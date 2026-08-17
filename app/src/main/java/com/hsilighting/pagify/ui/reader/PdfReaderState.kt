@@ -15,6 +15,16 @@ data class PdfReaderState(
     /** Zero-based index of the page the user is looking at. */
     val currentPage: Int = 0,
     val zoom: Float = 1f,
+    /**
+     * The page zoom is locked to, or null when at fit-width.
+     *
+     * Zooming scopes the view to a single page rather than magnifying the whole
+     * document: panning around a magnified page should never wander into its
+     * neighbours, which is disorienting at high zoom and makes it easy to lose the
+     * page you were reading. Set when zoom first rises above fit-width, cleared
+     * when it returns.
+     */
+    val zoomedPage: Int? = null,
     val rotationQuarterTurns: Int = 0,
     /** Natural sizes, indexed by page. Empty entries have not been measured yet. */
     val pageSizes: Map<Int, PageSize> = emptyMap(),
@@ -39,7 +49,9 @@ data class PdfReaderState(
     }
 
     companion object {
-        const val MIN_ZOOM = 0.5f
+        /** Page exactly fills the viewport width. Below this, zoom is released. */
+        const val FIT_WIDTH_ZOOM = 1f
+        const val MIN_ZOOM = 1f
         const val MAX_ZOOM = 8f
 
         /**

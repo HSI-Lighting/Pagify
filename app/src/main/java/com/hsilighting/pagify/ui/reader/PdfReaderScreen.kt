@@ -42,6 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
@@ -66,8 +67,10 @@ fun PdfReaderScreen(
     onPageVisible: (Int) -> Unit,
     /** Multiply the current zoom, which is what a pinch gesture reports. */
     onZoomBy: (Float) -> Unit,
-    /** Double-tap: jump between fit-width and a readable zoom. */
+    /** Double-tap while zoomed: return to fit-width. */
     onToggleZoom: () -> Unit,
+    /** Zoom in from fit-width, pinning the page the gesture landed on. */
+    onZoomInOn: (Int) -> Unit,
     /** Viewport width in device pixels, so prefetch can match the render scale. */
     onViewportWidth: (Float) -> Unit,
     onRotate: () -> Unit,
@@ -138,6 +141,7 @@ fun PdfReaderScreen(
                     onPageVisible = onPageVisible,
                     onZoomBy = onZoomBy,
                     onToggleZoom = onToggleZoom,
+                    onZoomInOn = onZoomInOn,
                     onViewportWidth = onViewportWidth,
                     pageSizeProvider = pageSizeProvider,
                     renderer = renderer,
@@ -159,14 +163,28 @@ private fun PageList(
     onPageVisible: (Int) -> Unit,
     onZoomBy: (Float) -> Unit,
     onToggleZoom: () -> Unit,
+    /** Zoom in from fit-width, pinning the page the gesture landed on. */
+    onZoomInOn: (Int) -> Unit,
     onViewportWidth: (Float) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
 ) {
     val listState = rememberLazyListState()
-    val horizontalScroll = rememberScrollState()
-    val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
+
+    // Where the navigator's viewport indicator comes from while pinned.
+    var window by remember { mutableStateOf(ViewportWindow.Full) }
+    var recenterRequest by remember { mutableStateOf<Offset?>(null) }
+
+    // Returning to fit-width restores the continuous list at the page that was
+    // pinned, so unzooming never drops the reader somewhere else in the document.
+    val pinnedPage = state.zoomedPage
+    LaunchedEffect(pinnedPage) {
+        if (pinnedPage == null) {
+            window = ViewportWindow.Full
+            listState.scrollToItem(state.currentPage)
+        }
+    }
 
     // Reporting the first *visible* item (rather than the centred one) keeps the
     // page counter in step with what the user sees while scrolling.
@@ -186,158 +204,86 @@ private fun PageList(
             onViewportWidth(with(density) { viewportWidth.toPx() })
         }
 
-        // Zoom is applied as real layout width rather than a graphicsLayer scale.
-        // That costs a relayout per zoom step, but it means the page is
-        // re-rasterised at its new size (sharp, not an upscaled bitmap) and the
-        // stock scroll containers handle panning, flinging and clamping for free.
-        val pageWidth = viewportWidth * state.zoom
+        if (pinnedPage != null) {
+            // Zoomed: one page, both axes pannable, bounded by that page.
+            ZoomedPage(
+                pageIndex = pinnedPage,
+                zoom = state.zoom,
+                pageSize = state.pageSizes[pinnedPage],
+                onZoomBy = onZoomBy,
+                onToggleZoom = onToggleZoom,
+                onWindowChanged = { window = it },
+                pageSizeProvider = pageSizeProvider,
+                renderer = renderer,
+                recenterRequest = recenterRequest,
+                onRecenterHandled = { recenterRequest = null },
+            )
+        } else {
+            val viewportWidthPx = with(density) { viewportWidth.toPx() }
 
-        Box(
-            Modifier
-                .fillMaxSize()
-                .horizontalScroll(horizontalScroll)
-                .pinchToZoom(onZoomBy)
-                .pointerInput(Unit) {
-                    detectTapGestures(onDoubleTap = { onToggleZoom() })
-                },
-        ) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .width(pageWidth + PAGE_GAP * 2)
-                    .fillMaxHeight(),
-                contentPadding = PaddingValues(PAGE_GAP),
-                verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
+            /**
+             * Which page a touch landed on, and where within it as a 0..1 fraction.
+             *
+             * Needed because the zoom that *enters* pinned mode originates here,
+             * where `ZoomedPage` does not exist yet to capture a focal point. The
+             * fraction is handed over as the initial recentre so the zoom lands on
+             * what was touched instead of the page's top-left corner.
+             */
+            fun focusAt(position: Offset): Pair<Int, Offset>? {
+                val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { info ->
+                    position.y >= info.offset && position.y < info.offset + info.size
+                } ?: return null
+                if (item.size <= 0 || viewportWidthPx <= 0f) return null
+                return item.index to Offset(
+                    (position.x / viewportWidthPx).coerceIn(0f, 1f),
+                    ((position.y - item.offset) / item.size).coerceIn(0f, 1f),
+                )
+            }
+
+            fun enterZoom(position: Offset) {
+                val (page, fraction) = focusAt(position) ?: return
+                recenterRequest = fraction
+                onZoomInOn(page)
+            }
+
+            // Fit-width: the familiar continuous scroll through the document.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .pinchToZoom { _, centroid -> enterZoom(centroid) }
+                    .pointerInput(Unit) {
+                        detectTapGestures(onDoubleTap = { enterZoom(it) })
+                    },
             ) {
-                items(count = state.pageCount) { index ->
-                    PdfPageView(
-                        pageIndex = index,
-                        pageWidth = pageWidth,
-                        pageSizeProvider = pageSizeProvider,
-                        renderer = renderer,
-                    )
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(PAGE_GAP),
+                    verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
+                ) {
+                    items(count = state.pageCount) { index ->
+                        PdfPageView(
+                            pageIndex = index,
+                            pageWidth = viewportWidth - PAGE_GAP * 2,
+                            pageSizeProvider = pageSizeProvider,
+                            renderer = renderer,
+                        )
+                    }
                 }
             }
         }
 
         // ------------------------------------------------------------ navigator --
-        val currentPageSize = state.pageSizes[state.currentPage]
-        val window = rememberViewportWindow(
-            listState = listState,
-            horizontalScroll = horizontalScroll,
-            currentPage = state.currentPage,
-            pageSize = currentPageSize,
-            viewportHeight = viewportHeight,
-            pageWidth = pageWidth,
-        )
-
-        if (!window.coversEverything) {
+        if (pinnedPage != null && !window.coversEverything) {
             PageNavigator(
-                pageIndex = state.currentPage,
-                pageSize = currentPageSize,
+                pageIndex = pinnedPage,
+                pageSize = state.pageSizes[pinnedPage],
                 window = window,
                 thumbnailRenderer = renderer,
                 modifier = Modifier.align(Alignment.CenterEnd),
-                onRecenter = { fx, fy ->
-                    coroutineScope.launch {
-                        recenterViewport(
-                            fractionX = fx,
-                            fractionY = fy,
-                            listState = listState,
-                            horizontalScroll = horizontalScroll,
-                            currentPage = state.currentPage,
-                            pageHeightPx = pageHeightPx(currentPageSize, pageWidth, density),
-                            viewportHeightPx = with(density) { viewportHeight.toPx() },
-                        )
-                    }
-                },
+                onRecenter = { fx, fy -> recenterRequest = Offset(fx, fy) },
             )
         }
-    }
-}
-
-private fun pageHeightPx(pageSize: PageSize?, pageWidth: Dp, density: Density): Float {
-    val aspect = pageSize?.aspectRatio ?: (595f / 842f)
-    if (aspect <= 0f) return 0f
-    return with(density) { pageWidth.toPx() } / aspect
-}
-
-/**
- * Derive which fraction of the current page is on screen.
- *
- * Horizontal comes from the scroll container's own range. Vertical comes from
- * `LazyListState`: the visible window starts at the current page's scroll offset
- * and is one viewport tall. Both are expressed as 0..1 fractions so the navigator
- * stays ignorant of zoom and density.
- */
-@Composable
-private fun rememberViewportWindow(
-    listState: LazyListState,
-    horizontalScroll: ScrollState,
-    currentPage: Int,
-    pageSize: PageSize?,
-    viewportHeight: Dp,
-    pageWidth: Dp,
-): ViewportWindow {
-    val density = LocalDensity.current
-    // Reads observable scroll state, so this recomputes as the user pans.
-    val scrollOffset = horizontalScroll.value
-    val scrollMax = horizontalScroll.maxValue
-    val firstIndex = listState.firstVisibleItemIndex
-    val firstOffset = listState.firstVisibleItemScrollOffset
-
-    return remember(
-        scrollOffset, scrollMax, firstIndex, firstOffset,
-        currentPage, pageSize, viewportHeight, pageWidth, density,
-    ) {
-        val pageHeight = pageHeightPx(pageSize, pageWidth, density)
-        val viewportPx = with(density) { viewportHeight.toPx() }
-        if (pageHeight <= 0f || viewportPx <= 0f) return@remember ViewportWindow.Full
-
-        val contentWidthPx = with(density) { pageWidth.toPx() }
-        val viewportWidthPx = contentWidthPx - scrollMax
-
-        val widthFraction = (viewportWidthPx / contentWidthPx).coerceIn(0f, 1f)
-        val leftFraction = if (scrollMax <= 0) 0f else {
-            (scrollOffset.toFloat() / contentWidthPx).coerceIn(0f, 1f - widthFraction)
-        }
-
-        // Only meaningful while the current page is the one at the top of the list;
-        // mid-transition between pages the window is reported as full rather than
-        // guessed at.
-        val topFraction = if (firstIndex == currentPage) {
-            (firstOffset / pageHeight).coerceIn(0f, 1f)
-        } else {
-            0f
-        }
-        val heightFraction = (viewportPx / pageHeight).coerceIn(0f, 1f)
-
-        ViewportWindow(
-            left = leftFraction,
-            top = topFraction.coerceAtMost(1f - heightFraction),
-            width = widthFraction,
-            height = heightFraction,
-        )
-    }
-}
-
-/** Centre the viewport on a point the user picked in the navigator. */
-private suspend fun recenterViewport(
-    fractionX: Float,
-    fractionY: Float,
-    listState: LazyListState,
-    horizontalScroll: ScrollState,
-    currentPage: Int,
-    pageHeightPx: Float,
-    viewportHeightPx: Float,
-) {
-    val targetX = (fractionX * horizontalScroll.maxValue).toInt()
-    horizontalScroll.scrollTo(targetX.coerceIn(0, horizontalScroll.maxValue))
-
-    if (pageHeightPx > 0f) {
-        val targetY = (fractionY * pageHeightPx - viewportHeightPx / 2f)
-            .coerceIn(0f, (pageHeightPx - viewportHeightPx).coerceAtLeast(0f))
-        listState.scrollToItem(currentPage, targetY.toInt())
     }
 }
 

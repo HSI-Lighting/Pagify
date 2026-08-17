@@ -104,15 +104,41 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun onPageVisible(pageIndex: Int) {
-        if (pageIndex == _state.value.currentPage) return
+        val current = _state.value
+        // Ignored while pinned: only the continuous list reports visibility, and a
+        // stale report arriving as the view switches must not move the pinned page.
+        if (current.zoomedPage != null) return
+        if (pageIndex == current.currentPage) return
         _state.update { it.copy(currentPage = pageIndex) }
         schedulePrefetch()
     }
 
-    fun setZoom(zoom: Float) {
+    /**
+     * @param pinPage the page the gesture landed on. Used only when zoom first
+     *   rises above fit-width; the page under the fingers is the one to pin, which
+     *   is not necessarily the topmost visible one.
+     */
+    fun setZoom(zoom: Float, pinPage: Int? = null) {
         val clamped = zoom.coerceIn(PdfReaderState.MIN_ZOOM, PdfReaderState.MAX_ZOOM)
         if (clamped == _state.value.zoom) return
-        _state.update { it.copy(zoom = clamped) }
+
+        _state.update { current ->
+            // Crossing above fit-width pins the view to the page the gesture was
+            // on; dropping back to fit-width releases it. Latching the page on the
+            // way up (rather than tracking the visible page continuously) is what
+            // keeps a magnified pan from drifting onto a neighbouring page.
+            val zoomedPage = when {
+                clamped <= PdfReaderState.FIT_WIDTH_ZOOM -> null
+                current.zoomedPage != null -> current.zoomedPage
+                else -> pinPage ?: current.currentPage
+            }
+            current.copy(
+                zoom = clamped,
+                zoomedPage = zoomedPage,
+                // While pinned, the page being read is by definition the pinned one.
+                currentPage = zoomedPage ?: current.currentPage,
+            )
+        }
         schedulePrefetch()
     }
 
@@ -125,15 +151,24 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * combination silently froze zoom at 1.0 in the first implementation. Reading
      * it here, from the single source of truth, removes the trap entirely.
      */
-    fun zoomBy(factor: Float) {
+    fun zoomBy(factor: Float, pinPage: Int? = null) {
         if (!factor.isFinite() || factor <= 0f) return
-        setZoom(_state.value.zoom * factor)
+        setZoom(_state.value.zoom * factor, pinPage)
     }
+
+    /** Double-tap or pinch from fit-width, on a specific page. */
+    fun zoomInOn(pageIndex: Int) = setZoom(DOUBLE_TAP_ZOOM, pinPage = pageIndex)
 
     /** Double-tap behaviour: jump to a readable zoom, or back to fit-width. */
     fun toggleZoom() {
         val current = _state.value.zoom
-        setZoom(if (current > FIT_WIDTH_ZOOM + 0.01f) FIT_WIDTH_ZOOM else DOUBLE_TAP_ZOOM)
+        setZoom(
+            if (current > PdfReaderState.FIT_WIDTH_ZOOM + 0.01f) {
+                PdfReaderState.FIT_WIDTH_ZOOM
+            } else {
+                DOUBLE_TAP_ZOOM
+            },
+        )
     }
 
     fun rotate() {
@@ -197,7 +232,6 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     private companion object {
         const val TAG = "PdfReaderViewModel"
-        const val FIT_WIDTH_ZOOM = 1f
         const val DOUBLE_TAP_ZOOM = 2.5f
     }
 }

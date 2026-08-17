@@ -73,6 +73,7 @@ class MainActivity : ComponentActivity() {
                     onPageVisible = viewModel::onPageVisible,
                     onZoomBy = viewModel::zoomBy,
                     onToggleZoom = viewModel::toggleZoom,
+                    onZoomInOn = viewModel::zoomInOn,
                     onViewportWidth = viewModel::onViewportWidthChanged,
                     onRotate = viewModel::rotate,
                     onShowMetadata = viewModel::showMetadata,
