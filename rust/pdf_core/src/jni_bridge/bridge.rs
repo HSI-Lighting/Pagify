@@ -174,10 +174,9 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getPageSize
     let fallback = JObject::null().into();
     guard(&mut env, fallback, |env| {
         let index = page_index_from(page_index)?;
-        let size = registry::with_session(handle, |session| {
-            let page = session.document.page(index)?;
-            Ok(page.size())
-        })?;
+        // Deliberately the no-load path: this is called for every page that
+        // scrolls into view, and loading each one would dominate the cost.
+        let size = registry::with_session(handle, |session| session.document.page_size(index))?;
 
         let array = env
             .new_float_array(2)

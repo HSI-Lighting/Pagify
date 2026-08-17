@@ -16,8 +16,7 @@ pub fn page_pixel_size(
     index: usize,
     request: &RenderRequest,
 ) -> Result<(u32, u32)> {
-    let page = session.document.page(index)?;
-    let (mut w, mut h) = page.size().pixel_size(request.scale);
+    let (mut w, mut h) = session.document.page_size(index)?.pixel_size(request.scale);
     if request.rotation.swaps_axes() {
         std::mem::swap(&mut w, &mut h);
     }
@@ -105,18 +104,19 @@ pub fn prefetch_page(
         ..*request
     };
 
-    let page = session.document.page(index)?;
-    let (mut w, mut h) = page.size().pixel_size(effective.scale);
+    // Size first, without loading the page: if the raster would be too large to
+    // cache there is no point paying for a page load at all.
+    let (mut w, mut h) = session.document.page_size(index)?.pixel_size(effective.scale);
     if effective.rotation.swaps_axes() {
         std::mem::swap(&mut w, &mut h);
     }
 
     let mut bitmap = Bitmap::new(w, h, PixelOrder::Rgba)?;
     {
+        let page = session.document.page(index)?;
         let mut target = RenderTarget::from_bitmap(&mut bitmap)?;
         page.render_into(&effective, &mut target)?;
     }
-    drop(page);
 
     session.cache.put(key, bitmap);
     Ok(true)

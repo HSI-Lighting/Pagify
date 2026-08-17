@@ -1,184 +1,217 @@
 package com.hsilighting.pagify.ui.reader
 
 import android.graphics.Bitmap
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.Dp
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.ui.components.PdfPageView
 import com.hsilighting.pagify.ui.components.ViewportWindow
 import com.hsilighting.pagify.ui.components.pinchToZoom
-import kotlin.math.roundToInt
-
-/**
- * Where the viewport should sit after a zoom change, expressed as the state
- * *before* it happened.
- *
- * Captured at gesture time rather than applied immediately because the new scroll
- * bounds do not exist until the page has been re-measured at its new size.
- */
-private data class ZoomAnchor(
-    val previousZoom: Float,
-    /** Focal point in viewport coordinates: the midpoint between the fingers. */
-    val focus: Offset,
-    val scrollX: Int,
-    val scrollY: Int,
-)
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 
 /**
  * A single page, magnified.
  *
  * Zooming deliberately leaves the continuous list behind and scopes the view to
  * one page: panning a magnified page should never wander into its neighbours,
- * which is disorienting and loses your place. Both axes scroll here, and both are
- * bounded by the page itself.
+ * which is disorienting and loses your place.
+ *
+ * ## Why this does its own transform instead of using scroll containers
+ *
+ * The position of the content is held here as an explicit [Offset], and applied
+ * with `graphicsLayer`. That is what makes pinch anchoring *exact*: the new
+ * offset is computed and applied in the same frame as the gesture event.
+ *
+ * The earlier attempt drove layout width from zoom and let two `ScrollState`s
+ * position it. Anchoring then had to be deferred, because a scroll range does not
+ * exist until the page has been re-measured — and a pinch fires dozens of events,
+ * each restarting and cancelling the pending correction. The surviving one
+ * applied a stale ratio against a scroll offset that had already moved, so the
+ * zoom drifted away from the fingers. Nothing here waits for a frame.
+ *
+ * Sharpness is preserved separately: the page is *laid out* at `committedScale`,
+ * and once a gesture settles that catches up to the live scale, so the page is
+ * re-rasterised rather than left as an upscaled bitmap.
  */
 @Composable
 fun ZoomedPage(
     pageIndex: Int,
-    zoom: Float,
+    initialZoom: Float,
     pageSize: PageSize?,
-    onZoomBy: (Float) -> Unit,
-    onToggleZoom: () -> Unit,
+    /** Called when a gesture settles, with the scale to render and prefetch at. */
+    onZoomSettled: (Float) -> Unit,
     onWindowChanged: (ViewportWindow) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> Bitmap?,
-    recenterRequest: Offset?,
-    onRecenterHandled: () -> Unit,
+    /** Where to centre when the view opens, as a 0..1 fraction of the page. */
+    initialFocus: Offset?,
     modifier: Modifier = Modifier,
 ) {
-    val horizontal = rememberScrollState()
-    val vertical = rememberScrollState()
-    val density = LocalDensity.current
+    BoxWithConstraints(modifier.fillMaxSize().clipToBounds()) {
+        val density = LocalDensity.current
+        val viewportW = with(density) { maxWidth.toPx() }
+        val viewportH = with(density) { maxHeight.toPx() }
 
-    var anchor by remember { mutableStateOf<ZoomAnchor?>(null) }
-
-    BoxWithConstraints(modifier.fillMaxSize()) {
-        val viewportWidth: Dp = maxWidth
-        val viewportHeight: Dp = maxHeight
-        val pageWidth = viewportWidth * zoom
-
-        val viewportWidthPx = with(density) { viewportWidth.toPx() }
-        val viewportHeightPx = with(density) { viewportHeight.toPx() }
-        val contentWidthPx = with(density) { pageWidth.toPx() }
         val aspect = pageSize?.aspectRatio ?: DEFAULT_ASPECT
-        val contentHeightPx = if (aspect > 0f) contentWidthPx / aspect else 0f
+        // The page at 1.0 fills the viewport width; everything scales from there.
+        val baseW = viewportW
+        val baseH = if (aspect > 0f) baseW / aspect else viewportH
 
-        // ------------------------------------------------- centroid anchoring --
-        // Keep whatever was under the fingers under the fingers. Working in
-        // viewport coordinates: the content point at the focus is
-        // (scroll + focus); after scaling by `ratio` it sits at
-        // (scroll + focus) * ratio, so the scroll must absorb the difference.
-        LaunchedEffect(zoom) {
-            val pending = anchor ?: return@LaunchedEffect
-            anchor = null
-            if (pending.previousZoom <= 0f) return@LaunchedEffect
+        var scale by remember { mutableFloatStateOf(initialZoom) }
+        var committedScale by remember { mutableFloatStateOf(initialZoom) }
+        var offset by remember { mutableStateOf(Offset.Zero) }
 
-            // The new scroll range only exists once the page has been re-measured,
-            // and `scrollTo` clamps to the current maximum — so applying this in
-            // the same frame would silently clamp against the old, smaller bounds.
-            withFrameNanos { }
-            withFrameNanos { }
-
-            val ratio = zoom / pending.previousZoom
-            val targetX = (pending.scrollX + pending.focus.x) * ratio - pending.focus.x
-            val targetY = (pending.scrollY + pending.focus.y) * ratio - pending.focus.y
-
-            horizontal.scrollTo(targetX.roundToInt().coerceIn(0, horizontal.maxValue))
-            vertical.scrollTo(targetY.roundToInt().coerceIn(0, vertical.maxValue))
-        }
-
-        // Recentre requests from the navigator, expressed as page fractions.
-        LaunchedEffect(recenterRequest) {
-            val request = recenterRequest ?: return@LaunchedEffect
-            // Same reason as the anchoring effect: the scroll range does not exist
-            // until the page has been measured at its new size, and `scrollTo`
-            // clamps against whatever the maximum currently is.
-            withFrameNanos { }
-            withFrameNanos { }
-            val targetX = request.x * contentWidthPx - viewportWidthPx / 2f
-            val targetY = request.y * contentHeightPx - viewportHeightPx / 2f
-            horizontal.scrollTo(targetX.roundToInt().coerceIn(0, horizontal.maxValue))
-            vertical.scrollTo(targetY.roundToInt().coerceIn(0, vertical.maxValue))
-            onRecenterHandled()
-        }
-
-        // Report the visible region so the navigator can draw it. Reading the
-        // scroll values here is what makes this recompute while panning.
-        val window = remember(
-            horizontal.value, vertical.value,
-            contentWidthPx, contentHeightPx, viewportWidthPx, viewportHeightPx,
-        ) {
-            if (contentWidthPx <= 0f || contentHeightPx <= 0f) {
-                ViewportWindow.Full
+        /**
+         * Keep the content covering the viewport, and centred on any axis where it
+         * is smaller. Without this a pan could strand the page off screen.
+         */
+        fun clamp(candidate: Offset, atScale: Float): Offset {
+            val contentW = baseW * atScale
+            val contentH = baseH * atScale
+            val x = if (contentW <= viewportW) {
+                (viewportW - contentW) / 2f
             } else {
-                val widthFraction = (viewportWidthPx / contentWidthPx).coerceIn(0f, 1f)
-                val heightFraction = (viewportHeightPx / contentHeightPx).coerceIn(0f, 1f)
-                ViewportWindow(
-                    left = (horizontal.value / contentWidthPx).coerceIn(0f, 1f - widthFraction),
-                    top = (vertical.value / contentHeightPx).coerceIn(0f, 1f - heightFraction),
-                    width = widthFraction,
-                    height = heightFraction,
-                )
+                candidate.x.coerceIn(viewportW - contentW, 0f)
+            }
+            val y = if (contentH <= viewportH) {
+                (viewportH - contentH) / 2f
+            } else {
+                candidate.y.coerceIn(viewportH - contentH, 0f)
+            }
+            return Offset(x, y)
+        }
+
+        // Open centred on whatever the entering gesture was aimed at.
+        LaunchedEffect(initialFocus, baseW, baseH) {
+            val focus = initialFocus ?: return@LaunchedEffect
+            offset = clamp(
+                Offset(
+                    viewportW / 2f - focus.x * baseW * scale,
+                    viewportH / 2f - focus.y * baseH * scale,
+                ),
+                scale,
+            )
+        }
+
+        /**
+         * Scale about [focus], a point in viewport coordinates.
+         *
+         * The content point under the focus is `(focus - offset) / scale`. For it
+         * to stay under the focus at the new scale, the offset must become
+         * `focus - thatPoint * newScale`, which reduces to the expression below.
+         */
+        fun zoomAbout(factor: Float, focus: Offset) {
+            val newScale = (scale * factor).coerceIn(
+                PdfReaderState.MIN_ZOOM,
+                PdfReaderState.MAX_ZOOM,
+            )
+            if (newScale == scale) return
+            val ratio = newScale / scale
+            offset = clamp(focus - (focus - offset) * ratio, newScale)
+            scale = newScale
+        }
+
+        // Re-render at the settled scale, and let the rest of the app know. Held
+        // back until the gesture stops so a pinch does not rasterise the page at
+        // every intermediate size.
+        LaunchedEffect(Unit) {
+            snapshotFlow { scale }.collectLatest { settled ->
+                delay(SETTLE_MILLIS)
+                committedScale = settled
+                onZoomSettled(settled)
             }
         }
-        LaunchedEffect(window) { onWindowChanged(window) }
 
-        // Two nested boxes on purpose. The gesture detectors sit on the OUTER,
-        // viewport-sized box so the focal point they report is in viewport
-        // coordinates — the space the anchoring maths above is written in. Placed
-        // inside the scrollers instead, their coordinates would be content-space
-        // (already shifted by the scroll offset) and every zoom would land in the
-        // wrong place by exactly the current scroll.
+        // Report the visible region for the navigator.
+        LaunchedEffect(offset, scale, baseW, baseH, viewportW, viewportH) {
+            val contentW = baseW * scale
+            val contentH = baseH * scale
+            onWindowChanged(
+                if (contentW <= 0f || contentH <= 0f) {
+                    ViewportWindow.Full
+                } else {
+                    val w = (viewportW / contentW).coerceIn(0f, 1f)
+                    val h = (viewportH / contentH).coerceIn(0f, 1f)
+                    ViewportWindow(
+                        left = (-offset.x / contentW).coerceIn(0f, 1f - w),
+                        top = (-offset.y / contentH).coerceIn(0f, 1f - h),
+                        width = w,
+                        height = h,
+                    )
+                },
+            )
+        }
+
         Box(
             Modifier
                 .fillMaxSize()
-                .pinchToZoom { factor, centroid ->
-                    anchor = ZoomAnchor(zoom, centroid, horizontal.value, vertical.value)
-                    onZoomBy(factor)
+                .pinchToZoom { factor, centroid -> zoomAbout(factor, centroid) }
+                .pointerInput(Unit) {
+                    detectDragGestures { change, drag ->
+                        change.consume()
+                        offset = clamp(offset + drag, scale)
+                    }
                 }
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onDoubleTap = { position ->
-                            // Same anchoring for double-tap: zoom about the point
-                            // tapped, not about a corner.
-                            anchor = ZoomAnchor(zoom, position, horizontal.value, vertical.value)
-                            onToggleZoom()
+                            // Back to fit-width, about the tapped point. Reported
+                            // immediately rather than after the settle delay so the
+                            // pinned page is released without a visible lag.
+                            if (scale > PdfReaderState.FIT_WIDTH_ZOOM + 0.01f) {
+                                zoomAbout(PdfReaderState.FIT_WIDTH_ZOOM / scale, position)
+                            } else {
+                                zoomAbout(DOUBLE_TAP_ZOOM / scale, position)
+                            }
+                            committedScale = scale
+                            onZoomSettled(scale)
                         },
                     )
                 },
         ) {
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .horizontalScroll(horizontal)
-                    .verticalScroll(vertical),
-            ) {
-                PdfPageView(
-                    pageIndex = pageIndex,
-                    pageWidth = pageWidth,
-                    pageSizeProvider = pageSizeProvider,
-                    renderer = renderer,
-                )
-            }
+            val residual = if (committedScale > 0f) scale / committedScale else 1f
+
+            PdfPageView(
+                pageIndex = pageIndex,
+                // Laid out at the committed scale; `residual` covers the gap while
+                // a gesture is still in flight, so the visual is always correct
+                // even before the page has been re-rasterised.
+                pageWidth = with(density) { (baseW * committedScale).toDp() },
+                pageSizeProvider = pageSizeProvider,
+                renderer = renderer,
+                modifier = Modifier.graphicsLayer {
+                    transformOrigin = TransformOrigin(0f, 0f)
+                    scaleX = residual
+                    scaleY = residual
+                    translationX = offset.x
+                    translationY = offset.y
+                },
+            )
         }
     }
 }
 
 private const val DEFAULT_ASPECT = 595f / 842f
+private const val DOUBLE_TAP_ZOOM = 2.5f
+
+/** How long after the last gesture event to re-rasterise at the new scale. */
+private const val SETTLE_MILLIS = 180L

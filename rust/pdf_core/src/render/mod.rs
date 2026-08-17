@@ -8,10 +8,17 @@ pub use cache::{CacheKey, CacheStats, PageCache};
 
 use crate::error::{PdfError, Result};
 
-/// Default cache budget. Sized so a mid-range phone holds roughly three or four
-/// full-screen pages — enough for one page either side of the current one, which
-/// is the whole point of prefetching.
-pub const DEFAULT_CACHE_BUDGET_BYTES: usize = 48 * 1024 * 1024;
+/// Default cache budget.
+///
+/// A full-screen page on a 1600px-wide tablet is roughly 16 MB, so the earlier
+/// 48 MB held *exactly* the current page plus its two prefetched neighbours —
+/// meaning every single page turn evicted something that was about to be needed
+/// and the cache churned instead of helping. This leaves genuine headroom.
+///
+/// These are native allocations, not Java heap, so the ceiling is the device's
+/// memory rather than the much smaller per-app heap limit; `onTrimMemory` still
+/// releases the lot under pressure.
+pub const DEFAULT_CACHE_BUDGET_BYTES: usize = 160 * 1024 * 1024;
 
 /// A borrowed destination for a render.
 ///

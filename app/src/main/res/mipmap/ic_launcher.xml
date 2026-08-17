@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Fallback for API 24-25, which predate adaptive icons: the same artwork with
-     the background baked in. API 26+ resolves to mipmap-anydpi-v26 instead. -->
+<!--
+  Fallback for API 24-25, which predate adaptive icons: the same mark with the
+  orange ground baked in and the artwork scaled up, since no mask will crop it.
+  API 26+ resolves to mipmap-anydpi-v26 instead.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="48dp"
     android:height="48dp"
@@ -8,15 +11,37 @@
     android:viewportHeight="108">
 
     <path
-        android:fillColor="#3F5F90"
+        android:fillColor="#F4622A"
         android:pathData="M0,0 h108 v108 h-108 z" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M36,28 h24 l16,16 v36 a4,4 0 0 1 -4,4 h-36 a4,4 0 0 1 -4,-4 v-48 a4,4 0 0 1 4,-4 z" />
-    <path
-        android:fillColor="#C7D6F0"
-        android:pathData="M60,28 l16,16 h-16 z" />
-    <path
-        android:fillColor="#3F5F90"
-        android:pathData="M41,54 h26 v4 h-26 z M41,63 h26 v4 h-26 z M41,72 h16 v4 h-16 z" />
+
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="1.24"
+        android:scaleY="1.24">
+
+        <path
+            android:fillColor="#FAFAF8"
+            android:pathData="M55,28 h17 l12,12 v44 a3,3 0 0 1 -3,3 h-26 a3,3 0 0 1 -3,-3 v-53 a3,3 0 0 1 3,-3 z" />
+        <path
+            android:fillColor="#C9D2C4"
+            android:pathData="M72,28 l12,12 h-12 z" />
+        <path
+            android:fillColor="#6E7A68"
+            android:pathData="M59,43 h17 a2,2 0 0 1 2,2 v7 a2,2 0 0 1 -2,2 h-17 a2,2 0 0 1 -2,-2 v-7 a2,2 0 0 1 2,-2 z" />
+        <path
+            android:fillColor="#BFC7BC"
+            android:pathData="M58,60 h20 v3 h-20 z M58,67 h20 v3 h-20 z M58,74 h13 v3 h-13 z" />
+        <path
+            android:fillColor="#7FB539"
+            android:pathData="M36,80 c3,-11 12,-19 24,-21 v-7 l14,10 -14,10 v-7 c-9,2 -15,8 -17,16 z" />
+        <path
+            android:fillColor="#6FAF20"
+            android:fillType="evenOdd"
+            android:pathData="M24,24 h17 a16,16 0 0 1 0,32 h-7 v28 h-10 z
+                              M34,33 h7 a7,7 0 0 1 0,14 h-7 z" />
+        <path
+            android:fillColor="#8CC63E"
+            android:pathData="M24,84 c0,-9 7,-16 16,-16 c0,9 -7,16 -16,16 z" />
+    </group>
 </vector>

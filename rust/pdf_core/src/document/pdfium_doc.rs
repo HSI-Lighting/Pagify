@@ -194,6 +194,27 @@ impl Document for PdfiumDocument {
         Ok(meta)
     }
 
+    /// Uses `FPDF_GetPageSizeByIndexF`, which reads the page tree without
+    /// loading the page itself.
+    fn page_size(&self, index: usize) -> Result<PageSize> {
+        self.validate_page_index(index)?;
+        let pdfium_index = i32::try_from(index).map_err(|_| PdfError::PageOutOfRange {
+            index,
+            count: self.page_count,
+        })?;
+
+        let rect = self
+            .document
+            .pages()
+            .page_size(pdfium_index)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        Ok(PageSize {
+            width_pt: rect.width().value,
+            height_pt: rect.height().value,
+        })
+    }
+
     fn page(&self, index: usize) -> Result<Box<dyn Page + '_>> {
         self.validate_page_index(index)?;
         let pdfium_index = i32::try_from(index).map_err(|_| PdfError::PageOutOfRange {

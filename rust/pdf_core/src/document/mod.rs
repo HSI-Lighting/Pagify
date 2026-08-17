@@ -110,6 +110,20 @@ pub trait Document: Send + Sync {
 
     fn page(&self, index: usize) -> Result<Box<dyn Page + '_>>;
 
+    /**
+     * Page dimensions without loading the page.
+     *
+     * Split out from [`Page::size`] because loading a page parses its resources
+     * and content-stream references, which on a large document is orders of
+     * magnitude more expensive than reading two numbers out of the page tree.
+     * Sizing happens constantly — measuring placeholders, choosing a render
+     * scale, prefetching — so it must not drag a page load along with it.
+     */
+    fn page_size(&self, index: usize) -> Result<PageSize> {
+        self.validate_page_index(index)?;
+        Ok(self.page(index)?.size())
+    }
+
     /// `Some` only for implementations that can mutate and save the file.
     /// Read-only documents return `None`, which is what phase 1 always does.
     fn as_editable(&mut self) -> Option<&mut dyn EditableDocument> {

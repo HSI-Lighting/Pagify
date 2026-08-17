@@ -65,12 +65,14 @@ fun PdfReaderScreen(
     state: PdfReaderState,
     onPickDocument: () -> Unit,
     onPageVisible: (Int) -> Unit,
-    /** Multiply the current zoom, which is what a pinch gesture reports. */
-    onZoomBy: (Float) -> Unit,
-    /** Double-tap while zoomed: return to fit-width. */
-    onToggleZoom: () -> Unit,
     /** Zoom in from fit-width, pinning the page the gesture landed on. */
     onZoomInOn: (Int) -> Unit,
+    /**
+     * A settled zoom level from the pinned view. Reported only once a gesture
+     * stops, so prefetching and re-rasterisation do not chase every frame of a
+     * pinch. Dropping to fit-width here is what releases the pin.
+     */
+    onZoomTo: (Float) -> Unit,
     /** Viewport width in device pixels, so prefetch can match the render scale. */
     onViewportWidth: (Float) -> Unit,
     onRotate: () -> Unit,
@@ -139,9 +141,8 @@ fun PdfReaderScreen(
                 is PdfReaderState.Phase.Ready -> PageList(
                     state = state,
                     onPageVisible = onPageVisible,
-                    onZoomBy = onZoomBy,
-                    onToggleZoom = onToggleZoom,
                     onZoomInOn = onZoomInOn,
+                    onZoomTo = onZoomTo,
                     onViewportWidth = onViewportWidth,
                     pageSizeProvider = pageSizeProvider,
                     renderer = renderer,
@@ -161,10 +162,9 @@ fun PdfReaderScreen(
 private fun PageList(
     state: PdfReaderState,
     onPageVisible: (Int) -> Unit,
-    onZoomBy: (Float) -> Unit,
-    onToggleZoom: () -> Unit,
     /** Zoom in from fit-width, pinning the page the gesture landed on. */
     onZoomInOn: (Int) -> Unit,
+    onZoomTo: (Float) -> Unit,
     onViewportWidth: (Float) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
@@ -208,15 +208,13 @@ private fun PageList(
             // Zoomed: one page, both axes pannable, bounded by that page.
             ZoomedPage(
                 pageIndex = pinnedPage,
-                zoom = state.zoom,
+                initialZoom = state.zoom,
                 pageSize = state.pageSizes[pinnedPage],
-                onZoomBy = onZoomBy,
-                onToggleZoom = onToggleZoom,
+                onZoomSettled = onZoomTo,
                 onWindowChanged = { window = it },
                 pageSizeProvider = pageSizeProvider,
                 renderer = renderer,
-                recenterRequest = recenterRequest,
-                onRecenterHandled = { recenterRequest = null },
+                initialFocus = recenterRequest,
             )
         } else {
             val viewportWidthPx = with(density) { viewportWidth.toPx() }

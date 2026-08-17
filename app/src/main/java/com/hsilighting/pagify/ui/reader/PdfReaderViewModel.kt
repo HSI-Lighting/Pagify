@@ -159,6 +159,15 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     /** Double-tap or pinch from fit-width, on a specific page. */
     fun zoomInOn(pageIndex: Int) = setZoom(DOUBLE_TAP_ZOOM, pinPage = pageIndex)
 
+    /**
+     * A settled zoom from the pinned view.
+     *
+     * Separate from [setZoom] only so it can be referenced as a plain
+     * `(Float) -> Unit`; [setZoom]'s optional second parameter makes its method
+     * reference the wrong shape.
+     */
+    fun zoomTo(zoom: Float) = setZoom(zoom)
+
     /** Double-tap behaviour: jump to a readable zoom, or back to fit-width. */
     fun toggleZoom() {
         val current = _state.value.zoom
