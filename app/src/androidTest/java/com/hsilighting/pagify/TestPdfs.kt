@@ -31,8 +31,20 @@ object TestPdfs {
      * `render/bitmap.rs` is wrong, so a transposition shows up as blue rather
      * than as a subtle shift.
      */
-    fun redSquare(): ByteArray {
-        val contentStream = "1 0 0 rg\n0 0 200 200 re\nf\n"
+    fun redSquare(): ByteArray = solidSquare("1 0 0 rg")
+
+    /**
+     * A single 200x200 page painted orange — R 255, G ~128, B 0.
+     *
+     * Red alone cannot distinguish "R and B are swapped" from "the fixture is
+     * actually blue". An asymmetric colour pins the byte order down: only one
+     * interpretation puts 128 in the green channel with 255 and 0 either side of
+     * it, and which side they land on is the whole question.
+     */
+    fun orangeSquare(): ByteArray = solidSquare("1 0.5 0 rg")
+
+    private fun solidSquare(colorOperator: String): ByteArray {
+        val contentStream = "$colorOperator\n0 0 200 200 re\nf\n"
         return build(
             listOf(
                 "<< /Type /Catalog /Pages 2 0 R >>",

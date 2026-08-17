@@ -78,10 +78,15 @@ impl<'a> RenderTarget<'a> {
         self.stride == self.width as usize * BYTES_PER_PIXEL
     }
 
-    /// Reinterpret whatever PDFium just wrote (always BGRA) as the order this
-    /// target's consumer expects. Safe to call unconditionally.
+    /// Reconcile what PDFium just wrote with the order this target's consumer
+    /// expects. Safe to call unconditionally.
+    ///
+    /// Currently a no-op for Android targets, because PDFium's output order and
+    /// `ARGB_8888` agree — see [`bitmap::PDFIUM_OUTPUT_ORDER`] for the measurement.
+    /// Kept as a call site so that fact lives in one constant instead of being
+    /// baked into the absence of code.
     pub fn normalise_from_pdfium(&mut self) {
-        if self.order == PixelOrder::Bgra {
+        if self.order == bitmap::PDFIUM_OUTPUT_ORDER {
             return;
         }
         bitmap::swap_red_blue_rows(self.pixels, self.width, self.height, self.stride);
@@ -151,18 +156,28 @@ mod tests {
     }
 
     #[test]
-    fn normalising_a_bgra_target_is_a_no_op() {
+    fn normalising_a_target_that_already_matches_pdfium_is_a_no_op() {
+        // This is the on-screen Android path: PDFium's output order and
+        // ARGB_8888 agree, so the zero-copy handover must touch nothing.
         let mut buf: Vec<u8> = (0u8..16).collect();
         let original = buf.clone();
-        let mut target = RenderTarget::new(2, 2, 8, PixelOrder::Bgra, &mut buf).unwrap();
+        let mut target =
+            RenderTarget::new(2, 2, 8, bitmap::PDFIUM_OUTPUT_ORDER, &mut buf).unwrap();
         target.normalise_from_pdfium();
-        assert_eq!(buf, original);
+        assert_eq!(
+            buf, original,
+            "the zero-copy path must not rewrite pixels PDFium already got right"
+        );
     }
 
     #[test]
-    fn normalising_an_rgba_target_swaps_red_and_blue() {
+    fn normalising_a_target_of_the_opposite_order_swaps_red_and_blue() {
+        let opposite = match bitmap::PDFIUM_OUTPUT_ORDER {
+            PixelOrder::Rgba => PixelOrder::Bgra,
+            PixelOrder::Bgra => PixelOrder::Rgba,
+        };
         let mut buf = vec![1, 2, 3, 4, 5, 6, 7, 8];
-        let mut target = RenderTarget::new(2, 1, 8, PixelOrder::Rgba, &mut buf).unwrap();
+        let mut target = RenderTarget::new(2, 1, 8, opposite, &mut buf).unwrap();
         target.normalise_from_pdfium();
         assert_eq!(buf, vec![3, 2, 1, 4, 7, 6, 5, 8]);
     }

@@ -12,7 +12,7 @@ use pdfium_render::prelude::{
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{Document, Page, PageSize, RenderRequest, Rotation};
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
-use crate::render::bitmap::{Bitmap, PixelOrder};
+use crate::render::bitmap::{self, Bitmap, PixelOrder};
 use crate::render::RenderTarget;
 
 /// The process-wide PDFium binding.
@@ -229,21 +229,24 @@ impl<'a> Page for PdfiumPage<'a> {
         if target.is_tightly_packed() {
             // Zero-copy: PDFium writes into the caller's buffer (an Android
             // bitmap's locked pixels on the on-screen path).
-            let mut pdf_bitmap = PdfBitmap::from_bytes(
-                target.width as i32,
-                target.height as i32,
-                PdfBitmapFormat::BGRA,
-                target.pixels,
-            )
-            .map_err(|e| PdfError::InvalidBitmap(e.to_string()))?;
+            {
+                let mut pdf_bitmap = PdfBitmap::from_bytes(
+                    target.width as i32,
+                    target.height as i32,
+                    PdfBitmapFormat::BGRA,
+                    target.pixels,
+                )
+                .map_err(|e| PdfError::InvalidBitmap(e.to_string()))?;
 
-            self.page
-                .render_into_bitmap_with_config(&mut pdf_bitmap, &config)
-                .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+                self.page
+                    .render_into_bitmap_with_config(&mut pdf_bitmap, &config)
+                    .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+            }
         } else {
             // The destination pads its rows and PDFium cannot be told about that,
             // so render tightly and blit row by row.
-            let mut scratch = Bitmap::new(target.width, target.height, PixelOrder::Bgra)?;
+            let mut scratch =
+                Bitmap::new(target.width, target.height, bitmap::PDFIUM_OUTPUT_ORDER)?;
             {
                 let mut pdf_bitmap = PdfBitmap::from_bytes(
                     target.width as i32,

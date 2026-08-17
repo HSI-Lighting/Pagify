@@ -2,11 +2,20 @@
 //!
 //! ## The one thing to understand here
 //!
-//! PDFium can only write `BGRA` (there is no RGBA output format in its API).
-//! Android's `Bitmap.Config.ARGB_8888` is, despite the name, **RGBA in memory
-//! order** on every supported device. So a byte-for-byte handover shows every
-//! document with red and blue transposed. Exactly one place fixes that:
-//! [`swap_red_blue_in_place`], called after PDFium finishes writing.
+//! Both sides of this boundary have misleading names, and getting the pairing
+//! wrong tints every document in the app.
+//!
+//! - Android's `Bitmap.Config.ARGB_8888` is **R, G, B, A in memory order**,
+//!   despite the name. (`Bitmap.getPixel` then *returns* a packed `0xAARRGGBB`
+//!   int, which is a separate thing and not what lives in the buffer.)
+//! - PDFium's `FPDFBitmap_BGRA` also writes **R, G, B, A in memory order** on
+//!   little-endian targets, despite *its* name. See [`PDFIUM_OUTPUT_ORDER`].
+//!
+//! So the two agree and the on-screen path needs no conversion at all. The
+//! conversion machinery below is kept because it is still needed whenever a
+//! buffer's order does not match its consumer's, and because pinning the fact
+//! down in [`PDFIUM_OUTPUT_ORDER`] means a future PDFium change is a one-line
+//! fix rather than a hunt.
 
 use crate::error::{PdfError, Result};
 
@@ -18,6 +27,22 @@ pub enum PixelOrder {
     /// What Android's ARGB_8888 expects in memory.
     Rgba,
 }
+
+/// The byte order PDFium actually produces when asked for `FPDFBitmap_BGRA`.
+///
+/// **Measured, not assumed.** On PDFium 151.0.7881 / arm64 Android, rendering a
+/// page painted `1 0.5 0 rg` (orange) puts `[255, 128, 0, 255]` in the buffer —
+/// red in byte 0. The enum value sent is unambiguously `FPDFBitmap_BGRA` (4,
+/// matching the shipped `fpdfview.h`), and `render_into_bitmap_with_settings`
+/// performs no conversion of its own, so this is PDFium's own output order.
+///
+/// It happens to match Android's `ARGB_8888` memory layout, which is why the
+/// on-screen render path is a pure zero-copy handover.
+///
+/// If a future PDFium starts emitting true B, G, R, A, flip this constant to
+/// [`PixelOrder::Bgra`] — every conversion site derives from it, and the
+/// `channelOrderIsCorrectForAnAsymmetricColour` instrumented test is the tripwire.
+pub const PDFIUM_OUTPUT_ORDER: PixelOrder = PixelOrder::Rgba;
 
 pub const BYTES_PER_PIXEL: usize = 4;
 

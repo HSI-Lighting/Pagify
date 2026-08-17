@@ -150,6 +150,31 @@ class NativeBridgeTest {
         }
     }
 
+    /**
+     * The decisive channel-order check.
+     *
+     * Orange is R 255, G 128, B 0 — asymmetric, so a transposition cannot hide.
+     * If red and blue were swapped this would read as a blue-ish #ff0080ff.
+     */
+    @Test
+    fun channelOrderIsCorrectForAnAsymmetricColour() {
+        PdfDocument.openFile(fixture("orange.pdf", TestPdfs.orangeSquare())).use { doc ->
+            val (w, h) = doc.pageSize(0).pixelSize(1f)
+            val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            doc.renderPageInto(0, bitmap, 1f)
+
+            val centre = bitmap.getPixel(w / 2, h / 2)
+            val red = centre shr 16 and 0xFF
+            val green = centre shr 8 and 0xFF
+            val blue = centre and 0xFF
+            val hex = "#${Integer.toHexString(centre)}"
+
+            assertTrue("expected red ~255, got $red in $hex", red > 240)
+            assertTrue("expected green ~128, got $green in $hex", green in 100..160)
+            assertTrue("expected blue ~0, got $blue in $hex", blue < 40)
+        }
+    }
+
     @Test
     fun redAndBlueAreNotTransposed() {
         // PDFium writes BGRA; Android's ARGB_8888 is RGBA in memory. If the swap

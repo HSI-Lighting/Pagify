@@ -43,10 +43,14 @@ object. A page never exists twice in memory.
 `zoom` only identifies the cache entry. Kotlin's rounding is therefore the single
 source of truth, and the two sides cannot disagree about how big a page is.
 
-**PDFium writes BGRA; Android's `ARGB_8888` is RGBA in memory.** Exactly one
-function reconciles that ([`swap_red_blue_in_place`](rust/pdf_core/src/render/bitmap.rs)).
-If it regresses, every document renders with red and blue transposed — hence the
-dedicated instrumented test with a red-square fixture.
+**Both sides have misleading names, and they happen to agree.** Android's
+`ARGB_8888` is R,G,B,A in memory; PDFium's `FPDFBitmap_BGRA` *also* emits R,G,B,A
+on little-endian targets. So the handover needs no channel conversion — but that
+is a measured fact, not an assumption, and it is pinned in one constant
+([`PDFIUM_OUTPUT_ORDER`](rust/pdf_core/src/render/bitmap.rs)) with an instrumented
+test using an asymmetric orange fixture as the tripwire. Assuming the documented
+BGRA order instead renders every document with red and blue transposed; that bug
+was in the first build and the test is what caught it.
 
 ---
 
@@ -91,8 +95,18 @@ Gradle drives the Rust build itself — no separate step. Useful flags:
 
 ```bash
 cargo test --manifest-path rust/pdf_core/Cargo.toml   # 64 host tests, no device
-./gradlew connectedDebugAndroidTest                   # JNI boundary, needs a device
+./gradlew connectedDebugAndroidTest                   # 18 tests, needs a device
 ```
+
+> **MIUI/HyperOS devices:** `connectedDebugAndroidTest` fails with
+> `INSTALL_FAILED_USER_RESTRICTED` because MIUI blocks ddmlib's split-install
+> session commit. Plain `adb install` is not blocked, so install and run manually:
+>
+> ```bash
+> adb install -r -t app/build/outputs/apk/debug/app-debug.apk
+> adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+> adb shell am instrument -w com.hsilighting.pagify.test/androidx.test.runner.AndroidJUnitRunner
+> ```
 
 The host tests cover pixel-format conversion, cache eviction, handle lifetimes and
 the cache-hit/miss logic against a fake document. The instrumented tests cover what
@@ -171,8 +185,8 @@ to PDFium, and untrusted-input parsing is where that difference matters.
 
 ## Known gaps
 
-- **Not yet run on a device.** The build is verified; the instrumented tests have
-  not been executed against real hardware.
+- **Verified on one device only** — Xiaomi Pad 5 (arm64-v8a, Android 13 / API 33).
+  The armeabi-v7a and x86_64 builds compile and package but are untested at runtime.
 - **Recent documents** are not persisted (phase 2). Persistable URI permissions
   are already taken, so the plumbing is there.
 - **No text search or selection UI**, though `getPageText` is exposed.
