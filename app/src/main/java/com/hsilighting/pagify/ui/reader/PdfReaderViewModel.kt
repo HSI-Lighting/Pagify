@@ -190,6 +190,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun showMetadata(show: Boolean) = _state.update { it.copy(showMetadataSheet = show) }
 
+    fun toggleThumbnails() = _state.update { it.copy(showThumbnails = !it.showThumbnails) }
+
     /**
      * Viewport width in device pixels, reported by the UI.
      *

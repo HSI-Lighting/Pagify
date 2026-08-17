@@ -41,6 +41,31 @@ object RenderScale {
      * quantisation: without that, every pixel of pinch drift would be a fresh
      * cache key, and rounding down would leave the raster slightly too blurry.
      */
+    /**
+     * Fraction of the readable width a proxy render uses.
+     *
+     * A quarter of the width is a sixteenth of the pixels, which is the
+     * difference between roughly 5 ms and roughly 80 ms per page. Recognisable
+     * while scrolling, and never mistaken for the readable pass.
+     */
+    const val PROXY_FRACTION = 0.25f
+
+    /** Width of a navigator/strip thumbnail, in pixels. */
+    const val THUMBNAIL_WIDTH_PX = 190f
+
+    /** The cheap first pass. See [PROXY_FRACTION]. */
+    fun proxyFor(pageSize: PageSize, targetPixelWidth: Float): Float =
+        forPage(pageSize, targetPixelWidth * PROXY_FRACTION)
+
+    /**
+     * Scale for a thumbnail, independent of zoom.
+     *
+     * Fixed width rather than a fraction of the reading size so that thumbnails
+     * keep one cache key no matter how far the reader is zoomed in — otherwise
+     * every zoom step would orphan the entire strip.
+     */
+    fun thumbnailFor(pageSize: PageSize): Float = forPage(pageSize, THUMBNAIL_WIDTH_PX)
+
     fun forPage(pageSize: PageSize, targetPixelWidth: Float): Float {
         if (pageSize.widthPoints <= 0f || pageSize.heightPoints <= 0f) return QUANTUM
         if (!targetPixelWidth.isFinite() || targetPixelWidth <= 0f) return QUANTUM

@@ -75,6 +75,7 @@ class MainActivity : ComponentActivity() {
                     onZoomTo = viewModel::zoomTo,
                     onViewportWidth = viewModel::onViewportWidthChanged,
                     onRotate = viewModel::rotate,
+                    onToggleThumbnails = viewModel::toggleThumbnails,
                     onShowMetadata = viewModel::showMetadata,
                     onSubmitPassword = viewModel::submitPassword,
                     pageSizeProvider = viewModel::pageSize,

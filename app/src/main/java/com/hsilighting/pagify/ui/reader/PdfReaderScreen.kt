@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,6 +21,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.automirrored.filled.ViewSidebar
 import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -54,6 +56,8 @@ import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfMetadata
 import com.hsilighting.pagify.ui.components.PageNavigator
 import com.hsilighting.pagify.ui.components.PdfPageView
+import com.hsilighting.pagify.ui.components.THUMBNAIL_STRIP_WIDTH
+import com.hsilighting.pagify.ui.components.ThumbnailStrip
 import com.hsilighting.pagify.ui.components.ViewportWindow
 import com.hsilighting.pagify.ui.components.pinchToZoom
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -76,6 +80,7 @@ fun PdfReaderScreen(
     /** Viewport width in device pixels, so prefetch can match the render scale. */
     onViewportWidth: (Float) -> Unit,
     onRotate: () -> Unit,
+    onToggleThumbnails: () -> Unit,
     onShowMetadata: (Boolean) -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
@@ -101,6 +106,21 @@ fun PdfReaderScreen(
                 },
                 actions = {
                     if (state.isReady) {
+                        IconButton(onClick = onToggleThumbnails) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ViewSidebar,
+                                contentDescription = if (state.showThumbnails) {
+                                    "Hide page thumbnails"
+                                } else {
+                                    "Show page thumbnails"
+                                },
+                                tint = if (state.showThumbnails) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
                         IconButton(onClick = onRotate) {
                             Icon(
                                 Icons.AutoMirrored.Filled.RotateRight,
@@ -170,6 +190,7 @@ private fun PageList(
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
 ) {
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
     val density = LocalDensity.current
 
     // Where the navigator's viewport indicator comes from while pinned.
@@ -244,28 +265,53 @@ private fun PageList(
                 onZoomInOn(page)
             }
 
-            // Fit-width: the familiar continuous scroll through the document.
-            Box(
-                Modifier
-                    .fillMaxSize()
-                    .pinchToZoom { _, centroid -> enterZoom(centroid) }
-                    .pointerInput(Unit) {
-                        detectTapGestures(onDoubleTap = { enterZoom(it) })
-                    },
-            ) {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(PAGE_GAP),
-                    verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
+            // Only pages you have actually landed on get a readable render;
+            // everything you flick past stays on its cheap proxy.
+            val settled = !listState.isScrollInProgress
+
+            Row(Modifier.fillMaxSize()) {
+                if (state.showThumbnails) {
+                    ThumbnailStrip(
+                        pageCount = state.pageCount,
+                        currentPage = state.currentPage,
+                        onSelectPage = { page ->
+                            coroutineScope.launch { listState.scrollToItem(page) }
+                            onPageVisible(page)
+                        },
+                        pageSizeProvider = pageSizeProvider,
+                        renderer = renderer,
+                    )
+                }
+
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .pinchToZoom { _, centroid -> enterZoom(centroid) }
+                        .pointerInput(Unit) {
+                            detectTapGestures(onDoubleTap = { enterZoom(it) })
+                        },
                 ) {
-                    items(count = state.pageCount) { index ->
-                        PdfPageView(
-                            pageIndex = index,
-                            pageWidth = viewportWidth - PAGE_GAP * 2,
-                            pageSizeProvider = pageSizeProvider,
-                            renderer = renderer,
-                        )
+                    // The rail takes its width out of the reader, so pages must be
+                    // measured against what is left, not the whole viewport.
+                    val railWidth = if (state.showThumbnails) THUMBNAIL_STRIP_WIDTH else 0.dp
+                    val pageWidth = viewportWidth - railWidth - PAGE_GAP * 2
+
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(PAGE_GAP),
+                        verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
+                    ) {
+                        items(count = state.pageCount) { index ->
+                            PdfPageView(
+                                pageIndex = index,
+                                pageWidth = pageWidth,
+                                readable = settled,
+                                pageSizeProvider = pageSizeProvider,
+                                renderer = renderer,
+                            )
+                        }
                     }
                 }
             }

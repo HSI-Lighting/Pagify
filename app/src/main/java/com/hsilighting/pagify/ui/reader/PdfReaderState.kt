@@ -29,6 +29,8 @@ data class PdfReaderState(
     /** Natural sizes, indexed by page. Empty entries have not been measured yet. */
     val pageSizes: Map<Int, PageSize> = emptyMap(),
     val showMetadataSheet: Boolean = false,
+    /** The thumbnail rail. On by default: it is the cheap way to move around. */
+    val showThumbnails: Boolean = true,
 ) {
     val isReady: Boolean get() = phase is Phase.Ready
     /** 1-based, for display. */
