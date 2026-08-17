@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hsilighting.pagify.core.PageSize
@@ -17,6 +18,7 @@ import com.hsilighting.pagify.core.ThumbnailCache
 import com.hsilighting.pagify.data.PdfRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,6 +40,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Pages whose thumbnail render failed; not retried by the warmer. */
     private val unwarmablePages = mutableSetOf<Int>()
+
+    /** On-demand thumbnail renders in flight. The warmer yields while this is nonzero. */
+    private val interactiveRenders = AtomicInteger(0)
 
     private val _state = MutableStateFlow(PdfReaderState())
     val state: StateFlow<PdfReaderState> = _state.asStateFlow()
@@ -128,6 +133,11 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     suspend fun renderPage(pageIndex: Int, zoom: Float): Bitmap? {
         val doc = document ?: return null
         val startedAt = System.nanoTime()
+        // Same signal the thumbnail warmer watches: the engine serialises all
+        // PDFium calls internally, so a full-page render can still queue behind a
+        // warmer thumbnail at the native level even though nothing on the Kotlin
+        // side looks blocked. Counting this here lets the warmer yield to it too.
+        interactiveRenders.incrementAndGet()
         return try {
             repository.renderPage(doc, pageIndex, zoom, state.value.rotationQuarterTurns)
                 .also { bitmap ->
@@ -146,6 +156,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             Log.w(TAG, "could not render page $pageIndex", t)
             SessionRecorder.record("PAGE_FAIL", "page=$pageIndex ${t.message}")
             null
+        } finally {
+            interactiveRenders.decrementAndGet()
         }
     }
 
@@ -186,6 +198,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         val doc = document ?: return null
         SessionRecorder.record("THUMB_REQ", "page=$pageIndex scale=$zoom")
         val startedAt = System.nanoTime()
+        interactiveRenders.incrementAndGet()
 
         return try {
             repository.renderThumbnail(doc, pageIndex, zoom).also { bitmap ->
@@ -209,6 +222,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             Log.w(TAG, "could not render thumbnail $pageIndex", t)
             SessionRecorder.record("THUMB_FAIL", "page=$pageIndex ${t.message}")
             null
+        } finally {
+            interactiveRenders.decrementAndGet()
         }
     }
 
@@ -350,6 +365,18 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             val pageCount = doc.pageCount
 
             while (isActive) {
+                // Yield to anything the user is waiting on.
+                //
+                // A recording showed why this is needed: with the warmer running,
+                // on-demand thumbnails went from a 1.5 s median to 3.1 s, and some
+                // requests sat 4 s before being cancelled. The warmer holds the
+                // render permit for a whole page, so a thumbnail you are actually
+                // looking at queued behind a page you are not — a priority
+                // inversion that made the rail feel worse, not better.
+                while (isActive && interactiveRenders.get() > 0) {
+                    delay(WARM_YIELD_MILLIS)
+                }
+
                 val around = _state.value.currentPage
                 val next = (0 until pageCount)
                     .filter { thumbnailCache.get(it) == null && it !in unwarmablePages }
@@ -423,5 +450,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
         /** Enough to bridge a view swap on the current page and its neighbours. */
         const val RECENT_RASTER_COUNT = 4
+
+        /** How often the warmer rechecks whether it may resume. */
+        const val WARM_YIELD_MILLIS = 80L
     }
 }

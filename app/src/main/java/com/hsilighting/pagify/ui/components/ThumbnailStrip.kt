@@ -54,6 +54,8 @@ import com.hsilighting.pagify.core.RenderScale
 fun ThumbnailStrip(
     pageCount: Int,
     currentPage: Int,
+    /** Incremented by the reader when *you* scroll it; the rail follows only then. */
+    followTick: Int,
     onSelectPage: (Int) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> Bitmap?,
@@ -78,8 +80,20 @@ fun ThumbnailStrip(
         }
     }
 
-    // Follow the reader, so the rail shows where you are.
-    LaunchedEffect(currentPage) {
+    // Follow the reader, bringing the current page to the top of the rail.
+    //
+    // Keyed on [followTick], which the reader increments *only* when you scroll
+    // it yourself — never when a page is chosen from here. Tapping a thumbnail
+    // must leave the rail exactly where it is, anywhere in the document: you were
+    // looking at a particular run of pages, and moving the rail out from under
+    // you loses your place and makes picking a second page from that run
+    // needlessly awkward.
+    //
+    // Driven by an explicit signal rather than by watching `currentPage`, because
+    // centring the chosen page leaves the *previous* page topmost in the reader,
+    // which echoes back as a page change and is indistinguishable from a real one.
+    LaunchedEffect(followTick) {
+        if (followTick == 0) return@LaunchedEffect
         userIsBrowsing = false
         if (currentPage in 0 until pageCount) {
             listState.animateScrollToItem(currentPage)
@@ -93,7 +107,7 @@ fun ThumbnailStrip(
     // corrections accumulate and drag the anchor: the rail was landing a dozen
     // pages away from the one being read. This absorbs that, then gets out of the
     // way as soon as the target is on screen or you start browsing.
-    LaunchedEffect(currentPage, pageCount) {
+    LaunchedEffect(followTick, pageCount) {
         snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.index } }
             .collect { visible ->
                 if (userIsBrowsing) return@collect
@@ -116,7 +130,12 @@ fun ThumbnailStrip(
             ThumbnailCell(
                 pageIndex = index,
                 isCurrent = index == currentPage,
-                onClick = { onSelectPage(index) },
+                onClick = {
+                    // Marks the rail as yours, so the drift correction also keeps
+                    // its hands off until the reader next moves.
+                    userIsBrowsing = true
+                    onSelectPage(index)
+                },
                 pageSizeProvider = pageSizeProvider,
                 renderer = renderer,
             )
@@ -146,7 +165,12 @@ private fun ThumbnailCell(
         bitmap = renderer(pageIndex, RenderScale.thumbnailFor(size))
     }
 
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    // The whole cell is the target, page number included — a 104dp-wide rail is
+    // already a small thing to hit, and the number reads as part of the cell.
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -161,8 +185,7 @@ private fun ThumbnailCell(
                         MaterialTheme.colorScheme.outlineVariant
                     },
                     shape = RoundedCornerShape(3.dp),
-                )
-                .clickable(onClick = onClick),
+                ),
         ) {
             bitmap?.let { bmp ->
                 Image(

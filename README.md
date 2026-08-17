@@ -211,6 +211,14 @@ to PDFium, and untrusted-input parsing is where that difference matters.
   zoom. `RenderScale.MAX_PIXELS` caps it at 16 MP (64 MB) and the bitmap is
   upscaled beyond that, which keeps the app alive but goes soft at high zoom.
   Rendering only the visible tile is the correct fix.
+- **Heavy documents (multi-GB, tens of MB per page) still render slowly per
+  page** — a thumbnail or full page load on such a file can take 1-3 seconds even
+  after the fixes below, because PDFium serialises internally and a page's own
+  resource/content-stream parsing dominates. The thumbnail cache, background
+  warmer, and interactive-render priority (the warmer yields while you are
+  actively waiting on a render) all reduce *repeated* cost and contention, but
+  none of them can make a single first render of a heavy page fast — see the
+  render-pipeline plan for the tiled-rendering approach that would.
 - **Recent documents** are not persisted (phase 2). Persistable URI permissions
   are already taken, so the plumbing is there.
 - **No text search or selection UI**, though `getPageText` is exposed.

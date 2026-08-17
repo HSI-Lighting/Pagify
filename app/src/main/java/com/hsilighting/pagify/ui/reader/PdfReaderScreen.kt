@@ -64,6 +64,7 @@ import com.hsilighting.pagify.ui.components.THUMBNAIL_STRIP_WIDTH
 import com.hsilighting.pagify.ui.components.ThumbnailStrip
 import com.hsilighting.pagify.ui.components.ViewportWindow
 import com.hsilighting.pagify.ui.components.pinchToZoom
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -248,12 +249,31 @@ private fun PageList(
         }
     }
 
+    /**
+     * Silences page-visibility reports while the reader is being scrolled by us
+     * rather than by the user.
+     *
+     * Choosing a page from the rail centres it, which leaves the *previous* page
+     * as the topmost visible one. That reported straight back as a page change,
+     * and the rail — which is supposed to hold still when you pick from it —
+     * treated the echo as the reader moving and scrolled anyway.
+     */
+    var scrollingProgrammatically by remember { mutableStateOf(false) }
+
+    /** Bumped only by a reader scroll you performed. The rail keys its follow off this. */
+    var readerFollowTick by remember { mutableStateOf(0) }
+
     // Reporting the first *visible* item (rather than the centred one) keeps the
     // page counter in step with what the user sees while scrolling.
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex }
             .distinctUntilChanged()
-            .collect(onPageVisible)
+            .collect { index ->
+                if (scrollingProgrammatically) return@collect
+                onPageVisible(index)
+                // The rail follows this, and only this.
+                readerFollowTick++
+            }
     }
 
     BoxWithConstraints(Modifier.fillMaxSize()) {
@@ -317,8 +337,35 @@ private fun PageList(
                     ThumbnailStrip(
                         pageCount = state.pageCount,
                         currentPage = state.currentPage,
+                        followTick = readerFollowTick,
                         onSelectPage = { page ->
-                            coroutineScope.launch { listState.scrollToItem(page) }
+                            coroutineScope.launch {
+                                scrollingProgrammatically = true
+                                // Centre the chosen page rather than pinning it to
+                                // the top: a spread you picked deliberately should
+                                // sit in the middle of the reader, with its
+                                // neighbours visible either side.
+                                val size = state.pageSizes[page]
+                                val pageHeightPx = size?.let {
+                                    val width = viewportWidth -
+                                        (if (state.showThumbnails) THUMBNAIL_STRIP_WIDTH else 0.dp) -
+                                        PAGE_GAP * 2
+                                    if (it.aspectRatio > 0f) {
+                                        with(density) { width.toPx() } / it.aspectRatio
+                                    } else {
+                                        null
+                                    }
+                                }
+                                val viewportHeightPx = with(density) { viewportHeight.toPx() }
+                                val offset = pageHeightPx
+                                    ?.let { -((viewportHeightPx - it) / 2f).toInt() }
+                                    ?: 0
+                                listState.scrollToItem(page, offset)
+                                // Long enough for the settled position to be
+                                // observed and discarded by the collector above.
+                                delay(SCROLL_SETTLE_MILLIS)
+                                scrollingProgrammatically = false
+                            }
                             onPageVisible(page)
                         },
                         pageSizeProvider = pageSizeProvider,
@@ -476,4 +523,7 @@ private fun MetadataRow(label: String, value: String?) {
 }
 
 private val PAGE_GAP = 12.dp
+
+/** How long to ignore visibility echoes after scrolling the reader ourselves. */
+private const val SCROLL_SETTLE_MILLIS = 250L
 
