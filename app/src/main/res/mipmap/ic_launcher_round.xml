@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Fallback for API 24-25, which predate adaptive icons: the same artwork with
+     the background baked in. API 26+ resolves to mipmap-anydpi-v26 instead. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path
+        android:fillColor="#3F5F90"
+        android:pathData="M0,0 h108 v108 h-108 z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,28 h24 l16,16 v36 a4,4 0 0 1 -4,4 h-36 a4,4 0 0 1 -4,-4 v-48 a4,4 0 0 1 4,-4 z" />
+    <path
+        android:fillColor="#C7D6F0"
+        android:pathData="M60,28 l16,16 h-16 z" />
+    <path
+        android:fillColor="#3F5F90"
+        android:pathData="M41,54 h26 v4 h-26 z M41,63 h26 v4 h-26 z M41,72 h16 v4 h-16 z" />
+</vector>

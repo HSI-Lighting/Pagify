@@ -1,0 +1,21 @@
+# Android / Gradle
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/captures
+.externalNativeBuild
+.cxx
+*.apk
+*.aab
+
+# Rust
+/rust/pdf_core/target/
+**/*.rs.bk
+
+# Note: app/src/main/jniLibs/*/libpdfium.so IS checked in on purpose.
+# It is a pinned third-party binary (chromium/7881) that the build cannot
+# reproduce locally; tools/fetch_pdfium.ps1 regenerates it.

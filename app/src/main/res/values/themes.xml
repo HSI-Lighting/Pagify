@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The real colours come from Compose (ui/theme/Theme.kt). This exists only
+         so the window has a sane background before the first frame draws. -->
+    <style name="Theme.Pagify" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

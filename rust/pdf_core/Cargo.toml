@@ -1,0 +1,50 @@
+[package]
+name = "pdf_core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+description = "Pagify PDF engine: parsing, rendering and caching behind a stable JNI surface."
+
+[lib]
+# `cdylib` is what the JVM dlopen()s; `rlib` keeps `cargo test` able to build the
+# crate as a normal library so the pure-logic modules can be unit-tested on the host.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+# Rendering backend. Default features pull in `pdfium_latest` (== pdfium_7881),
+# which is why the bundled libpdfium.so is pinned to chromium/7881 — see
+# tools/fetch_pdfium.ps1. `image` support is not needed: we render straight into
+# caller-supplied buffers, so it is switched off to keep the .so small.
+pdfium-render = { version = "0.9.3", default-features = false, features = [
+    "pdfium_latest",
+    "thread_safe",
+] }
+
+# Phase 3+. Pure-Rust document mutation for annotations/signatures. Kept behind a
+# feature flag until it is exercised, per the security note in the architecture doc.
+lopdf = { version = "0.44", optional = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+android_logger = "0.15"
+
+[features]
+default = []
+# Enables the lopdf-backed EditableDocument implementation (roadmap phase 3).
+editing = ["dep:lopdf"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = "symbols"
+# Deliberately NOT `panic = "abort"`. Every JNI entry point wraps its body in
+# `catch_unwind` and converts a panic into a Java exception; aborting instead would
+# turn any malformed-PDF edge case into a process kill with no diagnostics.
+panic = "unwind"
