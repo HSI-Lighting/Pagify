@@ -14,6 +14,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.hsilighting.pagify.core.BlankFrameDetector
 import com.hsilighting.pagify.ui.reader.PdfReaderScreen
 import com.hsilighting.pagify.ui.reader.PdfReaderViewModel
 import com.hsilighting.pagify.ui.theme.PagifyTheme
@@ -29,9 +30,13 @@ class MainActivity : ComponentActivity() {
      */
     private val incomingDocument = MutableStateFlow<Uri?>(null)
 
+    /** Reads real screen pixels during zoom gestures. See [BlankFrameDetector]. */
+    private lateinit var blankFrameDetector: BlankFrameDetector
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        blankFrameDetector = BlankFrameDetector(window)
 
         incomingDocument.value = viewableUri(intent)
 
@@ -74,6 +79,9 @@ class MainActivity : ComponentActivity() {
                     onPageVisible = viewModel::onPageVisible,
                     onZoomInOn = viewModel::zoomInOn,
                     onZoomTo = viewModel::zoomTo,
+                    onZoomActivity = { blankFrameDetector.onZoomActivity() },
+                    onContentBounds = blankFrameDetector::setContentBounds,
+                    peekRenderedPage = viewModel::peekRenderedPage,
                     onViewportWidth = viewModel::onViewportWidthChanged,
                     onRotate = viewModel::rotate,
                     onToggleThumbnails = viewModel::toggleThumbnails,
@@ -92,6 +100,11 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        blankFrameDetector.release()
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -98,6 +98,32 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         pendingUri?.let { open(it, password) }
     }
 
+    /**
+     * The most recent raster of each page, for handing straight to a view that is
+     * about to be composed.
+     *
+     * Entering zoom builds a fresh view with no bitmap, and even the cheap proxy
+     * takes a couple of hundred milliseconds — the blank-frame watcher measured
+     * 54 ms of a completely empty content area in that gap. Reading a bitmap
+     * synchronously at composition means the first frame already has pixels, so
+     * there is no gap to measure.
+     *
+     * Only the last few pages are kept; this exists to bridge a view swap, not to
+     * be another cache.
+     */
+    private val recentPageRasters = object : LinkedHashMap<Int, Bitmap>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Bitmap>?): Boolean =
+            size > RECENT_RASTER_COUNT
+    }
+
+    @Synchronized
+    fun peekRenderedPage(pageIndex: Int): Bitmap? = recentPageRasters[pageIndex]
+
+    @Synchronized
+    private fun rememberRaster(pageIndex: Int, bitmap: Bitmap) {
+        recentPageRasters[pageIndex] = bitmap
+    }
+
     /** Renders on demand for a page composable. Returns null if the page failed. */
     suspend fun renderPage(pageIndex: Int, zoom: Float): Bitmap? {
         val doc = document ?: return null
@@ -105,6 +131,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         return try {
             repository.renderPage(doc, pageIndex, zoom, state.value.rotationQuarterTurns)
                 .also { bitmap ->
+                    rememberRaster(pageIndex, bitmap)
                     SessionRecorder.record(
                         kind = "PAGE_PIXELS",
                         detail = "page=$pageIndex scale=$zoom " +
@@ -393,5 +420,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     private companion object {
         const val TAG = "PdfReaderViewModel"
         const val DOUBLE_TAP_ZOOM = 2.5f
+
+        /** Enough to bridge a view swap on the current page and its neighbours. */
+        const val RECENT_RASTER_COUNT = 4
     }
 }

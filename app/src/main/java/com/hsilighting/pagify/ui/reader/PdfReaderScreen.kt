@@ -48,6 +48,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -87,6 +89,12 @@ fun PdfReaderScreen(
     onToggleThumbnails: () -> Unit,
     /** Start or stop the render-timeline recording. */
     onToggleRecording: () -> Unit,
+    /** Fired on every zoom gesture event, to drive the blank-frame watcher. */
+    onZoomActivity: () -> Unit,
+    /** Reader bounds in window pixels, so the watcher samples only the page area. */
+    onContentBounds: (Int, Int, Int, Int) -> Unit,
+    /** Synchronous peek at the last raster drawn for a page. */
+    peekRenderedPage: (Int) -> android.graphics.Bitmap?,
     onShowMetadata: (Boolean) -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
@@ -188,6 +196,9 @@ fun PdfReaderScreen(
                     onPageVisible = onPageVisible,
                     onZoomInOn = onZoomInOn,
                     onZoomTo = onZoomTo,
+                    onZoomActivity = onZoomActivity,
+                    onContentBounds = onContentBounds,
+                    peekRenderedPage = peekRenderedPage,
                     thumbnailRenderer = thumbnailRenderer,
                     onViewportWidth = onViewportWidth,
                     pageSizeProvider = pageSizeProvider,
@@ -211,6 +222,9 @@ private fun PageList(
     /** Zoom in from fit-width, pinning the page the gesture landed on. */
     onZoomInOn: (Int) -> Unit,
     onZoomTo: (Float) -> Unit,
+    onZoomActivity: () -> Unit,
+    onContentBounds: (Int, Int, Int, Int) -> Unit,
+    peekRenderedPage: (Int) -> android.graphics.Bitmap?,
     onViewportWidth: (Float) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
@@ -259,9 +273,11 @@ private fun PageList(
                 initialZoom = state.zoom,
                 pageSize = state.pageSizes[pinnedPage],
                 onZoomSettled = onZoomTo,
+                onZoomActivity = onZoomActivity,
                 onWindowChanged = { window = it },
                 pageSizeProvider = pageSizeProvider,
                 renderer = renderer,
+                initialBitmap = peekRenderedPage(pinnedPage),
                 initialFocus = recenterRequest,
             )
         } else {
@@ -314,9 +330,28 @@ private fun PageList(
                     Modifier
                         .weight(1f)
                         .fillMaxHeight()
-                        .pinchToZoom { _, centroid -> enterZoom(centroid) }
+                        // Tells the blank watcher exactly which pixels are meant
+                        // to be showing a page — the rail must stay out of it.
+                        .onGloballyPositioned { coordinates ->
+                            val bounds = coordinates.boundsInWindow()
+                            onContentBounds(
+                                bounds.left.toInt(),
+                                bounds.top.toInt(),
+                                bounds.right.toInt(),
+                                bounds.bottom.toInt(),
+                            )
+                        }
+                        .pinchToZoom { _, centroid ->
+                            onZoomActivity()
+                            enterZoom(centroid)
+                        }
                         .pointerInput(Unit) {
-                            detectTapGestures(onDoubleTap = { enterZoom(it) })
+                            detectTapGestures(
+                                onDoubleTap = {
+                                    onZoomActivity()
+                                    enterZoom(it)
+                                },
+                            )
                         },
                 ) {
                     // The rail takes its width out of the reader, so pages must be
