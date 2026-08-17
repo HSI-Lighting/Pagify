@@ -20,7 +20,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.automirrored.filled.ViewSidebar
 import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material3.Button
@@ -83,6 +85,8 @@ fun PdfReaderScreen(
     onViewportWidth: (Float) -> Unit,
     onRotate: () -> Unit,
     onToggleThumbnails: () -> Unit,
+    /** Start or stop the render-timeline recording. */
+    onToggleRecording: () -> Unit,
     onShowMetadata: (Boolean) -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
@@ -108,6 +112,25 @@ fun PdfReaderScreen(
                 },
                 actions = {
                     if (state.isReady) {
+                        IconButton(onClick = onToggleRecording) {
+                            Icon(
+                                imageVector = if (state.isRecording) {
+                                    Icons.Filled.StopCircle
+                                } else {
+                                    Icons.Filled.FiberManualRecord
+                                },
+                                contentDescription = if (state.isRecording) {
+                                    "Stop recording and save the render timeline"
+                                } else {
+                                    "Record a render timeline"
+                                },
+                                tint = if (state.isRecording) {
+                                    MaterialTheme.colorScheme.error
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                            )
+                        }
                         IconButton(onClick = onToggleThumbnails) {
                             Icon(
                                 Icons.AutoMirrored.Filled.ViewSidebar,

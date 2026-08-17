@@ -23,6 +23,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.RenderScale
+import com.hsilighting.pagify.core.SessionRecorder
 
 /**
  * One page of the document, rendered in two passes.
@@ -53,7 +54,19 @@ fun PdfPageView(
     /** Scale of what is currently on screen, so an upgrade is not redone. */
     var renderedScale by remember(pageIndex) { mutableStateOf(0f) }
 
-    LaunchedEffect(pageIndex) { pageSize = pageSizeProvider(pageIndex) }
+    LaunchedEffect(pageIndex) {
+        SessionRecorder.record("PAGE_ENTER", "page=$pageIndex")
+        val measured = pageSizeProvider(pageIndex)
+        pageSize = measured
+        // The moment the placeholder can claim its true shape. Everything between
+        // here and PAGE_PROXY is time the reader spends looking at an empty box.
+        measured?.let {
+            SessionRecorder.record(
+                kind = "PAGE_OUTLINE",
+                detail = "page=$pageIndex pts=${it.widthPoints}x${it.heightPoints}",
+            )
+        }
+    }
 
     val density = LocalDensity.current
     val targetPx = with(density) { pageWidth.toPx() }
@@ -73,6 +86,7 @@ fun PdfPageView(
             if (renderedScale < scale) {
                 bitmap = it
                 renderedScale = scale
+                SessionRecorder.record("PAGE_PROXY", "page=$pageIndex px=${it.width}x${it.height}")
             }
         }
     }
@@ -85,6 +99,7 @@ fun PdfPageView(
         renderer(pageIndex, scale)?.let {
             bitmap = it
             renderedScale = scale
+            SessionRecorder.record("PAGE_READABLE", "page=$pageIndex px=${it.width}x${it.height}")
         }
     }
 

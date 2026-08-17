@@ -31,6 +31,8 @@ data class PdfReaderState(
     val showMetadataSheet: Boolean = false,
     /** The thumbnail rail. On by default: it is the cheap way to move around. */
     val showThumbnails: Boolean = true,
+    /** A render-timeline recording is in progress. See `SessionRecorder`. */
+    val isRecording: Boolean = false,
 ) {
     val isReady: Boolean get() = phase is Phase.Ready
     /** 1-based, for display. */

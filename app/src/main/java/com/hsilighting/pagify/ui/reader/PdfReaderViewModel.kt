@@ -3,12 +3,17 @@ package com.hsilighting.pagify.ui.reader
 import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
+import android.os.Build
 import android.util.Log
+import java.io.File
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
+import com.hsilighting.pagify.core.RenderScale
+import com.hsilighting.pagify.core.SessionRecorder
+import com.hsilighting.pagify.core.ThumbnailCache
 import com.hsilighting.pagify.data.PdfRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -16,11 +21,23 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.yield
+import kotlin.math.abs
 
 class PdfReaderViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository = PdfRepository(application.contentResolver)
+
+    /** Survives scrolling, unlike a per-cell `remember`. Cleared on document change. */
+    private val thumbnailCache = ThumbnailCache()
+
+    /** Background job that fills [thumbnailCache] ahead of the reader. */
+    private var thumbnailWarmJob: Job? = null
+
+    /** Pages whose thumbnail render failed; not retried by the warmer. */
+    private val unwarmablePages = mutableSetOf<Int>()
 
     private val _state = MutableStateFlow(PdfReaderState())
     val state: StateFlow<PdfReaderState> = _state.asStateFlow()
@@ -58,6 +75,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                     )
                 }
                 schedulePrefetch()
+                warmThumbnails()
             } catch (e: PdfPasswordException) {
                 // Not a failure: the user has something to do about it.
                 _state.update {
@@ -83,23 +101,86 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     /** Renders on demand for a page composable. Returns null if the page failed. */
     suspend fun renderPage(pageIndex: Int, zoom: Float): Bitmap? {
         val doc = document ?: return null
+        val startedAt = System.nanoTime()
         return try {
             repository.renderPage(doc, pageIndex, zoom, state.value.rotationQuarterTurns)
+                .also { bitmap ->
+                    SessionRecorder.record(
+                        kind = "PAGE_PIXELS",
+                        detail = "page=$pageIndex scale=$zoom " +
+                            "px=${bitmap.width}x${bitmap.height} " +
+                            "mp=${"%.1f".format(bitmap.width.toLong() * bitmap.height / 1e6)}",
+                        durationMillis = (System.nanoTime() - startedAt) / 1_000_000,
+                    )
+                }
+        } catch (t: CancellationException) {
+            throw t
         } catch (t: Throwable) {
             Log.w(TAG, "could not render page $pageIndex", t)
+            SessionRecorder.record("PAGE_FAIL", "page=$pageIndex ${t.message}")
             null
         }
     }
 
-    /** Throttled render for the thumbnail rail. See [PdfRepository.renderThumbnail]. */
+    // ------------------------------------------------------------- inspector --
+
+    fun toggleRecording(externalFilesDir: File?): String? {
+        if (SessionRecorder.isRecording) {
+            val directory = externalFilesDir ?: return "No writable directory for the recording"
+            val file = SessionRecorder.stop(directory)
+            _state.update { it.copy(isRecording = false) }
+            return file?.let { "Saved ${it.name}" }
+        }
+
+        SessionRecorder.start(
+            documentName = _state.value.documentName.ifBlank { "(none)" },
+            pageCount = _state.value.pageCount,
+            deviceNote = "${Build.MODEL} | Android ${Build.VERSION.RELEASE} | " +
+                "${Build.SUPPORTED_ABIS.firstOrNull()}",
+        )
+        _state.update { it.copy(isRecording = true) }
+        return "Recording"
+    }
+
+    /**
+     * Thumbnail for the rail, from memory when possible.
+     *
+     * The cache is checked before anything else touches the engine, so scrolling
+     * back over pages already seen costs a map lookup rather than a page load —
+     * which on a document with heavy pages is the difference between instant and
+     * a couple of hundred milliseconds each.
+     */
     suspend fun renderThumbnail(pageIndex: Int, zoom: Float): Bitmap? {
+        thumbnailCache.get(pageIndex)?.let { cached ->
+            SessionRecorder.record("THUMB_HIT", "page=$pageIndex", 0)
+            return cached
+        }
+
         val doc = document ?: return null
+        SessionRecorder.record("THUMB_REQ", "page=$pageIndex scale=$zoom")
+        val startedAt = System.nanoTime()
+
         return try {
-            repository.renderThumbnail(doc, pageIndex, zoom)
+            repository.renderThumbnail(doc, pageIndex, zoom).also { bitmap ->
+                thumbnailCache.put(pageIndex, bitmap)
+                SessionRecorder.record(
+                    kind = "THUMB_RENDER",
+                    detail = "page=$pageIndex px=${bitmap.width}x${bitmap.height} " +
+                        "kb=${bitmap.byteCount / 1024}",
+                    durationMillis = (System.nanoTime() - startedAt) / 1_000_000,
+                )
+            }
         } catch (t: CancellationException) {
+            // Its cell scrolled away before this reached the front of the queue.
+            SessionRecorder.record(
+                kind = "THUMB_SKIP",
+                detail = "page=$pageIndex",
+                durationMillis = (System.nanoTime() - startedAt) / 1_000_000,
+            )
             throw t
         } catch (t: Throwable) {
             Log.w(TAG, "could not render thumbnail $pageIndex", t)
+            SessionRecorder.record("THUMB_FAIL", "page=$pageIndex ${t.message}")
             null
         }
     }
@@ -221,6 +302,56 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         schedulePrefetch()
     }
 
+    /**
+     * Fills the thumbnail cache in the background, nearest-first.
+     *
+     * On a document with heavy pages a first thumbnail costs well over a second —
+     * measured at a median of 1.5 s on the 2.9 GB catalogue — and no cache can
+     * make a first render fast. What it can do is make sure the first render
+     * already happened before you scrolled there.
+     *
+     * It always picks the uncached page closest to where you are, so jumping to
+     * page 60 immediately redirects the work rather than grinding through pages
+     * 4, 5, 6 that nobody is looking at. Each page acquires the render permit
+     * separately, so an on-demand thumbnail or page slots in between rather than
+     * queuing behind the whole document.
+     */
+    private fun warmThumbnails() {
+        thumbnailWarmJob?.cancel()
+        thumbnailWarmJob = viewModelScope.launch {
+            val doc = document ?: return@launch
+            val pageCount = doc.pageCount
+
+            while (isActive) {
+                val around = _state.value.currentPage
+                val next = (0 until pageCount)
+                    .filter { thumbnailCache.get(it) == null && it !in unwarmablePages }
+                    .minByOrNull { abs(it - around) } ?: break
+
+                val startedAt = System.nanoTime()
+                val rendered = runCatching {
+                    val size = repository.pageSize(doc, next)
+                    repository.renderThumbnail(doc, next, RenderScale.thumbnailFor(size))
+                }.getOrNull()
+
+                if (rendered != null) {
+                    thumbnailCache.put(next, rendered)
+                    SessionRecorder.record(
+                        kind = "THUMB_WARM",
+                        detail = "page=$next cacheKb=${thumbnailCache.usedBytes / 1024}",
+                        durationMillis = (System.nanoTime() - startedAt) / 1_000_000,
+                    )
+                } else {
+                    // Remembered so the loop does not spin forever on a page that
+                    // cannot be rendered. On-demand requests may still retry it.
+                    unwarmablePages += next
+                }
+                yield()
+            }
+            SessionRecorder.record("THUMB_WARM_DONE", "cacheKb=${thumbnailCache.usedBytes / 1024}")
+        }
+    }
+
     private fun schedulePrefetch() {
         val doc = document ?: return
         // Without a viewport width there is no way to know what scale to warm the
@@ -246,8 +377,12 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     private fun closeDocument() {
         prefetchJob?.cancel()
+        thumbnailWarmJob?.cancel()
+        unwarmablePages.clear()
         document?.close()
         document = null
+        // Thumbnails of a closed document are just held memory.
+        thumbnailCache.clear()
     }
 
     override fun onCleared() {

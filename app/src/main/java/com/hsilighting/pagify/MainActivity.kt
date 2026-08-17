@@ -3,6 +3,7 @@ package com.hsilighting.pagify
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -76,6 +77,13 @@ class MainActivity : ComponentActivity() {
                     onViewportWidth = viewModel::onViewportWidthChanged,
                     onRotate = viewModel::rotate,
                     onToggleThumbnails = viewModel::toggleThumbnails,
+                    onToggleRecording = {
+                        // App-private external storage, so the file can be pulled
+                        // with adb without any permission prompt.
+                        viewModel.toggleRecording(getExternalFilesDir(null))?.let { message ->
+                            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                        }
+                    },
                     onShowMetadata = viewModel::showMetadata,
                     onSubmitPassword = viewModel::submitPassword,
                     pageSizeProvider = viewModel::pageSize,
