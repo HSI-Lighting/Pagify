@@ -1,6 +1,7 @@
 package com.hsilighting.pagify.ui.reader
 
 import android.graphics.Bitmap
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
@@ -17,16 +18,19 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.TransformOrigin
-import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import com.hsilighting.pagify.core.PageSize
-import com.hsilighting.pagify.ui.components.PdfPageView
+import com.hsilighting.pagify.core.RenderScale
 import com.hsilighting.pagify.ui.components.ViewportWindow
 import com.hsilighting.pagify.ui.components.pinchToZoom
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlin.math.roundToInt
 
 /**
  * A single page, magnified.
@@ -141,6 +145,21 @@ fun ZoomedPage(
             }
         }
 
+        // The rasterised page. Kept here rather than in PdfPageView because the
+        // zoomed view draws it itself; the previous bitmap stays on screen until
+        // its replacement arrives, so re-rasterising never blanks the page.
+        var pageBitmap by remember(pageIndex) { mutableStateOf<Bitmap?>(null) }
+
+        val renderScale = remember(pageSize, committedScale, baseW) {
+            val size = pageSize ?: return@remember null
+            RenderScale.forPage(size, baseW * committedScale)
+        }
+
+        LaunchedEffect(pageIndex, renderScale) {
+            val target = renderScale ?: return@LaunchedEffect
+            renderer(pageIndex, target)?.let { pageBitmap = it }
+        }
+
         // Report the visible region for the navigator.
         LaunchedEffect(offset, scale, baseW, baseH, viewportW, viewportH) {
             val contentW = baseW * scale
@@ -188,24 +207,27 @@ fun ZoomedPage(
                     )
                 },
         ) {
-            val residual = if (committedScale > 0f) scale / committedScale else 1f
-
-            PdfPageView(
-                pageIndex = pageIndex,
-                // Laid out at the committed scale; `residual` covers the gap while
-                // a gesture is still in flight, so the visual is always correct
-                // even before the page has been re-rasterised.
-                pageWidth = with(density) { (baseW * committedScale).toDp() },
-                pageSizeProvider = pageSizeProvider,
-                renderer = renderer,
-                modifier = Modifier.graphicsLayer {
-                    transformOrigin = TransformOrigin(0f, 0f)
-                    scaleX = residual
-                    scaleY = residual
-                    translationX = offset.x
-                    translationY = offset.y
-                },
-            )
+            // The page is *drawn*, not laid out, at its magnified size. Laying out
+            // a composable at `baseW * scale` meant a 4x zoom asked for a
+            // ~6400x9100 px layer, past the GPU's maximum texture size, and the
+            // layer silently failed — the page vanished the instant a gesture
+            // settled and the layout caught up to the scale. Here the canvas is
+            // always viewport-sized and only the destination rectangle grows, so
+            // there is no size that can break it.
+            Canvas(Modifier.fillMaxSize()) {
+                val bmp = pageBitmap ?: return@Canvas
+                drawImage(
+                    image = bmp.asImageBitmap(),
+                    dstOffset = IntOffset(offset.x.roundToInt(), offset.y.roundToInt()),
+                    dstSize = IntSize(
+                        (baseW * scale).roundToInt().coerceAtLeast(1),
+                        (baseH * scale).roundToInt().coerceAtLeast(1),
+                    ),
+                    // Bilinear, so the stretch between a settle and the next
+                    // re-rasterisation is smooth rather than blocky.
+                    filterQuality = FilterQuality.Medium,
+                )
+            }
         }
     }
 }
