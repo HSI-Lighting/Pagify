@@ -98,15 +98,23 @@ cargo test --manifest-path rust/pdf_core/Cargo.toml   # 64 host tests, no device
 ./gradlew connectedDebugAndroidTest                   # 18 tests, needs a device
 ```
 
-> **MIUI/HyperOS devices:** `connectedDebugAndroidTest` fails with
-> `INSTALL_FAILED_USER_RESTRICTED` because MIUI blocks ddmlib's split-install
-> session commit. Plain `adb install` is not blocked, so install and run manually:
+> **MIUI/HyperOS devices need a one-time seed.** MIUI refuses the *first* install
+> of a package through ddmlib's split-install session commit, so on a clean device
+> `connectedDebugAndroidTest` fails with `INSTALL_FAILED_USER_RESTRICTED: Install
+> canceled by user`. Plain `adb install` is not restricted, and once the packages
+> exist Gradle updates them happily. So seed them once per device:
 >
 > ```bash
+> ./gradlew assembleDebug assembleDebugAndroidTest
 > adb install -r -t app/build/outputs/apk/debug/app-debug.apk
 > adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-> adb shell am instrument -w com.hsilighting.pagify.test/androidx.test.runner.AndroidJUnitRunner
 > ```
+>
+> After that `./gradlew connectedDebugAndroidTest` works normally. Two red
+> herrings worth knowing: this is unrelated to the screen being locked, and MIUI's
+> `adb uninstall` reports `DELETE_FAILED_INTERNAL_ERROR` while actually removing
+> the package — so an uninstall "failure" in the log is usually not one. If you do
+> uninstall, re-seed before using Gradle again.
 
 The host tests cover pixel-format conversion, cache eviction, handle lifetimes and
 the cache-hit/miss logic against a fake document. The instrumented tests cover what
