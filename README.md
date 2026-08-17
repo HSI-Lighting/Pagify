@@ -98,11 +98,16 @@ cargo test --manifest-path rust/pdf_core/Cargo.toml   # 64 host tests, no device
 ./gradlew connectedDebugAndroidTest                   # 18 tests, needs a device
 ```
 
-> **MIUI/HyperOS devices need a one-time seed.** MIUI refuses the *first* install
-> of a package through ddmlib's split-install session commit, so on a clean device
-> `connectedDebugAndroidTest` fails with `INSTALL_FAILED_USER_RESTRICTED: Install
-> canceled by user`. Plain `adb install` is not restricted, and once the packages
-> exist Gradle updates them happily. So seed them once per device:
+> **MIUI/HyperOS devices restrict installing *new* packages.** Updates to a package
+> that already exists always work; creating one is what gets refused, with
+> `INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`. That hits
+> `connectedDebugAndroidTest` on a clean device, and it is **intermittent** — plain
+> `adb install` of a new package succeeded once here and was refused later on an
+> awake, unlocked device, so it is not simply the screen being locked. When it
+> refuses, enable *Developer options → Install via USB* (needs a Mi account and
+> network) or install from Android Studio.
+>
+> When it does let you in, seed both packages once and Gradle stays happy after:
 >
 > ```bash
 > ./gradlew assembleDebug assembleDebugAndroidTest
@@ -110,11 +115,10 @@ cargo test --manifest-path rust/pdf_core/Cargo.toml   # 64 host tests, no device
 > adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
 > ```
 >
-> After that `./gradlew connectedDebugAndroidTest` works normally. Two red
-> herrings worth knowing: this is unrelated to the screen being locked, and MIUI's
-> `adb uninstall` reports `DELETE_FAILED_INTERNAL_ERROR` while actually removing
-> the package — so an uninstall "failure" in the log is usually not one. If you do
-> uninstall, re-seed before using Gradle again.
+> After that `./gradlew connectedDebugAndroidTest` works normally. One more trap:
+> MIUI's `adb uninstall` reports `DELETE_FAILED_INTERNAL_ERROR` while actually
+> removing the package, so an uninstall "failure" in the log is usually not one —
+> but it does leave you needing to re-seed, which may then be refused.
 
 The host tests cover pixel-format conversion, cache eviction, handle lifetimes and
 the cache-hit/miss logic against a fake document. The instrumented tests cover what
@@ -195,6 +199,18 @@ to PDFium, and untrusted-input parsing is where that difference matters.
 
 - **Verified on one device only** — Xiaomi Pad 5 (arm64-v8a, Android 13 / API 33).
   The armeabi-v7a and x86_64 builds compile and package but are untested at runtime.
+- **Two-finger pinch is not hardware-verified.** Double-tap zoom, one-finger
+  panning and the navigator were all confirmed on device via screenshots, but a
+  real pinch could not be: `adb` has no multitouch primitive, and SELinux blocks
+  writing synthetic events to `/dev/input` (being in the `input` group is not
+  enough without root). `PinchToZoomTest` covers the handler with Compose's
+  multi-pointer injection — including that a one-finger drag must be ignored so
+  scrolling still works — but it has not run yet, because MIUI is currently
+  refusing to install the test APK. **Please try a pinch by hand.**
+- **No tiled rendering.** A page is one bitmap, so cost grows with the square of
+  zoom. `RenderScale.MAX_PIXELS` caps it at 16 MP (64 MB) and the bitmap is
+  upscaled beyond that, which keeps the app alive but goes soft at high zoom.
+  Rendering only the visible tile is the correct fix.
 - **Recent documents** are not persisted (phase 2). Persistable URI permissions
   are already taken, so the plumbing is there.
 - **No text search or selection UI**, though `getPageText` is exposed.

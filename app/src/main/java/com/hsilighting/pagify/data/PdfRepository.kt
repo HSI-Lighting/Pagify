@@ -7,6 +7,7 @@ import android.provider.OpenableColumns
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfMetadata
+import com.hsilighting.pagify.core.RenderScale
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -66,7 +67,12 @@ class PdfRepository(
     }
 
     /**
-     * Warms the native cache for [pageIndices].
+     * Warms the native cache for [pageIndices], sized for a page drawn
+     * [targetPixelWidth] pixels wide.
+     *
+     * Takes a pixel width rather than a zoom factor because each page computes its
+     * own render scale from its own dimensions — a document can mix portrait and
+     * landscape pages, and one shared scale would be wrong for half of them.
      *
      * Failures are swallowed on purpose: a prefetch is an optimisation, and a page
      * that cannot be pre-rendered will simply report its error when the user
@@ -75,12 +81,15 @@ class PdfRepository(
     suspend fun prefetch(
         document: PdfDocument,
         pageIndices: Iterable<Int>,
-        zoom: Float,
+        targetPixelWidth: Float,
         rotationQuarterTurns: Int = 0,
     ) = withContext(renderDispatcher) {
         for (index in pageIndices) {
             if (index !in 0 until document.pageCount) continue
-            runCatching { document.prefetchPage(index, zoom, rotationQuarterTurns) }
+            runCatching {
+                val scale = RenderScale.forPage(document.pageSize(index), targetPixelWidth)
+                document.prefetchPage(index, scale, rotationQuarterTurns)
+            }
         }
     }
 
