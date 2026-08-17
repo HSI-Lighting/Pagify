@@ -146,18 +146,43 @@ fun ZoomedPage(
         }
 
         // The rasterised page. Kept here rather than in PdfPageView because the
-        // zoomed view draws it itself; the previous bitmap stays on screen until
-        // its replacement arrives, so re-rasterising never blanks the page.
+        // zoomed view draws it itself.
         var pageBitmap by remember(pageIndex) { mutableStateOf<Bitmap?>(null) }
+        var bitmapScale by remember(pageIndex) { mutableStateOf(0f) }
 
         val renderScale = remember(pageSize, committedScale, baseW) {
             val size = pageSize ?: return@remember null
             RenderScale.forPage(size, baseW * committedScale)
         }
 
+        // Something to show *immediately*, before the sharp render exists.
+        //
+        // Entering zoom composes this view fresh, with no bitmap, so the canvas
+        // had nothing to draw and the page flashed blank — worst on exactly the
+        // documents where the sharp render takes longest. The proxy is the same
+        // cheap raster the list already drew, so it is almost always a cache hit
+        // and appears at once; it is then replaced, never blanked.
+        LaunchedEffect(pageIndex, pageSize) {
+            val size = pageSize ?: return@LaunchedEffect
+            if (pageBitmap != null) return@LaunchedEffect
+            val proxy = RenderScale.proxyFor(size, baseW)
+            renderer(pageIndex, proxy)?.let {
+                if (bitmapScale < proxy) {
+                    pageBitmap = it
+                    bitmapScale = proxy
+                }
+            }
+        }
+
         LaunchedEffect(pageIndex, renderScale) {
             val target = renderScale ?: return@LaunchedEffect
-            renderer(pageIndex, target)?.let { pageBitmap = it }
+            if (bitmapScale >= target) return@LaunchedEffect
+            // Assigned only on success, so a failed or slow render leaves whatever
+            // is on screen in place rather than clearing it.
+            renderer(pageIndex, target)?.let {
+                pageBitmap = it
+                bitmapScale = target
+            }
         }
 
         // Report the visible region for the navigator.

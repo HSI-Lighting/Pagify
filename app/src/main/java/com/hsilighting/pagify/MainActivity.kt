@@ -80,6 +80,7 @@ class MainActivity : ComponentActivity() {
                     onSubmitPassword = viewModel::submitPassword,
                     pageSizeProvider = viewModel::pageSize,
                     renderer = viewModel::renderPage,
+                    thumbnailRenderer = viewModel::renderThumbnail,
                 )
             }
         }

@@ -10,6 +10,9 @@ import com.hsilighting.pagify.core.PdfMetadata
 import com.hsilighting.pagify.core.RenderScale
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 /**
@@ -27,6 +30,9 @@ class PdfRepository(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val renderDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) {
+
+    /** Admits one thumbnail render at a time. See [renderThumbnail]. */
+    private val thumbnailGate = Semaphore(1)
 
     suspend fun open(uri: Uri, password: String? = null): PdfDocument = withContext(ioDispatcher) {
         PdfDocument.openUri(resolver, uri, displayNameOf(uri), password)
@@ -50,12 +56,45 @@ class PdfRepository(
      * how you get a `Canvas: trying to use a recycled bitmap` crash. The native
      * cache is what keeps this cheap — the allocation is the only copy involved.
      */
+    /**
+     * Renders a thumbnail, one at a time and skippable.
+     *
+     * The rail composes a dozen cells at once, and PDFium serialises internally
+     * anyway — so letting twelve renders queue only piles up bitmaps and puts the
+     * page you actually want behind all of them. This admits one at a time, and
+     * `ensureActive` drops any request whose cell scrolled away while it waited,
+     * which during a fast flick is nearly all of them.
+     *
+     * On a document with very heavy pages this is the difference between a rail
+     * that scrolls and one that stalls: the cost of a thumbnail there is the page
+     * load and image decode, not the handful of pixels drawn.
+     */
+    suspend fun renderThumbnail(
+        document: PdfDocument,
+        pageIndex: Int,
+        zoom: Float,
+    ): Bitmap = withContext(renderDispatcher) {
+        thumbnailGate.withPermit {
+            ensureActive()
+            renderPageInternal(document, pageIndex, zoom, 0)
+        }
+    }
+
     suspend fun renderPage(
         document: PdfDocument,
         pageIndex: Int,
         zoom: Float,
         rotationQuarterTurns: Int = 0,
     ): Bitmap = withContext(renderDispatcher) {
+        renderPageInternal(document, pageIndex, zoom, rotationQuarterTurns)
+    }
+
+    private fun renderPageInternal(
+        document: PdfDocument,
+        pageIndex: Int,
+        zoom: Float,
+        rotationQuarterTurns: Int,
+    ): Bitmap {
         val size = document.pageSize(pageIndex)
         val (width, height) = size.pixelSize(zoom).let { (w, h) ->
             if (rotationQuarterTurns % 2 == 0) w to h else h to w
@@ -63,7 +102,7 @@ class PdfRepository(
 
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         document.renderPageInto(pageIndex, bitmap, zoom, rotationQuarterTurns)
-        bitmap
+        return bitmap
     }
 
     /**

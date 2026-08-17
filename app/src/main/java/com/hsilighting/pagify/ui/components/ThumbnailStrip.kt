@@ -5,6 +5,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -60,28 +61,44 @@ fun ThumbnailStrip(
 ) {
     val listState = rememberLazyListState()
 
-    // Follow the reader, so the rail always shows where you are.
+    /**
+     * Set once you drag the rail yourself, cleared when the reader moves.
+     *
+     * Browsing the rail ahead of the page you are reading is the whole point of
+     * having one, so the follow-the-reader behaviour below has to yield the
+     * moment you take over — otherwise the rail drags you back and is unusable.
+     * Read from the drag interactions rather than `isScrollInProgress`, which is
+     * also true during the rail's own programmatic scrolling.
+     */
+    var userIsBrowsing by remember { mutableStateOf(false) }
+
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { interaction ->
+            if (interaction is DragInteraction.Start) userIsBrowsing = true
+        }
+    }
+
+    // Follow the reader, so the rail shows where you are.
     LaunchedEffect(currentPage) {
+        userIsBrowsing = false
         if (currentPage in 0 until pageCount) {
             listState.animateScrollToItem(currentPage)
         }
     }
 
-    // ...and keep following it.
+    // ...and keep following it until it actually lands.
     //
     // Every cell starts at a guessed A4 aspect and resizes once its real page
     // dimensions arrive. With a hundred-plus cells above the viewport, those
     // corrections accumulate and drag the anchor: the rail was landing a dozen
-    // pages away from the one being read. Re-asserting the position whenever the
-    // current page drifts out of view absorbs that, and the idle check means it
-    // never fights you while you are scrolling the rail yourself.
+    // pages away from the one being read. This absorbs that, then gets out of the
+    // way as soon as the target is on screen or you start browsing.
     LaunchedEffect(currentPage, pageCount) {
-        snapshotFlow { listState.isScrollInProgress to listState.layoutInfo.visibleItemsInfo }
-            .collect { (scrolling, visible) ->
-                if (scrolling || visible.isEmpty()) return@collect
-                if (visible.none { it.index == currentPage } && currentPage in 0 until pageCount) {
-                    listState.scrollToItem(currentPage)
-                }
+        snapshotFlow { listState.layoutInfo.visibleItemsInfo.map { it.index } }
+            .collect { visible ->
+                if (userIsBrowsing) return@collect
+                if (visible.isEmpty() || currentPage !in 0 until pageCount) return@collect
+                if (currentPage !in visible) listState.scrollToItem(currentPage)
             }
     }
 
@@ -123,6 +140,9 @@ private fun ThumbnailCell(
     LaunchedEffect(pageIndex) {
         val size = pageSizeProvider(pageIndex) ?: return@LaunchedEffect
         pageSize = size
+        // Cancelled when this cell scrolls out of the LazyColumn, which is what
+        // lets the throttled renderer skip it entirely instead of drawing
+        // something nobody will see.
         bitmap = renderer(pageIndex, RenderScale.thumbnailFor(size))
     }
 

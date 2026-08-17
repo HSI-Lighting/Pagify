@@ -316,4 +316,10 @@ fn build_render_config(request: &RenderRequest, width: u32, height: u32) -> PdfR
         .set_clear_color(PdfColor::WHITE)
         .render_annotations(request.render_annotations)
         .render_form_data(request.render_form_data)
+        // Bounds PDFium's cache of decoded images. Without it, a document whose
+        // pages carry tens of megabytes of imagery each (a 2.9 GB catalogue works
+        // out at ~31 MB per page) accumulates decoded bitmaps far larger than
+        // anything being drawn — the cost lands on a small thumbnail render just
+        // as hard as on a full page, because the decode is the same either way.
+        .limit_render_image_cache_size(true)
 }

@@ -77,6 +77,8 @@ fun PdfReaderScreen(
      * pinch. Dropping to fit-width here is what releases the pin.
      */
     onZoomTo: (Float) -> Unit,
+    /** Throttled, skippable renderer for thumbnails. See PdfRepository.renderThumbnail. */
+    thumbnailRenderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
     /** Viewport width in device pixels, so prefetch can match the render scale. */
     onViewportWidth: (Float) -> Unit,
     onRotate: () -> Unit,
@@ -163,6 +165,7 @@ fun PdfReaderScreen(
                     onPageVisible = onPageVisible,
                     onZoomInOn = onZoomInOn,
                     onZoomTo = onZoomTo,
+                    thumbnailRenderer = thumbnailRenderer,
                     onViewportWidth = onViewportWidth,
                     pageSizeProvider = pageSizeProvider,
                     renderer = renderer,
@@ -188,6 +191,7 @@ private fun PageList(
     onViewportWidth: (Float) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
+    thumbnailRenderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
 ) {
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -279,7 +283,7 @@ private fun PageList(
                             onPageVisible(page)
                         },
                         pageSizeProvider = pageSizeProvider,
-                        renderer = renderer,
+                        renderer = thumbnailRenderer,
                     )
                 }
 
@@ -323,7 +327,7 @@ private fun PageList(
                 pageIndex = pinnedPage,
                 pageSize = state.pageSizes[pinnedPage],
                 window = window,
-                thumbnailRenderer = renderer,
+                thumbnailRenderer = thumbnailRenderer,
                 modifier = Modifier.align(Alignment.CenterEnd),
                 onRecenter = { fx, fy -> recenterRequest = Offset(fx, fy) },
             )

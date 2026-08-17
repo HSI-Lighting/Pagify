@@ -10,6 +10,7 @@ import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
 import com.hsilighting.pagify.data.PdfRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -86,6 +87,19 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             repository.renderPage(doc, pageIndex, zoom, state.value.rotationQuarterTurns)
         } catch (t: Throwable) {
             Log.w(TAG, "could not render page $pageIndex", t)
+            null
+        }
+    }
+
+    /** Throttled render for the thumbnail rail. See [PdfRepository.renderThumbnail]. */
+    suspend fun renderThumbnail(pageIndex: Int, zoom: Float): Bitmap? {
+        val doc = document ?: return null
+        return try {
+            repository.renderThumbnail(doc, pageIndex, zoom)
+        } catch (t: CancellationException) {
+            throw t
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not render thumbnail $pageIndex", t)
             null
         }
     }
