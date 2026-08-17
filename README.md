@@ -200,3 +200,13 @@ to PDFium, and untrusted-input parsing is where that difference matters.
 - **No text search or selection UI**, though `getPageText` is exposed.
 - **Rotation clears the whole cache** rather than re-keying it. Correct, but does
   more work than necessary.
+- **Possible scroll-anchor drift on mixed-size documents.** Observed once: a
+  149-page catalog opened showing "Page 17 of 149" instead of page 1. Not
+  reproduced in two targeted attempts afterwards (cold start and `onNewIntent`
+  both landed on page 1 correctly), so the trigger is unknown.
+  `PdfPageView`'s pre-measurement placeholder is hardcoded to A4 portrait
+  (`DEFAULT_ASPECT_RATIO`), and this document mixes a portrait cover with
+  landscape spreads — so as pages resolve to shorter-than-guessed heights the
+  content above the viewport collapses, which is a plausible way for
+  `LazyColumn`'s anchor to move. Fixing it properly means measuring page sizes up
+  front (one cheap `FPDF_GetPageSizeByIndex` per page) instead of guessing.
