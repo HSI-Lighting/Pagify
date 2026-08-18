@@ -1,14 +1,22 @@
 //! Bounded undo/redo stacks.
+//!
+//! The undo side stores `(Command, UndoRecord)` pairs; the redo side stores bare
+//! commands. That asymmetry is the design: an undo record belongs to one
+//! execution and is spent when it is used, while the command that produced it can
+//! simply be run again to make a fresh one.
 
-use crate::command::Command;
-use crate::document::EditableDocument;
+use crate::command::{Command, UndoRecord};
+use crate::document::DocumentMut;
 use crate::error::Result;
 
 pub const DEFAULT_UNDO_DEPTH: usize = 64;
 
 pub struct CommandHistory {
-    undo_stack: Vec<Box<dyn Command>>,
-    redo_stack: Vec<Box<dyn Command>>,
+    /// Applied changes, each with what it takes to reverse them.
+    undo_stack: Vec<(Command, UndoRecord)>,
+    /// Reversed changes. Only the intent is kept — redoing re-executes it, which
+    /// produces a new undo record against the document's current state.
+    redo_stack: Vec<Command>,
     depth: usize,
 }
 
@@ -27,59 +35,61 @@ impl CommandHistory {
         }
     }
 
-    /// Run a command and record it.
+    /// Run a command and record it, returning the pages whose cached rasters it
+    /// invalidates.
     ///
     /// A command that fails is *not* recorded, and the redo stack is left alone —
     /// otherwise a failed edit would silently discard the user's redo history.
-    pub fn execute(
-        &mut self,
-        mut command: Box<dyn Command>,
-        doc: &mut dyn EditableDocument,
-    ) -> Result<()> {
-        command.execute(doc)?;
+    pub fn execute(&mut self, command: Command, doc: &mut dyn DocumentMut) -> Result<Vec<usize>> {
+        let undo = command.execute(doc)?;
+        let affected = command.affected_pages();
 
-        // Any new edit invalidates the redo branch.
+        // Any new edit makes the redo branch unreachable: there is no longer a
+        // history in which those changes come next.
         self.redo_stack.clear();
-        self.undo_stack.push(command);
+        self.undo_stack.push((command, undo));
 
         if self.undo_stack.len() > self.depth {
             self.undo_stack.remove(0);
         }
-        Ok(())
+        Ok(affected)
     }
 
-    /// Undo the most recent command, returning the pages it touched so their
-    /// cached rasters can be invalidated. `None` means nothing to undo.
-    pub fn undo(&mut self, doc: &mut dyn EditableDocument) -> Result<Option<Vec<usize>>> {
-        let Some(mut command) = self.undo_stack.pop() else {
+    /// Undo the most recent command. `None` means there was nothing to undo.
+    pub fn undo(&mut self, doc: &mut dyn DocumentMut) -> Result<Option<Vec<usize>>> {
+        let Some((command, undo)) = self.undo_stack.pop() else {
             return Ok(None);
         };
 
-        if let Err(e) = command.undo(doc) {
-            // Put it back: a failed undo must leave the stack as it was, or the
-            // user loses the ability to retry.
-            self.undo_stack.push(command);
-            return Err(e);
-        }
+        let affected = command.affected_pages();
+        // `revert` consumes the record, so — unlike the old self-inverting
+        // version — a failure here cannot put the pair back. Reversal is
+        // all-or-nothing per command for that reason: a half-reverted change with
+        // its record already spent would leave the document in a state nothing
+        // could describe.
+        undo.revert(doc)?;
 
-        let pages = command.affected_pages();
         self.redo_stack.push(command);
-        Ok(Some(pages))
+        Ok(Some(affected))
     }
 
-    pub fn redo(&mut self, doc: &mut dyn EditableDocument) -> Result<Option<Vec<usize>>> {
-        let Some(mut command) = self.redo_stack.pop() else {
+    pub fn redo(&mut self, doc: &mut dyn DocumentMut) -> Result<Option<Vec<usize>>> {
+        let Some(command) = self.redo_stack.pop() else {
             return Ok(None);
         };
 
-        if let Err(e) = command.execute(doc) {
-            self.redo_stack.push(command);
-            return Err(e);
+        match command.execute(doc) {
+            Ok(undo) => {
+                let affected = command.affected_pages();
+                self.undo_stack.push((command, undo));
+                Ok(Some(affected))
+            }
+            Err(e) => {
+                // Nothing was consumed, so the redo can be retried.
+                self.redo_stack.push(command);
+                Err(e)
+            }
         }
-
-        let pages = command.affected_pages();
-        self.undo_stack.push(command);
-        Ok(Some(pages))
     }
 
     pub fn can_undo(&self) -> bool {
@@ -91,11 +101,19 @@ impl CommandHistory {
     }
 
     pub fn undo_description(&self) -> Option<String> {
-        self.undo_stack.last().map(|c| c.description())
+        self.undo_stack.last().map(|(c, _)| c.description())
     }
 
     pub fn redo_description(&self) -> Option<String> {
         self.redo_stack.last().map(|c| c.description())
+    }
+
+    /// The applied history as intent alone — an Action Wizard script.
+    ///
+    /// Undo records are deliberately left behind: a script replayed against a
+    /// different document must not carry the first one's removed pages.
+    pub fn as_script(&self) -> Vec<Command> {
+        self.undo_stack.iter().map(|(c, _)| c.clone()).collect()
     }
 
     pub fn clear(&mut self) {
@@ -107,182 +125,305 @@ impl CommandHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Annotation, Signature};
+    use crate::document::{Document, PageSize, RemovedPage};
     use crate::error::PdfError;
-    use std::sync::{Arc, Mutex};
+    use std::io::Write;
 
-    /// Stand-in for a real editable document. The commands below record their own
-    /// ordering into a shared log, so this only has to satisfy the trait.
-    #[derive(Default)]
-    struct RecordingDoc;
-
-    impl EditableDocument for RecordingDoc {
-        fn add_annotation(&mut self, _page: usize, _annotation: Annotation) -> Result<()> {
-            Ok(())
-        }
-        fn add_signature(&mut self, _page: usize, _signature: Signature) -> Result<()> {
-            Ok(())
-        }
-        fn remove_annotation(&mut self, _page: usize, _id: u64) -> Result<()> {
-            Ok(())
-        }
-        fn save(&self, _path: &str) -> Result<()> {
-            Ok(())
-        }
+    /// A page tree and nothing else, which is all these tests are about.
+    ///
+    /// Pages are identified by width, so a reorder or a deletion is visible
+    /// without rendering anything — the same trick the round-trip fixtures use.
+    struct FakeDoc {
+        widths: Vec<f32>,
+        rotations: Vec<u8>,
+        fail_next: bool,
     }
 
-    struct TestCommand {
-        name: String,
-        page: usize,
-        log: Arc<Mutex<Vec<String>>>,
-        fail_execute: bool,
-        fail_undo: bool,
-    }
-
-    impl TestCommand {
-        fn new(name: &str, page: usize, log: &Arc<Mutex<Vec<String>>>) -> Box<dyn Command> {
-            Box::new(TestCommand {
-                name: name.to_string(),
-                page,
-                log: Arc::clone(log),
-                fail_execute: false,
-                fail_undo: false,
-            })
-        }
-    }
-
-    impl Command for TestCommand {
-        fn execute(&mut self, _doc: &mut dyn EditableDocument) -> Result<()> {
-            if self.fail_execute {
-                return Err(PdfError::Unsupported("test failure"));
+    impl FakeDoc {
+        fn with_pages(widths: &[f32]) -> Self {
+            FakeDoc {
+                widths: widths.to_vec(),
+                rotations: vec![0; widths.len()],
+                fail_next: false,
             }
-            self.log.lock().unwrap().push(format!("do:{}", self.name));
-            Ok(())
-        }
-        fn undo(&mut self, _doc: &mut dyn EditableDocument) -> Result<()> {
-            if self.fail_undo {
-                return Err(PdfError::Unsupported("test failure"));
-            }
-            self.log.lock().unwrap().push(format!("undo:{}", self.name));
-            Ok(())
-        }
-        fn description(&self) -> String {
-            self.name.clone()
-        }
-        fn affected_pages(&self) -> Vec<usize> {
-            vec![self.page]
         }
     }
 
-    fn fixtures() -> (CommandHistory, RecordingDoc, Arc<Mutex<Vec<String>>>) {
-        (
-            CommandHistory::default(),
-            RecordingDoc::default(),
-            Arc::new(Mutex::new(Vec::new())),
-        )
+    impl DocumentMut for FakeDoc {
+        fn reorder_pages(&mut self, order: &[usize]) -> Result<()> {
+            let mut moved = vec![0f32; self.widths.len()];
+            let mut turned = vec![0u8; self.widths.len()];
+            for (from, &to) in order.iter().enumerate() {
+                moved[to] = self.widths[from];
+                turned[to] = self.rotations[from];
+            }
+            self.widths = moved;
+            self.rotations = turned;
+            Ok(())
+        }
+
+        fn delete_page(&mut self, index: usize) -> Result<RemovedPage> {
+            if self.fail_next {
+                return Err(PdfError::Pdfium("refused".into()));
+            }
+            let width = self.widths.remove(index);
+            self.rotations.remove(index);
+            Ok(RemovedPage::new(
+                PageSize {
+                    width_pt: width,
+                    height_pt: 100.0,
+                },
+                Vec::new(),
+            ))
+        }
+
+        fn insert_page(&mut self, at: usize, page: RemovedPage) -> Result<()> {
+            self.widths.insert(at, page.size.width_pt);
+            self.rotations.insert(at, 0);
+            Ok(())
+        }
+
+        fn insert_blank_page(&mut self, at: usize, size: PageSize) -> Result<()> {
+            self.widths.insert(at, size.width_pt);
+            self.rotations.insert(at, 0);
+            Ok(())
+        }
+
+        fn set_page_rotation(&mut self, index: usize, quarter_turns: u8) -> Result<()> {
+            self.rotations[index] = quarter_turns;
+            Ok(())
+        }
+
+        fn extract_pages(&self, _range: &[usize]) -> Result<Box<dyn Document>> {
+            Err(PdfError::Pdfium("not needed by these tests".into()))
+        }
+
+        fn import_pages(&mut self, _from: &dyn Document, _r: &[usize], _at: usize) -> Result<()> {
+            Ok(())
+        }
+
+        fn save_incremental(&mut self, _dest: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+
+        fn save_full_copy(&mut self, _dest: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+
+        fn is_dirty(&self) -> bool {
+            true
+        }
     }
 
     #[test]
-    fn undo_and_redo_run_in_the_right_order() {
-        let (mut history, mut doc, log) = fixtures();
+    fn nothing_to_undo_on_an_untouched_document() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0]);
+        assert!(!history.can_undo());
+        assert!(history.undo(&mut doc).unwrap().is_none());
+    }
 
-        history.execute(TestCommand::new("a", 0, &log), &mut doc).unwrap();
-        history.execute(TestCommand::new("b", 1, &log), &mut doc).unwrap();
+    #[test]
+    fn a_deleted_page_comes_back_with_its_content() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
 
-        assert_eq!(history.undo(&mut doc).unwrap(), Some(vec![1]));
-        assert_eq!(history.undo(&mut doc).unwrap(), Some(vec![0]));
-        assert_eq!(history.redo(&mut doc).unwrap(), Some(vec![0]));
+        history
+            .execute(Command::DeletePage { index: 1 }, &mut doc)
+            .unwrap();
+        assert_eq!(vec![10.0, 30.0], doc.widths);
 
+        history.undo(&mut doc).unwrap();
         assert_eq!(
-            *log.lock().unwrap(),
-            vec!["do:a", "do:b", "undo:b", "undo:a", "do:a"]
+            vec![10.0, 20.0, 30.0],
+            doc.widths,
+            "the page must return to its own position carrying its own content",
         );
     }
 
     #[test]
-    fn undoing_an_empty_history_is_not_an_error() {
-        let (mut history, mut doc, _) = fixtures();
-        assert_eq!(history.undo(&mut doc).unwrap(), None);
-        assert_eq!(history.redo(&mut doc).unwrap(), None);
-        assert!(!history.can_undo());
-        assert!(!history.can_redo());
-    }
+    fn redo_reapplies_and_can_be_undone_again() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
 
-    #[test]
-    fn a_new_edit_discards_the_redo_branch() {
-        let (mut history, mut doc, log) = fixtures();
-        history.execute(TestCommand::new("a", 0, &log), &mut doc).unwrap();
+        history
+            .execute(Command::DeletePage { index: 0 }, &mut doc)
+            .unwrap();
         history.undo(&mut doc).unwrap();
         assert!(history.can_redo());
 
-        history.execute(TestCommand::new("b", 0, &log), &mut doc).unwrap();
+        history.redo(&mut doc).unwrap();
+        assert_eq!(vec![20.0, 30.0], doc.widths);
 
-        assert!(!history.can_redo(), "redoing past a new edit would corrupt the document");
-    }
-
-    #[test]
-    fn a_failed_command_is_not_recorded_and_leaves_redo_intact() {
-        let (mut history, mut doc, log) = fixtures();
-        history.execute(TestCommand::new("a", 0, &log), &mut doc).unwrap();
+        // The redo produced a *fresh* undo record; without one this would fail.
         history.undo(&mut doc).unwrap();
+        assert_eq!(vec![10.0, 20.0, 30.0], doc.widths);
+    }
 
-        let failing = Box::new(TestCommand {
-            name: "boom".into(),
-            page: 0,
-            log: Arc::clone(&log),
-            fail_execute: true,
-            fail_undo: false,
-        });
-        assert!(history.execute(failing, &mut doc).is_err());
+    /// A rotation is not its own inverse, so this catches an undo that merely
+    /// replays the command it was meant to reverse.
+    #[test]
+    fn undoing_a_reorder_restores_the_original_order() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
 
-        assert!(!history.can_undo(), "the failed command was not pushed");
-        assert!(history.can_redo(), "the redo branch survived the failure");
+        history
+            .execute(
+                Command::ReorderPages {
+                    order: vec![1, 2, 0],
+                },
+                &mut doc,
+            )
+            .unwrap();
+        assert_eq!(vec![30.0, 10.0, 20.0], doc.widths);
+
+        history.undo(&mut doc).unwrap();
+        assert_eq!(vec![10.0, 20.0, 30.0], doc.widths);
     }
 
     #[test]
-    fn a_failed_undo_leaves_the_command_where_it_was() {
-        let (mut history, mut doc, log) = fixtures();
-        let failing = Box::new(TestCommand {
-            name: "stuck".into(),
-            page: 2,
-            log: Arc::clone(&log),
-            fail_execute: false,
-            fail_undo: true,
-        });
-        history.execute(failing, &mut doc).unwrap();
+    fn an_inserted_page_is_removed_again_by_undo() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0]);
 
-        assert!(history.undo(&mut doc).is_err());
-        assert!(history.can_undo(), "the user must be able to retry the undo");
+        history
+            .execute(
+                Command::InsertBlankPage {
+                    at: 1,
+                    width_pt: 99.0,
+                    height_pt: 100.0,
+                },
+                &mut doc,
+            )
+            .unwrap();
+        assert_eq!(vec![10.0, 99.0, 20.0], doc.widths);
+
+        history.undo(&mut doc).unwrap();
+        assert_eq!(vec![10.0, 20.0], doc.widths);
+    }
+
+    #[test]
+    fn a_new_edit_abandons_the_redo_branch() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
+
+        history
+            .execute(Command::DeletePage { index: 0 }, &mut doc)
+            .unwrap();
+        history.undo(&mut doc).unwrap();
+        assert!(history.can_redo());
+
+        history
+            .execute(Command::DeletePage { index: 2 }, &mut doc)
+            .unwrap();
         assert!(!history.can_redo());
     }
 
     #[test]
-    fn the_stack_is_bounded_and_drops_the_oldest_entries() {
-        let mut history = CommandHistory::new(2);
-        let mut doc = RecordingDoc::default();
-        let log = Arc::new(Mutex::new(Vec::new()));
+    fn a_failed_command_is_not_recorded_and_keeps_the_redo_branch() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
 
-        for name in ["a", "b", "c"] {
-            history.execute(TestCommand::new(name, 0, &log), &mut doc).unwrap();
-        }
+        history
+            .execute(Command::DeletePage { index: 0 }, &mut doc)
+            .unwrap();
+        history.undo(&mut doc).unwrap();
 
-        assert_eq!(history.undo_description().as_deref(), Some("c"));
-        history.undo(&mut doc).unwrap();
-        assert_eq!(history.undo_description().as_deref(), Some("b"));
-        history.undo(&mut doc).unwrap();
-        assert!(!history.can_undo(), "'a' fell off the bottom of the stack");
+        doc.fail_next = true;
+        assert!(history
+            .execute(Command::DeletePage { index: 0 }, &mut doc)
+            .is_err());
+
+        assert!(!history.can_undo(), "a failed edit must not be undoable");
+        assert!(history.can_redo(), "and must not discard the redo branch");
     }
 
     #[test]
-    fn descriptions_follow_the_top_of_each_stack() {
-        let (mut history, mut doc, log) = fixtures();
-        history.execute(TestCommand::new("highlight", 0, &log), &mut doc).unwrap();
+    fn the_stack_is_bounded_and_drops_the_oldest() {
+        let mut history = CommandHistory::new(2);
+        let mut doc = FakeDoc::with_pages(&[1.0, 2.0, 3.0, 4.0, 5.0]);
 
-        assert_eq!(history.undo_description().as_deref(), Some("highlight"));
-        assert_eq!(history.redo_description(), None);
+        for _ in 0..4 {
+            history
+                .execute(Command::DeletePage { index: 0 }, &mut doc)
+                .unwrap();
+        }
+
+        let mut undone = 0;
+        while history.undo(&mut doc).unwrap().is_some() {
+            undone += 1;
+        }
+        assert_eq!(2, undone);
+    }
+
+    #[test]
+    fn descriptions_come_from_the_top_of_each_stack() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0]);
+
+        history
+            .execute(Command::DeletePage { index: 1 }, &mut doc)
+            .unwrap();
+        assert_eq!(Some("Delete page 2".to_string()), history.undo_description());
+        assert_eq!(None, history.redo_description());
 
         history.undo(&mut doc).unwrap();
-        assert_eq!(history.undo_description(), None);
-        assert_eq!(history.redo_description().as_deref(), Some("highlight"));
+        assert_eq!(None, history.undo_description());
+        assert_eq!(Some("Delete page 2".to_string()), history.redo_description());
+    }
+
+    /// A script is intent alone. If undo records ever leaked into one, replaying
+    /// it against a second document would insert the first document's pages.
+    #[test]
+    fn a_script_carries_intent_and_nothing_else() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
+
+        history
+            .execute(Command::DeletePage { index: 2 }, &mut doc)
+            .unwrap();
+        history
+            .execute(
+                Command::SetPageRotation {
+                    index: 0,
+                    quarter_turns: 1,
+                },
+                &mut doc,
+            )
+            .unwrap();
+
+        let script = history.as_script();
+        assert_eq!(
+            vec![
+                Command::DeletePage { index: 2 },
+                Command::SetPageRotation {
+                    index: 0,
+                    quarter_turns: 1
+                },
+            ],
+            script,
+        );
+
+        // And it survives a trip through the wire, which is the point of it.
+        let json = serde_json::to_string(&script).unwrap();
+        let back: Vec<Command> = serde_json::from_str(&json).unwrap();
+        assert_eq!(script, back);
+    }
+
+    #[test]
+    fn execute_reports_the_pages_whose_rasters_are_now_stale() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0]);
+
+        let affected = history
+            .execute(
+                Command::SetPageRotation {
+                    index: 1,
+                    quarter_turns: 2,
+                },
+                &mut doc,
+            )
+            .unwrap();
+        assert_eq!(vec![1], affected);
     }
 }

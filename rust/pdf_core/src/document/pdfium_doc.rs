@@ -26,9 +26,18 @@ static PDFIUM: OnceLock<std::result::Result<&'static Pdfium, String>> = OnceLock
 pub fn pdfium() -> Result<&'static Pdfium> {
     PDFIUM
         .get_or_init(|| {
-            // `libpdfium.so` is packaged into the APK next to `libpdf_core.so`, so
-            // the system loader finds it by soname without a path.
-            let bindings = Pdfium::bind_to_system_library().map_err(|e| e.to_string())?;
+            // On Android `libpdfium.so` is packaged into the APK next to
+            // `libpdf_core.so`, so the system loader finds it by soname with no
+            // path. A desktop host has no such library to find, which is what
+            // `PAGIFY_PDFIUM_LIB` is for: it points at a desktop build of the
+            // *pinned* PDFium, and it is what lets the round-trip and corpus
+            // tests — every acceptance criterion in phases A and B — run
+            // off-device at all. Unset in the app, so the Android path is
+            // untouched.
+            let bindings = match std::env::var("PAGIFY_PDFIUM_LIB") {
+                Ok(path) => Pdfium::bind_to_library(&path).map_err(|e| e.to_string())?,
+                Err(_) => Pdfium::bind_to_system_library().map_err(|e| e.to_string())?,
+            };
             Ok(&*Box::leak(Box::new(Pdfium::new(bindings))))
         })
         .as_ref()

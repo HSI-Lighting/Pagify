@@ -6,6 +6,17 @@ navigate, zoom, rotate, cache), phase 2 in progress (text extraction, thumbnails
 annotation layer). There is **no write path at all** — the engine cannot yet
 modify or save a PDF.
 
+> **Revision 3 — 2026-08-18.** Amended after auditing the tree rather than assuming
+> it. Changed: the `editing` feature does not compile (§4.3); `Command` must be a
+> serialisable enum with a separate, non-serialisable undo record (§4.2);
+> `EditableDocument` is annotation-shaped and must be redrawn before Phase A (§5,
+> Phase A); the Kotlin/Rust model conflict is resolved by a new decision on the
+> interaction boundary (§4.7); acceptance criteria must name a tool that can actually
+> check the claim (§7); and the memory figures in §8 are corrected — the *uncapped*
+> raster pool is the largest consumer, not the smallest. Phase ordering, sizings and
+> the feature index are unchanged. The immediate task breakdown lives in
+> `Groundwork Instructions`.
+
 ---
 
 ## 0. How to read this
@@ -143,11 +154,64 @@ A `Command` should be:
 If this holds, the Action Wizard in Phase F is roughly two weeks. If it does not,
 Phase F is a rewrite of every operation.
 
-### 4.3 One writer — **decide: PDFium**
+**Make `Command` an enum, not a trait object.** You cannot derive `Serialize` on a
+trait, and the usual workaround — `typetag` — is a trap in this build specifically:
+it registers implementations through link-section tricks, and the release profile
+here is `lto = true`, `codegen-units = 1`, `strip = "symbols"`, built as a `cdylib`
+for Android. That combination is exactly where static registration gets stripped or
+never runs, giving a green build and empty deserialisation at runtime.
 
-`lopdf` is currently behind the `editing` feature flag. Resist using both writers.
-Two independent object models writing one file is a class of corruption bug that is
+An enum with `#[derive(Serialize, Deserialize)]` and `match` dispatch has no
+link-time magic, works on every target, and makes an Action Wizard script a plain
+`Vec<Command>`. The cost is losing open extensibility for third-party commands; the
+existing `Plugin` trait can carry its own escape hatch if that is ever needed.
+
+**And separate intent from the undo record.** Commands self-invert today — the
+history stores `Box<dyn Command>` and calls `command.undo(doc)`. That works for
+annotations, where the command knows what it added. It cannot work for a page
+deletion: the content is gone, and a serialisable enum by definition cannot carry a
+removed page's bytes.
+
+These are two different things:
+
+| | **Intent** | **Undo record** |
+|---|---|---|
+| What | the `Command` enum | `UndoRecord` |
+| Serialisable | yes | **no** |
+| Scope | replayable against any document | one document, one execution |
+| Holds | parameters only | removed pages, prior state |
+| Stored by | Action Wizard scripts | `CommandHistory` only |
+
+So `execute` returns an `UndoRecord`, and `CommandHistory` stores `(Command,
+UndoRecord)` pairs. An Action Wizard script stores `Vec<Command>` alone — a script
+replaying against a *different* document must not carry the first document's undo
+payloads, which would be a correctness bug rather than merely bloat.
+
+One consequence to decide rather than default into: undo for deletions cannot survive
+a process restart, because the removed page lives in memory. Accept it and clear undo
+history on restart, spill undo records to the autosave sidecar, or — since §4.1
+already commits to incremental save — make undo truncate to the previous xref instead
+of holding page bytes. The last is elegant but constrains save cadence to one
+incremental section per command.
+
+### 4.3 One writer — **decide: PDFium, and delete the `editing` feature**
+
+`lopdf` sits behind the `editing` feature flag. Resist using both writers. Two
+independent object models writing one file is a class of corruption bug that is
 extremely hard to diagnose.
+
+**That feature does not currently compile.** `document/mod.rs` declares
+`pub mod editable_doc;` under `#[cfg(feature = "editing")]` and the file does not
+exist, so `cargo check --features editing` fails on a missing module. Nothing behind
+that flag is dormant — it is aspirational.
+
+Do not fix it by creating the file. The module's own header describes it as "the
+`lopdf`-backed editable one", which is the architecture this decision reverses;
+making it compile would cement that behind a green build. Delete the module
+declaration, delete the `editing` feature and the optional `lopdf` dependency, and
+build the mutation trait against PDFium with **no feature flag at all**. Editing is
+not optional any more — it is the product, and a flag around it guarantees the
+default build never type-checks the editing path.
 
 PDFium covers Phase A and B almost entirely:
 - page tree: `FPDF_ImportPagesByIndex`, `FPDFPage_Delete`, `FPDF_CreateNewDocument`
@@ -188,6 +252,37 @@ produce documents that look fine on the editing device and wrong everywhere else
 Crates: `skrifa` / `ttf-parser` (parsing), `subsetter` or `allsorts` (subsetting),
 `rustybuzz` (shaping).
 
+### 4.7 The interaction boundary — **decide: split at the commit, not the gesture**
+
+§4.5 says the model lives in Rust. The annotation model was built in Kotlin, and
+those conflict. The Kotlin choice was not careless: PDFium is bound `thread_safe`,
+every call into a session serialises against page rendering, and a render on the
+catalogue takes 300–780 ms. A drag emits an event per frame and cannot sit behind
+that lock.
+
+The resolution is a boundary, not a side:
+
+> Ephemeral interaction state lives in Kotlin. Committed state is a `Command`
+> against the Rust document.
+
+Kotlin keeps the wet stroke, the live selection, hit-testing and drag preview — pure
+geometry over already-cached data, never touching the engine. On commit, the change
+becomes a `Command`, and undo/redo moves to the existing `CommandHistory`. The
+Kotlin store stops being the model and becomes a projection of it.
+
+**This is not an annotation decision.** It is the interaction architecture for all of
+Phase B and C: in B the ephemeral state is a drag handle on an image, in C a text
+cursor and in-progress typing. Settling it once, while there is one edit shape, is
+about a week. Rediscovering it per feature is the rest of the project.
+
+Two things to get right when implementing it:
+
+1. **Wire invalidation immediately.** `Command::affected_pages()` already exists and
+   is exactly the hook that stops the Kotlin projection drifting from the Rust model.
+2. **The registry lock split is still separately needed.** This boundary is correct
+   regardless, but it does not stop a cache *hit* queueing behind a long render
+   inside `registry::with_session`.
+
 ---
 
 ## 5. Phases
@@ -198,7 +293,13 @@ Crates: `skrifa` / `ttf-parser` (parsing), `subsetter` or `allsorts` (subsetting
 editing features land.
 
 **Scope**
-- `EditableDocument` trait implemented against PDFium.
+- A mutation trait implemented against PDFium. **Do not reuse `EditableDocument`** —
+  it is annotation-shaped (`add_annotation`, `add_signature`, `remove_annotation`,
+  `save`) and carries no page-tree operations. Because `Command` and `CommandHistory`
+  are both typed against it, redrawing it is a prerequisite of Phase A, not something
+  to discover during it. Name the replacement for what it does (`DocumentMut`), and
+  keep annotation operations off it — they arrive as commands against the Phase B
+  object layer.
 - Save / Save-As / incremental save; dirty-state tracking; autosave to a sidecar.
 - `Command` plumbing end to end: JNI → registry → command stack → cache invalidation.
 - Page tree operations: reorder, delete, insert blank, extract range, rotate
@@ -424,7 +525,8 @@ encrypted, malformed, CJK, right-to-left, huge. Run every operation across all o
 them and assert no corruption. Validate saved output with an *external* tool:
 
 ```bash
-qpdf --check output.pdf          # structural validity
+qpdf --check output.pdf          # structural validity ONLY
+pdfsig output.pdf                # signatures (poppler-utils)
 veraPDF --flavour 2b output.pdf  # if PDF/A conformance matters
 ```
 
@@ -432,6 +534,15 @@ External validation matters because the failure mode is "opens fine in Pagify,
 corrupt in Acrobat". A check written against your own parser cannot catch that — the
 same reasoning that made the asymmetric-orange fixture necessary for the channel-order
 bug.
+
+**Name a tool that can actually check the claim.** `qpdf --check` validates structure
+and cannot inspect a signature at all; asserting "the signature still verifies" under
+it is worse than no criterion, because it reads as covered. Signatures need `pdfsig`.
+
+**And never assert something time-bound.** Certificates expire. A criterion that
+checks trust-chain validity will start failing on a date with no code change. Assert
+*byte-range integrity* instead — that the signed region is unmodified and its digest
+still matches — which is the property an edit could actually break.
 
 **Golden-render tests.** Render a page before and after an operation, compare against
 a stored PNG within tolerance. The only practical way to catch visual regressions in
@@ -461,10 +572,25 @@ alignment and distribution invariants is far more valuable than hand-written cas
 | `lopdf` on untrusted input | any | Security | Fuzz before it touches a user file |
 | Rich media portability | F | User disappointment | Set expectations in UI; keep investment low |
 
-**The memory item is a live problem, not a future one.** The engine cache
-(160 MB), the thumbnail cache (48 MB) and the recent-raster map (up to 4 full pages)
-are budgeted independently, nothing sums them, and `onTrimMemory` currently reaches
-only the first. An editing model adds a fourth consumer. Resolve this in Phase A.
+**The memory item is a live problem, not a future one**, and the pool that matters is
+the one with no budget at all:
+
+| Pool | Cap | Reached by `onTrimMemory` |
+|---|---|---|
+| Native page cache | 160 MB | yes |
+| `ThumbnailCache` | 48 MB | no — `trim()` exists but is never called |
+| `recentPageRasters` | **none** | no |
+
+`recentPageRasters` holds four full-page bitmaps. A page measured at 4465 × 3157 on
+this device is ~54 MB at ARGB_8888, so that pool alone reaches **~215 MB — more than
+both capped pools combined**. It is the largest consumer in the app and the only one
+nobody budgeted.
+
+Worse, the per-bitmap ceiling it *should* be bounded by is not enforced:
+`RenderScale.forPage` clamps to `maxScale` and then rounds up past it, which is what
+keeps `theSixteenMegapixelCeilingIsActuallyEnforced` red. Fix that first, or any
+budget is arithmetic over a number that does not hold. An editing model then becomes
+the fourth consumer. Resolve all of it in Phase A.
 
 ---
 

@@ -26,18 +26,18 @@ pdfium-render = { version = "0.9.3", default-features = false, features = [
     "thread_safe",
 ] }
 
-# Phase 3+. Pure-Rust document mutation for annotations/signatures. Kept behind a
-# feature flag until it is exercised, per the security note in the architecture doc.
-lopdf = { version = "0.44", optional = true }
+# No `lopdf`. PDFium is the single writer: two independent object models writing
+# one file is a corruption class that is very hard to diagnose, and PDFium covers
+# the page tree, objects, text and save on its own. If lopdf ever comes back it is
+# for read-only structural analysis, and not before it has been fuzzed.
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
 android_logger = "0.15"
 
-[features]
-default = []
-# Enables the lopdf-backed EditableDocument implementation (roadmap phase 3).
-editing = ["dep:lopdf"]
+# No `editing` feature. Editing is the product, not an option, and a flag around it
+# means the default build never type-checks the editing path — which is how the
+# previous one came to gate a module that had never been written.
 
 [profile.release]
 opt-level = 3

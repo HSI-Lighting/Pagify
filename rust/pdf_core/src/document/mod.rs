@@ -1,17 +1,18 @@
 //! The document abstraction.
 //!
-//! Everything above this layer (the JNI bridge, the cache, the future command
-//! stack) talks to `dyn Document`, so the read-only PDFium implementation shipping
-//! today and the `lopdf`-backed editable one arriving in roadmap phase 3 are
-//! interchangeable without touching the bridge.
+//! Everything above this layer — the JNI bridge, the cache, the command stack —
+//! talks to `dyn Document`. Mutation arrives as a separate trait implemented
+//! against **PDFium, the single writer**, and deliberately behind no feature flag:
+//! a flag around editing guarantees the default build never type-checks the
+//! editing path, which is exactly how the old `editing` feature came to declare a
+//! module nobody had written.
 
 pub mod metadata;
 pub mod pdfium_doc;
 
-#[cfg(feature = "editing")]
-pub mod editable_doc;
-
 pub use metadata::DocumentMetadata;
+
+use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,11 @@ use crate::render::RenderTarget;
 /// Every consumer of this is a UI that hit-tests a touch against these rects, and
 /// flipping the axis once here is far safer than expecting each caller to
 /// remember to do it.
+///
+/// A run is at most one line, and never spans two of them. Runs arrive from
+/// [`Page::text_segments`] in the document's **character order**, which is the
+/// order the text is read in; see that method for why callers must not throw
+/// that ordering away.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextSegment {
@@ -38,16 +44,6 @@ pub struct TextSegment {
 impl TextSegment {
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.left && x <= self.right && y >= self.top && y <= self.bottom
-    }
-
-    /// True when this run falls inside the band swept between two points.
-    ///
-    /// Selection runs line by line rather than as a rectangle: dragging from the
-    /// middle of one line to the middle of another should take the *whole* of the
-    /// lines in between, which a plain bounding-box intersection would not do.
-    pub fn intersects_band(&self, from_y: f32, to_y: f32) -> bool {
-        let (top, bottom) = if from_y <= to_y { (from_y, to_y) } else { (to_y, from_y) };
-        self.bottom >= top && self.top <= bottom
     }
 }
 
@@ -140,6 +136,14 @@ pub trait Page {
     /// Separate from [`Page::text`] because the two have very different costs and
     /// callers: the flat string is for search and copy, while this walks every
     /// run on the page and is only wanted when the user is actually selecting.
+    ///
+    /// **The order is part of the contract.** Runs come back in the document's
+    /// character order — the order the page is read in — not sorted by position.
+    /// A selection is the interval between two runs in that order, which is the
+    /// only thing that distinguishes one column of a page from the column beside
+    /// it; the two share a y band and cannot be told apart geometrically. A
+    /// caller that sorts, filters into a map, or otherwise discards the ordering
+    /// has thrown away the information selection depends on.
     fn text_segments(&self) -> Result<Vec<TextSegment>> {
         Ok(Vec::new())
     }
@@ -167,8 +171,15 @@ pub trait Document: Send + Sync {
     }
 
     /// `Some` only for implementations that can mutate and save the file.
-    /// Read-only documents return `None`, which is what phase 1 always does.
-    fn as_editable(&mut self) -> Option<&mut dyn EditableDocument> {
+    ///
+    /// Every mutation reaches a document through here and then through a
+    /// [`Command`](crate::command::Command); there is no other way in, which is
+    /// what keeps batch processing and scripting cheap to add later.
+    ///
+    /// Not named `as_mut`: on a `Box<dyn Document>` that resolves to `Box`'s own
+    /// inherent method instead, silently handing back the document rather than
+    /// its mutation interface.
+    fn as_document_mut(&mut self) -> Option<&mut dyn DocumentMut> {
         None
     }
 
@@ -182,13 +193,86 @@ pub trait Document: Send + Sync {
     }
 }
 
-/// Roadmap phase 3+. Declared now so the command stack in [`crate::command`] and
-/// the plugin traits in [`crate::plugins`] can be written against a real type.
-pub trait EditableDocument {
-    fn add_annotation(&mut self, page: usize, annotation: Annotation) -> Result<()>;
-    fn add_signature(&mut self, page: usize, signature: Signature) -> Result<()>;
-    fn remove_annotation(&mut self, page: usize, annotation_id: u64) -> Result<()>;
-    fn save(&self, path: &str) -> Result<()>;
+/// A page lifted out of a document, held so it can be put back.
+///
+/// Deleting a page in PDFium destroys it, so undo cannot work by remembering an
+/// index — the content has to be kept. This owns that content, and it is
+/// deliberately opaque: whether it ends up as a one-page scratch document or as
+/// serialised object bytes is the implementation's business, and nothing above
+/// the engine should be able to inspect or rebuild one.
+///
+/// It is **not** serialisable and never leaves the process. See [`UndoRecord`].
+#[derive(Debug)]
+pub struct RemovedPage {
+    /// The page's own size, which is all any caller legitimately needs.
+    pub size: PageSize,
+    /// Engine-owned payload. Written and read by the PDFium implementation; the
+    /// page tree has no other way to hand content back after a delete.
+    #[allow(dead_code)]
+    pub(crate) payload: Vec<u8>,
+}
+
+impl RemovedPage {
+    #[allow(dead_code)] // The PDFium implementation is the first non-test caller.
+    pub(crate) fn new(size: PageSize, payload: Vec<u8>) -> Self {
+        RemovedPage { size, payload }
+    }
+}
+
+/// Mutation of a document's structure.
+///
+/// Named for what it does, and deliberately free of annotation vocabulary: marks
+/// on a page are objects, and they arrive as commands against the object layer
+/// rather than as methods here. The previous trait was shaped the other way round
+/// — `add_annotation`, `add_signature`, `remove_annotation` — which left the whole
+/// page tree unreachable and made it useless for the write path.
+///
+/// Every method is reached through a [`Command`](crate::command::Command), which
+/// is what makes undo, batch processing and scripting fall out later rather than
+/// having to be retrofitted.
+pub trait DocumentMut {
+    // ------------------------------------------------------------- page tree --
+
+    /// Reorder in place. `order[i]` is the index the page currently at `i` moves to.
+    fn reorder_pages(&mut self, order: &[usize]) -> Result<()>;
+
+    /// Remove a page, handing back its content so the deletion can be undone.
+    fn delete_page(&mut self, index: usize) -> Result<RemovedPage>;
+
+    /// Put a previously removed page back.
+    fn insert_page(&mut self, at: usize, page: RemovedPage) -> Result<()>;
+
+    fn insert_blank_page(&mut self, at: usize, size: PageSize) -> Result<()>;
+
+    /// Persisted rotation, unlike the view rotation the reader applies at render
+    /// time — this one survives a save.
+    fn set_page_rotation(&mut self, index: usize, quarter_turns: u8) -> Result<()>;
+
+    /// A new document holding copies of the given pages. Does not mutate self.
+    fn extract_pages(&self, range: &[usize]) -> Result<Box<dyn Document>>;
+
+    fn import_pages(&mut self, from: &dyn Document, range: &[usize], at: usize) -> Result<()>;
+
+    // ----------------------------------------------------------- persistence --
+
+    /// Append a delta, leaving the original bytes untouched.
+    ///
+    /// The default, and not for speed: a digital signature covers a byte range of
+    /// the file, so a full rewrite breaks every existing signature and makes it
+    /// impossible to add one that survives a later edit.
+    ///
+    /// Measured on the pinned PDFium via `examples/incremental_probe.rs`: with
+    /// `FPDF_INCREMENTAL` the original survives as an exact prefix and a second
+    /// `%%EOF` follows it; without the flag the file is rewritten 216 bytes
+    /// shorter and the prefix is gone. Note that `pdfium-render`'s own
+    /// `save_to_writer` hardcodes the flag to zero, so it takes the second path.
+    fn save_incremental(&mut self, dest: &mut dyn Write) -> Result<()>;
+
+    /// A rewritten, compacted copy. Offered as an explicit user action — never as
+    /// the default save, because it is the path that destroys signatures.
+    fn save_full_copy(&mut self, dest: &mut dyn Write) -> Result<()>;
+
+    fn is_dirty(&self) -> bool;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -291,41 +375,13 @@ mod tests {
         assert!(!s.contains(5.0, 110.0), "left of the run");
     }
 
-    #[test]
-    fn a_drag_selects_every_line_it_crosses() {
-        // Dragging from partway down line one to partway down line three must
-        // take line two whole, which a bounding-box test would also do — but it
-        // must NOT take line four, which sits past the release point.
-        let line1 = segment(100.0, 120.0);
-        let line2 = segment(130.0, 150.0);
-        let line3 = segment(160.0, 180.0);
-        let line4 = segment(190.0, 210.0);
-
-        let (from, to) = (110.0, 170.0);
-        assert!(line1.intersects_band(from, to));
-        assert!(line2.intersects_band(from, to));
-        assert!(line3.intersects_band(from, to));
-        assert!(!line4.intersects_band(from, to));
-    }
-
-    #[test]
-    fn dragging_upwards_selects_the_same_lines_as_dragging_down() {
-        let line = segment(130.0, 150.0);
-        assert_eq!(
-            line.intersects_band(110.0, 170.0),
-            line.intersects_band(170.0, 110.0),
-            "selection must not depend on drag direction",
-        );
-    }
-
-    #[test]
-    fn a_band_that_only_grazes_a_line_still_takes_it() {
-        // Touching exactly the top edge counts: a user who starts the drag on the
-        // first pixel of a line clearly means to include it.
-        let line = segment(130.0, 150.0);
-        assert!(line.intersects_band(150.0, 160.0));
-        assert!(!line.intersects_band(151.0, 160.0));
-    }
+    // The band tests that used to live here have been removed along with
+    // `intersects_band`. They passed throughout the period in which highlighting
+    // was visibly broken, because they asserted that a vertical band takes every
+    // line it crosses — which it does, and which is the wrong question. On a
+    // two-column page the band crosses both columns. Selection is now a range
+    // over reading order, and is tested against runs extracted from a real
+    // two-column page in `TextSelectionTest`.
 
     #[test]
     fn quarter_turns_wrap_in_both_directions() {
