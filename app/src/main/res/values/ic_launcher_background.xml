@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- The vivid orange the mark sits on. -->
-    <color name="ic_launcher_background">#F4622A</color>
+    <!--
+      The blue the mark sits on, taken from the supplied logo artwork.
+
+      This is the adaptive icon's background *layer*, so it fills the whole
+      108dp canvas and the launcher's mask crops it to whatever shape the device
+      uses. The legacy pre-API-26 icons have the same colour composited in
+      directly, since no background layer applies there.
+    -->
+    <color name="ic_launcher_background">#3B00E6</color>
 </resources>
