@@ -42,6 +42,10 @@ class PdfDocument private constructor(
 
     fun pageText(pageIndex: Int): String = NativeBridge.getPageText(requireOpen(), pageIndex)
 
+    /** Positioned text runs for selection and highlighting. See [TextSegment]. */
+    fun textSegments(pageIndex: Int): List<TextSegment> =
+        TextSegment.listFromJson(NativeBridge.getTextSegmentsJson(requireOpen(), pageIndex))
+
     /**
      * Renders into [bitmap], whose dimensions decide the output size.
      *

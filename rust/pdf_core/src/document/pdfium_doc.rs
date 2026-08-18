@@ -10,7 +10,7 @@ use pdfium_render::prelude::{
 };
 
 use crate::document::metadata::DocumentMetadata;
-use crate::document::{Document, Page, PageSize, RenderRequest, Rotation};
+use crate::document::{Document, Page, PageSize, RenderRequest, Rotation, TextSegment};
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
 use crate::render::bitmap::{self, Bitmap, PixelOrder};
 use crate::render::RenderTarget;
@@ -295,6 +295,38 @@ impl<'a> Page for PdfiumPage<'a> {
             .text()
             .map_err(|e| PdfError::Pdfium(e.to_string()))?
             .all())
+    }
+
+    fn text_segments(&self) -> Result<Vec<TextSegment>> {
+        let page_height = self.page.height().value;
+        let text = self
+            .page
+            .text()
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        let mut segments = Vec::new();
+        for segment in text.segments().iter() {
+            let content = segment.text();
+            // Whitespace-only runs carry no glyphs to highlight and would only
+            // add gaps to a selection.
+            if content.trim().is_empty() {
+                continue;
+            }
+
+            let bounds = segment.bounds();
+
+            // PDF space puts the origin at the bottom-left with y increasing
+            // upwards; every consumer of this wants top-left with y increasing
+            // down. Flipping once, here, keeps that conversion out of the UI.
+            segments.push(TextSegment {
+                left: bounds.left().value,
+                top: page_height - bounds.top().value,
+                right: bounds.right().value,
+                bottom: page_height - bounds.bottom().value,
+                text: content,
+            });
+        }
+        Ok(segments)
     }
 }
 

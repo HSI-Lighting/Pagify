@@ -208,6 +208,34 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getPageText
     })
 }
 
+/// Text runs on a page with their positions, as a JSON array.
+///
+/// Coordinates are in points from the page's top-left, matching
+/// `getPageSize`, so the UI can scale them by the same factor it renders at.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getTextSegmentsJson<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page_index: jint,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let index = page_index_from(page_index)?;
+        let segments = registry::with_session(handle, |session| {
+            let page = session.document.page(index)?;
+            page.text_segments()
+        })?;
+
+        let json = serde_json::to_string(&segments)
+            .map_err(|e| PdfError::Pdfium(format!("could not serialise text segments: {e}")))?;
+
+        Ok(env
+            .new_string(json)
+            .map_err(|e| PdfError::Pdfium(format!("could not allocate Java string: {e}")))?
+            .into_raw())
+    })
+}
+
 // ------------------------------------------------------------------ render --
 
 /// Render a page into a caller-supplied `ARGB_8888` bitmap.

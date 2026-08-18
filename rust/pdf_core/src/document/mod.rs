@@ -18,6 +18,39 @@ use serde::{Deserialize, Serialize};
 use crate::error::Result;
 use crate::render::RenderTarget;
 
+/// A run of text on a page, with where it sits.
+///
+/// Coordinates are in points with the origin at the page's **top-left** and y
+/// increasing downwards — deliberately not PDF's own bottom-left convention.
+/// Every consumer of this is a UI that hit-tests a touch against these rects, and
+/// flipping the axis once here is far safer than expecting each caller to
+/// remember to do it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextSegment {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub text: String,
+}
+
+impl TextSegment {
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.left && x <= self.right && y >= self.top && y <= self.bottom
+    }
+
+    /// True when this run falls inside the band swept between two points.
+    ///
+    /// Selection runs line by line rather than as a rectangle: dragging from the
+    /// middle of one line to the middle of another should take the *whole* of the
+    /// lines in between, which a plain bounding-box intersection would not do.
+    pub fn intersects_band(&self, from_y: f32, to_y: f32) -> bool {
+        let (top, bottom) = if from_y <= to_y { (from_y, to_y) } else { (to_y, from_y) };
+        self.bottom >= top && self.top <= bottom
+    }
+}
+
 /// Page dimensions in PostScript points (1/72"), as authored in the PDF.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PageSize {
@@ -101,6 +134,15 @@ pub trait Page {
 
     /// Extracted text in reading order, as PDFium's text page reports it.
     fn text(&self) -> Result<String>;
+
+    /// Text runs with their positions, for selection and highlighting.
+    ///
+    /// Separate from [`Page::text`] because the two have very different costs and
+    /// callers: the flat string is for search and copy, while this walks every
+    /// run on the page and is only wanted when the user is actually selecting.
+    fn text_segments(&self) -> Result<Vec<TextSegment>> {
+        Ok(Vec::new())
+    }
 }
 
 pub trait Document: Send + Sync {
@@ -229,6 +271,60 @@ mod tests {
         assert!(Rotation::Clockwise90.swaps_axes());
         assert!(!Rotation::Clockwise180.swaps_axes());
         assert!(Rotation::Clockwise270.swaps_axes());
+    }
+
+    fn segment(top: f32, bottom: f32) -> TextSegment {
+        TextSegment {
+            left: 10.0,
+            top,
+            right: 200.0,
+            bottom,
+            text: "run".into(),
+        }
+    }
+
+    #[test]
+    fn a_point_inside_a_run_is_detected() {
+        let s = segment(100.0, 120.0);
+        assert!(s.contains(50.0, 110.0));
+        assert!(!s.contains(50.0, 130.0), "below the run");
+        assert!(!s.contains(5.0, 110.0), "left of the run");
+    }
+
+    #[test]
+    fn a_drag_selects_every_line_it_crosses() {
+        // Dragging from partway down line one to partway down line three must
+        // take line two whole, which a bounding-box test would also do — but it
+        // must NOT take line four, which sits past the release point.
+        let line1 = segment(100.0, 120.0);
+        let line2 = segment(130.0, 150.0);
+        let line3 = segment(160.0, 180.0);
+        let line4 = segment(190.0, 210.0);
+
+        let (from, to) = (110.0, 170.0);
+        assert!(line1.intersects_band(from, to));
+        assert!(line2.intersects_band(from, to));
+        assert!(line3.intersects_band(from, to));
+        assert!(!line4.intersects_band(from, to));
+    }
+
+    #[test]
+    fn dragging_upwards_selects_the_same_lines_as_dragging_down() {
+        let line = segment(130.0, 150.0);
+        assert_eq!(
+            line.intersects_band(110.0, 170.0),
+            line.intersects_band(170.0, 110.0),
+            "selection must not depend on drag direction",
+        );
+    }
+
+    #[test]
+    fn a_band_that_only_grazes_a_line_still_takes_it() {
+        // Touching exactly the top edge counts: a user who starts the drag on the
+        // first pixel of a line clearly means to include it.
+        let line = segment(130.0, 150.0);
+        assert!(line.intersects_band(150.0, 160.0));
+        assert!(!line.intersects_band(151.0, 160.0));
     }
 
     #[test]

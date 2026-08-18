@@ -70,6 +70,15 @@ internal object NativeBridge {
     @Throws(PdfException::class)
     external fun getPageText(handle: Long, pageIndex: Int): String
 
+    /**
+     * Text runs with their positions, as JSON; see [TextSegment.listFromJson].
+     *
+     * Points from the page's top-left, matching [getPageSize], so the same scale
+     * used to render a page also maps these onto it.
+     */
+    @Throws(PdfException::class)
+    external fun getTextSegmentsJson(handle: Long, pageIndex: Int): String
+
     // ---------------------------------------------------------------- render --
 
     /**
