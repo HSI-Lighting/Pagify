@@ -248,6 +248,13 @@ pub trait DocumentMut {
     /// time — this one survives a save.
     fn set_page_rotation(&mut self, index: usize, quarter_turns: u8) -> Result<()>;
 
+    /// The rotation a page is currently at, in quarter turns.
+    ///
+    /// Read *before* a change so undo can restore it. Without it an undo record
+    /// could only ever put back zero, which is correct exactly when the page was
+    /// unrotated to begin with and silently wrong otherwise.
+    fn page_rotation(&self, index: usize) -> Result<u8>;
+
     /// A new document holding copies of the given pages. Does not mutate self.
     fn extract_pages(&self, range: &[usize]) -> Result<Box<dyn Document>>;
 

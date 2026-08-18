@@ -113,11 +113,9 @@ impl Command {
                 index,
                 quarter_turns,
             } => {
-                // The prior rotation has to be read *before* the change, or undo
-                // restores whatever the command just set. The engine
-                // implementation supplies it; until then this records zero, which
-                // the round-trip test pins so the gap cannot be forgotten.
-                let previous = 0u8;
+                // Read *before* the change, or undo restores whatever the command
+                // just set rather than what was there.
+                let previous = doc.page_rotation(*index)?;
                 doc.set_page_rotation(*index, *quarter_turns)?;
                 Ok(UndoRecord::SetPageRotation {
                     index: *index,

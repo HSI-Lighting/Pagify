@@ -1,16 +1,18 @@
 //! Read-only [`Document`] backed by PDFium — the phase 1 implementation.
 
 use std::fs::File;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfPage, PdfPageRenderRotation,
-    PdfRenderConfig, Pdfium,
+    PdfPagePaperSize, PdfPoints, PdfRenderConfig, Pdfium,
 };
 
 use crate::document::metadata::DocumentMetadata;
-use crate::document::{Document, Page, PageSize, RenderRequest, Rotation, TextSegment};
+use crate::document::{
+    Document, DocumentMut, Page, PageSize, RemovedPage, RenderRequest, Rotation, TextSegment,
+};
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
 use crate::render::bitmap::{self, Bitmap, PixelOrder};
 use crate::render::RenderTarget;
@@ -59,6 +61,8 @@ pub struct PdfiumDocument {
     document: PdfDocument<'static>,
     source: DocumentSource,
     page_count: usize,
+    /// Set by any mutation, so a caller can ask whether a save is owed.
+    dirty: bool,
 }
 
 // `PdfDocument` already carries these under pdfium-render's `thread_safe` feature,
@@ -145,6 +149,7 @@ impl PdfiumDocument {
             document,
             source,
             page_count,
+            dirty: false,
         })
     }
 
@@ -174,6 +179,10 @@ impl PdfiumDocument {
 impl Document for PdfiumDocument {
     fn page_count(&self) -> usize {
         self.page_count
+    }
+
+    fn as_document_mut(&mut self) -> Option<&mut dyn DocumentMut> {
+        Some(self)
     }
 
     fn metadata(&self) -> Result<DocumentMetadata> {
@@ -364,3 +373,164 @@ fn build_render_config(request: &RenderRequest, width: u32, height: u32) -> PdfR
         // as hard as on a full page, because the decode is the same either way.
         .limit_render_image_cache_size(true)
 }
+
+/// The page-tree half of the write path.
+///
+/// Three operations are missing, and all three fail for the *same* reason rather
+/// than three: `pdfium-render` 0.9.3 keeps `PdfDocument::handle()` `pub(crate)`,
+/// so the raw `FPDF_DOCUMENT` cannot be reached from outside the crate. PDFium
+/// itself does all three perfectly well — `examples/incremental_probe.rs`
+/// measures the save working through the raw bindings — and the functions are on
+/// the public bindings trait. Only the handle is out of reach.
+///
+/// So the fix is one line upstream, not a change of engine, and making the
+/// handle public unblocks page deletion, reordering and incremental save
+/// together. Adding a save variant alone would not.
+impl DocumentMut for PdfiumDocument {
+    fn insert_blank_page(&mut self, at: usize, size: PageSize) -> Result<()> {
+        let index = i32::try_from(at)
+            .map_err(|_| PdfError::InvalidArgument(format!("page index {at} is out of range")))?;
+
+        self.document
+            .pages_mut()
+            .create_page_at_index(
+                PdfPagePaperSize::from_points(
+                    PdfPoints::new(size.width_pt),
+                    PdfPoints::new(size.height_pt),
+                ),
+                index,
+            )
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        self.page_count += 1;
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn set_page_rotation(&mut self, index: usize, quarter_turns: u8) -> Result<()> {
+        self.validate_page_index(index)?;
+        let page_index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {index} is out of range"))
+        })?;
+
+        let mut page = self
+            .document
+            .pages()
+            .get(page_index)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        page.set_rotation(match quarter_turns % 4 {
+            1 => PdfPageRenderRotation::Degrees90,
+            2 => PdfPageRenderRotation::Degrees180,
+            3 => PdfPageRenderRotation::Degrees270,
+            _ => PdfPageRenderRotation::None,
+        });
+
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// The rotation a page is currently at, in quarter turns.
+    ///
+    /// Read *before* a change so undo can put it back; without this the undo
+    /// record could only ever restore zero, which is right exactly when the page
+    /// was unrotated to begin with.
+    fn page_rotation(&self, index: usize) -> Result<u8> {
+        self.validate_page_index(index)?;
+        let page_index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {index} is out of range"))
+        })?;
+
+        let page = self
+            .document
+            .pages()
+            .get(page_index)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        Ok(match page.rotation().map_err(|e| PdfError::Pdfium(e.to_string()))? {
+            PdfPageRenderRotation::Degrees90 => 1,
+            PdfPageRenderRotation::Degrees180 => 2,
+            PdfPageRenderRotation::Degrees270 => 3,
+            _ => 0,
+        })
+    }
+
+    fn extract_pages(&self, range: &[usize]) -> Result<Box<dyn Document>> {
+        if range.is_empty() {
+            return Err(PdfError::InvalidArgument("no pages to extract".into()));
+        }
+        for &index in range {
+            self.validate_page_index(index)?;
+        }
+
+        // Built by copying into a fresh document and reading it back, so the
+        // result is an ordinary opened document with no borrow of this one.
+        let mut new_doc = pdfium()?
+            .create_new_pdf()
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        for (position, &source) in range.iter().enumerate() {
+            let from = i32::try_from(source).map_err(|_| {
+                PdfError::InvalidArgument(format!("page index {source} is out of range"))
+            })?;
+            let to = i32::try_from(position).unwrap_or(i32::MAX);
+            new_doc
+                .pages_mut()
+                .copy_page_range_from_document(&self.document, from..=from, to)
+                .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        }
+
+        let bytes = new_doc
+            .save_to_bytes()
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        Ok(Box::new(PdfiumDocument::open_bytes(bytes, None)?))
+    }
+
+    fn import_pages(&mut self, _from: &dyn Document, _range: &[usize], _at: usize) -> Result<()> {
+        // Needs the source document's raw handle, which is only reachable for a
+        // `PdfiumDocument`; `&dyn Document` deliberately hides that. Landing this
+        // means either downcasting or narrowing the parameter, and the choice
+        // belongs with the merge feature that first needs it.
+        Err(PdfError::Pdfium(
+            "import_pages: needs the source document's PDFium handle; see DocumentMut".into(),
+        ))
+    }
+
+    fn save_full_copy(&mut self, dest: &mut dyn Write) -> Result<()> {
+        // A rewrite, and safe to build on the binding's own save: this is the
+        // path that is *supposed* to relocate every object. Never the default —
+        // it is what destroys a signature's byte range.
+        let bytes = self
+            .document
+            .save_to_bytes()
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        dest.write_all(&bytes)?;
+        self.dirty = false;
+        Ok(())
+    }
+
+    fn save_incremental(&mut self, _dest: &mut dyn Write) -> Result<()> {
+        Err(PdfError::Pdfium(HANDLE_NEEDED.into()))
+    }
+
+    fn delete_page(&mut self, _index: usize) -> Result<RemovedPage> {
+        Err(PdfError::Pdfium(HANDLE_NEEDED.into()))
+    }
+
+    fn insert_page(&mut self, _at: usize, _page: RemovedPage) -> Result<()> {
+        Err(PdfError::Pdfium(HANDLE_NEEDED.into()))
+    }
+
+    fn reorder_pages(&mut self, _order: &[usize]) -> Result<()> {
+        Err(PdfError::Pdfium(HANDLE_NEEDED.into()))
+    }
+
+    fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+}
+
+/// One sentence, one cause, so a failure says what to do about it.
+const HANDLE_NEEDED: &str = "blocked on pdfium-render: PdfDocument::handle() is \
+    pub(crate), so FPDF_SaveWithVersion, FPDFPage_Delete and FPDF_MovePages \
+    cannot be reached. Making the handle public unblocks all three at once";

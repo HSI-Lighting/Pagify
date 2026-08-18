@@ -65,3 +65,19 @@ pub fn save_and_reopen(_pdfium: &(), doc: &mut Box<dyn Document>) -> Box<dyn Doc
 
     Box::new(PdfiumDocument::open_bytes(bytes, None).expect("reopen what we just wrote"))
 }
+
+/// Save through the rewriting path and reopen.
+///
+/// Used by the tests that can run today. It is *not* what the app should do —
+/// a full rewrite relocates every object and breaks any signature — but it is
+/// the only save reachable until the binding exposes the document handle, and it
+/// still proves that a command's effect was written rather than merely applied.
+pub fn save_full_copy_and_reopen(doc: &mut Box<dyn Document>) -> Box<dyn Document> {
+    let mut bytes = Vec::new();
+    doc.as_document_mut()
+        .expect("the document must be mutable")
+        .save_full_copy(&mut bytes)
+        .expect("save");
+
+    Box::new(PdfiumDocument::open_bytes(bytes, None).expect("reopen what we just wrote"))
+}

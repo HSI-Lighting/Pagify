@@ -194,6 +194,10 @@ mod tests {
             Ok(())
         }
 
+        fn page_rotation(&self, index: usize) -> Result<u8> {
+            Ok(self.rotations[index])
+        }
+
         fn extract_pages(&self, _range: &[usize]) -> Result<Box<dyn Document>> {
             Err(PdfError::Pdfium("not needed by these tests".into()))
         }

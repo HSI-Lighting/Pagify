@@ -175,3 +175,141 @@ fn an_incremental_save_appends_and_leaves_the_original_bytes_alone() {
         "the original bytes must survive verbatim, or every signature over them breaks",
     );
 }
+
+// ------------------------------------------------------- what works today --
+//
+// The operations below reach PDFium through the binding's own safe API, so they
+// are live rather than ignored. They go through the same command stack as
+// everything above — the point is that the plumbing is proven end to end while
+// the three blocked operations wait on one line upstream.
+
+#[test]
+fn an_inserted_page_survives_a_full_copy_save() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::InsertBlankPage {
+                at: 1,
+                width_pt: 999.0,
+                height_pt: 400.0,
+            },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("insert");
+
+    let reopened = harness::save_full_copy_and_reopen(&mut doc);
+    assert_eq!(vec![200, 999, 250, 300, 350, 400], page_widths(&reopened));
+}
+
+/// Rotation is the operation whose undo record was wrong until the engine could
+/// report the prior value: without it, undo could only ever restore zero, which
+/// looks correct exactly when the page started unrotated.
+#[test]
+fn a_rotation_survives_a_save_and_undoes_to_what_was_there_before() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+
+    let mut history = CommandHistory::default();
+    // Two turns in a row, so the second one's undo has something other than zero
+    // to restore. A single rotation from an unrotated page cannot tell the two
+    // implementations apart.
+    for turns in [1u8, 3u8] {
+        history
+            .execute(
+                Command::SetPageRotation {
+                    index: 2,
+                    quarter_turns: turns,
+                },
+                doc.as_document_mut().expect("mutable"),
+            )
+            .expect("rotate");
+    }
+
+    let mut saved = harness::save_full_copy_and_reopen(&mut doc);
+    assert_eq!(
+        3,
+        saved
+            .as_document_mut()
+            .expect("mutable")
+            .page_rotation(2)
+            .expect("rotation"),
+        "the rotation has to be written, not merely applied in memory",
+    );
+
+    history
+        .undo(doc.as_document_mut().expect("mutable"))
+        .expect("undo")
+        .expect("something to undo");
+    assert_eq!(
+        1,
+        doc.as_document_mut()
+            .expect("mutable")
+            .page_rotation(2)
+            .expect("rotation"),
+        "undo must restore the previous rotation, not zero",
+    );
+}
+
+#[test]
+fn extracting_pages_produces_a_document_of_just_those_pages() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+
+    let extracted = doc
+        .as_document_mut()
+        .expect("mutable")
+        .extract_pages(&[3, 1])
+        .expect("extract");
+
+    assert_eq!(
+        vec![350, 250],
+        page_widths(&extracted),
+        "extraction keeps the order it was asked for, not the source order",
+    );
+}
+
+#[test]
+fn a_document_is_clean_until_something_changes_it() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let mut doc = open_fixture(&pdfium, "single-page.pdf");
+    assert!(!doc.as_document_mut().expect("mutable").is_dirty());
+
+    doc.as_document_mut()
+        .expect("mutable")
+        .set_page_rotation(0, 1)
+        .expect("rotate");
+    assert!(doc.as_document_mut().expect("mutable").is_dirty());
+}
+
+/// The three blocked operations fail for one reason, and the message says which.
+#[test]
+fn the_blocked_operations_name_their_single_cause() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+    let mutable = doc.as_document_mut().expect("mutable");
+
+    for message in [
+        mutable.delete_page(0).err().map(|e| e.to_string()),
+        mutable.reorder_pages(&[1, 0]).err().map(|e| e.to_string()),
+        mutable.save_incremental(&mut Vec::new()).err().map(|e| e.to_string()),
+    ] {
+        let message = message.expect("these are blocked and must say so");
+        assert!(
+            message.contains("PdfDocument::handle()"),
+            "a blocked operation must name what unblocks it, got: {message}",
+        );
+    }
+}
