@@ -11,6 +11,12 @@ description = "Pagify PDF engine: parsing, rendering and caching behind a stable
 # crate as a normal library so the pure-logic modules can be unit-tested on the host.
 crate-type = ["cdylib", "rlib"]
 
+[patch.crates-io]
+# One line changed: PdfDocument::handle() made public, which is what makes
+# incremental save, page deletion and reordering reachable at all. The reasons,
+# the measurements behind them and how to update are in rust/vendor/README.md.
+pdfium-render = { path = "../vendor/pdfium-render" }
+
 [dependencies]
 log = "0.4"
 serde = { version = "1", features = ["derive"] }

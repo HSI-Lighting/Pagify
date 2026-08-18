@@ -1,12 +1,15 @@
 //! Read-only [`Document`] backed by PDFium — the phase 1 implementation.
 
 use std::fs::File;
+use std::ffi::c_void;
 use std::io::{Read, Seek, Write};
+use std::os::raw::{c_int, c_ulong};
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfPage, PdfPageRenderRotation,
-    PdfPagePaperSize, PdfPoints, PdfRenderConfig, Pdfium,
+    PdfPagePaperSize, PdfPoints, PdfRenderConfig, Pdfium, PdfiumLibraryBindingsAccessor,
+    FPDF_FILEWRITE,
 };
 
 use crate::document::metadata::DocumentMetadata;
@@ -155,6 +158,77 @@ impl PdfiumDocument {
 
     pub fn source(&self) -> &DocumentSource {
         &self.source
+    }
+
+
+    /// Save through `FPDF_SaveWithVersion`, which is the only route to the
+    /// incremental flag; the binding's own save hardcodes flags to zero.
+    ///
+    /// The `FPDF_FILEWRITE` callback is supplied here because the crate's
+    /// equivalent is `pub(crate)`.
+    fn save_with_flags(&self, flags: u32) -> Result<Vec<u8>> {
+        #[repr(C)]
+        struct Sink {
+            base: FPDF_FILEWRITE,
+            bytes: *mut Vec<u8>,
+        }
+
+        unsafe extern "C" fn write_block(
+            this: *mut FPDF_FILEWRITE,
+            data: *const c_void,
+            size: c_ulong,
+        ) -> c_int {
+            let sink = this as *mut Sink;
+            let out = &mut *(*sink).bytes;
+            out.extend_from_slice(std::slice::from_raw_parts(data as *const u8, size as usize));
+            1
+        }
+
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut sink = Sink {
+            // PDFium hands the callback a pointer to the struct it was given, so
+            // the interface header has to come first and the payload after it.
+            base: FPDF_FILEWRITE {
+                version: 1,
+                WriteBlock: Some(write_block),
+            },
+            bytes: &mut bytes,
+        };
+
+        let ok = unsafe {
+            pdfium()?.bindings().FPDF_SaveWithVersion(
+                self.document.handle(),
+                &mut sink as *mut Sink as *mut FPDF_FILEWRITE,
+                // `FPDF_DWORD` is 32-bit on Windows and 64-bit on Android, so the
+                // literal has to widen per target rather than be typed once.
+                flags.into(),
+                PDF_VERSION_1_7,
+            )
+        };
+        if ok == 0 {
+            return Err(PdfError::Pdfium("PDFium refused to save".into()));
+        }
+        Ok(bytes)
+    }
+
+    /// One page, as the bytes of a standalone single-page document.
+    ///
+    /// This is what makes a deletion undoable: PDFium destroys a page when it is
+    /// deleted, so the content has to be taken out first, and a whole document is
+    /// the only container the import side can read back.
+    fn page_as_document_bytes(&self, page_index: i32) -> Result<Vec<u8>> {
+        let mut scratch = pdfium()?
+            .create_new_pdf()
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        scratch
+            .pages_mut()
+            .copy_page_range_from_document(&self.document, page_index..=page_index, 0)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        scratch
+            .save_to_bytes()
+            .map_err(|e| PdfError::Pdfium(e.to_string()))
     }
 
     /// Render straight into an owned bitmap. Used by the prefetch path, which has
@@ -509,21 +583,135 @@ impl DocumentMut for PdfiumDocument {
         Ok(())
     }
 
-    fn save_incremental(&mut self, _dest: &mut dyn Write) -> Result<()> {
-        Err(PdfError::Pdfium(HANDLE_NEEDED.into()))
+    /// Append a delta rather than rewriting the file.
+    ///
+    /// `FPDF_INCREMENTAL` is the whole point: with it the original bytes stay
+    /// exactly where they were and a new cross-reference section follows, so any
+    /// signature over the original range still verifies. Without it PDFium
+    /// renumbers and relocates every object, which breaks every existing
+    /// signature irrecoverably — and that is what the binding's own
+    /// `save_to_writer` does, since it hardcodes its flags to zero.
+    fn save_incremental(&mut self, dest: &mut dyn Write) -> Result<()> {
+        let bytes = self.save_with_flags(FPDF_INCREMENTAL)?;
+        dest.write_all(&bytes)?;
+        self.dirty = false;
+        Ok(())
     }
 
-    fn delete_page(&mut self, _index: usize) -> Result<RemovedPage> {
-        Err(PdfError::Pdfium(HANDLE_NEEDED.into()))
+    /// Remove a page, keeping its content so the deletion can be undone.
+    ///
+    /// The page is copied into a single-page scratch document *before* PDFium is
+    /// asked to delete it — afterwards there is nothing left to copy. That
+    /// scratch document, serialised, is what [`RemovedPage`] carries.
+    fn delete_page(&mut self, index: usize) -> Result<RemovedPage> {
+        self.validate_page_index(index)?;
+        let page_index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {index} is out of range"))
+        })?;
+
+        let size = self.page_size(index)?;
+        let payload = self.page_as_document_bytes(page_index)?;
+
+        unsafe {
+            pdfium()?
+                .bindings()
+                .FPDFPage_Delete(self.document.handle(), page_index);
+        }
+
+        self.page_count -= 1;
+        self.dirty = true;
+        Ok(RemovedPage::new(size, payload))
     }
 
-    fn insert_page(&mut self, _at: usize, _page: RemovedPage) -> Result<()> {
-        Err(PdfError::Pdfium(HANDLE_NEEDED.into()))
+    /// Put a previously removed page back at `at`.
+    fn insert_page(&mut self, at: usize, page: RemovedPage) -> Result<()> {
+        if at > self.page_count {
+            return Err(PdfError::PageOutOfRange {
+                index: at,
+                count: self.page_count,
+            });
+        }
+        let destination = i32::try_from(at).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {at} is out of range"))
+        })?;
+
+        // The payload is a one-page document; importing from it puts the original
+        // content back rather than a blank page of the same size.
+        let source = pdfium()?
+            .load_pdf_from_byte_vec(page.into_payload(), None)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        self.document
+            .pages_mut()
+            .copy_page_range_from_document(&source, 0..=0, destination)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        self.page_count += 1;
+        self.dirty = true;
+        Ok(())
     }
 
-    fn reorder_pages(&mut self, _order: &[usize]) -> Result<()> {
-        Err(PdfError::Pdfium(HANDLE_NEEDED.into()))
+    /// Reorder in place. `order[i]` is where the page currently at `i` ends up.
+    ///
+    /// `FPDF_MovePages` takes the pages to move and a destination, so a whole
+    /// permutation is expressed as a sequence of single-page moves: walk the
+    /// target order and pull each page to the front of the remaining tail. That
+    /// is O(n) moves and, unlike delete-and-reimport, it keeps every page's
+    /// objects and annotations intact.
+    fn reorder_pages(&mut self, order: &[usize]) -> Result<()> {
+        if order.len() != self.page_count {
+            return Err(PdfError::InvalidArgument(format!(
+                "reorder needs one destination per page: got {} for {} pages",
+                order.len(),
+                self.page_count,
+            )));
+        }
+        let mut seen = vec![false; order.len()];
+        for &to in order {
+            if to >= order.len() || seen[to] {
+                return Err(PdfError::InvalidArgument(
+                    "reorder must be a permutation: every page exactly once".into(),
+                ));
+            }
+            seen[to] = true;
+        }
+
+        // `order` says where each page goes; walking the result needs the reverse.
+        let mut wanted = vec![0usize; order.len()];
+        for (from, &to) in order.iter().enumerate() {
+            wanted[to] = from;
+        }
+
+        // `current[i]` is the original index of whatever now sits at position i.
+        let mut current: Vec<usize> = (0..order.len()).collect();
+        let bindings = pdfium()?.bindings();
+
+        for position in 0..wanted.len() {
+            let target = wanted[position];
+            let at = current.iter().position(|&p| p == target).unwrap_or(position);
+            if at == position {
+                continue;
+            }
+
+            let page_index = i32::try_from(at).unwrap_or(i32::MAX);
+            let destination = i32::try_from(position).unwrap_or(i32::MAX);
+            let ok = unsafe {
+                bindings.FPDF_MovePages(self.document.handle(), &page_index, 1, destination)
+            };
+            if ok == 0 {
+                return Err(PdfError::Pdfium(format!(
+                    "PDFium refused to move page {at} to {position}"
+                )));
+            }
+
+            let moved = current.remove(at);
+            current.insert(position, moved);
+        }
+
+        self.dirty = true;
+        Ok(())
     }
+
 
     fn is_dirty(&self) -> bool {
         self.dirty
@@ -531,6 +719,12 @@ impl DocumentMut for PdfiumDocument {
 }
 
 /// One sentence, one cause, so a failure says what to do about it.
+/// PDF 1.7, the version PDFium writes by default.
+const PDF_VERSION_1_7: c_int = 17;
+
+/// `FPDF_INCREMENTAL` from `fpdf_save.h`. Not re-exported by the binding.
+const FPDF_INCREMENTAL: u32 = 1;
+
 const HANDLE_NEEDED: &str = "blocked on pdfium-render: PdfDocument::handle() is \
     pub(crate), so FPDF_SaveWithVersion, FPDFPage_Delete and FPDF_MovePages \
     cannot be reached. Making the handle public unblocks all three at once";

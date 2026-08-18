@@ -81,3 +81,25 @@ pub fn save_full_copy_and_reopen(doc: &mut Box<dyn Document>) -> Box<dyn Documen
 
     Box::new(PdfiumDocument::open_bytes(bytes, None).expect("reopen what we just wrote"))
 }
+
+/// Serialises whole tests against each other.
+///
+/// Not tidiness — a correctness requirement this suite discovered. Run in
+/// parallel, tests that each hold an open document report each other's page
+/// sizes: deleting a page and reopening gave `[200, 612, 612, 612]`, Letter being
+/// what PDFium reports for a page whose geometry it cannot resolve. Single
+/// threaded the same code is exact.
+///
+/// `pdfium-render` keys its page-index cache on the `FPDF_DOCUMENT` handle behind
+/// a mutex, so this is not a data race — it is aliasing. PDFium reuses handle
+/// values once a document is closed, and a later document inherits the cache
+/// entries of an earlier one.
+///
+/// It matters beyond the tests: `delete_page` and `extract_pages` both open a
+/// scratch document while the main one is live, so an engine mutation running
+/// beside a render on another thread is the same shape. Mutations and renders
+/// have to be serialised in the app for the same reason.
+pub fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}

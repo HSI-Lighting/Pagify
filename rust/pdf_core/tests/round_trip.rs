@@ -34,6 +34,7 @@ fn fixtures_are_present_and_readable() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let doc = open_fixture(&pdfium, "pages-ladder.pdf");
     assert_eq!(5, doc.page_count());
     assert_eq!(
@@ -44,11 +45,11 @@ fn fixtures_are_present_and_readable() {
 }
 
 #[test]
-#[ignore = "Task 4: DocumentMut is not implemented against PDFium yet"]
 fn a_deleted_page_is_still_gone_after_a_save() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
 
     let mut history = CommandHistory::default();
@@ -64,11 +65,11 @@ fn a_deleted_page_is_still_gone_after_a_save() {
 }
 
 #[test]
-#[ignore = "Task 4: DocumentMut is not implemented against PDFium yet"]
 fn a_reorder_survives_a_save() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
 
     let mut history = CommandHistory::default();
@@ -88,11 +89,11 @@ fn a_reorder_survives_a_save() {
 }
 
 #[test]
-#[ignore = "Task 4: DocumentMut is not implemented against PDFium yet"]
 fn an_inserted_blank_page_survives_a_save() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
 
     let mut history = CommandHistory::default();
@@ -113,11 +114,11 @@ fn an_inserted_blank_page_survives_a_save() {
 
 /// Undo has to be reversible *through* a save, not merely in memory.
 #[test]
-#[ignore = "Task 4: DocumentMut is not implemented against PDFium yet"]
 fn a_deletion_undone_before_saving_leaves_the_document_untouched() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
 
     let mut history = CommandHistory::default();
@@ -140,11 +141,11 @@ fn a_deletion_undone_before_saving_leaves_the_document_untouched() {
 /// every other test in this file while relocating every object in the file, which
 /// is exactly what destroys a signature's byte range.
 #[test]
-#[ignore = "Task 4: DocumentMut is not implemented against PDFium yet"]
 fn an_incremental_save_appends_and_leaves_the_original_bytes_alone() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let original = harness::fixture_bytes("pages-ladder.pdf");
     let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
 
@@ -188,6 +189,7 @@ fn an_inserted_page_survives_a_full_copy_save() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
 
     let mut history = CommandHistory::default();
@@ -214,6 +216,7 @@ fn a_rotation_survives_a_save_and_undoes_to_what_was_there_before() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
 
     let mut history = CommandHistory::default();
@@ -262,6 +265,7 @@ fn extracting_pages_produces_a_document_of_just_those_pages() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
 
     let extracted = doc
@@ -282,6 +286,7 @@ fn a_document_is_clean_until_something_changes_it() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let mut doc = open_fixture(&pdfium, "single-page.pdf");
     assert!(!doc.as_document_mut().expect("mutable").is_dirty());
 
@@ -292,24 +297,23 @@ fn a_document_is_clean_until_something_changes_it() {
     assert!(doc.as_document_mut().expect("mutable").is_dirty());
 }
 
-/// The three blocked operations fail for one reason, and the message says which.
+/// The three operations the vendored patch unblocked, all in one place: they
+/// used to return an error naming `PdfDocument::handle()`, and the point of the
+/// patch was that one line reaches all three.
 #[test]
-fn the_blocked_operations_name_their_single_cause() {
+fn the_operations_the_patch_unblocked_all_work() {
     let Some(pdfium) = skip_without_pdfium() else {
         return;
     };
+    let _serial = harness::serial();
     let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
     let mutable = doc.as_document_mut().expect("mutable");
 
-    for message in [
-        mutable.delete_page(0).err().map(|e| e.to_string()),
-        mutable.reorder_pages(&[1, 0]).err().map(|e| e.to_string()),
-        mutable.save_incremental(&mut Vec::new()).err().map(|e| e.to_string()),
-    ] {
-        let message = message.expect("these are blocked and must say so");
-        assert!(
-            message.contains("PdfDocument::handle()"),
-            "a blocked operation must name what unblocks it, got: {message}",
-        );
-    }
+    let removed = mutable.delete_page(0).expect("delete");
+    assert_eq!(200.0, removed.size.width_pt.round());
+
+    mutable.reorder_pages(&[1, 0, 2, 3]).expect("reorder");
+    mutable
+        .save_incremental(&mut Vec::new())
+        .expect("incremental save");
 }

@@ -217,6 +217,12 @@ impl RemovedPage {
     pub(crate) fn new(size: PageSize, payload: Vec<u8>) -> Self {
         RemovedPage { size, payload }
     }
+
+    /// Hand the content to whoever is putting the page back, consuming self so a
+    /// removed page cannot be restored twice from the same record.
+    pub(crate) fn into_payload(self) -> Vec<u8> {
+        self.payload
+    }
 }
 
 /// Mutation of a document's structure.
