@@ -4,8 +4,11 @@
 //! branching — can be unit-tested on the host against a fake document, rather than
 //! only being exercisable on a device.
 
+use serde::{Deserialize, Serialize};
+
+use crate::command::Command;
 use crate::document::{RenderRequest, Rotation};
-use crate::error::Result;
+use crate::error::{PdfError, Result};
 use crate::registry::DocumentSession;
 use crate::render::bitmap::{Bitmap, PixelOrder};
 use crate::render::{CacheKey, RenderTarget};
@@ -122,11 +125,154 @@ pub fn prefetch_page(
     Ok(true)
 }
 
+
+// ------------------------------------------------------------------- editing --
+
+/// Everything the UI needs to redraw its edit controls after a mutation.
+///
+/// Returned from every edit entry point rather than left to the caller to
+/// assemble: page count, undo availability and dirtiness all change together, and
+/// fetching them one at a time across JNI would let the UI paint a state the
+/// document was never actually in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditState {
+    pub page_count: usize,
+    pub can_undo: bool,
+    pub can_redo: bool,
+    /// `None` when that stack is empty. Already phrased as a user action
+    /// ("Delete page 5"), so the UI can label its buttons with no lookup table.
+    pub undo_label: Option<String>,
+    pub redo_label: Option<String>,
+    /// Whether a save would have anything to write.
+    pub dirty: bool,
+    /// False for a document that cannot be edited at all, so the UI can hide the
+    /// controls rather than offer them and then fail.
+    pub editable: bool,
+}
+
+pub fn edit_state(session: &mut DocumentSession) -> EditState {
+    let page_count = session.document.page_count();
+    let (editable, dirty) = match session.document.as_document_mut() {
+        Some(doc) => (true, doc.is_dirty()),
+        None => (false, false),
+    };
+
+    EditState {
+        page_count,
+        can_undo: session.history.can_undo(),
+        can_redo: session.history.can_redo(),
+        undo_label: session.history.undo_description(),
+        redo_label: session.history.redo_description(),
+        dirty,
+        editable,
+    }
+}
+
+/// Drop the rasters an edit made stale.
+///
+/// An empty `affected` means *everything*, which is what
+/// [`Command::affected_pages`] returns for any change to the page tree: deleting
+/// page 2 renumbers every page after it, so a cache keyed by index has nothing it
+/// can safely keep. Getting this wrong is invisible until a user deletes a page
+/// and the one after it still draws the old content.
+fn invalidate(session: &mut DocumentSession, affected: &[usize]) {
+    if affected.is_empty() {
+        session.cache.clear();
+    } else {
+        for &index in affected {
+            session.cache.remove_page(index);
+        }
+    }
+}
+
+/// Run a command, record it for undo, and invalidate what it changed.
+///
+/// The only way a document is mutated. Nothing here inspects the command, so a new
+/// [`Command`] variant needs no change at this layer — which is the point of
+/// routing every edit through one.
+pub fn execute(session: &mut DocumentSession, command: Command) -> Result<EditState> {
+    let affected = {
+        // `document` and `history` are separate fields, so both can be borrowed at
+        // once; the block ends the borrows before `invalidate` takes the session.
+        let doc = session
+            .document
+            .as_document_mut()
+            .ok_or(PdfError::Unsupported("editing this document"))?;
+        session.history.execute(command, doc)?
+    };
+    invalidate(session, &affected);
+    Ok(edit_state(session))
+}
+
+/// Reverse the most recent command.
+///
+/// `false` means there was nothing to undo, which is not an error — the UI keeps
+/// its buttons enabled off [`EditState`], and a redundant tap should be a no-op
+/// rather than an exception.
+pub fn undo(session: &mut DocumentSession) -> Result<(bool, EditState)> {
+    let affected = {
+        let doc = session
+            .document
+            .as_document_mut()
+            .ok_or(PdfError::Unsupported("editing this document"))?;
+        session.history.undo(doc)?
+    };
+    apply_outcome(session, affected)
+}
+
+/// Re-apply the most recently undone command. `false` means nothing to redo.
+pub fn redo(session: &mut DocumentSession) -> Result<(bool, EditState)> {
+    let affected = {
+        let doc = session
+            .document
+            .as_document_mut()
+            .ok_or(PdfError::Unsupported("editing this document"))?;
+        session.history.redo(doc)?
+    };
+    apply_outcome(session, affected)
+}
+
+fn apply_outcome(
+    session: &mut DocumentSession,
+    affected: Option<Vec<usize>>,
+) -> Result<(bool, EditState)> {
+    match affected {
+        Some(affected) => {
+            invalidate(session, &affected);
+            Ok((true, edit_state(session)))
+        }
+        // Nothing moved, so nothing is stale.
+        None => Ok((false, edit_state(session))),
+    }
+}
+
+/// Write the document out.
+///
+/// `incremental` appends a delta and leaves the original bytes untouched, which is
+/// what keeps an existing digital signature valid. The full copy rewrites and
+/// compacts the file and destroys every signature over it, so it is offered as an
+/// explicit choice and never as the default.
+pub fn save(
+    session: &mut DocumentSession,
+    dest: &mut dyn std::io::Write,
+    incremental: bool,
+) -> Result<()> {
+    let doc = session
+        .document
+        .as_document_mut()
+        .ok_or(PdfError::Unsupported("saving this document"))?;
+    if incremental {
+        doc.save_incremental(dest)
+    } else {
+        doc.save_full_copy(dest)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::document::metadata::DocumentMetadata;
-    use crate::document::{Document, Page, PageSize};
+    use crate::document::{Document, DocumentMut, Page, PageSize, RemovedPage};
     use crate::error::PdfError;
     use std::cell::Cell;
     use std::rc::Rc;
@@ -341,5 +487,272 @@ mod tests {
 
         assert_eq!(outcome, RenderOutcome::Rendered);
         assert_eq!(renders.get(), 2);
+    }
+
+    // ---------------------------------------------------------------- editing --
+
+    /// A page tree that can be mutated, with pages identified by width — so a
+    /// delete or a reorder is observable without rendering anything.
+    struct EditableDoc {
+        widths: Vec<f32>,
+        rotations: Vec<u8>,
+        dirty: bool,
+    }
+
+    // Sound for the test harness: never shared across threads.
+    unsafe impl Send for EditableDoc {}
+    unsafe impl Sync for EditableDoc {}
+
+    impl EditableDoc {
+        fn with_pages(count: usize) -> Self {
+            EditableDoc {
+                widths: (0..count).map(|i| 100.0 + i as f32 * 10.0).collect(),
+                rotations: vec![0; count],
+                dirty: false,
+            }
+        }
+    }
+
+    impl Document for EditableDoc {
+        fn page_count(&self) -> usize {
+            self.widths.len()
+        }
+        fn metadata(&self) -> Result<DocumentMetadata> {
+            Ok(DocumentMetadata {
+                page_count: self.widths.len(),
+                ..Default::default()
+            })
+        }
+        fn page(&self, index: usize) -> Result<Box<dyn Page + '_>> {
+            self.validate_page_index(index)?;
+            unreachable!("these tests never rasterise")
+        }
+        fn page_size(&self, index: usize) -> Result<PageSize> {
+            self.validate_page_index(index)?;
+            Ok(PageSize {
+                width_pt: self.widths[index],
+                height_pt: 100.0,
+            })
+        }
+        fn as_document_mut(&mut self) -> Option<&mut dyn DocumentMut> {
+            Some(self)
+        }
+    }
+
+    impl DocumentMut for EditableDoc {
+        fn reorder_pages(&mut self, order: &[usize]) -> Result<()> {
+            let mut moved = vec![0f32; self.widths.len()];
+            for (from, &to) in order.iter().enumerate() {
+                moved[to] = self.widths[from];
+            }
+            self.widths = moved;
+            self.dirty = true;
+            Ok(())
+        }
+        fn delete_page(&mut self, index: usize) -> Result<RemovedPage> {
+            let width = self.widths.remove(index);
+            self.rotations.remove(index);
+            self.dirty = true;
+            Ok(RemovedPage::new(
+                PageSize {
+                    width_pt: width,
+                    height_pt: 100.0,
+                },
+                Vec::new(),
+            ))
+        }
+        fn insert_page(&mut self, at: usize, page: RemovedPage) -> Result<()> {
+            self.widths.insert(at, page.size.width_pt);
+            self.rotations.insert(at, 0);
+            self.dirty = true;
+            Ok(())
+        }
+        fn insert_blank_page(&mut self, at: usize, size: PageSize) -> Result<()> {
+            self.widths.insert(at, size.width_pt);
+            self.rotations.insert(at, 0);
+            self.dirty = true;
+            Ok(())
+        }
+        fn set_page_rotation(&mut self, index: usize, quarter_turns: u8) -> Result<()> {
+            self.rotations[index] = quarter_turns;
+            self.dirty = true;
+            Ok(())
+        }
+        fn page_rotation(&self, index: usize) -> Result<u8> {
+            Ok(self.rotations[index])
+        }
+        fn extract_pages(&self, _range: &[usize]) -> Result<Box<dyn Document>> {
+            Err(PdfError::Unsupported("extract in tests"))
+        }
+        fn import_pages(&mut self, _f: &dyn Document, _r: &[usize], _at: usize) -> Result<()> {
+            Ok(())
+        }
+        fn save_incremental(&mut self, dest: &mut dyn std::io::Write) -> Result<()> {
+            dest.write_all(b"incremental")?;
+            Ok(())
+        }
+        fn save_full_copy(&mut self, dest: &mut dyn std::io::Write) -> Result<()> {
+            dest.write_all(b"full")?;
+            Ok(())
+        }
+        fn is_dirty(&self) -> bool {
+            self.dirty
+        }
+    }
+
+    fn editable_session(pages: usize) -> DocumentSession {
+        DocumentSession::new(Box::new(EditableDoc::with_pages(pages)))
+    }
+
+    /// One raster per page at two different zooms, so a test can tell
+    /// "invalidated page 2" apart from "cleared everything".
+    fn fill_cache(session: &mut DocumentSession, pages: usize) {
+        for index in 0..pages {
+            for zoom in [1.0f32, 2.0] {
+                session.cache.put(
+                    CacheKey::new(index, zoom, 0),
+                    Bitmap::new(4, 4, PixelOrder::Rgba).unwrap(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rotating_a_page_invalidates_that_page_at_every_zoom_and_leaves_the_rest() {
+        let mut session = editable_session(3);
+        fill_cache(&mut session, 3);
+        assert_eq!(session.cache.len(), 6);
+
+        execute(
+            &mut session,
+            Command::SetPageRotation {
+                index: 1,
+                quarter_turns: 1,
+            },
+        )
+        .unwrap();
+
+        // Both of page 1's rasters go; the other two pages keep theirs.
+        assert_eq!(session.cache.len(), 4);
+        assert!(!session.cache.contains(&CacheKey::new(1, 1.0, 0)));
+        assert!(!session.cache.contains(&CacheKey::new(1, 2.0, 0)));
+        assert!(session.cache.contains(&CacheKey::new(0, 1.0, 0)));
+        assert!(session.cache.contains(&CacheKey::new(2, 2.0, 0)));
+    }
+
+    #[test]
+    fn deleting_a_page_clears_the_whole_cache_because_every_later_index_shifts() {
+        let mut session = editable_session(3);
+        fill_cache(&mut session, 3);
+
+        execute(&mut session, Command::DeletePage { index: 0 }).unwrap();
+
+        assert_eq!(
+            session.cache.len(),
+            0,
+            "page 1's raster is now index 0's; keeping any of them draws the wrong page"
+        );
+    }
+
+    #[test]
+    fn an_edit_and_its_undo_leave_the_page_tree_where_it_started() {
+        let mut session = editable_session(3);
+
+        let after = execute(&mut session, Command::DeletePage { index: 1 }).unwrap();
+        assert_eq!(after.page_count, 2);
+        assert!(after.can_undo);
+        assert_eq!(after.undo_label.as_deref(), Some("Delete page 2"));
+
+        let (undone, state) = undo(&mut session).unwrap();
+        assert!(undone);
+        assert_eq!(state.page_count, 3);
+        assert!(!state.can_undo);
+        assert!(state.can_redo);
+
+        // The page that comes back is the one removed, not a blank of the same size.
+        assert_eq!(session.document.page_size(1).unwrap().width_pt, 110.0);
+    }
+
+    #[test]
+    fn redo_reapplies_and_a_fresh_edit_discards_the_redo_branch() {
+        let mut session = editable_session(3);
+        execute(&mut session, Command::DeletePage { index: 2 }).unwrap();
+        undo(&mut session).unwrap();
+
+        let (redone, state) = redo(&mut session).unwrap();
+        assert!(redone);
+        assert_eq!(state.page_count, 2);
+
+        undo(&mut session).unwrap();
+        execute(
+            &mut session,
+            Command::InsertBlankPage {
+                at: 0,
+                width_pt: 200.0,
+                height_pt: 300.0,
+            },
+        )
+        .unwrap();
+
+        let state = edit_state(&mut session);
+        assert!(
+            !state.can_redo,
+            "a fresh edit makes the undone branch unreachable"
+        );
+    }
+
+    #[test]
+    fn undo_and_redo_on_an_empty_history_are_no_ops_rather_than_errors() {
+        let mut session = editable_session(2);
+
+        let (undone, _) = undo(&mut session).unwrap();
+        let (redone, _) = redo(&mut session).unwrap();
+
+        assert!(!undone, "nothing to undo is a no-op, not a thrown exception");
+        assert!(!redone);
+    }
+
+    #[test]
+    fn a_read_only_document_reports_itself_uneditable_instead_of_failing_later() {
+        let (mut session, _) = session_with(2);
+
+        let state = edit_state(&mut session);
+        assert!(!state.editable);
+        assert!(!state.dirty);
+
+        assert!(matches!(
+            execute(&mut session, Command::DeletePage { index: 0 }),
+            Err(PdfError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn dirtiness_tracks_whether_a_save_would_have_anything_to_write() {
+        let mut session = editable_session(2);
+        assert!(!edit_state(&mut session).dirty);
+
+        execute(
+            &mut session,
+            Command::SetPageRotation {
+                index: 0,
+                quarter_turns: 2,
+            },
+        )
+        .unwrap();
+
+        assert!(edit_state(&mut session).dirty);
+    }
+
+    #[test]
+    fn the_incremental_save_runs_unless_a_full_copy_is_asked_for() {
+        let mut session = editable_session(1);
+
+        let mut appended = Vec::new();
+        save(&mut session, &mut appended, true).unwrap();
+        assert_eq!(appended, b"incremental");
+
+        let mut rewritten = Vec::new();
+        save(&mut session, &mut rewritten, false).unwrap();
+        assert_eq!(rewritten, b"full");
     }
 }

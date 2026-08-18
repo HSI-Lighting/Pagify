@@ -22,6 +22,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.automirrored.filled.ViewSidebar
@@ -36,7 +37,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
@@ -71,7 +75,9 @@ import com.hsilighting.pagify.ui.components.AnnotationToolbar
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
 import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.twoFingerPan
+import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.components.PageNavigator
+import com.hsilighting.pagify.ui.components.PageOrganiser
 import com.hsilighting.pagify.ui.components.PdfPageView
 import com.hsilighting.pagify.ui.components.THUMBNAIL_STRIP_WIDTH
 import com.hsilighting.pagify.ui.components.ThumbnailStrip
@@ -137,11 +143,43 @@ fun PdfReaderScreen(
     /** The reader has taken the scroll a history step asked for. */
     onJumpHandled: () -> Unit,
     onShowMetadata: (Boolean) -> Unit,
+    // ---------------------------------------------------------- page organiser --
+    onShowPageOrganiser: (Boolean) -> Unit,
+    /**
+     * One page-tree change. A single sealed type rather than a callback each,
+     * because every new operation would otherwise add another parameter to an
+     * already long list — and to keep the set readable beside the engine's own
+     * `Command` enum.
+     */
+    onPageAction: (PageAction) -> Unit,
+    /** Write the page changes back over the file that was opened. */
+    onSaveDocument: () -> Unit,
+    /** Write the page changes to a file the user picks. */
+    onSaveCopy: () -> Unit,
+    /** The snackbar has shown `state.message`; clear it. */
+    onMessageShown: () -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
 ) {
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // Keyed on the message itself, so two different messages in a row both show
+    // and the effect does not restart on every unrelated recomposition.
+    //
+    // Stands down while the page organiser is open. A modal sheet draws over the
+    // `Scaffold` and its snackbar host with it, so showing one there would consume
+    // the message behind the sheet and leave the user with no sign that anything
+    // happened — the organiser displays it inline instead.
+    LaunchedEffect(state.message, state.showPageOrganiser) {
+        if (state.showPageOrganiser) return@LaunchedEffect
+        val message = state.message ?: return@LaunchedEffect
+        snackbarHostState.showSnackbar(message)
+        onMessageShown()
+    }
+
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
                 title = {
@@ -214,6 +252,24 @@ fun PdfReaderScreen(
                             Icon(
                                 Icons.AutoMirrored.Filled.RotateRight,
                                 contentDescription = "Rotate",
+                            )
+                        }
+                        IconButton(onClick = { onShowPageOrganiser(true) }) {
+                            Icon(
+                                Icons.Filled.GridView,
+                                // The tint is the only thing distinguishing a
+                                // document with unsaved page changes from one
+                                // without, so it belongs in the label too.
+                                contentDescription = if (state.editState.dirty) {
+                                    "Organise pages — unsaved changes"
+                                } else {
+                                    "Organise pages"
+                                },
+                                tint = if (state.editState.dirty) {
+                                    MaterialTheme.colorScheme.primary
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
                             )
                         }
                         IconButton(onClick = { onShowMetadata(true) }) {
@@ -332,6 +388,36 @@ fun PdfReaderScreen(
         if (state.showMetadataSheet && state.metadata != null) {
             ModalBottomSheet(onDismissRequest = { onShowMetadata(false) }) {
                 MetadataSheet(state.metadata)
+            }
+        }
+
+        if (state.showPageOrganiser && state.isReady) {
+            ModalBottomSheet(
+                onDismissRequest = { onShowPageOrganiser(false) },
+                // Straight to full height, skipping the half-open state a sheet
+                // normally rests at. This one is a working panel, not a short menu:
+                // at half height its page grid ran past the bottom of the screen and
+                // took Save and Close with it, and nothing on screen suggested the
+                // sheet could be dragged up to reach them.
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            ) {
+                PageOrganiser(
+                    pageCount = state.pageCount,
+                    currentPage = state.currentPage,
+                    editState = state.editState,
+                    isSaving = state.isSaving,
+                    onAction = onPageAction,
+                    onSave = onSaveDocument,
+                    onSaveCopy = onSaveCopy,
+                    onClose = { onShowPageOrganiser(false) },
+                    pageSizeProvider = pageSizeProvider,
+                    // The rail's throttled renderer, not the full-size one: this
+                    // grid asks for every page at once, and a dozen full renders
+                    // would queue ahead of the page being read.
+                    renderer = thumbnailRenderer,
+                    message = state.message,
+                    onMessageShown = onMessageShown,
+                )
             }
         }
     }

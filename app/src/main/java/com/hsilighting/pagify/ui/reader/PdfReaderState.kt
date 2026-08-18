@@ -2,6 +2,7 @@ package com.hsilighting.pagify.ui.reader
 
 import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.AnnotationTool
+import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfMetadata
 import com.hsilighting.pagify.core.PenMode
@@ -36,6 +37,26 @@ data class PdfReaderState(
     val showThumbnails: Boolean = true,
     /** A render-timeline recording is in progress. See `SessionRecorder`. */
     val isRecording: Boolean = false,
+
+    // -------------------------------------------------------- document edits --
+    /**
+     * Undo depth, dirtiness and page count for edits to the *document* — pages
+     * deleted, moved, rotated or inserted.
+     *
+     * Deliberately separate from [canUndo] and [canRedo] below, which are the
+     * annotation history. They are different models with different lifetimes:
+     * annotations live in an `AnnotationStore` and are not yet written into the
+     * file, while these go through the engine's `Command` path and change the
+     * document itself. A single shared undo stack would make the button's meaning
+     * depend on which of the two the user last touched.
+     */
+    val editState: EditState = EditState(),
+    /** The page-organisation sheet: reorder, rotate, delete, insert. */
+    val showPageOrganiser: Boolean = false,
+    /** A save is running. Blocks a second one and drives the progress indicator. */
+    val isSaving: Boolean = false,
+    /** One-shot message for the snackbar. Cleared by `messageShown`. */
+    val message: String? = null,
 
     // ------------------------------------------------------------ annotation --
     val tool: AnnotationTool = AnnotationTool.None,

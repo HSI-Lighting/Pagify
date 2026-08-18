@@ -115,6 +115,58 @@ internal object NativeBridge {
         rotationQuarterTurns: Int,
     ): Boolean
 
+    // ------------------------------------------------------------------ edit --
+
+    /**
+     * Applies one [PdfCommand], given as its JSON form.
+     *
+     * JSON rather than one external per operation because the command *is* the
+     * API: adding an operation then needs no new native symbol and no new
+     * declaration here, only a new [PdfCommand] variant on each side.
+     *
+     * @return the resulting [EditState] as JSON.
+     */
+    @Throws(PdfException::class)
+    external fun executeCommandJson(handle: Long, commandJson: String): String
+
+    /**
+     * Reverses the most recent edit.
+     *
+     * An empty history is not an error — the returned state simply still reports
+     * `canUndo == false`. Callers drive their buttons from that rather than from a
+     * thrown exception, so a double tap is a no-op.
+     */
+    @Throws(PdfException::class)
+    external fun undoEdit(handle: Long): String
+
+    @Throws(PdfException::class)
+    external fun redoEdit(handle: Long): String
+
+    @Throws(PdfException::class)
+    external fun getEditStateJson(handle: Long): String
+
+    /**
+     * The rotation a page currently carries, in quarter turns.
+     *
+     * [PdfCommand.SetPageRotation] is absolute rather than relative, because an
+     * undo record has to restore the angle a page actually had. A UI that turns by
+     * a quarter at a time therefore has to read the current value first.
+     */
+    @Throws(PdfException::class)
+    external fun getPageRotation(handle: Long, pageIndex: Int): Int
+
+    /**
+     * Writes the document to [fd], taking ownership of it exactly as
+     * [openDocumentFd] does.
+     *
+     * **[fd] must not point at the file this document was opened from.** PDFium
+     * reads objects lazily for the document's whole life, so a save reads from the
+     * source while writing; aiming both ends at one file truncates the input
+     * mid-save. [PdfDocument.saveTo] is the path that gets this right.
+     */
+    @Throws(PdfException::class)
+    external fun saveToFd(handle: Long, fd: Int, incremental: Boolean)
+
     // ----------------------------------------------------------------- cache --
 
     @Throws(PdfException::class)

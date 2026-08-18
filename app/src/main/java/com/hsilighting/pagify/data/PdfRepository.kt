@@ -4,9 +4,12 @@ import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
+import com.hsilighting.pagify.core.PdfCommand
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfMetadata
+import com.hsilighting.pagify.core.PdfNativeException
 import com.hsilighting.pagify.core.RenderScale
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -14,6 +17,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * Boundary between the UI and the native engine.
@@ -129,6 +133,59 @@ class PdfRepository(
                 val scale = RenderScale.forPage(document.pageSize(index), targetPixelWidth)
                 document.prefetchPage(index, scale, rotationQuarterTurns)
             }
+        }
+    }
+
+    // ------------------------------------------------------------------ edit --
+
+    /**
+     * Applies one edit.
+     *
+     * On [ioDispatcher] rather than [renderDispatcher]: an edit takes the same
+     * native registry lock a render takes, and deleting a page also copies its
+     * content out so the deletion can be undone. Queuing that behind the render
+     * pool would put it behind every page the user is currently looking at.
+     */
+    suspend fun execute(document: PdfDocument, command: PdfCommand): EditState =
+        withContext(ioDispatcher) { document.execute(command) }
+
+    suspend fun undo(document: PdfDocument): EditState =
+        withContext(ioDispatcher) { document.undo() }
+
+    suspend fun redo(document: PdfDocument): EditState =
+        withContext(ioDispatcher) { document.redo() }
+
+    suspend fun editState(document: PdfDocument): EditState =
+        withContext(ioDispatcher) { document.editState() }
+
+    suspend fun pageRotation(document: PdfDocument, pageIndex: Int): Int =
+        withContext(ioDispatcher) { document.pageRotation(pageIndex) }
+
+    /**
+     * Writes the document to [uri] — the file it came from, or a new one.
+     *
+     * Two steps, and the order is the point: write a scratch file, and only once
+     * that has completed copy it over the destination. PDFium reads lazily from the
+     * source for the document's whole life, so saving straight back onto it would
+     * truncate the input mid-save; and copying only after a complete write means an
+     * interrupted save leaves the user's file untouched rather than half-rewritten.
+     *
+     * When [uri] is the document's own source, the open document still reads the
+     * *old* descriptor afterwards, so the caller has to reopen to see what was
+     * written.
+     */
+    suspend fun writeTo(
+        document: PdfDocument,
+        uri: Uri,
+        scratchDir: File,
+        incremental: Boolean = true,
+    ) = withContext(ioDispatcher) {
+        document.saveVia(scratchDir, incremental) { scratch ->
+            // "rwt" truncates. Plain "w" leaves any bytes beyond the new length in
+            // place, which on a shrinking save appends rubbish after %%EOF.
+            resolver.openOutputStream(uri, "rwt")
+                ?.use { out -> scratch.inputStream().use { it.copyTo(out) } }
+                ?: throw PdfNativeException("could not open $uri for writing")
         }
     }
 

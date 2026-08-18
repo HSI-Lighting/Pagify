@@ -7,6 +7,7 @@ use jni::objects::{JClass, JFloatArray, JObject, JString};
 use jni::sys::{jboolean, jfloat, jint, jlong, jstring, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
 
+use crate::command::Command;
 use crate::document::pdfium_doc::PdfiumDocument;
 use crate::document::{Document, RenderRequest, Rotation};
 use crate::engine;
@@ -66,9 +67,14 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_openDocumen
     guard(&mut env, INVALID_HANDLE, |env| {
         let path = required_string(env, &path, "path")?;
         let password = optional_string(env, &password)?;
-        let document = PdfiumDocument::open_path(&path, password.as_deref())?;
-        log::debug!("opened {} ({} pages)", path, document.page_count());
-        Ok(registry::insert(Box::new(document)))
+        // Opened *inside* the registry lock — see `registry::insert_with` for the
+        // measurements. Constructing a PDFium document while another thread is
+        // opening or closing one lets the two share recycled addresses.
+        registry::insert_with(move || {
+            let document = PdfiumDocument::open_path(&path, password.as_deref())?;
+            log::debug!("opened {} ({} pages)", path, document.page_count());
+            Ok(Box::new(document) as Box<dyn Document>)
+        })
     })
 }
 
@@ -97,9 +103,14 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_openDocumen
         // If this fails, `file` drops here and the descriptor is closed.
         let password = optional_string(env, &password)?;
 
-        let document = PdfiumDocument::from_file(file, password.as_deref())?;
-        log::debug!("opened fd {} ({} pages)", fd, document.page_count());
-        Ok(registry::insert(Box::new(document)))
+        // Only the PDFium open needs the registry lock; adopting the descriptor
+        // above must stay outside it, because it has to happen before anything
+        // fallible or the fd would leak on the password path.
+        registry::insert_with(move || {
+            let document = PdfiumDocument::from_file(file, password.as_deref())?;
+            log::debug!("opened fd {} ({} pages)", fd, document.page_count());
+            Ok(Box::new(document) as Box<dyn Document>)
+        })
     })
 }
 
@@ -395,5 +406,151 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_nativeVersi
             .new_string(env!("CARGO_PKG_VERSION"))
             .map_err(|e| PdfError::Pdfium(format!("could not allocate Java string: {e}")))?
             .into_raw())
+    })
+}
+
+// ------------------------------------------------------------------- editing --
+
+/// Serialise an [`engine::EditState`] for the return trip.
+fn edit_state_json<'local>(env: &JNIEnv<'local>, state: engine::EditState) -> Result<jstring> {
+    let json = serde_json::to_string(&state)
+        .map_err(|e| PdfError::Pdfium(format!("could not encode edit state: {e}")))?;
+    Ok(env
+        .new_string(json)
+        .map_err(|e| PdfError::Pdfium(format!("could not allocate Java string: {e}")))?
+        .into_raw())
+}
+
+/// Apply one edit, described as a serialised [`Command`].
+///
+/// JSON rather than a function per operation, because the command *is* the API:
+/// `Command` already has to serialise for saved scripts, so passing it across the
+/// boundary in that form means a new operation needs no new JNI export, no new
+/// Kotlin external, and no new symbol name to keep in step.
+///
+/// @return the resulting [`engine::EditState`] as JSON.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_executeCommandJson<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    command_json: JString<'local>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let json = required_string(env, &command_json, "command")?;
+        let command: Command = serde_json::from_str(&json).map_err(|e| {
+            PdfError::InvalidArgument(format!("could not decode command {json}: {e}"))
+        })?;
+
+        let state = registry::with_session(handle, |session| engine::execute(session, command))?;
+        edit_state_json(env, state)
+    })
+}
+
+/// Reverse the most recent edit.
+///
+/// An empty history is not an error: the returned state simply still reports
+/// `canUndo == false`, and the UI drives its buttons from that. Throwing here
+/// would turn a double tap into a crash dialog.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_undoEdit<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let (_, state) = registry::with_session(handle, engine::undo)?;
+        edit_state_json(env, state)
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_redoEdit<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let (_, state) = registry::with_session(handle, engine::redo)?;
+        edit_state_json(env, state)
+    })
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getEditStateJson<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let state = registry::with_session(handle, |session| Ok(engine::edit_state(session)))?;
+        edit_state_json(env, state)
+    })
+}
+
+/// Write the document to a descriptor.
+///
+/// **`fd` must not refer to the file this document was opened from.** PDFium reads
+/// objects lazily for a document's whole life, so a save streams *from* the source
+/// while writing — pointing both ends at one file truncates the input halfway
+/// through and produces a PDF that is neither the old one nor the new one. Kotlin
+/// writes to a scratch file and copies it over afterwards; see `PdfDocument.saveTo`.
+///
+/// Ownership of `fd` transfers here on every path, matching `openDocumentFd`.
+///
+/// `incremental` appends a delta and leaves the original bytes intact, which keeps
+/// any existing digital signature valid. A full copy rewrites and compacts the
+/// file, and breaks every signature over it.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_saveToFd(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    fd: jint,
+    incremental: jboolean,
+) {
+    guard(&mut env, (), |_| {
+        // Adopted first so there is no path on which the descriptor is neither
+        // owned by a `File` here nor still owned by Kotlin.
+        // Safety: the contract above places ownership of `fd` with this call.
+        let file = unsafe { PdfiumDocument::adopt_fd(fd)? };
+        let mut writer = std::io::BufWriter::new(file);
+
+        registry::with_session(handle, |session| {
+            engine::save(session, &mut writer, incremental == JNI_TRUE)
+        })?;
+
+        // Flushed explicitly: a `BufWriter` that fails on drop swallows the error,
+        // which would report a successful save of a truncated file.
+        std::io::Write::flush(&mut writer)?;
+        Ok(())
+    })
+}
+
+/// The rotation a page currently carries, in quarter turns.
+///
+/// Needed because `Command::SetPageRotation` is absolute rather than relative: an
+/// undo record has to restore the angle the page actually had, and a relative
+/// command could not describe that. The UI turns pages by a quarter at a time, so
+/// it has to read the current value to work out what to ask for.
+///
+/// Zero for a document that cannot be edited, which is also the right answer —
+/// nothing can have rotated it.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getPageRotation(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+    page_index: jint,
+) -> jint {
+    guard(&mut env, 0, |_| {
+        let index = page_index_from(page_index)?;
+        registry::with_session(handle, |session| {
+            session.document.validate_page_index(index)?;
+            match session.document.as_document_mut() {
+                Some(doc) => Ok(doc.page_rotation(index)? as jint),
+                None => Ok(0),
+            }
+        })
     })
 }

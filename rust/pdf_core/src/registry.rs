@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use crate::command::CommandHistory;
 use crate::document::Document;
 use crate::error::{PdfError, Result};
 use crate::render::{PageCache, DEFAULT_CACHE_BUDGET_BYTES};
@@ -17,6 +18,10 @@ use crate::render::{PageCache, DEFAULT_CACHE_BUDGET_BYTES};
 pub struct DocumentSession {
     pub document: Box<dyn Document>,
     pub cache: PageCache,
+    /// Undo/redo for this document. Per-session rather than global: two open
+    /// documents must not share a history, or undo in one would try to revert a
+    /// command against the other.
+    pub history: CommandHistory,
 }
 
 impl DocumentSession {
@@ -24,6 +29,7 @@ impl DocumentSession {
         DocumentSession {
             document,
             cache: PageCache::new(DEFAULT_CACHE_BUDGET_BYTES),
+            history: CommandHistory::default(),
         }
     }
 }
@@ -43,10 +49,57 @@ fn lock() -> MutexGuard<'static, HashMap<i64, DocumentSession>> {
     sessions().lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Register an already-constructed document.
+///
+/// Prefer [`insert_with`] for anything backed by PDFium: constructing the document
+/// *outside* the lock is the bug that one documents. This entry point remains for
+/// tests, whose fake documents have no engine state to race over.
 pub fn insert(document: Box<dyn Document>) -> i64 {
     let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
     lock().insert(handle, DocumentSession::new(document));
     handle
+}
+
+/// Open a document **with the registry lock already held**, then register it.
+///
+/// The lock has to cover the open itself, not just the insertion. PDFium hands out
+/// document and page addresses that it recycles freely, and `pdfium-render` keys a
+/// process-global page-index cache on those raw addresses with no purge when a
+/// document closes. While one document is being built or torn down, another
+/// arriving at the same address shares its key space — and a page lookup can be
+/// answered with the wrong document's page.
+///
+/// This is not theoretical, and it is not only a write-path concern. Two threads
+/// cycling open → read → close over two different files, measured with
+/// `examples/handle_race_probe.rs`:
+///
+/// ```text
+///                    opens failed    wrong page geometry
+///   unserialised     771 of 800      3 of the 29 reads that got through
+///   serialised         0 of 800      0 of 800
+/// ```
+///
+/// One of the corrupt reads reproduced `[200, 612, 612, 612]` exactly — the
+/// failure that first appeared in the round-trip suite, one correct page followed
+/// by three reporting US Letter, which is what PDFium falls back to when it cannot
+/// find a page's geometry.
+///
+/// The app reaches this shape without editing anything: documents open on
+/// `Dispatchers.IO` while renders run on `Dispatchers.Default`, so opening a second
+/// file while the first is still drawing is exactly the two-thread case above.
+///
+/// Note what this costs: opening a large document now blocks renders of any other
+/// open document until it completes. That is the right trade — PDFium's open is
+/// lazy, and the alternative is a page cache that occasionally serves pages from
+/// the wrong file.
+pub fn insert_with(open: impl FnOnce() -> Result<Box<dyn Document>>) -> Result<i64> {
+    let mut guard = lock();
+    // Failing here drops the guard on the way out, so a failed open never leaves
+    // the registry locked.
+    let document = open()?;
+    let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+    guard.insert(handle, DocumentSession::new(document));
+    Ok(handle)
 }
 
 /// Run `f` against the session for `handle`.

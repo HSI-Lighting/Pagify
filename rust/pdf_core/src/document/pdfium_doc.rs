@@ -724,7 +724,3 @@ const PDF_VERSION_1_7: c_int = 17;
 
 /// `FPDF_INCREMENTAL` from `fpdf_save.h`. Not re-exported by the binding.
 const FPDF_INCREMENTAL: u32 = 1;
-
-const HANDLE_NEEDED: &str = "blocked on pdfium-render: PdfDocument::handle() is \
-    pub(crate), so FPDF_SaveWithVersion, FPDFPage_Delete and FPDF_MovePages \
-    cannot be reached. Making the handle public unblocks all three at once";

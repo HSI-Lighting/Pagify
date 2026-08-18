@@ -43,8 +43,21 @@ use crate::document::{DocumentMut, PageSize, RemovedPage};
 use crate::error::Result;
 
 /// What the user asked for. Parameters only, and serialisable.
+///
+/// `rename_all` renames the *variants*; `rename_all_fields` renames the fields
+/// inside them, and both are needed. Without the second, `SetPageRotation`
+/// serialises its tag as `setPageRotation` but its field as `quarter_turns` — so a
+/// caller that reasonably sends camelCase throughout gets
+/// `missing field 'quarter_turns'` at runtime, and nothing at all at compile time.
+///
+/// That cost a run on a device to find, because the mistake is invisible in half
+/// the enum: `DeletePage { index }` and `ReorderPages { order }` have single-word
+/// fields and worked perfectly. Only the two variants with multi-word fields were
+/// broken. `decoding_the_json_the_app_sends` below pins all four against literal
+/// strings, which is the only thing that can hold a wire format shared with code
+/// in another language.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "camelCase")]
+#[serde(tag = "op", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Command {
     /// `order[i]` is the index the page currently at `i` moves to.
     ReorderPages {
@@ -263,6 +276,84 @@ mod tests {
                 quarter_turns: 1
             }
             .affected_pages()
+        );
+    }
+
+    /// The exact strings `PdfCommand.toJson()` produces in Kotlin.
+    ///
+    /// Written as literals on purpose. A round-trip test — serialise a `Command`,
+    /// deserialise it, compare — passes happily whatever the field names are, so it
+    /// cannot see a mismatch with the other side of the boundary. These strings are
+    /// copied from `app/src/main/java/com/hsilighting/pagify/core/PdfEdit.kt`, and
+    /// they are the contract.
+    ///
+    /// This test exists because two of the four commands were undecodable in a
+    /// build whose Rust and Kotlin suites were both green: `rename_all` renamed the
+    /// variants and left `quarter_turns`, `width_pt` and `height_pt` in snake_case.
+    /// It took running the app on a tablet to find, which is far too late.
+    #[test]
+    fn decoding_the_json_the_app_sends() {
+        let cases = [
+            (
+                r#"{"op":"deletePage","index":3}"#,
+                Command::DeletePage { index: 3 },
+            ),
+            (
+                r#"{"op":"reorderPages","order":[2,0,1]}"#,
+                Command::ReorderPages {
+                    order: vec![2, 0, 1],
+                },
+            ),
+            (
+                r#"{"op":"insertBlankPage","at":1,"widthPt":595,"heightPt":842}"#,
+                Command::InsertBlankPage {
+                    at: 1,
+                    width_pt: 595.0,
+                    height_pt: 842.0,
+                },
+            ),
+            (
+                r#"{"op":"setPageRotation","index":0,"quarterTurns":1}"#,
+                Command::SetPageRotation {
+                    index: 0,
+                    quarter_turns: 1,
+                },
+            ),
+        ];
+
+        for (json, expected) in cases {
+            let decoded: Command = serde_json::from_str(json)
+                .unwrap_or_else(|e| panic!("the app sends {json}, which failed to decode: {e}"));
+            assert_eq!(expected, decoded, "decoded {json} into the wrong command");
+        }
+    }
+
+    /// Every command must also *encode* to the same shape, so a saved script can be
+    /// read back by either side.
+    #[test]
+    fn encoding_matches_what_the_app_expects_to_read() {
+        let encoded = serde_json::to_string(&Command::SetPageRotation {
+            index: 2,
+            quarter_turns: 3,
+        })
+        .expect("encode");
+
+        assert!(
+            encoded.contains(r#""quarterTurns":3"#),
+            "fields must be camelCase like the tag, got {encoded}",
+        );
+        assert!(encoded.contains(r#""op":"setPageRotation""#), "got {encoded}");
+    }
+
+    /// An unknown operation must be an error rather than a silent no-op.
+    #[test]
+    fn an_unrecognised_command_is_refused() {
+        // Fully qualified: `Result` in this crate is an alias with one parameter.
+        let result: std::result::Result<Command, serde_json::Error> =
+            serde_json::from_str(r#"{"op":"encryptEverything"}"#);
+        assert!(
+            result.is_err(),
+            "an operation this build does not implement must fail loudly, not be ignored",
         );
     }
 }

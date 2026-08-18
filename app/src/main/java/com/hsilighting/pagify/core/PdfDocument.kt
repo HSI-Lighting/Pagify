@@ -6,6 +6,7 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import java.io.Closeable
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -69,6 +70,79 @@ class PdfDocument private constructor(
     /** @return true if it rendered; false if that page was already cached. */
     fun prefetchPage(pageIndex: Int, zoom: Float, rotationQuarterTurns: Int = 0): Boolean =
         NativeBridge.prefetchPage(requireOpen(), pageIndex, zoom, rotationQuarterTurns)
+
+    // ------------------------------------------------------------------ edit --
+
+    /** Applies one edit and returns the document's resulting [EditState]. */
+    fun execute(command: PdfCommand): EditState =
+        EditState.fromJson(NativeBridge.executeCommandJson(requireOpen(), command.toJson()))
+
+    /** Reverses the most recent edit. A no-op when there is nothing to undo. */
+    fun undo(): EditState = EditState.fromJson(NativeBridge.undoEdit(requireOpen()))
+
+    fun redo(): EditState = EditState.fromJson(NativeBridge.redoEdit(requireOpen()))
+
+    fun editState(): EditState = EditState.fromJson(NativeBridge.getEditStateJson(requireOpen()))
+
+    /** Persisted rotation of a page, in quarter turns. Zero if not editable. */
+    fun pageRotation(pageIndex: Int): Int = NativeBridge.getPageRotation(requireOpen(), pageIndex)
+
+    /**
+     * Writes the edited document to [destination].
+     *
+     * [destination] must be a file this document was **not** opened from. PDFium
+     * reads objects lazily for a document's entire life, so a save streams from the
+     * source while writing to the sink; pointing both at one file truncates the
+     * input halfway through and yields a PDF that is neither the old one nor the
+     * new one. Overwriting the user's original is therefore a two-step job, which
+     * is what [saveVia] does.
+     *
+     * @param incremental append a delta, leaving the original bytes intact so any
+     *   existing digital signature stays valid. Passing false rewrites and compacts
+     *   the file, which breaks every signature over it.
+     */
+    fun saveTo(destination: File, incremental: Boolean = true) {
+        val pfd = ParcelFileDescriptor.open(
+            destination,
+            ParcelFileDescriptor.MODE_CREATE or
+                ParcelFileDescriptor.MODE_TRUNCATE or
+                ParcelFileDescriptor.MODE_WRITE_ONLY,
+        )
+        // detachFd, matching the open path: ownership moves to native code, which
+        // closes it on every outcome. Closing it here too could take down a
+        // descriptor the OS has since handed to something else.
+        val fd = try {
+            pfd.detachFd()
+        } catch (t: Throwable) {
+            pfd.close()
+            throw t
+        }
+        NativeBridge.saveToFd(requireOpen(), fd, incremental)
+    }
+
+    /**
+     * Saves to a scratch file, hands it to [publish], and deletes it afterwards.
+     *
+     * The scratch file is not a convenience — see [saveTo] for why writing over the
+     * source directly destroys it. [publish] only runs once the save has finished,
+     * so an interrupted save leaves the user's original untouched rather than
+     * half-rewritten.
+     *
+     * The document keeps reading from its original descriptor afterwards, which
+     * still refers to the pre-publish bytes. Callers must reopen to see the saved
+     * file; the reader does that as part of its save action.
+     */
+    fun saveVia(scratchDir: File, incremental: Boolean = true, publish: (File) -> Unit) {
+        val scratch = File.createTempFile("pagify-save", ".pdf", scratchDir)
+        try {
+            saveTo(scratch, incremental)
+            publish(scratch)
+        } finally {
+            scratch.delete()
+        }
+    }
+
+    // ----------------------------------------------------------------- cache --
 
     fun setCacheBudgetBytes(budgetBytes: Long) =
         NativeBridge.setCacheBudgetBytes(requireOpen(), budgetBytes)

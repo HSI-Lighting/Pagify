@@ -1,5 +1,6 @@
 package com.hsilighting.pagify
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -15,6 +16,7 @@ import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hsilighting.pagify.core.BlankFrameDetector
+import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.reader.PdfReaderScreen
 import com.hsilighting.pagify.ui.reader.PdfReaderViewModel
 import com.hsilighting.pagify.ui.theme.PagifyTheme
@@ -56,20 +58,46 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val picker = rememberLauncherForActivityResult(
-                    ActivityResultContracts.OpenDocument(),
+                    OpenWritableDocument(),
                 ) { uri ->
                     if (uri != null) {
                         // Without this the grant expires with the process, so a
                         // document reopened after a low-memory kill would fail.
+                        // Write is taken alongside read because saving edits back
+                        // to the file the user opened needs it, and it cannot be
+                        // asked for later — the grant is fixed when the picker
+                        // returns.
                         runCatching {
                             contentResolver.takePersistableUriPermission(
                                 uri,
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
                             )
+                        }.onFailure {
+                            // A read-only provider refuses the write half. The
+                            // document still opens, and "Save a copy" is the way
+                            // out; failing the open over it would be worse.
+                            runCatching {
+                                contentResolver.takePersistableUriPermission(
+                                    uri,
+                                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                                )
+                            }
                         }
                         viewModel.open(uri)
                     }
                 }
+
+                /**
+                 * Where "Save a copy" writes.
+                 *
+                 * `CreateDocument` rather than a path of our own choosing: the user
+                 * picks the destination, which is both the only way to write outside
+                 * the sandbox and what makes the file findable again afterwards.
+                 */
+                val copyPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument(PDF_MIME_TYPE),
+                ) { uri -> uri?.let(viewModel::saveCopyTo) }
 
                 val openPicker = remember { { picker.launch(arrayOf(PDF_MIME_TYPE)) } }
 
@@ -108,6 +136,20 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onShowMetadata = viewModel::showMetadata,
+                    onShowPageOrganiser = viewModel::showPageOrganiser,
+                    onPageAction = { action ->
+                        when (action) {
+                            is PageAction.Delete -> viewModel.deletePage(action.index)
+                            is PageAction.InsertBlankAt -> viewModel.insertBlankPage(action.at)
+                            is PageAction.Move -> viewModel.movePage(action.from, action.to)
+                            is PageAction.Rotate -> viewModel.rotatePage(action.index)
+                            PageAction.Undo -> viewModel.undoEdit()
+                            PageAction.Redo -> viewModel.redoEdit()
+                        }
+                    },
+                    onSaveDocument = { viewModel.save() },
+                    onSaveCopy = { copyPicker.launch(suggestedCopyName(state.documentName)) },
+                    onMessageShown = viewModel::messageShown,
                     onSubmitPassword = viewModel::submitPassword,
                     pageSizeProvider = viewModel::pageSize,
                     renderer = viewModel::renderPage,
@@ -134,5 +176,39 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         const val PDF_MIME_TYPE = "application/pdf"
+
+        /**
+         * A name for "Save a copy" that will not collide with the original.
+         *
+         * The picker lets the user change it, so this only has to be a sensible
+         * starting point — and one that makes clear which file it came from.
+         */
+        fun suggestedCopyName(documentName: String): String {
+            val base = documentName.ifBlank { "Document" }.removeSuffix(".pdf")
+            return "$base (edited).pdf"
+        }
     }
+}
+
+/**
+ * `ACTION_OPEN_DOCUMENT`, asking for write access as well as read.
+ *
+ * `ActivityResultContracts.OpenDocument` requests read only, and the grant a
+ * picker returns cannot be widened afterwards — so a document opened through it
+ * can never be saved back over, however the app later asks. Adding the flag at the
+ * point the intent is built is the only place this can be fixed.
+ *
+ * A provider that has nothing writable to offer simply returns a read-only grant,
+ * which is why this is a widening rather than a requirement: it costs nothing when
+ * it cannot be honoured, and "Save a copy" covers that case.
+ */
+private class OpenWritableDocument : ActivityResultContracts.OpenDocument() {
+    override fun createIntent(context: Context, input: Array<String>): Intent =
+        super.createIntent(context, input).apply {
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+            )
+        }
 }

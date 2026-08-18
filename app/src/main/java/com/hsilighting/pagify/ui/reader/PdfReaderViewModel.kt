@@ -16,12 +16,16 @@ import com.hsilighting.pagify.core.AnnotationEdit
 import com.hsilighting.pagify.core.AnnotationStore
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.BitmapPools
+import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
+import com.hsilighting.pagify.core.PageRemap
+import com.hsilighting.pagify.core.PdfCommand
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
 import com.hsilighting.pagify.core.PenMode
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.core.RenderScale
+import com.hsilighting.pagify.core.reorderForMove
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.ThumbnailCache
 import com.hsilighting.pagify.data.PdfRepository
@@ -82,6 +86,10 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
                 val metadata = repository.metadata(opened)
                 val firstPage = repository.pageSize(opened, 0)
+                // Fetched on open so the UI knows straight away whether this
+                // document can be edited at all, rather than offering the controls
+                // and discovering it cannot when one is pressed.
+                val edits = repository.editState(opened)
 
                 _state.update {
                     it.copy(
@@ -91,6 +99,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                         pageCount = opened.pageCount,
                         currentPage = 0,
                         pageSizes = mapOf(0 to firstPage),
+                        editState = edits,
                     )
                 }
                 schedulePrefetch()
@@ -741,6 +750,292 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         closeDocument()
     }
 
+
+    // -------------------------------------------------------- document edits --
+
+    fun showPageOrganiser(show: Boolean) = _state.update { it.copy(showPageOrganiser = show) }
+
+    fun messageShown() = _state.update { it.copy(message = null) }
+
+    fun deletePage(pageIndex: Int) {
+        val doc = document ?: return
+        if (_state.value.pageCount <= 1) {
+            _state.update { it.copy(message = "A document must keep at least one page.") }
+            return
+        }
+        runEdit(
+            command = PdfCommand.DeletePage(pageIndex),
+            remap = PageRemap.afterDelete(pageIndex),
+            describe = { "Deleted page ${pageIndex + 1}" },
+            document = doc,
+        )
+    }
+
+    fun insertBlankPage(at: Int) {
+        val doc = document ?: return
+        // A new page matches the one it is inserted before, so it does not appear
+        // as an odd-sized sheet in the middle of a uniform document. Falling back
+        // to A4 only when nothing has been measured yet.
+        val template = _state.value.pageSizes[at.coerceAtMost(_state.value.pageCount - 1)]
+            ?: _state.value.pageSizes.values.firstOrNull()
+            ?: PageSize(A4_WIDTH_POINTS, A4_HEIGHT_POINTS)
+
+        runEdit(
+            command = PdfCommand.InsertBlankPage(at, template.widthPoints, template.heightPoints),
+            remap = PageRemap.afterInsert(at),
+            describe = { "Inserted page ${at + 1}" },
+            document = doc,
+        )
+    }
+
+    /**
+     * Move one page to a new position.
+     *
+     * The engine takes a whole permutation rather than a from/to pair, so the drag
+     * is converted here: remove the moved index and re-insert it, then read off
+     * where each original index ended up. Doing it this way means the reorder that
+     * reaches the document is the same shape whether it came from a drag, a
+     * keyboard shortcut or a script.
+     */
+    fun movePage(from: Int, to: Int) {
+        val doc = document ?: return
+        val count = _state.value.pageCount
+        if (from == to || from !in 0 until count || to !in 0 until count) return
+
+        val order = reorderForMove(count, from, to)
+
+        runEdit(
+            command = PdfCommand.ReorderPages(order),
+            remap = PageRemap.afterReorder(order),
+            describe = { "Moved page ${from + 1} to ${to + 1}" },
+            document = doc,
+            follow = to,
+        )
+    }
+
+    /**
+     * Turn a page and write the turn into the document.
+     *
+     * Distinct from [rotateView], which turns the whole document on screen and
+     * changes nothing on disk.
+     */
+    fun rotatePage(pageIndex: Int, quarterTurns: Int = 1) {
+        val doc = document ?: return
+        val size = _state.value.pageSizes[pageIndex]
+
+        viewModelScope.launch {
+            try {
+                val current = repository.pageRotation(doc, pageIndex)
+                val turned = ((current + quarterTurns) % 4 + 4) % 4
+                val state = repository.execute(
+                    doc,
+                    PdfCommand.SetPageRotation(pageIndex, turned),
+                )
+                // Marks are stored in page points, so they have to turn with the
+                // page or they land somewhere else entirely on it.
+                if (size != null) {
+                    annotations.rotatePage(
+                        pageIndex,
+                        quarterTurns,
+                        size.widthPoints,
+                        size.heightPoints,
+                    )
+                }
+                afterEdit(doc, state, "Rotated page ${pageIndex + 1}", follow = pageIndex)
+            } catch (t: Throwable) {
+                reportEditFailure(t)
+            }
+        }
+    }
+
+    fun undoEdit() {
+        val doc = document ?: return
+        viewModelScope.launch {
+            try {
+                val label = _state.value.editState.undoLabel
+                val state = repository.undo(doc)
+                // The page tree moved in a way this layer cannot describe, so every
+                // index-keyed mark is suspect. Dropping the annotation history is
+                // the honest response; see AnnotationStore.remapPages.
+                annotations.clearAll()
+                afterEdit(doc, state, label?.let { "Undid: $it" })
+            } catch (t: Throwable) {
+                reportEditFailure(t)
+            }
+        }
+    }
+
+    fun redoEdit() {
+        val doc = document ?: return
+        viewModelScope.launch {
+            try {
+                val label = _state.value.editState.redoLabel
+                val state = repository.redo(doc)
+                annotations.clearAll()
+                afterEdit(doc, state, label?.let { "Redid: $it" })
+            } catch (t: Throwable) {
+                reportEditFailure(t)
+            }
+        }
+    }
+
+    /**
+     * Write the edits back over the file the user opened.
+     *
+     * Reopens afterwards rather than carrying on with the open document. The
+     * document reads lazily from the descriptor it was opened with, which still
+     * points at the *pre-save* bytes; continuing to use it would show the old file
+     * while the new one sits on disk, and the next edit would be built on a stale
+     * view of it.
+     *
+     * @param incremental append a delta, keeping the original bytes and any
+     *   signature over them intact. False rewrites and compacts the file.
+     */
+    fun save(incremental: Boolean = true) {
+        val doc = document ?: return
+        val uri = pendingUri ?: return
+        if (_state.value.isSaving) return
+        if (!_state.value.editState.dirty) {
+            _state.update { it.copy(message = "No changes to save.") }
+            return
+        }
+
+        _state.update { it.copy(isSaving = true) }
+        viewModelScope.launch {
+            try {
+                repository.writeTo(doc, uri, scratchDir(), incremental)
+                SessionRecorder.record("SAVED", "incremental=$incremental")
+                // Reopen at the page the user was on, so saving does not feel like
+                // closing and re-opening the file.
+                val page = _state.value.currentPage
+                _state.update { it.copy(isSaving = false, message = "Saved.") }
+                open(uri)
+                _state.update { it.copy(jumpToPage = page) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "save failed", t)
+                _state.update { it.copy(isSaving = false, message = saveFailureMessage(t)) }
+            }
+        }
+    }
+
+    /**
+     * What to tell the user when a save fails.
+     *
+     * A `SecurityException` here is not an error on the user's part and not
+     * something they can fix by trying again: a PDF opened from a mail attachment
+     * or a download arrives with a read-only grant, and nothing the app does later
+     * can widen it. So it names the way out instead of repeating the platform's
+     * message, which on a device read
+     * "com.hsilighting.pagify has no access to content://media/external/file/1000001372".
+     */
+    private fun saveFailureMessage(t: Throwable): String = when (t) {
+        is SecurityException -> "This file is read-only. Use Save a copy instead."
+        else -> t.message ?: "The document could not be saved."
+    }
+
+    /**
+     * Write the edits to a file the user has just chosen.
+     *
+     * The way out when the original cannot be written to: a PDF arriving from a
+     * mail attachment or a browser download is handed over read-only, and no
+     * amount of permission-taking on our side changes that. Saving a copy is then
+     * the only honest option, so it is offered rather than reporting a failure the
+     * user can do nothing about.
+     *
+     * Deliberately does not reopen: the user keeps editing the document they had
+     * open, and the copy is a snapshot of it.
+     */
+    fun saveCopyTo(destination: Uri) {
+        val doc = document ?: return
+        if (_state.value.isSaving) return
+
+        _state.update { it.copy(isSaving = true) }
+        viewModelScope.launch {
+            try {
+                repository.writeTo(doc, destination, scratchDir(), incremental = true)
+                SessionRecorder.record("SAVED_COPY", "to=$destination")
+                _state.update { it.copy(isSaving = false, message = "Copy saved.") }
+            } catch (t: Throwable) {
+                Log.e(TAG, "save copy failed", t)
+                _state.update {
+                    it.copy(
+                        isSaving = false,
+                        message = t.message ?: "The copy could not be saved.",
+                    )
+                }
+            }
+        }
+    }
+
+    /** Where [PdfDocument.saveVia] puts its scratch copy. */
+    private fun scratchDir(): File = getApplication<Application>().cacheDir
+
+    private fun runEdit(
+        command: PdfCommand,
+        remap: PageRemap,
+        describe: () -> String,
+        document: PdfDocument,
+        follow: Int? = null,
+    ) {
+        viewModelScope.launch {
+            try {
+                val state = repository.execute(document, command)
+                val dropped = annotations.remapPages(remap)
+                val note = describe() + if (dropped > 0) " ($dropped mark(s) removed)" else ""
+                afterEdit(document, state, note, follow)
+            } catch (t: Throwable) {
+                reportEditFailure(t)
+            }
+        }
+    }
+
+    /**
+     * Bring every index-keyed cache back into line with the edited document.
+     *
+     * There are five of them, and forgetting one is invisible until a specific
+     * page is looked at: the thumbnail rail would keep showing a deleted page, the
+     * highlighter would hit-test the wrong page's text, and the raster bridge would
+     * flash the old content on the way into zoom. The engine invalidates its own
+     * cache from the command's `affected_pages`; everything here is the Kotlin side
+     * of the same job.
+     */
+    private fun afterEdit(
+        doc: PdfDocument,
+        state: EditState,
+        message: String?,
+        follow: Int? = null,
+    ) {
+        thumbnailCache.clear()
+        textSegmentCache.clear()
+        dropRecentRasters()
+        unwarmablePages.clear()
+
+        val pageCount = state.pageCount
+        _state.update { current ->
+            val page = (follow ?: current.currentPage).coerceIn(0, (pageCount - 1).coerceAtLeast(0))
+            current.copy(
+                editState = state,
+                pageCount = pageCount,
+                currentPage = page,
+                // Sizes are re-measured below; keeping the old map would leave the
+                // layout anchored to pages that have moved.
+                pageSizes = emptyMap(),
+                pagesWithoutSelectableText = emptySet(),
+                jumpToPage = page,
+                message = message,
+            )
+        }
+        refreshAnnotations()
+        measureAllPages(doc)
+        warmThumbnails()
+        schedulePrefetch()
+    }
+
+    private fun reportEditFailure(t: Throwable) {
+        if (t is CancellationException) throw t
+        Log.e(TAG, "edit failed", t)
+        _state.update { it.copy(message = t.message ?: "That change could not be applied.") }
+    }
     private companion object {
         const val TAG = "PdfReaderViewModel"
         const val DOUBLE_TAP_ZOOM = 2.5f
@@ -760,5 +1055,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
         /** How often the warmer rechecks whether it may resume. */
         const val WARM_YIELD_MILLIS = 80L
+
+        /** Fallback size for an inserted page when nothing has been measured yet. */
+        const val A4_WIDTH_POINTS = 595f
+        const val A4_HEIGHT_POINTS = 842f
     }
 }

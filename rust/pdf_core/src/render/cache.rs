@@ -143,6 +143,23 @@ impl PageCache {
         }
     }
 
+    /// Drop every raster of one page, at any zoom and any rotation.
+    ///
+    /// [`remove`](Self::remove) takes a whole [`CacheKey`], which an edit cannot
+    /// build: rotating page 3 invalidates it at every zoom the user has visited,
+    /// and the caller has no idea which those are.
+    pub fn remove_page(&mut self, page_index: usize) {
+        let doomed: Vec<CacheKey> = self
+            .entries
+            .keys()
+            .filter(|key| key.page_index == page_index)
+            .copied()
+            .collect();
+        for key in doomed {
+            self.remove(&key);
+        }
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
         self.recency.clear();

@@ -24,7 +24,9 @@
 //! page ended up where — no text, no pixels.
 
 use pdf_core::command::{Command, CommandHistory};
+use pdf_core::document::pdfium_doc::PdfiumDocument;
 use pdf_core::document::Document;
+use pdf_core::registry;
 
 mod harness;
 use harness::{open_fixture, page_widths, save_and_reopen, skip_without_pdfium};
@@ -316,4 +318,79 @@ fn the_operations_the_patch_unblocked_all_work() {
     mutable
         .save_incremental(&mut Vec::new())
         .expect("incremental save");
+}
+
+/// Opening documents from several threads at once must not corrupt them.
+///
+/// Deliberately goes through `registry`, not `PdfiumDocument`, because the
+/// registry is where the fix lives: `insert_with` holds the registry lock across
+/// the PDFium open, so no document is ever constructed while another is being
+/// built or torn down at an address PDFium has recycled.
+///
+/// Measured without that, by `examples/handle_race_probe.rs`: 771 of 800 opens
+/// failed outright and 3 of the 29 reads that got through returned another
+/// document's page sizes — one of them reproducing `[200, 612, 612, 612]`, the
+/// exact failure that first appeared in this suite.
+///
+/// This cannot prove the absence of a race and does not claim to; it fails loudly
+/// against the unserialised version, which is what makes it worth having.
+///
+/// `harness::serial()` is still taken. It excludes the *other* tests, which drive
+/// `PdfiumDocument` directly and so are not covered by the registry lock — the two
+/// spawned threads below are unaffected by it, and they are the concurrency under
+/// test.
+#[test]
+fn opening_documents_concurrently_gives_each_one_its_own_pages() {
+    let Some(_pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let ladder = harness::fixture_path("pages-ladder.pdf");
+    let mixed = harness::fixture_path("mixed-sizes.pdf");
+
+    // Two different files, so a mix-up is visible as the wrong page sizes rather
+    // than hiding behind identical ones.
+    let expectations = [
+        (ladder, vec![200, 250, 300, 350, 400]),
+        (mixed, vec![595, 420, 612, 842]),
+    ];
+
+    let threads: Vec<_> = expectations
+        .into_iter()
+        .map(|(path, expected)| {
+            std::thread::spawn(move || {
+                for round in 0..40 {
+                    let path = path.to_str().expect("fixture path").to_owned();
+                    let handle = registry::insert_with(move || {
+                        Ok(Box::new(PdfiumDocument::open_path(&path, None)?) as Box<dyn Document>)
+                    })
+                    .unwrap_or_else(|e| panic!("round {round}: open failed: {e}"));
+
+                    let widths = registry::with_session(handle, |session| {
+                        Ok((0..session.document.page_count())
+                            .map(|i| {
+                                session
+                                    .document
+                                    .page_size(i)
+                                    .map(|s| s.width_pt.round() as i32)
+                                    .unwrap_or(-1)
+                            })
+                            .collect::<Vec<_>>())
+                    })
+                    .expect("read page sizes");
+
+                    assert_eq!(
+                        expected, widths,
+                        "round {round} read another document's page geometry",
+                    );
+                    registry::remove(handle);
+                }
+            })
+        })
+        .collect();
+
+    for thread in threads {
+        thread.join().expect("a thread saw the wrong document");
+    }
 }

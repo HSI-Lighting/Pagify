@@ -90,15 +90,31 @@ pub fn save_full_copy_and_reopen(doc: &mut Box<dyn Document>) -> Box<dyn Documen
 /// what PDFium reports for a page whose geometry it cannot resolve. Single
 /// threaded the same code is exact.
 ///
-/// `pdfium-render` keys its page-index cache on the `FPDF_DOCUMENT` handle behind
-/// a mutex, so this is not a data race — it is aliasing. PDFium reuses handle
-/// values once a document is closed, and a later document inherits the cache
-/// entries of an earlier one.
+/// `pdfium-render` keys a process-global page-index cache on raw
+/// `(FPDF_DOCUMENT, FPDF_PAGE)` addresses, which PDFium recycles freely. The cache
+/// is behind a mutex, so this is not a data race — it is aliasing.
 ///
-/// It matters beyond the tests: `delete_page` and `extract_pages` both open a
-/// scratch document while the main one is live, so an engine mutation running
-/// beside a render on another thread is the same shape. Mutations and renders
-/// have to be serialised in the app for the same reason.
+/// The obvious explanation is wrong, and `examples/handle_reuse_probe.rs` exists to
+/// rule it out: opening documents one after another reuses the *same* address every
+/// time, and each one still reports its own pages. Entries do not simply outlive a
+/// close. What breaks it is *overlap* — one document being torn down while another
+/// is built at the same address — which takes two threads and cannot happen
+/// sequentially at all.
+///
+/// `examples/handle_race_probe.rs` measures the difference. Two threads cycling
+/// open → read → close over two different files:
+///
+/// ```text
+///                    opens failed    wrong page geometry
+///   unserialised     771 of 800      3 of the 29 reads that got through
+///   serialised         0 of 800      0 of 800
+/// ```
+///
+/// The app is fixed rather than worked around: `registry::insert_with` holds the
+/// registry lock across the open itself, so construction, destruction, mutation and
+/// rendering are all serialised against one another. These tests talk to
+/// `PdfiumDocument` directly and bypass the registry, which is why they still need
+/// a lock of their own.
 pub fn serial() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())

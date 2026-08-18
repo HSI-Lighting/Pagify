@@ -232,6 +232,65 @@ class AnnotationStore {
     /** @return how many marks were cleared. */
     fun clearAll(): Int = removeAll(label = "clear all") { true }
 
+    // ------------------------------------------------ following the page tree --
+
+    /**
+     * Renumber every mark after a page-tree edit, dropping those whose page went.
+     *
+     * **The annotation history is discarded.** Every [AnnotationEdit] records the
+     * index a mark occupied on a page that may no longer exist, or may now hold
+     * something else entirely; replaying one across a structural change would put
+     * marks back onto whatever page happens to sit at that number now. Losing the
+     * ability to undo a highlight is a far smaller harm than silently moving
+     * somebody's annotations onto the wrong pages, and the document edit itself
+     * stays undoable through the engine's own history either way.
+     *
+     * @return how many marks were dropped because their page was deleted.
+     */
+    fun remapPages(remap: PageRemap): Int {
+        val surviving = mutableMapOf<Int, MutableList<Annotation>>()
+        var dropped = 0
+
+        // Ascending, so two pages merging into one keep their relative order
+        // rather than depending on the map's iteration order.
+        for (oldIndex in byPage.keys.sorted()) {
+            val marks = byPage[oldIndex] ?: continue
+            val newIndex = remap(oldIndex)
+            if (newIndex == null) {
+                dropped += marks.size
+                continue
+            }
+            surviving.getOrPut(newIndex) { mutableListOf() }
+                .addAll(marks.map { it.movedTo(newIndex) })
+        }
+
+        byPage.clear()
+        byPage.putAll(surviving)
+        done.clear()
+        undone.clear()
+        return dropped
+    }
+
+    /**
+     * Turn every mark on [pageIndex] with its page.
+     *
+     * [width] and [height] are the page's size *before* the turn, since that is
+     * the space the marks are currently expressed in.
+     *
+     * Clears the history for the same reason as [remapPages]: the stored edits
+     * hold geometry in the old orientation.
+     */
+    fun rotatePage(pageIndex: Int, quarterTurns: Int, width: Float, height: Float) {
+        val page = byPage[pageIndex] ?: return
+        if (page.isEmpty()) return
+
+        val turned = page.map { it.rotatedInPage(quarterTurns, width, height) }
+        page.clear()
+        page.addAll(turned)
+        done.clear()
+        undone.clear()
+    }
+
     private fun removeAll(label: String, predicate: (Annotation) -> Boolean): Int {
         val taken = mutableListOf<PlacedAnnotation>()
         byPage.values.forEach { page ->
