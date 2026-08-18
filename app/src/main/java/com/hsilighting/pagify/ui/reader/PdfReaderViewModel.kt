@@ -293,8 +293,17 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         setZoom(_state.value.zoom * factor, pinPage)
     }
 
-    /** Double-tap or pinch from fit-width, on a specific page. */
-    fun zoomInOn(pageIndex: Int) = setZoom(DOUBLE_TAP_ZOOM, pinPage = pageIndex)
+    /**
+     * Enter the pinned view on [pageIndex] at [targetZoom].
+     *
+     * The zoom is a parameter rather than a constant because a pinch and a
+     * double-tap want different things. A double-tap is a request for a specific,
+     * readable magnification. A pinch is continuous, and answering it with a fixed
+     * jump throws the gesture away: however gently you pinched, the page snapped
+     * to the double-tap zoom.
+     */
+    fun zoomInOn(pageIndex: Int, targetZoom: Float = DOUBLE_TAP_ZOOM) =
+        setZoom(targetZoom, pinPage = pageIndex)
 
     /**
      * A settled zoom from the pinned view.

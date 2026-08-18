@@ -19,3 +19,8 @@
 # Note: app/src/main/jniLibs/*/libpdfium.so IS checked in on purpose.
 # It is a pinned third-party binary (chromium/7881) that the build cannot
 # reproduce locally; tools/fetch_pdfium.ps1 regenerates it.
+
+# Test documents kept at the repo root. These are large — the 2.9 GB catalogue
+# used for performance work lives here — and a stray `git add -A` would try to
+# commit one. They are inputs to testing, never part of the source.
+/*.pdf

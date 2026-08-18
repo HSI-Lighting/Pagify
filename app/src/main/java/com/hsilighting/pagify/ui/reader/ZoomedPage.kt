@@ -70,6 +70,16 @@ fun ZoomedPage(
     renderer: suspend (pageIndex: Int, zoom: Float) -> Bitmap?,
     /** Whatever the list last drew for this page; avoids a blank first frame. */
     initialBitmap: Bitmap?,
+    /**
+     * The width, in pixels, that the list draws this page at.
+     *
+     * This is what `scale = 1.0` has to mean, and getting it wrong is visible as a
+     * jump. This view replaces the whole row including the thumbnail rail, so its
+     * own viewport is *wider* than the reader area the page was just occupying —
+     * measuring the base against the viewport made entering zoom silently enlarge
+     * the page by the width of the rail and its gaps before any gesture applied.
+     */
+    basePageWidthPx: Float,
     /** Where to centre when the view opens, as a 0..1 fraction of the page. */
     initialFocus: Offset?,
     modifier: Modifier = Modifier,
@@ -80,8 +90,9 @@ fun ZoomedPage(
         val viewportH = with(density) { maxHeight.toPx() }
 
         val aspect = pageSize?.aspectRatio ?: DEFAULT_ASPECT
-        // The page at 1.0 fills the viewport width; everything scales from there.
-        val baseW = viewportW
+        // Scale 1.0 is exactly what the list was showing, so handing over is
+        // pixel-identical and every zoom grows continuously from there.
+        val baseW = if (basePageWidthPx > 0f) basePageWidthPx else viewportW
         val baseH = if (aspect > 0f) baseW / aspect else viewportH
 
         var scale by remember { mutableFloatStateOf(initialZoom) }

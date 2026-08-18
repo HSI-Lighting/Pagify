@@ -74,8 +74,12 @@ fun PdfReaderScreen(
     state: PdfReaderState,
     onPickDocument: () -> Unit,
     onPageVisible: (Int) -> Unit,
-    /** Zoom in from fit-width, pinning the page the gesture landed on. */
-    onZoomInOn: (Int) -> Unit,
+    /**
+     * Zoom in from fit-width, pinning the page the gesture landed on, at the given
+     * magnification. The zoom is carried so a pinch can hand over at the size it
+     * actually reached rather than snapping to a fixed level.
+     */
+    onZoomInOn: (Int, Float) -> Unit,
     /**
      * A settled zoom level from the pinned view. Reported only once a gesture
      * stops, so prefetching and re-rasterisation do not chase every frame of a
@@ -220,8 +224,7 @@ fun PdfReaderScreen(
 private fun PageList(
     state: PdfReaderState,
     onPageVisible: (Int) -> Unit,
-    /** Zoom in from fit-width, pinning the page the gesture landed on. */
-    onZoomInOn: (Int) -> Unit,
+    onZoomInOn: (Int, Float) -> Unit,
     onZoomTo: (Float) -> Unit,
     onZoomActivity: () -> Unit,
     onContentBounds: (Int, Int, Int, Int) -> Unit,
@@ -286,6 +289,13 @@ private fun PageList(
             onViewportWidth(with(density) { viewportWidth.toPx() })
         }
 
+        // The width the list draws a page at. Shared with the pinned view so that
+        // scale 1.0 means the same thing on both sides of the handover.
+        val railWidthForBase = if (state.showThumbnails) THUMBNAIL_STRIP_WIDTH else 0.dp
+        val listPageWidthPx = with(density) {
+            (viewportWidth - railWidthForBase - PAGE_GAP * 2).toPx()
+        }
+
         if (pinnedPage != null) {
             // Zoomed: one page, both axes pannable, bounded by that page.
             ZoomedPage(
@@ -298,6 +308,7 @@ private fun PageList(
                 pageSizeProvider = pageSizeProvider,
                 renderer = renderer,
                 initialBitmap = peekRenderedPage(pinnedPage),
+                basePageWidthPx = listPageWidthPx,
                 initialFocus = recenterRequest,
             )
         } else {
@@ -322,11 +333,28 @@ private fun PageList(
                 )
             }
 
-            fun enterZoom(position: Offset) {
+            fun enterZoom(position: Offset, targetZoom: Float) {
                 val (page, fraction) = focusAt(position) ?: return
                 recenterRequest = fraction
-                onZoomInOn(page)
+                onZoomInOn(page, targetZoom)
             }
+
+            /**
+             * Running product of an in-progress pinch, before the pinned view exists.
+             *
+             * The pinned view is a different composable, so handing over ends the
+             * gesture Compose is delivering here — the rest of the pinch is not
+             * received. Handing over on the very first event therefore meant one
+             * tiny movement decided the whole zoom, and it was answered with a
+             * fixed 2.5x jump regardless of how far the fingers had actually moved.
+             *
+             * Accumulating instead lets the gesture speak: the handover happens once
+             * the pinch is unambiguous, and it carries the magnification reached by
+             * that point rather than a constant. Clamped at 1.0 so pinching *out* at
+             * fit-width, where there is nowhere to go, never banks negative progress
+             * that a later pinch would have to undo.
+             */
+            var pinchProgress by remember { mutableStateOf(1f) }
 
             // Only pages you have actually landed on get a readable render;
             // everything you flick past stays on its cheap proxy.
@@ -388,15 +416,21 @@ private fun PageList(
                                 bounds.bottom.toInt(),
                             )
                         }
-                        .pinchToZoom { _, centroid ->
+                        .pinchToZoom { factor, centroid ->
                             onZoomActivity()
-                            enterZoom(centroid)
+                            pinchProgress = (pinchProgress * factor).coerceAtLeast(1f)
+                            if (pinchProgress >= PINCH_HANDOVER_ZOOM) {
+                                enterZoom(centroid, pinchProgress)
+                                pinchProgress = 1f
+                            }
                         }
                         .pointerInput(Unit) {
                             detectTapGestures(
                                 onDoubleTap = {
                                     onZoomActivity()
-                                    enterZoom(it)
+                                    // A double-tap is a request for a specific
+                                    // magnification, so the jump here is the point.
+                                    enterZoom(it, DOUBLE_TAP_ZOOM)
                                 },
                             )
                         },
@@ -523,6 +557,18 @@ private fun MetadataRow(label: String, value: String?) {
 }
 
 private val PAGE_GAP = 12.dp
+
+/**
+ * Magnification at which an in-progress pinch hands over to the pinned view.
+ *
+ * Low enough that the handover feels like a continuation of the gesture rather
+ * than a jump, high enough that an incidental two-finger touch while scrolling
+ * does not trip it.
+ */
+private const val PINCH_HANDOVER_ZOOM = 1.12f
+
+/** Where a double-tap lands. Mirrors the ViewModel's own constant. */
+private const val DOUBLE_TAP_ZOOM = 2.5f
 
 /** How long to ignore visibility echoes after scrolling the reader ourselves. */
 private const val SCROLL_SETTLE_MILLIS = 250L
