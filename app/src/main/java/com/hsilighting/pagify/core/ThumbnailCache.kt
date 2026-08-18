@@ -17,10 +17,24 @@ import android.util.LruCache
  * scrolling up and down the rail feel like first-time work every time. Keeping
  * thumbnails in their own space means the two cannot compete.
  */
-class ThumbnailCache(maxBytes: Int = DEFAULT_MAX_BYTES) {
+class ThumbnailCache(maxBytes: Int = DEFAULT_MAX_BYTES) : BitmapPools.Pool {
 
     private val entries = object : LruCache<Int, Bitmap>(maxBytes) {
         override fun sizeOf(key: Int, value: Bitmap): Int = value.byteCount
+    }
+
+    init {
+        // Registered on construction, because `trim()` existed for a long time
+        // with no caller at all: nothing routed the system's memory warning here.
+        BitmapPools.register(this)
+    }
+
+    override val poolName = "thumbnails"
+
+    override fun bytesHeld(): Int = entries.size()
+
+    override fun trimTo(level: Int) {
+        if (BitmapPools.isCritical(level)) clear() else trim()
     }
 
     fun get(pageIndex: Int): Bitmap? = entries.get(pageIndex)

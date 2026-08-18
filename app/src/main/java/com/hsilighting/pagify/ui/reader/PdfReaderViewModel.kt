@@ -10,9 +10,12 @@ import java.util.concurrent.atomic.AtomicInteger
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hsilighting.pagify.core.Annotation
+import androidx.compose.ui.geometry.Offset
 import com.hsilighting.pagify.core.AnnotationColors
+import com.hsilighting.pagify.core.AnnotationEdit
 import com.hsilighting.pagify.core.AnnotationStore
 import com.hsilighting.pagify.core.AnnotationTool
+import com.hsilighting.pagify.core.BitmapPools
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
@@ -129,9 +132,37 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * be another cache.
      */
     private val recentPageRasters = object : LinkedHashMap<Int, Bitmap>(8, 0.75f, true) {
+        // Bounded by *bytes* as well as by count. Four entries sounds modest
+        // until the entries are full-page rasters: a page measured 4465 x 3157 on
+        // the test tablet is ~54 MB at ARGB_8888, so a count-only cap permitted
+        // roughly 215 MB — more than the engine's 160 MB cache and the 48 MB
+        // thumbnail cache combined, in the one pool nothing was watching.
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, Bitmap>?): Boolean =
-            size > RECENT_RASTER_COUNT
+            size > RECENT_RASTER_COUNT ||
+                values.sumOf { it.byteCount } > RECENT_RASTER_BUDGET_BYTES
     }
+
+    /**
+     * Registers the raster map with the process-wide accounting.
+     *
+     * It exists only to bridge a view swap — handing a bitmap to a composable
+     * about to be built — so under pressure it is dropped outright rather than
+     * trimmed by half. The cost of losing it is one cheap proxy render, and the
+     * blank-frame watcher will say if that is ever visible.
+     */
+    private val rasterPool = object : BitmapPools.Pool {
+        override val poolName = "recentRasters"
+
+        override fun bytesHeld(): Int = heldRasterBytes()
+
+        override fun trimTo(level: Int) = dropRecentRasters()
+    }.also { BitmapPools.register(it) }
+
+    @Synchronized
+    private fun heldRasterBytes(): Int = recentPageRasters.values.sumOf { it.byteCount }
+
+    @Synchronized
+    private fun dropRecentRasters() = recentPageRasters.clear()
 
     @Synchronized
     fun peekRenderedPage(pageIndex: Int): Bitmap? = recentPageRasters[pageIndex]
@@ -402,7 +433,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             is Annotation.Signature -> annotation.copy(id = annotations.nextId())
         }
         annotations.add(withId)
-        _state.update { it.copy(annotationRevision = it.annotationRevision + 1) }
+        refreshAnnotations()
 
         // The count is what distinguishes "the gesture never reached the tool"
         // from "it did, but produced nothing" — the two look identical on screen.
@@ -415,10 +446,95 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         SessionRecorder.record("ANNOTATION_ADD", detail)
     }
 
-    fun undoAnnotation() {
-        if (annotations.undo()) {
-            _state.update { it.copy(annotationRevision = it.annotationRevision + 1) }
+    // ------------------------------------------------------------- the eraser --
+
+    /** Open an eraser stroke; everything it rubs out until [endErase] is one undo. */
+    fun beginErase() = annotations.beginErase()
+
+    /**
+     * @param tolerance in page points. The caller converts a fixed touch radius
+     *   through the current render scale, so the target stays the same physical
+     *   size however far the page is magnified.
+     */
+    fun eraseAt(pageIndex: Int, point: Offset, tolerance: Float) {
+        val hit = annotations.eraseAt(pageIndex, point, tolerance)
+        if (hit) refreshAnnotations()
+        // Misses are recorded too, and matter more than hits: "the gesture never
+        // reached the tool" and "it arrived and found nothing there" are the same
+        // picture on screen, and only the second one is about the hit test.
+        SessionRecorder.record(
+            kind = "ERASE",
+            detail = "page=$pageIndex at=${point.x.toInt()},${point.y.toInt()} " +
+                "tol=${tolerance.toInt()} hit=$hit left=${annotations.countOnPage(pageIndex)}",
+        )
+    }
+
+    fun endErase() {
+        annotations.endErase()
+        refreshAnnotations()
+    }
+
+    fun clearPage(pageIndex: Int) {
+        val cleared = annotations.clearPage(pageIndex)
+        if (cleared > 0) {
+            refreshAnnotations()
+            SessionRecorder.record("ANNOTATION_CLEAR", "page=$pageIndex marks=$cleared")
         }
+    }
+
+    fun clearAllAnnotations() {
+        val cleared = annotations.clearAll()
+        if (cleared > 0) {
+            refreshAnnotations()
+            SessionRecorder.record("ANNOTATION_CLEAR", "scope=document marks=$cleared")
+        }
+    }
+
+    // --------------------------------------------------------- undo and redo --
+
+    fun undoAnnotation() = applyHistory(annotations.undo(), "UNDO")
+
+    fun redoAnnotation() = applyHistory(annotations.redo(), "REDO")
+
+    /**
+     * Reflect a history step, and take the reader to the page it changed.
+     *
+     * Undoing something on a page you are not looking at is otherwise silent —
+     * the change happens where you cannot see it, which reads as a broken button
+     * rather than as a change off screen.
+     */
+    private fun applyHistory(edit: AnnotationEdit?, kind: String) {
+        if (edit == null) return
+        refreshAnnotations()
+        SessionRecorder.record(
+            kind = "ANNOTATION_$kind",
+            detail = "what=${edit.label} marks=${edit.size} page=${edit.pageIndex}",
+        )
+        edit.pageIndex?.let { page ->
+            if (page != _state.value.currentPage) {
+                _state.update { it.copy(currentPage = page, jumpToPage = page) }
+            }
+        }
+    }
+
+    /** The reader has taken the scroll a history step asked for. */
+    fun jumpHandled() = _state.update { it.copy(jumpToPage = null) }
+
+    /**
+     * Republish everything derived from the store.
+     *
+     * The store is mutable and identity-stable, so nothing in it is observable
+     * until the revision counter moves. `canUndo` and `canRedo` are copied out at
+     * the same moment, or the buttons would enable a frame late.
+     */
+    private fun refreshAnnotations() = _state.update {
+        it.copy(
+            annotationRevision = it.annotationRevision + 1,
+            canUndo = annotations.canUndo,
+            canRedo = annotations.canRedo,
+            annotationsOnPage = annotations.countOnPage(it.currentPage),
+            annotationsInDocument = annotations.total,
+        )
     }
 
     /**
@@ -430,15 +546,43 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     suspend fun textSegments(pageIndex: Int): List<TextSegment> {
         textSegmentCache[pageIndex]?.let { return it }
         val doc = document ?: return emptyList()
+        val startedAt = System.nanoTime()
         return try {
             withContext(Dispatchers.Default) { doc.textSegments(pageIndex) }
-                .also { textSegmentCache[pageIndex] = it }
+                .also { segments ->
+                    textSegmentCache[pageIndex] = segments
+                    // Recorded whether or not anything came back — a page with no
+                    // text is not an error, and it is the whole explanation for
+                    // "the highlighter does nothing here but the marker works".
+                    SessionRecorder.record(
+                        kind = "TEXT_LAYER",
+                        detail = "page=$pageIndex runs=${segments.size}",
+                        durationMillis = (System.nanoTime() - startedAt) / 1_000_000,
+                    )
+                    if (segments.isEmpty()) noteHasNoSelectableText(pageIndex)
+                }
         } catch (t: CancellationException) {
             throw t
         } catch (t: Throwable) {
             Log.w(TAG, "could not read text layout for page $pageIndex", t)
             emptyList()
         }
+    }
+
+    /**
+     * Remember that a page carries no text layer.
+     *
+     * A scanned document has none anywhere: its pages are images, so there is
+     * nothing for the highlighter to select and it silently produces nothing. The
+     * UI needs to be able to say so rather than let the tool look broken — which
+     * is exactly what happened on the 2.9 GB catalogue, where every page is a
+     * scan at roughly 31 MB apiece.
+     */
+    fun noteHighlightFoundNothing(pageIndex: Int) = noteHasNoSelectableText(pageIndex)
+
+    private fun noteHasNoSelectableText(pageIndex: Int) = _state.update {
+        if (pageIndex in it.pagesWithoutSelectableText) it
+        else it.copy(pagesWithoutSelectableText = it.pagesWithoutSelectableText + pageIndex)
     }
 
     /**
@@ -603,6 +747,16 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
         /** Enough to bridge a view swap on the current page and its neighbours. */
         const val RECENT_RASTER_COUNT = 4
+
+        /**
+         * Byte ceiling for the raster map, whatever the count says.
+         *
+         * Sized to hold two pages at the 16 MP render ceiling rather than four
+         * at whatever size they happen to be. The map only has to bridge a view
+         * swap, so two is enough, and the previous count-only bound made this the
+         * largest consumer in the app by a wide margin.
+         */
+        const val RECENT_RASTER_BUDGET_BYTES = 128 * 1024 * 1024
 
         /** How often the warmer rechecks whether it may resume. */
         const val WARM_YIELD_MILLIS = 80L

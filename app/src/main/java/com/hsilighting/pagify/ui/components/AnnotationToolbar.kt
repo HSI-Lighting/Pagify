@@ -11,15 +11,18 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Backspace
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.HistoryEdu
 import androidx.compose.material.icons.filled.TextFields
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,9 +58,15 @@ fun AnnotationToolbar(
     onSelectTool: (AnnotationTool) -> Unit,
     onPenModeChange: (PenMode) -> Unit,
     onPenColorChange: (Long) -> Unit,
+    /** Marks on the page being read, and in the document as a whole. */
+    marksOnPage: Int,
+    marksInDocument: Int,
+    onClearPage: () -> Unit,
+    onClearAll: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var showPenPalette by remember { mutableStateOf(false) }
+    var showClearMenu by remember { mutableStateOf(false) }
 
     Box(modifier, contentAlignment = Alignment.BottomCenter) {
         if (showPenPalette) {
@@ -67,6 +76,16 @@ fun AnnotationToolbar(
                 onPenModeChange = onPenModeChange,
                 onPenColorChange = onPenColorChange,
                 onDismiss = { showPenPalette = false },
+                modifier = Modifier.padding(bottom = 74.dp),
+            )
+        }
+        if (showClearMenu) {
+            ClearMenu(
+                marksOnPage = marksOnPage,
+                marksInDocument = marksInDocument,
+                onClearPage = onClearPage,
+                onClearAll = onClearAll,
+                onDismiss = { showClearMenu = false },
                 modifier = Modifier.padding(bottom = 74.dp),
             )
         }
@@ -116,6 +135,19 @@ fun AnnotationToolbar(
                     label = "Signature",
                     selected = selectedTool == AnnotationTool.Signature,
                     onClick = { onSelectTool(toggle(selectedTool, AnnotationTool.Signature)) },
+                )
+                ToolButton(
+                    icon = Icons.Filled.Backspace,
+                    label = "Eraser",
+                    selected = selectedTool == AnnotationTool.Eraser,
+                    onClick = { onSelectTool(toggle(selectedTool, AnnotationTool.Eraser)) },
+                    onLongClick = {
+                        // Clearing a page or the document lives behind the eraser
+                        // because that is what it means — the same action, wider.
+                        // Long press does not select the tool, so a wipe is not
+                        // followed by an armed eraser under your finger.
+                        showClearMenu = true
+                    },
                 )
                 ToolButton(
                     icon = Icons.Filled.CropFree,
@@ -264,5 +296,145 @@ private fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
             },
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
         )
+    }
+}
+
+/**
+ * The wider erasures, behind a long press on the eraser.
+ *
+ * Both confirm before they run. Undo would bring the marks back either way, but a
+ * wipe you did not mean to trigger is alarming in a way a single erased highlight
+ * is not, and the count in the prompt is what tells you which of the two actions
+ * you are about to take.
+ */
+@Composable
+private fun ClearMenu(
+    marksOnPage: Int,
+    marksInDocument: Int,
+    onClearPage: () -> Unit,
+    onClearAll: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var confirming by remember { mutableStateOf<ClearScope?>(null) }
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            ClearChip(
+                label = "Clear page ($marksOnPage)",
+                enabled = marksOnPage > 0,
+                onClick = { confirming = ClearScope.Page },
+            )
+            ClearChip(
+                label = "Clear all ($marksInDocument)",
+                enabled = marksInDocument > 0,
+                onClick = { confirming = ClearScope.Document },
+            )
+        }
+    }
+
+    confirming?.let { scope ->
+        val count = if (scope == ClearScope.Page) marksOnPage else marksInDocument
+        val where = if (scope == ClearScope.Page) "this page" else "the whole document"
+        AlertDialog(
+            onDismissRequest = { confirming = null },
+            title = { Text(if (scope == ClearScope.Page) "Clear this page?" else "Clear everything?") },
+            text = {
+                Text(
+                    "This removes ${count.marks()} from $where. " +
+                        "You can undo it.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        if (scope == ClearScope.Page) onClearPage() else onClearAll()
+                        confirming = null
+                        onDismiss()
+                    },
+                ) { Text("Clear") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirming = null }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+private enum class ClearScope { Page, Document }
+
+private fun Int.marks(): String = if (this == 1) "1 mark" else "$this marks"
+
+@Composable
+private fun ClearChip(label: String, enabled: Boolean, onClick: () -> Unit) {
+    Surface(
+        shape = RoundedCornerShape(14.dp),
+        color = if (enabled) {
+            MaterialTheme.colorScheme.errorContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
+        modifier = Modifier.clickable(enabled = enabled, onClick = onClick),
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = if (enabled) {
+                MaterialTheme.colorScheme.onErrorContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+            },
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+        )
+    }
+}
+
+/**
+ * Shown when the highlighter is active on a page that has no text.
+ *
+ * A scanned page is an image: there are no text runs to select, so a highlight
+ * drag produces nothing at all. Without this the tool simply appears broken —
+ * which is how it looked on the scanned catalogue, where the marker worked and
+ * the highlighter did not, and nothing on screen explained the difference.
+ *
+ * It offers the marker rather than only reporting the problem, because that is
+ * the thing the reader was trying to do.
+ */
+@Composable
+fun NoTextOnPageHint(
+    onUseMarker: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+    ) {
+        Row(
+            Modifier.padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(
+                text = "This page is a scan — no text to highlight",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            TextButton(onClick = onUseMarker) { Text("Use marker") }
+            TextButton(onClick = onDismiss) { Text("Dismiss") }
+        }
     }
 }

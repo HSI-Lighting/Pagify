@@ -11,6 +11,7 @@ import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.hsilighting.pagify.ui.components.pinchToZoom
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -24,9 +25,9 @@ import org.junit.runner.RunWith
  * the shell. Compose's test framework can inject multiple pointers directly, which
  * makes this the only way to actually exercise the handler rather than assume it.
  *
- * The second test matters as much as the first: the handler must ignore
- * single-pointer gestures, or it starves the surrounding scroll containers and the
- * document becomes unscrollable.
+ * Every test drives *both* pointers before a single `move()`, because that is what
+ * a real two-finger gesture delivers: one event carrying both positions. Updating
+ * one pointer per event describes a gesture nobody performs.
  */
 @RunWith(AndroidJUnit4::class)
 class PinchToZoomTest {
@@ -35,6 +36,7 @@ class PinchToZoomTest {
     val rule = createComposeRule()
 
     private val reported = mutableListOf<Float>()
+    private var gesturesEnded = 0
 
     private fun setUpSurface() {
         rule.setContent {
@@ -42,7 +44,9 @@ class PinchToZoomTest {
                 Modifier
                     .fillMaxSize()
                     .testTag(TAG)
-                    .pinchToZoom { factor -> reported += factor },
+                    .pinchToZoom(onGestureEnd = { gesturesEnded++ }) { factor, _ ->
+                        reported += factor
+                    },
             )
         }
     }
@@ -57,8 +61,6 @@ class PinchToZoomTest {
             down(0, Offset(cx - 100f, y))
             down(1, Offset(cx + 100f, y))
 
-            // Both pointers updated before a single `move`, so the handler sees one
-            // event containing both — which is what a real pinch delivers.
             repeat(4) { step ->
                 val spread = 100f + (step + 1) * 80f
                 updatePointerTo(0, Offset(cx - spread, y))
@@ -74,6 +76,7 @@ class PinchToZoomTest {
             "spreading fingers must report factors above 1, got $reported",
             reported.all { it > 1f },
         )
+        assertEquals("the gesture end must be reported once", 1, gesturesEnded)
     }
 
     @Test
@@ -103,6 +106,114 @@ class PinchToZoomTest {
         )
     }
 
+    /**
+     * The reported bug: two fingers dragging to scroll would quietly zoom in.
+     *
+     * The separation wobbles by a few pixels because fingers are not a rigid bar,
+     * and each wobble arrived as a zoom factor slightly off 1.0. Acting on them
+     * accumulated into a real magnification, and the reader jumped into the
+     * magnified view on its own.
+     */
+    @Test
+    fun aTwoFingerScrollNeverReportsZoom() {
+        setUpSurface()
+
+        rule.onNodeWithTag(TAG).performTouchInput {
+            val cx = width / 2f
+            val startY = height * 0.8f
+            down(0, Offset(cx - 200f, startY))
+            down(1, Offset(cx + 200f, startY))
+
+            repeat(15) { step ->
+                // A few pixels of separation noise, the way real fingers behave,
+                // against a scroll of several hundred.
+                val wobble = ((step % 4) - 2) * 3f
+                val y = startY - (step + 1) * 18f
+                updatePointerTo(0, Offset(cx - 200f - wobble, y))
+                updatePointerTo(1, Offset(cx + 200f + wobble, y))
+                move()
+            }
+            up(0)
+            up(1)
+        }
+
+        assertTrue(
+            "a parallel two-finger drag must not zoom, got $reported",
+            reported.isEmpty(),
+        )
+    }
+
+    /**
+     * The decision has to hold for the whole gesture. Fingers routinely drift
+     * apart at the end of a long scroll, and if that were allowed to re-classify,
+     * the page would start zooming under a finger already on its way up.
+     */
+    @Test
+    fun aScrollThatDriftsApartAtTheEndStaysAScroll() {
+        setUpSurface()
+
+        rule.onNodeWithTag(TAG).performTouchInput {
+            val cx = width / 2f
+            val startY = height * 0.8f
+            down(0, Offset(cx - 150f, startY))
+            down(1, Offset(cx + 150f, startY))
+
+            // First scroll far enough to be unambiguously a pan...
+            repeat(10) { step ->
+                val y = startY - (step + 1) * 18f
+                updatePointerTo(0, Offset(cx - 150f, y))
+                updatePointerTo(1, Offset(cx + 150f, y))
+                move()
+            }
+            // ...then let the fingers splay well past the slop.
+            repeat(6) { step ->
+                val spread = 150f + (step + 1) * 40f
+                val y = startY - 180f
+                updatePointerTo(0, Offset(cx - spread, y))
+                updatePointerTo(1, Offset(cx + spread, y))
+                move()
+            }
+            up(0)
+            up(1)
+        }
+
+        assertTrue(
+            "a gesture already committed to scrolling must not become a zoom, got $reported",
+            reported.isEmpty(),
+        )
+    }
+
+    /**
+     * The other side of the same coin: a pinch with one finger held still moves
+     * the midpoint about half as far as it changes the separation, so it must not
+     * be mistaken for a pan.
+     */
+    @Test
+    fun aPinchAnchoredOnOneFingerStillZooms() {
+        setUpSurface()
+
+        rule.onNodeWithTag(TAG).performTouchInput {
+            val y = height / 2f
+            val cx = width / 2f
+            val anchor = Offset(cx - 100f, y)
+            down(0, anchor)
+            down(1, Offset(cx + 100f, y))
+
+            repeat(5) { step ->
+                updatePointerTo(0, anchor)
+                updatePointerTo(1, Offset(cx + 100f + (step + 1) * 90f, y))
+                move()
+            }
+            up(0)
+            up(1)
+        }
+
+        assertTrue(
+            "an anchored pinch must still zoom, got $reported",
+            reported.isNotEmpty() && reported.all { it > 1f },
+        )
+    }
+
     @Test
     fun aSingleFingerDragIsIgnoredSoScrollingStillWorks() {
         setUpSurface()
@@ -119,6 +230,7 @@ class PinchToZoomTest {
             "one finger must never be treated as zoom, got $reported",
             reported.isEmpty(),
         )
+        assertEquals("one finger is not a two-finger gesture", 0, gesturesEnded)
     }
 
     private companion object {

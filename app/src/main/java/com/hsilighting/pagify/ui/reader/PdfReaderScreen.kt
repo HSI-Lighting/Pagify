@@ -26,6 +26,8 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.automirrored.filled.ViewSidebar
 import androidx.compose.material.icons.automirrored.filled.RotateRight
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -62,9 +64,11 @@ import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfMetadata
 import com.hsilighting.pagify.core.PenMode
+import com.hsilighting.pagify.core.pinchProgressAfter
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.ui.components.AnnotationToolbar
+import com.hsilighting.pagify.ui.components.NoTextOnPageHint
 import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.twoFingerPan
 import com.hsilighting.pagify.ui.components.PageNavigator
@@ -120,6 +124,18 @@ fun PdfReaderScreen(
     onPenModeChange: (PenMode) -> Unit,
     onPenColorChange: (Long) -> Unit,
     onUndoAnnotation: () -> Unit,
+    onRedoAnnotation: () -> Unit,
+    /** Open an eraser stroke; everything it takes until [onEraseEnd] is one undo. */
+    onEraseStart: () -> Unit,
+    /** Rub out whatever is at this page point, within this tolerance in points. */
+    onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
+    onEraseEnd: () -> Unit,
+    /** A highlight drag swept this page and selected nothing. */
+    onHighlightMissed: (Int) -> Unit,
+    onClearPage: (Int) -> Unit,
+    onClearAll: () -> Unit,
+    /** The reader has taken the scroll a history step asked for. */
+    onJumpHandled: () -> Unit,
     onShowMetadata: (Boolean) -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
@@ -145,6 +161,21 @@ fun PdfReaderScreen(
                 },
                 actions = {
                     if (state.isReady) {
+                        // Undo and redo sit here rather than in the tool ribbon:
+                        // they apply to edits already made, so they have to be
+                        // reachable when no tool is selected.
+                        IconButton(onClick = onUndoAnnotation, enabled = state.canUndo) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Undo,
+                                contentDescription = "Undo the last edit",
+                            )
+                        }
+                        IconButton(onClick = onRedoAnnotation, enabled = state.canRedo) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.Redo,
+                                contentDescription = "Redo the last undone edit",
+                            )
+                        }
                         IconButton(onClick = onToggleRecording) {
                             Icon(
                                 imageVector = if (state.isRecording) {
@@ -221,6 +252,11 @@ fun PdfReaderScreen(
                     annotationsForPage = annotationsForPage,
                     textSegmentsForPage = textSegmentsForPage,
                     onAddAnnotation = onAddAnnotation,
+                    onEraseStart = onEraseStart,
+                    onErase = onErase,
+                    onEraseEnd = onEraseEnd,
+                    onHighlightMissed = onHighlightMissed,
+                    onJumpHandled = onJumpHandled,
                     onPageVisible = onPageVisible,
                     onZoomInOn = onZoomInOn,
                     onZoomTo = onZoomTo,
@@ -238,6 +274,43 @@ fun PdfReaderScreen(
             // reader rather than taking layout space — turning a tool on must not
             // reflow the page you are working on.
             if (state.isReady) {
+                // Only while the highlighter is the live tool: the marker, the
+                // eraser and plain reading all work perfectly well on a scan, so
+                // saying anything then would be noise.
+                val highlighterOnScan = state.tool == AnnotationTool.Pen &&
+                    state.penMode == PenMode.Highlight &&
+                    state.currentPage in state.pagesWithoutSelectableText
+                var hintDismissed by remember(state.currentPage) { mutableStateOf(false) }
+
+                // Recorded only while the highlighter is the live tool, which is
+                // the only time the answer is interesting — and it is the line
+                // that separates "the page has text we failed to find" from "the
+                // hint is showing and the reader ignored it".
+                val highlighterLive = state.tool == AnnotationTool.Pen &&
+                    state.penMode == PenMode.Highlight
+                LaunchedEffect(highlighterLive, highlighterOnScan, state.currentPage, hintDismissed) {
+                    if (!highlighterLive) return@LaunchedEffect
+                    SessionRecorder.record(
+                        kind = "SCAN_HINT",
+                        detail = "show=$highlighterOnScan dismissed=$hintDismissed " +
+                            "page=${state.currentPage} " +
+                            "knownScanPages=${state.pagesWithoutSelectableText.size}",
+                    )
+                }
+
+                if (highlighterOnScan && !hintDismissed) {
+                    NoTextOnPageHint(
+                        onUseMarker = {
+                            onPenModeChange(PenMode.Marker)
+                            hintDismissed = true
+                        },
+                        onDismiss = { hintDismissed = true },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 94.dp),
+                    )
+                }
+
                 AnnotationToolbar(
                     selectedTool = state.tool,
                     penMode = state.penMode,
@@ -245,6 +318,10 @@ fun PdfReaderScreen(
                     onSelectTool = onSelectTool,
                     onPenModeChange = onPenModeChange,
                     onPenColorChange = onPenColorChange,
+                    marksOnPage = state.annotationsOnPage,
+                    marksInDocument = state.annotationsInDocument,
+                    onClearPage = { onClearPage(state.currentPage) },
+                    onClearAll = onClearAll,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 20.dp),
@@ -266,6 +343,11 @@ private fun PageList(
     annotationsForPage: (Int) -> List<Annotation>,
     textSegmentsForPage: suspend (Int) -> List<TextSegment>,
     onAddAnnotation: (Annotation) -> Unit,
+    onEraseStart: () -> Unit,
+    onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
+    onEraseEnd: () -> Unit,
+    onHighlightMissed: (Int) -> Unit,
+    onJumpHandled: () -> Unit,
     onPageVisible: (Int) -> Unit,
     onZoomInOn: (Int, Float) -> Unit,
     onZoomTo: (Float) -> Unit,
@@ -308,6 +390,18 @@ private fun PageList(
 
     /** Bumped only by a reader scroll you performed. The rail keys its follow off this. */
     var readerFollowTick by remember { mutableStateOf(0) }
+
+    // Undo and redo can change a page you are not looking at. Going there is what
+    // makes the button's effect visible; without it the edit happens off screen
+    // and the button reads as broken.
+    LaunchedEffect(state.jumpToPage) {
+        val page = state.jumpToPage ?: return@LaunchedEffect
+        scrollingProgrammatically = true
+        listState.scrollToItem(page)
+        delay(SCROLL_SETTLE_MILLIS)
+        scrollingProgrammatically = false
+        onJumpHandled()
+    }
 
     // Which page you are actually looking at.
     //
@@ -358,6 +452,21 @@ private fun PageList(
         }
 
         if (pinnedPage != null) {
+            // The highlighter needs the page's text runs here just as it does in
+            // the list. Keyed on the tool as well as the page so switching to the
+            // highlighter while already magnified loads them rather than waiting
+            // for the page to change.
+            val wantsText = state.tool == AnnotationTool.Pen &&
+                state.penMode == PenMode.Highlight
+            var pinnedSegments by remember(pinnedPage) {
+                mutableStateOf<List<TextSegment>>(emptyList())
+            }
+            LaunchedEffect(pinnedPage, wantsText) {
+                if (wantsText && pinnedSegments.isEmpty()) {
+                    pinnedSegments = textSegmentsForPage(pinnedPage)
+                }
+            }
+
             // Zoomed: one page, both axes pannable, bounded by that page.
             ZoomedPage(
                 pageIndex = pinnedPage,
@@ -371,6 +480,17 @@ private fun PageList(
                 initialBitmap = peekRenderedPage(pinnedPage),
                 basePageWidthPx = listPageWidthPx,
                 initialFocus = recenterRequest,
+                annotations = remember(pinnedPage, state.annotationRevision) {
+                    annotationsForPage(pinnedPage)
+                },
+                textSegments = pinnedSegments,
+                tool = state.tool,
+                penMode = state.penMode,
+                penColor = state.penColor,
+                onAddAnnotation = onAddAnnotation,
+                onEraseStart = onEraseStart,
+                onErase = { point, tolerance -> onErase(pinnedPage, point, tolerance) },
+                onEraseEnd = onEraseEnd,
             )
         } else {
             val viewportWidthPx = with(density) { viewportWidth.toPx() }
@@ -411,9 +531,15 @@ private fun PageList(
              *
              * Accumulating instead lets the gesture speak: the handover happens once
              * the pinch is unambiguous, and it carries the magnification reached by
-             * that point rather than a constant. Clamped at 1.0 so pinching *out* at
-             * fit-width, where there is nowhere to go, never banks negative progress
-             * that a later pinch would have to undo.
+             * that point rather than a constant.
+             *
+             * It is reset when the fingers lift, and **not** clamped as it goes.
+             * Clamping each step at 1.0 made this a ratchet: the wobble of a
+             * two-finger scroll pushed it up and down in equal measure, but only
+             * the upward half survived the clamp, so it crept towards the handover
+             * threshold and eventually zoomed the reader in on its own. That is
+             * also why it only ever went *in*. The clamp now applies to the value
+             * handed over, which is the only place it was needed.
              */
             var pinchProgress by remember { mutableStateOf(1f) }
 
@@ -524,11 +650,14 @@ private fun PageList(
                                 bounds.bottom.toInt(),
                             )
                         }
-                        .pinchToZoom { factor, centroid ->
+                        .pinchToZoom(onGestureEnd = { pinchProgress = 1f }) { factor, centroid ->
                             onZoomActivity()
-                            pinchProgress = (pinchProgress * factor).coerceAtLeast(1f)
+                            pinchProgress = pinchProgressAfter(pinchProgress, factor)
                             if (pinchProgress >= PINCH_HANDOVER_ZOOM) {
-                                enterZoom(centroid, pinchProgress)
+                                // Clamped only here: pinching *out* at fit-width
+                                // has nowhere to go, and must not hand over below
+                                // the size the reader is already showing.
+                                enterZoom(centroid, pinchProgress.coerceAtLeast(1f))
                                 pinchProgress = 1f
                             }
                         }
@@ -558,15 +687,17 @@ private fun PageList(
                         state = listState,
                         modifier = Modifier
                             .fillMaxSize()
-                            .then(
-                                if (toolActive) {
-                                    Modifier.twoFingerPan { delta ->
-                                        coroutineScope.launch { listState.scrollBy(-delta) }
-                                    }
-                                } else {
-                                    Modifier
-                                }
-                            ),
+                            // Two-finger scrolling, whether or not a tool is live.
+                            // It has to be handled here in both cases: the pinch
+                            // handler claims every two-finger event on the Initial
+                            // pass, so the list's own scrolling never sees one.
+                            // Previously this was fitted only when a tool was
+                            // active, which left two fingers doing nothing at all
+                            // the rest of the time — and, before the gate in
+                            // `pinchToZoom`, slowly zooming instead.
+                            .twoFingerPan { delta ->
+                                coroutineScope.launch { listState.scrollBy(-delta) }
+                            },
                         userScrollEnabled = !toolActive,
                         contentPadding = PaddingValues(PAGE_GAP),
                         verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
@@ -580,6 +711,10 @@ private fun PageList(
                                 annotationsForPage = annotationsForPage,
                                 textSegmentsForPage = textSegmentsForPage,
                                 onAddAnnotation = onAddAnnotation,
+                                onEraseStart = onEraseStart,
+                                onErase = onErase,
+                                onEraseEnd = onEraseEnd,
+                                onHighlightMissed = onHighlightMissed,
                                 pageSizeProvider = pageSizeProvider,
                                 renderer = renderer,
                             )
@@ -619,6 +754,10 @@ private fun AnnotatablePage(
     annotationsForPage: (Int) -> List<Annotation>,
     textSegmentsForPage: suspend (Int) -> List<TextSegment>,
     onAddAnnotation: (Annotation) -> Unit,
+    onEraseStart: () -> Unit,
+    onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
+    onEraseEnd: () -> Unit,
+    onHighlightMissed: (Int) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
 ) {
@@ -643,7 +782,13 @@ private fun AnnotatablePage(
     // Re-read through the revision counter: the store is mutable and identity
     // stable, so Compose cannot otherwise see that a mark was added.
     val annotations = remember(pageIndex, state.annotationRevision) {
-        annotationsForPage(pageIndex)
+        annotationsForPage(pageIndex).also {
+            SessionRecorder.record(
+                kind = "PAGE_MARKS",
+                detail = "page=$pageIndex rev=${state.annotationRevision} " +
+                    "drawing=${it.size} canUndo=${state.canUndo}",
+            )
+        }
     }
 
     PdfPageView(
@@ -663,6 +808,10 @@ private fun AnnotatablePage(
             renderScale = renderScale,
             onAdd = onAddAnnotation,
             onRequestNote = { /* Note tool is wired in the next slice. */ },
+            onEraseStart = onEraseStart,
+            onErase = { point, tolerance -> onErase(pageIndex, point, tolerance) },
+            onEraseEnd = onEraseEnd,
+            onHighlightMissed = { onHighlightMissed(pageIndex) },
         ),
     )
 }

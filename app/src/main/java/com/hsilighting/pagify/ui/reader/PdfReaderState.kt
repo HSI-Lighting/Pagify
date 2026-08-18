@@ -42,12 +42,35 @@ data class PdfReaderState(
     val penMode: PenMode = PenMode.Highlight,
     val penColor: Long = AnnotationColors.YELLOW,
     /**
-     * Bumped whenever an annotation is added or undone.
+     * Bumped whenever the annotations change at all.
      *
      * The store itself is mutable and identity-stable, so Compose cannot see
      * changes inside it; this counter is what makes a new mark actually redraw.
      */
     val annotationRevision: Int = 0,
+    val canUndo: Boolean = false,
+    val canRedo: Boolean = false,
+    /**
+     * Pages checked for a text layer and found to have none.
+     *
+     * A scan has no text objects, so the highlighter has nothing to select and
+     * quietly produces nothing. Knowing which pages those are is what lets the UI
+     * say so instead of leaving the tool looking broken.
+     */
+    val pagesWithoutSelectableText: Set<Int> = emptySet(),
+    /** Marks on [currentPage], for the wording of the clear-page action. */
+    val annotationsOnPage: Int = 0,
+    /** Marks anywhere in the document, for the clear-all action. */
+    val annotationsInDocument: Int = 0,
+    /**
+     * A page the reader has been asked to scroll to and has not yet.
+     *
+     * Undo and redo set this when the edit they reversed belongs to a page you
+     * are not looking at: the change would otherwise happen off screen, which is
+     * indistinguishable from the button doing nothing. The reader clears it once
+     * it has scrolled, so the same page can be asked for twice in a row.
+     */
+    val jumpToPage: Int? = null,
 ) {
     val isReady: Boolean get() = phase is Phase.Ready
     /** 1-based, for display. */

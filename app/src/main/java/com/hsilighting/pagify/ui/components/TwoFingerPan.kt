@@ -5,6 +5,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.composed
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import com.hsilighting.pagify.core.SessionRecorder
@@ -24,12 +25,26 @@ import com.hsilighting.pagify.core.SessionRecorder
  * @param onPan vertical movement in pixels since the last event, sign matching
  *   the gesture: dragging down gives a positive delta.
  */
-fun Modifier.twoFingerPan(onPan: (Float) -> Unit): Modifier = composed {
-    val pan: State<(Float) -> Unit> = rememberUpdatedState(onPan)
+fun Modifier.twoFingerPan(onPan: (Float) -> Unit): Modifier =
+    twoFingerPanXY { delta -> onPan(delta.y) }
+
+/**
+ * The same gesture, both axes.
+ *
+ * The magnified view pans in two dimensions and so cannot use the vertical-only
+ * form the list needs. They share one implementation because the part that is
+ * easy to get wrong — claiming on the Initial pass, and only once a second finger
+ * is down — is the part they have in common.
+ *
+ * @param onPan centroid movement in pixels since the last event, sign matching
+ *   the gesture: dragging down and to the right gives positive components.
+ */
+fun Modifier.twoFingerPanXY(onPan: (Offset) -> Unit): Modifier = composed {
+    val pan: State<(Offset) -> Unit> = rememberUpdatedState(onPan)
 
     pointerInput(Unit) {
         awaitEachGesture {
-            var lastCentroidY: Float? = null
+            var lastCentroid: Offset? = null
             var pointerCount: Int
 
             do {
@@ -38,17 +53,20 @@ fun Modifier.twoFingerPan(onPan: (Float) -> Unit): Modifier = composed {
                 pointerCount = pressed.size
 
                 if (pointerCount >= 2) {
-                    val centroidY = pressed.map { it.position.y }.average().toFloat()
-                    lastCentroidY?.let { previous ->
-                        val delta = centroidY - previous
-                        if (delta != 0f) pan.value(delta)
+                    val centroid = Offset(
+                        pressed.map { it.position.x }.average().toFloat(),
+                        pressed.map { it.position.y }.average().toFloat(),
+                    )
+                    lastCentroid?.let { previous ->
+                        val delta = centroid - previous
+                        if (delta != Offset.Zero) pan.value(delta)
                     }
-                    lastCentroidY = centroidY
+                    lastCentroid = centroid
                     event.changes.forEach { it.consume() }
                 } else {
                     // Dropping back to one finger restarts the reference point, so
                     // lifting one of two fingers does not register as a huge jump.
-                    lastCentroidY = null
+                    lastCentroid = null
                 }
             } while (pointerCount > 0)
         }

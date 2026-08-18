@@ -24,10 +24,16 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import com.hsilighting.pagify.core.Annotation
+import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.PageSize
+import com.hsilighting.pagify.core.PenMode
+import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.core.RenderScale
 import com.hsilighting.pagify.ui.components.ViewportWindow
+import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.pinchToZoom
+import com.hsilighting.pagify.ui.components.twoFingerPanXY
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlin.math.roundToInt
@@ -82,6 +88,24 @@ fun ZoomedPage(
     basePageWidthPx: Float,
     /** Where to centre when the view opens, as a 0..1 fraction of the page. */
     initialFocus: Offset?,
+    /**
+     * Marks already on this page, and the state of the tool ribbon.
+     *
+     * Annotating has to work here too. This view is a separate render path from
+     * the list, and it was built before the tools existed, so it drew the page
+     * bitmap and nothing else: magnifying a page made its highlights disappear,
+     * and the pen had no surface to draw on — every one-finger drag went to the
+     * pan handler below instead.
+     */
+    annotations: List<Annotation>,
+    textSegments: List<TextSegment>,
+    tool: AnnotationTool,
+    penMode: PenMode,
+    penColor: Long,
+    onAddAnnotation: (Annotation) -> Unit,
+    onEraseStart: () -> Unit,
+    onErase: (point: Offset, tolerancePoints: Float) -> Unit,
+    onEraseEnd: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier.fillMaxSize().clipToBounds()) {
@@ -224,6 +248,20 @@ fun ZoomedPage(
             )
         }
 
+        // Pixels per page point at the size the canvas is currently drawing, which
+        // is the live scale rather than the committed one: the bitmap may still be
+        // the previous rasterisation stretched to fit, and a mark has to sit on the
+        // text as it appears now, not as it will appear once the render catches up.
+        val annotationScale = pageSize
+            ?.takeIf { it.widthPoints > 0f }
+            ?.let { baseW * scale / it.widthPoints }
+            ?: 0f
+
+        // With a tool live one finger belongs to the tool, exactly as in the list.
+        // Leaving the pan on one finger is what made the pen appear disabled here:
+        // `detectDragGestures` consumed the drag before the drawing layer saw it.
+        val toolActive = tool != AnnotationTool.None
+
         Box(
             Modifier
                 .fillMaxSize()
@@ -231,12 +269,23 @@ fun ZoomedPage(
                     onZoomActivity()
                     zoomAbout(factor, centroid)
                 }
-                .pointerInput(Unit) {
-                    detectDragGestures { change, drag ->
-                        change.consume()
-                        offset = clamp(offset + drag, scale)
-                    }
-                }
+                // Two fingers always pan, for the same reason as in the list: the
+                // pinch handler claims every two-finger event, so nothing else
+                // would ever receive one.
+                .twoFingerPanXY { drag -> offset = clamp(offset + drag, scale) }
+                // One finger pans only when it is not busy annotating.
+                .then(
+                    if (toolActive) {
+                        Modifier
+                    } else {
+                        Modifier.pointerInput(Unit) {
+                            detectDragGestures { change, drag ->
+                                change.consume()
+                                offset = clamp(offset + drag, scale)
+                            }
+                        }
+                    },
+                )
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onDoubleTap = { position ->
@@ -253,7 +302,27 @@ fun ZoomedPage(
                             onZoomSettled(scale)
                         },
                     )
-                },
+                }
+                // Last in the chain, so it is the innermost input receiver and a
+                // one-finger drag reaches the tool before anything else can claim
+                // it — and the innermost draw, so marks land over the page.
+                .annotationLayer(
+                    pageIndex = pageIndex,
+                    annotations = annotations,
+                    textSegments = textSegments,
+                    tool = tool,
+                    penMode = penMode,
+                    penColor = penColor,
+                    renderScale = annotationScale,
+                    // The page is drawn translated by `offset`, so the layer has to
+                    // be told where its top-left corner actually is.
+                    contentOffset = offset,
+                    onAdd = onAddAnnotation,
+                    onRequestNote = { /* Note tool is wired in the next slice. */ },
+                    onEraseStart = onEraseStart,
+                    onErase = onErase,
+                    onEraseEnd = onEraseEnd,
+                ),
         ) {
             // The page is *drawn*, not laid out, at its magnified size. Laying out
             // a composable at `baseW * scale` meant a 4x zoom asked for a

@@ -11,6 +11,10 @@ import org.json.JSONArray
  *
  * These are page-space, not screen-space: multiply by the render scale to place
  * them over a drawn page, which keeps them valid at any zoom.
+ *
+ * A run is at most one line. **The order of a page's runs is meaningful** — the
+ * engine returns them in the document's character order, which is the order the
+ * page is read in — and [TextSelection] depends on it. Do not sort them.
  */
 data class TextSegment(
     val left: Float,
@@ -22,19 +26,6 @@ data class TextSegment(
     val width: Float get() = right - left
     val height: Float get() = bottom - top
 
-    /**
-     * True when this run falls in the band swept between two y positions.
-     *
-     * Selection is by line, not by rectangle: dragging from the middle of one
-     * line to the middle of another should take the whole of every line between,
-     * including their left and right extremes, which is what a reader expects
-     * and what a bounding-box intersection would not give.
-     */
-    fun intersectsBand(fromY: Float, toY: Float): Boolean {
-        val top = minOf(fromY, toY)
-        val bottom = maxOf(fromY, toY)
-        return this.bottom >= top && this.top <= bottom
-    }
 
     companion object {
         fun listFromJson(json: String): List<TextSegment> {
