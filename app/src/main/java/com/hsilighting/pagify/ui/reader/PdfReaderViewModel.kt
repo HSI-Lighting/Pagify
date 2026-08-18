@@ -9,14 +9,21 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.hsilighting.pagify.core.Annotation
+import com.hsilighting.pagify.core.AnnotationColors
+import com.hsilighting.pagify.core.AnnotationStore
+import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
+import com.hsilighting.pagify.core.PenMode
+import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.core.RenderScale
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.ThumbnailCache
 import com.hsilighting.pagify.data.PdfRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -25,6 +32,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import kotlin.math.abs
 
@@ -338,6 +346,76 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun toggleThumbnails() = _state.update { it.copy(showThumbnails = !it.showThumbnails) }
 
+    // ---------------------------------------------------------- annotations --
+
+    /**
+     * The marks on the open document.
+     *
+     * Exposed directly rather than mirrored into [PdfReaderState] because a
+     * stroke grows by a point every few milliseconds while drawing, and copying
+     * the whole set into a new immutable state on each one would allocate
+     * heavily mid-gesture. [PdfReaderState.annotationRevision] is what tells
+     * Compose to redraw.
+     */
+    val annotations = AnnotationStore()
+
+    /** Text runs per page, fetched once and reused; highlighting hit-tests these. */
+    private val textSegmentCache = mutableMapOf<Int, List<TextSegment>>()
+
+    fun selectTool(tool: AnnotationTool) = _state.update { it.copy(tool = tool) }
+
+    fun setPenMode(mode: PenMode) = _state.update { current ->
+        // Each mode carries its own palette, so a colour chosen for one would be
+        // wrong for the other -- switching resets to that palette's default.
+        val palette = when (mode) {
+            PenMode.Highlight -> AnnotationColors.highlightPalette
+            PenMode.Marker -> AnnotationColors.markerPalette
+        }
+        current.copy(
+            penMode = mode,
+            penColor = if (current.penColor in palette) current.penColor else palette.first(),
+        )
+    }
+
+    fun setPenColor(color: Long) = _state.update { it.copy(penColor = color) }
+
+    fun addAnnotation(annotation: Annotation) {
+        val withId = when (annotation) {
+            is Annotation.Highlight -> annotation.copy(id = annotations.nextId())
+            is Annotation.Ink -> annotation.copy(id = annotations.nextId())
+            is Annotation.Note -> annotation.copy(id = annotations.nextId())
+            is Annotation.Signature -> annotation.copy(id = annotations.nextId())
+        }
+        annotations.add(withId)
+        _state.update { it.copy(annotationRevision = it.annotationRevision + 1) }
+    }
+
+    fun undoAnnotation() {
+        if (annotations.undo()) {
+            _state.update { it.copy(annotationRevision = it.annotationRevision + 1) }
+        }
+    }
+
+    /**
+     * Positioned text for a page, from cache when possible.
+     *
+     * Walking every run on a page is not free, and the highlighter asks for it on
+     * the first touch of a drag — so it is fetched once per page and kept.
+     */
+    suspend fun textSegments(pageIndex: Int): List<TextSegment> {
+        textSegmentCache[pageIndex]?.let { return it }
+        val doc = document ?: return emptyList()
+        return try {
+            withContext(Dispatchers.Default) { doc.textSegments(pageIndex) }
+                .also { textSegmentCache[pageIndex] = it }
+        } catch (t: CancellationException) {
+            throw t
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not read text layout for page $pageIndex", t)
+            emptyList()
+        }
+    }
+
     /**
      * Viewport width in device pixels, reported by the UI.
      *
@@ -446,6 +524,10 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         document = null
         // Thumbnails of a closed document are just held memory.
         thumbnailCache.clear()
+        // Marks and text layout belong to the file that is going away; leaving
+        // them would paint one document's annotations onto the next.
+        annotations.clear()
+        textSegmentCache.clear()
     }
 
     override fun onCleared() {

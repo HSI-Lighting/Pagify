@@ -56,8 +56,14 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.hsilighting.pagify.core.Annotation
+import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfMetadata
+import com.hsilighting.pagify.core.PenMode
+import com.hsilighting.pagify.core.TextSegment
+import com.hsilighting.pagify.ui.components.AnnotationToolbar
+import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.PageNavigator
 import com.hsilighting.pagify.ui.components.PdfPageView
 import com.hsilighting.pagify.ui.components.THUMBNAIL_STRIP_WIDTH
@@ -100,6 +106,16 @@ fun PdfReaderScreen(
     onContentBounds: (Int, Int, Int, Int) -> Unit,
     /** Synchronous peek at the last raster drawn for a page. */
     peekRenderedPage: (Int) -> android.graphics.Bitmap?,
+    // ------------------------------------------------------------ annotation --
+    /** Marks already on a page. Re-read whenever `annotationRevision` changes. */
+    annotationsForPage: (Int) -> List<Annotation>,
+    /** Positioned text for a page; the highlighter hit-tests against this. */
+    textSegmentsForPage: suspend (Int) -> List<TextSegment>,
+    onAddAnnotation: (Annotation) -> Unit,
+    onSelectTool: (AnnotationTool) -> Unit,
+    onPenModeChange: (PenMode) -> Unit,
+    onPenColorChange: (Long) -> Unit,
+    onUndoAnnotation: () -> Unit,
     onShowMetadata: (Boolean) -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
@@ -198,6 +214,9 @@ fun PdfReaderScreen(
 
                 is PdfReaderState.Phase.Ready -> PageList(
                     state = state,
+                    annotationsForPage = annotationsForPage,
+                    textSegmentsForPage = textSegmentsForPage,
+                    onAddAnnotation = onAddAnnotation,
                     onPageVisible = onPageVisible,
                     onZoomInOn = onZoomInOn,
                     onZoomTo = onZoomTo,
@@ -208,6 +227,23 @@ fun PdfReaderScreen(
                     onViewportWidth = onViewportWidth,
                     pageSizeProvider = pageSizeProvider,
                     renderer = renderer,
+                )
+            }
+
+            // Inside the Box so it can align to the bottom, and floating over the
+            // reader rather than taking layout space — turning a tool on must not
+            // reflow the page you are working on.
+            if (state.isReady) {
+                AnnotationToolbar(
+                    selectedTool = state.tool,
+                    penMode = state.penMode,
+                    penColor = state.penColor,
+                    onSelectTool = onSelectTool,
+                    onPenModeChange = onPenModeChange,
+                    onPenColorChange = onPenColorChange,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 20.dp),
                 )
             }
         }
@@ -223,6 +259,9 @@ fun PdfReaderScreen(
 @Composable
 private fun PageList(
     state: PdfReaderState,
+    annotationsForPage: (Int) -> List<Annotation>,
+    textSegmentsForPage: suspend (Int) -> List<TextSegment>,
+    onAddAnnotation: (Annotation) -> Unit,
     onPageVisible: (Int) -> Unit,
     onZoomInOn: (Int, Float) -> Unit,
     onZoomTo: (Float) -> Unit,
@@ -447,10 +486,14 @@ private fun PageList(
                         verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
                     ) {
                         items(count = state.pageCount) { index ->
-                            PdfPageView(
+                            AnnotatablePage(
                                 pageIndex = index,
                                 pageWidth = pageWidth,
                                 readable = settled,
+                                state = state,
+                                annotationsForPage = annotationsForPage,
+                                textSegmentsForPage = textSegmentsForPage,
+                                onAddAnnotation = onAddAnnotation,
                                 pageSizeProvider = pageSizeProvider,
                                 renderer = renderer,
                             )
@@ -472,6 +515,69 @@ private fun PageList(
             )
         }
     }
+}
+
+/**
+ * A page with its annotations drawn over it, and pen input when a tool is on.
+ *
+ * The render scale is derived here rather than passed down, because the layer
+ * has to convert page points to pixels using the *same* factor the page itself
+ * was drawn at — otherwise a mark sits slightly off the text it belongs to.
+ */
+@Composable
+private fun AnnotatablePage(
+    pageIndex: Int,
+    pageWidth: Dp,
+    readable: Boolean,
+    state: PdfReaderState,
+    annotationsForPage: (Int) -> List<Annotation>,
+    textSegmentsForPage: suspend (Int) -> List<TextSegment>,
+    onAddAnnotation: (Annotation) -> Unit,
+    pageSizeProvider: suspend (Int) -> PageSize?,
+    renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
+) {
+    val density = LocalDensity.current
+    val pageSize = state.pageSizes[pageIndex]
+
+    // Pixels per page point, at the width this page is actually drawn.
+    val renderScale = remember(pageSize, pageWidth, density) {
+        val size = pageSize ?: return@remember 0f
+        if (size.widthPoints <= 0f) return@remember 0f
+        with(density) { pageWidth.toPx() } / size.widthPoints
+    }
+
+    // Only loaded when the highlighter is actually in use: walking every text run
+    // on a page is real work, and no other tool needs it.
+    var segments by remember(pageIndex) { mutableStateOf<List<TextSegment>>(emptyList()) }
+    val wantsText = state.tool == AnnotationTool.Pen && state.penMode == PenMode.Highlight
+    LaunchedEffect(pageIndex, wantsText) {
+        if (wantsText && segments.isEmpty()) segments = textSegmentsForPage(pageIndex)
+    }
+
+    // Re-read through the revision counter: the store is mutable and identity
+    // stable, so Compose cannot otherwise see that a mark was added.
+    val annotations = remember(pageIndex, state.annotationRevision) {
+        annotationsForPage(pageIndex)
+    }
+
+    PdfPageView(
+        pageIndex = pageIndex,
+        pageWidth = pageWidth,
+        readable = readable,
+        pageSizeProvider = pageSizeProvider,
+        renderer = renderer,
+        modifier = Modifier.annotationLayer(
+            pageIndex = pageIndex,
+            annotations = annotations,
+            textSegments = segments,
+            tool = state.tool,
+            penMode = state.penMode,
+            penColor = state.penColor,
+            renderScale = renderScale,
+            onAdd = onAddAnnotation,
+            onRequestNote = { /* Note tool is wired in the next slice. */ },
+        ),
+    )
 }
 
 @Composable

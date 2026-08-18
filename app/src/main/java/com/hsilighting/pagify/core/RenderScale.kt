@@ -76,6 +76,17 @@ object RenderScale {
         ).toFloat()
 
         val bounded = ideal.coerceAtMost(maxScale)
-        return (ceil((bounded / QUANTUM).toDouble()) * QUANTUM).toFloat().coerceAtLeast(QUANTUM)
+        val rounded = (ceil((bounded / QUANTUM).toDouble()) * QUANTUM).toFloat()
+
+        // Rounding *up* can put the scale back over the ceiling the clamp above
+        // just applied — an A4 page at a wide viewport landed on 5.75, i.e.
+        // 16.56 MP against a 16 MP limit. Since MAX_PIXELS is what stops
+        // `Bitmap.createBitmap` failing, the quantum has to give way to it, not
+        // the other way round: step down one step when the rounding overshoots.
+        val capped = if (rounded > maxScale) rounded - QUANTUM else rounded
+
+        // A page so large that even one quantum exceeds the budget still has to
+        // render something; the bitmap is upscaled for display in that case.
+        return capped.coerceAtLeast(QUANTUM)
     }
 }

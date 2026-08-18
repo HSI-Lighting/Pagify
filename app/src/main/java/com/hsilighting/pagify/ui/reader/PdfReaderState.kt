@@ -1,7 +1,10 @@
 package com.hsilighting.pagify.ui.reader
 
+import com.hsilighting.pagify.core.AnnotationColors
+import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfMetadata
+import com.hsilighting.pagify.core.PenMode
 
 /**
  * Everything the reader screen draws from. One immutable snapshot per emission,
@@ -33,6 +36,18 @@ data class PdfReaderState(
     val showThumbnails: Boolean = true,
     /** A render-timeline recording is in progress. See `SessionRecorder`. */
     val isRecording: Boolean = false,
+
+    // ------------------------------------------------------------ annotation --
+    val tool: AnnotationTool = AnnotationTool.None,
+    val penMode: PenMode = PenMode.Highlight,
+    val penColor: Long = AnnotationColors.YELLOW,
+    /**
+     * Bumped whenever an annotation is added or undone.
+     *
+     * The store itself is mutable and identity-stable, so Compose cannot see
+     * changes inside it; this counter is what makes a new mark actually redraw.
+     */
+    val annotationRevision: Int = 0,
 ) {
     val isReady: Boolean get() = phase is Phase.Ready
     /** 1-based, for display. */

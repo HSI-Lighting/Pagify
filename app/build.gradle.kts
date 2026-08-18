@@ -196,6 +196,10 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 
     testImplementation(libs.junit)
+    // Shadows the stubbed org.json in the unit-test android.jar, whose methods all
+    // throw "not mocked". Without this, PdfMetadata/TextSegment cannot be tested
+    // off-device at all.
+    testImplementation(libs.org.json)
 
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.junit)

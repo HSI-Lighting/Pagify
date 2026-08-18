@@ -14,6 +14,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Draw
+import androidx.compose.material.icons.filled.HistoryEdu
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -109,7 +110,9 @@ fun AnnotationToolbar(
                     onClick = { onSelectTool(toggle(selectedTool, AnnotationTool.Note)) },
                 )
                 ToolButton(
-                    icon = Icons.Filled.Draw,
+                    // Distinct from the pen on purpose: both were Draw, and two
+                    // identical glyphs in a four-slot ribbon is unreadable.
+                    icon = Icons.Filled.HistoryEdu,
                     label = "Signature",
                     selected = selectedTool == AnnotationTool.Signature,
                     onClick = { onSelectTool(toggle(selectedTool, AnnotationTool.Signature)) },
