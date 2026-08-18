@@ -45,17 +45,26 @@ fun PdfPageView(
     pageIndex: Int,
     pageWidth: Dp,
     readable: Boolean,
+    /** Size if the caller already measured it; avoids laying out at a guess. */
+    knownSize: PageSize? = null,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> Bitmap?,
     modifier: Modifier = Modifier,
 ) {
-    var pageSize by remember(pageIndex) { mutableStateOf<PageSize?>(null) }
+    // Seeded from the caller when the size is already known, so the page is never
+    // laid out at a guess and then resized. That resize is what shifted the layout
+    // under LazyColumn's anchor and dragged a jumped-to page away from where it
+    // had correctly landed.
+    var pageSize by remember(pageIndex) { mutableStateOf(knownSize) }
     var bitmap by remember(pageIndex) { mutableStateOf<Bitmap?>(null) }
     /** Scale of what is currently on screen, so an upgrade is not redone. */
     var renderedScale by remember(pageIndex) { mutableStateOf(0f) }
 
     LaunchedEffect(pageIndex) {
         SessionRecorder.record("PAGE_ENTER", "page=$pageIndex")
+        // Already known: measuring again would only re-set the same value, and
+        // any transient null in between would resize the page for a frame.
+        if (pageSize != null) return@LaunchedEffect
         val measured = pageSizeProvider(pageIndex)
         pageSize = measured
         // The moment the placeholder can claim its true shape. Everything between

@@ -46,6 +46,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     /** Background job that fills [thumbnailCache] ahead of the reader. */
     private var thumbnailWarmJob: Job? = null
 
+    /** Measures every page size up front; see measureAllPages. */
+    private var pageMeasureJob: Job? = null
+
     /** Pages whose thumbnail render failed; not retried by the warmer. */
     private val unwarmablePages = mutableSetOf<Int>()
 
@@ -89,6 +92,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 }
                 schedulePrefetch()
                 warmThumbnails()
+                measureAllPages(opened)
             } catch (e: PdfPasswordException) {
                 // Not a failure: the user has something to do about it.
                 _state.update {
@@ -466,8 +470,44 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * separately, so an on-demand thumbnail or page slots in between rather than
      * queuing behind the whole document.
      */
+    /**
+     * Measures every page up front, so no page is ever laid out at a guess.
+     *
+     * Until this existed, a page that had not been measured was given a
+     * placeholder A4-portrait aspect and then resized when its real dimensions
+     * arrived. On a landscape document that is a ~2x error per page, and it
+     * shifted the layout underneath `LazyColumn`'s anchor: jumping to a page
+     * landed correctly and was then dragged away as the pages above it shrank.
+     * A recording caught it as `firstVisible=62 offset=1188` becoming
+     * `firstVisible=63 offset=233` within 250 ms.
+     *
+     * Affordable only because page sizing no longer loads the page — it reads the
+     * page tree — so this is a few hundred cheap calls rather than a few hundred
+     * page parses. Applied as one state update; 149 separate ones would each copy
+     * the whole map and recompose the reader.
+     */
+    private fun measureAllPages(doc: PdfDocument) {
+        pageMeasureJob?.cancel()
+        pageMeasureJob = viewModelScope.launch {
+            val measured = withContext(Dispatchers.Default) {
+                buildMap {
+                    for (index in 0 until doc.pageCount) {
+                        if (!isActive) return@buildMap
+                        runCatching { doc.pageSize(index) }.getOrNull()?.let { put(index, it) }
+                    }
+                }
+            }
+            if (measured.isEmpty()) return@launch
+            // Existing entries win: anything the reader measured while this ran is
+            // just as correct, and preferring them avoids a visible re-layout.
+            _state.update { it.copy(pageSizes = measured + it.pageSizes) }
+            SessionRecorder.record("PAGES_MEASURED", "count=${measured.size}")
+        }
+    }
+
     private fun warmThumbnails() {
         thumbnailWarmJob?.cancel()
+        pageMeasureJob?.cancel()
         thumbnailWarmJob = viewModelScope.launch {
             val doc = document ?: return@launch
             val pageCount = doc.pageCount
@@ -540,6 +580,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     private fun closeDocument() {
         prefetchJob?.cancel()
         thumbnailWarmJob?.cancel()
+        pageMeasureJob?.cancel()
         unwarmablePages.clear()
         document?.close()
         document = null

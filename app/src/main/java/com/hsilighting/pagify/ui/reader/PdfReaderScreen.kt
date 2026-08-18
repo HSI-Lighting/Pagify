@@ -73,6 +73,7 @@ import com.hsilighting.pagify.ui.components.THUMBNAIL_STRIP_WIDTH
 import com.hsilighting.pagify.ui.components.ThumbnailStrip
 import com.hsilighting.pagify.ui.components.ViewportWindow
 import com.hsilighting.pagify.ui.components.pinchToZoom
+import kotlin.math.abs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -308,10 +309,28 @@ private fun PageList(
     /** Bumped only by a reader scroll you performed. The rail keys its follow off this. */
     var readerFollowTick by remember { mutableStateOf(0) }
 
-    // Reporting the first *visible* item (rather than the centred one) keeps the
-    // page counter in step with what the user sees while scrolling.
+    // Which page you are actually looking at.
+    //
+    // Not `firstVisibleItemIndex`: at the end of a document the last page can
+    // fill the screen while the item *starting* highest is still the one before
+    // it, so the counter sat one page short and the rail highlighted the wrong
+    // thumbnail. Taking the page nearest the viewport's centre matches what is
+    // being read, and pinning to the last item once the list can scroll no
+    // further makes the final page reachable at all.
     LaunchedEffect(listState) {
-        snapshotFlow { listState.firstVisibleItemIndex }
+        snapshotFlow {
+            val info = listState.layoutInfo
+            val items = info.visibleItemsInfo
+            when {
+                items.isEmpty() -> listState.firstVisibleItemIndex
+                !listState.canScrollForward -> items.last().index
+                else -> {
+                    val centre = (info.viewportStartOffset + info.viewportEndOffset) / 2
+                    items.minByOrNull { abs((it.offset + it.size / 2) - centre) }?.index
+                        ?: listState.firstVisibleItemIndex
+                }
+            }
+        }
             .distinctUntilChanged()
             .collect { index ->
                 if (scrollingProgrammatically) return@collect
@@ -466,6 +485,21 @@ private fun PageList(
                                 // Long enough for the settled position to be
                                 // observed and discarded by the collector above.
                                 delay(SCROLL_SETTLE_MILLIS)
+
+                                // Logged *after* the settle, because RAIL_LANDED
+                                // is measured the instant the scroll returns and
+                                // therefore cannot see anything that moves the list
+                                // afterwards — which is exactly the failure being
+                                // chased: pages between here and the target are
+                                // composed at a guessed aspect and then resize as
+                                // their real dimensions arrive, dragging the anchor.
+                                SessionRecorder.record(
+                                    kind = "RAIL_SETTLED",
+                                    detail = "page=$page firstVisible=${listState.firstVisibleItemIndex} " +
+                                        "itemOffset=${listState.firstVisibleItemScrollOffset} " +
+                                        "drifted=${listState.firstVisibleItemIndex != (page - 1).coerceAtLeast(0)}",
+                                )
+
                                 scrollingProgrammatically = false
                             }
                             onPageVisible(page)
@@ -616,6 +650,7 @@ private fun AnnotatablePage(
         pageIndex = pageIndex,
         pageWidth = pageWidth,
         readable = readable,
+        knownSize = pageSize,
         pageSizeProvider = pageSizeProvider,
         renderer = renderer,
         modifier = Modifier.annotationLayer(
