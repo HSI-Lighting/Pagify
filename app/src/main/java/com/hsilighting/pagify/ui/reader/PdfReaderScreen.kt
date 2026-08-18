@@ -291,10 +291,10 @@ fun PdfReaderScreen(
                 LaunchedEffect(highlighterLive, highlighterOnScan, state.currentPage, hintDismissed) {
                     if (!highlighterLive) return@LaunchedEffect
                     SessionRecorder.record(
-                        kind = "SCAN_HINT",
+                        kind = "NO_TEXT_HINT",
                         detail = "show=$highlighterOnScan dismissed=$hintDismissed " +
                             "page=${state.currentPage} " +
-                            "knownScanPages=${state.pagesWithoutSelectableText.size}",
+                            "pagesWithoutText=${state.pagesWithoutSelectableText.size}",
                     )
                 }
 

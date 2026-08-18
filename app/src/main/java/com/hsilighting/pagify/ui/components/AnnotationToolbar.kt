@@ -400,15 +400,20 @@ private fun ClearChip(label: String, enabled: Boolean, onClick: () -> Unit) {
 }
 
 /**
- * Shown when the highlighter is active on a page that has no text.
+ * Shown when the highlighter is active on a page with no selectable text.
  *
- * A scanned page is an image: there are no text runs to select, so a highlight
- * drag produces nothing at all. Without this the tool simply appears broken —
- * which is how it looked on the scanned catalogue, where the marker worked and
- * the highlighter did not, and nothing on screen explained the difference.
+ * Two quite different documents land here and the wording must fit both. A scan
+ * is an image of a page. Far more common in practice is type **converted to
+ * outlines** — the words drawn as vector paths by a print export — which reads
+ * perfectly, renders crisply at any zoom, and carries no characters at all. The
+ * 2.9 GB catalogue is the second kind: 92 of its 95 pages have zero text objects
+ * while being pure vector artwork, which is why it looks like text that ought to
+ * be selectable and is not, in this viewer or any other.
  *
- * It offers the marker rather than only reporting the problem, because that is
- * the thing the reader was trying to do.
+ * Neither can be highlighted without OCR, so the message says what is true of
+ * both rather than guessing which one this is. It offers the marker instead of
+ * only reporting the problem, because drawing on the page is what the reader was
+ * trying to do.
  */
 @Composable
 fun NoTextOnPageHint(
@@ -429,7 +434,7 @@ fun NoTextOnPageHint(
             horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Text(
-                text = "This page is a scan — no text to highlight",
+                text = "No selectable text on this page",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSecondaryContainer,
             )
