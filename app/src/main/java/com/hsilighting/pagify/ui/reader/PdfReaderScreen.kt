@@ -2,6 +2,7 @@ package com.hsilighting.pagify.ui.reader
 
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -61,9 +62,11 @@ import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfMetadata
 import com.hsilighting.pagify.core.PenMode
+import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.ui.components.AnnotationToolbar
 import com.hsilighting.pagify.ui.components.annotationLayer
+import com.hsilighting.pagify.ui.components.twoFingerPan
 import com.hsilighting.pagify.ui.components.PageNavigator
 import com.hsilighting.pagify.ui.components.PdfPageView
 import com.hsilighting.pagify.ui.components.THUMBNAIL_STRIP_WIDTH
@@ -408,26 +411,58 @@ private fun PageList(
                         onSelectPage = { page ->
                             coroutineScope.launch {
                                 scrollingProgrammatically = true
+
                                 // Centre the chosen page rather than pinning it to
                                 // the top: a spread you picked deliberately should
-                                // sit in the middle of the reader, with its
-                                // neighbours visible either side.
-                                val size = state.pageSizes[page]
-                                val pageHeightPx = size?.let {
-                                    val width = viewportWidth -
-                                        (if (state.showThumbnails) THUMBNAIL_STRIP_WIDTH else 0.dp) -
-                                        PAGE_GAP * 2
-                                    if (it.aspectRatio > 0f) {
-                                        with(density) { width.toPx() } / it.aspectRatio
-                                    } else {
-                                        null
-                                    }
+                                // land where you are looking, with its neighbours
+                                // visible either side.
+                                //
+                                // The size has to be *fetched*, not read from
+                                // state.pageSizes. That map only holds pages the
+                                // reader has already measured, so picking a page
+                                // from the rail that had not been scrolled to left
+                                // it null, the offset silently fell back to 0, and
+                                // the page pinned to the top — the exact symptom
+                                // reported. Measuring is cheap now (page_size does
+                                // not load the page), so it is simply awaited.
+                                val size = state.pageSizes[page] ?: pageSizeProvider(page)
+
+                                val width = viewportWidth -
+                                    (if (state.showThumbnails) THUMBNAIL_STRIP_WIDTH else 0.dp) -
+                                    PAGE_GAP * 2
+                                val pageHeightPx = size?.takeIf { it.aspectRatio > 0f }?.let {
+                                    with(density) { width.toPx() } / it.aspectRatio
                                 }
                                 val viewportHeightPx = with(density) { viewportHeight.toPx() }
-                                val offset = pageHeightPx
-                                    ?.let { -((viewportHeightPx - it) / 2f).toInt() }
-                                    ?: 0
+
+                                // A page taller than the viewport cannot be centred;
+                                // aligning its top is the closest thing to it.
+                                //
+                                // The parentheses matter. Written as
+                                // `-(...).toInt().coerceAtMost(0)` the clamp binds
+                                // before the negation, so the positive half-gap is
+                                // clamped to zero and every page lands at the top —
+                                // which is exactly what it did.
+                                val offset = pageHeightPx?.let {
+                                    val centred = -(((viewportHeightPx - it) / 2f).toInt())
+                                    centred.coerceAtMost(0)
+                                } ?: 0
+
+                                SessionRecorder.record(
+                                    kind = "RAIL_SELECT",
+                                    detail = "page=$page sizeKnown=${size != null} " +
+                                        "pageH=${pageHeightPx?.toInt() ?: -1} " +
+                                        "viewportH=${viewportHeightPx.toInt()} offset=$offset",
+                                )
+
                                 listState.scrollToItem(page, offset)
+
+                                SessionRecorder.record(
+                                    kind = "RAIL_LANDED",
+                                    detail = "page=$page firstVisible=${listState.firstVisibleItemIndex} " +
+                                        "itemOffset=${listState.firstVisibleItemScrollOffset}",
+                                )
+
                                 // Long enough for the settled position to be
                                 // observed and discarded by the collector above.
                                 delay(SCROLL_SETTLE_MILLIS)
@@ -479,9 +514,26 @@ private fun PageList(
                     val railWidth = if (state.showThumbnails) THUMBNAIL_STRIP_WIDTH else 0.dp
                     val pageWidth = viewportWidth - railWidth - PAGE_GAP * 2
 
+                    // With a tool live, one finger belongs to the tool. Leaving the
+                    // list scrollable meant a highlight drag raced the scroller and
+                    // usually lost, since the scroll container claims the gesture
+                    // once past touch slop. Two fingers pan instead, handled below.
+                    val toolActive = state.tool != AnnotationTool.None
+
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .then(
+                                if (toolActive) {
+                                    Modifier.twoFingerPan { delta ->
+                                        coroutineScope.launch { listState.scrollBy(-delta) }
+                                    }
+                                } else {
+                                    Modifier
+                                }
+                            ),
+                        userScrollEnabled = !toolActive,
                         contentPadding = PaddingValues(PAGE_GAP),
                         verticalArrangement = Arrangement.spacedBy(PAGE_GAP),
                     ) {

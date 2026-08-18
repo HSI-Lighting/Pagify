@@ -362,7 +362,18 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     /** Text runs per page, fetched once and reused; highlighting hit-tests these. */
     private val textSegmentCache = mutableMapOf<Int, List<TextSegment>>()
 
-    fun selectTool(tool: AnnotationTool) = _state.update { it.copy(tool = tool) }
+    fun selectTool(tool: AnnotationTool) {
+        _state.update { it.copy(tool = tool) }
+        // Recorded because tool state decides how every subsequent touch is
+        // routed: with a tool live one finger annotates and the list stops
+        // scrolling, so a recording without this cannot explain why a drag did
+        // or did not scroll.
+        SessionRecorder.record(
+            kind = "TOOL_SELECT",
+            detail = "tool=$tool penMode=${_state.value.penMode} " +
+                "oneFingerPans=${tool == AnnotationTool.None}",
+        )
+    }
 
     fun setPenMode(mode: PenMode) = _state.update { current ->
         // Each mode carries its own palette, so a colour chosen for one would be
@@ -388,6 +399,16 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         }
         annotations.add(withId)
         _state.update { it.copy(annotationRevision = it.annotationRevision + 1) }
+
+        // The count is what distinguishes "the gesture never reached the tool"
+        // from "it did, but produced nothing" — the two look identical on screen.
+        val detail = when (withId) {
+            is Annotation.Highlight -> "highlight page=${withId.pageIndex} lines=${withId.rects.size}"
+            is Annotation.Ink -> "ink page=${withId.pageIndex} points=${withId.points.size}"
+            is Annotation.Note -> "note page=${withId.pageIndex}"
+            is Annotation.Signature -> "signature page=${withId.pageIndex}"
+        }
+        SessionRecorder.record("ANNOTATION_ADD", detail)
     }
 
     fun undoAnnotation() {
