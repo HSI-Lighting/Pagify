@@ -444,7 +444,7 @@ fun PdfReaderScreen(
                     pageCount = state.pageCount,
                     currentPage = state.currentPage,
                     editState = state.editState,
-                    unsavedMarks = state.annotationsInDocument,
+                    unsavedMarks = state.unsavedMarkCount,
                     isSaving = state.isSaving,
                     onAction = onPageAction,
                     onSave = onSaveDocument,
@@ -923,7 +923,7 @@ private fun AnnotatablePage(
     // stable, so Compose cannot otherwise see that a mark was added.
     // Marks already in the file are read the first time a page is drawn, so they
     // can be erased rather than only rendered.
-    LaunchedEffect(pageIndex) { onPageMarksNeeded(pageIndex) }
+    LaunchedEffect(pageIndex, state.documentRevision) { onPageMarksNeeded(pageIndex) }
 
     val annotations = remember(pageIndex, state.annotationRevision) {
         annotationsForPage(pageIndex).also {

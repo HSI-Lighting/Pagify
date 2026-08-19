@@ -61,6 +61,16 @@ data class PdfReaderState(
      * changed and nothing asked for the pixels again.
      */
     val pageContentRevision: Int = 0,
+    /**
+     * Bumped on every open, so per-page work keyed on it runs again for a
+     * different document.
+     *
+     * Saving reopens the file, and a page that keeps its index across that reopen
+     * keeps its composable too — so a `LaunchedEffect(pageIndex)` never fires
+     * again. That is what stopped saved marks being loaded after a save: the
+     * eraser then found nothing to erase, on a page that visibly had a mark.
+     */
+    val documentRevision: Int = 0,
     /** The page-organisation sheet: reorder, rotate, delete, insert. */
     val showPageOrganiser: Boolean = false,
     /** A save is running. Blocks a second one and drives the progress indicator. */
@@ -123,6 +133,8 @@ data class PdfReaderState(
     val annotationsOnPage: Int = 0,
     /** Marks anywhere in the document, for the clear-all action. */
     val annotationsInDocument: Int = 0,
+    /** Of those, the ones not yet written into the file. Drives the Save button. */
+    val unsavedMarkCount: Int = 0,
     /**
      * A page the reader has been asked to scroll to and has not yet.
      *

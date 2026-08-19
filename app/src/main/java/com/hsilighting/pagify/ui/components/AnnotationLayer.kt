@@ -248,9 +248,27 @@ fun Modifier.annotationLayer(
                 )
             }
 
-        // Signature and Snapshot are driven from their own surfaces, and None must
-        // leave every gesture to the reader.
-        else -> Modifier
+        // Signature and Snapshot are driven from their own surfaces. With no tool
+        // the reader keeps every gesture — except that a note has to be openable
+        // without first arming a tool, which is not something anyone would think
+        // to try.
+        //
+        // The detector is added *only* on pages that actually carry a note, so the
+        // no-tool path stays exactly as it was everywhere else. That matters: an
+        // always-on tap handler here is the kind of thing that quietly interferes
+        // with scrolling, and most pages have no note to open.
+        else -> if (annotations.any { it is Annotation.Note }) {
+            Modifier.pointerInput(pageIndex, tool, annotations.size) {
+                detectTapGestures { position ->
+                    currentAnnotations
+                        .filterIsInstance<Annotation.Note>()
+                        .lastOrNull { it.isHitBy(toPage(position), tolerancePoints()) }
+                        ?.let(openNote)
+                }
+            }
+        } else {
+            Modifier
+        }
     }
 
     return this

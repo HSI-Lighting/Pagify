@@ -81,7 +81,12 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     fun open(uri: Uri, password: String? = null) {
         pendingUri = uri
         closeDocument()
-        _state.value = PdfReaderState(phase = PdfReaderState.Phase.Loading)
+        _state.value = PdfReaderState(
+            phase = PdfReaderState.Phase.Loading,
+            // Carried across the reset so it keeps increasing; a fresh state would
+            // put it back to zero and the effects keyed on it would not re-run.
+            documentRevision = _state.value.documentRevision,
+        )
 
         viewModelScope.launch {
             try {
@@ -104,6 +109,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                         currentPage = 0,
                         pageSizes = mapOf(0 to firstPage),
                         editState = edits,
+                        documentRevision = it.documentRevision + 1,
                     )
                 }
                 schedulePrefetch()
@@ -600,6 +606,10 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             canRedo = annotations.canRedo,
             annotationsOnPage = annotations.countOnPage(it.currentPage),
             annotationsInDocument = annotations.total,
+            // Marks read out of the file are already in it. Counting them as
+            // unsaved made a document with saved marks claim unsaved changes the
+            // moment it opened.
+            unsavedMarkCount = (annotations.total - savedMarkLocations.size).coerceAtLeast(0),
         )
     }
 
@@ -1042,7 +1052,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         val doc = document ?: return
         val uri = pendingUri ?: return
         if (_state.value.isSaving) return
-        if (!_state.value.editState.dirty && annotations.isEmpty) {
+        if (!_state.value.editState.dirty && _state.value.unsavedMarkCount == 0) {
             _state.update { it.copy(message = "No changes to save.") }
             return
         }
