@@ -20,47 +20,59 @@
 //! reasoning about them had produced a confident wrong answer. It is also how
 //! the selection fixture in `app/src/test/resources/` is regenerated from a real
 //! document, rather than hand-written to match whatever the code happens to do.
-use pdfium_render::prelude::*;
+use pdf_core::document::pdfium_doc::PdfiumDocument;
+use pdf_core::document::Document;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path = args.get(1).expect("usage: inspect_text <pdf> <page-index> [tsv]");
-    let index: i32 = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(0);
+    let index: usize = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(0);
     let tsv = args.get(3).map(|s| s == "tsv").unwrap_or(false);
 
-    let lib = std::env::var("PAGIFY_PDFIUM_LIB").expect("set PAGIFY_PDFIUM_LIB");
-    let bindings = Pdfium::bind_to_library(&lib).expect("bind pdfium");
-    let pdfium = Pdfium::new(bindings);
-
-    let doc = pdfium.load_pdf_from_file(path, None).expect("open");
-    let page = doc.pages().get(index).expect("page");
-    let height = page.height().value;
-    let text = page.text().expect("text");
+    // Through the engine, not around it. This example used to repeat the
+    // top-left conversion itself, which meant it agreed with a bug in that
+    // conversion instead of exposing it: on a page whose CropBox is inset, both
+    // the engine and this dump reported runs 90 pt too high, and the dump was
+    // the tool being used to check the engine.
+    let doc = PdfiumDocument::open_path(path, None).expect("open");
+    let size = doc.page_size(index).expect("page size");
+    let page = doc.page(index).expect("page");
+    let segments = page.text_segments().expect("text runs");
 
     if !tsv {
-        println!("page {index}  {} x {} pts", page.width().value, height);
-        println!("chars: {}", text.len());
+        println!(
+            "page {index}  {:.3} x {:.3} pts",
+            size.width_pt, size.height_pt,
+        );
+        println!("runs: {}", segments.len());
     }
 
-    for (i, seg) in text.segments().iter().enumerate() {
-        let b = seg.bounds();
-        // Same top-left flip the engine applies, so the dump is in the space the
-        // UI actually works in.
-        let (left, top) = (b.left().value, height - b.top().value);
-        let (right, bottom) = (b.right().value, height - b.bottom().value);
-        let content = seg.text().replace(['\t', '\n', '\r'], " ");
-        // The engine drops whitespace-only runs — they carry no glyphs to select
-        // — so a dump that kept them would not be the list the app works from.
-        if content.trim().is_empty() {
-            continue;
-        }
+    for (i, seg) in segments.iter().enumerate() {
+        let content = seg.text.replace(['\t', '\n', '\r'], " ");
+        let (left, top, right, bottom) = (seg.left, seg.top, seg.right, seg.bottom);
 
         if tsv {
             println!("{left:.2}\t{top:.2}\t{right:.2}\t{bottom:.2}\t{content}");
         } else {
-            let preview = content.chars().take(60).collect::<String>();
             println!(
-                "{i:4}  L{left:8.2} T{top:8.2} R{right:8.2} B{bottom:8.2}  {preview:?}"
+                "{i:4}  L {left:7.2} T {top:7.2} R {right:7.2} B {bottom:7.2}  {content:?}",
+            );
+        }
+    }
+
+    if !tsv {
+        // A run outside the page is the signature of a conversion that used the
+        // wrong reference — it is how the CropBox bug was found, so the dump says
+        // so rather than leaving it to be noticed.
+        let stray = segments
+            .iter()
+            .filter(|s| s.top < 0.0 || s.left < 0.0 || s.bottom > size.height_pt)
+            .count();
+        if stray > 0 {
+            println!(
+                "\n  {stray} of {} runs fall outside the page — the coordinate \
+                 conversion is wrong, not the document",
+                segments.len(),
             );
         }
     }

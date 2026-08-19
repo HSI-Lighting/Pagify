@@ -404,7 +404,10 @@ impl<'a> Page for PdfiumPage<'a> {
     }
 
     fn text_segments(&self) -> Result<Vec<TextSegment>> {
-        let page_height = self.page.height().value;
+        // The crop, not the page height. PDFium reports and renders the CropBox
+        // but hands back text geometry in MediaBox space, so on a page whose crop
+        // is inset the two differ by exactly that inset — see `PageSpace`.
+        let space = PageSpace::for_page(&self.page, self.page.height().value);
         let text = self
             .page
             .text()
@@ -422,13 +425,16 @@ impl<'a> Page for PdfiumPage<'a> {
             let bounds = segment.bounds();
 
             // PDF space puts the origin at the bottom-left with y increasing
-            // upwards; every consumer of this wants top-left with y increasing
-            // down. Flipping once, here, keeps that conversion out of the UI.
+            // upwards; every consumer of this wants the crop's top-left with y
+            // increasing down. Converting once, here, keeps it out of the UI.
+            let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+            let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
+
             segments.push(TextSegment {
-                left: bounds.left().value,
-                top: page_height - bounds.top().value,
-                right: bounds.right().value,
-                bottom: page_height - bounds.bottom().value,
+                left,
+                top,
+                right,
+                bottom,
                 text: content,
             });
         }
@@ -837,9 +843,34 @@ impl RawPage {
         Ok(RawPage { handle })
     }
 
-    /// Page height in points, which is what every coordinate flip below needs.
-    fn height(&self) -> Result<f32> {
-        Ok(unsafe { pdfium()?.bindings().FPDF_GetPageHeightF(self.handle) })
+    /// The crop-aware mapping for this page.
+    ///
+    /// Read through the raw boxes rather than `PageSpace::for_page`, which needs a
+    /// `PdfPage`: this type deliberately holds only an `FPDF_PAGE`. The answer is
+    /// the same one, and it has to be — a mark written against the page height
+    /// while text is placed against the crop would land somewhere the text is not.
+    fn space(&self) -> Result<PageSpace> {
+        let bindings = pdfium()?.bindings();
+        let height = unsafe { bindings.FPDF_GetPageHeightF(self.handle) };
+        let (mut left, mut bottom, mut right, mut top) = (0.0, 0.0, 0.0, 0.0);
+
+        let read = unsafe {
+            bindings.FPDFPage_GetCropBox(self.handle, &mut left, &mut bottom, &mut right, &mut top)
+        } != 0
+            || unsafe {
+                bindings.FPDFPage_GetMediaBox(
+                    self.handle,
+                    &mut left,
+                    &mut bottom,
+                    &mut right,
+                    &mut top,
+                )
+            } != 0;
+
+        if !read || !left.is_finite() || !top.is_finite() || right <= left || top <= bottom {
+            return Ok(PageSpace::at_origin(height));
+        }
+        Ok(PageSpace::new(left, top))
     }
 }
 
@@ -851,27 +882,18 @@ impl Drop for RawPage {
     }
 }
 
-/// Flip one y coordinate between the two conventions.
-///
-/// Ours is top-left with y down; PDF's is bottom-left with y up. The operation is
-/// its own inverse, which is why one function serves both directions — and why
-/// applying it twice by mistake is silent rather than obviously broken.
-fn flip_y(page_height: f32, y: f32) -> f32 {
-    page_height - y
-}
-
 /// One of our rects as PDFium wants it: bottom-left origin, `top` above `bottom`.
 ///
-/// The ordering matters as much as the flip. Our `Rect` has `top < bottom`
-/// because y grows downwards; after flipping, `top > bottom`. Handing PDFium an
+/// The ordering matters as much as the conversion. Our `Rect` has `top < bottom`
+/// because y grows downwards; afterwards `top > bottom`. Handing PDFium an
 /// inverted rect produces an annotation with no area, which draws as nothing at
 /// all rather than as anything visibly wrong.
-fn to_pdf_rect(page_height: f32, rect: &Rect) -> FS_RECTF {
-    let top = flip_y(page_height, rect.top);
-    let bottom = flip_y(page_height, rect.bottom);
+fn to_pdf_rect(space: &PageSpace, rect: &Rect) -> FS_RECTF {
+    let (left, top) = space.to_pdf(rect.left, rect.top);
+    let (right, bottom) = space.to_pdf(rect.right, rect.bottom);
     FS_RECTF {
-        left: rect.left.min(rect.right),
-        right: rect.left.max(rect.right),
+        left: left.min(right),
+        right: left.max(right),
         top: top.max(bottom),
         bottom: top.min(bottom),
     }
@@ -938,7 +960,7 @@ impl PdfiumDocument {
     /// call and the error paths all close it.
     fn write_annotation(&self, page: &RawPage, annotation: &Annotation) -> Result<()> {
         let bindings = pdfium()?.bindings();
-        let height = page.height()?;
+        let space = page.space()?;
 
         let subtype = match annotation {
             Annotation::Highlight { .. } => ANNOT_HIGHLIGHT,
@@ -953,7 +975,7 @@ impl PdfiumDocument {
             return Err(PdfError::Pdfium("could not create annotation".into()));
         }
 
-        let outcome = self.fill_annotation(annot, annotation, height);
+        let outcome = self.fill_annotation(annot, annotation, &space);
 
         unsafe { bindings.FPDFPage_CloseAnnot(annot) };
         outcome
@@ -963,13 +985,13 @@ impl PdfiumDocument {
         &self,
         annot: FPDF_ANNOTATION,
         annotation: &Annotation,
-        height: f32,
+        space: &PageSpace,
     ) -> Result<()> {
         let bindings = pdfium()?.bindings();
 
         let bounds = bounding_box(annotation)
             .ok_or_else(|| PdfError::InvalidArgument("annotation has no geometry".into()))?;
-        let rect = to_pdf_rect(height, &bounds);
+        let rect = to_pdf_rect(space, &bounds);
         unsafe { bindings.FPDFAnnot_SetRect(annot, &rect) };
 
         let colour = match annotation {
@@ -991,7 +1013,7 @@ impl PdfiumDocument {
         match annotation {
             Annotation::Highlight { rects, .. } => {
                 for r in rects {
-                    let pdf = to_pdf_rect(height, r);
+                    let pdf = to_pdf_rect(space, r);
                     // Quad points are the four corners in the order PDF expects:
                     // top-left, top-right, bottom-left, bottom-right. Not the
                     // winding order a reader would guess — bottom-left comes
@@ -1018,9 +1040,9 @@ impl PdfiumDocument {
                     }
                     let points: Vec<FS_POINTF> = stroke
                         .iter()
-                        .map(|p| FS_POINTF {
-                            x: p.x,
-                            y: flip_y(height, p.y),
+                        .map(|p| {
+                            let (x, y) = space.to_pdf(p.x, p.y);
+                            FS_POINTF { x, y }
                         })
                         .collect();
                     let added = unsafe {
@@ -1037,5 +1059,154 @@ impl PdfiumDocument {
         }
 
         Ok(())
+    }
+}
+
+/// The mapping between PDF page space and the space everything above the engine
+/// uses.
+///
+/// PDFium reports a page's size, and renders it, from the **CropBox** — but
+/// `FPDFText_GetRect`, `FPDFAnnot_SetRect` and every other geometry call speak
+/// **MediaBox** coordinates. Where the two differ, subtracting from the page
+/// height is not a coordinate conversion; it is a conversion plus a silent
+/// translation.
+///
+/// A real price list made the size of that plain:
+///
+/// ```text
+///   MediaBox [0 0 595.276 841.89]
+///   CropBox  [36 90 541.276 751.89]
+/// ```
+///
+/// PDFium reports the page as 505.276 x 661.89 and draws the CropBox. Text at
+/// `y = 698` — comfortably inside the crop — came back as `661.89 - 698 =
+/// -36.43`, a *negative* distance from the top of the page. Every run on every
+/// page of that document was recorded 90 pt too high and 36 pt too far right, so
+/// highlights landed on blank paper and the eraser could not find what it drew.
+///
+/// The negative tops are what gave it away, and they only appear because this
+/// inset is large. A crop inset of a few points yields marks that are merely
+/// slightly wrong — far harder to notice, and just as broken.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PageSpace {
+    /// x of the crop's left edge, in PDF space.
+    left: f32,
+    /// y of the crop's *top* edge, in PDF space. Not the height.
+    top: f32,
+}
+
+impl PageSpace {
+    fn new(left: f32, top: f32) -> Self {
+        PageSpace { left, top }
+    }
+
+    /// The origin-anchored case: no crop, or none that could be read.
+    fn at_origin(page_height: f32) -> Self {
+        PageSpace {
+            left: 0.0,
+            top: page_height,
+        }
+    }
+
+    /// Read the box PDFium actually renders.
+    ///
+    /// Crop first, media second, then the origin-anchored assumption the old code
+    /// made — a page is entitled to declare neither, and one that declares no crop
+    /// is cropped to its MediaBox. Reached through the public boundaries API
+    /// rather than the raw page handle, which keeps the vendored crate at the
+    /// single patched line it has.
+    fn for_page(page: &PdfPage, page_height: f32) -> Self {
+        let fallback = PageSpace {
+            left: 0.0,
+            top: page_height,
+        };
+
+        let bounds = page
+            .boundaries()
+            .crop()
+            .or_else(|_| page.boundaries().media());
+
+        match bounds {
+            Ok(b) => {
+                let left = b.bounds.left().value;
+                let top = b.bounds.top().value;
+                if left.is_finite() && top.is_finite() {
+                    PageSpace { left, top }
+                } else {
+                    fallback
+                }
+            }
+            Err(_) => fallback,
+        }
+    }
+
+    /// PDF space to ours: origin at the crop's top-left, y increasing downwards.
+    fn to_top_left(&self, x: f32, y: f32) -> (f32, f32) {
+        (x - self.left, self.top - y)
+    }
+
+    /// Ours back to PDF space. The exact inverse of [`PageSpace::to_top_left`].
+    fn to_pdf(&self, x: f32, y: f32) -> (f32, f32) {
+        (x + self.left, self.top - y)
+    }
+}
+
+#[cfg(test)]
+mod page_space_tests {
+    use super::PageSpace;
+
+    /// The real numbers from the price list that exposed this.
+    ///
+    /// MediaBox `[0 0 595.276 841.89]`, CropBox `[36 90 541.276 751.89]`. PDFium
+    /// reports the page as 505.276 x 661.89 and returns text geometry in MediaBox
+    /// space, so the crop's top edge — 751.89 — is the reference, not the height.
+    fn price_list() -> PageSpace {
+        PageSpace::new(36.0, 751.89)
+    }
+
+    #[test]
+    fn a_run_inside_the_crop_lands_inside_the_page() {
+        // The run that came back at -36.43 before the fix.
+        let (x, y) = price_list().to_top_left(65.78, 698.32);
+
+        assert!((x - 29.78).abs() < 0.01, "x was {x}");
+        assert!((y - 53.57).abs() < 0.01, "y was {y}");
+        assert!(y > 0.0, "a run inside the crop must not be above the page");
+    }
+
+    #[test]
+    fn subtracting_the_page_height_is_what_produced_a_negative_top() {
+        // Kept as an explicit statement of the old behaviour, so the difference is
+        // visible rather than something you have to reconstruct from git history.
+        let page_height = 661.89;
+        let old = page_height - 698.32;
+        assert!(old < 0.0, "the old conversion put this run above the page");
+
+        let (_, new) = price_list().to_top_left(65.78, 698.32);
+        assert!((new - old - 90.0).abs() < 0.01, "the inset is exactly 90 pt");
+    }
+
+    #[test]
+    fn the_two_directions_are_exact_inverses() {
+        // A mark is written through `to_pdf` and read back through `to_top_left`,
+        // so any disagreement between them moves every saved annotation.
+        let space = price_list();
+        for &(x, y) in &[(0.0, 0.0), (100.0, 250.5), (505.276, 661.89)] {
+            let (px, py) = space.to_pdf(x, y);
+            let (rx, ry) = space.to_top_left(px, py);
+            assert!((rx - x).abs() < 0.001, "x {x} -> {px} -> {rx}");
+            assert!((ry - y).abs() < 0.001, "y {y} -> {py} -> {ry}");
+        }
+    }
+
+    #[test]
+    fn a_page_with_no_inset_behaves_exactly_as_before() {
+        // The common case must not move: an origin-anchored page is what the old
+        // code assumed, and it was right about those.
+        let space = PageSpace::at_origin(842.0);
+        let (x, y) = space.to_top_left(100.0, 800.0);
+
+        assert_eq!(100.0, x);
+        assert_eq!(42.0, y);
     }
 }
