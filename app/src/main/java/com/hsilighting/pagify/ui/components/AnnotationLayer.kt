@@ -275,6 +275,7 @@ fun Modifier.annotationLayer(
         .then(inputModifier)
         .drawWithContent {
             drawContent()
+            android.util.Log.i("AnnotationLayer", "draw page=$pageIndex marks=${annotations.size}")
             annotations.forEach { drawAnnotation(it, scale, origin) }
             if (wetHighlight.isNotEmpty()) {
                 drawHighlightRects(wetHighlight, currentColor, scale, origin)
