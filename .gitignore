@@ -24,3 +24,6 @@
 # used for performance work lives here — and a stray `git add -A` would try to
 # commit one. They are inputs to testing, never part of the source.
 /*.pdf
+
+# Licensed typefaces supplied for text replacement; see rust/pdf_core/fixtures/fonts/README.md
+Century Gothic.zip
