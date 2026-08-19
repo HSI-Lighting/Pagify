@@ -11,7 +11,7 @@ use crate::document::{RegionRequest, RenderRequest, Rotation};
 use crate::error::{PdfError, Result};
 use crate::registry::DocumentSession;
 use crate::render::bitmap::{Bitmap, PixelOrder};
-use crate::render::{CacheKey, ImageFormat, RenderTarget};
+use crate::render::{CacheKey, ImageFormat, Markup, RegionPixels, RenderTarget};
 
 /// Pixel dimensions a page occupies for the given request, accounting for rotation.
 pub fn page_pixel_size(
@@ -141,19 +141,38 @@ pub fn render_region(
     page.render_region(request)
 }
 
-/// Render a region and encode it, in one call.
+/// Render a region, draw the markup on it, and encode it — in one call.
 ///
-/// One call rather than two so the intermediate bitmap never crosses the FFI.
+/// One call rather than three so the intermediate bitmap never crosses the FFI.
 /// A 4× capture is tens of megabytes as pixels and a fraction of that encoded;
 /// handing the raw buffer to Kotlin only to encode it there would cost a copy
 /// into the Java heap of the larger of the two.
+///
+/// The markup is composited here rather than drawn by the UI and screen-grabbed,
+/// for the same reason the capture itself is a re-render: what leaves the app is
+/// built from the document and the committed shapes, and can hold nothing else.
 pub fn export_region(
     session: &DocumentSession,
     index: usize,
     request: &RegionRequest,
     format: ImageFormat,
+    marks: &[Markup],
 ) -> Result<Vec<u8>> {
-    let bitmap = render_region(session, index, request)?;
+    let mut bitmap = render_region(session, index, request)?;
+
+    if !marks.is_empty() {
+        // Resolved again rather than threaded out of the render: `resolve` is a
+        // pure function of the same three inputs, so the two agree by
+        // construction — including when the ceiling lowered the scale, which is
+        // exactly the case where a separately-computed transform would drift.
+        let region = RegionPixels::resolve(
+            session.document.page_size(index)?,
+            request.crop,
+            request.scale,
+        )?;
+        crate::render::markup::composite(&mut bitmap, marks, &region)?;
+    }
+
     crate::render::export::encode(&bitmap, format)
 }
 

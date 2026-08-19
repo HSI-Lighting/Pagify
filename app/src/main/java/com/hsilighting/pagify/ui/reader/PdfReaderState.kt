@@ -5,6 +5,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ImageBitmap
 import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.CaptureRequest
+import com.hsilighting.pagify.core.Markup
+import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
@@ -168,6 +170,17 @@ data class PdfReaderState(
      * app an empty file.
      */
     val captureToShare: CaptureShare? = null,
+    /**
+     * Marks drawn on the capture that is on screen, in page points.
+     *
+     * Cleared with the capture. They live on the picture and are deliberately not
+     * written into the PDF: an annotation in the document is a different thing
+     * with a different lifetime, and conflating the two would drag the whole write
+     * path into a feature that produces a PNG.
+     */
+    val markup: List<Markup> = emptyList(),
+    val markupTool: MarkupTool = MarkupTool.Pen,
+    val markupColor: Long = AnnotationColors.RED,
 ) {
     val isReady: Boolean get() = phase is Phase.Ready
     /** 1-based, for display. */

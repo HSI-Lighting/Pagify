@@ -79,6 +79,8 @@ import com.hsilighting.pagify.ui.components.CaptureSheet
 import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.CaptureScale
+import com.hsilighting.pagify.core.MarkupShape
+import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
 import com.hsilighting.pagify.ui.components.NoteComposer
 import com.hsilighting.pagify.ui.components.NoteReader
@@ -191,6 +193,14 @@ fun PdfReaderScreen(
     onDismissCapture: () -> Unit,
     /** The share sheet has been raised; the capture can be let go of. */
     onCaptureShared: () -> Unit,
+    // Markup on the capture. The shapes are Kotlin's until they are committed,
+    // and the engine's from then on — see roadmap decision 4.7.
+    onMarkupTool: (MarkupTool) -> Unit,
+    onMarkupColor: (Long) -> Unit,
+    onCommitMarkup: (MarkupShape) -> Unit,
+    /** A stroke that was held still before lifting; ask what shape it is. */
+    onRecogniseMarkup: (List<Offset>) -> Unit,
+    onUndoMarkup: () -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
@@ -443,8 +453,16 @@ fun PdfReaderScreen(
                 CaptureSheet(
                     preview = capture,
                     isCapturing = state.isCapturing,
+                    markup = state.markup,
+                    markupTool = state.markupTool,
+                    markupColor = state.markupColor,
                     onScaleChange = onCaptureScale,
                     onFormatChange = onCaptureFormat,
+                    onMarkupTool = onMarkupTool,
+                    onMarkupColor = onMarkupColor,
+                    onCommitMarkup = onCommitMarkup,
+                    onRecogniseMarkup = onRecogniseMarkup,
+                    onUndoMarkup = onUndoMarkup,
                     onSaveToGallery = onSaveCapture,
                     onShare = onShareCapture,
                     onCopy = onCopyCapture,

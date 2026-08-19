@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import androidx.compose.ui.geometry.Offset
 import java.io.Closeable
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -83,17 +84,29 @@ class PdfDocument private constructor(
      * Blocking, and slow enough to notice: a 4× capture of a dense page is a real
      * render. Call it off the main thread.
      */
-    fun captureRegion(request: CaptureRequest): ByteArray = NativeBridge.captureRegion(
-        requireOpen(),
-        request.pageIndex,
-        request.crop.left,
-        request.crop.top,
-        request.crop.right,
-        request.crop.bottom,
-        request.scale.factor,
-        request.format.wireName,
-        request.quality,
-    )
+    fun captureRegion(request: CaptureRequest, markup: List<Markup> = emptyList()): ByteArray =
+        NativeBridge.captureRegion(
+            requireOpen(),
+            request.pageIndex,
+            request.crop.left,
+            request.crop.top,
+            request.crop.right,
+            request.crop.bottom,
+            request.scale.factor,
+            request.format.wireName,
+            request.quality,
+            markup.toWireJson(),
+        )
+
+    /**
+     * What the engine makes of a drawn stroke.
+     *
+     * Pure geometry, so unlike everything else here it takes no lock and can be
+     * called straight off a gesture. Returns freehand when it is not sure, which
+     * it is far more often than not — see [NativeBridge.recogniseStroke].
+     */
+    fun recogniseStroke(points: List<Offset>): MarkupShape =
+        shapeFromWireJson(NativeBridge.recogniseStroke(points.strokeToWireJson()), points)
 
     // ------------------------------------------------------------------ edit --
 

@@ -3,11 +3,15 @@
 pub mod bitmap;
 pub mod cache;
 pub mod export;
+pub mod markup;
+pub mod recognise;
 pub mod region;
 
 pub use bitmap::{Bitmap, PixelOrder, BYTES_PER_PIXEL};
 pub use cache::{CacheKey, CacheStats, PageCache};
 pub use export::ImageFormat;
+pub use markup::{Markup, Shape};
+pub use recognise::recognise;
 pub use region::RegionPixels;
 
 use crate::error::{PdfError, Result};

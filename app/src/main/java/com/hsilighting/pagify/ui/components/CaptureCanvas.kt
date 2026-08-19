@@ -1,0 +1,313 @@
+package com.hsilighting.pagify.ui.components
+
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.size
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.dp
+import com.hsilighting.pagify.core.MARKUP_DWELL_MILLIS
+import com.hsilighting.pagify.core.Markup
+import com.hsilighting.pagify.core.MarkupGesture
+import com.hsilighting.pagify.core.MarkupShape
+import com.hsilighting.pagify.core.MarkupTool
+import kotlinx.coroutines.withTimeoutOrNull
+
+/**
+ * The capture, with its marks drawn over it and the input that adds more.
+ *
+ * The picture on screen is a downscaled preview; the marks are drawn on top of it
+ * by Compose rather than composited into it, so a stroke follows the finger at
+ * frame rate and no engine call happens while one is down. The exported file is
+ * rendered separately, by the engine, from these same shapes — see roadmap
+ * decision 4.7 for why the split is here.
+ *
+ * Everything crossing the boundary is in **page points**. The mapping is the
+ * displayed rectangle onto the crop, so it holds however the preview happens to
+ * be scaled or letterboxed.
+ */
+@Composable
+fun CaptureCanvas(
+    image: ImageBitmap,
+    /** The region of the page this picture covers, in page points. */
+    crop: Rect,
+    markup: List<Markup>,
+    tool: MarkupTool,
+    color: Long,
+    onCommit: (MarkupShape) -> Unit,
+    /** Held still before lifting: ask the engine what this stroke was. */
+    onRecognise: (List<Offset>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
+        // Fit the picture inside the available space, then work in that rectangle.
+        // Deriving the mapping from the *displayed* size rather than the preview's
+        // pixel size keeps it right whatever the decoder chose to downsample to.
+        val aspect = image.width.toFloat() / image.height.toFloat()
+        val boxAspect = maxWidth / maxHeight
+        val shownWidth = if (aspect >= boxAspect) maxWidth else maxHeight * aspect
+        val shownHeight = if (aspect >= boxAspect) maxWidth / aspect else maxHeight
+
+        val density = LocalDensity.current
+        val widthPx = with(density) { shownWidth.toPx() }
+        val heightPx = with(density) { shownHeight.toPx() }
+
+        Box(Modifier.size(shownWidth, shownHeight)) {
+            Image(
+                bitmap = image,
+                contentDescription = "The captured region",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            MarkupSurface(
+                widthPx = widthPx,
+                heightPx = heightPx,
+                crop = crop,
+                markup = markup,
+                tool = tool,
+                color = color,
+                onCommit = onCommit,
+                onRecognise = onRecognise,
+            )
+        }
+    }
+}
+
+@Composable
+private fun MarkupSurface(
+    widthPx: Float,
+    heightPx: Float,
+    crop: Rect,
+    markup: List<Markup>,
+    tool: MarkupTool,
+    color: Long,
+    onCommit: (MarkupShape) -> Unit,
+    onRecognise: (List<Offset>) -> Unit,
+) {
+    val commit by rememberUpdatedState(onCommit)
+    val recognise by rememberUpdatedState(onRecognise)
+    val marks by rememberUpdatedState(markup)
+    val ink by rememberUpdatedState(color)
+
+    // Re-made when the tool changes: a gesture belongs to one tool, and carrying a
+    // half-drawn stroke into another would commit it as the wrong shape.
+    val gesture = remember(tool) { MarkupGesture(tool) }
+    var preview by remember(tool) { mutableStateOf<MarkupShape?>(null) }
+    var dwelling by remember(tool) { mutableStateOf(false) }
+
+    /** Displayed pixels to page points. */
+    fun toPage(position: Offset) = Offset(
+        crop.left + (position.x / widthPx) * crop.width,
+        crop.top + (position.y / heightPx) * crop.height,
+    )
+
+    /** Page points back to displayed pixels, for drawing. */
+    fun toPixels(point: Offset) = Offset(
+        (point.x - crop.left) / crop.width * widthPx,
+        (point.y - crop.top) / crop.height * heightPx,
+    )
+
+    val scale = if (crop.width > 0f) widthPx / crop.width else 1f
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .pointerInput(tool, crop, widthPx, heightPx) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val down = awaitPointerEvent().changes.firstOrNull { it.pressed }
+                            ?: continue
+                        gesture.down(toPage(down.position))
+                        down.consume()
+                        preview = null
+                        dwelling = false
+
+                        var lifted = false
+                        while (!lifted) {
+                            // A still finger produces no events at all, so a
+                            // timeout *is* the dwell — no polling, no timer, and
+                            // nothing running between frames.
+                            val event = withTimeoutOrNull(MARKUP_DWELL_MILLIS) {
+                                awaitPointerEvent(PointerEventPass.Main)
+                            }
+
+                            if (event == null) {
+                                gesture.still()
+                                dwelling = gesture.isDwelling
+                                continue
+                            }
+
+                            val change = event.changes.first()
+                            change.consume()
+                            if (!change.pressed) {
+                                lifted = true
+                            } else {
+                                gesture.move(toPage(change.position))
+                                dwelling = gesture.isDwelling
+                                preview = gesture.preview
+                            }
+                        }
+
+                        when (val outcome = gesture.up()) {
+                            is MarkupGesture.Outcome.Commit -> commit(outcome.shape)
+                            is MarkupGesture.Outcome.Recognise -> recognise(outcome.points)
+                            MarkupGesture.Outcome.Nothing -> Unit
+                        }
+                        preview = null
+                        dwelling = false
+                    }
+                }
+            },
+    ) {
+        androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
+            marks.forEach { drawMarkup(it.shape, it.color, it.widthPoints * scale, ::toPixels) }
+            preview?.let { drawMarkup(it, ink, MARKUP_PREVIEW_WIDTH_POINTS * scale, ::toPixels) }
+        }
+
+        if (dwelling) {
+            // Says the hold registered and what lifting will now do. Without it a
+            // snap arrives unannounced, which is the one thing recognition must
+            // never do.
+            DwellHint(Modifier.align(Alignment.TopCenter))
+        }
+    }
+}
+
+@Composable
+private fun DwellHint(modifier: Modifier) {
+    androidx.compose.material3.Surface(
+        modifier = modifier,
+        shape = androidx.compose.foundation.shape.RoundedCornerShape(12.dp),
+        color = androidx.compose.material3.MaterialTheme.colorScheme.inverseSurface,
+    ) {
+        androidx.compose.material3.Text(
+            text = "Release to snap to a shape",
+            modifier = Modifier.size(width = 190.dp, height = 28.dp),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            style = androidx.compose.material3.MaterialTheme.typography.labelMedium,
+            color = androidx.compose.material3.MaterialTheme.colorScheme.inverseOnSurface,
+        )
+    }
+}
+
+private fun DrawScope.drawMarkup(
+    shape: MarkupShape,
+    color: Long,
+    widthPx: Float,
+    toPixels: (Offset) -> Offset,
+) {
+    val ink = Color(color)
+    val stroke = Stroke(
+        width = widthPx.coerceAtLeast(1f),
+        cap = StrokeCap.Round,
+        join = StrokeJoin.Round,
+    )
+
+    when (shape) {
+        is MarkupShape.Freehand -> {
+            if (shape.points.size < 2) return
+            val path = Path().apply {
+                val start = toPixels(shape.points.first())
+                moveTo(start.x, start.y)
+                for (i in 1 until shape.points.size) {
+                    val previous = toPixels(shape.points[i - 1])
+                    val current = toPixels(shape.points[i])
+                    quadraticTo(
+                        previous.x,
+                        previous.y,
+                        (previous.x + current.x) / 2f,
+                        (previous.y + current.y) / 2f,
+                    )
+                }
+                val last = toPixels(shape.points.last())
+                lineTo(last.x, last.y)
+            }
+            drawPath(path, ink, style = stroke)
+        }
+
+        is MarkupShape.Line -> drawLine(
+            color = ink,
+            start = toPixels(shape.from),
+            end = toPixels(shape.to),
+            strokeWidth = stroke.width,
+            cap = StrokeCap.Round,
+        )
+
+        is MarkupShape.Arrow -> {
+            val from = toPixels(shape.from)
+            val to = toPixels(shape.to)
+            drawLine(ink, from, to, strokeWidth = stroke.width, cap = StrokeCap.Round)
+
+            val angle = kotlin.math.atan2(to.y - from.y, to.x - from.x)
+            val head = stroke.width * ARROW_HEAD_LENGTHS
+            for (side in listOf(-1f, 1f)) {
+                val barb = angle + Math.PI.toFloat() + side * ARROW_HEAD_ANGLE
+                drawLine(
+                    color = ink,
+                    start = to,
+                    end = Offset(
+                        to.x + head * kotlin.math.cos(barb),
+                        to.y + head * kotlin.math.sin(barb),
+                    ),
+                    strokeWidth = stroke.width,
+                    cap = StrokeCap.Round,
+                )
+            }
+        }
+
+        is MarkupShape.Rectangle -> {
+            val (topLeft, size) = shape.rect.inPixels(toPixels)
+            drawRect(ink, topLeft = topLeft, size = size, style = stroke)
+        }
+
+        is MarkupShape.Ellipse -> {
+            val (topLeft, size) = shape.rect.inPixels(toPixels)
+            drawOval(ink, topLeft = topLeft, size = size, style = stroke)
+        }
+
+        is MarkupShape.Highlight -> {
+            val (topLeft, size) = shape.rect.inPixels(toPixels)
+            // Filled and translucent, matching what the engine composites: a
+            // highlight that covers what it marks has failed at its one job.
+            drawRect(ink.copy(alpha = HIGHLIGHT_ALPHA), topLeft = topLeft, size = size)
+        }
+    }
+}
+
+private fun Rect.inPixels(toPixels: (Offset) -> Offset): Pair<Offset, Size> {
+    val topLeft = toPixels(Offset(left, top))
+    val bottomRight = toPixels(Offset(right, bottom))
+    return topLeft to Size(bottomRight.x - topLeft.x, bottomRight.y - topLeft.y)
+}
+
+/** Matches `render::markup` in the engine, so the preview is what gets exported. */
+private const val HIGHLIGHT_ALPHA = 0.35f
+private const val ARROW_HEAD_LENGTHS = 4f
+private const val ARROW_HEAD_ANGLE = 0.44f
+
+/** Nib the live stroke is previewed at. The committed mark uses the same. */
+private const val MARKUP_PREVIEW_WIDTH_POINTS = 2.4f

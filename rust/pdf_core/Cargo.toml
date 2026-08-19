@@ -42,6 +42,16 @@ pdfium-render = { version = "0.9.3", default-features = false, features = [
 # the host down to the bytes.
 image = { version = "0.25.6", default-features = false, features = ["png", "jpeg"] }
 
+# Markup on a capture: anti-aliased path fill and stroke, composited into the
+# same buffer PDFium rendered into.
+#
+# A pure-Rust port of Skia's raster backend, so it adds **no C++ dependency** —
+# which is the whole reason it is this and not `skia-safe` or `cairo`. A C++
+# graphics dependency here would tie the one feature most likely to be reused to
+# the Android build. `vello`/`femtovg` are GPU renderers and would need surface
+# management for a still image; `imageproc` has no proper anti-aliased stroking.
+tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
+
 # No `lopdf`. PDFium is the single writer: two independent object models writing
 # one file is a corruption class that is very hard to diagnose, and PDFium covers
 # the page tree, objects, text and save on its own. If lopdf ever comes back it is

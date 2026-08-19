@@ -169,8 +169,12 @@ private fun List<Offset>.toWireJson(): JSONArray = JSONArray(
  * The app stores colours as `0xAARRGGBB` longs and the engine wants separate
  * bytes. Alpha is carried rather than dropped: a highlight is translucent, and
  * writing it opaque would black out the words underneath it.
+ *
+ * Shared with [Markup] rather than copied: two versions of a channel-order
+ * conversion is two chances to get a shift wrong, and a wrong one is silent — a
+ * red mark simply arrives blue.
  */
-private fun Long.colorToWireJson(): JSONObject = JSONObject().apply {
+internal fun Long.colorToWireJson(): JSONObject = JSONObject().apply {
     put("r", ((this@colorToWireJson shr 16) and 0xFF).toInt())
     put("g", ((this@colorToWireJson shr 8) and 0xFF).toInt())
     put("b", (this@colorToWireJson and 0xFF).toInt())

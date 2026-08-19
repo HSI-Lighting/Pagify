@@ -26,6 +26,9 @@ import com.hsilighting.pagify.core.CaptureRequest
 import com.hsilighting.pagify.core.CaptureScale
 import com.hsilighting.pagify.core.captureFileName
 import com.hsilighting.pagify.core.isWorthCapturing
+import com.hsilighting.pagify.core.Markup
+import com.hsilighting.pagify.core.MarkupShape
+import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PageTextRecogniser
@@ -1459,7 +1462,71 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         return decoded.asImageBitmap()
     }
 
-    fun dismissCapture() = _state.update { it.copy(capture = null) }
+    fun dismissCapture() = _state.update { it.copy(capture = null, markup = emptyList()) }
+
+    // ------------------------------------------------------- markup on a capture --
+
+    fun setMarkupTool(tool: MarkupTool) = _state.update { it.copy(markupTool = tool) }
+
+    fun setMarkupColor(color: Long) = _state.update { it.copy(markupColor = color) }
+
+    /** Add a mark that needed no recognition — a dragged shape, or a plain stroke. */
+    fun addMarkup(shape: MarkupShape) = _state.update {
+        it.copy(markup = it.markup + Markup(shape, it.markupColor))
+    }
+
+    /**
+     * Ask the engine what a stroke was, then add whatever it says.
+     *
+     * Only reached when the finger held still before lifting, so a snap is always
+     * something the user asked for. The call itself is pure geometry — no
+     * document, no lock — but it still happens after the lift rather than during
+     * the drag, so nothing can cost a frame mid-stroke.
+     */
+    fun recogniseAndAddMarkup(points: List<Offset>) {
+        val doc = document ?: return addMarkup(MarkupShape.Freehand(points))
+        viewModelScope.launch {
+            val shape = withContext(Dispatchers.Default) {
+                runCatching { doc.recogniseStroke(points) }
+                    .getOrElse { MarkupShape.Freehand(points) }
+            }
+            addMarkup(shape)
+        }
+    }
+
+    /**
+     * Remove the most recent mark.
+     *
+     * A snapped shape is one mark, so undoing it removes the whole snap — which is
+     * what someone who did not want the shape is reaching for.
+     */
+    fun undoMarkup() = _state.update {
+        it.copy(markup = it.markup.dropLast(1))
+    }
+
+    fun clearMarkup() = _state.update { it.copy(markup = emptyList()) }
+
+    /**
+     * The bytes to export: the capture with its markup drawn in.
+     *
+     * Re-rendered rather than taken from the preview, because the preview is the
+     * clean capture — the marks on screen are drawn over it by the UI. Rendering
+     * again is what makes the file match what is on the sheet, and it is the
+     * engine that draws them, so the exported picture is still built from nothing
+     * but the document and the committed shapes.
+     */
+    private suspend fun captureBytesWithMarkup(capture: CapturePreview): ByteArray {
+        val marks = _state.value.markup
+        if (marks.isEmpty()) return capture.bytes
+
+        val doc = document ?: return capture.bytes
+        return withContext(Dispatchers.Default) {
+            runCatching { doc.captureRegion(capture.request, marks) }.getOrElse { failure ->
+                Log.e(TAG, "drawing the markup failed; exporting the plain capture", failure)
+                capture.bytes
+            }
+        }
+    }
 
     /**
      * The storage permission was refused, below API 29.
@@ -1476,10 +1543,11 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         val capture = _state.value.capture ?: return
         viewModelScope.launch {
             try {
+                val bytes = captureBytesWithMarkup(capture)
                 withContext(Dispatchers.IO) {
                     CaptureExport.saveToGallery(
                         context = getApplication(),
-                        bytes = capture.bytes,
+                        bytes = bytes,
                         fileName = capture.fileName,
                         format = capture.request.format,
                     )
@@ -1507,8 +1575,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         val capture = _state.value.capture ?: return
         viewModelScope.launch {
             try {
+                val bytes = captureBytesWithMarkup(capture)
                 val uri = withContext(Dispatchers.IO) {
-                    CaptureExport.cache(getApplication(), capture.bytes, capture.fileName)
+                    CaptureExport.cache(getApplication(), bytes, capture.fileName)
                 }
                 _state.update {
                     it.copy(captureToShare = CaptureShare(uri, capture.request.format.mimeType))
@@ -1527,8 +1596,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         val capture = _state.value.capture ?: return
         viewModelScope.launch {
             try {
+                val bytes = captureBytesWithMarkup(capture)
                 val uri = withContext(Dispatchers.IO) {
-                    CaptureExport.cache(getApplication(), capture.bytes, capture.fileName)
+                    CaptureExport.cache(getApplication(), bytes, capture.fileName)
                 }
                 CaptureExport.copyToClipboard(getApplication(), uri)
                 _state.update { it.copy(capture = null, message = "Picture copied.") }

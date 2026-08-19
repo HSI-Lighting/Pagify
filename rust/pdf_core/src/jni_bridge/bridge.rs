@@ -9,13 +9,13 @@ use jni::JNIEnv;
 
 use crate::command::Command;
 use crate::document::pdfium_doc::PdfiumDocument;
-use crate::document::{Document, Rect, RegionRequest, RenderRequest, Rotation};
+use crate::document::{Document, Point, Rect, RegionRequest, RenderRequest, Rotation};
 use crate::engine;
 use crate::error::{PdfError, Result};
 use crate::jni_bridge::android_bitmap::LockedPixels;
 use crate::jni_bridge::{guard, optional_string, required_string};
 use crate::registry;
-use crate::render::{ImageFormat, PixelOrder, RenderTarget};
+use crate::render::{self, ImageFormat, Markup, PixelOrder, RenderTarget};
 
 const INVALID_HANDLE: jlong = -1;
 
@@ -613,6 +613,7 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureRegi
     scale: jfloat,
     format: JString<'local>,
     quality: jint,
+    markup_json: JString<'local>,
 ) -> jbyteArray {
     guard(&mut env, std::ptr::null_mut(), |env| {
         let index = page_index_from(page_index)?;
@@ -620,6 +621,11 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureRegi
             &required_string(env, &format, "format")?,
             quality.clamp(1, 100) as u8,
         )?;
+        let marks: Vec<Markup> = match optional_string(env, &markup_json)? {
+            Some(json) if !json.trim().is_empty() => serde_json::from_str(&json)
+                .map_err(|e| PdfError::InvalidArgument(format!("could not read markup: {e}")))?,
+            _ => Vec::new(),
+        };
         let request = RegionRequest {
             crop: Rect {
                 left,
@@ -633,12 +639,43 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureRegi
 
         let bytes =
             registry::with_session(handle, |session| {
-                engine::export_region(session, index, &request, format)
+                engine::export_region(session, index, &request, format, &marks)
             })?;
 
         Ok(env
             .byte_array_from_slice(&bytes)
             .map_err(|e| PdfError::Pdfium(format!("could not allocate the capture: {e}")))?
+            .into_raw())
+    })
+}
+
+/// Turn a drawn stroke into a shape, or say it is not one.
+///
+/// Takes the stroke's points as JSON and returns a [`crate::render::Shape`] the
+/// app can commit as markup. Pure geometry — no document, no handle, no lock —
+/// which is why it is safe to call the moment a finger lifts.
+///
+/// It declines far more readily than it snaps: a squiggle that stays a squiggle
+/// costs nothing, and a squiggle silently turned into a circle costs the user
+/// their drawing.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_recogniseStroke<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    points_json: JString<'local>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let json = required_string(env, &points_json, "points")?;
+        let points: Vec<Point> = serde_json::from_str(&json)
+            .map_err(|e| PdfError::InvalidArgument(format!("could not read the stroke: {e}")))?;
+
+        let shape = render::recognise(&points);
+        let encoded = serde_json::to_string(&shape)
+            .map_err(|e| PdfError::Pdfium(format!("could not encode the shape: {e}")))?;
+
+        Ok(env
+            .new_string(encoded)
+            .map_err(|e| PdfError::Pdfium(format!("could not allocate Java string: {e}")))?
             .into_raw())
     })
 }

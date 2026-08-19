@@ -215,6 +215,7 @@ internal object NativeBridge {
      *
      * @param format `"png"` or `"jpeg"`.
      * @param quality 1–100, ignored for PNG.
+     * @param markupJson marks to draw on it, in page points. `[]` for none.
      */
     @Throws(PdfException::class)
     external fun captureRegion(
@@ -227,5 +228,22 @@ internal object NativeBridge {
         scale: Float,
         format: String,
         quality: Int,
+        markupJson: String,
     ): ByteArray
+
+    /**
+     * Turn a drawn stroke into a shape, or say it is not one.
+     *
+     * Pure geometry — no document, no handle, no lock — so it is safe to call the
+     * moment a finger lifts, on whatever thread the gesture is on.
+     *
+     * It declines far more readily than it snaps. That is deliberate: a squiggle
+     * that stays a squiggle costs nothing, and a squiggle silently turned into a
+     * circle costs the user their drawing.
+     *
+     * @param pointsJson `[{"x":..,"y":..}, …]` in page points.
+     * @return one shape in the markup wire form. `freehand` means "not a shape".
+     */
+    @Throws(PdfException::class)
+    external fun recogniseStroke(pointsJson: String): String
 }
