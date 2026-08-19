@@ -73,6 +73,7 @@ import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.ui.components.AnnotationToolbar
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
+import com.hsilighting.pagify.ui.components.NoteComposer
 import com.hsilighting.pagify.ui.components.RecognisingTextHint
 import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.twoFingerPan
@@ -127,6 +128,11 @@ fun PdfReaderScreen(
     /** Positioned text for a page; the highlighter hit-tests against this. */
     textSegmentsForPage: suspend (Int) -> List<TextSegment>,
     onAddAnnotation: (Annotation) -> Unit,
+    /** The Note tool was tapped at this page point; ask the reader for the text. */
+    /** The reader typed a note, or dismissed the composer. */
+    onConfirmNote: (String) -> Unit,
+    onCancelNote: () -> Unit,
+    onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
     onSelectTool: (AnnotationTool) -> Unit,
     onPenModeChange: (PenMode) -> Unit,
     onPenColorChange: (Long) -> Unit,
@@ -309,6 +315,7 @@ fun PdfReaderScreen(
                     annotationsForPage = annotationsForPage,
                     textSegmentsForPage = textSegmentsForPage,
                     onAddAnnotation = onAddAnnotation,
+                    onRequestNote = onRequestNote,
                     onEraseStart = onEraseStart,
                     onErase = onErase,
                     onEraseEnd = onEraseEnd,
@@ -396,6 +403,10 @@ fun PdfReaderScreen(
             }
         }
 
+        state.pendingNote?.let {
+            NoteComposer(onConfirm = onConfirmNote, onDismiss = onCancelNote)
+        }
+
         if (state.showMetadataSheet && state.metadata != null) {
             ModalBottomSheet(onDismissRequest = { onShowMetadata(false) }) {
                 MetadataSheet(state.metadata)
@@ -441,6 +452,7 @@ private fun PageList(
     annotationsForPage: (Int) -> List<Annotation>,
     textSegmentsForPage: suspend (Int) -> List<TextSegment>,
     onAddAnnotation: (Annotation) -> Unit,
+    onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
     onEraseStart: () -> Unit,
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
@@ -586,6 +598,7 @@ private fun PageList(
                 penMode = state.penMode,
                 penColor = state.penColor,
                 onAddAnnotation = onAddAnnotation,
+                onRequestNote = onRequestNote,
                 onEraseStart = onEraseStart,
                 onErase = { point, tolerance -> onErase(pinnedPage, point, tolerance) },
                 onEraseEnd = onEraseEnd,
@@ -809,6 +822,7 @@ private fun PageList(
                                 annotationsForPage = annotationsForPage,
                                 textSegmentsForPage = textSegmentsForPage,
                                 onAddAnnotation = onAddAnnotation,
+                                onRequestNote = onRequestNote,
                                 onEraseStart = onEraseStart,
                                 onErase = onErase,
                                 onEraseEnd = onEraseEnd,
@@ -852,6 +866,7 @@ private fun AnnotatablePage(
     annotationsForPage: (Int) -> List<Annotation>,
     textSegmentsForPage: suspend (Int) -> List<TextSegment>,
     onAddAnnotation: (Annotation) -> Unit,
+    onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
     onEraseStart: () -> Unit,
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
@@ -905,7 +920,7 @@ private fun AnnotatablePage(
             penColor = state.penColor,
             renderScale = renderScale,
             onAdd = onAddAnnotation,
-            onRequestNote = { /* Note tool is wired in the next slice. */ },
+            onRequestNote = { anchor -> onRequestNote(pageIndex, anchor) },
             onEraseStart = onEraseStart,
             onErase = { point, tolerance -> onErase(pageIndex, point, tolerance) },
             onEraseEnd = onEraseEnd,

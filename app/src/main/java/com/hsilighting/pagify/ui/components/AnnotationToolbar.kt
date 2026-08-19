@@ -19,12 +19,16 @@ import androidx.compose.material.icons.filled.HistoryEdu
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -478,4 +482,43 @@ fun RecognisingTextHint(modifier: Modifier = Modifier) {
             )
         }
     }
+}
+
+/**
+ * Typing the text of a new note.
+ *
+ * A dialog rather than an inline field on the page: the keyboard covers roughly
+ * half a tablet screen, and an anchored editor would sit under it exactly when
+ * the note is near the bottom of a page — which is where the reader has just
+ * scrolled to in order to tap there.
+ */
+@Composable
+fun NoteComposer(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    val focus = remember { FocusRequester() }
+
+    // The dialog exists to be typed into, so it asks for the keyboard itself
+    // rather than making the reader tap the field they just asked for.
+    LaunchedEffect(Unit) { focus.requestFocus() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Add a note") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                placeholder = { Text("Note") },
+                modifier = Modifier.focusRequester(focus),
+            )
+        },
+        confirmButton = {
+            // Disabled on blank: an empty note draws as a marker with nothing in
+            // it, which cannot be told apart from a stray tap.
+            TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) {
+                Text("Add")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }

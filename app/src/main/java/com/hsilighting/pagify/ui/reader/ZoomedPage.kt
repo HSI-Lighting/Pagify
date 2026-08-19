@@ -103,6 +103,8 @@ fun ZoomedPage(
     penMode: PenMode,
     penColor: Long,
     onAddAnnotation: (Annotation) -> Unit,
+    /** The Note tool was tapped at this page point. */
+    onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
     onEraseStart: () -> Unit,
     onErase: (point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
@@ -318,7 +320,7 @@ fun ZoomedPage(
                     // be told where its top-left corner actually is.
                     contentOffset = offset,
                     onAdd = onAddAnnotation,
-                    onRequestNote = { /* Note tool is wired in the next slice. */ },
+                    onRequestNote = { anchor -> onRequestNote(pageIndex, anchor) },
                     onEraseStart = onEraseStart,
                     onErase = onErase,
                     onEraseEnd = onEraseEnd,

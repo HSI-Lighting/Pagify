@@ -443,6 +443,36 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setPenColor(color: Long) = _state.update { it.copy(penColor = color) }
 
+    /** The Note tool was tapped at [anchor] on [pageIndex]; ask for the text. */
+    fun requestNote(pageIndex: Int, anchor: Offset) = _state.update {
+        it.copy(pendingNote = PendingNote(pageIndex, anchor))
+    }
+
+    fun cancelNote() = _state.update { it.copy(pendingNote = null) }
+
+    /**
+     * Place the note that was being typed.
+     *
+     * Blank text places nothing. An empty note draws as a marker with no content,
+     * which is indistinguishable from a stray tap and impossible to tell from a
+     * bug once it is sitting on the page.
+     */
+    fun confirmNote(text: String) {
+        val pending = _state.value.pendingNote ?: return
+        _state.update { it.copy(pendingNote = null) }
+        if (text.isBlank()) return
+
+        addAnnotation(
+            Annotation.Note(
+                id = 0L,
+                pageIndex = pending.pageIndex,
+                anchor = pending.anchor,
+                text = text.trim(),
+                color = _state.value.penColor,
+            ),
+        )
+    }
+
     fun addAnnotation(annotation: Annotation) {
         val withId = when (annotation) {
             is Annotation.Highlight -> annotation.copy(id = annotations.nextId())

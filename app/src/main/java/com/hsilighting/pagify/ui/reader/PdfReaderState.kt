@@ -1,5 +1,6 @@
 package com.hsilighting.pagify.ui.reader
 
+import androidx.compose.ui.geometry.Offset
 import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.EditState
@@ -84,6 +85,15 @@ data class PdfReaderState(
     /** Pages currently being read by [com.hsilighting.pagify.core.PageTextRecogniser]. */
     val pagesBeingRecognised: Set<Int> = emptySet(),
     /**
+     * Where a note is being typed, if one is.
+     *
+     * Held here rather than in the layer that captured the tap because the text
+     * is typed in a dialog: the page is gone from under the keyboard by then, and
+     * a note placed against a composable that has since scrolled away would land
+     * wherever the reader has got to instead of where it was tapped.
+     */
+    val pendingNote: PendingNote? = null,
+    /**
      * Pages whose text was recognised rather than found in the file.
      *
      * Kept apart from ordinary text because it is not the same thing: recognition
@@ -140,3 +150,11 @@ data class PdfReaderState(
         const val PREFETCH_RADIUS = 1
     }
 }
+
+/**
+ * A note the reader has asked for and not yet typed.
+ *
+ * Carries the page as well as the point: a note is anchored in page space, and
+ * the reader may well have scrolled between the tap and the keyboard appearing.
+ */
+data class PendingNote(val pageIndex: Int, val anchor: Offset)
