@@ -189,6 +189,7 @@ class MainActivity : ComponentActivity() {
                     onCaptureShared = viewModel::captureShared,
                     onMarkupTool = viewModel::setMarkupTool,
                     onMarkupColor = viewModel::setMarkupColor,
+                    onMarkupSize = viewModel::setMarkupSize,
                     onCommitMarkup = viewModel::addMarkup,
                     onRecogniseMarkup = viewModel::recogniseAndAddMarkup,
                     onUndoMarkup = viewModel::undoMarkup,

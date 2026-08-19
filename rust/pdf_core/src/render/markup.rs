@@ -10,11 +10,11 @@
 //!
 //! ## Coordinates
 //!
-//! Shapes are in **page points, top-left origin** — the same space as annotations
-//! and as the capture's crop (decision 4.4), never in the capture's pixels.
-//! Pixel-space shapes would be wrong the moment the export scale changed, and the
-//! sheet lets exactly that happen: re-rendering the same capture at 4× has to put
-//! the markup in the same place on the page, not a quarter of the way into it.
+//! Shapes are in **capture-local units, top-left origin** — the picture's own
+//! space, not any page's. A capture can span two pages and a mark drawn across
+//! the join belongs to neither. Nor are they in pixels: the editor lets the export
+//! scale change after a mark is drawn, and a pixel-space shape would land
+//! somewhere else entirely the moment it did.
 
 use serde::{Deserialize, Serialize};
 use tiny_skia::{
@@ -57,11 +57,13 @@ pub enum Shape {
     Highlight { rect: Rect },
 }
 
-/// Alpha a highlight is drawn at, whatever alpha its colour carries.
+/// The most opaque a highlight may be drawn, whatever alpha it carries.
 ///
-/// Fixed rather than taken from the colour so a highlight cannot be committed
-/// opaque, which would black out the very thing it was drawn to point at.
-const HIGHLIGHT_ALPHA: f32 = 0.35;
+/// The intensity is the user's to set and arrives in the colour's alpha — but not
+/// all the way to opaque. A highlight exists to pick something out, so one that
+/// covers what it marks has failed at its only job, and a slider that can reach
+/// that state offers a setting nobody wants once they see it.
+const HIGHLIGHT_ALPHA_CEILING: u8 = 216;
 
 /// How long an arrow's head is, as a multiple of its stroke width.
 const ARROW_HEAD_LENGTHS: f32 = 4.0;
@@ -127,13 +129,13 @@ fn draw(pixmap: &mut PixmapMut, mark: &Markup, scale: f32) {
 
     let path = match &mark.shape {
         Shape::Highlight { rect } => {
-            // Filled, and at a fixed alpha: a highlight that covers what it marks
-            // has failed at the one thing it is for.
+            // Filled, at the intensity the colour carries — capped, so however
+            // far the slider is pushed the page still reads through it.
             paint.set_color_rgba8(
                 mark.color.r,
                 mark.color.g,
                 mark.color.b,
-                (255.0 * HIGHLIGHT_ALPHA) as u8,
+                mark.color.a.min(HIGHLIGHT_ALPHA_CEILING),
             );
             let (left, top) = to_pixels(
                 Point {
@@ -411,7 +413,8 @@ mod tests {
             &mut bitmap,
             &[Markup {
                 shape: Shape::Highlight { rect: rect(20.0, 45.0, 80.0, 55.0) },
-                color: Color { r: 255, g: 224, b: 102, a: 255 },
+                // Alpha is the intensity, which is the user's to set.
+                color: Color { r: 255, g: 224, b: 102, a: 90 },
                 width_pt: 0.0,
             }],
             SCALE,
@@ -424,6 +427,57 @@ mod tests {
             "the black band was covered rather than washed: {over_text:?}",
         );
         assert!(over_text.0 > 0, "the wash left no colour at all: {over_text:?}");
+    }
+
+    #[test]
+    fn a_highlights_intensity_comes_from_its_colour() {
+        // The intensity slider sets this. A fixed alpha — which is what this was —
+        // would leave the slider looking connected to nothing.
+        fn wash(alpha: u8) -> i32 {
+            let mut bitmap = white_capture();
+            composite(
+                &mut bitmap,
+                &[Markup {
+                    shape: Shape::Highlight { rect: rect(20.0, 20.0, 80.0, 80.0) },
+                    color: Color { r: 0, g: 0, b: 0, a: alpha },
+                    width_pt: 0.0,
+                }],
+                SCALE,
+            )
+            .unwrap();
+            pixel(&bitmap, 100, 100).0 as i32
+        }
+
+        assert!(wash(200) < wash(90), "a stronger alpha should darken further");
+        assert!(wash(30) > wash(90), "a weaker alpha should darken less");
+    }
+
+    #[test]
+    fn a_highlight_can_never_be_drawn_fully_opaque() {
+        // However far the slider is pushed, the page has to read through it, or
+        // the tool hides the very thing it was used to point at.
+        let mut bitmap = white_capture();
+        for y in 90..110 {
+            for x in 40..160 {
+                let at = y * bitmap.stride + x * 4;
+                bitmap.data[at..at + 3].copy_from_slice(&[0, 0, 0]);
+            }
+        }
+
+        composite(
+            &mut bitmap,
+            &[Markup {
+                shape: Shape::Highlight { rect: rect(20.0, 45.0, 80.0, 55.0) },
+                color: Color { r: 255, g: 255, b: 0, a: 255 },
+                width_pt: 0.0,
+            }],
+            SCALE,
+        )
+        .unwrap();
+
+        // The black band underneath still shows through the strongest wash.
+        let over_text = pixel(&bitmap, 100, 100);
+        assert!(over_text.1 < 250, "the wash went opaque: {over_text:?}");
     }
 
     #[test]

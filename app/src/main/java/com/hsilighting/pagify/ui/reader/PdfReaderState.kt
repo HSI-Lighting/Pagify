@@ -7,6 +7,7 @@ import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.CaptureRequest
 import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.MarkupTool
+import com.hsilighting.pagify.core.defaultMarkupSizes
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
@@ -181,6 +182,15 @@ data class PdfReaderState(
     val markup: List<Markup> = emptyList(),
     val markupTool: MarkupTool = MarkupTool.Pen,
     val markupColor: Long = AnnotationColors.RED,
+    /**
+     * How heavy each tool draws — nib width for the ones that draw a line, wash
+     * intensity for the highlighter.
+     *
+     * Per tool, so setting a fine pen survives a trip through the highlighter and
+     * back. Kept on the reader rather than inside the editor because it should
+     * also survive the editor being closed and another capture taken.
+     */
+    val markupSizes: Map<MarkupTool, Float> = defaultMarkupSizes(),
 ) {
     val isReady: Boolean get() = phase is Phase.Ready
     /** 1-based, for display. */

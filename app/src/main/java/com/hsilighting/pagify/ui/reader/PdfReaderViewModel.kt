@@ -30,6 +30,9 @@ import com.hsilighting.pagify.core.isWorthCapturing
 import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupTool
+import com.hsilighting.pagify.core.defaultSize
+import com.hsilighting.pagify.core.markupFor
+import com.hsilighting.pagify.core.sizeRange
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PageTextRecogniser
@@ -1481,9 +1484,28 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setMarkupColor(color: Long) = _state.update { it.copy(markupColor = color) }
 
+    /**
+     * How heavy the current tool draws: nib width, or intensity for the
+     * highlighter.
+     *
+     * Set against the tool it belongs to rather than globally, so each tool keeps
+     * whatever it was last set to.
+     */
+    fun setMarkupSize(tool: MarkupTool, size: Float) = _state.update {
+        it.copy(markupSizes = it.markupSizes + (tool to size.coerceIn(tool.sizeRange)))
+    }
+
     /** Add a mark that needed no recognition — a dragged shape, or a plain stroke. */
     fun addMarkup(shape: MarkupShape) = _state.update {
-        it.copy(markup = it.markup + Markup(shape, it.markupColor))
+        val tool = it.markupTool
+        it.copy(
+            markup = it.markup + markupFor(
+                shape = shape,
+                tool = tool,
+                color = it.markupColor,
+                size = it.markupSizes[tool] ?: tool.defaultSize,
+            ),
+        )
     }
 
     /**

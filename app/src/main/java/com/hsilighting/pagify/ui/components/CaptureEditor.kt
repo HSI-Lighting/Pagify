@@ -1,6 +1,7 @@
 package com.hsilighting.pagify.ui.components
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,7 +17,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowRightAlt
 import androidx.compose.material.icons.automirrored.filled.Undo
@@ -36,6 +39,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -47,9 +51,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.hsilighting.pagify.core.AnnotationColors
@@ -58,7 +68,11 @@ import com.hsilighting.pagify.core.CaptureScale
 import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupTool
+import com.hsilighting.pagify.core.isIntensity
+import com.hsilighting.pagify.core.sizePresets
+import com.hsilighting.pagify.core.sizeRange
 import com.hsilighting.pagify.ui.reader.CapturePreview
+import kotlin.math.roundToInt
 
 /**
  * The capture, full screen, with everything you can do to it.
@@ -82,10 +96,13 @@ fun CaptureEditor(
     markup: List<Markup>,
     markupTool: MarkupTool,
     markupColor: Long,
+    /** How heavy the current tool draws: nib width, or intensity for the wash. */
+    markupSize: Float,
     onScaleChange: (CaptureScale) -> Unit,
     onFormatChange: (CaptureFormat) -> Unit,
     onMarkupTool: (MarkupTool) -> Unit,
     onMarkupColor: (Long) -> Unit,
+    onMarkupSize: (MarkupTool, Float) -> Unit,
     onCommitMarkup: (MarkupShape) -> Unit,
     onRecogniseMarkup: (List<Offset>) -> Unit,
     onUndoMarkup: () -> Unit,
@@ -96,6 +113,7 @@ fun CaptureEditor(
 ) {
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
+    var pickingColour by remember { mutableStateOf(false) }
 
     // A window of its own rather than a box inside the reader, so it covers the
     // app bar and the thumbnail rail too. Placed in the reader's content area it
@@ -114,6 +132,17 @@ fun CaptureEditor(
         // Back closes the editor rather than the document. The dialog handles back
         // itself, but only for its own window — this keeps the two paths the same.
         BackHandler(onBack = onDismiss)
+
+        if (pickingColour) {
+            ColourWheelDialog(
+                initial = markupColor,
+                onPick = {
+                    onMarkupColor(it)
+                    pickingColour = false
+                },
+                onDismiss = { pickingColour = false },
+            )
+        }
 
         Surface(
             modifier = Modifier.fillMaxSize(),
@@ -182,6 +211,7 @@ fun CaptureEditor(
                         markup = markup,
                         tool = markupTool,
                         color = markupColor,
+                        size = markupSize,
                         onCommit = onCommitMarkup,
                         onRecognise = onRecogniseMarkup,
                         zoom = zoom,
@@ -211,8 +241,11 @@ fun CaptureEditor(
                     MarkupTools(
                         tool = markupTool,
                         color = markupColor,
+                        size = markupSize,
                         onTool = onMarkupTool,
                         onColor = onMarkupColor,
+                        onSize = onMarkupSize,
+                        onPickCustomColour = { pickingColour = true },
                     )
     
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -273,118 +306,336 @@ fun CaptureEditor(
     }
 }
 
-
 /**
- * What to draw with.
+ * What to draw with, how heavy, and in what colour.
  *
  * The pen is first and selected by default: it needs no aiming, and holding still
  * at the end of a stroke turns a rough circle or box into the tidy version anyway,
  * so the other tools are for when someone wants the shape without the hold.
+ *
+ * The sizes sit beside the colours and are always on screen, because "how thick"
+ * is asked as often as "what colour" and burying it behind a press would make the
+ * common case the slow one. The long press on a tool is for the size that is not
+ * one of the four.
  */
 @Composable
 private fun MarkupTools(
     tool: MarkupTool,
     color: Long,
+    size: Float,
     onTool: (MarkupTool) -> Unit,
     onColor: (Long) -> Unit,
+    onSize: (MarkupTool, Float) -> Unit,
+    onPickCustomColour: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
+    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            MarkupToolButton(Icons.Filled.Draw, "Pen", MarkupTool.Pen, tool, onTool)
+            MarkupToolButton(Icons.Filled.Draw, "Pen", MarkupTool.Pen, tool, size, onTool, onSize)
             MarkupToolButton(
                 Icons.Filled.HorizontalRule,
                 "Line",
                 MarkupTool.Line,
                 tool,
+                size,
                 onTool,
+                onSize,
             )
             MarkupToolButton(
                 Icons.AutoMirrored.Filled.ArrowRightAlt,
                 "Arrow",
                 MarkupTool.Arrow,
                 tool,
+                size,
                 onTool,
+                onSize,
             )
             MarkupToolButton(
                 Icons.Filled.CheckBoxOutlineBlank,
                 "Box",
                 MarkupTool.Rectangle,
                 tool,
+                size,
                 onTool,
+                onSize,
             )
             MarkupToolButton(
                 Icons.Filled.RadioButtonUnchecked,
                 "Circle",
                 MarkupTool.Ellipse,
                 tool,
+                size,
                 onTool,
+                onSize,
             )
             MarkupToolButton(
                 Icons.Filled.Highlight,
                 "Highlight",
                 MarkupTool.Highlight,
                 tool,
+                size,
                 onTool,
+                onSize,
             )
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            MARKUP_COLOURS.forEach { swatch ->
-                Box(
-                    modifier = Modifier
-                        .size(26.dp)
-                        .background(Color(swatch), CircleShape)
-                        .border(
-                            width = if (swatch == color) 3.dp else 1.dp,
-                            color = if (swatch == color) {
-                                MaterialTheme.colorScheme.onSurface
-                            } else {
-                                MaterialTheme.colorScheme.outlineVariant
-                            },
-                            shape = CircleShape,
-                        )
-                        .clickable { onColor(swatch) },
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            SizePresets(tool = tool, size = size, color = color, onSize = onSize)
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                MARKUP_COLOURS.forEach { swatch ->
+                    ColourSwatch(
+                        colour = swatch,
+                        selected = swatch == color,
+                        onClick = { onColor(swatch) },
+                    )
+                }
+                CustomColourSwatch(
+                    current = color,
+                    isCustom = color !in MARKUP_COLOURS,
+                    onClick = onPickCustomColour,
                 )
             }
         }
     }
 }
 
+/**
+ * The four sizes a tap away, drawn at the size they mean.
+ *
+ * A dot the size of the nib, or a bar at the intensity of the wash — because a
+ * row of identical dots labelled 1 to 4 answers the question with a number when
+ * the question was about how it will look.
+ */
+@Composable
+private fun SizePresets(
+    tool: MarkupTool,
+    size: Float,
+    color: Long,
+    onSize: (MarkupTool, Float) -> Unit,
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        tool.sizePresets.forEach { preset ->
+            val chosen = kotlin.math.abs(preset - size) < 0.01f
+            Box(
+                modifier = Modifier
+                    .size(30.dp)
+                    .background(
+                        color = if (chosen) {
+                            MaterialTheme.colorScheme.secondaryContainer
+                        } else {
+                            Color.Transparent
+                        },
+                        shape = CircleShape,
+                    )
+                    .clickable { onSize(tool, preset) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Canvas(Modifier.size(22.dp)) {
+                    if (tool.isIntensity) {
+                        drawRect(
+                            color = Color(color).copy(alpha = preset),
+                            topLeft = Offset(0f, this.size.height * 0.25f),
+                            size = Size(this.size.width, this.size.height * 0.5f),
+                        )
+                    } else {
+                        // Half the nib, so the dot is the width the tool draws,
+                        // clamped to something still visible and still inside.
+                        drawCircle(
+                            color = Color(color),
+                            radius = (preset * PRESET_DOT_SCALE).coerceIn(2f, this.size.minDimension / 2f),
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ColourSwatch(colour: Long, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(26.dp)
+            .background(Color(colour), CircleShape)
+            .border(
+                width = if (selected) 3.dp else 1.dp,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.outlineVariant
+                },
+                shape = CircleShape,
+            )
+            .clickable(onClick = onClick),
+    )
+}
+
+/**
+ * The way out of the palette.
+ *
+ * Shows the wheel it opens until a colour has been picked from it, and the colour
+ * itself afterwards — otherwise choosing a custom colour makes the selection ring
+ * vanish from the row and nothing on screen says what is being drawn with.
+ */
+@Composable
+private fun CustomColourSwatch(current: Long, isCustom: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(26.dp)
+            .border(
+                width = if (isCustom) 3.dp else 1.dp,
+                color = if (isCustom) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.outlineVariant
+                },
+                shape = CircleShape,
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.size(22.dp)) {
+            if (isCustom) {
+                drawCircle(Color(current))
+            } else {
+                drawCircle(
+                    brush = Brush.sweepGradient(
+                        listOf(
+                            Color.Red,
+                            Color.Yellow,
+                            Color.Green,
+                            Color.Cyan,
+                            Color.Blue,
+                            Color.Magenta,
+                            Color.Red,
+                        ),
+                    ),
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A tool, with its size a long press away.
+ *
+ * Long press selects the tool as well as opening the slider. Opening a size
+ * control for a tool you are not using would be a strange thing to offer, and
+ * having to tap first and then press again is a step for nothing.
+ */
 @Composable
 private fun MarkupToolButton(
     icon: ImageVector,
     label: String,
     represents: MarkupTool,
     selected: MarkupTool,
+    size: Float,
     onTool: (MarkupTool) -> Unit,
+    onSize: (MarkupTool, Float) -> Unit,
 ) {
     val isSelected = represents == selected
-    IconButton(
-        onClick = { onTool(represents) },
-        modifier = Modifier
-            .size(44.dp)
-            .background(
-                color = if (isSelected) {
-                    MaterialTheme.colorScheme.secondaryContainer
+    var adjusting by remember { mutableStateOf(false) }
+
+    Box {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .background(
+                    color = if (isSelected) {
+                        MaterialTheme.colorScheme.secondaryContainer
+                    } else {
+                        Color.Transparent
+                    },
+                    shape = CircleShape,
+                )
+                .combinedClickableCompat(
+                    onClick = { onTool(represents) },
+                    onLongClick = {
+                        onTool(represents)
+                        adjusting = true
+                    },
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = label,
+                tint = if (isSelected) {
+                    MaterialTheme.colorScheme.onSecondaryContainer
                 } else {
-                    Color.Transparent
+                    MaterialTheme.colorScheme.onSurfaceVariant
                 },
-                shape = CircleShape,
-            ),
+            )
+        }
+
+        if (adjusting) {
+            SizePopup(
+                tool = represents,
+                label = label,
+                size = size,
+                onSize = { onSize(represents, it) },
+                onDismiss = { adjusting = false },
+            )
+        }
+    }
+}
+
+/**
+ * The slider, over the tool it belongs to.
+ *
+ * A popup rather than a dialog: it is a small adjustment to something visible,
+ * and a dialog would take the whole screen away from the picture being marked up.
+ */
+@Composable
+private fun SizePopup(
+    tool: MarkupTool,
+    label: String,
+    size: Float,
+    onSize: (Float) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Popup(
+        alignment = Alignment.TopCenter,
+        // Above the button, which is near the bottom of the screen.
+        offset = IntOffset(0, -POPUP_LIFT_PX),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = if (isSelected) {
-                MaterialTheme.colorScheme.onSecondaryContainer
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-        )
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            tonalElevation = 3.dp,
+            shadowElevation = 8.dp,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            Column(
+                modifier = Modifier.width(240.dp).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    if (tool.isIntensity) {
+                        "$label · ${(size * 100).roundToInt()}%"
+                    } else {
+                        "$label · ${"%.1f".format(size)}"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                )
+                Slider(
+                    value = size,
+                    onValueChange = onSize,
+                    valueRange = tool.sizeRange,
+                )
+            }
+        }
     }
 }
 
@@ -411,3 +662,15 @@ private const val MINIMUM_ZOOM = 1f
  * downsampled, so more zoom only enlarges pixels.
  */
 private const val MAXIMUM_ZOOM = 8f
+
+/**
+ * How far a preset dot's radius is from the nib width it stands for.
+ *
+ * The dots are a rank, not a ruler: a 16-unit nib drawn at true size would fill
+ * its slot and a 0.6 one would be invisible, so the scale keeps the order and the
+ * clamps keep both ends usable.
+ */
+private const val PRESET_DOT_SCALE = 2.2f
+
+/** How far above the tool row the size popup sits, in pixels. */
+private const val POPUP_LIFT_PX = 240

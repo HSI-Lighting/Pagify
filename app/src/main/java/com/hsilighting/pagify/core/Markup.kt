@@ -44,11 +44,69 @@ data class Markup(
     val widthPoints: Float = MARKUP_STROKE_POINTS,
 )
 
-/** Default nib, in page points. About a pen line on paper. */
+/** Default nib, in capture units. About a pen line on paper. */
 const val MARKUP_STROKE_POINTS = 2.4f
 
 /** What the markup toolbar can draw. */
 enum class MarkupTool { Pen, Line, Arrow, Rectangle, Ellipse, Highlight }
+
+/**
+ * How heavy a tool draws.
+ *
+ * One number per tool, meaning two different things: for anything that draws a
+ * line it is the **nib width**, and for the highlighter it is the **intensity**
+ * of the wash, 0..1. They are the same control answering the same question —
+ * "how strong is this tool" — so they are one setting rather than two, and only
+ * the range and the label differ.
+ *
+ * Per tool rather than shared: someone who has set a fine pen does not expect
+ * picking up the highlighter and putting it down again to have changed it.
+ */
+val MarkupTool.isIntensity: Boolean get() = this == MarkupTool.Highlight
+
+/** Where a tool's slider starts and stops. */
+val MarkupTool.sizeRange: ClosedFloatingPointRange<Float>
+    get() = if (isIntensity) 0.08f..0.85f else 0.6f..16f
+
+/** What a tool draws at until it is changed. */
+val MarkupTool.defaultSize: Float get() = if (isIntensity) 0.35f else MARKUP_STROKE_POINTS
+
+/**
+ * The sizes offered as a tap rather than a drag.
+ *
+ * Four, spread across the range, because the slider is for when none of these is
+ * quite right — not the other way round. Most marks want "thin" or "thick" and
+ * nothing in between, and making that a drag every time taxes the common case.
+ */
+val MarkupTool.sizePresets: List<Float>
+    get() = if (isIntensity) {
+        listOf(0.15f, 0.3f, 0.5f, 0.75f)
+    } else {
+        listOf(1.2f, 2.4f, 5f, 10f)
+    }
+
+/** Every tool at its default, for a fresh capture. */
+fun defaultMarkupSizes(): Map<MarkupTool, Float> =
+    MarkupTool.entries.associateWith { it.defaultSize }
+
+/**
+ * Build a mark from the tool that drew it and how heavy that tool is set to.
+ *
+ * The highlighter's intensity rides in the colour's **alpha**, which is where the
+ * engine reads it: a wash and a stroke are the same `Markup`, and giving the
+ * highlighter a field of its own would mean every other tool carrying one it
+ * ignores.
+ */
+fun markupFor(shape: MarkupShape, tool: MarkupTool, color: Long, size: Float): Markup =
+    if (tool.isIntensity) {
+        Markup(
+            shape = shape,
+            color = (color and 0x00FFFFFFL) or ((size.coerceIn(0f, 1f) * 255f).toLong() shl 24),
+            widthPoints = 0f,
+        )
+    } else {
+        Markup(shape = shape, color = color, widthPoints = size)
+    }
 
 /**
  * Whether this tool's shape is dragged corner to corner rather than traced.

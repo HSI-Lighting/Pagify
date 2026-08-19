@@ -86,6 +86,7 @@ import com.hsilighting.pagify.core.captureTilesFor
 import com.hsilighting.pagify.ui.components.captureOverlay
 import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupTool
+import com.hsilighting.pagify.core.defaultSize
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
 import com.hsilighting.pagify.ui.components.NoteComposer
 import com.hsilighting.pagify.ui.components.NoteReader
@@ -208,6 +209,8 @@ fun PdfReaderScreen(
     // and the engine's from then on — see roadmap decision 4.7.
     onMarkupTool: (MarkupTool) -> Unit,
     onMarkupColor: (Long) -> Unit,
+    /** Nib width, or the highlighter's intensity — see `MarkupTool.isIntensity`. */
+    onMarkupSize: (MarkupTool, Float) -> Unit,
     onCommitMarkup: (MarkupShape) -> Unit,
     /** A stroke that was held still before lifting; ask what shape it is. */
     onRecogniseMarkup: (List<Offset>) -> Unit,
@@ -469,10 +472,12 @@ fun PdfReaderScreen(
                 markup = state.markup,
                 markupTool = state.markupTool,
                 markupColor = state.markupColor,
+                markupSize = state.markupSizes[state.markupTool] ?: state.markupTool.defaultSize,
                 onScaleChange = onCaptureScale,
                 onFormatChange = onCaptureFormat,
                 onMarkupTool = onMarkupTool,
                 onMarkupColor = onMarkupColor,
+                onMarkupSize = onMarkupSize,
                 onCommitMarkup = onCommitMarkup,
                 onRecogniseMarkup = onRecogniseMarkup,
                 onUndoMarkup = onUndoMarkup,

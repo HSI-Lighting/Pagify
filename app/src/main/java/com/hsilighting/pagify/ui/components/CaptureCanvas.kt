@@ -35,6 +35,7 @@ import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.MarkupGesture
 import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupTool
+import com.hsilighting.pagify.core.markupFor
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -58,6 +59,8 @@ fun CaptureCanvas(
     markup: List<Markup>,
     tool: MarkupTool,
     color: Long,
+    /** Nib width, or the highlighter's intensity. */
+    size: Float,
     onCommit: (MarkupShape) -> Unit,
     /** Held still before lifting: ask the engine what this stroke was. */
     onRecognise: (List<Offset>) -> Unit,
@@ -112,6 +115,7 @@ fun CaptureCanvas(
                 markup = markup,
                 tool = tool,
                 color = color,
+                size = size,
                 onCommit = onCommit,
                 onRecognise = onRecognise,
             )
@@ -127,6 +131,7 @@ private fun MarkupSurface(
     markup: List<Markup>,
     tool: MarkupTool,
     color: Long,
+    size: Float,
     onCommit: (MarkupShape) -> Unit,
     onRecognise: (List<Offset>) -> Unit,
 ) {
@@ -134,6 +139,8 @@ private fun MarkupSurface(
     val recognise by rememberUpdatedState(onRecognise)
     val marks by rememberUpdatedState(markup)
     val ink by rememberUpdatedState(color)
+    val currentTool by rememberUpdatedState(tool)
+    val currentSize by rememberUpdatedState(size)
 
     // Re-made when the tool changes: a gesture belongs to one tool, and carrying a
     // half-drawn stroke into another would commit it as the wrong shape.
@@ -207,7 +214,13 @@ private fun MarkupSurface(
     ) {
         androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
             marks.forEach { drawMarkup(it.shape, it.color, it.widthPoints * scale, ::toPixels) }
-            preview?.let { drawMarkup(it, ink, MARKUP_PREVIEW_WIDTH_POINTS * scale, ::toPixels) }
+            // The wet stroke is drawn through the same builder the commit uses, so
+            // what is under the finger is what ends up in the file — including the
+            // highlighter's intensity, which rides in the colour's alpha.
+            preview?.let { shape ->
+                val wet = markupFor(shape, currentTool, ink, currentSize)
+                drawMarkup(wet.shape, wet.color, wet.widthPoints * scale, ::toPixels)
+            }
         }
 
         if (dwelling) {
@@ -315,7 +328,9 @@ private fun DrawScope.drawMarkup(
             val (topLeft, size) = shape.rect.inPixels(toPixels)
             // Filled and translucent, matching what the engine composites: a
             // highlight that covers what it marks has failed at its one job.
-            drawRect(ink.copy(alpha = HIGHLIGHT_ALPHA), topLeft = topLeft, size = size)
+            // The alpha is the mark's own: the intensity slider sets it, and the
+            // engine composites the export from the same number.
+            drawRect(ink, topLeft = topLeft, size = size)
         }
     }
 }
@@ -327,9 +342,5 @@ private fun Rect.inPixels(toPixels: (Offset) -> Offset): Pair<Offset, Size> {
 }
 
 /** Matches `render::markup` in the engine, so the preview is what gets exported. */
-private const val HIGHLIGHT_ALPHA = 0.35f
 private const val ARROW_HEAD_LENGTHS = 4f
 private const val ARROW_HEAD_ANGLE = 0.44f
-
-/** Nib the live stroke is previewed at. The committed mark uses the same. */
-private const val MARKUP_PREVIEW_WIDTH_POINTS = 2.4f
