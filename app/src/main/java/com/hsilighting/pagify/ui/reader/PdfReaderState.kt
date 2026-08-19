@@ -52,6 +52,15 @@ data class PdfReaderState(
      * depend on which of the two the user last touched.
      */
     val editState: EditState = EditState(),
+    /**
+     * Bumped whenever the document changes under the pages on screen.
+     *
+     * A page render is skipped once it is already drawn at that scale. That is
+     * what keeps scrolling cheap, and it is also what left an erased mark on
+     * screen: PDFium draws saved annotations as part of the page, so the file had
+     * changed and nothing asked for the pixels again.
+     */
+    val pageContentRevision: Int = 0,
     /** The page-organisation sheet: reorder, rotate, delete, insert. */
     val showPageOrganiser: Boolean = false,
     /** A save is running. Blocks a second one and drives the progress indicator. */

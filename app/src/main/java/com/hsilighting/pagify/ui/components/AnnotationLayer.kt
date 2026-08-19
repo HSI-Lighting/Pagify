@@ -268,12 +268,28 @@ private fun DrawScope.drawAnnotation(annotation: Annotation, scale: Float, origi
             drawInkStroke(stroke, annotation.color, SIGNATURE_WIDTH_POINTS, scale, origin)
         }
         is Annotation.Note -> {
-            // A small anchored marker; the note's text is shown in a sheet rather
-            // than painted onto the page, where it would obscure what it annotates.
+            // An anchored marker; the note's text is shown in a sheet rather than
+            // painted onto the page, where it would obscure what it annotates.
+            //
+            // Outlined, rather than a plain disc in the pen colour. A 7 pt yellow
+            // dot on white paper is genuinely hard to find, and the first version
+            // of this was reported as the note not being added at all — which is
+            // exactly what an invisible marker looks like.
+            val centre = annotation.anchor * scale + origin
+            val radius = NOTE_MARKER_RADIUS_POINTS * scale
+            drawCircle(Color(annotation.color), radius = radius, center = centre)
             drawCircle(
-                Color(annotation.color),
-                radius = NOTE_MARKER_RADIUS_POINTS * scale,
-                center = annotation.anchor * scale + origin,
+                Color.Black.copy(alpha = NOTE_OUTLINE_ALPHA),
+                radius = radius,
+                center = centre,
+                style = Stroke(width = NOTE_OUTLINE_WIDTH_POINTS * scale),
+            )
+            // A pip in the middle, so it reads as a marker rather than as a stray
+            // blob of highlighter.
+            drawCircle(
+                Color.Black.copy(alpha = NOTE_OUTLINE_ALPHA),
+                radius = radius * NOTE_PIP_FRACTION,
+                center = centre,
             )
         }
     }
@@ -345,3 +361,12 @@ private const val ERASER_RING_PX = 2f
  * exact hit test would ask for precision no finger has. Roughly half a fingertip.
  */
 private val ERASER_TOUCH_RADIUS = 14.dp
+
+/** Ink of the note marker's outline and pip. */
+private const val NOTE_OUTLINE_ALPHA = 0.65f
+
+/** Outline thickness, in page points, so it holds up at any zoom. */
+private const val NOTE_OUTLINE_WIDTH_POINTS = 1.2f
+
+/** Pip radius as a fraction of the marker's. */
+private const val NOTE_PIP_FRACTION = 0.32f

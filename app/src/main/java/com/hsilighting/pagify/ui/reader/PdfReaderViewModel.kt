@@ -1288,6 +1288,12 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 if (below > 0) savedMarkLocations[id] = pageIndex to (at.second - below)
             }
 
+            // The mark was part of the drawn page, so the pixels are now wrong.
+            thumbnailCache.clear()
+            dropRecentRasters()
+            _state.update {
+                it.copy(pageContentRevision = it.pageContentRevision + 1)
+            }
             refreshEditState()
         }
     }

@@ -924,6 +924,11 @@ private fun AnnotatablePage(
         knownSize = pageSize,
         pageSizeProvider = pageSizeProvider,
         renderer = renderer,
+        // Read straight off the state this composable already has, rather than
+        // threaded down from the screen: it changes for exactly the same reason
+        // the marks do, and three more parameters to carry one integer would be
+        // three more places to forget it.
+        contentRevision = state.pageContentRevision,
         modifier = Modifier.annotationLayer(
             pageIndex = pageIndex,
             annotations = annotations,

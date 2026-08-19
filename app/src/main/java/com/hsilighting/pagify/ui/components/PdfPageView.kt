@@ -49,6 +49,15 @@ fun PdfPageView(
     knownSize: PageSize? = null,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> Bitmap?,
+    /**
+     * Bumped when the document itself changes under this page.
+     *
+     * A render is skipped once the page is already drawn at that scale, which is
+     * what stops a scroll re-rasterising everything. It also meant that erasing a
+     * mark PDFium draws as part of the page left the old raster on screen: the
+     * file had changed and nothing asked for the pixels again.
+     */
+    contentRevision: Int = 0,
     modifier: Modifier = Modifier,
 ) {
     // Seeded from the caller when the size is already known, so the page is never
@@ -58,7 +67,9 @@ fun PdfPageView(
     var pageSize by remember(pageIndex) { mutableStateOf(knownSize) }
     var bitmap by remember(pageIndex) { mutableStateOf<Bitmap?>(null) }
     /** Scale of what is currently on screen, so an upgrade is not redone. */
-    var renderedScale by remember(pageIndex) { mutableStateOf(0f) }
+    // Reset when the document changes, so the guards below stop suppressing the
+    // re-render the change requires.
+    var renderedScale by remember(pageIndex, contentRevision) { mutableStateOf(0f) }
 
     LaunchedEffect(pageIndex) {
         SessionRecorder.record("PAGE_ENTER", "page=$pageIndex")
@@ -88,7 +99,7 @@ fun PdfPageView(
     }
 
     // Proxy first, unconditionally: cheap, and it is what fills the placeholder.
-    LaunchedEffect(pageIndex, proxyScale) {
+    LaunchedEffect(pageIndex, proxyScale, contentRevision) {
         val scale = proxyScale ?: return@LaunchedEffect
         if (renderedScale >= scale) return@LaunchedEffect
         renderer(pageIndex, scale)?.let {
@@ -101,7 +112,7 @@ fun PdfPageView(
     }
 
     // Then the readable pass, only where it earns its cost.
-    LaunchedEffect(pageIndex, readableScale, readable) {
+    LaunchedEffect(pageIndex, readableScale, readable, contentRevision) {
         if (!readable) return@LaunchedEffect
         val scale = readableScale ?: return@LaunchedEffect
         if (renderedScale >= scale) return@LaunchedEffect
