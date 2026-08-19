@@ -522,3 +522,21 @@ fun NoteComposer(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
 }
+
+/**
+ * Reading a note that is already on the page.
+ *
+ * The counterpart to [NoteComposer], and the half that was missing: a note's text
+ * was stored and then unreachable, so the tool appeared to add a marker and
+ * nothing else.
+ */
+@Composable
+fun NoteReader(text: String, onDelete: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Note") },
+        text = { Text(text.ifBlank { "(empty)" }) },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        dismissButton = { TextButton(onClick = onDelete) { Text("Delete") } },
+    )
+}

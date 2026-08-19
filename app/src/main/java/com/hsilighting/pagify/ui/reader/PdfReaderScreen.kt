@@ -74,6 +74,7 @@ import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.ui.components.AnnotationToolbar
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
 import com.hsilighting.pagify.ui.components.NoteComposer
+import com.hsilighting.pagify.ui.components.NoteReader
 import com.hsilighting.pagify.ui.components.RecognisingTextHint
 import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.twoFingerPan
@@ -132,6 +133,10 @@ fun PdfReaderScreen(
     /** The reader typed a note, or dismissed the composer. */
     onConfirmNote: (String) -> Unit,
     onCancelNote: () -> Unit,
+    /** A note marker was tapped, and what to do with the note it opened. */
+    onOpenNote: (com.hsilighting.pagify.core.Annotation.Note) -> Unit,
+    onCloseNote: () -> Unit,
+    onDeleteNote: () -> Unit,
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
@@ -319,6 +324,7 @@ fun PdfReaderScreen(
                     onAddAnnotation = onAddAnnotation,
                     onRequestNote = onRequestNote,
                     onPageMarksNeeded = onPageMarksNeeded,
+                    onOpenNote = onOpenNote,
                     onEraseStart = onEraseStart,
                     onErase = onErase,
                     onEraseEnd = onEraseEnd,
@@ -406,6 +412,14 @@ fun PdfReaderScreen(
             }
         }
 
+        state.openNote?.let { note ->
+            NoteReader(
+                text = note.text,
+                onDelete = onDeleteNote,
+                onDismiss = onCloseNote,
+            )
+        }
+
         state.pendingNote?.let {
             NoteComposer(onConfirm = onConfirmNote, onDismiss = onCancelNote)
         }
@@ -458,6 +472,7 @@ private fun PageList(
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
+    onOpenNote: (Annotation.Note) -> Unit,
     onEraseStart: () -> Unit,
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
@@ -605,6 +620,7 @@ private fun PageList(
                 onAddAnnotation = onAddAnnotation,
                 onRequestNote = onRequestNote,
                 onPageMarksNeeded = onPageMarksNeeded,
+                onOpenNote = onOpenNote,
                 onEraseStart = onEraseStart,
                 onErase = { point, tolerance -> onErase(pinnedPage, point, tolerance) },
                 onEraseEnd = onEraseEnd,
@@ -830,6 +846,7 @@ private fun PageList(
                                 onAddAnnotation = onAddAnnotation,
                                 onRequestNote = onRequestNote,
                                 onPageMarksNeeded = onPageMarksNeeded,
+                                onOpenNote = onOpenNote,
                                 onEraseStart = onEraseStart,
                                 onErase = onErase,
                                 onEraseEnd = onEraseEnd,
@@ -876,6 +893,7 @@ private fun AnnotatablePage(
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
+    onOpenNote: (Annotation.Note) -> Unit,
     onEraseStart: () -> Unit,
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
@@ -939,6 +957,7 @@ private fun AnnotatablePage(
             renderScale = renderScale,
             onAdd = onAddAnnotation,
             onRequestNote = { anchor -> onRequestNote(pageIndex, anchor) },
+            onOpenNote = onOpenNote,
             onEraseStart = onEraseStart,
             onErase = { point, tolerance -> onErase(pageIndex, point, tolerance) },
             onEraseEnd = onEraseEnd,

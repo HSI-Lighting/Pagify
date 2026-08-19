@@ -27,6 +27,7 @@ import androidx.compose.ui.draw.drawWithContent
 import com.hsilighting.pagify.core.Annotation
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.NOTE_MARKER_RADIUS_POINTS
+import com.hsilighting.pagify.core.isHitBy
 import com.hsilighting.pagify.core.PenMode
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
@@ -66,6 +67,8 @@ fun Modifier.annotationLayer(
     contentOffset: Offset = Offset.Zero,
     onAdd: (Annotation) -> Unit,
     onRequestNote: (Offset) -> Unit,
+    /** A note marker was tapped; show what it says. */
+    onOpenNote: (Annotation.Note) -> Unit = {},
     /** Opens an eraser stroke; everything it takes until [onEraseEnd] is one undo. */
     onEraseStart: () -> Unit = {},
     /** Rub out whatever is at this page point, within this tolerance in points. */
@@ -89,6 +92,8 @@ fun Modifier.annotationLayer(
     val currentSegments by rememberUpdatedState(textSegments)
     val add by rememberUpdatedState(onAdd)
     val requestNote by rememberUpdatedState(onRequestNote)
+    val openNote by rememberUpdatedState(onOpenNote)
+    val currentAnnotations by rememberUpdatedState(annotations)
     val scale by rememberUpdatedState(renderScale)
     val origin by rememberUpdatedState(contentOffset)
     val eraseStart by rememberUpdatedState(onEraseStart)
@@ -191,7 +196,21 @@ fun Modifier.annotationLayer(
         }
 
         AnnotationTool.Note -> Modifier.pointerInput(pageIndex, tool) {
-            detectTapGestures { position -> requestNote(toPage(position)) }
+            detectTapGestures { position ->
+                val at = toPage(position)
+                // A tap on an existing marker opens it; anywhere else starts a new
+                // one. Without this the text a note holds could be typed and never
+                // read again — the marker was the only thing the page ever showed,
+                // which made the tool look like it added a dot and nothing else.
+                //
+                // Topmost first: later marks draw over earlier ones, so the last
+                // match is the one under the finger.
+                val hit = currentAnnotations
+                    .filterIsInstance<Annotation.Note>()
+                    .lastOrNull { it.isHitBy(at, tolerancePoints()) }
+
+                if (hit != null) openNote(hit) else requestNote(at)
+            }
         }
 
         // A tap rubs out the mark it lands on; a drag sweeps across several. Both

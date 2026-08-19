@@ -107,6 +107,7 @@ fun ZoomedPage(
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
+    onOpenNote: (com.hsilighting.pagify.core.Annotation.Note) -> Unit,
     onEraseStart: () -> Unit,
     onErase: (point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
@@ -323,6 +324,7 @@ fun ZoomedPage(
                     contentOffset = offset,
                     onAdd = onAddAnnotation,
                     onRequestNote = { anchor -> onRequestNote(pageIndex, anchor) },
+                    onOpenNote = onOpenNote,
                     onEraseStart = onEraseStart,
                     onErase = onErase,
                     onEraseEnd = onEraseEnd,

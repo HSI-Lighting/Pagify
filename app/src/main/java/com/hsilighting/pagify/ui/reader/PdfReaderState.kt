@@ -103,6 +103,14 @@ data class PdfReaderState(
      */
     val pendingNote: PendingNote? = null,
     /**
+     * A note the reader has tapped open.
+     *
+     * Without this the text a note holds could be typed and never read again: the
+     * page only ever drew a marker, and nothing anywhere touched `Note.text`. The
+     * tool looked like it added a dot and nothing else.
+     */
+    val openNote: com.hsilighting.pagify.core.Annotation.Note? = null,
+    /**
      * Pages whose text was recognised rather than found in the file.
      *
      * Kept apart from ordinary text because it is not the same thing: recognition

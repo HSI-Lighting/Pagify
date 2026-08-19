@@ -19,6 +19,7 @@ import com.hsilighting.pagify.core.BitmapPools
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PageTextRecogniser
+import com.hsilighting.pagify.core.NOTE_MARKER_RADIUS_POINTS
 import com.hsilighting.pagify.core.PageRemap
 import com.hsilighting.pagify.core.PdfCommand
 import com.hsilighting.pagify.core.PdfDocument
@@ -449,6 +450,19 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun cancelNote() = _state.update { it.copy(pendingNote = null) }
+
+    fun openNote(note: Annotation.Note) = _state.update { it.copy(openNote = note) }
+
+    fun closeNote() = _state.update { it.copy(openNote = null) }
+
+    /** Rub out the note being read, from the store and from the file if it is in it. */
+    fun deleteOpenNote() {
+        val note = _state.value.openNote ?: return
+        _state.update { it.copy(openNote = null) }
+        annotations.eraseAt(note.pageIndex, note.anchor, NOTE_MARKER_RADIUS_POINTS)
+        refreshAnnotations()
+        commitErasedSavedMarks(note.pageIndex)
+    }
 
     /**
      * Place the note that was being typed.
