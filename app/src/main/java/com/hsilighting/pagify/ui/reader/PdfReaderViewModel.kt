@@ -526,7 +526,18 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun eraseAt(pageIndex: Int, point: Offset, tolerance: Float) {
         val hit = annotations.eraseAt(pageIndex, point, tolerance)
-        Log.i(TAG, "erase: page=$pageIndex hit=$hit tracked=${savedMarkLocations.size}")
+        Log.i(
+            TAG,
+            "erase: page=$pageIndex at=${point.x},${point.y} tol=$tolerance hit=$hit " +
+                "marks=${annotations.forPage(pageIndex).map { m ->
+                    when (m) {
+                        is Annotation.Highlight -> "H${m.rects.firstOrNull()}"
+                        is Annotation.Ink -> "I${m.points.size}"
+                        is Annotation.Note -> "N${m.anchor}"
+                        is Annotation.Signature -> "S"
+                    }
+                }}",
+        )
         if (hit) {
             refreshAnnotations()
             // A mark that came out of the file has to come out of the file.
