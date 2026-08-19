@@ -542,3 +542,125 @@ fn a_mark_undone_before_saving_never_reaches_the_file() {
         "an undone mark was written to the file anyway",
     );
 }
+
+/// A saved mark comes back with its geometry, which is what makes it erasable.
+///
+/// Reading is not merely the inverse of writing here: the mark goes out through
+/// quad points in PDF space and comes back through them, so an error in either
+/// direction — or a disagreement between the two about the CropBox — shows up as
+/// a rect in the wrong place rather than as a failure.
+#[test]
+fn a_saved_highlight_can_be_read_back_where_it_was_put() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+    let placed = Rect {
+        left: 20.0,
+        top: 30.0,
+        right: 180.0,
+        bottom: 44.0,
+    };
+
+    doc.as_document_mut()
+        .expect("mutable")
+        .add_annotation(
+            1,
+            &Annotation::Highlight {
+                rects: vec![placed],
+                color: Color {
+                    r: 255,
+                    g: 224,
+                    b: 102,
+                    a: 128,
+                },
+            },
+        )
+        .expect("add");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    let marks = reopened.annotations(1).expect("read back");
+    assert_eq!(1, marks.len(), "exactly the one mark that was written");
+
+    match &marks[0].annotation {
+        Annotation::Highlight { rects, .. } => {
+            assert_eq!(1, rects.len());
+            let r = rects[0];
+            // Within a point: the round trip goes through f32 PDF coordinates.
+            assert!((r.left - placed.left).abs() < 1.0, "left was {}", r.left);
+            assert!((r.top - placed.top).abs() < 1.0, "top was {}", r.top);
+            assert!((r.right - placed.right).abs() < 1.0, "right was {}", r.right);
+            assert!(
+                (r.bottom - placed.bottom).abs() < 1.0,
+                "bottom was {}",
+                r.bottom,
+            );
+        }
+        other => panic!("read back as {other:?}, not a highlight"),
+    }
+}
+
+/// Erasing a saved mark works, and undoing the erase puts it back.
+///
+/// This is the whole reason reading exists: the undo record needs the mark
+/// itself, so an erase without a read is an erase that cannot be undone.
+#[test]
+fn a_saved_mark_can_be_erased_and_the_erase_undone() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "single-page.pdf");
+    doc.as_document_mut()
+        .expect("mutable")
+        .add_annotation(
+            0,
+            &Annotation::Ink {
+                strokes: vec![vec![
+                    Point { x: 10.0, y: 20.0 },
+                    Point { x: 40.0, y: 25.0 },
+                    Point { x: 70.0, y: 20.0 },
+                ]],
+                color: Color {
+                    r: 0,
+                    g: 0,
+                    b: 255,
+                    a: 255,
+                },
+                width: 3.0,
+            },
+        )
+        .expect("add");
+
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::RemoveAnnotation {
+                page_index: 0,
+                index: 0,
+            },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("erase");
+    assert_eq!(0, doc.annotation_count(0).expect("count"));
+
+    history
+        .undo(doc.as_document_mut().expect("mutable"))
+        .expect("undo")
+        .expect("something to undo");
+
+    let marks = doc.annotations(0).expect("read back");
+    assert_eq!(1, marks.len(), "the erased mark did not come back");
+    match &marks[0].annotation {
+        Annotation::Ink { strokes, .. } => {
+            assert_eq!(1, strokes.len());
+            assert_eq!(3, strokes[0].len(), "the stroke lost points on the way back");
+            assert!((strokes[0][0].x - 10.0).abs() < 1.0);
+            assert!((strokes[0][0].y - 20.0).abs() < 1.0);
+        }
+        other => panic!("came back as {other:?}, not ink"),
+    }
+}

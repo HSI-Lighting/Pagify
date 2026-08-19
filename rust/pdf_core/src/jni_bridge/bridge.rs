@@ -554,3 +554,31 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getPageRota
         })
     })
 }
+
+/// Marks already on a page, each with PDFium's own index for it.
+///
+/// The index matters more than it looks: a page can carry form widgets and links
+/// this engine does not model, and those are skipped rather than guessed at. So
+/// the position in this list is *not* the annotation's index, and a caller that
+/// erases by list position would delete somebody's form field.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getAnnotationsJson<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page_index: jint,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let index = page_index_from(page_index)?;
+        let json = registry::with_session(handle, |session| {
+            let marks = session.document.annotations(index)?;
+            serde_json::to_string(&marks)
+                .map_err(|e| PdfError::Pdfium(format!("could not encode annotations: {e}")))
+        })?;
+
+        Ok(env
+            .new_string(json)
+            .map_err(|e| PdfError::Pdfium(format!("could not allocate Java string: {e}")))?
+            .into_raw())
+    })
+}

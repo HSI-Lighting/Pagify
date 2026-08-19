@@ -15,7 +15,8 @@ use pdfium_render::prelude::{
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
-    Annotation, Document, DocumentMut, Page, PageSize, Rect, RemovedPage, RenderRequest, Rotation,
+    Annotation, Color, Document, DocumentMut, IndexedAnnotation, Page, PageSize, Point, Rect,
+    RemovedPage, RenderRequest, Rotation,
     TextSegment,
 };
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
@@ -290,6 +291,40 @@ impl Document for PdfiumDocument {
 
     /// Uses `FPDF_GetPageSizeByIndexF`, which reads the page tree without
     /// loading the page itself.
+    fn annotations(&self, page_index: usize) -> Result<Vec<IndexedAnnotation>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let space = page.space()?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+
+        let mut marks = Vec::new();
+        for i in 0..count.max(0) {
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, i) };
+            if annot.is_null() {
+                continue;
+            }
+            let read = self.read_annotation(annot, &space);
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+
+            // The index carried is PDFium's, not this list's. A page holding one
+            // form widget followed by one highlight yields a single entry whose
+            // index is 1 — addressing it as 0 would delete the widget.
+            if let Some(annotation) = read? {
+                marks.push(IndexedAnnotation {
+                    index: i as usize,
+                    annotation,
+                });
+            }
+        }
+        Ok(marks)
+    }
+
     fn annotation_count(&self, page_index: usize) -> Result<usize> {
         self.validate_page_index(page_index)?;
         let index = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
@@ -595,16 +630,36 @@ impl DocumentMut for PdfiumDocument {
 
     fn take_annotation(&mut self, page_index: usize, index: usize) -> Result<Annotation> {
         self.validate_page_index(page_index)?;
-        let _ = index;
-        // Removing is easy; *returning what was removed* is not, and without that
-        // the removal cannot be undone. Reconstructing a mark from PDFium means
-        // reading quad points, ink lists and colours back — the read half of this
-        // module, which is not written yet. Refusing is the honest behaviour until
-        // it is: an erase that worked with an undo that silently lost the mark
-        // would be worse than one that does not start.
-        Err(PdfError::Unsupported(
-            "erasing a mark that is already saved in the file",
-        ))
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+        let annot_index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument(format!("annotation index {index} is out of range"))
+        })?;
+
+        // Read it *before* removing it. Afterwards there is nothing left to read,
+        // and the undo record would have nothing to put back.
+        let taken = {
+            let page = RawPage::open(self.document.handle(), page_number)?;
+            let space = page.space()?;
+            let bindings = pdfium()?.bindings();
+
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, annot_index) };
+            if annot.is_null() {
+                return Err(PdfError::Pdfium(format!(
+                    "page {page_index} has no annotation at index {index}"
+                )));
+            }
+            let read = self.read_annotation(annot, &space);
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+
+            read?.ok_or(PdfError::Unsupported(
+                "erasing an annotation of a kind this engine does not model",
+            ))?
+        };
+
+        self.remove_annotation(page_index, index)?;
+        Ok(taken)
     }
 
     fn extract_pages(&self, range: &[usize]) -> Result<Box<dyn Document>> {
@@ -1210,3 +1265,206 @@ mod page_space_tests {
         assert_eq!(42.0, y);
     }
 }
+
+// ------------------------------------------------------------- reading marks --
+
+impl PdfiumDocument {
+    /// Reconstruct one annotation, or `None` for a type this engine does not model.
+    ///
+    /// Skipping is the important behaviour. A page can carry form widgets, links
+    /// and stamps that have no representation here, and guessing at them would be
+    /// worse than ignoring them: the caller addresses annotations by PDFium's own
+    /// index, so an unmodelled one simply has no entry rather than shifting every
+    /// index after it.
+    fn read_annotation(
+        &self,
+        annot: FPDF_ANNOTATION,
+        space: &PageSpace,
+    ) -> Result<Option<Annotation>> {
+        let bindings = pdfium()?.bindings();
+        let subtype = unsafe { bindings.FPDFAnnot_GetSubtype(annot) };
+
+        let colour = self.read_colour(annot);
+
+        let annotation = match subtype {
+            ANNOT_HIGHLIGHT => {
+                let count = unsafe { bindings.FPDFAnnot_CountAttachmentPoints(annot) };
+                let mut rects = Vec::new();
+                for i in 0..count {
+                    let mut quad = FS_QUADPOINTSF {
+                        x1: 0.0,
+                        y1: 0.0,
+                        x2: 0.0,
+                        y2: 0.0,
+                        x3: 0.0,
+                        y3: 0.0,
+                        x4: 0.0,
+                        y4: 0.0,
+                    };
+                    if unsafe { bindings.FPDFAnnot_GetAttachmentPoints(annot, i, &mut quad) } == 0 {
+                        continue;
+                    }
+                    // The quad's corners are not in a guaranteed order, so the rect
+                    // is taken from the extremes rather than from x1/y1 and x4/y4.
+                    let xs = [quad.x1, quad.x2, quad.x3, quad.x4];
+                    let ys = [quad.y1, quad.y2, quad.y3, quad.y4];
+                    let (left, top) = space.to_top_left(
+                        xs.iter().cloned().fold(f32::INFINITY, f32::min),
+                        ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+                    );
+                    let (right, bottom) = space.to_top_left(
+                        xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max),
+                        ys.iter().cloned().fold(f32::INFINITY, f32::min),
+                    );
+                    rects.push(Rect {
+                        left,
+                        top,
+                        right,
+                        bottom,
+                    });
+                }
+                if rects.is_empty() {
+                    return Ok(None);
+                }
+                Annotation::Highlight {
+                    rects,
+                    color: colour,
+                }
+            }
+
+            ANNOT_INK => {
+                let paths = unsafe { bindings.FPDFAnnot_GetInkListCount(annot) };
+                let mut strokes = Vec::new();
+                for path in 0..paths {
+                    // Sized first with a null buffer, as every counted PDFium
+                    // getter wants: asking for the length and the data in one call
+                    // is what silently truncates a long stroke.
+                    let len =
+                        unsafe { bindings.FPDFAnnot_GetInkListPath(annot, path, std::ptr::null_mut(), 0) };
+                    if len == 0 {
+                        continue;
+                    }
+                    let mut raw = vec![FS_POINTF { x: 0.0, y: 0.0 }; len as usize];
+                    let written = unsafe {
+                        bindings.FPDFAnnot_GetInkListPath(annot, path, raw.as_mut_ptr(), len)
+                    };
+                    raw.truncate(written as usize);
+
+                    let stroke: Vec<Point> = raw
+                        .iter()
+                        .map(|p| {
+                            let (x, y) = space.to_top_left(p.x, p.y);
+                            Point { x, y }
+                        })
+                        .collect();
+                    if stroke.len() >= 2 {
+                        strokes.push(stroke);
+                    }
+                }
+                if strokes.is_empty() {
+                    return Ok(None);
+                }
+                Annotation::Ink {
+                    strokes,
+                    color: colour,
+                    // Not recorded on the annotation itself in a form this engine
+                    // writes or reads; the border width lives in /BS, which PDFium
+                    // does not expose. The nib is cosmetic on read-back — the
+                    // strokes are what a hit test uses.
+                    width: DEFAULT_INK_WIDTH_POINTS,
+                }
+            }
+
+            ANNOT_TEXT => {
+                let mut rect = FS_RECTF {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                };
+                if unsafe { bindings.FPDFAnnot_GetRect(annot, &mut rect) } == 0 {
+                    return Ok(None);
+                }
+                let (left, top) = space.to_top_left(rect.left, rect.top);
+                let (right, bottom) = space.to_top_left(rect.right, rect.bottom);
+                Annotation::Note {
+                    rect: Rect {
+                        left: left.min(right),
+                        top: top.min(bottom),
+                        right: left.max(right),
+                        bottom: top.max(bottom),
+                    },
+                    contents: read_annotation_string(annot, "Contents").unwrap_or_default(),
+                    color: colour,
+                }
+            }
+
+            // Widgets, links, stamps, everything else: left exactly as they are.
+            _ => return Ok(None),
+        };
+
+        Ok(Some(annotation))
+    }
+
+    fn read_colour(&self, annot: FPDF_ANNOTATION) -> Color {
+        let Ok(pdfium) = pdfium() else {
+            return DEFAULT_MARK_COLOUR;
+        };
+        let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+        let ok = unsafe {
+            pdfium.bindings().FPDFAnnot_GetColor(
+                annot,
+                COLORTYPE_COLOR,
+                &mut r,
+                &mut g,
+                &mut b,
+                &mut a,
+            )
+        } != 0;
+
+        if ok {
+            Color {
+                r: r as u8,
+                g: g as u8,
+                b: b as u8,
+                a: a as u8,
+            }
+        } else {
+            // An annotation is allowed to carry no colour at all, in which case a
+            // viewer picks one. Returning a visible default beats returning
+            // transparent black, which would read back as an invisible mark.
+            DEFAULT_MARK_COLOUR
+        }
+    }
+}
+
+/// Read a UTF-16LE string value off an annotation.
+fn read_annotation_string(annot: FPDF_ANNOTATION, key: &str) -> Option<String> {
+    let bindings = pdfium().ok()?.bindings();
+
+    // Length first, in bytes, including the terminator.
+    let bytes = unsafe { bindings.FPDFAnnot_GetStringValue(annot, key, std::ptr::null_mut(), 0) };
+    if bytes <= 2 {
+        return None;
+    }
+
+    let mut buffer = vec![0u16; (bytes as usize).div_ceil(2)];
+    unsafe { bindings.FPDFAnnot_GetStringValue(annot, key, buffer.as_mut_ptr(), bytes) };
+
+    // Drop the trailing NUL before decoding, or every value gains a stray char.
+    if let Some(end) = buffer.iter().position(|&c| c == 0) {
+        buffer.truncate(end);
+    }
+    Some(String::from_utf16_lossy(&buffer))
+}
+
+/// Nib width used for ink read back out of a document.
+const DEFAULT_INK_WIDTH_POINTS: f32 = 2.0;
+
+/// Shown for a mark whose own colour cannot be read.
+const DEFAULT_MARK_COLOUR: Color = Color {
+    r: 255,
+    g: 214,
+    b: 0,
+    a: 255,
+};
