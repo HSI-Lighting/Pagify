@@ -17,6 +17,7 @@ and know which page landed where.
 | `pages-ladder.pdf` | 5 | 200, 250, 300, 350, 400 | reorder, delete, insert, rotate |
 | `single-page.pdf` | 1 | 200 | boundary: deleting the only page |
 | `mixed-sizes.pdf` | 4 | 595, 420, 612, 842 | A4/A5/Letter/A3, non-uniform tree |
+| `quadrants.pdf` | 1 | 400 | region export: four solid colours, one per quadrant |
 
 No passwords. Nothing here is encrypted.
 
@@ -57,3 +58,14 @@ classic table, `FPDF_INCREMENTAL` handles those correctly, and the whole suite w
 green while the app wrote files qpdf called damaged on any document with an xref
 stream — which is most PDFs of version 1.5 or later. A fixture set that is
 uniform in a property the code branches on cannot test that branch.
+
+## quadrants.pdf
+
+One 400 × 400 pt page in four solid colours: red top-left, green top-right, blue
+bottom-left, yellow bottom-right.
+
+For the region export, where the thing under test is *where the pixels came from*.
+Page geometry cannot answer that — a crop of the wrong part of a page is exactly as
+many pixels as a crop of the right part, so a size assertion passes either way.
+Four flat colours make the answer readable off a single pixel, and any colour that
+is not the cropped quadrant's is content leaking in from outside the crop.

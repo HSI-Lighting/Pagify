@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::command::Command;
-use crate::document::{RenderRequest, Rotation};
+use crate::document::{RegionRequest, RenderRequest, Rotation};
 use crate::error::{PdfError, Result};
 use crate::registry::DocumentSession;
 use crate::render::bitmap::{Bitmap, PixelOrder};
@@ -123,6 +123,22 @@ pub fn prefetch_page(
 
     session.cache.put(key, bitmap);
     Ok(true)
+}
+
+/// Rasterise one region of a page for export.
+///
+/// Deliberately **not** cached. The page cache exists so a swipe resolves to a
+/// memcpy, and it is budgeted for that; a single 4× export can be larger than the
+/// whole budget, so caching one would evict every raster the reader is about to
+/// need in order to keep something that is used once and never asked for again.
+pub fn render_region(
+    session: &DocumentSession,
+    index: usize,
+    request: &RegionRequest,
+) -> Result<Bitmap> {
+    session.document.validate_page_index(index)?;
+    let page = session.document.page(index)?;
+    page.render_region(request)
 }
 
 

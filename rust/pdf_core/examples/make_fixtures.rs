@@ -38,6 +38,53 @@ fn main() {
         &format!("{out}/mixed-sizes.pdf"),
         &[(595.0, 842.0), (420.0, 595.0), (612.0, 792.0), (842.0, 1191.0)],
     );
+    write_quadrants(&pdfium, &format!("{out}/quadrants.pdf"));
+}
+
+/// A page in four solid colours, one per quadrant.
+///
+/// For the region export, where the thing under test is *where* the pixels came
+/// from. Page geometry cannot answer that — a crop of the wrong part of the page
+/// is the same size as a crop of the right part — so this fixture makes the
+/// answer readable straight off a pixel: a correct crop of the top-left quadrant
+/// contains red and nothing else, and any of the other three colours appearing
+/// anywhere in it is content leaking in from outside the crop.
+fn write_quadrants(pdfium: &Pdfium, path: &str) {
+    const SIDE: f32 = 400.0;
+    let half = SIDE / 2.0;
+
+    let mut doc = pdfium.create_new_pdf().expect("create");
+    let mut page = doc
+        .pages_mut()
+        .create_page_at_end(PdfPagePaperSize::from_points(
+            PdfPoints::new(SIDE),
+            PdfPoints::new(SIDE),
+        ))
+        .expect("add page");
+
+    // PDF's own bottom-left origin here, since this talks to PDFium directly
+    // rather than through the engine's top-left space. `new_from_values` takes
+    // (bottom, left, top, right) — an order worth writing out rather than
+    // trusting to memory.
+    let quadrants = [
+        // bottom, left, top,  right, colour
+        (half, 0.0, SIDE, half, PdfColor::new(255, 0, 0, 255)), // top-left: red
+        (half, half, SIDE, SIDE, PdfColor::new(0, 255, 0, 255)), // top-right: green
+        (0.0, 0.0, half, half, PdfColor::new(0, 0, 255, 255)),  // bottom-left: blue
+        (0.0, half, half, SIDE, PdfColor::new(255, 255, 0, 255)), // bottom-right: yellow
+    ];
+
+    for (bottom, left, top, right, colour) in quadrants {
+        let rect = PdfRect::new_from_values(bottom, left, top, right);
+        let object = PdfPagePathObject::new_rect(&doc, rect, None, None, Some(colour))
+            .expect("build quadrant");
+        page.objects_mut().add_path_object(object).expect("add quadrant");
+    }
+
+    page.regenerate_content().expect("regenerate");
+    drop(page);
+    doc.save_to_file(path).expect("save");
+    println!("{path}: 1 page, 400x400, four solid quadrants");
 }
 
 fn write(pdfium: &Pdfium, path: &str, sizes: &[(f32, f32)]) {

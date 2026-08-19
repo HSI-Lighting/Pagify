@@ -16,12 +16,12 @@ use pdfium_render::prelude::{
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
     Annotation, Color, Document, DocumentMut, IndexedAnnotation, Page, PageSize, Point, Rect,
-    RemovedPage, RenderRequest, Rotation,
+    RegionRequest, RemovedPage, RenderRequest, Rotation,
     TextSegment,
 };
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
 use crate::render::bitmap::{self, Bitmap, PixelOrder};
-use crate::render::RenderTarget;
+use crate::render::{RegionPixels, RenderTarget};
 
 /// The process-wide PDFium binding.
 ///
@@ -428,6 +428,48 @@ impl<'a> Page for PdfiumPage<'a> {
 
         target.normalise_from_pdfium();
         Ok(())
+    }
+
+    fn render_region(&self, request: &RegionRequest) -> Result<Bitmap> {
+        let region = RegionPixels::resolve(self.size(), request.crop, request.scale)?;
+
+        let mut bitmap = Bitmap::new(region.width, region.height, bitmap::PDFIUM_OUTPUT_ORDER)?;
+        // White, ourselves, rather than PDFium's `clear_before_rendering`. Its
+        // clear fills from the *page's* origin, which for a crop sits off the
+        // top-left of this bitmap — so the corner of the page that is not covered
+        // by the page image would keep whatever the allocation held. Filling here
+        // is unconditional and needs no reasoning about where the page landed.
+        bitmap.data.fill(0xFF);
+
+        let config = PdfRenderConfig::new()
+            // The whole page, at the export scale...
+            .set_target_size(region.page_width as i32, region.page_height as i32)
+            // ...with its top-left pushed off this bitmap, so only the crop lands
+            // inside it. PDFium clips to the destination, which is what makes the
+            // guarantee that nothing outside the crop can appear structural
+            // rather than a post-render trim.
+            .set_origin(-region.offset_x, -region.offset_y)
+            .set_format(PdfBitmapFormat::BGRA)
+            .clear_before_rendering(false)
+            .render_annotations(request.render_annotations)
+            .render_form_data(request.render_form_data)
+            .limit_render_image_cache_size(true);
+
+        {
+            let mut pdf_bitmap = PdfBitmap::from_bytes(
+                region.width as i32,
+                region.height as i32,
+                PdfBitmapFormat::BGRA,
+                &mut bitmap.data,
+            )
+            .map_err(|e| PdfError::InvalidBitmap(e.to_string()))?;
+
+            self.page
+                .render_into_bitmap_with_config(&mut pdf_bitmap, &config)
+                .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        }
+
+        Ok(bitmap)
     }
 
     fn text(&self) -> Result<String> {

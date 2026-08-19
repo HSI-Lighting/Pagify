@@ -16,8 +16,8 @@ use std::io::Write;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
-use crate::render::RenderTarget;
+use crate::error::{PdfError, Result};
+use crate::render::{Bitmap, RenderTarget};
 
 /// A run of text on a page, with where it sits.
 ///
@@ -115,6 +115,42 @@ impl Default for RenderRequest {
     }
 }
 
+/// What to capture out of a page, and how sharply.
+///
+/// Separate from [`RenderRequest`] because the two are sized by opposite ends.
+/// A screen render is sized by its destination — Kotlin measures the view and the
+/// bitmap's dimensions decide the pixels. An export is sized by the crop and an
+/// explicit scale, so the output resolution stays independent of the display.
+///
+/// `crop` is in page points with a top-left origin and y increasing downwards
+/// (decision 4.4), the same space as [`Annotation`] geometry, and it is resolved
+/// against the page rather than trusted: see [`crate::render::RegionPixels`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RegionRequest {
+    pub crop: Rect,
+    /// Points-to-pixels multiplier for the export. Lowered if it would breach the
+    /// render ceiling; never raised.
+    pub scale: f32,
+    pub render_annotations: bool,
+    pub render_form_data: bool,
+}
+
+impl Default for RegionRequest {
+    fn default() -> Self {
+        RegionRequest {
+            crop: Rect {
+                left: 0.0,
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            scale: 2.0,
+            render_annotations: true,
+            render_form_data: true,
+        }
+    }
+}
+
 /// A single page of an open document.
 ///
 /// The `'_` lifetime on `Document::page` is a deviation from the original sketch:
@@ -127,6 +163,19 @@ pub trait Page {
     /// returned so the hot path can draw straight into a locked Android Bitmap
     /// with no intermediate allocation or copy.
     fn render_into(&self, request: &RenderRequest, target: &mut RenderTarget<'_>) -> Result<()>;
+
+    /// Rasterise one region of the page, at a scale of the caller's choosing.
+    ///
+    /// Returns an owned bitmap rather than filling a supplied one because the
+    /// caller cannot know the size in advance: the render ceiling may have
+    /// lowered the scale, and the resolved [`crate::render::RegionPixels`] is what
+    /// decides the dimensions.
+    ///
+    /// Nothing outside `crop` appears in the result. That is what makes this an
+    /// export rather than a screenshot — see decision 4.8.
+    fn render_region(&self, _request: &RegionRequest) -> Result<Bitmap> {
+        Err(PdfError::Unsupported("region rendering"))
+    }
 
     /// Extracted text in reading order, as PDFium's text page reports it.
     fn text(&self) -> Result<String>;

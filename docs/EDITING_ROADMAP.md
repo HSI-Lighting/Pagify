@@ -283,6 +283,36 @@ Two things to get right when implementing it:
    regardless, but it does not stop a cache *hit* queueing behind a long render
    inside `registry::with_session`.
 
+### 4.8 Capture — **decide: re-render the region, never capture the screen**
+
+The requirement is a picture of part of a page containing "just the contents of the
+PDF, with no notifications and no popups from any app". Those are not two features
+to build on top of a screenshot — they are **consequences of never involving the
+screen.** A notification cannot appear in a bitmap that was never a screenshot.
+
+| | Screen capture | Re-render the region |
+|---|---|---|
+| Other apps' notifications | in scope by construction | **impossible** |
+| Our own dialogs | captured if on screen | **impossible** |
+| System bars | present | **impossible** |
+| Resolution | the display's | any scale asked for |
+| Permissions | consent + foreground service | none |
+| Host-testable | needs a device | yes |
+
+Rejected: `MediaProjection`, which captures the whole display; `PixelCopy` on our
+own view, which excludes other apps but is still capped at screen resolution and
+still catches our own dialogs; `FLAG_SECURE`, which prevents capture rather than
+shaping it.
+
+This is the same move as "the destination bitmap's dimensions decide the render
+size": make the bad state unrepresentable instead of filtering it out afterwards.
+
+Implemented as `Page::render_region` — crop rect in page points, explicit export
+scale, owned bitmap out. Deliberately **not** the on-screen path, which is sized by
+its destination; an export is sized by the crop, because its whole point is to be
+sharper than the display. `tests/region_export.rs` holds the guarantee against
+`quadrants.pdf`, where anything from outside the crop is a different colour.
+
 ---
 
 ## 5. Phases
