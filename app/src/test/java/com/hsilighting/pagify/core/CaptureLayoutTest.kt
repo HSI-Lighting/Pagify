@@ -1,5 +1,6 @@
 package com.hsilighting.pagify.core
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -112,6 +113,44 @@ class CaptureLayoutTest {
     fun `a page with no measured size is skipped rather than dividing by zero`() {
         val pages = listOf(PlacedPage(0, Rect(0f, 0f, 500f, 500f), PageSize(0f, 0f)))
         assertEquals(emptyList<CaptureTile>(), captureTilesFor(Rect(0f, 0f, 100f, 100f), pages))
+    }
+
+    @Test
+    fun `a zoomed page sits at its offset, scaled`() {
+        // The zoomed view draws the page translated and scaled about its own
+        // top-left, so this is the rectangle a capture there crops against.
+        assertEquals(
+            Rect(0f, 0f, 1000f, 2000f),
+            zoomedPageBounds(Offset.Zero, baseWidthPx = 500f, baseHeightPx = 1000f, scale = 2f),
+        )
+    }
+
+    @Test
+    fun `a page zoomed past the viewport keeps its negative offset`() {
+        // The normal case once zoomed in: the page is bigger than the screen and
+        // its top-left is off it. Clamping that to zero would crop the wrong part.
+        val bounds = zoomedPageBounds(
+            Offset(-300f, -700f),
+            baseWidthPx = 500f,
+            baseHeightPx = 1000f,
+            scale = 4f,
+        )
+        assertEquals(Rect(-300f, -700f, 1700f, 3300f), bounds)
+    }
+
+    @Test
+    fun `a crop taken from a zoomed page is in that page's own points`() {
+        // End to end for the zoomed path: a box over the middle of a page
+        // magnified 4x should crop the middle of the page, not four times it.
+        val page = PageSize(widthPoints = 500f, heightPoints = 1000f)
+        val bounds = zoomedPageBounds(Offset(-500f, -1000f), 500f, 1000f, scale = 4f)
+
+        val tiles = captureTilesFor(Rect(0f, 0f, 400f, 400f), listOf(PlacedPage(0, bounds, page)))
+
+        assertEquals(1, tiles.size)
+        // The box starts 500 px into a 2000 px-wide render of a 500 pt page, so
+        // 125 pt in, and covers 400 px = 100 pt.
+        assertEquals(Rect(125f, 250f, 225f, 350f), tiles[0].crop)
     }
 
     @Test

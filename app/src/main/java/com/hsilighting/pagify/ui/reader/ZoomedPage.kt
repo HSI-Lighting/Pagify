@@ -33,6 +33,7 @@ import com.hsilighting.pagify.core.CaptureTile
 import com.hsilighting.pagify.core.PlacedPage
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.captureTilesFor
+import com.hsilighting.pagify.core.zoomedPageBounds
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PenMode
 import com.hsilighting.pagify.core.TextSegment
@@ -338,12 +339,7 @@ fun ZoomedPage(
                             // The page is drawn translated by `offset` at `scale`,
                             // in this element's own pixels — the same frame the drag
                             // is reported in, so nothing needs converting.
-                            val onScreen = Rect(
-                                left = offset.x,
-                                top = offset.y,
-                                right = offset.x + baseW * scale,
-                                bottom = offset.y + baseH * scale,
-                            )
+                            val onScreen = zoomedPageBounds(offset, baseW, baseH, scale)
                             val tiles = captureTilesFor(
                                 box,
                                 listOf(PlacedPage(pageIndex, onScreen, pageSize)),

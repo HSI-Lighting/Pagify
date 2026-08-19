@@ -1,5 +1,6 @@
 package com.hsilighting.pagify.core
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 
 /**
@@ -69,3 +70,29 @@ private fun Rect.intersectOrNull(other: Rect): Rect? {
     val bottom = minOf(bottom, other.bottom)
     return if (right > left && bottom > top) Rect(left, top, right, bottom) else null
 }
+
+/**
+ * Where the magnified page sits on screen, in the zoomed view's own pixels.
+ *
+ * Trivial arithmetic, pulled out of the composable so it can be tested at all:
+ * inside a `Modifier` chain it is reachable only on a device, and it is the one
+ * place the zoomed capture can be wrong. A capture whose crop is derived from the
+ * wrong rectangle still produces a plausible picture — of the wrong part of the
+ * page.
+ *
+ * The zoomed view draws the page translated by [offset] and scaled about its own
+ * top-left, so its rectangle is the offset and the scaled size. [offset] is
+ * negative once the page is larger than the viewport, which is the normal case
+ * when zoomed in.
+ */
+fun zoomedPageBounds(
+    offset: Offset,
+    baseWidthPx: Float,
+    baseHeightPx: Float,
+    scale: Float,
+): Rect = Rect(
+    left = offset.x,
+    top = offset.y,
+    right = offset.x + baseWidthPx * scale,
+    bottom = offset.y + baseHeightPx * scale,
+)
