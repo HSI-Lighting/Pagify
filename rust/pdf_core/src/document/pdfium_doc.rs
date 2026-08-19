@@ -725,7 +725,7 @@ impl DocumentMut for PdfiumDocument {
     /// signature irrecoverably — and that is what the binding's own
     /// `save_to_writer` does, since it hardcodes its flags to zero.
     fn save_incremental(&mut self, dest: &mut dyn Write) -> Result<()> {
-        let bytes = self.save_with_flags(FPDF_INCREMENTAL)?;
+        let bytes = close_trailing_xref_object(self.save_with_flags(FPDF_INCREMENTAL)?);
         dest.write_all(&bytes)?;
         self.dirty = false;
         Ok(())
@@ -1468,3 +1468,198 @@ const DEFAULT_MARK_COLOUR: Color = Color {
     b: 0,
     a: 255,
 };
+
+/// Close the cross-reference stream that PDFium leaves open on an incremental save.
+///
+/// PDFium appends its trailing xref *stream* without an `endobj`:
+///
+/// ```text
+///   169 0 obj <</Type/XRef ... /Length 25>>stream
+///   <binary>
+///   endstream
+///   startxref
+///   141073
+///   %%EOF
+/// ```
+///
+/// An indirect object has to be closed, so the file is malformed. It only happens
+/// on documents that use cross-reference *streams* — PDF 1.5 and later, which is
+/// most things — and never on the classic `xref` tables the small fixtures use.
+///
+/// PDFium reads its own output regardless, silently reconstructing the table, and
+/// that is why every round-trip test in this crate passed while the app was
+/// writing damaged files. `qpdf --check` on a real document saved by the app:
+///
+/// ```text
+///   WARNING: expected endobj (xref stream: object 169 0)
+///   WARNING: file is damaged
+///   WARNING: Attempting to reconstruct cross-reference table
+/// ```
+///
+/// against a clean report on the same document before the edit, and clean reports
+/// on every full-copy save. Incremental was the only path that did it, and it does
+/// it even with no edit at all.
+///
+/// Inserting the keyword is safe with respect to offsets, which is the only thing
+/// that could make this worse than the bug. Everything the xref stream points at
+/// lies *before* it, and `startxref` names the stream's own offset — also before
+/// the insertion. Nothing that is pointed at moves.
+fn close_trailing_xref_object(bytes: Vec<u8>) -> Vec<u8> {
+    const ENDSTREAM: &[u8] = b"endstream";
+    const STARTXREF: &[u8] = b"startxref";
+    const ENDOBJ: &[u8] = b"endobj";
+
+    let Some(startxref) = find_last(&bytes, STARTXREF) else {
+        // No trailer to speak of. Not this function's business to invent one.
+        return bytes;
+    };
+    let Some(endstream) = find_last(&bytes[..startxref], ENDSTREAM) else {
+        // A classic `xref` table rather than a stream: nothing is left open.
+        return bytes;
+    };
+
+    let gap = &bytes[endstream + ENDSTREAM.len()..startxref];
+    let mut bytes = if contains(gap, ENDOBJ) {
+        bytes
+    } else {
+        let mut fixed = Vec::with_capacity(bytes.len() + ENDOBJ.len() + 2);
+        fixed.extend_from_slice(&bytes[..endstream + ENDSTREAM.len()]);
+        fixed.extend_from_slice(b"\nendobj\n");
+        fixed.extend_from_slice(&bytes[startxref..]);
+        fixed
+    };
+
+    // Second defect, same save, and the one that actually stops a reader finding
+    // the table. PDFium writes the dictionary without `/Type /XRef`:
+    //
+    //     169 0 obj <</Info 16 0 R /Root 19 0 R /Size 170/Prev 136467/...>>stream
+    //
+    // where the same document's own xref stream, written by whatever produced it,
+    // reads `<</Type /XRef/W[1 4 2]/Index[0 169]/...`. The key is required — a
+    // cross-reference stream is identified by it — so without it `startxref` names
+    // an offset that holds an object no reader will accept as a table, and qpdf
+    // reports `xref not found` at exactly the right offset.
+    if let Some(dict) = trailing_dictionary_start(&bytes) {
+        if !contains(&bytes[dict..], b"/Type") {
+            let mut typed = Vec::with_capacity(bytes.len() + 12);
+            typed.extend_from_slice(&bytes[..dict]);
+            typed.extend_from_slice(b"/Type/XRef");
+            typed.extend_from_slice(&bytes[dict..]);
+            bytes = typed;
+        }
+    }
+
+    bytes
+}
+
+/// Byte just after the `<<` opening the trailing cross-reference stream's
+/// dictionary, if there is one.
+///
+/// Inserting there is offset-safe for the same reason closing the object is: the
+/// only offset naming this object is `startxref`, which points at its *header* —
+/// before the insertion — and every offset the table itself holds points at
+/// objects earlier in the file. Nothing that is pointed at moves.
+fn trailing_dictionary_start(bytes: &[u8]) -> Option<usize> {
+    let startxref = find_last(bytes, b"startxref")?;
+    let stream = find_last(&bytes[..startxref], b"stream")?;
+    let open = find_last(&bytes[..stream], b"<<")?;
+    Some(open + 2)
+}
+
+fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).rev().find(|&i| &haystack[i..i + needle.len()] == needle)
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    find_last(haystack, needle).is_some()
+}
+
+#[cfg(test)]
+mod trailing_object_tests {
+    use super::{close_trailing_xref_object, find_last};
+
+    /// The exact shape PDFium produced on a real document.
+    #[test]
+    fn an_unclosed_xref_stream_is_closed() {
+        let broken = b"1 0 obj\n<<>>stream\nxx\nendstream\nstartxref\n99\n%%EOF\n".to_vec();
+        let fixed = close_trailing_xref_object(broken);
+        let text = String::from_utf8_lossy(&fixed);
+
+        assert!(text.contains("endstream\nendobj\nstartxref"), "got {text}");
+    }
+
+    #[test]
+    fn a_classic_xref_table_is_left_alone() {
+        // No stream at the end at all — the small fixtures, and every file that
+        // saved cleanly before this was found.
+        let classic = b"xref\n0 1\n0000000000 65535 f \ntrailer\n<<>>\nstartxref\n9\n%%EOF\n".to_vec();
+        assert_eq!(classic.clone(), close_trailing_xref_object(classic));
+    }
+
+    #[test]
+    fn an_xref_stream_missing_its_type_gains_one() {
+        // The defect that actually stops a reader finding the table: PDFium omits
+        // /Type /XRef, so startxref names an object nothing will accept as a
+        // cross-reference stream.
+        let broken = b"1 0 obj
+<</Size 5/Prev 9>>stream
+xx
+endstream
+endobj
+startxref
+0
+%%EOF
+".to_vec();
+        let fixed = close_trailing_xref_object(broken);
+        let text = String::from_utf8_lossy(&fixed);
+
+        assert!(text.contains("/Type/XRef"), "got {text}");
+        assert!(text.contains("/Size 5"), "the rest of the dictionary survives: {text}");
+    }
+
+    #[test]
+    fn a_dictionary_that_already_declares_its_type_is_not_given_a_second_one() {
+        let good = b"1 0 obj
+<</Type/XRef/Size 5>>stream
+xx
+endstream
+endobj
+startxref
+0
+%%EOF
+".to_vec();
+        let fixed = close_trailing_xref_object(good.clone());
+
+        assert_eq!(good, fixed);
+    }
+
+    #[test]
+    fn a_file_with_no_trailer_is_returned_unchanged() {
+        let odd = b"not a pdf at all".to_vec();
+        assert_eq!(odd.clone(), close_trailing_xref_object(odd));
+    }
+
+    #[test]
+    fn the_object_header_startxref_names_does_not_move() {
+        // The one way these repairs could be worse than the bug they fix. Both
+        // insert bytes *inside* the trailing object, so the offset that must not
+        // shift is the one naming its header — which `startxref` holds, and which
+        // every reader follows to find the table at all. Everything the table
+        // itself points at lies earlier still.
+        let broken =
+            b"%PDF-1.7\n1 0 obj\n<</Size 5>>stream\nxx\nendstream\nstartxref\n9\n%%EOF\n".to_vec();
+        let header = find_last(&broken, b"1 0 obj").expect("header");
+
+        let fixed = close_trailing_xref_object(broken.clone());
+
+        assert_eq!(
+            header,
+            find_last(&fixed, b"1 0 obj").expect("header"),
+            "the header startxref points at moved",
+        );
+        assert_eq!(broken[..header], fixed[..header], "bytes before it changed");
+    }
+}

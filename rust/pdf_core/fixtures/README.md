@@ -42,3 +42,18 @@ does not look complete when it is not:
 The 2.9 GB catalogue stays out of the repository. The Phase A acceptance that a
 one-page edit saves in under 2 s is therefore a **local** measurement, not a CI
 gate, unless a large synthetic fixture is generated for it.
+
+## xref-stream.pdf
+
+Generated from `pages-ladder.pdf` with
+
+    qpdf --object-streams=generate --newline-before-endstream pages-ladder.pdf xref-stream.pdf
+
+632 bytes, five pages, and the only fixture here that uses a **cross-reference
+stream** rather than a classic `xref` table.
+
+It exists because its absence hid a real defect. Every other fixture used a
+classic table, `FPDF_INCREMENTAL` handles those correctly, and the whole suite was
+green while the app wrote files qpdf called damaged on any document with an xref
+stream — which is most PDFs of version 1.5 or later. A fixture set that is
+uniform in a property the code branches on cannot test that branch.

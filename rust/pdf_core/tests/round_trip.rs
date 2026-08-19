@@ -664,3 +664,65 @@ fn a_saved_mark_can_be_erased_and_the_erase_undone() {
         other => panic!("came back as {other:?}, not ink"),
     }
 }
+
+/// What this engine writes is a valid PDF, according to a reader that did not
+/// write it.
+///
+/// The gap this closes: every other test here saves with PDFium and reopens with
+/// PDFium. That proves the command's effect was written and says nothing about
+/// whether the file is well-formed, because PDFium reconstructs a broken
+/// cross-reference table without complaint.
+///
+/// `xref-stream.pdf` is the fixture that matters. The others use classic `xref`
+/// tables and saved cleanly throughout, while `FPDF_INCREMENTAL` on a document
+/// with a cross-reference *stream* wrote a file qpdf called damaged — with no edit
+/// at all. Modern PDFs use streams, so that was most real documents.
+#[test]
+fn every_save_path_produces_a_file_an_external_reader_accepts() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    for fixture in [
+        "xref-stream.pdf",
+        "pages-ladder.pdf",
+        "mixed-sizes.pdf",
+        "single-page.pdf",
+    ] {
+        // Untouched first. An incremental save of a document nobody has edited
+        // must still be a valid file, and that is the case that was broken.
+        let mut doc = open_fixture(&pdfium, fixture);
+        harness::check_both_saves(&mut doc, &format!("{fixture}-untouched"));
+
+        // Then with each kind of edit, since they append different objects.
+        let mut edited = open_fixture(&pdfium, fixture);
+        edited
+            .as_document_mut()
+            .expect("mutable")
+            .set_page_rotation(0, 1)
+            .expect("rotate");
+        edited
+            .as_document_mut()
+            .expect("mutable")
+            .add_annotation(
+                0,
+                &Annotation::Highlight {
+                    rects: vec![Rect {
+                        left: 10.0,
+                        top: 10.0,
+                        right: 60.0,
+                        bottom: 24.0,
+                    }],
+                    color: Color {
+                        r: 255,
+                        g: 224,
+                        b: 102,
+                        a: 128,
+                    },
+                },
+            )
+            .expect("annotate");
+        harness::check_both_saves(&mut edited, &format!("{fixture}-edited"));
+    }
+}

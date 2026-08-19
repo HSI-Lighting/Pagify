@@ -119,3 +119,88 @@ pub fn serial() -> std::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
+
+/// An external check that the bytes this engine wrote are a well-formed PDF.
+///
+/// Every other assertion in this suite saves with PDFium and reopens with PDFium,
+/// which proves a command's effect was written and cannot prove the file is valid:
+/// the only reader asked is the one that did the writing, and PDFium silently
+/// reconstructs a broken cross-reference table rather than complaining.
+///
+/// That gap hid a real defect. `FPDF_INCREMENTAL` on a document using a
+/// cross-reference *stream* produced a file qpdf called damaged — even with no
+/// edit at all — while every test here stayed green. The fixtures could not catch
+/// it either, because they all used classic `xref` tables; `xref-stream.pdf`
+/// exists so this path is exercised.
+///
+/// Skipped, not failed, when qpdf is absent: it is a separate install, and a hard
+/// failure would train people to ignore a red suite. Set `PAGIFY_QPDF` to the
+/// binary, or have it on `PATH`.
+pub fn check_with_qpdf(bytes: &[u8], label: &str) {
+    let Some(qpdf) = qpdf_binary() else {
+        eprintln!("skipped qpdf check of {label}: set PAGIFY_QPDF or put qpdf on PATH");
+        return;
+    };
+
+    let path = std::env::temp_dir().join(format!("pagify-qpdf-{label}.pdf"));
+    std::fs::write(&path, bytes).expect("write bytes for qpdf");
+
+    let output = std::process::Command::new(&qpdf)
+        .arg("--check")
+        .arg(&path)
+        .output()
+        .expect("run qpdf");
+
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let _ = std::fs::remove_file(&path);
+
+    // qpdf exits 2 on errors and 3 on warnings alone. Warnings are tolerated —
+    // one of them ("xref entry for the xref stream itself is missing") qpdf
+    // describes as common and handled correctly, and rewriting the table's binary
+    // data to silence it would risk far more than it gains. Anything qpdf calls
+    // damaged is a failure.
+    assert!(
+        !report.contains("file is damaged"),
+        "qpdf calls {label} damaged:\n{report}",
+    );
+    assert_ne!(
+        Some(2),
+        output.status.code(),
+        "qpdf reported errors in {label}:\n{report}",
+    );
+}
+
+fn qpdf_binary() -> Option<std::path::PathBuf> {
+    if let Ok(explicit) = std::env::var("PAGIFY_QPDF") {
+        let path = std::path::PathBuf::from(explicit);
+        return path.exists().then_some(path);
+    }
+    // A bare name lets the OS search PATH.
+    std::process::Command::new("qpdf")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|_| std::path::PathBuf::from("qpdf"))
+}
+
+/// Save through both paths and hand each to qpdf.
+pub fn check_both_saves(doc: &mut Box<dyn Document>, label: &str) {
+    let mut incremental = Vec::new();
+    doc.as_document_mut()
+        .expect("mutable")
+        .save_incremental(&mut incremental)
+        .expect("incremental save");
+    check_with_qpdf(&incremental, &format!("{label}-incremental"));
+
+    let mut full = Vec::new();
+    doc.as_document_mut()
+        .expect("mutable")
+        .save_full_copy(&mut full)
+        .expect("full save");
+    check_with_qpdf(&full, &format!("{label}-full"));
+}
