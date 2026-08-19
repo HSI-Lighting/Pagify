@@ -91,6 +91,7 @@ import com.hsilighting.pagify.ui.components.NoTextOnPageHint
 import com.hsilighting.pagify.ui.components.NoteComposer
 import com.hsilighting.pagify.ui.components.NoteReader
 import com.hsilighting.pagify.ui.components.RecognisingTextHint
+import com.hsilighting.pagify.ui.components.TextSelectionBar
 import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.twoFingerPan
 import com.hsilighting.pagify.ui.components.PageAction
@@ -167,7 +168,13 @@ fun PdfReaderScreen(
     onEraseEnd: () -> Unit,
     /** A highlight drag swept this page and selected nothing. */
     onHighlightMissed: (Int) -> Unit,
-    /** A region was dragged out with the snapshot tool, in page points. */
+    /** Selecting text: long press to start, handles to adjust, tap to dismiss. */
+    onSelectWord: (pageIndex: Int, point: Offset) -> Unit,
+    onMoveSelectionHandle: (isStart: Boolean, point: Offset) -> Unit,
+    onClearSelection: () -> Unit,
+    /** What to do with the selected text. */
+    onCopySelection: () -> Unit,
+    onHighlightSelection: () -> Unit,
     /** A box was dragged around part of the reader; capture what it framed. */
     onCaptureViewport: (
         tiles: List<CaptureTile>,
@@ -372,6 +379,9 @@ fun PdfReaderScreen(
                     onErase = onErase,
                     onEraseEnd = onEraseEnd,
                     onHighlightMissed = onHighlightMissed,
+                    onSelectWord = onSelectWord,
+                    onMoveSelectionHandle = onMoveSelectionHandle,
+                    onClearSelection = onClearSelection,
                     onCaptureViewport = onCaptureViewport,
                     onJumpHandled = onJumpHandled,
                     onPageVisible = onPageVisible,
@@ -438,6 +448,20 @@ fun PdfReaderScreen(
                             hintDismissed = true
                         },
                         onDismiss = { hintDismissed = true },
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 94.dp),
+                    )
+                }
+
+                // The bar for a selection, above the tool ribbon. Only while text
+                // is selected, and it goes as soon as the selection does.
+                state.selection?.let { selection ->
+                    TextSelectionBar(
+                        characters = selection.text.length,
+                        onCopy = onCopySelection,
+                        onHighlight = onHighlightSelection,
+                        onDismiss = onClearSelection,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(bottom = 94.dp),
@@ -564,6 +588,10 @@ private fun PageList(
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
     onHighlightMissed: (Int) -> Unit,
+    /** Selecting text: long press to start, handles to adjust, tap to dismiss. */
+    onSelectWord: (pageIndex: Int, point: Offset) -> Unit,
+    onMoveSelectionHandle: (isStart: Boolean, point: Offset) -> Unit,
+    onClearSelection: () -> Unit,
     /** A box was dragged around part of the reader; capture what it framed. */
     onCaptureViewport: (
         tiles: List<CaptureTile>,
@@ -973,6 +1001,9 @@ private fun PageList(
                                 onErase = onErase,
                                 onEraseEnd = onEraseEnd,
                                 onHighlightMissed = onHighlightMissed,
+                                onSelectWord = onSelectWord,
+                                onMoveSelectionHandle = onMoveSelectionHandle,
+                                onClearSelection = onClearSelection,
                                 onBounds = { index, bounds -> pageBounds[index] = bounds },
                                 pageSizeProvider = pageSizeProvider,
                                 renderer = renderer,
@@ -1074,6 +1105,10 @@ private fun AnnotatablePage(
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
     onHighlightMissed: (Int) -> Unit,
+    /** A long press on this page; select the word under it. */
+    onSelectWord: (pageIndex: Int, point: Offset) -> Unit,
+    onMoveSelectionHandle: (isStart: Boolean, point: Offset) -> Unit,
+    onClearSelection: () -> Unit,
     /**
      * Where this page ended up, in window coordinates.
      *
@@ -1147,6 +1182,12 @@ private fun AnnotatablePage(
             onErase = { point, tolerance -> onErase(pageIndex, point, tolerance) },
             onEraseEnd = onEraseEnd,
             onHighlightMissed = { onHighlightMissed(pageIndex) },
+            // Only the page that holds it: two pages drawing the same selection
+            // would put a handle on each.
+            selection = state.selection?.takeIf { it.pageIndex == pageIndex },
+            onSelectWord = { at -> onSelectWord(pageIndex, at) },
+            onMoveSelectionHandle = onMoveSelectionHandle,
+            onClearSelection = onClearSelection,
         ),
     )
 }

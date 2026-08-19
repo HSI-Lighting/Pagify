@@ -34,6 +34,7 @@ import com.hsilighting.pagify.core.PenMode
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.core.TextSelection
+import com.hsilighting.pagify.ui.reader.PageTextSelection
 
 /**
  * Draws a page's annotations and, when a tool is active, captures the input that
@@ -85,6 +86,19 @@ fun Modifier.annotationLayer(
      * should work and do not.
      */
     onHighlightMissed: () -> Unit = {},
+    /**
+     * The text selected on this page, if any.
+     *
+     * Drawn here rather than in a layer of its own because it has to sit exactly
+     * where the text does, and this is the one place that already knows the page
+     * scale and where the page's corner is on screen.
+     */
+    selection: PageTextSelection? = null,
+    /** A long press landed here; select the word under it. */
+    onSelectWord: (Offset) -> Unit = {},
+    /** A selection handle was dragged. */
+    onMoveSelectionHandle: (isStart: Boolean, point: Offset) -> Unit = { _, _ -> },
+    onClearSelection: () -> Unit = {},
 ): Modifier {
     // Read through `rememberUpdatedState`: the pointerInput block below is keyed
     // on the tool, so without this it would capture the colour and mode that were
@@ -103,6 +117,10 @@ fun Modifier.annotationLayer(
     val erase by rememberUpdatedState(onErase)
     val eraseEnd by rememberUpdatedState(onEraseEnd)
     val highlightMissed by rememberUpdatedState(onHighlightMissed)
+    val currentSelection by rememberUpdatedState(selection)
+    val selectWord by rememberUpdatedState(onSelectWord)
+    val moveHandle by rememberUpdatedState(onMoveSelectionHandle)
+    val clearSelection by rememberUpdatedState(onClearSelection)
 
     /** Live stroke, in page points, while a marker drag is in progress. */
     var wetStroke by remember { mutableStateOf<List<Offset>>(emptyList()) }
@@ -265,18 +283,54 @@ fun Modifier.annotationLayer(
         // no-tool path stays exactly as it was everywhere else. That matters: an
         // always-on tap handler here is the kind of thing that quietly interferes
         // with scrolling, and most pages have no note to open.
-        else -> if (annotations.any { it is Annotation.Note }) {
-            Modifier.pointerInput(pageIndex, tool, annotations.size) {
-                detectTapGestures { position ->
-                    currentAnnotations
-                        .filterIsInstance<Annotation.Note>()
-                        .lastOrNull { it.isHitBy(toPage(position), tolerancePoints()) }
-                        ?.let(openNote)
-                }
+        else -> Modifier
+            .pointerInput(pageIndex, tool, annotations.size) {
+                detectTapGestures(
+                    onTap = { position ->
+                        // A note first, if one is under the finger. Otherwise a
+                        // tap dismisses the selection — the same gesture every
+                        // reader uses, which is why it must not also start one.
+                        val note = currentAnnotations
+                            .filterIsInstance<Annotation.Note>()
+                            .lastOrNull { it.isHitBy(toPage(position), tolerancePoints()) }
+
+                        if (note != null) openNote(note) else clearSelection()
+                    },
+                    // Long press, because a plain drag has to go on scrolling the
+                    // document. It is also what selecting text means on every
+                    // other reader, so it needs no explaining.
+                    onLongPress = { position ->
+                        selectWord(toPage(position))
+                    },
+                )
             }
-        } else {
-            Modifier
-        }
+            // Only while a selection exists on this page: an always-on drag
+            // handler would race the scroller for every swipe on every page.
+            .then(
+                if (selection != null) {
+                    Modifier.pointerInput(pageIndex, selection.rects.size) {
+                        var draggingStart = false
+                        detectDragGestures(
+                            onDragStart = { position ->
+                                val at = toPage(position)
+                                val live = currentSelection ?: return@detectDragGestures
+                                // Whichever handle is nearer. Grabbing the wrong
+                                // one collapses the selection, which reads as the
+                                // drag having deleted it.
+                                draggingStart =
+                                    (at - live.startHandle).getDistance() <=
+                                    (at - live.endHandle).getDistance()
+                            },
+                            onDrag = { change, _ ->
+                                change.consume()
+                                moveHandle(draggingStart, toPage(change.position))
+                            },
+                        )
+                    }
+                } else {
+                    Modifier
+                },
+            )
     }
 
     return this
@@ -296,6 +350,7 @@ fun Modifier.annotationLayer(
             if (wetStroke.size > 1) {
                 drawInkStroke(wetStroke, currentColor, MARKER_WIDTH_POINTS, scale, origin)
             }
+            currentSelection?.let { drawSelection(it, scale, origin) }
             eraserAt?.let { at ->
                 // Shows exactly how far the eraser reaches, so a miss reads as a
                 // miss rather than as the tool not working.
@@ -421,3 +476,53 @@ private const val NOTE_OUTLINE_WIDTH_POINTS = 1.2f
 
 /** Pip radius as a fraction of the marker's. */
 private const val NOTE_PIP_FRACTION = 0.32f
+
+/**
+ * The selected text, and the handles that adjust it.
+ *
+ * A wash under the words rather than an outline around them: the point is to
+ * show which text is selected, and an outline around a ragged multi-line span is
+ * far harder to read than a band behind it.
+ *
+ * The handles are teardrops hanging below each end, which is the shape every
+ * Android text field uses. Copying that is not laziness — a control someone has
+ * used a thousand times needs no discovering.
+ */
+private fun DrawScope.drawSelection(
+    selection: PageTextSelection,
+    scale: Float,
+    origin: Offset,
+) {
+    if (selection.rects.isEmpty()) return
+
+    selection.rects.forEach { rect ->
+        drawRect(
+            color = SELECTION_COLOUR.copy(alpha = SELECTION_ALPHA),
+            topLeft = Offset(rect.left, rect.top) * scale + origin,
+            size = Size(rect.width * scale, rect.height * scale),
+        )
+    }
+
+    listOf(selection.startHandle, selection.endHandle).forEach { at ->
+        val centre = at * scale + origin + Offset(0f, HANDLE_RADIUS_PX)
+        drawCircle(SELECTION_COLOUR, radius = HANDLE_RADIUS_PX, center = centre)
+        // The stem, so the circle reads as attached to the text rather than
+        // floating below it.
+        drawLine(
+            color = SELECTION_COLOUR,
+            start = at * scale + origin,
+            end = centre,
+            strokeWidth = HANDLE_STEM_PX,
+        )
+    }
+}
+
+/** The selection wash and its handles. Blue, as every reader on the platform. */
+private val SELECTION_COLOUR = Color(0xFF4C8DF6)
+
+/** Low enough to read the words through, high enough to see which they are. */
+private const val SELECTION_ALPHA = 0.32f
+
+/** Handles in pixels, not page points: a grab target is a finger, not a font. */
+private const val HANDLE_RADIUS_PX = 18f
+private const val HANDLE_STEM_PX = 3f

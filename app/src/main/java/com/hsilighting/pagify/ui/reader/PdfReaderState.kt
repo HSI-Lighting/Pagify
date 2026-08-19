@@ -2,6 +2,7 @@ package com.hsilighting.pagify.ui.reader
 
 import android.net.Uri
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.ImageBitmap
 import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.CaptureRequest
@@ -151,6 +152,16 @@ data class PdfReaderState(
      */
     val jumpToPage: Int? = null,
 
+    // ------------------------------------------------------------- selection --
+    /**
+     * The text currently selected, if any.
+     *
+     * One selection at a time, and it belongs to a page: selecting across a page
+     * boundary would mean a range over two character lists, and the reader has no
+     * way to show a handle on a page that has scrolled away.
+     */
+    val selection: PageTextSelection? = null,
+
     // --------------------------------------------------------------- capture --
     /** A capture is being rendered. Blocks a second one and drives the spinner. */
     val isCapturing: Boolean = false,
@@ -234,6 +245,25 @@ data class PdfReaderState(
  * the reader may well have scrolled between the tap and the keyboard appearing.
  */
 data class PendingNote(val pageIndex: Int, val anchor: Offset)
+
+/**
+ * Text the reader has selected on a page.
+ *
+ * The range is over that page's characters, and everything else is derived from
+ * it — the rects to paint and the text to copy. Kept together so the three can
+ * never disagree: a selection whose highlight says one thing and whose clipboard
+ * says another is worse than no selection at all.
+ */
+data class PageTextSelection(
+    val pageIndex: Int,
+    val range: IntRange,
+    val rects: List<Rect>,
+    val text: String,
+) {
+    /** Where the handles go: the start of the first band and the end of the last. */
+    val startHandle: Offset get() = rects.firstOrNull()?.let { Offset(it.left, it.bottom) } ?: Offset.Zero
+    val endHandle: Offset get() = rects.lastOrNull()?.let { Offset(it.right, it.bottom) } ?: Offset.Zero
+}
 
 /**
  * A capture the reader has taken, with what it took and what it looks like.

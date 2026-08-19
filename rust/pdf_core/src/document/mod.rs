@@ -19,6 +19,30 @@ use serde::{Deserialize, Serialize};
 use crate::error::{PdfError, Result};
 use crate::render::{Bitmap, RenderTarget};
 
+/// A page's text with a box for every character of it.
+///
+/// What selection needs and runs cannot give. A run is a whole line, so a
+/// selection built from runs can only start and end at a line — dragging across
+/// half a sentence would copy all of both lines it touched. Characters make the
+/// selection say what the user pointed at.
+///
+/// `text` and `boxes` are built from a single walk of the page and are aligned by
+/// construction: four floats per character, in `text`'s own order. That alignment
+/// is the whole contract, which is why the two arrive together rather than from
+/// two calls that could be made against different states.
+///
+/// The alignment is in **UTF-16 code units**, not code points, because the
+/// consumer is Kotlin and a Kotlin string is indexed that way. A character
+/// outside the basic plane contributes its box twice, so `text.length` and
+/// `boxes.len() / 4` agree on both sides of the boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageCharacters {
+    pub text: String,
+    /// Left, top, right, bottom — four per code unit, top-left origin.
+    pub boxes: Vec<f32>,
+}
+
 /// A run of text on a page, with where it sits.
 ///
 /// Coordinates are in points with the origin at the page's **top-left** and y
@@ -195,6 +219,19 @@ pub trait Page {
     /// has thrown away the information selection depends on.
     fn text_segments(&self) -> Result<Vec<TextSegment>> {
         Ok(Vec::new())
+    }
+
+    /// The page's text with a box for every character.
+    ///
+    /// Separate from [`Page::text_segments`] because it costs more and is wanted
+    /// less often: runs are enough to draw a highlight over a line, and only a
+    /// selection — which has to start and end where a finger points, mid-line —
+    /// needs to know where each character sits.
+    fn characters(&self) -> Result<PageCharacters> {
+        Ok(PageCharacters {
+            text: String::new(),
+            boxes: Vec::new(),
+        })
     }
 }
 

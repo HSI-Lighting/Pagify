@@ -744,3 +744,34 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_recogniseSt
             .into_raw())
     })
 }
+
+/// A page's text with a box for every character, as JSON.
+///
+/// What selection needs and [`Java_com_hsilighting_pagify_core_NativeBridge_getTextSegmentsJson`]
+/// cannot give: a run is a whole line, so a selection built from runs can only
+/// start and end at a line. Characters let it start and end where the finger is.
+///
+/// Costlier than the runs — a dense page is thousands of boxes — so it is a
+/// separate call, made only when someone actually selects.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getPageCharactersJson<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page_index: jint,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let index = page_index_from(page_index)?;
+        let json = registry::with_session(handle, |session| {
+            let page = session.document.page(index)?;
+            let characters = page.characters()?;
+            serde_json::to_string(&characters)
+                .map_err(|e| PdfError::Pdfium(format!("could not encode characters: {e}")))
+        })?;
+
+        Ok(env
+            .new_string(json)
+            .map_err(|e| PdfError::Pdfium(format!("could not allocate Java string: {e}")))?
+            .into_raw())
+    })
+}

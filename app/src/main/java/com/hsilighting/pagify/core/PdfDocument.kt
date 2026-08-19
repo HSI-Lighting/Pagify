@@ -44,9 +44,18 @@ class PdfDocument private constructor(
 
     fun pageText(pageIndex: Int): String = NativeBridge.getPageText(requireOpen(), pageIndex)
 
-    /** Positioned text runs for selection and highlighting. See [TextSegment]. */
+    /** Positioned text runs, for the highlighter. See [TextSegment]. */
     fun textSegments(pageIndex: Int): List<TextSegment> =
         TextSegment.listFromJson(NativeBridge.getTextSegmentsJson(requireOpen(), pageIndex))
+
+    /**
+     * The page's text with a box for every character, for selecting it.
+     *
+     * Heavier than [textSegments] and wanted far less often, which is why it is a
+     * call of its own rather than part of the same trip.
+     */
+    fun pageCharacters(pageIndex: Int): PageCharacters =
+        PageCharacters.fromJson(NativeBridge.getPageCharactersJson(requireOpen(), pageIndex))
 
     /**
      * Renders into [bitmap], whose dimensions decide the output size.

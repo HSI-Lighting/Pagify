@@ -1,6 +1,9 @@
 package com.hsilighting.pagify.ui.reader
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
@@ -34,6 +37,7 @@ import com.hsilighting.pagify.core.defaultSize
 import com.hsilighting.pagify.core.markupFor
 import com.hsilighting.pagify.core.sizeRange
 import com.hsilighting.pagify.core.EditState
+import com.hsilighting.pagify.core.PageCharacters
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PageTextRecogniser
 import com.hsilighting.pagify.core.NOTE_MARKER_RADIUS_POINTS
@@ -621,6 +625,135 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     /** The reader has taken the scroll a history step asked for. */
     fun jumpHandled() = _state.update { it.copy(jumpToPage = null) }
 
+    // -------------------------------------------------------------- selection --
+
+    /**
+     * Per-page character geometry, fetched on demand.
+     *
+     * Not fetched with the page: a dense page is thousands of boxes, and most
+     * pages are read rather than selected from. Cached once asked for, because a
+     * handle drag asks again on every move.
+     */
+    private val characterCache = mutableMapOf<Int, PageCharacters>()
+
+    private suspend fun charactersOf(pageIndex: Int): PageCharacters {
+        characterCache[pageIndex]?.let { return it }
+        val doc = document ?: return PageCharacters.EMPTY
+
+        val characters = withContext(Dispatchers.Default) {
+            runCatching { doc.pageCharacters(pageIndex) }.getOrElse { failure ->
+                Log.e(TAG, "reading characters on page $pageIndex failed", failure)
+                PageCharacters.EMPTY
+            }
+        }
+        characterCache[pageIndex] = characters
+        return characters
+    }
+
+    /**
+     * Select the word under a long press.
+     *
+     * A word rather than a character: pointing at a letter means pointing at the
+     * word it is in, and starting from one character would mean dragging a handle
+     * before anything useful was selected.
+     */
+    fun selectWordAt(pageIndex: Int, point: Offset) {
+        viewModelScope.launch {
+            val characters = charactersOf(pageIndex)
+            val index = characters.indexNear(point)
+            if (index == null) {
+                // A page with no text layer. The highlighter has a hint for this,
+                // but it only shows while the highlighter is armed — and a long
+                // press needs no tool, so without this the gesture would simply
+                // do nothing and look broken. Which is what it looked like on a
+                // catalogue where 92 of 95 pages are outlined type.
+                noteHasNoSelectableText(pageIndex)
+                SessionRecorder.record("SELECT_NO_TEXT", "page=$pageIndex")
+                _state.update { it.copy(message = "No selectable text here — the page is an image or outlines.") }
+                return@launch
+            }
+            applySelection(pageIndex, characters, characters.wordAround(index))
+        }
+    }
+
+    /**
+     * Drag one end of the selection.
+     *
+     * The two ends are interchangeable: dragging the start past the end turns the
+     * selection round, which is what happens if you keep going.
+     */
+    fun moveSelectionHandle(isStart: Boolean, point: Offset) {
+        val current = _state.value.selection ?: return
+        viewModelScope.launch {
+            val characters = charactersOf(current.pageIndex)
+            val moved = characters.indexNear(point) ?: return@launch
+            val anchor = if (isStart) current.range.last else current.range.first
+            applySelection(
+                current.pageIndex,
+                characters,
+                minOf(anchor, moved)..maxOf(anchor, moved),
+            )
+        }
+    }
+
+    private fun applySelection(pageIndex: Int, characters: PageCharacters, range: IntRange) {
+        _state.update {
+            it.copy(
+                selection = PageTextSelection(
+                    pageIndex = pageIndex,
+                    range = range,
+                    rects = characters.rectsOf(range),
+                    text = characters.textOf(range),
+                ),
+            )
+        }
+    }
+
+    fun clearSelection() = _state.update { it.copy(selection = null) }
+
+    /** Put the selected text on the clipboard. */
+    fun copySelection() {
+        val selection = _state.value.selection ?: return
+        if (selection.text.isBlank()) return
+
+        val clipboard = getApplication<Application>()
+            .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Pagify", selection.text))
+
+        SessionRecorder.record(
+            kind = "TEXT_COPY",
+            detail = "page=${selection.pageIndex} chars=${selection.text.length}",
+        )
+        _state.update {
+            it.copy(
+                selection = null,
+                // Android 13 and later shows its own copy confirmation, so saying
+                // it again would be the second one. Older versions say nothing.
+                message = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    it.message
+                } else {
+                    "Copied."
+                },
+            )
+        }
+    }
+
+    /** Turn the selection into a highlight, in the current pen colour. */
+    fun highlightSelection() {
+        val selection = _state.value.selection ?: return
+        if (selection.rects.isEmpty()) return
+
+        addAnnotation(
+            Annotation.Highlight(
+                id = 0L,
+                pageIndex = selection.pageIndex,
+                rects = selection.rects,
+                color = _state.value.penColor,
+            ),
+        )
+        clearSelection()
+    }
+
     /**
      * Republish everything derived from the store.
      *
@@ -925,6 +1058,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         // them would paint one document's annotations onto the next.
         annotations.clear()
         textSegmentCache.clear()
+        // Keyed by page index, so keeping it would let one document's characters
+        // answer for another's page 3.
+        characterCache.clear()
         // Marks belong to the file that is going away, and so does the mapping
         // from their ids to indices in it.
         savedMarkLocations.clear()

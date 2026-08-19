@@ -237,6 +237,19 @@ internal object NativeBridge {
     ): ByteArray
 
     /**
+     * A page's text with a box for every character, as JSON.
+     *
+     * What selecting text needs and [getTextSegmentsJson] cannot give: a run is a
+     * whole line, so a selection built from runs can only begin and end at a
+     * line. Characters let it begin and end where the finger is.
+     *
+     * Costlier than the runs — a dense page is thousands of boxes — so it is a
+     * separate call, made only when someone actually selects.
+     */
+    @Throws(PdfException::class)
+    external fun getPageCharactersJson(handle: Long, pageIndex: Int): String
+
+    /**
      * Turn a drawn stroke into a shape, or say it is not one.
      *
      * Pure geometry — no document, no handle, no lock — so it is safe to call the

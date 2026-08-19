@@ -40,6 +40,48 @@ fn main() {
     );
     write_quadrants(&pdfium, &format!("{out}/quadrants.pdf"));
     write_spread(&pdfium, &format!("{out}/spread.pdf"));
+    write_text_lines(&pdfium, &format!("{out}/text-lines.pdf"));
+}
+
+/// Three lines of known text at known places.
+///
+/// Every other fixture here is deliberately blank — page geometry was all the
+/// write path needed. Selection needs the opposite: text whose exact content and
+/// order are known in advance, so a test can say "these characters, in this
+/// order, at these positions" rather than "some characters came back".
+pub const TEXT_LINES: [&str; 3] = [
+    "The quick brown fox",
+    "jumps over the lazy dog",
+    "Pack my box with five dozen jugs",
+];
+
+fn write_text_lines(pdfium: &Pdfium, path: &str) {
+    let mut doc = pdfium.create_new_pdf().expect("create");
+    let font = doc.fonts_mut().helvetica();
+
+    let mut page = doc
+        .pages_mut()
+        .create_page_at_end(PdfPagePaperSize::from_points(
+            PdfPoints::new(400.0),
+            PdfPoints::new(300.0),
+        ))
+        .expect("add page");
+
+    // Well apart vertically, so a test can aim at one line without ambiguity
+    // about which it hit.
+    for (index, line) in TEXT_LINES.iter().enumerate() {
+        let mut object = PdfPageTextObject::new(&doc, line, font, PdfPoints::new(14.0))
+            .expect("build the line");
+        object
+            .translate(PdfPoints::new(40.0), PdfPoints::new(240.0 - index as f32 * 60.0))
+            .expect("place the line");
+        page.objects_mut().add_text_object(object).expect("add the line");
+    }
+
+    page.regenerate_content().expect("regenerate");
+    drop(page);
+    doc.save_to_file(path).expect("save");
+    println!("{path}: 1 page, 400x300, three lines of known text");
 }
 
 /// Two pages, each a single flat colour.

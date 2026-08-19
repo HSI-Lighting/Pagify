@@ -15,6 +15,7 @@ use pdfium_render::prelude::{
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
+    PageCharacters,
     Annotation, Color, Document, DocumentMut, IndexedAnnotation, Page, PageSize, Point, Rect,
     RegionRequest, RemovedPage, RenderRequest, Rotation,
     TextSegment,
@@ -516,6 +517,50 @@ impl<'a> Page for PdfiumPage<'a> {
             });
         }
         Ok(segments)
+    }
+
+    fn characters(&self) -> Result<PageCharacters> {
+        // The crop again, for the same reason as the runs: PDFium reports text
+        // geometry in MediaBox space while rendering from the CropBox.
+        let space = PageSpace::for_page(&self.page, self.page.height().value);
+        let text = self
+            .page
+            .text()
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        let characters = text.chars();
+        let expected = characters.len() as usize;
+        let mut out = PageCharacters {
+            text: String::with_capacity(expected),
+            boxes: Vec::with_capacity(expected * 4),
+        };
+
+        for character in characters.iter() {
+            let Some(glyph) = character.unicode_char() else {
+                // A character PDFium cannot map to Unicode has nothing to copy
+                // and nothing to point at. Skipping it keeps the text and the
+                // boxes aligned, which is the only thing this type promises.
+                continue;
+            };
+
+            // Loose bounds rather than tight: a selection should cover the line's
+            // full height, so consecutive characters join into an unbroken band
+            // rather than a row of glyph-shaped bites.
+            let Ok(bounds) = character.loose_bounds() else {
+                continue;
+            };
+            let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+            let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
+
+            out.text.push(glyph);
+            // Once per UTF-16 code unit, so a character outside the basic plane
+            // does not slide every box after it by one on the Kotlin side.
+            for _ in 0..glyph.len_utf16() {
+                out.boxes.extend_from_slice(&[left, top, right, bottom]);
+            }
+        }
+
+        Ok(out)
     }
 }
 
