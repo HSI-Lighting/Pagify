@@ -39,7 +39,7 @@ pub use history::CommandHistory;
 
 use serde::{Deserialize, Serialize};
 
-use crate::document::{DocumentMut, PageSize, RemovedPage};
+use crate::document::{Annotation, DocumentMut, PageSize, RemovedPage};
 use crate::error::Result;
 
 /// What the user asked for. Parameters only, and serialisable.
@@ -75,6 +75,24 @@ pub enum Command {
         index: usize,
         quarter_turns: u8,
     },
+
+    // ------------------------------------------------------------ annotation --
+    /// Put a mark on a page.
+    ///
+    /// Annotations reach the document through the same path as everything else,
+    /// which is the payoff of routing every mutation through a command: undo,
+    /// redo, cache invalidation and the JNI surface already existed, so these two
+    /// variants needed none of them written again.
+    AddAnnotation {
+        page_index: usize,
+        annotation: Annotation,
+    },
+    /// Take a mark off a page. `index` is **PDFium's** index for it, not a
+    /// position in any list this engine produced — see [`IndexedAnnotation`].
+    RemoveAnnotation {
+        page_index: usize,
+        index: usize,
+    },
 }
 
 /// What one execution needs in order to be undone.
@@ -92,6 +110,22 @@ pub enum UndoRecord {
     /// Removes a page that an insert added.
     RemovePage { index: usize },
     SetPageRotation { index: usize, quarter_turns: u8 },
+
+    /// Removes a mark that an add put there.
+    RemoveAnnotation { page_index: usize, index: usize },
+    /// Puts back a mark that a remove took away.
+    ///
+    /// Re-adding appends, so a restored annotation lands at the end of the page's
+    /// array rather than back at the index it held. That is a z-order change and
+    /// nothing more, visible only where two marks overlap. Restoring the exact
+    /// position would mean removing and rewriting every annotation after it —
+    /// which would destroy any form widget or link this engine cannot model, a
+    /// far worse trade than a highlight changing which of two overlapping marks
+    /// draws on top.
+    RestoreAnnotation {
+        page_index: usize,
+        annotation: Annotation,
+    },
 }
 
 impl Command {
@@ -135,6 +169,25 @@ impl Command {
                     quarter_turns: previous,
                 })
             }
+            Command::AddAnnotation {
+                page_index,
+                annotation,
+            } => {
+                // The index PDFium actually gave it, so undo removes this mark and
+                // not whichever one happens to be last by then.
+                let index = doc.add_annotation(*page_index, annotation)?;
+                Ok(UndoRecord::RemoveAnnotation {
+                    page_index: *page_index,
+                    index,
+                })
+            }
+            Command::RemoveAnnotation { page_index, index } => {
+                let annotation = doc.take_annotation(*page_index, *index)?;
+                Ok(UndoRecord::RestoreAnnotation {
+                    page_index: *page_index,
+                    annotation,
+                })
+            }
         }
     }
 
@@ -145,6 +198,16 @@ impl Command {
             Command::DeletePage { index } => format!("Delete page {}", index + 1),
             Command::InsertBlankPage { at, .. } => format!("Insert page {}", at + 1),
             Command::SetPageRotation { index, .. } => format!("Rotate page {}", index + 1),
+            // Named by what the user drew, not by "annotation" — the label goes
+            // straight onto an undo button, and "Undo add annotation" tells nobody
+            // which of their marks is about to vanish.
+            Command::AddAnnotation {
+                page_index,
+                annotation,
+            } => format!("{} on page {}", annotation.describe(), page_index + 1),
+            Command::RemoveAnnotation { page_index, .. } => {
+                format!("Erase on page {}", page_index + 1)
+            }
         }
     }
 
@@ -159,6 +222,22 @@ impl Command {
             | Command::DeletePage { .. }
             | Command::InsertBlankPage { .. } => Vec::new(),
             Command::SetPageRotation { index, .. } => vec![*index],
+            // A mark changes one page and renumbers nothing, so the rest of the
+            // cache survives — which matters, because marks are made far more
+            // often than pages are moved.
+            Command::AddAnnotation { page_index, .. }
+            | Command::RemoveAnnotation { page_index, .. } => vec![*page_index],
+        }
+    }
+}
+
+impl Annotation {
+    /// How the user would name this mark, for an undo label.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Annotation::Highlight { .. } => "Highlight",
+            Annotation::Ink { .. } => "Drawing",
+            Annotation::Note { .. } => "Note",
         }
     }
 }
@@ -175,6 +254,13 @@ impl UndoRecord {
                 index,
                 quarter_turns,
             } => doc.set_page_rotation(index, quarter_turns),
+            UndoRecord::RemoveAnnotation { page_index, index } => {
+                doc.remove_annotation(page_index, index)
+            }
+            UndoRecord::RestoreAnnotation {
+                page_index,
+                annotation,
+            } => doc.add_annotation(page_index, &annotation).map(|_| ()),
         }
     }
 }
@@ -199,6 +285,7 @@ fn invert_permutation(order: &[usize]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::document::{Color, Rect};
 
     #[test]
     fn a_permutation_and_its_inverse_cancel() {
@@ -318,6 +405,24 @@ mod tests {
                     index: 0,
                     quarter_turns: 1,
                 },
+            ),
+            // A mark is a *nested* object under "annotation". Merging its fields
+            // into the command reads perfectly well and decodes as
+            // `missing field annotation` — which is how the app first sent it, and
+            // what a device run rather than either test suite had to catch.
+            (
+                r#"{"op":"addAnnotation","pageIndex":0,"annotation":{"kind":"highlight","rects":[{"left":1.0,"top":2.0,"right":3.0,"bottom":4.0}],"color":{"r":255,"g":224,"b":102,"a":128}}}"#,
+                Command::AddAnnotation {
+                    page_index: 0,
+                    annotation: Annotation::Highlight {
+                        rects: vec![Rect { left: 1.0, top: 2.0, right: 3.0, bottom: 4.0 }],
+                        color: Color { r: 255, g: 224, b: 102, a: 128 },
+                    },
+                },
+            ),
+            (
+                r#"{"op":"removeAnnotation","pageIndex":3,"index":7}"#,
+                Command::RemoveAnnotation { page_index: 3, index: 7 },
             ),
         ];
 

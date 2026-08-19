@@ -25,7 +25,7 @@
 
 use pdf_core::command::{Command, CommandHistory};
 use pdf_core::document::pdfium_doc::PdfiumDocument;
-use pdf_core::document::Document;
+use pdf_core::document::{Annotation, Color, Document, Point, Rect};
 use pdf_core::registry;
 
 mod harness;
@@ -393,4 +393,152 @@ fn opening_documents_concurrently_gives_each_one_its_own_pages() {
     for thread in threads {
         thread.join().expect("a thread saw the wrong document");
     }
+}
+
+/// A mark survives a save and a reopen, which is the whole point of the feature.
+///
+/// Asserting against `annotation_count` rather than reading the mark back through
+/// our own model on purpose: the count comes from PDFium's view of the page, so a
+/// pass means the annotation is really in the file, not merely that we can parse
+/// what we just wrote.
+#[test]
+fn a_highlight_is_still_there_after_a_save_and_reopen() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+    assert_eq!(
+        0,
+        doc.annotation_count(1).expect("count"),
+        "the fixture must start clean or this test proves nothing",
+    );
+
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::AddAnnotation {
+                page_index: 1,
+                annotation: Annotation::Highlight {
+                    rects: vec![Rect {
+                        left: 20.0,
+                        top: 30.0,
+                        right: 180.0,
+                        bottom: 44.0,
+                    }],
+                    color: Color {
+                        r: 255,
+                        g: 224,
+                        b: 102,
+                        a: 128,
+                    },
+                },
+            },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("add the highlight");
+
+    assert_eq!(1, doc.annotation_count(1).expect("count"));
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    assert_eq!(
+        1,
+        reopened.annotation_count(1).expect("count"),
+        "the mark did not survive the save",
+    );
+    // And it landed on the page it was put on, not on every page.
+    assert_eq!(0, reopened.annotation_count(0).expect("count"));
+}
+
+/// Ink is a different write path — strokes rather than quad points — so it gets
+/// its own round trip rather than riding on the highlight's.
+#[test]
+fn a_drawn_stroke_survives_a_save() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "single-page.pdf");
+    let stroke: Vec<Point> = (0..12)
+        .map(|i| Point {
+            x: 20.0 + i as f32 * 8.0,
+            y: 50.0 + (i % 3) as f32 * 4.0,
+        })
+        .collect();
+
+    doc.as_document_mut()
+        .expect("mutable")
+        .add_annotation(
+            0,
+            &Annotation::Ink {
+                strokes: vec![stroke],
+                color: Color {
+                    r: 0,
+                    g: 0,
+                    b: 255,
+                    a: 255,
+                },
+                width: 3.0,
+            },
+        )
+        .expect("add ink");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    assert_eq!(1, reopened.annotation_count(0).expect("count"));
+}
+
+/// Undoing a mark before saving leaves the file with nothing in it.
+///
+/// The counterpart to the page-tree version of this test: an edit that was undone
+/// must not reach the document at all, or undo is only a UI illusion.
+#[test]
+fn a_mark_undone_before_saving_never_reaches_the_file() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "single-page.pdf");
+    let mut history = CommandHistory::default();
+
+    history
+        .execute(
+            Command::AddAnnotation {
+                page_index: 0,
+                annotation: Annotation::Note {
+                    rect: Rect {
+                        left: 10.0,
+                        top: 10.0,
+                        right: 30.0,
+                        bottom: 30.0,
+                    },
+                    contents: "temporary".into(),
+                    color: Color {
+                        r: 255,
+                        g: 255,
+                        b: 0,
+                        a: 255,
+                    },
+                },
+            },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("add the note");
+    assert_eq!(1, doc.annotation_count(0).expect("count"));
+
+    history
+        .undo(doc.as_document_mut().expect("mutable"))
+        .expect("undo")
+        .expect("something to undo");
+
+    assert_eq!(0, doc.annotation_count(0).expect("count"));
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    assert_eq!(
+        0,
+        reopened.annotation_count(0).expect("count"),
+        "an undone mark was written to the file anyway",
+    );
 }

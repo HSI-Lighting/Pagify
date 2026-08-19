@@ -272,7 +272,9 @@ pub fn save(
 mod tests {
     use super::*;
     use crate::document::metadata::DocumentMetadata;
-    use crate::document::{Document, DocumentMut, Page, PageSize, RemovedPage};
+    use crate::document::{
+        Annotation, Color, Document, DocumentMut, Page, PageSize, Point, Rect, RemovedPage,
+    };
     use crate::error::PdfError;
     use std::cell::Cell;
     use std::rc::Rc;
@@ -497,6 +499,8 @@ mod tests {
         widths: Vec<f32>,
         rotations: Vec<u8>,
         dirty: bool,
+        /// Marks per page, so an add and its undo are observable.
+        annotations: std::collections::HashMap<usize, Vec<Annotation>>,
     }
 
     // Sound for the test harness: never shared across threads.
@@ -509,6 +513,7 @@ mod tests {
                 widths: (0..count).map(|i| 100.0 + i as f32 * 10.0).collect(),
                 rotations: vec![0; count],
                 dirty: false,
+                annotations: std::collections::HashMap::new(),
             }
         }
     }
@@ -581,6 +586,29 @@ mod tests {
         fn page_rotation(&self, index: usize) -> Result<u8> {
             Ok(self.rotations[index])
         }
+        fn add_annotation(&mut self, page: usize, annotation: &Annotation) -> Result<usize> {
+            let marks = self.annotations.entry(page).or_default();
+            marks.push(annotation.clone());
+            self.dirty = true;
+            Ok(marks.len() - 1)
+        }
+
+        fn remove_annotation(&mut self, page: usize, index: usize) -> Result<()> {
+            self.take_annotation(page, index).map(|_| ())
+        }
+
+        fn take_annotation(&mut self, page: usize, index: usize) -> Result<Annotation> {
+            let marks = self
+                .annotations
+                .get_mut(&page)
+                .ok_or(PdfError::Unsupported("no marks on that page"))?;
+            if index >= marks.len() {
+                return Err(PdfError::Unsupported("no such mark"));
+            }
+            self.dirty = true;
+            Ok(marks.remove(index))
+        }
+
         fn extract_pages(&self, _range: &[usize]) -> Result<Box<dyn Document>> {
             Err(PdfError::Unsupported("extract in tests"))
         }
@@ -754,5 +782,167 @@ mod tests {
         let mut rewritten = Vec::new();
         save(&mut session, &mut rewritten, false).unwrap();
         assert_eq!(rewritten, b"full");
+    }
+
+    // ---------------------------------------------------------- annotations --
+
+    fn yellow() -> Color {
+        Color {
+            r: 255,
+            g: 214,
+            b: 0,
+            a: 128,
+        }
+    }
+
+    fn highlight_over(line: f32) -> Annotation {
+        Annotation::Highlight {
+            rects: vec![Rect {
+                left: 10.0,
+                top: line,
+                right: 200.0,
+                bottom: line + 12.0,
+            }],
+            color: yellow(),
+        }
+    }
+
+    #[test]
+    fn a_mark_and_its_undo_leave_the_page_as_it_was() {
+        let mut session = editable_session(2);
+
+        let state = execute(
+            &mut session,
+            Command::AddAnnotation {
+                page_index: 1,
+                annotation: highlight_over(40.0),
+            },
+        )
+        .unwrap();
+
+        assert!(state.dirty);
+        assert_eq!(state.undo_label.as_deref(), Some("Highlight on page 2"));
+
+        let (undone, _) = undo(&mut session).unwrap();
+        assert!(undone);
+
+        // The mark is gone from the page it was put on, and the page tree is
+        // untouched — a mark must never renumber anything.
+        let doc = session.document.as_document_mut().unwrap();
+        assert!(matches!(
+            doc.remove_annotation(1, 0),
+            Err(PdfError::Unsupported(_))
+        ));
+        assert_eq!(2, session.document.page_count());
+    }
+
+    #[test]
+    fn a_mark_invalidates_only_the_page_it_is_on() {
+        let mut session = editable_session(3);
+        fill_cache(&mut session, 3);
+        assert_eq!(session.cache.len(), 6);
+
+        execute(
+            &mut session,
+            Command::AddAnnotation {
+                page_index: 2,
+                annotation: highlight_over(10.0),
+            },
+        )
+        .unwrap();
+
+        // Four rasters survive. Marks are made far more often than pages are
+        // moved, so clearing the whole cache for one highlight would make the
+        // common case pay for the rare one.
+        assert_eq!(session.cache.len(), 4);
+        assert!(!session.cache.contains(&CacheKey::new(2, 1.0, 0)));
+        assert!(session.cache.contains(&CacheKey::new(0, 1.0, 0)));
+        assert!(session.cache.contains(&CacheKey::new(1, 2.0, 0)));
+    }
+
+    #[test]
+    fn erasing_a_mark_puts_it_back_on_undo() {
+        let mut session = editable_session(1);
+        execute(
+            &mut session,
+            Command::AddAnnotation {
+                page_index: 0,
+                annotation: highlight_over(20.0),
+            },
+        )
+        .unwrap();
+
+        execute(
+            &mut session,
+            Command::RemoveAnnotation {
+                page_index: 0,
+                index: 0,
+            },
+        )
+        .unwrap();
+
+        let (undone, state) = undo(&mut session).unwrap();
+        assert!(undone);
+        // Two marks would mean the undo re-added without the erase having taken;
+        // none would mean the record lost it.
+        assert_eq!(state.undo_label.as_deref(), Some("Highlight on page 1"));
+    }
+
+    #[test]
+    fn every_tool_the_reader_offers_survives_a_round_trip_through_json() {
+        // The wire format is shared with Kotlin and nothing checks it at compile
+        // time — the same trap that made setPageRotation undecodable while both
+        // suites were green.
+        let marks = [
+            highlight_over(30.0),
+            Annotation::Ink {
+                strokes: vec![vec![
+                    Point { x: 1.0, y: 2.0 },
+                    Point { x: 3.0, y: 4.0 },
+                ]],
+                color: yellow(),
+                width: 3.5,
+            },
+            Annotation::Note {
+                rect: Rect {
+                    left: 5.0,
+                    top: 5.0,
+                    right: 25.0,
+                    bottom: 25.0,
+                },
+                contents: "check this".into(),
+                color: yellow(),
+            },
+        ];
+
+        for mark in marks {
+            let command = Command::AddAnnotation {
+                page_index: 4,
+                annotation: mark.clone(),
+            };
+            let json = serde_json::to_string(&command).expect("encode");
+            let decoded: Command = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("{json} failed to decode: {e}"));
+            assert_eq!(command, decoded);
+        }
+    }
+
+    #[test]
+    fn the_json_an_annotation_command_produces_is_all_camel_case() {
+        let json = serde_json::to_string(&Command::AddAnnotation {
+            page_index: 2,
+            annotation: Annotation::Ink {
+                strokes: vec![vec![Point { x: 1.0, y: 2.0 }]],
+                color: yellow(),
+                width: 2.0,
+            },
+        })
+        .expect("encode");
+
+        // `page_index` is the one that would have slipped through: every other
+        // field in this enum is a single word.
+        assert!(json.contains(r#""pageIndex":2"#), "got {json}");
+        assert!(json.contains(r#""op":"addAnnotation""#), "got {json}");
+        assert!(json.contains(r#""kind":"ink""#), "got {json}");
     }
 }

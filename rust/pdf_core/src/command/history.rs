@@ -125,7 +125,7 @@ impl CommandHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Document, PageSize, RemovedPage};
+    use crate::document::{Annotation, Document, PageSize, RemovedPage};
     use crate::error::PdfError;
     use std::io::Write;
 
@@ -196,6 +196,18 @@ mod tests {
 
         fn page_rotation(&self, index: usize) -> Result<u8> {
             Ok(self.rotations[index])
+        }
+
+        fn add_annotation(&mut self, _page: usize, _a: &Annotation) -> Result<usize> {
+            Ok(0)
+        }
+
+        fn remove_annotation(&mut self, _page: usize, _index: usize) -> Result<()> {
+            Ok(())
+        }
+
+        fn take_annotation(&mut self, _page: usize, _index: usize) -> Result<Annotation> {
+            Err(PdfError::Unsupported("annotations in these tests"))
         }
 
         fn extract_pages(&self, _range: &[usize]) -> Result<Box<dyn Document>> {

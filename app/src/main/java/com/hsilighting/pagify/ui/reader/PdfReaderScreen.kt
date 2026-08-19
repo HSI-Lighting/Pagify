@@ -416,6 +416,7 @@ fun PdfReaderScreen(
                     pageCount = state.pageCount,
                     currentPage = state.currentPage,
                     editState = state.editState,
+                    unsavedMarks = state.annotationsInDocument,
                     isSaving = state.isSaving,
                     onAction = onPageAction,
                     onSave = onSaveDocument,

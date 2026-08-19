@@ -87,6 +87,15 @@ fun PageOrganiser(
     pageCount: Int,
     currentPage: Int,
     editState: EditState,
+    /**
+     * Marks made this session that are not yet in the file.
+     *
+     * Kept separate from [editState] because a highlight does not make the
+     * *document* dirty — marks live in an `AnnotationStore` until a save writes
+     * them out. Without this the Save button stayed disabled on a document whose
+     * only change was every annotation the reader had drawn on it.
+     */
+    unsavedMarks: Int,
     isSaving: Boolean,
     onAction: (PageAction) -> Unit,
     onSave: () -> Unit,
@@ -129,7 +138,7 @@ fun PageOrganiser(
                 Text(
                     text = buildString {
                         append(if (pageCount == 1) "1 page" else "$pageCount pages")
-                        if (editState.dirty) append(" · unsaved changes")
+                        if (editState.dirty || unsavedMarks > 0) append(" · unsaved changes")
                     },
                     style = MaterialTheme.typography.labelMedium,
                 )
@@ -240,11 +249,12 @@ fun PageOrganiser(
             if (isSaving) {
                 CircularProgressIndicator(modifier = Modifier.width(20.dp).height(20.dp))
             }
-            TextButton(onClick = onSaveCopy, enabled = editState.dirty && !isSaving) {
+            val hasChanges = editState.dirty || unsavedMarks > 0
+            TextButton(onClick = onSaveCopy, enabled = hasChanges && !isSaving) {
                 Text("Save a copy")
             }
             TextButton(onClick = onClose, enabled = !isSaving) { Text("Close") }
-            FilledTonalButton(onClick = onSave, enabled = editState.dirty && !isSaving) {
+            FilledTonalButton(onClick = onSave, enabled = hasChanges && !isSaving) {
                 Text("Save")
             }
         }

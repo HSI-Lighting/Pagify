@@ -3,18 +3,20 @@
 use std::fs::File;
 use std::ffi::c_void;
 use std::io::{Read, Seek, Write};
-use std::os::raw::{c_int, c_ulong};
+use std::os::raw::{c_int, c_uint, c_ulong};
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfPage, PdfPageRenderRotation,
     PdfPagePaperSize, PdfPoints, PdfRenderConfig, Pdfium, PdfiumLibraryBindingsAccessor,
-    FPDF_FILEWRITE,
+    FPDFANNOT_COLORTYPE, FPDF_ANNOTATION, FPDF_ANNOTATION_SUBTYPE, FPDF_DOCUMENT, FPDF_FILEWRITE,
+    FPDF_PAGE, FS_POINTF, FS_QUADPOINTSF, FS_RECTF,
 };
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
-    Document, DocumentMut, Page, PageSize, RemovedPage, RenderRequest, Rotation, TextSegment,
+    Annotation, Document, DocumentMut, Page, PageSize, Rect, RemovedPage, RenderRequest, Rotation,
+    TextSegment,
 };
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
 use crate::render::bitmap::{self, Bitmap, PixelOrder};
@@ -288,6 +290,18 @@ impl Document for PdfiumDocument {
 
     /// Uses `FPDF_GetPageSizeByIndexF`, which reads the page tree without
     /// loading the page itself.
+    fn annotation_count(&self, page_index: usize) -> Result<usize> {
+        self.validate_page_index(page_index)?;
+        let index = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+
+        let page = RawPage::open(self.document.handle(), index)?;
+        let count = unsafe { pdfium()?.bindings().FPDFPage_GetAnnotCount(page.handle) };
+        Ok(count.max(0) as usize)
+    }
+
     fn page_size(&self, index: usize) -> Result<PageSize> {
         self.validate_page_index(index)?;
         let pdfium_index = i32::try_from(index).map_err(|_| PdfError::PageOutOfRange {
@@ -529,6 +543,64 @@ impl DocumentMut for PdfiumDocument {
         })
     }
 
+    fn add_annotation(&mut self, page_index: usize, annotation: &Annotation) -> Result<usize> {
+        self.validate_page_index(page_index)?;
+        let index = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+
+        let page = RawPage::open(self.document.handle(), index)?;
+        self.write_annotation(&page, annotation)?;
+
+        // Read the count back rather than assume. PDFium appends, so the new mark
+        // is the last one — but taking the count makes that a measured fact rather
+        // than an assumption the undo record silently depends on.
+        let count = unsafe { pdfium()?.bindings().FPDFPage_GetAnnotCount(page.handle) };
+        if count <= 0 {
+            return Err(PdfError::Pdfium(
+                "annotation was created but the page reports none".into(),
+            ));
+        }
+
+        self.dirty = true;
+        Ok((count - 1) as usize)
+    }
+
+    fn remove_annotation(&mut self, page_index: usize, index: usize) -> Result<()> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+        let annot_index = i32::try_from(index)
+            .map_err(|_| PdfError::InvalidArgument(format!("annotation index {index} is out of range")))?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let removed =
+            unsafe { pdfium()?.bindings().FPDFPage_RemoveAnnot(page.handle, annot_index) };
+        if removed == 0 {
+            return Err(PdfError::Pdfium(format!(
+                "page {page_index} has no annotation at index {index}"
+            )));
+        }
+
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn take_annotation(&mut self, page_index: usize, index: usize) -> Result<Annotation> {
+        self.validate_page_index(page_index)?;
+        let _ = index;
+        // Removing is easy; *returning what was removed* is not, and without that
+        // the removal cannot be undone. Reconstructing a mark from PDFium means
+        // reading quad points, ink lists and colours back — the read half of this
+        // module, which is not written yet. Refusing is the honest behaviour until
+        // it is: an erase that worked with an undo that silently lost the mark
+        // would be worse than one that does not start.
+        Err(PdfError::Unsupported(
+            "erasing a mark that is already saved in the file",
+        ))
+    }
+
     fn extract_pages(&self, range: &[usize]) -> Result<Box<dyn Document>> {
         if range.is_empty() {
             return Err(PdfError::InvalidArgument("no pages to extract".into()));
@@ -724,3 +796,246 @@ const PDF_VERSION_1_7: c_int = 17;
 
 /// `FPDF_INCREMENTAL` from `fpdf_save.h`. Not re-exported by the binding.
 const FPDF_INCREMENTAL: u32 = 1;
+
+// ------------------------------------------------------------------ annotation --
+
+/// Annotation subtypes from `fpdf_annot.h`.
+///
+/// Spelled out because the binding re-exports the *types* but not these
+/// constants. They are PDF spec subtype numbers and do not move between PDFium
+/// releases.
+const ANNOT_TEXT: FPDF_ANNOTATION_SUBTYPE = 1;
+const ANNOT_HIGHLIGHT: FPDF_ANNOTATION_SUBTYPE = 9;
+const ANNOT_INK: FPDF_ANNOTATION_SUBTYPE = 15;
+
+/// `FPDFANNOT_COLORTYPE_Color` — the stroke/foreground colour.
+const COLORTYPE_COLOR: FPDFANNOT_COLORTYPE = 0;
+
+/// A page opened straight through the C API, closed when it goes out of scope.
+///
+/// Deliberately not `pdfium-render`'s `PdfPage`: reaching the raw `FPDF_PAGE` it
+/// wraps would need a second patch to the vendored crate, and the annotation
+/// calls below are all raw FFI anyway. Opening our own costs one `FPDF_LoadPage`
+/// and keeps the vendor diff at the single line it is.
+///
+/// The `Drop` is the point of the type. Several of the calls below can fail, and
+/// an early return that leaked the page would hold a reference to the document
+/// for as long as it stayed open — which, since the registry lock is dropped
+/// afterwards, would eventually be blamed on something else entirely.
+struct RawPage {
+    handle: FPDF_PAGE,
+}
+
+impl RawPage {
+    fn open(document: FPDF_DOCUMENT, index: c_int) -> Result<Self> {
+        // Safety: `document` comes from a live `PdfDocument` held by the caller,
+        // and `index` has been validated against the page count.
+        let handle = unsafe { pdfium()?.bindings().FPDF_LoadPage(document, index) };
+        if handle.is_null() {
+            return Err(PdfError::Pdfium(format!("could not load page {index}")));
+        }
+        Ok(RawPage { handle })
+    }
+
+    /// Page height in points, which is what every coordinate flip below needs.
+    fn height(&self) -> Result<f32> {
+        Ok(unsafe { pdfium()?.bindings().FPDF_GetPageHeightF(self.handle) })
+    }
+}
+
+impl Drop for RawPage {
+    fn drop(&mut self) {
+        if let Ok(pdfium) = pdfium() {
+            unsafe { pdfium.bindings().FPDF_ClosePage(self.handle) };
+        }
+    }
+}
+
+/// Flip one y coordinate between the two conventions.
+///
+/// Ours is top-left with y down; PDF's is bottom-left with y up. The operation is
+/// its own inverse, which is why one function serves both directions — and why
+/// applying it twice by mistake is silent rather than obviously broken.
+fn flip_y(page_height: f32, y: f32) -> f32 {
+    page_height - y
+}
+
+/// One of our rects as PDFium wants it: bottom-left origin, `top` above `bottom`.
+///
+/// The ordering matters as much as the flip. Our `Rect` has `top < bottom`
+/// because y grows downwards; after flipping, `top > bottom`. Handing PDFium an
+/// inverted rect produces an annotation with no area, which draws as nothing at
+/// all rather than as anything visibly wrong.
+fn to_pdf_rect(page_height: f32, rect: &Rect) -> FS_RECTF {
+    let top = flip_y(page_height, rect.top);
+    let bottom = flip_y(page_height, rect.bottom);
+    FS_RECTF {
+        left: rect.left.min(rect.right),
+        right: rect.left.max(rect.right),
+        top: top.max(bottom),
+        bottom: top.min(bottom),
+    }
+}
+
+/// The smallest rect containing every part of a mark.
+///
+/// Every annotation needs a `/Rect`, and PDFium will not compute one: a highlight
+/// whose rect does not enclose its quad points, or ink whose rect does not
+/// enclose its strokes, is clipped to the rect and partly or wholly invisible.
+fn bounding_box(annotation: &Annotation) -> Option<Rect> {
+    let mut bounds: Option<Rect> = None;
+    let mut grow = |left: f32, top: f32, right: f32, bottom: f32| {
+        bounds = Some(match bounds {
+            None => Rect {
+                left,
+                top,
+                right,
+                bottom,
+            },
+            Some(b) => Rect {
+                left: b.left.min(left),
+                top: b.top.min(top),
+                right: b.right.max(right),
+                bottom: b.bottom.max(bottom),
+            },
+        });
+    };
+
+    match annotation {
+        Annotation::Highlight { rects, .. } => {
+            for r in rects {
+                grow(
+                    r.left.min(r.right),
+                    r.top.min(r.bottom),
+                    r.left.max(r.right),
+                    r.top.max(r.bottom),
+                );
+            }
+        }
+        Annotation::Ink { strokes, width, .. } => {
+            // Half the nib either side, or the rect clips the stroke it draws.
+            let pad = (width / 2.0).max(0.0);
+            for stroke in strokes {
+                for p in stroke {
+                    grow(p.x - pad, p.y - pad, p.x + pad, p.y + pad);
+                }
+            }
+        }
+        Annotation::Note { rect, .. } => grow(
+            rect.left.min(rect.right),
+            rect.top.min(rect.bottom),
+            rect.left.max(rect.right),
+            rect.top.max(rect.bottom),
+        ),
+    }
+    bounds
+}
+
+impl PdfiumDocument {
+    /// Write one mark onto an already-open page.
+    ///
+    /// Split out from `add_annotation` so the page stays open for exactly this
+    /// call and the error paths all close it.
+    fn write_annotation(&self, page: &RawPage, annotation: &Annotation) -> Result<()> {
+        let bindings = pdfium()?.bindings();
+        let height = page.height()?;
+
+        let subtype = match annotation {
+            Annotation::Highlight { .. } => ANNOT_HIGHLIGHT,
+            Annotation::Ink { .. } => ANNOT_INK,
+            Annotation::Note { .. } => ANNOT_TEXT,
+        };
+
+        // Safety: the page handle is live for the duration, and the annotation is
+        // closed before returning on every path.
+        let annot = unsafe { bindings.FPDFPage_CreateAnnot(page.handle, subtype) };
+        if annot.is_null() {
+            return Err(PdfError::Pdfium("could not create annotation".into()));
+        }
+
+        let outcome = self.fill_annotation(annot, annotation, height);
+
+        unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+        outcome
+    }
+
+    fn fill_annotation(
+        &self,
+        annot: FPDF_ANNOTATION,
+        annotation: &Annotation,
+        height: f32,
+    ) -> Result<()> {
+        let bindings = pdfium()?.bindings();
+
+        let bounds = bounding_box(annotation)
+            .ok_or_else(|| PdfError::InvalidArgument("annotation has no geometry".into()))?;
+        let rect = to_pdf_rect(height, &bounds);
+        unsafe { bindings.FPDFAnnot_SetRect(annot, &rect) };
+
+        let colour = match annotation {
+            Annotation::Highlight { color, .. }
+            | Annotation::Ink { color, .. }
+            | Annotation::Note { color, .. } => *color,
+        };
+        unsafe {
+            bindings.FPDFAnnot_SetColor(
+                annot,
+                COLORTYPE_COLOR,
+                colour.r as c_uint,
+                colour.g as c_uint,
+                colour.b as c_uint,
+                colour.a as c_uint,
+            )
+        };
+
+        match annotation {
+            Annotation::Highlight { rects, .. } => {
+                for r in rects {
+                    let pdf = to_pdf_rect(height, r);
+                    // Quad points are the four corners in the order PDF expects:
+                    // top-left, top-right, bottom-left, bottom-right. Not the
+                    // winding order a reader would guess — bottom-left comes
+                    // third, and getting it wrong produces a bow-tie shape.
+                    let quad = FS_QUADPOINTSF {
+                        x1: pdf.left,
+                        y1: pdf.top,
+                        x2: pdf.right,
+                        y2: pdf.top,
+                        x3: pdf.left,
+                        y3: pdf.bottom,
+                        x4: pdf.right,
+                        y4: pdf.bottom,
+                    };
+                    unsafe { bindings.FPDFAnnot_AppendAttachmentPoints(annot, &quad) };
+                }
+            }
+            Annotation::Ink { strokes, .. } => {
+                for stroke in strokes {
+                    if stroke.len() < 2 {
+                        // A single point is not a stroke PDFium will draw, and it
+                        // would silently produce an empty ink list rather than a dot.
+                        continue;
+                    }
+                    let points: Vec<FS_POINTF> = stroke
+                        .iter()
+                        .map(|p| FS_POINTF {
+                            x: p.x,
+                            y: flip_y(height, p.y),
+                        })
+                        .collect();
+                    let added = unsafe {
+                        bindings.FPDFAnnot_AddInkStroke(annot, points.as_ptr(), points.len() as _)
+                    };
+                    if added < 0 {
+                        return Err(PdfError::Pdfium("could not add ink stroke".into()));
+                    }
+                }
+            }
+            Annotation::Note { contents, .. } => {
+                unsafe { bindings.FPDFAnnot_SetStringValue_str(annot, "Contents", contents) };
+            }
+        }
+
+        Ok(())
+    }
+}

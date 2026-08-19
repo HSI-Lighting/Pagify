@@ -170,6 +170,27 @@ pub trait Document: Send + Sync {
         Ok(self.page(index)?.size())
     }
 
+    /// Marks already on a page, each with PDFium's index for it.
+    ///
+    /// Empty by default: a document that cannot report annotations is not an
+    /// error, it simply has none to show. Types this engine does not model are
+    /// skipped rather than guessed at — see [`IndexedAnnotation`] for why that
+    /// makes the index, not the list position, the thing to address them by.
+    fn annotations(&self, _page_index: usize) -> Result<Vec<IndexedAnnotation>> {
+        Ok(Vec::new())
+    }
+
+    /// How many annotations a page carries, of any type.
+    ///
+    /// Separate from [`Document::annotations`] because it answers a different
+    /// question and is far cheaper: it counts what is actually on the page,
+    /// including the widgets and links this engine does not model. That makes it
+    /// the honest check that a save really wrote something — reading back through
+    /// our own model could only ever confirm that we can parse what we wrote.
+    fn annotation_count(&self, _page_index: usize) -> Result<usize> {
+        Ok(0)
+    }
+
     /// `Some` only for implementations that can mutate and save the file.
     ///
     /// Every mutation reaches a document through here and then through a
@@ -261,6 +282,27 @@ pub trait DocumentMut {
     /// unrotated to begin with and silently wrong otherwise.
     fn page_rotation(&self, index: usize) -> Result<u8>;
 
+    // ------------------------------------------------------------ annotation --
+
+    /// Add a mark to a page, returning the index PDFium gave it.
+    ///
+    /// The index is returned rather than assumed, because it is what makes the
+    /// addition reversible: undo removes exactly that annotation.
+    fn add_annotation(&mut self, page_index: usize, annotation: &Annotation) -> Result<usize>;
+
+    /// Remove a mark and discard it.
+    ///
+    /// Split from [`DocumentMut::take_annotation`] because the two have very
+    /// different requirements and only one of them is hard. Undoing an *add* needs
+    /// nothing back — the mark is being thrown away — while undoing a *remove*
+    /// needs the mark itself, which means reading quad points, ink lists and
+    /// colours back out of PDFium. Keeping them apart is what lets a drawn mark be
+    /// undoable before that reading exists.
+    fn remove_annotation(&mut self, page_index: usize, index: usize) -> Result<()>;
+
+    /// Remove a mark and hand it back, so the removal can be undone.
+    fn take_annotation(&mut self, page_index: usize, index: usize) -> Result<Annotation>;
+
     /// A new document holding copies of the given pages. Does not mutate self.
     fn extract_pages(&self, range: &[usize]) -> Result<Box<dyn Document>>;
 
@@ -304,22 +346,64 @@ pub struct Color {
     pub a: u8,
 }
 
+/// A point in page space, top-left origin with y increasing downwards.
+///
+/// A struct rather than a tuple so the JSON reads `{"x":1,"y":2}`. A bare pair
+/// serialises as `[1,2]`, which is compact and unreadable the moment you are
+/// staring at a malformed stroke wondering which number is which.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// A mark on a page.
+///
+/// **Coordinates are top-left origin with y increasing downwards**, matching the
+/// text runs and the Kotlin model — *not* PDF's bottom-left convention. The
+/// PDFium implementation flips once at the boundary, in both directions, so that
+/// nothing above the engine has to think about it. That is the same bargain
+/// `text_segments` already makes, and breaking it for annotations would put every
+/// restored mark on the wrong half of its page.
+///
+/// The set is deliberately small: these three cover every tool the reader offers,
+/// since a signature is ink with several strokes. Anything a document contains
+/// that does not map onto one of them — a form widget, a link — is left alone
+/// rather than modelled badly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Annotation {
-    Text {
-        rect: Rect,
-        content: String,
-        author: String,
-    },
-    Highlight {
-        rect: Rect,
-        color: Color,
-    },
+    /// Text picked out with the highlighter: one rect per line covered, which is
+    /// why this is a list rather than a rect. A selection spanning three lines is
+    /// one annotation, so erasing it takes one action rather than three.
+    Highlight { rects: Vec<Rect>, color: Color },
+    /// A freehand stroke, or several — a signature is ink committed all at once.
     Ink {
-        strokes: Vec<Vec<(f32, f32)>>,
+        strokes: Vec<Vec<Point>>,
         color: Color,
         width: f32,
     },
+    /// A note anchored to a point on the page.
+    Note {
+        rect: Rect,
+        contents: String,
+        color: Color,
+    },
+}
+
+/// An annotation together with **PDFium's own index** for it on the page.
+///
+/// The index is not the annotation's position in the returned list, and the
+/// difference is load-bearing: a page can hold annotations this engine does not
+/// model, and those are skipped on read. Numbering our own results would address
+/// the wrong annotation as soon as a page contained one — and a delete would take
+/// out somebody's form field instead of their highlight.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexedAnnotation {
+    pub index: usize,
+    #[serde(flatten)]
+    pub annotation: Annotation,
 }
 
 #[derive(Debug, Clone)]

@@ -162,6 +162,17 @@ class AnnotationStore {
 
     fun forPage(pageIndex: Int): List<Annotation> = byPage[pageIndex].orEmpty()
 
+    /**
+     * Every page that carries a mark, lowest first.
+     *
+     * Ascending so a save writes marks in page order, which makes the resulting
+     * file's annotation arrays match the order a reader would expect — and makes
+     * a partial save, if one ever fails halfway, stop at a page boundary rather
+     * than somewhere arbitrary.
+     */
+    fun pagesWithMarks(): List<Int> =
+        byPage.filterValues { it.isNotEmpty() }.keys.sorted()
+
     fun countOnPage(pageIndex: Int): Int = byPage[pageIndex]?.size ?: 0
 
     val total: Int get() = byPage.values.sumOf { it.size }

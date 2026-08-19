@@ -990,7 +990,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         val doc = document ?: return
         val uri = pendingUri ?: return
         if (_state.value.isSaving) return
-        if (!_state.value.editState.dirty) {
+        if (!_state.value.editState.dirty && annotations.isEmpty) {
             _state.update { it.copy(message = "No changes to save.") }
             return
         }
@@ -998,6 +998,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(isSaving = true) }
         viewModelScope.launch {
             try {
+                commitMarks(doc)
                 repository.writeTo(doc, uri, scratchDir(), incremental)
                 SessionRecorder.record("SAVED", "incremental=$incremental")
                 // Reopen at the page the user was on, so saving does not feel like
@@ -1058,6 +1059,26 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                         message = t.message ?: "The copy could not be saved.",
                     )
                 }
+            }
+        }
+    }
+
+    /**
+     * Write the session's marks into the document, just before it is saved.
+     *
+     * The commit boundary is the save, not the gesture. Drawing a stroke sends
+     * nothing across JNI — a marker line is hundreds of points and would take the
+     * engine's lock hundreds of times mid-drag — so marks accumulate in the
+     * [AnnotationStore] and cross once, here, as commands.
+     *
+     * Each one goes through the ordinary command path, so a failure part-way
+     * leaves the marks that did land already recorded in the document's own undo
+     * history rather than in some half-state of this function's making.
+     */
+    private suspend fun commitMarks(doc: PdfDocument) {
+        for (page in annotations.pagesWithMarks()) {
+            for (mark in annotations.forPage(page)) {
+                repository.execute(doc, PdfCommand.AddAnnotation(page, mark))
             }
         }
     }
