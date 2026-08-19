@@ -276,8 +276,13 @@ fun Modifier.annotationLayer(
         .then(inputModifier)
         .drawWithContent {
             drawContent()
-            android.util.Log.i("AnnotationLayer", "draw page=$pageIndex marks=${annotations.size}")
-            annotations.forEach { drawAnnotation(it, scale, origin) }
+            // Read through the state, not the captured parameter. A plain captured
+            // list changes value without the draw node ever hearing about it, so
+            // the display list is reused and the lambda never runs again — the
+            // page composed with the new mark and kept painting the old picture.
+            val marks = currentAnnotations
+            android.util.Log.i("AnnotationLayer", "draw page=$pageIndex marks=${marks.size}")
+            marks.forEach { drawAnnotation(it, scale, origin) }
             if (wetHighlight.isNotEmpty()) {
                 drawHighlightRects(wetHighlight, currentColor, scale, origin)
             }
