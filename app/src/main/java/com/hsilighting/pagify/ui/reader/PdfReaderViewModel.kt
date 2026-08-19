@@ -526,6 +526,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun eraseAt(pageIndex: Int, point: Offset, tolerance: Float) {
         val hit = annotations.eraseAt(pageIndex, point, tolerance)
+        Log.i(TAG, "erase: page=$pageIndex hit=$hit tracked=${savedMarkLocations.size}")
         if (hit) {
             refreshAnnotations()
             // A mark that came out of the file has to come out of the file.
@@ -1241,11 +1242,15 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun loadSavedMarks(pageIndex: Int) {
         val doc = document ?: return
-        if (!loadedMarkPages.add(pageIndex)) return
+        if (!loadedMarkPages.add(pageIndex)) {
+            Log.i(TAG, "marks: page=$pageIndex already loaded")
+            return
+        }
 
         viewModelScope.launch {
             try {
                 val marks = repository.savedMarks(doc, pageIndex) { annotations.nextId() }
+                Log.i(TAG, "marks: page=$pageIndex read=${marks.size}")
                 if (marks.isEmpty()) return@launch
 
                 for (mark in marks) {
@@ -1286,6 +1291,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             // and then whatever had shifted into 3 — a different mark entirely.
             .sortedByDescending { it.second }
 
+        Log.i(TAG, "eraseSaved: page=$pageIndex gone=${gone.size}")
         if (gone.isEmpty()) return
         val removedIndices = gone.map { it.second }
 
