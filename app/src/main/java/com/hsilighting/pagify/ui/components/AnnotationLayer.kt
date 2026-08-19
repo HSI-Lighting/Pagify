@@ -87,6 +87,7 @@ fun Modifier.annotationLayer(
     // Read through `rememberUpdatedState`: the pointerInput block below is keyed
     // on the tool, so without this it would capture the colour and mode that were
     // current when the gesture handler started rather than the latest ones.
+    android.util.Log.i("AnnotationLayer", "compose page=$pageIndex marks=${annotations.size} tool=$tool")
     val currentColor by rememberUpdatedState(penColor)
     val currentMode by rememberUpdatedState(penMode)
     val currentSegments by rememberUpdatedState(textSegments)
