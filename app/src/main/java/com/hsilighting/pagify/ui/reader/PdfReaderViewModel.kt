@@ -18,6 +18,7 @@ import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.BitmapPools
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
+import com.hsilighting.pagify.core.PageTextRecogniser
 import com.hsilighting.pagify.core.PageRemap
 import com.hsilighting.pagify.core.PdfCommand
 import com.hsilighting.pagify.core.PdfDocument
@@ -30,7 +31,9 @@ import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.ThumbnailCache
 import com.hsilighting.pagify.data.PdfRepository
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -406,6 +409,12 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     /** Text runs per page, fetched once and reused; highlighting hit-tests these. */
     private val textSegmentCache = mutableMapOf<Int, List<TextSegment>>()
 
+    /** Reads text off pages that carry none. See [PageTextRecogniser]. */
+    private val recogniser = PageTextRecogniser()
+
+    /** Recognition in flight, keyed by page, so a page is never read twice at once. */
+    private val recognitionJobs = mutableMapOf<Int, Deferred<List<TextSegment>>>()
+
     fun selectTool(tool: AnnotationTool) {
         _state.update { it.copy(tool = tool) }
         // Recorded because tool state decides how every subsequent touch is
@@ -556,42 +565,128 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         textSegmentCache[pageIndex]?.let { return it }
         val doc = document ?: return emptyList()
         val startedAt = System.nanoTime()
-        return try {
+
+        val embedded = try {
             withContext(Dispatchers.Default) { doc.textSegments(pageIndex) }
-                .also { segments ->
-                    textSegmentCache[pageIndex] = segments
-                    // Recorded whether or not anything came back — a page with no
-                    // text is not an error, and it is the whole explanation for
-                    // "the highlighter does nothing here but the marker works".
-                    SessionRecorder.record(
-                        kind = "TEXT_LAYER",
-                        detail = "page=$pageIndex runs=${segments.size}",
-                        durationMillis = (System.nanoTime() - startedAt) / 1_000_000,
-                    )
-                    if (segments.isEmpty()) noteHasNoSelectableText(pageIndex)
-                }
         } catch (t: CancellationException) {
             throw t
         } catch (t: Throwable) {
             Log.w(TAG, "could not read text layout for page $pageIndex", t)
             emptyList()
         }
+
+        SessionRecorder.record(
+            kind = "TEXT_LAYER",
+            detail = "page=$pageIndex runs=${embedded.size}",
+            durationMillis = (System.nanoTime() - startedAt) / 1_000_000,
+        )
+
+        if (embedded.isNotEmpty()) {
+            textSegmentCache[pageIndex] = embedded
+            return embedded
+        }
+
+        // No text layer at all. Read the page instead — see PageTextRecogniser for
+        // how a document can look entirely like text and contain none.
+        return recognisedSegments(doc, pageIndex)
+    }
+
+    /**
+     * Recognised text for a page, run at most once per page.
+     *
+     * Shared through a `Deferred` rather than merely guarded, because the
+     * highlighter asks for a page's text on the first touch of a drag and can ask
+     * again before the first answer arrives. Without this, a page could be rendered
+     * at recognition scale and read twice over — the most expensive thing this app
+     * does, duplicated at exactly the moment the user is waiting on it.
+     */
+    private suspend fun recognisedSegments(
+        doc: PdfDocument,
+        pageIndex: Int,
+    ): List<TextSegment> {
+        val job = synchronized(recognitionJobs) {
+            recognitionJobs.getOrPut(pageIndex) {
+                viewModelScope.async {
+                    try {
+                        runRecognition(doc, pageIndex)
+                    } finally {
+                        synchronized(recognitionJobs) { recognitionJobs.remove(pageIndex) }
+                    }
+                }
+            }
+        }
+        return job.await()
+    }
+
+    private suspend fun runRecognition(doc: PdfDocument, pageIndex: Int): List<TextSegment> {
+        _state.update { it.copy(pagesBeingRecognised = it.pagesBeingRecognised + pageIndex) }
+        val startedAt = System.nanoTime()
+
+        return try {
+            val size = repository.pageSize(doc, pageIndex)
+            // Rendered specifically for recognition rather than reusing whatever
+            // raster is on screen: accuracy depends on glyph height in pixels, and
+            // the displayed page may be at any zoom, including a proxy pass.
+            val bitmap = repository.renderPage(doc, pageIndex, PageTextRecogniser.scaleFor(size))
+            val segments = recogniser.recognise(bitmap, size)
+
+            textSegmentCache[pageIndex] = segments
+            SessionRecorder.record(
+                kind = "TEXT_RECOGNISED",
+                detail = "page=$pageIndex runs=${segments.size} px=${bitmap.width}x${bitmap.height}",
+                durationMillis = (System.nanoTime() - startedAt) / 1_000_000,
+            )
+
+            // Recorded so the reader can say the text was read off the page rather
+            // than found in it. Recognition makes mistakes, and a user who selects
+            // a wrong character deserves to know why.
+            if (segments.isNotEmpty()) {
+                _state.update { it.copy(pagesRecognised = it.pagesRecognised + pageIndex) }
+            } else {
+                noteHasNoSelectableText(pageIndex)
+            }
+            segments
+        } catch (t: CancellationException) {
+            throw t
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not recognise text on page $pageIndex", t)
+            // Deliberately not cached: a failure here is usually transient — memory
+            // pressure, or the model still unpacking on first use — and caching it
+            // would leave the page unselectable for the rest of the session.
+            noteHasNoSelectableText(pageIndex)
+            emptyList()
+        } finally {
+            _state.update { it.copy(pagesBeingRecognised = it.pagesBeingRecognised - pageIndex) }
+        }
     }
 
     /**
      * Remember that a page carries no text layer.
      *
-     * A scanned document has none anywhere: its pages are images, so there is
-     * nothing for the highlighter to select and it silently produces nothing. The
-     * UI needs to be able to say so rather than let the tool look broken — which
-     * is exactly what happened on the 2.9 GB catalogue, where every page is a
-     * scan at roughly 31 MB apiece.
+     * Some pages have nothing to select even after recognition has been tried:
+     * artwork with no words in it, or a photograph. The highlighter then produces
+     * nothing, and the UI needs to be able to say so rather than let the tool look
+     * broken.
+     *
+     * Note this is now the *second* answer, not the first. A page with no text
+     * layer is read by [PageTextRecogniser] before it is called textless — which
+     * is what the 2.97 GB catalogue needed, where the words on 92 of 95 pages are
+     * vector outlines rather than text.
      */
     fun noteHighlightFoundNothing(pageIndex: Int) = noteHasNoSelectableText(pageIndex)
 
-    private fun noteHasNoSelectableText(pageIndex: Int) = _state.update {
-        if (pageIndex in it.pagesWithoutSelectableText) it
-        else it.copy(pagesWithoutSelectableText = it.pagesWithoutSelectableText + pageIndex)
+    private fun noteHasNoSelectableText(pageIndex: Int) {
+        // A page that does have text, recognised or embedded, must never be marked
+        // as having none — and the highlighter reports a miss on any drag that hits
+        // nothing, including one across the blank half of a page. Without this,
+        // recognising a page and then dragging beside a word would put up "no
+        // selectable text" on the very page that had just been read successfully.
+        if (textSegmentCache[pageIndex]?.isNotEmpty() == true) return
+
+        _state.update {
+            if (pageIndex in it.pagesWithoutSelectableText) it
+            else it.copy(pagesWithoutSelectableText = it.pagesWithoutSelectableText + pageIndex)
+        }
     }
 
     /**

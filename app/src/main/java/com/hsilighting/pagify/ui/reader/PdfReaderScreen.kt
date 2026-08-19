@@ -73,6 +73,7 @@ import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.ui.components.AnnotationToolbar
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
+import com.hsilighting.pagify.ui.components.RecognisingTextHint
 import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.twoFingerPan
 import com.hsilighting.pagify.ui.components.PageAction
@@ -354,7 +355,17 @@ fun PdfReaderScreen(
                     )
                 }
 
-                if (highlighterOnScan && !hintDismissed) {
+                // Recognition takes seconds on a heavy page, and it starts on the
+                // first touch of a highlight drag. Without something on screen the
+                // gesture looks like it did nothing at all, which is precisely the
+                // complaint that led here.
+                if (highlighterLive && state.currentPage in state.pagesBeingRecognised) {
+                    RecognisingTextHint(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 94.dp),
+                    )
+                } else if (highlighterOnScan && !hintDismissed) {
                     NoTextOnPageHint(
                         onUseMarker = {
                             onPenModeChange(PenMode.Marker)

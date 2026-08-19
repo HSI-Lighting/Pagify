@@ -72,13 +72,26 @@ data class PdfReaderState(
     val canUndo: Boolean = false,
     val canRedo: Boolean = false,
     /**
-     * Pages checked for a text layer and found to have none.
+     * Pages with no text the highlighter can select — after recognition has also
+     * been tried and come back with nothing.
      *
-     * A scan has no text objects, so the highlighter has nothing to select and
-     * quietly produces nothing. Knowing which pages those are is what lets the UI
-     * say so instead of leaving the tool looking broken.
+     * A page can have no text objects at all: the words may be vector artwork, or
+     * an image. The highlighter then has nothing to select and quietly produces
+     * nothing, which is what lets the UI say so instead of leaving the tool
+     * looking broken.
      */
     val pagesWithoutSelectableText: Set<Int> = emptySet(),
+    /** Pages currently being read by [com.hsilighting.pagify.core.PageTextRecogniser]. */
+    val pagesBeingRecognised: Set<Int> = emptySet(),
+    /**
+     * Pages whose text was recognised rather than found in the file.
+     *
+     * Kept apart from ordinary text because it is not the same thing: recognition
+     * misreads characters, and a user who selects something slightly wrong is owed
+     * an explanation. It is also what a future "save the recognised layer into the
+     * PDF" step would work from.
+     */
+    val pagesRecognised: Set<Int> = emptySet(),
     /** Marks on [currentPage], for the wording of the clear-page action. */
     val annotationsOnPage: Int = 0,
     /** Marks anywhere in the document, for the clear-all action. */

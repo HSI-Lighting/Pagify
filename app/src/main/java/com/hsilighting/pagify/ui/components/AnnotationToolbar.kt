@@ -18,6 +18,7 @@ import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.HistoryEdu
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -440,6 +441,41 @@ fun NoTextOnPageHint(
             )
             TextButton(onClick = onUseMarker) { Text("Use marker") }
             TextButton(onClick = onDismiss) { Text("Dismiss") }
+        }
+    }
+}
+
+/**
+ * Shown while a page is being read by the recogniser.
+ *
+ * The wording says *reading*, not "loading": the text is being worked out from
+ * the picture of the page, and it may come back imperfect. Setting that
+ * expectation here is cheaper than explaining a wrong character later.
+ */
+@Composable
+fun RecognisingTextHint(modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(18.dp),
+                strokeWidth = 2.dp,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            Text(
+                text = "Reading text on this page…",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
         }
     }
 }
