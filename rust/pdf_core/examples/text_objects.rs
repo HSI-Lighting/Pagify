@@ -109,7 +109,20 @@ fn sweep(doc: &PdfDocument) {
             .iter()
             .filter(|o| o.object_type() == PdfPageObjectType::Text)
             .count();
-        let chars = page.text().map(|t| t.len()).unwrap_or(0);
+
+        // NOT `unwrap_or(0)`. That was here, and it silently recorded a *failed*
+        // `FPDFText_LoadPage` as "this page has no text" — two completely
+        // different facts, and no way afterwards to tell which one a zero meant.
+        // A conclusion about a document cannot rest on a number that cannot
+        // distinguish absence from failure. `catalogue_text_probe.rs` reports the
+        // two separately; here a failure is at least made loud.
+        let chars = match page.text() {
+            Ok(text) => text.len(),
+            Err(e) => {
+                println!("  page {index}: TEXT PAGE FAILED TO LOAD: {e}");
+                -1
+            }
+        };
 
         if texts > 0 {
             with_text_objects.push((index, texts));
