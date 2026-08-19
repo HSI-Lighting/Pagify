@@ -114,6 +114,7 @@ class MainActivity : ComponentActivity() {
                     textSegmentsForPage = viewModel::textSegments,
                     onAddAnnotation = viewModel::addAnnotation,
                     onRequestNote = viewModel::requestNote,
+                    onPageMarksNeeded = viewModel::loadSavedMarks,
                     onConfirmNote = viewModel::confirmNote,
                     onCancelNote = viewModel::cancelNote,
                     onSelectTool = viewModel::selectTool,

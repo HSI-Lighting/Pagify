@@ -183,6 +183,23 @@ class AnnotationStore {
 
     val canRedo: Boolean get() = undone.isNotEmpty()
 
+    /**
+     * Put a mark in without recording it in the history.
+     *
+     * For marks read back out of the document: they were not made in this session,
+     * so "undo" should not reach back past the file the reader opened and start
+     * removing things that were already in it. Their removal is undoable through
+     * the *document's* history instead, which is where a change to the file
+     * belongs.
+     */
+    fun addFromDocument(annotation: Annotation) {
+        pageOf(annotation.pageIndex).add(annotation)
+    }
+
+    /** True if a mark with this id is still present on its page. */
+    fun contains(pageIndex: Int, id: Long): Boolean =
+        byPage[pageIndex]?.any { it.id == id } == true
+
     fun add(annotation: Annotation) {
         pageOf(annotation.pageIndex).add(annotation)
         record(AnnotationEdit(label = "mark", added = listOf(annotation)))

@@ -146,6 +146,16 @@ internal object NativeBridge {
     external fun getEditStateJson(handle: Long): String
 
     /**
+     * Marks already in the document on this page, as JSON.
+     *
+     * Each carries PDFium's own index, which is what an erase addresses. A page
+     * can hold form widgets and links the engine does not model; those are absent
+     * from the list, so a position in it is not an index.
+     */
+    @Throws(PdfException::class)
+    external fun getAnnotationsJson(handle: Long, pageIndex: Int): String
+
+    /**
      * The rotation a page currently carries, in quarter turns.
      *
      * [PdfCommand.SetPageRotation] is absolute rather than relative, because an

@@ -11,6 +11,7 @@ import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfMetadata
 import com.hsilighting.pagify.core.PdfNativeException
 import com.hsilighting.pagify.core.RenderScale
+import com.hsilighting.pagify.core.SavedMark
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -157,6 +158,12 @@ class PdfRepository(
 
     suspend fun editState(document: PdfDocument): EditState =
         withContext(ioDispatcher) { document.editState() }
+
+    suspend fun savedMarks(
+        document: PdfDocument,
+        pageIndex: Int,
+        nextId: () -> Long,
+    ): List<SavedMark> = withContext(ioDispatcher) { document.savedMarks(pageIndex, nextId) }
 
     suspend fun pageRotation(document: PdfDocument, pageIndex: Int): Int =
         withContext(ioDispatcher) { document.pageRotation(pageIndex) }

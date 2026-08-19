@@ -506,7 +506,11 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun eraseAt(pageIndex: Int, point: Offset, tolerance: Float) {
         val hit = annotations.eraseAt(pageIndex, point, tolerance)
-        if (hit) refreshAnnotations()
+        if (hit) {
+            refreshAnnotations()
+            // A mark that came out of the file has to come out of the file.
+            commitErasedSavedMarks(pageIndex)
+        }
         // Misses are recorded too, and matter more than hits: "the gesture never
         // reached the tool" and "it arrived and found nothing there" are the same
         // picture on screen, and only the second one is about the hit test.
@@ -868,6 +872,10 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         // them would paint one document's annotations onto the next.
         annotations.clear()
         textSegmentCache.clear()
+        // Marks belong to the file that is going away, and so does the mapping
+        // from their ids to indices in it.
+        savedMarkLocations.clear()
+        loadedMarkPages.clear()
     }
 
     override fun onCleared() {
@@ -1108,6 +1116,10 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     private suspend fun commitMarks(doc: PdfDocument) {
         for (page in annotations.pagesWithMarks()) {
             for (mark in annotations.forPage(page)) {
+                // Marks read out of the document are already in it. Writing them
+                // again on every save would duplicate every highlight each time
+                // the reader pressed Save.
+                if (savedMarkLocations.containsKey(mark.id)) continue
                 repository.execute(doc, PdfCommand.AddAnnotation(page, mark))
             }
         }
@@ -1181,6 +1193,112 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         if (t is CancellationException) throw t
         Log.e(TAG, "edit failed", t)
         _state.update { it.copy(message = t.message ?: "That change could not be applied.") }
+    }
+
+    // ------------------------------------------------ marks already in the file --
+
+    /**
+     * Where a mark loaded from the document lives, by its store id.
+     *
+     * Erasing one needs two things — the page, and the index PDFium knows it by —
+     * and neither is recoverable from the mark once it sits in the store beside
+     * marks made this session.
+     */
+    private val savedMarkLocations = mutableMapOf<Long, Pair<Int, Int>>()
+
+    /** Pages whose saved marks have been read, so they are read once. */
+    private val loadedMarkPages = mutableSetOf<Int>()
+
+    /**
+     * Load the marks already in the file for one page.
+     *
+     * Per page rather than for the document on open: a 95-page file would
+     * otherwise pay for every page's annotations before drawing the first one.
+     */
+    fun loadSavedMarks(pageIndex: Int) {
+        val doc = document ?: return
+        if (!loadedMarkPages.add(pageIndex)) return
+
+        viewModelScope.launch {
+            try {
+                val marks = repository.savedMarks(doc, pageIndex) { annotations.nextId() }
+                if (marks.isEmpty()) return@launch
+
+                for (mark in marks) {
+                    // Added without history: these were not made in this session, so
+                    // undo must not reach back past the file the reader opened.
+                    // Removing one is undoable through the document's own history.
+                    annotations.addFromDocument(mark.annotation)
+                    savedMarkLocations[mark.annotation.id] = pageIndex to mark.index
+                }
+                refreshAnnotations()
+                SessionRecorder.record("MARKS_LOADED", "page=$pageIndex count=${marks.size}")
+            } catch (t: CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                // The marks still *draw* — they are part of the rendered page — so
+                // this is not worth interrupting the reader for. It only means they
+                // cannot be erased, and retrying on the next visit is free.
+                Log.w(TAG, "could not read marks on page $pageIndex", t)
+                loadedMarkPages.remove(pageIndex)
+            }
+        }
+    }
+
+    /**
+     * Take out of the file any loaded mark the eraser has just removed.
+     *
+     * Reconciled by id rather than reported by the eraser, because a single sweep
+     * can take several marks and can mix session marks with saved ones; each needs
+     * different treatment and this way neither has to know about the other.
+     */
+    private fun commitErasedSavedMarks(pageIndex: Int) {
+        val doc = document ?: return
+        val gone = savedMarkLocations
+            .filter { (id, at) -> at.first == pageIndex && !annotations.contains(pageIndex, id) }
+            .map { (id, at) -> id to at.second }
+            // Highest index first. PDFium renumbers everything after a removed
+            // annotation, so erasing 1 then 3 in ascending order would take out 1
+            // and then whatever had shifted into 3 — a different mark entirely.
+            .sortedByDescending { it.second }
+
+        if (gone.isEmpty()) return
+        val removedIndices = gone.map { it.second }
+
+        viewModelScope.launch {
+            for ((id, index) in gone) {
+                try {
+                    repository.execute(doc, PdfCommand.RemoveAnnotation(pageIndex, index))
+                    savedMarkLocations.remove(id)
+                } catch (t: CancellationException) {
+                    throw t
+                } catch (t: Throwable) {
+                    Log.w(TAG, "could not erase saved mark $id at $index", t)
+                    _state.update { it.copy(message = "That mark could not be erased.") }
+                }
+            }
+
+            // Every surviving mark on this page shifts down by the number of
+            // removals below it. Removing highest-first keeps the *removals*
+            // correct; it does nothing for the indices left behind, and a stale one
+            // would erase the wrong mark next time.
+            for ((id, at) in savedMarkLocations.toList()) {
+                if (at.first != pageIndex) continue
+                val below = removedIndices.count { it < at.second }
+                if (below > 0) savedMarkLocations[id] = pageIndex to (at.second - below)
+            }
+
+            refreshEditState()
+        }
+    }
+
+    private fun refreshEditState() {
+        val doc = document ?: return
+        viewModelScope.launch {
+            runCatching { repository.editState(doc) }
+                .getOrNull()
+                ?.let { fresh -> _state.update { it.copy(editState = fresh) } }
+        }
     }
     private companion object {
         const val TAG = "PdfReaderViewModel"

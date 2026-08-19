@@ -246,3 +246,116 @@ data class EditState(
         }
     }
 }
+
+/**
+ * A mark that is already in the document, with the index the engine addresses it
+ * by.
+ *
+ * The index is **PDFium's**, not a position in any list: pages can hold form
+ * widgets and links the engine does not model, and those are skipped on read. A
+ * page holding a widget followed by a highlight yields one entry whose index is
+ * 1, and erasing "the first mark" by list position would delete the widget.
+ */
+data class SavedMark(val index: Int, val annotation: Annotation)
+
+/**
+ * Parse the marks on a page as the engine reports them.
+ *
+ * The engine flattens the annotation's own fields alongside `index`, so this
+ * reads one object rather than a nested pair — see `IndexedAnnotation` in
+ * `rust/pdf_core/src/document/mod.rs`.
+ */
+fun savedMarksFromJson(json: String, pageIndex: Int, nextId: () -> Long): List<SavedMark> {
+    val array = JSONArray(json)
+    return buildList(array.length()) {
+        for (i in 0 until array.length()) {
+            val o = array.getJSONObject(i)
+            val annotation = annotationFromWire(o, pageIndex, nextId()) ?: continue
+            add(SavedMark(index = o.getInt("index"), annotation = annotation))
+        }
+    }
+}
+
+/** One mark from its wire form, or null for a shape this build cannot draw. */
+private fun annotationFromWire(o: JSONObject, pageIndex: Int, id: Long): Annotation? {
+    val color = o.optJSONObject("color").toColorLong()
+    return when (o.optString("kind")) {
+        "highlight" -> {
+            val rects = o.optJSONArray("rects") ?: return null
+            val parsed = (0 until rects.length()).map { rects.getJSONObject(it).toRect() }
+            if (parsed.isEmpty()) null
+            else Annotation.Highlight(id, pageIndex, parsed, color)
+        }
+
+        "ink" -> {
+            val strokes = o.optJSONArray("strokes") ?: return null
+            // The app's Ink is one stroke; the engine's is several, because a
+            // signature is ink too. Several strokes come back as a Signature so
+            // that nothing is silently dropped on the way in.
+            val parsed = (0 until strokes.length()).map { s ->
+                val points = strokes.getJSONArray(s)
+                (0 until points.length()).map { points.getJSONObject(it).toOffset() }
+            }.filter { it.size >= 2 }
+
+            when {
+                parsed.isEmpty() -> null
+                parsed.size == 1 -> Annotation.Ink(
+                    id = id,
+                    pageIndex = pageIndex,
+                    points = parsed[0],
+                    color = color,
+                    strokeWidth = o.optDouble("width", 2.0).toFloat(),
+                )
+                else -> Annotation.Signature(
+                    id = id,
+                    pageIndex = pageIndex,
+                    strokes = parsed,
+                    bounds = parsed.flatten().boundsOf(),
+                    color = color,
+                )
+            }
+        }
+
+        "note" -> {
+            val rect = o.optJSONObject("rect")?.toRect() ?: return null
+            Annotation.Note(
+                id = id,
+                pageIndex = pageIndex,
+                anchor = rect.center,
+                text = o.optString("contents"),
+                color = color,
+            )
+        }
+
+        else -> null
+    }
+}
+
+private fun JSONObject.toRect() = Rect(
+    optDouble("left").toFloat(),
+    optDouble("top").toFloat(),
+    optDouble("right").toFloat(),
+    optDouble("bottom").toFloat(),
+)
+
+private fun JSONObject.toOffset() = Offset(optDouble("x").toFloat(), optDouble("y").toFloat())
+
+/** `0xAARRGGBB`, the form the app stores colours in. */
+private fun JSONObject?.toColorLong(): Long {
+    if (this == null) return AnnotationColors.YELLOW
+    val a = optInt("a", 255).toLong() and 0xFF
+    val r = optInt("r", 255).toLong() and 0xFF
+    val g = optInt("g", 214).toLong() and 0xFF
+    val b = optInt("b", 0).toLong() and 0xFF
+    return (a shl 24) or (r shl 16) or (g shl 8) or b
+}
+
+private fun List<Offset>.boundsOf(): Rect {
+    if (isEmpty()) return Rect(0f, 0f, 0f, 0f)
+    return Rect(
+        minOf { it.x },
+        minOf { it.y },
+        maxOf { it.x },
+        maxOf { it.y },
+    )
+}

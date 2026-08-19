@@ -133,6 +133,8 @@ fun PdfReaderScreen(
     onConfirmNote: (String) -> Unit,
     onCancelNote: () -> Unit,
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
+    /** This page is on screen; load any marks the file already holds for it. */
+    onPageMarksNeeded: (Int) -> Unit,
     onSelectTool: (AnnotationTool) -> Unit,
     onPenModeChange: (PenMode) -> Unit,
     onPenColorChange: (Long) -> Unit,
@@ -316,6 +318,7 @@ fun PdfReaderScreen(
                     textSegmentsForPage = textSegmentsForPage,
                     onAddAnnotation = onAddAnnotation,
                     onRequestNote = onRequestNote,
+                    onPageMarksNeeded = onPageMarksNeeded,
                     onEraseStart = onEraseStart,
                     onErase = onErase,
                     onEraseEnd = onEraseEnd,
@@ -453,6 +456,8 @@ private fun PageList(
     textSegmentsForPage: suspend (Int) -> List<TextSegment>,
     onAddAnnotation: (Annotation) -> Unit,
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
+    /** This page is on screen; load any marks the file already holds for it. */
+    onPageMarksNeeded: (Int) -> Unit,
     onEraseStart: () -> Unit,
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
@@ -599,6 +604,7 @@ private fun PageList(
                 penColor = state.penColor,
                 onAddAnnotation = onAddAnnotation,
                 onRequestNote = onRequestNote,
+                onPageMarksNeeded = onPageMarksNeeded,
                 onEraseStart = onEraseStart,
                 onErase = { point, tolerance -> onErase(pinnedPage, point, tolerance) },
                 onEraseEnd = onEraseEnd,
@@ -823,6 +829,7 @@ private fun PageList(
                                 textSegmentsForPage = textSegmentsForPage,
                                 onAddAnnotation = onAddAnnotation,
                                 onRequestNote = onRequestNote,
+                                onPageMarksNeeded = onPageMarksNeeded,
                                 onEraseStart = onEraseStart,
                                 onErase = onErase,
                                 onEraseEnd = onEraseEnd,
@@ -867,6 +874,8 @@ private fun AnnotatablePage(
     textSegmentsForPage: suspend (Int) -> List<TextSegment>,
     onAddAnnotation: (Annotation) -> Unit,
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
+    /** This page is on screen; load any marks the file already holds for it. */
+    onPageMarksNeeded: (Int) -> Unit,
     onEraseStart: () -> Unit,
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
@@ -894,6 +903,10 @@ private fun AnnotatablePage(
 
     // Re-read through the revision counter: the store is mutable and identity
     // stable, so Compose cannot otherwise see that a mark was added.
+    // Marks already in the file are read the first time a page is drawn, so they
+    // can be erased rather than only rendered.
+    LaunchedEffect(pageIndex) { onPageMarksNeeded(pageIndex) }
+
     val annotations = remember(pageIndex, state.annotationRevision) {
         annotationsForPage(pageIndex).also {
             SessionRecorder.record(

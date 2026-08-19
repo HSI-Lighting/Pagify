@@ -105,6 +105,8 @@ fun ZoomedPage(
     onAddAnnotation: (Annotation) -> Unit,
     /** The Note tool was tapped at this page point. */
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
+    /** This page is on screen; load any marks the file already holds for it. */
+    onPageMarksNeeded: (Int) -> Unit,
     onEraseStart: () -> Unit,
     onErase: (point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,

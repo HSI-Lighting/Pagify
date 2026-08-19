@@ -84,6 +84,14 @@ class PdfDocument private constructor(
 
     fun editState(): EditState = EditState.fromJson(NativeBridge.getEditStateJson(requireOpen()))
 
+    /** Marks already in the file on this page, each with the engine's index. */
+    fun savedMarks(pageIndex: Int, nextId: () -> Long): List<SavedMark> =
+        savedMarksFromJson(
+            NativeBridge.getAnnotationsJson(requireOpen(), pageIndex),
+            pageIndex,
+            nextId,
+        )
+
     /** Persisted rotation of a page, in quarter turns. Zero if not editable. */
     fun pageRotation(pageIndex: Int): Int = NativeBridge.getPageRotation(requireOpen(), pageIndex)
 
