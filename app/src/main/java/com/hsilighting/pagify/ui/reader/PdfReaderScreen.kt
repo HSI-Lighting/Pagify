@@ -734,6 +734,7 @@ private fun PageList(
                 onEraseStart = onEraseStart,
                 onErase = { point, tolerance -> onErase(pinnedPage, point, tolerance) },
                 onEraseEnd = onEraseEnd,
+                onCaptureViewport = onCaptureViewport,
             )
         } else {
             val viewportWidthPx = with(density) { viewportWidth.toPx() }

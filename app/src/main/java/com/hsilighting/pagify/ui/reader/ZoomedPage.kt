@@ -21,18 +21,25 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import com.hsilighting.pagify.core.Annotation
 import com.hsilighting.pagify.core.AnnotationTool
+import com.hsilighting.pagify.core.CaptureTile
+import com.hsilighting.pagify.core.PlacedPage
+import com.hsilighting.pagify.core.SessionRecorder
+import com.hsilighting.pagify.core.captureTilesFor
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PenMode
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.core.RenderScale
 import com.hsilighting.pagify.ui.components.ViewportWindow
 import com.hsilighting.pagify.ui.components.annotationLayer
+import com.hsilighting.pagify.ui.components.captureOverlay
 import com.hsilighting.pagify.ui.components.pinchToZoom
 import com.hsilighting.pagify.ui.components.twoFingerPanXY
 import kotlinx.coroutines.delay
@@ -112,6 +119,13 @@ fun ZoomedPage(
     onEraseStart: () -> Unit,
     onErase: (point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
+    /** A box was dragged around part of the page; capture what it framed. */
+    onCaptureViewport: (
+        tiles: List<CaptureTile>,
+        area: Rect,
+        background: Long,
+        originPage: Int,
+    ) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier.fillMaxSize().clipToBounds()) {
@@ -268,6 +282,12 @@ fun ZoomedPage(
         // `detectDragGestures` consumed the drag before the drawing layer saw it.
         val toolActive = tool != AnnotationTool.None
 
+        // Read where the theme is in scope: what shows between or beside pages in
+        // a capture is a reader decision, not the engine's.
+        val captureBackground = MaterialTheme.colorScheme.surfaceVariant
+            .toArgb()
+            .toLong() and 0xFFFFFFFFL
+
         Box(
             Modifier
                 .fillMaxSize()
@@ -309,6 +329,40 @@ fun ZoomedPage(
                         },
                     )
                 }
+                // Capture is dragged here too, not only in the list. The zoomed
+                // view is a separate composable, and leaving it out is what made
+                // the snapshot tool do nothing the moment a page was zoomed into.
+                .then(
+                    if (tool == AnnotationTool.Snapshot && pageSize != null) {
+                        Modifier.captureOverlay { box ->
+                            // The page is drawn translated by `offset` at `scale`,
+                            // in this element's own pixels — the same frame the drag
+                            // is reported in, so nothing needs converting.
+                            val onScreen = Rect(
+                                left = offset.x,
+                                top = offset.y,
+                                right = offset.x + baseW * scale,
+                                bottom = offset.y + baseH * scale,
+                            )
+                            val tiles = captureTilesFor(
+                                box,
+                                listOf(PlacedPage(pageIndex, onScreen, pageSize)),
+                            )
+                            SessionRecorder.record(
+                                kind = "CAPTURE_BOX",
+                                detail = "zoomed page=$pageIndex " +
+                                    "box=${box.left.toInt()},${box.top.toInt()}.." +
+                                    "${box.right.toInt()},${box.bottom.toInt()} " +
+                                    "page=${onScreen.left.toInt()},${onScreen.top.toInt()}.." +
+                                    "${onScreen.right.toInt()},${onScreen.bottom.toInt()} " +
+                                    "tiles=${tiles.size}",
+                            )
+                            onCaptureViewport(tiles, box, captureBackground, pageIndex)
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
                 // Last in the chain, so it is the innermost input receiver and a
                 // one-finger drag reaches the tool before anything else can claim
                 // it — and the innermost draw, so marks land over the page.
