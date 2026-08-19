@@ -147,7 +147,7 @@ class MainActivity : ComponentActivity() {
                     onClearPage = viewModel::clearPage,
                     onClearAll = viewModel::clearAllAnnotations,
                     onHighlightMissed = viewModel::noteHighlightFoundNothing,
-                    onCaptureRegion = viewModel::captureRegion,
+                    onCaptureViewport = viewModel::capture,
                     onJumpHandled = viewModel::jumpHandled,
                     onViewportWidth = viewModel::onViewportWidthChanged,
                     onRotate = viewModel::rotate,

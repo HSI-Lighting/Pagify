@@ -24,6 +24,7 @@ import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.CaptureRequest
 import com.hsilighting.pagify.core.CaptureScale
+import com.hsilighting.pagify.core.CaptureTile
 import com.hsilighting.pagify.core.captureFileName
 import com.hsilighting.pagify.core.isWorthCapturing
 import com.hsilighting.pagify.core.Markup
@@ -1364,20 +1365,29 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     // ---------------------------------------------------------------- capture --
 
     /**
-     * Capture a region of a page as a picture.
+     * Capture what was framed on screen, across however many pages that turns out
+     * to be.
      *
-     * The engine re-renders the crop from the document, so the result holds only
-     * what is in the PDF — no notification, no dialog of ours, no status bar. That
-     * is a consequence of never involving the screen rather than something
-     * filtered out afterwards; see roadmap decision 4.8.
+     * The engine re-renders each page's share from the document, so the result
+     * holds only what is in the PDF — no notification, no dialog of ours, no
+     * status bar. That is a consequence of never involving the screen rather than
+     * something filtered out afterwards; see roadmap decision 4.8.
+     *
+     * The tiles come from the reader, the only part of the app that knows where a
+     * page sits on a screen. A capture that stopped at the page the drag began on
+     * is what made this feel broken: a box drawn across a page join came back
+     * holding half of what was inside it.
      */
-    fun captureRegion(pageIndex: Int, crop: Rect) {
-        if (!crop.isWorthCapturing()) return
+    fun capture(tiles: List<CaptureTile>, area: Rect, background: Long, originPage: Int) {
+        if (tiles.isEmpty() || !area.isWorthCapturing()) return
         val existing = _state.value.capture?.request
         takeCapture(
             CaptureRequest(
-                pageIndex = pageIndex,
-                crop = crop,
+                tiles = tiles,
+                width = area.width,
+                height = area.height,
+                background = background,
+                originPage = originPage,
                 // Whatever was chosen last, so a second capture does not silently
                 // come back at a different resolution from the first.
                 scale = existing?.scale ?: CaptureScale.X2,
@@ -1407,17 +1417,18 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             try {
                 val name = captureFileName(
                     documentName = _state.value.documentName,
-                    pageIndex = request.pageIndex,
+                    pageIndex = request.originPage,
                     format = request.format,
                     timestamp = CaptureExport.timestamp(),
                 )
                 val taken = withContext(Dispatchers.Default) {
-                    val bytes = doc.captureRegion(request)
+                    val bytes = doc.capture(request)
                     CapturePreview(request, bytes, name, decodeForPreview(bytes))
                 }
                 SessionRecorder.record(
                     kind = "CAPTURE",
-                    detail = "page=${request.pageIndex} scale=${request.scale.label} " +
+                    detail = "page=${request.originPage} pages=${request.tiles.size} " +
+                        "scale=${request.scale.label} " +
                         "format=${request.format.wireName} bytes=${taken.bytes.size}",
                 )
                 _state.update { it.copy(isCapturing = false, capture = taken) }
@@ -1521,7 +1532,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
         val doc = document ?: return capture.bytes
         return withContext(Dispatchers.Default) {
-            runCatching { doc.captureRegion(capture.request, marks) }.getOrElse { failure ->
+            runCatching { doc.capture(capture.request, marks) }.getOrElse { failure ->
                 Log.e(TAG, "drawing the markup failed; exporting the plain capture", failure)
                 capture.bytes
             }

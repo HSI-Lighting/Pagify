@@ -75,24 +75,23 @@ class PdfDocument private constructor(
     // --------------------------------------------------------------- capture --
 
     /**
-     * Re-renders one region of a page and returns it encoded.
+     * Re-renders what was framed on screen and returns it encoded.
      *
      * **Not a screenshot** — the pixels come from the document, so nothing that is
-     * not in the document can be in the result. See [NativeBridge.captureRegion]
+     * not in the document can be in the result. See [NativeBridge.captureViewport]
      * and roadmap decision 4.8.
      *
      * Blocking, and slow enough to notice: a 4× capture of a dense page is a real
      * render. Call it off the main thread.
      */
-    fun captureRegion(request: CaptureRequest, markup: List<Markup> = emptyList()): ByteArray =
-        NativeBridge.captureRegion(
+    fun capture(request: CaptureRequest, markup: List<Markup> = emptyList()): ByteArray =
+        NativeBridge.captureViewport(
             requireOpen(),
-            request.pageIndex,
-            request.crop.left,
-            request.crop.top,
-            request.crop.right,
-            request.crop.bottom,
+            request.tiles.tilesToWireJson(),
+            request.width,
+            request.height,
             request.scale.factor,
+            request.background.toInt(),
             request.format.wireName,
             request.quality,
             markup.toWireJson(),

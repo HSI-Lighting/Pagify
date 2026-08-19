@@ -194,7 +194,7 @@ internal object NativeBridge {
     // --------------------------------------------------------------- capture --
 
     /**
-     * Re-renders one region of a page and returns it encoded.
+     * Re-renders whatever was framed on screen and returns it encoded.
      *
      * **This is not a screenshot, and that is the whole design.** The pixels come
      * from the document, so nothing that is not in the document can appear in the
@@ -203,29 +203,34 @@ internal object NativeBridge {
      * afterwards; see roadmap decision 4.8 for the alternatives and why each was
      * rejected.
      *
-     * The crop is in **page points, top-left origin**, the same space annotations
-     * use. [scale] is the export resolution and is deliberately independent of the
-     * on-screen zoom — a capture can be sharper than the display. It is lowered if
-     * it would breach the render ceiling, so a large region at 4× comes back as the
-     * sharpest image that fits rather than as a failure.
+     * A capture is **not one page**. The reader stacks pages in a column, so a box
+     * dragged around something interesting routinely takes the bottom of one page,
+     * the gap below it and the top of the next. [tilesJson] carries one entry per
+     * page that contributes — which part of it, and where that part belongs — as
+     * the app is the only side that knows where a page sits on a screen.
+     *
+     * [width] and [height] are in capture units, and [scale] multiplies them for
+     * the export: the framing comes from the screen, the resolution does not. The
+     * scale is lowered if it would breach the render ceiling, so a large area at 4×
+     * comes back as the sharpest picture that fits rather than as a failure.
      *
      * Encoding happens natively so the uncompressed bitmap never crosses this
      * boundary: a 4× capture is tens of megabytes as pixels and a fraction of that
      * as a PNG.
      *
+     * @param background `0xAARRGGBB`, shown wherever no page reaches.
      * @param format `"png"` or `"jpeg"`.
      * @param quality 1–100, ignored for PNG.
-     * @param markupJson marks to draw on it, in page points. `[]` for none.
+     * @param markupJson marks to draw on it, in capture units. `[]` for none.
      */
     @Throws(PdfException::class)
-    external fun captureRegion(
+    external fun captureViewport(
         handle: Long,
-        pageIndex: Int,
-        left: Float,
-        top: Float,
-        right: Float,
-        bottom: Float,
+        tilesJson: String,
+        width: Float,
+        height: Float,
         scale: Float,
+        background: Int,
         format: String,
         quality: Int,
         markupJson: String,

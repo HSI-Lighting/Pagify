@@ -9,13 +9,13 @@ use jni::JNIEnv;
 
 use crate::command::Command;
 use crate::document::pdfium_doc::PdfiumDocument;
-use crate::document::{Document, Point, Rect, RegionRequest, RenderRequest, Rotation};
+use crate::document::{Color, Document, Point, Rect, RegionRequest, RenderRequest, Rotation};
 use crate::engine;
 use crate::error::{PdfError, Result};
 use crate::jni_bridge::android_bitmap::LockedPixels;
 use crate::jni_bridge::{guard, optional_string, required_string};
 use crate::registry;
-use crate::render::{self, ImageFormat, Markup, PixelOrder, RenderTarget};
+use crate::render::{self, ImageFormat, Markup, PixelOrder, RenderTarget, Tile, ViewportRequest};
 
 const INVALID_HANDLE: jlong = -1;
 
@@ -639,8 +639,73 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureRegi
 
         let bytes =
             registry::with_session(handle, |session| {
-                engine::export_region(session, index, &request, format, &marks)
+                engine::export_region(session.document.as_ref(), index, &request, format, &marks)
             })?;
+
+        Ok(env
+            .byte_array_from_slice(&bytes)
+            .map_err(|e| PdfError::Pdfium(format!("could not allocate the capture: {e}")))?
+            .into_raw())
+    })
+}
+
+/// Capture what is on screen, across however many pages that turns out to be.
+///
+/// The reader lays pages in a column, so a box dragged around something
+/// interesting very often crosses a join. `tilesJson` holds one entry per page
+/// that might contribute — which part of that page, and where it belongs in the
+/// picture — because the layout belongs to the app, and working it out again here
+/// would be a second copy to keep in step.
+///
+/// Still not a screenshot: every pixel is rendered from the document, so the gaps
+/// between pages come out as `background` rather than as whatever the app happened
+/// to be drawing there, and nothing floating above the reader can appear at all.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureViewport<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    tiles_json: JString<'local>,
+    width: jfloat,
+    height: jfloat,
+    scale: jfloat,
+    background: jint,
+    format: JString<'local>,
+    quality: jint,
+    markup_json: JString<'local>,
+) -> jbyteArray {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let tiles: Vec<Tile> = serde_json::from_str(&required_string(env, &tiles_json, "tiles")?)
+            .map_err(|e| PdfError::InvalidArgument(format!("could not read the tiles: {e}")))?;
+        let format = ImageFormat::parse(
+            &required_string(env, &format, "format")?,
+            quality.clamp(1, 100) as u8,
+        )?;
+        let marks: Vec<Markup> = match optional_string(env, &markup_json)? {
+            Some(json) if !json.trim().is_empty() => serde_json::from_str(&json)
+                .map_err(|e| PdfError::InvalidArgument(format!("could not read markup: {e}")))?,
+            _ => Vec::new(),
+        };
+
+        let request = ViewportRequest {
+            tiles,
+            width,
+            height,
+            scale,
+            // Packed `0xAARRGGBB`, the form the app stores every other colour in.
+            background: Color {
+                a: (background >> 24) as u8,
+                r: (background >> 16) as u8,
+                g: (background >> 8) as u8,
+                b: background as u8,
+            },
+            render_annotations: true,
+            render_form_data: true,
+        };
+
+        let bytes = registry::with_session(handle, |session| {
+            engine::export_viewport(session.document.as_ref(), &request, format, &marks)
+        })?;
 
         Ok(env
             .byte_array_from_slice(&bytes)

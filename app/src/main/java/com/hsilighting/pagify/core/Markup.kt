@@ -8,10 +8,11 @@ import org.json.JSONObject
 /**
  * Marks drawn on a capture.
  *
- * Held in **page points, top-left origin** — the same space as annotations and as
- * the capture's crop, never in the pixels of the preview. The sheet lets the
- * export scale change after a mark is drawn, and a mark stored in pixels would
- * land a quarter of the way into the picture the moment it did.
+ * Held in **capture-local units** — the picture's own space, origin at its
+ * top-left — rather than in any page's points. A capture can span two pages, and
+ * a mark drawn across the join belongs to neither of them. Nor in the preview's
+ * pixels: the editor lets the export scale change after a mark is drawn, and a
+ * mark stored in pixels would land somewhere else entirely the moment it did.
  *
  * The split follows roadmap decision 4.7: the wet stroke and the preview drawing
  * are Kotlin's, the committed shape and the compositing are the engine's. What
@@ -122,7 +123,7 @@ private fun Offset.toWireJson(): JSONObject = JSONObject().apply {
     put("y", y.toDouble())
 }
 
-private fun Rect.toMarkupWireJson(): JSONObject = JSONObject().apply {
+internal fun Rect.toMarkupWireJson(): JSONObject = JSONObject().apply {
     put("left", left.toDouble())
     put("top", top.toDouble())
     put("right", right.toDouble())
@@ -181,3 +182,22 @@ private fun JSONObject.rect(name: String): Rect {
         bottom = at.optDouble("bottom").toFloat(),
     )
 }
+
+// ------------------------------------------------------------- capture tiles --
+
+/**
+ * The tiles a capture is assembled from, in the engine's form.
+ *
+ * `pageIndex` rather than `page_index`: the engine renames struct fields to camel
+ * case on this wire. Pinned in a test on both sides, because a field name that
+ * does not match fails at run time on a device and nowhere else.
+ */
+fun List<CaptureTile>.tilesToWireJson(): String = JSONArray(
+    map { tile ->
+        JSONObject().apply {
+            put("pageIndex", tile.pageIndex)
+            put("crop", tile.crop.toMarkupWireJson())
+            put("dest", tile.dest.toMarkupWireJson())
+        }
+    },
+).toString()

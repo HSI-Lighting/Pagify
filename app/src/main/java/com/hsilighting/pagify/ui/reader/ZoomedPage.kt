@@ -112,8 +112,6 @@ fun ZoomedPage(
     onEraseStart: () -> Unit,
     onErase: (point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
-    /** A region was dragged out with the snapshot tool, in page points. */
-    onCaptureRegion: (pageIndex: Int, crop: Rect) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier.fillMaxSize().clipToBounds()) {
@@ -331,7 +329,6 @@ fun ZoomedPage(
                     onEraseStart = onEraseStart,
                     onErase = onErase,
                     onEraseEnd = onEraseEnd,
-                    onCaptureRegion = { crop -> onCaptureRegion(pageIndex, crop) },
                 ),
         ) {
             // The page is *drawn*, not laid out, at its magnified size. Laying out

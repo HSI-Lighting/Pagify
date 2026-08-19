@@ -24,6 +24,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
@@ -52,7 +53,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 @Composable
 fun CaptureCanvas(
     image: ImageBitmap,
-    /** The region of the page this picture covers, in page points. */
+    /** The picture's own bounds, in capture units. Marks are placed against it. */
     crop: Rect,
     markup: List<Markup>,
     tool: MarkupTool,
@@ -60,6 +61,13 @@ fun CaptureCanvas(
     onCommit: (MarkupShape) -> Unit,
     /** Held still before lifting: ask the engine what this stroke was. */
     onRecognise: (List<Offset>) -> Unit,
+    /**
+     * Magnification of the picture on screen. Nothing to do with the export
+     * scale: this is for looking closely and drawing accurately, and the file is
+     * rendered at its own resolution regardless.
+     */
+    zoom: Float = 1f,
+    pan: Offset = Offset.Zero,
     modifier: Modifier = Modifier,
 ) {
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
@@ -75,7 +83,21 @@ fun CaptureCanvas(
         val widthPx = with(density) { shownWidth.toPx() }
         val heightPx = with(density) { shownHeight.toPx() }
 
-        Box(Modifier.size(shownWidth, shownHeight)) {
+        // The zoom is a layer transform, so the drawing surface underneath keeps
+        // working in unzoomed coordinates: Compose maps touches back through the
+        // same transform, which means the markup arithmetic needs no notion of
+        // zoom at all. Doing it the other way — scaling the coordinates by hand —
+        // is how a stroke ends up landing somewhere other than under the finger.
+        Box(
+            Modifier
+                .size(shownWidth, shownHeight)
+                .graphicsLayer {
+                    scaleX = zoom
+                    scaleY = zoom
+                    translationX = pan.x
+                    translationY = pan.y
+                },
+        ) {
             Image(
                 bitmap = image,
                 contentDescription = "The captured region",

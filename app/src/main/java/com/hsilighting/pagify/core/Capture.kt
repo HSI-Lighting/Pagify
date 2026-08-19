@@ -48,15 +48,59 @@ enum class CaptureScale(val factor: Float, val label: String) {
     X4(4f, "4×"),
 }
 
-/** One capture, fully specified. The crop is in page points, top-left origin. */
-data class CaptureRequest(
+/**
+ * One page's share of a capture.
+ *
+ * [crop] is in that page's own points; [dest] is where it belongs in the picture,
+ * in capture units. The two are separate because a capture is not a page: it is a
+ * rectangle someone dragged on screen, which may take the bottom of one page, the
+ * gap below it, and the top of the next.
+ */
+data class CaptureTile(
     val pageIndex: Int,
     val crop: Rect,
+    val dest: Rect,
+)
+
+/**
+ * One capture, fully specified.
+ *
+ * Sized in **capture units** — screen pixels at the zoom the reader was at — with
+ * [scale] multiplying that for the export. The framing comes from what was on
+ * screen; the resolution does not, which is what lets a capture be sharper than
+ * the display that framed it.
+ */
+data class CaptureRequest(
+    val tiles: List<CaptureTile>,
+    val width: Float,
+    val height: Float,
+    /**
+     * Shows wherever no page reaches: between two pages, and past the edge of one.
+     * The reader's own background, so a capture looks like what was on screen.
+     */
+    val background: Long,
+    /**
+     * The page the drag started on.
+     *
+     * For the file name and the label on the sheet only. A capture spanning two
+     * pages has to be called something, and the page someone started on is the one
+     * they would name it after.
+     */
+    val originPage: Int,
     val scale: CaptureScale = CaptureScale.X2,
     val format: CaptureFormat = CaptureFormat.PNG,
     /** 1–100. Ignored for PNG. */
     val quality: Int = 92,
-)
+) {
+    /**
+     * The picture's own coordinate space, which is what markup is drawn in.
+     *
+     * A mark drawn across the join between two pages belongs to neither of them,
+     * so marks are positioned against the capture rather than against any page
+     * inside it.
+     */
+    val localBounds: Rect get() = Rect(0f, 0f, width, height)
+}
 
 /**
  * The smallest crop worth capturing, in page points.

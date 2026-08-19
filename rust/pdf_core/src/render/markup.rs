@@ -24,7 +24,7 @@ use tiny_skia::{
 use crate::document::{Color, Point, Rect};
 use crate::error::{PdfError, Result};
 use crate::render::bitmap::{Bitmap, PixelOrder};
-use crate::render::region::RegionPixels;
+
 
 /// One committed mark on a capture.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -71,13 +71,14 @@ const ARROW_HEAD_ANGLE: f32 = 0.44;
 
 /// Draw `marks` into a captured bitmap.
 ///
-/// The bitmap must be the one [`RegionPixels`] describes: the transform from page
-/// points to pixels comes from `region`, so a mismatched pair puts every mark in
-/// the wrong place rather than failing.
+/// `scale` is capture units to pixels. Marks are in **capture-local units** with
+/// the origin at the picture's own top-left, not in the coordinates of any page
+/// inside it: a capture can span two pages, and a mark drawn across the join
+/// belongs to neither of them.
 ///
-/// A pure function of `(bitmap, marks, region)` — same inputs, byte-identical
+/// A pure function of `(bitmap, marks, scale)` — same inputs, byte-identical
 /// output — which is what makes a capture reproducible.
-pub fn composite(bitmap: &mut Bitmap, marks: &[Markup], region: &RegionPixels) -> Result<()> {
+pub fn composite(bitmap: &mut Bitmap, marks: &[Markup], scale: f32) -> Result<()> {
     if marks.is_empty() {
         return Ok(());
     }
@@ -97,26 +98,19 @@ pub fn composite(bitmap: &mut Bitmap, marks: &[Markup], region: &RegionPixels) -
         .ok_or_else(|| PdfError::InvalidBitmap("could not borrow the capture".to_string()))?;
 
     for mark in marks {
-        draw(&mut pixmap, mark, region);
+        draw(&mut pixmap, mark, scale);
     }
 
     Ok(())
 }
 
-/// Page points to capture pixels.
-///
-/// The capture is the crop, so a page point has the crop's own top-left
-/// subtracted before it is scaled — otherwise every mark lands offset by however
-/// far into the page the crop began.
-fn to_pixels(p: Point, region: &RegionPixels) -> (f32, f32) {
-    (
-        p.x * region.scale - region.offset_x as f32,
-        p.y * region.scale - region.offset_y as f32,
-    )
+/// Capture-local units to pixels.
+fn to_pixels(p: Point, scale: f32) -> (f32, f32) {
+    (p.x * scale, p.y * scale)
 }
 
-fn draw(pixmap: &mut PixmapMut, mark: &Markup, region: &RegionPixels) {
-    let width_px = (mark.width_pt * region.scale).max(1.0);
+fn draw(pixmap: &mut PixmapMut, mark: &Markup, scale: f32) {
+    let width_px = (mark.width_pt * scale).max(1.0);
 
     let mut paint = Paint::default();
     paint.anti_alias = true;
@@ -146,14 +140,14 @@ fn draw(pixmap: &mut PixmapMut, mark: &Markup, region: &RegionPixels) {
                     x: rect.left,
                     y: rect.top,
                 },
-                region,
+                scale,
             );
             let (right, bottom) = to_pixels(
                 Point {
                     x: rect.right,
                     y: rect.bottom,
                 },
-                region,
+                scale,
             );
             let mut builder = PathBuilder::new();
             builder.push_rect(
@@ -169,11 +163,11 @@ fn draw(pixmap: &mut PixmapMut, mark: &Markup, region: &RegionPixels) {
                 None => return,
             }
         }
-        Shape::Freehand { points } => freehand_path(points, region),
-        Shape::Line { from, to } => segment_path(*from, *to, region),
-        Shape::Arrow { from, to } => arrow_path(*from, *to, width_px, region),
-        Shape::Rect { rect } => rect_path(*rect, region),
-        Shape::Ellipse { rect } => ellipse_path(*rect, region),
+        Shape::Freehand { points } => freehand_path(points, scale),
+        Shape::Line { from, to } => segment_path(*from, *to, scale),
+        Shape::Arrow { from, to } => arrow_path(*from, *to, width_px, scale),
+        Shape::Rect { rect } => rect_path(*rect, scale),
+        Shape::Ellipse { rect } => ellipse_path(*rect, scale),
     };
 
     if let Some(path) = path {
@@ -181,31 +175,31 @@ fn draw(pixmap: &mut PixmapMut, mark: &Markup, region: &RegionPixels) {
     }
 }
 
-fn freehand_path(points: &[Point], region: &RegionPixels) -> Option<tiny_skia::Path> {
+fn freehand_path(points: &[Point], scale: f32) -> Option<tiny_skia::Path> {
     if points.len() < 2 {
         return None;
     }
     let mut builder = PathBuilder::new();
-    let (x, y) = to_pixels(points[0], region);
+    let (x, y) = to_pixels(points[0], scale);
     builder.move_to(x, y);
 
     // Quadratics through the midpoints, so a fast drag reads as a smooth line
     // rather than as the visible polygon that joining raw touch samples gives.
     for pair in points.windows(2) {
-        let (px, py) = to_pixels(pair[0], region);
-        let (cx, cy) = to_pixels(pair[1], region);
+        let (px, py) = to_pixels(pair[0], scale);
+        let (cx, cy) = to_pixels(pair[1], scale);
         builder.quad_to(px, py, (px + cx) / 2.0, (py + cy) / 2.0);
     }
-    let (x, y) = to_pixels(*points.last().expect("checked non-empty"), region);
+    let (x, y) = to_pixels(*points.last().expect("checked non-empty"), scale);
     builder.line_to(x, y);
 
     builder.finish()
 }
 
-fn segment_path(from: Point, to: Point, region: &RegionPixels) -> Option<tiny_skia::Path> {
+fn segment_path(from: Point, to: Point, scale: f32) -> Option<tiny_skia::Path> {
     let mut builder = PathBuilder::new();
-    let (x0, y0) = to_pixels(from, region);
-    let (x1, y1) = to_pixels(to, region);
+    let (x0, y0) = to_pixels(from, scale);
+    let (x1, y1) = to_pixels(to, scale);
     builder.move_to(x0, y0);
     builder.line_to(x1, y1);
     builder.finish()
@@ -215,10 +209,10 @@ fn arrow_path(
     from: Point,
     to: Point,
     width_px: f32,
-    region: &RegionPixels,
+    scale: f32,
 ) -> Option<tiny_skia::Path> {
-    let (x0, y0) = to_pixels(from, region);
-    let (x1, y1) = to_pixels(to, region);
+    let (x0, y0) = to_pixels(from, scale);
+    let (x1, y1) = to_pixels(to, scale);
 
     let angle = (y1 - y0).atan2(x1 - x0);
     let head = width_px * ARROW_HEAD_LENGTHS;
@@ -236,20 +230,20 @@ fn arrow_path(
     builder.finish()
 }
 
-fn rect_path(rect: Rect, region: &RegionPixels) -> Option<tiny_skia::Path> {
+fn rect_path(rect: Rect, scale: f32) -> Option<tiny_skia::Path> {
     let (left, top) = to_pixels(
         Point {
             x: rect.left,
             y: rect.top,
         },
-        region,
+        scale,
     );
     let (right, bottom) = to_pixels(
         Point {
             x: rect.right,
             y: rect.bottom,
         },
-        region,
+        scale,
     );
     let mut builder = PathBuilder::new();
     builder.move_to(left, top);
@@ -260,20 +254,20 @@ fn rect_path(rect: Rect, region: &RegionPixels) -> Option<tiny_skia::Path> {
     builder.finish()
 }
 
-fn ellipse_path(rect: Rect, region: &RegionPixels) -> Option<tiny_skia::Path> {
+fn ellipse_path(rect: Rect, scale: f32) -> Option<tiny_skia::Path> {
     let (left, top) = to_pixels(
         Point {
             x: rect.left,
             y: rect.top,
         },
-        region,
+        scale,
     );
     let (right, bottom) = to_pixels(
         Point {
             x: rect.right,
             y: rect.bottom,
         },
-        region,
+        scale,
     );
     let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
     let (rx, ry) = ((right - left) / 2.0, (bottom - top) / 2.0);
@@ -298,32 +292,16 @@ fn ellipse_path(rect: Rect, region: &RegionPixels) -> Option<tiny_skia::Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::PageSize;
 
-    /// A 100 x 100 pt crop of a 200 x 200 pt page, starting at (50, 50), at 2×.
+    /// The capture used throughout: 100 x 100 capture units at 2×, so 200 x 200 px.
     ///
-    /// Offset on both axes deliberately: a transform that forgets to subtract the
-    /// crop's origin still looks right when the crop starts at zero.
-    fn region() -> RegionPixels {
-        RegionPixels::resolve(
-            PageSize {
-                width_pt: 200.0,
-                height_pt: 200.0,
-            },
-            Rect {
-                left: 50.0,
-                top: 50.0,
-                right: 150.0,
-                bottom: 150.0,
-            },
-            2.0,
-        )
-        .expect("region")
-    }
+    /// Units, not page points. A capture can span two pages, and a mark drawn
+    /// across the join belongs to neither of them, so marks are positioned against
+    /// the picture itself — which makes the pixel arithmetic a single multiply.
+    const SCALE: f32 = 2.0;
 
     fn white_capture() -> Bitmap {
-        let region = region();
-        let mut bitmap = Bitmap::new(region.width, region.height, PixelOrder::Rgba).unwrap();
+        let mut bitmap = Bitmap::new(200, 200, PixelOrder::Rgba).unwrap();
         bitmap.data.fill(0xFF);
         bitmap
     }
@@ -338,60 +316,52 @@ mod tests {
     }
 
     fn red() -> Color {
-        Color {
-            r: 255,
-            g: 0,
-            b: 0,
-            a: 255,
-        }
+        Color { r: 255, g: 0, b: 0, a: 255 }
     }
 
     fn mark(shape: Shape) -> Markup {
-        Markup {
-            shape,
-            color: red(),
-            width_pt: 4.0,
-        }
+        Markup { shape, color: red(), width_pt: 4.0 }
+    }
+
+    fn at(x: f32, y: f32) -> Point {
+        Point { x, y }
+    }
+
+    fn rect(left: f32, top: f32, right: f32, bottom: f32) -> Rect {
+        Rect { left, top, right, bottom }
     }
 
     #[test]
-    fn a_line_is_drawn_where_the_page_points_say_and_nowhere_else() {
+    fn a_line_is_drawn_where_the_units_say_and_nowhere_else() {
         let mut bitmap = white_capture();
-        // Across the middle of the crop in page space: y = 100 pt, which is
-        // (100 - 50) * 2 = 100 px down the capture.
+        // Across the middle: y = 50 units, which is 100 px down the capture.
         composite(
             &mut bitmap,
-            &[mark(Shape::Line {
-                from: Point { x: 60.0, y: 100.0 },
-                to: Point { x: 140.0, y: 100.0 },
-            })],
-            &region(),
+            &[mark(Shape::Line { from: at(10.0, 50.0), to: at(90.0, 50.0) })],
+            SCALE,
         )
         .unwrap();
 
         assert!(!is_white(pixel(&bitmap, 100, 100)), "the line is not on it");
-        assert!(is_white(pixel(&bitmap, 100, 60)), "ink well above the line");
-        assert!(is_white(pixel(&bitmap, 100, 140)), "ink well below the line");
+        assert!(is_white(pixel(&bitmap, 100, 20)), "ink well above the line");
+        assert!(is_white(pixel(&bitmap, 100, 180)), "ink well below the line");
     }
 
     #[test]
-    fn the_crops_origin_is_subtracted_rather_than_ignored() {
-        // The trap: a transform that scales but forgets the crop's own top-left
-        // draws this at (120, 120) instead of (20, 20), and every test whose crop
-        // starts at the page corner still passes.
+    fn a_mark_is_placed_by_the_capture_rather_than_by_any_page_inside_it() {
+        // The trap this guards: treating a mark's coordinates as page points and
+        // subtracting a crop's origin. Marks arrive already relative to the
+        // picture, so any further offset moves every one of them.
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Line {
-                from: Point { x: 55.0, y: 60.0 },
-                to: Point { x: 65.0, y: 60.0 },
-            })],
-            &region(),
+            &[mark(Shape::Line { from: at(5.0, 10.0), to: at(15.0, 10.0) })],
+            SCALE,
         )
         .unwrap();
 
-        assert!(!is_white(pixel(&bitmap, 20, 20)), "not where the crop puts it");
-        assert!(is_white(pixel(&bitmap, 120, 120)), "drawn as if uncropped");
+        assert!(!is_white(pixel(&bitmap, 20, 20)), "not where the units put it");
+        assert!(is_white(pixel(&bitmap, 120, 120)), "drawn somewhere else entirely");
     }
 
     #[test]
@@ -399,19 +369,11 @@ mod tests {
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Rect {
-                rect: Rect {
-                    left: 70.0,
-                    top: 70.0,
-                    right: 130.0,
-                    bottom: 130.0,
-                },
-            })],
-            &region(),
+            &[mark(Shape::Rect { rect: rect(20.0, 20.0, 80.0, 80.0) })],
+            SCALE,
         )
         .unwrap();
 
-        // (70 - 50) * 2 = 40 px; the middle is (100, 100).
         assert!(!is_white(pixel(&bitmap, 40, 100)), "left edge missing");
         assert!(!is_white(pixel(&bitmap, 160, 100)), "right edge missing");
         assert!(is_white(pixel(&bitmap, 100, 100)), "the middle was filled in");
@@ -422,15 +384,8 @@ mod tests {
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Ellipse {
-                rect: Rect {
-                    left: 70.0,
-                    top: 70.0,
-                    right: 130.0,
-                    bottom: 130.0,
-                },
-            })],
-            &region(),
+            &[mark(Shape::Ellipse { rect: rect(20.0, 20.0, 80.0, 80.0) })],
+            SCALE,
         )
         .unwrap();
 
@@ -455,23 +410,11 @@ mod tests {
         composite(
             &mut bitmap,
             &[Markup {
-                shape: Shape::Highlight {
-                    rect: Rect {
-                        left: 70.0,
-                        top: 95.0,
-                        right: 130.0,
-                        bottom: 105.0,
-                    },
-                },
-                color: Color {
-                    r: 255,
-                    g: 224,
-                    b: 102,
-                    a: 255,
-                },
+                shape: Shape::Highlight { rect: rect(20.0, 45.0, 80.0, 55.0) },
+                color: Color { r: 255, g: 224, b: 102, a: 255 },
                 width_pt: 0.0,
             }],
-            &region(),
+            SCALE,
         )
         .unwrap();
 
@@ -488,11 +431,8 @@ mod tests {
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Arrow {
-                from: Point { x: 60.0, y: 60.0 },
-                to: Point { x: 140.0, y: 140.0 },
-            })],
-            &region(),
+            &[mark(Shape::Arrow { from: at(10.0, 10.0), to: at(90.0, 90.0) })],
+            SCALE,
         )
         .unwrap();
 
@@ -508,10 +448,8 @@ mod tests {
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Freehand {
-                points: vec![Point { x: 100.0, y: 100.0 }],
-            })],
-            &region(),
+            &[mark(Shape::Freehand { points: vec![at(50.0, 50.0)] })],
+            SCALE,
         )
         .unwrap();
         assert!(bitmap.data.iter().all(|&b| b == 0xFF));
@@ -522,49 +460,30 @@ mod tests {
         // A capture that composites differently run to run cannot be compared with
         // anything, including a later export of the same markup.
         let marks = vec![
-            mark(Shape::Ellipse {
-                rect: Rect {
-                    left: 70.0,
-                    top: 70.0,
-                    right: 130.0,
-                    bottom: 120.0,
-                },
-            }),
+            mark(Shape::Ellipse { rect: rect(20.0, 20.0, 80.0, 70.0) }),
             mark(Shape::Freehand {
-                points: vec![
-                    Point { x: 60.0, y: 60.0 },
-                    Point { x: 90.0, y: 110.0 },
-                    Point { x: 130.0, y: 70.0 },
-                ],
+                points: vec![at(10.0, 10.0), at(40.0, 60.0), at(80.0, 20.0)],
             }),
         ];
 
         let mut once = white_capture();
         let mut twice = white_capture();
-        composite(&mut once, &marks, &region()).unwrap();
-        composite(&mut twice, &marks, &region()).unwrap();
+        composite(&mut once, &marks, SCALE).unwrap();
+        composite(&mut twice, &marks, SCALE).unwrap();
         assert_eq!(once.data, twice.data);
     }
 
     #[test]
     fn marks_are_drawn_in_order_so_the_last_one_is_on_top() {
-        let blue = Color {
-            r: 0,
-            g: 0,
-            b: 255,
-            a: 255,
-        };
+        let blue = Color { r: 0, g: 0, b: 255, a: 255 };
         let across = |color: Color| Markup {
-            shape: Shape::Line {
-                from: Point { x: 60.0, y: 100.0 },
-                to: Point { x: 140.0, y: 100.0 },
-            },
+            shape: Shape::Line { from: at(10.0, 50.0), to: at(90.0, 50.0) },
             color,
             width_pt: 6.0,
         };
 
         let mut bitmap = white_capture();
-        composite(&mut bitmap, &[across(red()), across(blue)], &region()).unwrap();
+        composite(&mut bitmap, &[across(red()), across(blue)], SCALE).unwrap();
 
         let (r, _, b) = pixel(&bitmap, 100, 100);
         assert!(b > r, "the second stroke should be the visible one");
@@ -573,43 +492,30 @@ mod tests {
     #[test]
     fn nothing_at_all_is_drawn_for_an_empty_list() {
         let mut bitmap = white_capture();
-        composite(&mut bitmap, &[], &region()).unwrap();
+        composite(&mut bitmap, &[], SCALE).unwrap();
         assert!(bitmap.data.iter().all(|&b| b == 0xFF));
     }
 
     #[test]
-    fn a_stroke_width_is_in_page_points_so_it_scales_with_the_export() {
-        let thin = {
+    fn a_stroke_width_scales_with_the_export_rather_than_being_fixed_in_pixels() {
+        let thickness = |width_pt: f32| {
             let mut bitmap = white_capture();
             composite(
                 &mut bitmap,
                 &[Markup {
-                    shape: Shape::Line {
-                        from: Point { x: 60.0, y: 100.0 },
-                        to: Point { x: 140.0, y: 100.0 },
-                    },
+                    shape: Shape::Line { from: at(10.0, 50.0), to: at(90.0, 50.0) },
                     color: red(),
-                    width_pt: 2.0,
+                    width_pt,
                 }],
-                &region(),
+                SCALE,
             )
             .unwrap();
             (0..bitmap.height).filter(|&y| !is_white(pixel(&bitmap, 100, y))).count()
         };
 
-        let thick = {
-            let mut bitmap = white_capture();
-            composite(&mut bitmap, &[mark(Shape::Line {
-                from: Point { x: 60.0, y: 100.0 },
-                to: Point { x: 140.0, y: 100.0 },
-            })], &region())
-            .unwrap();
-            (0..bitmap.height).filter(|&y| !is_white(pixel(&bitmap, 100, y))).count()
-        };
-
-        // 4 pt at 2x is 8 px; 2 pt is 4 px. The exact counts depend on
+        // 4 units at 2x is 8 px; 2 units is 4 px. The exact counts depend on
         // anti-aliasing, the ordering does not.
-        assert!(thick > thin, "thick={thick} thin={thin}");
+        assert!(thickness(4.0) > thickness(2.0));
     }
 
     #[test]
@@ -622,10 +528,7 @@ mod tests {
         assert_eq!(
             decoded,
             Markup {
-                shape: Shape::Arrow {
-                    from: Point { x: 1.0, y: 2.0 },
-                    to: Point { x: 3.0, y: 4.0 },
-                },
+                shape: Shape::Arrow { from: at(1.0, 2.0), to: at(3.0, 4.0) },
                 color: red(),
                 width_pt: 2.5,
             },

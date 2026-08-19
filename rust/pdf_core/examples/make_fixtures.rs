@@ -39,6 +39,46 @@ fn main() {
         &[(595.0, 842.0), (420.0, 595.0), (612.0, 792.0), (842.0, 1191.0)],
     );
     write_quadrants(&pdfium, &format!("{out}/quadrants.pdf"));
+    write_spread(&pdfium, &format!("{out}/spread.pdf"));
+}
+
+/// Two pages, each a single flat colour.
+///
+/// For the viewport capture, which draws parts of several pages into one picture.
+/// The question it has to answer is *which page each pixel came from*, and one
+/// colour per page answers it off a single pixel — where page geometry cannot,
+/// since the bottom of one page and the top of the next are the same shape.
+fn write_spread(pdfium: &Pdfium, path: &str) {
+    const SIDE: f32 = 400.0;
+    let colours = [
+        PdfColor::new(255, 0, 0, 255),
+        PdfColor::new(0, 0, 255, 255),
+    ];
+
+    let mut doc = pdfium.create_new_pdf().expect("create");
+    for colour in colours {
+        let mut page = doc
+            .pages_mut()
+            .create_page_at_end(PdfPagePaperSize::from_points(
+                PdfPoints::new(SIDE),
+                PdfPoints::new(SIDE),
+            ))
+            .expect("add page");
+
+        let object = PdfPagePathObject::new_rect(
+            &doc,
+            PdfRect::new_from_values(0.0, 0.0, SIDE, SIDE),
+            None,
+            None,
+            Some(colour),
+        )
+        .expect("build page fill");
+        page.objects_mut().add_path_object(object).expect("add fill");
+        page.regenerate_content().expect("regenerate");
+    }
+
+    doc.save_to_file(path).expect("save");
+    println!("{path}: 2 pages, 400x400, red then blue");
 }
 
 /// A page in four solid colours, one per quadrant.

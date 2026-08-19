@@ -7,11 +7,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::command::Command;
-use crate::document::{RegionRequest, RenderRequest, Rotation};
+use crate::document::{Document, RegionRequest, RenderRequest, Rotation};
 use crate::error::{PdfError, Result};
 use crate::registry::DocumentSession;
 use crate::render::bitmap::{Bitmap, PixelOrder};
-use crate::render::{CacheKey, ImageFormat, Markup, RegionPixels, RenderTarget};
+use crate::document::Color;
+use crate::render::{CacheKey, ImageFormat, Markup, RegionPixels, RenderTarget, ViewportPlan, ViewportRequest};
 
 /// Pixel dimensions a page occupies for the given request, accounting for rotation.
 pub fn page_pixel_size(
@@ -132,12 +133,12 @@ pub fn prefetch_page(
 /// whole budget, so caching one would evict every raster the reader is about to
 /// need in order to keep something that is used once and never asked for again.
 pub fn render_region(
-    session: &DocumentSession,
+    document: &dyn Document,
     index: usize,
     request: &RegionRequest,
 ) -> Result<Bitmap> {
-    session.document.validate_page_index(index)?;
-    let page = session.document.page(index)?;
+    document.validate_page_index(index)?;
+    let page = document.page(index)?;
     page.render_region(request)
 }
 
@@ -152,13 +153,13 @@ pub fn render_region(
 /// for the same reason the capture itself is a re-render: what leaves the app is
 /// built from the document and the committed shapes, and can hold nothing else.
 pub fn export_region(
-    session: &DocumentSession,
+    document: &dyn Document,
     index: usize,
     request: &RegionRequest,
     format: ImageFormat,
     marks: &[Markup],
 ) -> Result<Vec<u8>> {
-    let mut bitmap = render_region(session, index, request)?;
+    let mut bitmap = render_region(document, index, request)?;
 
     if !marks.is_empty() {
         // Resolved again rather than threaded out of the render: `resolve` is a
@@ -166,14 +167,112 @@ pub fn export_region(
         // construction — including when the ceiling lowered the scale, which is
         // exactly the case where a separately-computed transform would drift.
         let region = RegionPixels::resolve(
-            session.document.page_size(index)?,
+            document.page_size(index)?,
             request.crop,
             request.scale,
         )?;
-        crate::render::markup::composite(&mut bitmap, marks, &region)?;
+        crate::render::markup::composite(&mut bitmap, marks, region.scale)?;
     }
 
     crate::render::export::encode(&bitmap, format)
+}
+
+/// Capture what is on screen, across however many pages that turns out to be.
+///
+/// The reader lays pages out in a column, so the region someone drags a box
+/// around is very often *not* one page: it straddles a join, or takes the bottom
+/// of one page and the top of the next. Capturing only the page the drag started
+/// on answers a question nobody asked.
+///
+/// Each [`Tile`] is one page's share of the picture — which part of that page,
+/// and where it belongs in the result. The caller works this out from its own
+/// layout, because the layout is the caller's: the engine has no idea where a
+/// page happens to sit on a screen, and inventing an idea here would be a second
+/// copy of the reader's arithmetic to keep in step.
+///
+/// Still not a screenshot. Every pixel is rendered from the document, so the gaps
+/// between pages come out as the supplied background rather than as whatever the
+/// app happened to be drawing there.
+pub fn export_viewport(
+    document: &dyn Document,
+    request: &ViewportRequest,
+    format: ImageFormat,
+    marks: &[Markup],
+) -> Result<Vec<u8>> {
+    let plan = ViewportPlan::resolve(request)?;
+    let mut bitmap = Bitmap::new(plan.width, plan.height, PixelOrder::Rgba)?;
+    fill(&mut bitmap, request.background);
+
+    for tile in &request.tiles {
+        let Some(placed) = plan.place(tile) else {
+            // Entirely outside the picture, which is normal: the caller lists the
+            // pages that *might* contribute and lets this decide.
+            continue;
+        };
+
+        let rendered = {
+            document.validate_page_index(tile.page_index)?;
+            let page = document.page(tile.page_index)?;
+            page.render_region(&RegionRequest {
+                crop: tile.crop,
+                scale: placed.scale,
+                render_annotations: request.render_annotations,
+                render_form_data: request.render_form_data,
+            })?
+        };
+
+        blit(&mut bitmap, &rendered, placed.left, placed.top);
+    }
+
+    if !marks.is_empty() {
+        crate::render::markup::composite(&mut bitmap, marks, plan.scale)?;
+    }
+
+    crate::render::export::encode(&bitmap, format)
+}
+
+/// Paint every pixel, including alpha.
+///
+/// The background shows through wherever no page reaches — between two pages, and
+/// around a picture dragged past the edge of one. Left unpainted those pixels
+/// would be whatever the allocation held.
+fn fill(bitmap: &mut Bitmap, colour: Color) {
+    for pixel in bitmap.data.chunks_exact_mut(4) {
+        pixel[0] = colour.r;
+        pixel[1] = colour.g;
+        pixel[2] = colour.b;
+        pixel[3] = colour.a;
+    }
+}
+
+/// Copy `source` into `destination` at a pixel offset, clipped to the edges.
+///
+/// Clipping rather than asserting: rounding a tile's edges into whole pixels can
+/// put its last row or column a pixel past the picture, and losing that pixel is
+/// invisible where refusing to draw the tile at all is not.
+fn blit(destination: &mut Bitmap, source: &Bitmap, left: i32, top: i32) {
+    for row in 0..source.height as i32 {
+        let target_row = top + row;
+        if target_row < 0 || target_row >= destination.height as i32 {
+            continue;
+        }
+
+        // The overlap on this row, in source pixels.
+        let from = (-left).max(0);
+        let to = (source.width as i32).min(destination.width as i32 - left);
+        if to <= from {
+            continue;
+        }
+
+        let source_start = row as usize * source.stride + from as usize * 4;
+        let source_end = row as usize * source.stride + to as usize * 4;
+        let destination_start =
+            target_row as usize * destination.stride + (left + from) as usize * 4;
+        let length = (to - from) as usize * 4;
+
+        destination.data[destination_start..destination_start + length]
+            .copy_from_slice(&source.data[source_start..source_end]);
+    }
 }
 
 

@@ -55,6 +55,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -75,10 +76,14 @@ import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.ui.components.AnnotationToolbar
 import com.hsilighting.pagify.ui.components.CaptureHint
-import com.hsilighting.pagify.ui.components.CaptureSheet
+import com.hsilighting.pagify.ui.components.CaptureEditor
 import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.CaptureScale
+import com.hsilighting.pagify.core.CaptureTile
+import com.hsilighting.pagify.core.PlacedPage
+import com.hsilighting.pagify.core.captureTilesFor
+import com.hsilighting.pagify.ui.components.captureOverlay
 import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
@@ -162,7 +167,13 @@ fun PdfReaderScreen(
     /** A highlight drag swept this page and selected nothing. */
     onHighlightMissed: (Int) -> Unit,
     /** A region was dragged out with the snapshot tool, in page points. */
-    onCaptureRegion: (pageIndex: Int, crop: Rect) -> Unit,
+    /** A box was dragged around part of the reader; capture what it framed. */
+    onCaptureViewport: (
+        tiles: List<CaptureTile>,
+        area: Rect,
+        background: Long,
+        originPage: Int,
+    ) -> Unit,
     onClearPage: (Int) -> Unit,
     onClearAll: () -> Unit,
     /** The reader has taken the scroll a history step asked for. */
@@ -358,7 +369,7 @@ fun PdfReaderScreen(
                     onErase = onErase,
                     onEraseEnd = onEraseEnd,
                     onHighlightMissed = onHighlightMissed,
-                    onCaptureRegion = onCaptureRegion,
+                    onCaptureViewport = onCaptureViewport,
                     onJumpHandled = onJumpHandled,
                     onPageVisible = onPageVisible,
                     onZoomInOn = onZoomInOn,
@@ -448,27 +459,28 @@ fun PdfReaderScreen(
             }
         }
 
+        // Full screen, above everything: the picture is a workspace rather than a
+        // menu, and a sheet gave it a third of the display while the controls took
+        // the rest.
         state.capture?.let { capture ->
-            ModalBottomSheet(onDismissRequest = onDismissCapture) {
-                CaptureSheet(
-                    preview = capture,
-                    isCapturing = state.isCapturing,
-                    markup = state.markup,
-                    markupTool = state.markupTool,
-                    markupColor = state.markupColor,
-                    onScaleChange = onCaptureScale,
-                    onFormatChange = onCaptureFormat,
-                    onMarkupTool = onMarkupTool,
-                    onMarkupColor = onMarkupColor,
-                    onCommitMarkup = onCommitMarkup,
-                    onRecogniseMarkup = onRecogniseMarkup,
-                    onUndoMarkup = onUndoMarkup,
-                    onSaveToGallery = onSaveCapture,
-                    onShare = onShareCapture,
-                    onCopy = onCopyCapture,
-                    onDismiss = onDismissCapture,
-                )
-            }
+            CaptureEditor(
+                preview = capture,
+                isCapturing = state.isCapturing,
+                markup = state.markup,
+                markupTool = state.markupTool,
+                markupColor = state.markupColor,
+                onScaleChange = onCaptureScale,
+                onFormatChange = onCaptureFormat,
+                onMarkupTool = onMarkupTool,
+                onMarkupColor = onMarkupColor,
+                onCommitMarkup = onCommitMarkup,
+                onRecogniseMarkup = onRecogniseMarkup,
+                onUndoMarkup = onUndoMarkup,
+                onSaveToGallery = onSaveCapture,
+                onShare = onShareCapture,
+                onCopy = onCopyCapture,
+                onDismiss = onDismissCapture,
+            )
         }
 
         // Launched from an effect rather than straight from the button, because
@@ -547,7 +559,13 @@ private fun PageList(
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
     onHighlightMissed: (Int) -> Unit,
-    onCaptureRegion: (pageIndex: Int, crop: Rect) -> Unit,
+    /** A box was dragged around part of the reader; capture what it framed. */
+    onCaptureViewport: (
+        tiles: List<CaptureTile>,
+        area: Rect,
+        background: Long,
+        originPage: Int,
+    ) -> Unit,
     onJumpHandled: () -> Unit,
     onPageVisible: (Int) -> Unit,
     onZoomInOn: (Int, Float) -> Unit,
@@ -566,6 +584,27 @@ private fun PageList(
 
     // Where the navigator's viewport indicator comes from while pinned.
     var window by remember { mutableStateOf(ViewportWindow.Full) }
+
+    /**
+     * Where each page currently sits, in the reader's own pixels.
+     *
+     * A capture spans whatever is on screen, so it needs the layout — and the
+     * layout is only known once the pages have been placed. Reported by each page
+     * rather than derived from `LazyListState`, which knows an item's vertical
+     * offset but nothing about where the page inside it was drawn.
+     *
+     * Stored in **window** coordinates, exactly as reported. Converting to the
+     * reader's space at write time looked tidier and was wrong: the origin it
+     * would subtract is itself only known after the reader has been positioned, so
+     * the first pages to lay out recorded themselves against a stale one and never
+     * corrected. The capture converts at read time instead, from the overlay's own
+     * origin, which is the same frame the drag was measured in.
+     *
+     * A plain map, not state: it is written during layout and read only when a
+     * capture gesture ends, and making it observable would recompose the reader on
+     * every scroll frame for no one's benefit.
+     */
+    val pageBounds = remember { mutableMapOf<Int, Rect>() }
     var recenterRequest by remember { mutableStateOf<Offset?>(null) }
 
     // Returning to fit-width restores the continuous list at the page that was
@@ -695,7 +734,6 @@ private fun PageList(
                 onEraseStart = onEraseStart,
                 onErase = { point, tolerance -> onErase(pinnedPage, point, tolerance) },
                 onEraseEnd = onEraseEnd,
-                onCaptureRegion = onCaptureRegion,
             )
         } else {
             val viewportWidthPx = with(density) { viewportWidth.toPx() }
@@ -888,6 +926,12 @@ private fun PageList(
                     // once past touch slop. Two fingers pan instead, handled below.
                     val toolActive = state.tool != AnnotationTool.None
 
+                    // Read here, where the theme is in scope, rather than in the
+                    // engine: what shows between two pages is a reader decision.
+                    val readerBackground = MaterialTheme.colorScheme.surfaceVariant
+                        .toArgb()
+                        .toLong() and 0xFFFFFFFFL
+
                     LazyColumn(
                         state = listState,
                         modifier = Modifier
@@ -923,11 +967,64 @@ private fun PageList(
                                 onErase = onErase,
                                 onEraseEnd = onEraseEnd,
                                 onHighlightMissed = onHighlightMissed,
-                                onCaptureRegion = onCaptureRegion,
+                                onBounds = { index, bounds -> pageBounds[index] = bounds },
                                 pageSizeProvider = pageSizeProvider,
                                 renderer = renderer,
                             )
                         }
+                    }
+
+                    // Above the list, so the drag reaches this before the scroll
+                    // container can claim it — and so a box can cross a page join,
+                    // which is the whole point of capturing what is on screen
+                    // rather than what fits on one page.
+                    if (state.tool == AnnotationTool.Snapshot) {
+                        // The overlay's own position, read at gesture time. The drag
+                        // arrives in this element's coordinates and the pages report
+                        // themselves in the window's, so one of the two has to move —
+                        // and doing it here, from a value that is current, is what
+                        // the write-time version could not guarantee.
+                        var overlayOrigin by remember { mutableStateOf(Offset.Zero) }
+
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .onGloballyPositioned {
+                                    overlayOrigin = it.boundsInWindow().topLeft
+                                }
+                                .captureOverlay { local ->
+                                    val box = local.translate(overlayOrigin.x, overlayOrigin.y)
+                                    val pages = pageBounds.entries
+                                        .sortedBy { it.key }
+                                        .mapNotNull { (index, bounds) ->
+                                            state.pageSizes[index]?.let {
+                                                PlacedPage(index, bounds, it)
+                                            }
+                                        }
+                                    val tiles = captureTilesFor(box, pages)
+                                    SessionRecorder.record(
+                                        kind = "CAPTURE_BOX",
+                                        detail = "box=${box.left.toInt()},${box.top.toInt()}.." +
+                                            "${box.right.toInt()},${box.bottom.toInt()} " +
+                                            "origin=${overlayOrigin.x.toInt()},${overlayOrigin.y.toInt()} " +
+                                            "known=${pageBounds.size} sized=${pages.size} " +
+                                            "tiles=${tiles.size} " +
+                                            pages.take(4).joinToString(" ") {
+                                                "p${it.pageIndex}=${it.bounds.top.toInt()}.." +
+                                                    "${it.bounds.bottom.toInt()}"
+                                            },
+                                    )
+                                    onCaptureViewport(
+                                        tiles,
+                                        box,
+                                        // The reader's own backdrop, so the gap
+                                        // between two pages looks in the picture
+                                        // like it looked on screen.
+                                        readerBackground,
+                                        tiles.firstOrNull()?.pageIndex ?: state.currentPage,
+                                    )
+                                },
+                        )
                     }
                 }
             }
@@ -971,7 +1068,13 @@ private fun AnnotatablePage(
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
     onHighlightMissed: (Int) -> Unit,
-    onCaptureRegion: (pageIndex: Int, crop: Rect) -> Unit,
+    /**
+     * Where this page ended up, in window coordinates.
+     *
+     * Reported rather than derived: a capture spans whatever is on screen, and
+     * only the layout knows where each page actually landed.
+     */
+    onBounds: (pageIndex: Int, bounds: Rect) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
 ) {
@@ -1021,7 +1124,9 @@ private fun AnnotatablePage(
         // the marks do, and three more parameters to carry one integer would be
         // three more places to forget it.
         contentRevision = state.pageContentRevision,
-        modifier = Modifier.annotationLayer(
+        modifier = Modifier
+            .onGloballyPositioned { onBounds(pageIndex, it.boundsInWindow()) }
+            .annotationLayer(
             pageIndex = pageIndex,
             annotations = annotations,
             textSegments = segments,
@@ -1036,7 +1141,6 @@ private fun AnnotatablePage(
             onErase = { point, tolerance -> onErase(pageIndex, point, tolerance) },
             onEraseEnd = onEraseEnd,
             onHighlightMissed = { onHighlightMissed(pageIndex) },
-            onCaptureRegion = { crop -> onCaptureRegion(pageIndex, crop) },
         ),
     )
 }
