@@ -1,7 +1,10 @@
 package com.hsilighting.pagify.ui.reader
 
+import android.net.Uri
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.ImageBitmap
 import com.hsilighting.pagify.core.AnnotationColors
+import com.hsilighting.pagify.core.CaptureRequest
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
@@ -144,6 +147,27 @@ data class PdfReaderState(
      * it has scrolled, so the same page can be asked for twice in a row.
      */
     val jumpToPage: Int? = null,
+
+    // --------------------------------------------------------------- capture --
+    /** A capture is being rendered. Blocks a second one and drives the spinner. */
+    val isCapturing: Boolean = false,
+    /**
+     * The capture taken and not yet dismissed.
+     *
+     * Held rather than exported straight away: what to do with it — keep, send,
+     * paste — is decided after seeing it, and the scale and format can still be
+     * changed, which re-renders from the same crop.
+     */
+    val capture: CapturePreview? = null,
+    /**
+     * A capture ready to hand to another app. One-shot; the reader launches the
+     * share sheet and calls `captureShared`.
+     *
+     * Minted here rather than in the screen because writing the file is I/O, and a
+     * share sheet that appears before the bytes are on disk hands the receiving
+     * app an empty file.
+     */
+    val captureToShare: CaptureShare? = null,
 ) {
     val isReady: Boolean get() = phase is Phase.Ready
     /** 1-based, for display. */
@@ -187,3 +211,29 @@ data class PdfReaderState(
  * the reader may well have scrolled between the tap and the keyboard appearing.
  */
 data class PendingNote(val pageIndex: Int, val anchor: Offset)
+
+/**
+ * A capture the reader has taken, with what it took and what it looks like.
+ *
+ * Not a data class on purpose: it carries a [ByteArray], whose `equals` compares
+ * identity anyway, so a generated `equals` would be a lie about a deep comparison
+ * it does not perform. Every capture is a fresh instance, which is exactly what
+ * state comparison needs.
+ */
+class CapturePreview(
+    val request: CaptureRequest,
+    /** The encoded image — what gets saved, shared or pasted, byte for byte. */
+    val bytes: ByteArray,
+    val fileName: String,
+    /** A downscaled copy for the preview. Never what is exported. */
+    val preview: ImageBitmap,
+) {
+    val sizeLabel: String
+        get() = when {
+            bytes.size >= 1024 * 1024 -> "%.1f MB".format(bytes.size / (1024f * 1024f))
+            else -> "${(bytes.size + 1023) / 1024} KB"
+        }
+}
+
+/** A capture written to the cache and ready to leave the app. */
+data class CaptureShare(val uri: Uri, val mimeType: String)

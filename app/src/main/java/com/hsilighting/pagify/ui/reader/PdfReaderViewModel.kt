@@ -2,6 +2,7 @@ package com.hsilighting.pagify.ui.reader
 
 import android.app.Application
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.util.Log
@@ -11,11 +12,20 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.hsilighting.pagify.core.Annotation
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.AnnotationEdit
 import com.hsilighting.pagify.core.AnnotationStore
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.BitmapPools
+import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.core.CaptureFormat
+import com.hsilighting.pagify.core.CaptureRequest
+import com.hsilighting.pagify.core.CaptureScale
+import com.hsilighting.pagify.core.captureFileName
+import com.hsilighting.pagify.core.isWorthCapturing
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PageTextRecogniser
@@ -1347,6 +1357,188 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 ?.let { fresh -> _state.update { it.copy(editState = fresh) } }
         }
     }
+
+    // ---------------------------------------------------------------- capture --
+
+    /**
+     * Capture a region of a page as a picture.
+     *
+     * The engine re-renders the crop from the document, so the result holds only
+     * what is in the PDF — no notification, no dialog of ours, no status bar. That
+     * is a consequence of never involving the screen rather than something
+     * filtered out afterwards; see roadmap decision 4.8.
+     */
+    fun captureRegion(pageIndex: Int, crop: Rect) {
+        if (!crop.isWorthCapturing()) return
+        val existing = _state.value.capture?.request
+        takeCapture(
+            CaptureRequest(
+                pageIndex = pageIndex,
+                crop = crop,
+                // Whatever was chosen last, so a second capture does not silently
+                // come back at a different resolution from the first.
+                scale = existing?.scale ?: CaptureScale.X2,
+                format = existing?.format ?: CaptureFormat.PNG,
+            ),
+        )
+    }
+
+    /** Re-render the capture on screen at a different resolution. */
+    fun setCaptureScale(scale: CaptureScale) {
+        val request = _state.value.capture?.request ?: return
+        if (request.scale != scale) takeCapture(request.copy(scale = scale))
+    }
+
+    /** Re-render the capture on screen in the other format. */
+    fun setCaptureFormat(format: CaptureFormat) {
+        val request = _state.value.capture?.request ?: return
+        if (request.format != format) takeCapture(request.copy(format = format))
+    }
+
+    private fun takeCapture(request: CaptureRequest) {
+        val doc = document ?: return
+        if (_state.value.isCapturing) return
+
+        _state.update { it.copy(isCapturing = true) }
+        viewModelScope.launch {
+            try {
+                val name = captureFileName(
+                    documentName = _state.value.documentName,
+                    pageIndex = request.pageIndex,
+                    format = request.format,
+                    timestamp = CaptureExport.timestamp(),
+                )
+                val taken = withContext(Dispatchers.Default) {
+                    val bytes = doc.captureRegion(request)
+                    CapturePreview(request, bytes, name, decodeForPreview(bytes))
+                }
+                SessionRecorder.record(
+                    kind = "CAPTURE",
+                    detail = "page=${request.pageIndex} scale=${request.scale.label} " +
+                        "format=${request.format.wireName} bytes=${taken.bytes.size}",
+                )
+                _state.update { it.copy(isCapturing = false, capture = taken) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "capture failed", t)
+                _state.update {
+                    it.copy(
+                        isCapturing = false,
+                        message = t.message ?: "That region could not be captured.",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Decode a copy small enough to show.
+     *
+     * The preview is a thumbnail on a sheet. Decoding a 4× capture at full size to
+     * fill it would allocate tens of megabytes of Java heap for something a few
+     * hundred pixels across — on top of the encoded bytes already being held.
+     */
+    private fun decodeForPreview(bytes: ByteArray): ImageBitmap {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+
+        var sample = 1
+        while (
+            bounds.outWidth / sample > PREVIEW_MAX_EDGE_PX ||
+            bounds.outHeight / sample > PREVIEW_MAX_EDGE_PX
+        ) {
+            sample *= 2
+        }
+
+        val decoded = BitmapFactory.decodeByteArray(
+            bytes,
+            0,
+            bytes.size,
+            BitmapFactory.Options().apply { inSampleSize = sample },
+        ) ?: error("the capture could not be decoded for preview")
+
+        return decoded.asImageBitmap()
+    }
+
+    fun dismissCapture() = _state.update { it.copy(capture = null) }
+
+    /**
+     * The storage permission was refused, below API 29.
+     *
+     * Says what to do rather than only that it failed: the capture is still on
+     * screen, and sharing it needs no permission at all.
+     */
+    fun noteCaptureNeedsStorage() = _state.update {
+        it.copy(message = "Saving to the gallery needs storage access. Share the picture instead.")
+    }
+
+    /** Keep the capture in the device's gallery. */
+    fun saveCaptureToGallery() {
+        val capture = _state.value.capture ?: return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    CaptureExport.saveToGallery(
+                        context = getApplication(),
+                        bytes = capture.bytes,
+                        fileName = capture.fileName,
+                        format = capture.request.format,
+                    )
+                }
+                _state.update { it.copy(capture = null, message = "Saved to Pictures/Pagify.") }
+            } catch (t: Throwable) {
+                Log.e(TAG, "saving a capture failed", t)
+                _state.update { it.copy(message = captureSaveFailureMessage(t)) }
+            }
+        }
+    }
+
+    /**
+     * Below API 29 there is no scoped storage, which makes this the one place in
+     * the app that can fail for want of a permission. Naming it is the difference
+     * between a user granting it and concluding the feature is broken.
+     */
+    private fun captureSaveFailureMessage(t: Throwable): String = when (t) {
+        is SecurityException -> "Allow storage access to save pictures to the gallery."
+        else -> t.message ?: "The picture could not be saved."
+    }
+
+    /** Write the capture to the cache and offer it to another app. */
+    fun shareCapture() {
+        val capture = _state.value.capture ?: return
+        viewModelScope.launch {
+            try {
+                val uri = withContext(Dispatchers.IO) {
+                    CaptureExport.cache(getApplication(), capture.bytes, capture.fileName)
+                }
+                _state.update {
+                    it.copy(captureToShare = CaptureShare(uri, capture.request.format.mimeType))
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "sharing a capture failed", t)
+                _state.update { it.copy(message = "The picture could not be shared.") }
+            }
+        }
+    }
+
+    fun captureShared() = _state.update { it.copy(captureToShare = null, capture = null) }
+
+    /** Put the capture on the clipboard, for pasting into another app. */
+    fun copyCapture() {
+        val capture = _state.value.capture ?: return
+        viewModelScope.launch {
+            try {
+                val uri = withContext(Dispatchers.IO) {
+                    CaptureExport.cache(getApplication(), capture.bytes, capture.fileName)
+                }
+                CaptureExport.copyToClipboard(getApplication(), uri)
+                _state.update { it.copy(capture = null, message = "Picture copied.") }
+            } catch (t: Throwable) {
+                Log.e(TAG, "copying a capture failed", t)
+                _state.update { it.copy(message = "The picture could not be copied.") }
+            }
+        }
+    }
+
     private companion object {
         const val TAG = "PdfReaderViewModel"
         const val DOUBLE_TAP_ZOOM = 2.5f
@@ -1370,5 +1562,14 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         /** Fallback size for an inserted page when nothing has been measured yet. */
         const val A4_WIDTH_POINTS = 595f
         const val A4_HEIGHT_POINTS = 842f
+
+        /**
+         * Longest edge of a decoded capture preview, in pixels.
+         *
+         * The preview fills part of a sheet; 1024 is past what any of our target
+         * screens can show of it, and it keeps a 4× capture's decode at a few
+         * megabytes rather than tens.
+         */
+        const val PREVIEW_MAX_EDGE_PX = 1024
     }
 }

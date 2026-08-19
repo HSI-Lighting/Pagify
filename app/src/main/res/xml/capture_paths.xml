@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    What the capture FileProvider is allowed to hand out.
+
+    Exactly one directory, inside our own cache. Sharing a broader path — or the
+    whole of cacheDir — would let any app we share one capture with resolve a URI
+    for a document the user never meant to send.
+-->
+<paths>
+    <cache-path name="captures" path="captures/" />
+</paths>

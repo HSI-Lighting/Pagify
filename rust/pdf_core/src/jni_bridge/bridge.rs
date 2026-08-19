@@ -4,18 +4,18 @@
 //! changing the Kotlin package means changing every `#[no_mangle]` name here.
 
 use jni::objects::{JClass, JFloatArray, JObject, JString};
-use jni::sys::{jboolean, jfloat, jint, jlong, jstring, JNI_FALSE, JNI_TRUE};
+use jni::sys::{jboolean, jbyteArray, jfloat, jint, jlong, jstring, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
 
 use crate::command::Command;
 use crate::document::pdfium_doc::PdfiumDocument;
-use crate::document::{Document, RenderRequest, Rotation};
+use crate::document::{Document, Rect, RegionRequest, RenderRequest, Rotation};
 use crate::engine;
 use crate::error::{PdfError, Result};
 use crate::jni_bridge::android_bitmap::LockedPixels;
 use crate::jni_bridge::{guard, optional_string, required_string};
 use crate::registry;
-use crate::render::{PixelOrder, RenderTarget};
+use crate::render::{ImageFormat, PixelOrder, RenderTarget};
 
 const INVALID_HANDLE: jlong = -1;
 
@@ -579,6 +579,66 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getAnnotati
         Ok(env
             .new_string(json)
             .map_err(|e| PdfError::Pdfium(format!("could not allocate Java string: {e}")))?
+            .into_raw())
+    })
+}
+
+// ----------------------------------------------------------------- capture --
+
+/// Re-render one region of a page and hand back an encoded image.
+///
+/// **Not a screenshot** — decision 4.8. The pixels come from the document, so
+/// nothing that is not in the document can be in the result: no notification, no
+/// dialog of ours, no status bar. That is a property of where the pixels come
+/// from rather than something filtered out afterwards, which is why this exists
+/// instead of a `MediaProjection` capture.
+///
+/// The crop is in page points with a top-left origin, the same space annotations
+/// use. `scale` is the export resolution and is independent of the on-screen
+/// zoom; it is lowered if it would breach the render ceiling.
+///
+/// Encoding happens on this side so the uncompressed bitmap never crosses the
+/// boundary: a 4× capture is tens of megabytes as pixels and a fraction of that
+/// as a PNG.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureRegion<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page_index: jint,
+    left: jfloat,
+    top: jfloat,
+    right: jfloat,
+    bottom: jfloat,
+    scale: jfloat,
+    format: JString<'local>,
+    quality: jint,
+) -> jbyteArray {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let index = page_index_from(page_index)?;
+        let format = ImageFormat::parse(
+            &required_string(env, &format, "format")?,
+            quality.clamp(1, 100) as u8,
+        )?;
+        let request = RegionRequest {
+            crop: Rect {
+                left,
+                top,
+                right,
+                bottom,
+            },
+            scale,
+            ..Default::default()
+        };
+
+        let bytes =
+            registry::with_session(handle, |session| {
+                engine::export_region(session, index, &request, format)
+            })?;
+
+        Ok(env
+            .byte_array_from_slice(&bytes)
+            .map_err(|e| PdfError::Pdfium(format!("could not allocate the capture: {e}")))?
             .into_raw())
     })
 }

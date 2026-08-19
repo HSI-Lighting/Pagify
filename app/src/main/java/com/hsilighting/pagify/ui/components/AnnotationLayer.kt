@@ -28,6 +28,8 @@ import com.hsilighting.pagify.core.Annotation
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.NOTE_MARKER_RADIUS_POINTS
 import com.hsilighting.pagify.core.isHitBy
+import com.hsilighting.pagify.core.isWorthCapturing
+import com.hsilighting.pagify.core.rectFromCorners
 import com.hsilighting.pagify.core.PenMode
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
@@ -83,6 +85,15 @@ fun Modifier.annotationLayer(
      * should work and do not.
      */
     onHighlightMissed: () -> Unit = {},
+    /**
+     * A region was dragged out with the snapshot tool, in page points.
+     *
+     * The rectangle is all this reports. Nothing here reads a pixel: the picture
+     * is re-rendered from the document by the engine, which is what keeps
+     * everything that is not the document — notifications, dialogs, the status
+     * bar — out of it by construction. See roadmap decision 4.8.
+     */
+    onCaptureRegion: (Rect) -> Unit = {},
 ): Modifier {
     // Read through `rememberUpdatedState`: the pointerInput block below is keyed
     // on the tool, so without this it would capture the colour and mode that were
@@ -101,6 +112,7 @@ fun Modifier.annotationLayer(
     val erase by rememberUpdatedState(onErase)
     val eraseEnd by rememberUpdatedState(onEraseEnd)
     val highlightMissed by rememberUpdatedState(onHighlightMissed)
+    val captureRegion by rememberUpdatedState(onCaptureRegion)
 
     /** Live stroke, in page points, while a marker drag is in progress. */
     var wetStroke by remember { mutableStateOf<List<Offset>>(emptyList()) }
@@ -108,6 +120,8 @@ fun Modifier.annotationLayer(
     var wetHighlight by remember { mutableStateOf<List<Rect>>(emptyList()) }
     /** Where the eraser is, in page points, while it is down. Drawn as a ring. */
     var eraserAt by remember { mutableStateOf<Offset?>(null) }
+    /** The region being dragged out with the snapshot tool, in page points. */
+    var captureRect by remember { mutableStateOf<Rect?>(null) }
 
     fun toPage(position: Offset): Offset =
         if (scale > 0f) (position - origin) / scale else Offset.Zero
@@ -249,7 +263,33 @@ fun Modifier.annotationLayer(
                 )
             }
 
-        // Signature and Snapshot are driven from their own surfaces. With no tool
+        // Drag out the region to capture. Deliberately the same gesture as the
+        // marker and the eraser: one finger draws, two fingers still pan, so the
+        // page can be moved without leaving the tool.
+        AnnotationTool.Snapshot -> Modifier.pointerInput(pageIndex, tool) {
+            var start = Offset.Zero
+            detectDragGestures(
+                onDragStart = { position ->
+                    start = toPage(position)
+                    captureRect = null
+                },
+                onDrag = { change, _ ->
+                    change.consume()
+                    val here = toPage(change.position)
+                    captureRect = rectFromCorners(start.x, start.y, here.x, here.y)
+                },
+                onDragEnd = {
+                    // A drag too small to mean it is a tap that moved. Capturing
+                    // it would put a two-pixel image and a share sheet in front of
+                    // someone who was trying to scroll.
+                    captureRect?.takeIf { it.isWorthCapturing() }?.let(captureRegion)
+                    captureRect = null
+                },
+                onDragCancel = { captureRect = null },
+            )
+        }
+
+        // Signature is driven from its own surface. With no tool
         // the reader keeps every gesture — except that a note has to be openable
         // without first arming a tool, which is not something anyone would think
         // to try.
@@ -299,7 +339,51 @@ fun Modifier.annotationLayer(
                     style = Stroke(width = ERASER_RING_PX),
                 )
             }
+            captureRect?.let { drawCaptureMarquee(it, scale, origin) }
         }
+}
+
+/**
+ * The region a capture will take.
+ *
+ * Dimming everything outside it rather than only outlining it: the outline says
+ * where the edges are, the dimming says what will be in the picture, and the
+ * second is the question someone dragging this actually has.
+ */
+private fun DrawScope.drawCaptureMarquee(rect: Rect, scale: Float, origin: Offset) {
+    val topLeft = Offset(rect.left, rect.top) * scale + origin
+    val size = Size(rect.width * scale, rect.height * scale)
+    val shade = Color.Black.copy(alpha = CAPTURE_SHADE_ALPHA)
+
+    // Four bands around the selection. Cheaper and more predictable than a
+    // clipped full-size rect, which fights the layer's own clip.
+    drawRect(shade, topLeft = Offset.Zero, size = Size(this.size.width, topLeft.y))
+    drawRect(
+        shade,
+        topLeft = Offset(0f, topLeft.y + size.height),
+        size = Size(this.size.width, (this.size.height - topLeft.y - size.height).coerceAtLeast(0f)),
+    )
+    drawRect(shade, topLeft = Offset(0f, topLeft.y), size = Size(topLeft.x, size.height))
+    drawRect(
+        shade,
+        topLeft = Offset(topLeft.x + size.width, topLeft.y),
+        size = Size((this.size.width - topLeft.x - size.width).coerceAtLeast(0f), size.height),
+    )
+
+    drawRect(
+        color = Color.White,
+        topLeft = topLeft,
+        size = size,
+        style = Stroke(width = CAPTURE_BORDER_PX),
+    )
+    // A dark hairline inside the white one, so the edge is visible against both a
+    // white page and a dark image.
+    drawRect(
+        color = Color.Black.copy(alpha = 0.55f),
+        topLeft = topLeft,
+        size = size,
+        style = Stroke(width = CAPTURE_BORDER_PX / 2f),
+    )
 }
 
 private fun DrawScope.drawAnnotation(annotation: Annotation, scale: Float, origin: Offset) {
@@ -414,3 +498,9 @@ private const val NOTE_OUTLINE_WIDTH_POINTS = 1.2f
 
 /** Pip radius as a fraction of the marker's. */
 private const val NOTE_PIP_FRACTION = 0.32f
+
+/** How far the page outside a capture selection is knocked back. */
+private const val CAPTURE_SHADE_ALPHA = 0.45f
+
+/** Marquee border, in pixels: a screen-space affordance, not part of the page. */
+private const val CAPTURE_BORDER_PX = 3f

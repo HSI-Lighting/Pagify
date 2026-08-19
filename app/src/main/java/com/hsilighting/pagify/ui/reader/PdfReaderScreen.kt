@@ -54,9 +54,11 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -72,6 +74,11 @@ import com.hsilighting.pagify.core.pinchProgressAfter
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.ui.components.AnnotationToolbar
+import com.hsilighting.pagify.ui.components.CaptureHint
+import com.hsilighting.pagify.ui.components.CaptureSheet
+import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.core.CaptureFormat
+import com.hsilighting.pagify.core.CaptureScale
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
 import com.hsilighting.pagify.ui.components.NoteComposer
 import com.hsilighting.pagify.ui.components.NoteReader
@@ -152,6 +159,8 @@ fun PdfReaderScreen(
     onEraseEnd: () -> Unit,
     /** A highlight drag swept this page and selected nothing. */
     onHighlightMissed: (Int) -> Unit,
+    /** A region was dragged out with the snapshot tool, in page points. */
+    onCaptureRegion: (pageIndex: Int, crop: Rect) -> Unit,
     onClearPage: (Int) -> Unit,
     onClearAll: () -> Unit,
     /** The reader has taken the scroll a history step asked for. */
@@ -172,6 +181,16 @@ fun PdfReaderScreen(
     onSaveCopy: () -> Unit,
     /** The snackbar has shown `state.message`; clear it. */
     onMessageShown: () -> Unit,
+    // ----------------------------------------------------------------- capture --
+    /** Re-render the capture on screen at another resolution or in another format. */
+    onCaptureScale: (CaptureScale) -> Unit,
+    onCaptureFormat: (CaptureFormat) -> Unit,
+    onSaveCapture: () -> Unit,
+    onShareCapture: () -> Unit,
+    onCopyCapture: () -> Unit,
+    onDismissCapture: () -> Unit,
+    /** The share sheet has been raised; the capture can be let go of. */
+    onCaptureShared: () -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
@@ -329,6 +348,7 @@ fun PdfReaderScreen(
                     onErase = onErase,
                     onEraseEnd = onEraseEnd,
                     onHighlightMissed = onHighlightMissed,
+                    onCaptureRegion = onCaptureRegion,
                     onJumpHandled = onJumpHandled,
                     onPageVisible = onPageVisible,
                     onZoomInOn = onZoomInOn,
@@ -375,7 +395,13 @@ fun PdfReaderScreen(
                 // first touch of a highlight drag. Without something on screen the
                 // gesture looks like it did nothing at all, which is precisely the
                 // complaint that led here.
-                if (highlighterLive && state.currentPage in state.pagesBeingRecognised) {
+                if (state.tool == AnnotationTool.Snapshot && state.capture == null) {
+                    CaptureHint(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 94.dp),
+                    )
+                } else if (highlighterLive && state.currentPage in state.pagesBeingRecognised) {
                     RecognisingTextHint(
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
@@ -410,6 +436,32 @@ fun PdfReaderScreen(
                         .padding(bottom = 20.dp),
                 )
             }
+        }
+
+        state.capture?.let { capture ->
+            ModalBottomSheet(onDismissRequest = onDismissCapture) {
+                CaptureSheet(
+                    preview = capture,
+                    isCapturing = state.isCapturing,
+                    onScaleChange = onCaptureScale,
+                    onFormatChange = onCaptureFormat,
+                    onSaveToGallery = onSaveCapture,
+                    onShare = onShareCapture,
+                    onCopy = onCopyCapture,
+                    onDismiss = onDismissCapture,
+                )
+            }
+        }
+
+        // Launched from an effect rather than straight from the button, because
+        // the file has to be written first: a share sheet raised before the bytes
+        // are on disk hands the receiving app an empty file.
+        val shareContext = LocalContext.current
+        LaunchedEffect(state.captureToShare) {
+            val share = state.captureToShare ?: return@LaunchedEffect
+            val format = CaptureFormat.entries.first { it.mimeType == share.mimeType }
+            shareContext.startActivity(CaptureExport.shareIntent(share.uri, format))
+            onCaptureShared()
         }
 
         state.openNote?.let { note ->
@@ -477,6 +529,7 @@ private fun PageList(
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
     onHighlightMissed: (Int) -> Unit,
+    onCaptureRegion: (pageIndex: Int, crop: Rect) -> Unit,
     onJumpHandled: () -> Unit,
     onPageVisible: (Int) -> Unit,
     onZoomInOn: (Int, Float) -> Unit,
@@ -624,6 +677,7 @@ private fun PageList(
                 onEraseStart = onEraseStart,
                 onErase = { point, tolerance -> onErase(pinnedPage, point, tolerance) },
                 onEraseEnd = onEraseEnd,
+                onCaptureRegion = onCaptureRegion,
             )
         } else {
             val viewportWidthPx = with(density) { viewportWidth.toPx() }
@@ -851,6 +905,7 @@ private fun PageList(
                                 onErase = onErase,
                                 onEraseEnd = onEraseEnd,
                                 onHighlightMissed = onHighlightMissed,
+                                onCaptureRegion = onCaptureRegion,
                                 pageSizeProvider = pageSizeProvider,
                                 renderer = renderer,
                             )
@@ -898,6 +953,7 @@ private fun AnnotatablePage(
     onErase: (pageIndex: Int, point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
     onHighlightMissed: (Int) -> Unit,
+    onCaptureRegion: (pageIndex: Int, crop: Rect) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
 ) {
@@ -962,6 +1018,7 @@ private fun AnnotatablePage(
             onErase = { point, tolerance -> onErase(pageIndex, point, tolerance) },
             onEraseEnd = onEraseEnd,
             onHighlightMissed = { onHighlightMissed(pageIndex) },
+            onCaptureRegion = { crop -> onCaptureRegion(pageIndex, crop) },
         ),
     )
 }

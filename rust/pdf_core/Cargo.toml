@@ -25,12 +25,22 @@ thiserror = "2"
 
 # Rendering backend. Default features pull in `pdfium_latest` (== pdfium_7881),
 # which is why the bundled libpdfium.so is pinned to chromium/7881 — see
-# tools/fetch_pdfium.ps1. `image` support is not needed: we render straight into
-# caller-supplied buffers, so it is switched off to keep the .so small.
+# tools/fetch_pdfium.ps1. Its own `image` bridge stays off: we render straight
+# into caller-supplied buffers, so nothing here needs its bitmap conversions.
 pdfium-render = { version = "0.9.3", default-features = false, features = [
     "pdfium_latest",
     "thread_safe",
 ] }
+
+# Encoding for the capture export, and nothing else. Only the two formats the
+# export offers are switched on — every other decoder the crate can build is dead
+# weight in the .so and, being a decoder of untrusted input, attack surface with
+# nothing asking for it.
+#
+# Encoded here rather than in Kotlin so the whole capture path stays in the
+# platform-neutral core: iOS and desktop inherit it, and the export is testable on
+# the host down to the bytes.
+image = { version = "0.25.6", default-features = false, features = ["png", "jpeg"] }
 
 # No `lopdf`. PDFium is the single writer: two independent object models writing
 # one file is a corruption class that is very hard to diagnose, and PDFium covers

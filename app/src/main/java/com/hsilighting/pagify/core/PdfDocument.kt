@@ -71,6 +71,30 @@ class PdfDocument private constructor(
     fun prefetchPage(pageIndex: Int, zoom: Float, rotationQuarterTurns: Int = 0): Boolean =
         NativeBridge.prefetchPage(requireOpen(), pageIndex, zoom, rotationQuarterTurns)
 
+    // --------------------------------------------------------------- capture --
+
+    /**
+     * Re-renders one region of a page and returns it encoded.
+     *
+     * **Not a screenshot** — the pixels come from the document, so nothing that is
+     * not in the document can be in the result. See [NativeBridge.captureRegion]
+     * and roadmap decision 4.8.
+     *
+     * Blocking, and slow enough to notice: a 4× capture of a dense page is a real
+     * render. Call it off the main thread.
+     */
+    fun captureRegion(request: CaptureRequest): ByteArray = NativeBridge.captureRegion(
+        requireOpen(),
+        request.pageIndex,
+        request.crop.left,
+        request.crop.top,
+        request.crop.right,
+        request.crop.bottom,
+        request.scale.factor,
+        request.format.wireName,
+        request.quality,
+    )
+
     // ------------------------------------------------------------------ edit --
 
     /** Applies one edit and returns the document's resulting [EditState]. */

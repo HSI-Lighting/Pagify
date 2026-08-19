@@ -190,4 +190,42 @@ internal object NativeBridge {
 
     /** Mirrors `ComponentCallbacks2.onTrimMemory`. Never throws. */
     external fun onTrimMemory(level: Int)
+
+    // --------------------------------------------------------------- capture --
+
+    /**
+     * Re-renders one region of a page and returns it encoded.
+     *
+     * **This is not a screenshot, and that is the whole design.** The pixels come
+     * from the document, so nothing that is not in the document can appear in the
+     * result — no notification, no dialog of ours, no status bar. Those are
+     * consequences of never involving the screen rather than things filtered out
+     * afterwards; see roadmap decision 4.8 for the alternatives and why each was
+     * rejected.
+     *
+     * The crop is in **page points, top-left origin**, the same space annotations
+     * use. [scale] is the export resolution and is deliberately independent of the
+     * on-screen zoom — a capture can be sharper than the display. It is lowered if
+     * it would breach the render ceiling, so a large region at 4× comes back as the
+     * sharpest image that fits rather than as a failure.
+     *
+     * Encoding happens natively so the uncompressed bitmap never crosses this
+     * boundary: a 4× capture is tens of megabytes as pixels and a fraction of that
+     * as a PNG.
+     *
+     * @param format `"png"` or `"jpeg"`.
+     * @param quality 1–100, ignored for PNG.
+     */
+    @Throws(PdfException::class)
+    external fun captureRegion(
+        handle: Long,
+        pageIndex: Int,
+        left: Float,
+        top: Float,
+        right: Float,
+        bottom: Float,
+        scale: Float,
+        format: String,
+        quality: Int,
+    ): ByteArray
 }

@@ -485,6 +485,32 @@ fun RecognisingTextHint(modifier: Modifier = Modifier) {
 }
 
 /**
+ * What to do with the snapshot tool armed.
+ *
+ * Every other tool announces itself the moment the page is touched — a stroke
+ * appears, a marker lands, something is rubbed out. This one does nothing at all
+ * until a rectangle has been dragged, so with nothing on screen an armed snapshot
+ * tool is indistinguishable from a tool that does not work.
+ */
+@Composable
+fun CaptureHint(modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+    ) {
+        Text(
+            text = "Drag a box around what you want to keep",
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSecondaryContainer,
+        )
+    }
+}
+
+/**
  * Typing the text of a new note.
  *
  * A dialog rather than an inline field on the page: the keyboard covers roughly

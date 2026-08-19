@@ -1,5 +1,6 @@
 package com.hsilighting.pagify
 
+import android.Manifest.permission.WRITE_EXTERNAL_STORAGE
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -16,6 +17,7 @@ import androidx.compose.runtime.remember
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hsilighting.pagify.core.BlankFrameDetector
+import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.reader.PdfReaderScreen
 import com.hsilighting.pagify.ui.reader.PdfReaderViewModel
@@ -101,6 +103,20 @@ class MainActivity : ComponentActivity() {
 
                 val openPicker = remember { { picker.launch(arrayOf(PDF_MIME_TYPE)) } }
 
+                /**
+                 * Saving a capture to the gallery, below API 29 only.
+                 *
+                 * From API 29 on, MediaStore's scoped storage needs no permission
+                 * at all, so this is never reached there — asking anyway would put
+                 * a permission dialog in front of an action that does not need one.
+                 */
+                val storagePermission = rememberLauncherForActivityResult(
+                    ActivityResultContracts.RequestPermission(),
+                ) { granted ->
+                    if (granted) viewModel.saveCaptureToGallery()
+                    else viewModel.noteCaptureNeedsStorage()
+                }
+
                 PdfReaderScreen(
                     state = state,
                     onPickDocument = openPicker,
@@ -131,6 +147,7 @@ class MainActivity : ComponentActivity() {
                     onClearPage = viewModel::clearPage,
                     onClearAll = viewModel::clearAllAnnotations,
                     onHighlightMissed = viewModel::noteHighlightFoundNothing,
+                    onCaptureRegion = viewModel::captureRegion,
                     onJumpHandled = viewModel::jumpHandled,
                     onViewportWidth = viewModel::onViewportWidthChanged,
                     onRotate = viewModel::rotate,
@@ -157,6 +174,19 @@ class MainActivity : ComponentActivity() {
                     onSaveDocument = { viewModel.save() },
                     onSaveCopy = { copyPicker.launch(suggestedCopyName(state.documentName)) },
                     onMessageShown = viewModel::messageShown,
+                    onCaptureScale = viewModel::setCaptureScale,
+                    onCaptureFormat = viewModel::setCaptureFormat,
+                    onSaveCapture = {
+                        if (CaptureExport.galleryNeedsPermission()) {
+                            storagePermission.launch(WRITE_EXTERNAL_STORAGE)
+                        } else {
+                            viewModel.saveCaptureToGallery()
+                        }
+                    },
+                    onShareCapture = viewModel::shareCapture,
+                    onCopyCapture = viewModel::copyCapture,
+                    onDismissCapture = viewModel::dismissCapture,
+                    onCaptureShared = viewModel::captureShared,
                     onSubmitPassword = viewModel::submitPassword,
                     pageSizeProvider = viewModel::pageSize,
                     renderer = viewModel::renderPage,

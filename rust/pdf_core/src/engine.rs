@@ -11,7 +11,7 @@ use crate::document::{RegionRequest, RenderRequest, Rotation};
 use crate::error::{PdfError, Result};
 use crate::registry::DocumentSession;
 use crate::render::bitmap::{Bitmap, PixelOrder};
-use crate::render::{CacheKey, RenderTarget};
+use crate::render::{CacheKey, ImageFormat, RenderTarget};
 
 /// Pixel dimensions a page occupies for the given request, accounting for rotation.
 pub fn page_pixel_size(
@@ -139,6 +139,22 @@ pub fn render_region(
     session.document.validate_page_index(index)?;
     let page = session.document.page(index)?;
     page.render_region(request)
+}
+
+/// Render a region and encode it, in one call.
+///
+/// One call rather than two so the intermediate bitmap never crosses the FFI.
+/// A 4× capture is tens of megabytes as pixels and a fraction of that encoded;
+/// handing the raw buffer to Kotlin only to encode it there would cost a copy
+/// into the Java heap of the larger of the two.
+pub fn export_region(
+    session: &DocumentSession,
+    index: usize,
+    request: &RegionRequest,
+    format: ImageFormat,
+) -> Result<Vec<u8>> {
+    let bitmap = render_region(session, index, request)?;
+    crate::render::export::encode(&bitmap, format)
 }
 
 
