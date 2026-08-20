@@ -27,3 +27,6 @@
 
 # Licensed typefaces supplied for text replacement; see rust/pdf_core/fixtures/fonts/README.md
 Century Gothic.zip
+
+# Release signing key and its password. Never checked in — see keystore/keystore.properties.
+/keystore/

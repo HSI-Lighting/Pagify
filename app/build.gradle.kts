@@ -148,11 +148,39 @@ android {
         }
     }
 
+    // Signing for a release build, when the key is on this machine.
+    //
+    // Read from a properties file outside version control rather than written
+    // here: the password is a real secret, and a build file is the first place
+    // anyone looks. Without that file the release build is simply unsigned, which
+    // is the right failure — an APK signed with some fallback key would install
+    // once and then refuse every update, with nothing to say why.
+    val signingProperties = rootProject.file("keystore/keystore.properties")
+    val releaseSigning: Properties? = if (signingProperties.exists()) {
+        val loaded = Properties()
+        signingProperties.inputStream().use { stream -> loaded.load(stream) }
+        loaded
+    } else {
+        null
+    }
+
+    signingConfigs {
+        if (releaseSigning != null) {
+            create("release") {
+                storeFile = rootProject.file(releaseSigning.getProperty("storeFile"))
+                storePassword = releaseSigning.getProperty("storePassword")
+                keyAlias = releaseSigning.getProperty("keyAlias")
+                keyPassword = releaseSigning.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
         }
         release {
+            signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
