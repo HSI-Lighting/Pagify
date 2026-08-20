@@ -196,6 +196,29 @@ class PdfRepository(
         }
     }
 
+    /**
+     * The file's size in bytes, or 0 when the provider will not say.
+     *
+     * Zero rather than an error because plenty of providers legitimately do not
+     * know — a stream, a generated document — and a size is a label on a list,
+     * not something to fail an open over.
+     */
+    fun sizeOf(uri: Uri): Long {
+        resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            val column = cursor.getColumnIndex(OpenableColumns.SIZE)
+            if (column >= 0 && cursor.moveToFirst() && !cursor.isNull(column)) {
+                return cursor.getLong(column)
+            }
+        }
+        // The provider would not say — which plenty legitimately do not for a
+        // file they generated or streamed. The descriptor knows, and asking it
+        // costs one open: worth it, because a row with no size looks like a
+        // row with something missing.
+        return runCatching {
+            resolver.openFileDescriptor(uri, "r")?.use { it.statSize.coerceAtLeast(0L) } ?: 0L
+        }.getOrDefault(0L)
+    }
+
     /** The provider's display name, falling back to the URI's last path segment. */
     private fun displayNameOf(uri: Uri): String {
         resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->

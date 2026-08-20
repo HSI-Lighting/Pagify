@@ -14,6 +14,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -34,6 +35,7 @@ import com.hsilighting.pagify.core.MARKUP_DWELL_MILLIS
 import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.MarkupGesture
 import com.hsilighting.pagify.core.MarkupShape
+import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.markupFor
 import kotlinx.coroutines.withTimeoutOrNull
@@ -61,6 +63,7 @@ fun CaptureCanvas(
     color: Long,
     /** Nib width, or the highlighter's intensity. */
     size: Float,
+    style: MarkupStyle,
     onCommit: (MarkupShape) -> Unit,
     /** Held still before lifting: ask the engine what this stroke was. */
     onRecognise: (List<Offset>) -> Unit,
@@ -116,6 +119,7 @@ fun CaptureCanvas(
                 tool = tool,
                 color = color,
                 size = size,
+                style = style,
                 onCommit = onCommit,
                 onRecognise = onRecognise,
             )
@@ -132,6 +136,8 @@ private fun MarkupSurface(
     tool: MarkupTool,
     color: Long,
     size: Float,
+    /** The style the *next* mark will use; each committed mark carries its own. */
+    style: MarkupStyle,
     onCommit: (MarkupShape) -> Unit,
     onRecognise: (List<Offset>) -> Unit,
 ) {
@@ -141,6 +147,7 @@ private fun MarkupSurface(
     val ink by rememberUpdatedState(color)
     val currentTool by rememberUpdatedState(tool)
     val currentSize by rememberUpdatedState(size)
+    val currentStyle by rememberUpdatedState(style)
 
     // Re-made when the tool changes: a gesture belongs to one tool, and carrying a
     // half-drawn stroke into another would commit it as the wrong shape.
@@ -165,6 +172,12 @@ private fun MarkupSurface(
     Box(
         Modifier
             .fillMaxSize()
+            // Clipped to the picture, because that is what a mark is on. A stroke
+            // that wandered past the edge was painted straight over the toolbar
+            // below — Compose does not clip a canvas to its own bounds — and the
+            // part beyond the edge is not in the export either, so showing it was
+            // a promise the file would not keep.
+            .clipToBounds()
             .pointerInput(tool, crop, widthPx, heightPx) {
                 awaitPointerEventScope {
                     while (true) {
@@ -213,13 +226,15 @@ private fun MarkupSurface(
             },
     ) {
         androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
-            marks.forEach { drawMarkup(it.shape, it.color, it.widthPoints * scale, ::toPixels) }
+            marks.forEach {
+                drawMarkup(it.shape, it.color, it.widthPoints * scale, it.style, ::toPixels)
+            }
             // The wet stroke is drawn through the same builder the commit uses, so
             // what is under the finger is what ends up in the file — including the
             // highlighter's intensity, which rides in the colour's alpha.
             preview?.let { shape ->
-                val wet = markupFor(shape, currentTool, ink, currentSize)
-                drawMarkup(wet.shape, wet.color, wet.widthPoints * scale, ::toPixels)
+                val wet = markupFor(shape, currentTool, ink, currentSize, currentStyle)
+                drawMarkup(wet.shape, wet.color, wet.widthPoints * scale, wet.style, ::toPixels)
             }
         }
 
@@ -253,13 +268,16 @@ private fun DrawScope.drawMarkup(
     shape: MarkupShape,
     color: Long,
     widthPx: Float,
+    style: MarkupStyle,
     toPixels: (Offset) -> Offset,
 ) {
     val ink = Color(color)
+    val effect = style.pathEffect(widthPx.coerceAtLeast(1f))
     val stroke = Stroke(
         width = widthPx.coerceAtLeast(1f),
         cap = StrokeCap.Round,
         join = StrokeJoin.Round,
+        pathEffect = effect,
     )
 
     when (shape) {
@@ -289,13 +307,21 @@ private fun DrawScope.drawMarkup(
             start = toPixels(shape.from),
             end = toPixels(shape.to),
             strokeWidth = stroke.width,
+            pathEffect = effect,
             cap = StrokeCap.Round,
         )
 
         is MarkupShape.Arrow -> {
             val from = toPixels(shape.from)
             val to = toPixels(shape.to)
-            drawLine(ink, from, to, strokeWidth = stroke.width, cap = StrokeCap.Round)
+            drawLine(
+                color = ink,
+                start = from,
+                end = to,
+                strokeWidth = stroke.width,
+                cap = StrokeCap.Round,
+                pathEffect = effect,
+            )
 
             val angle = kotlin.math.atan2(to.y - from.y, to.x - from.x)
             val head = stroke.width * ARROW_HEAD_LENGTHS

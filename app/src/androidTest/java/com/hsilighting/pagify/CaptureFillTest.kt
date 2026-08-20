@@ -62,6 +62,8 @@ class CaptureFillTest {
                 markupTool = com.hsilighting.pagify.core.MarkupTool.Pen,
                 markupColor = 0xFFFF0000L,
                 markupSize = 4f,
+                markupStyle = com.hsilighting.pagify.core.MarkupStyle.SOLID,
+                onMarkupStyle = {},
                 fill = CaptureFill.PAGE,
                 onFillChange = { chosen = it },
                 onScaleChange = {},

@@ -32,7 +32,9 @@ import com.hsilighting.pagify.core.CaptureTile
 import com.hsilighting.pagify.core.captureFileName
 import com.hsilighting.pagify.core.isWorthCapturing
 import com.hsilighting.pagify.core.Markup
+import com.hsilighting.pagify.core.AppSettings
 import com.hsilighting.pagify.core.MarkupShape
+import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.defaultSize
 import com.hsilighting.pagify.core.markupFor
@@ -47,6 +49,10 @@ import com.hsilighting.pagify.core.PdfCommand
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
 import com.hsilighting.pagify.core.PenMode
+import com.hsilighting.pagify.core.RecentDocument
+import com.hsilighting.pagify.core.ThemeChoice
+import com.hsilighting.pagify.data.AppSettingsStore
+import com.hsilighting.pagify.data.RecentDocumentsStore
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.core.RenderScale
 import com.hsilighting.pagify.core.reorderForMove
@@ -100,6 +106,76 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      *  does not queue up prefetches for pages already scrolled past. */
     private var prefetchJob: Job? = null
 
+    /**
+     * The library's list of documents opened before.
+     *
+     * Read once here rather than by the library screen, so that opening a document
+     * from anywhere — a row, the picker, a share from another app — updates the
+     * one list everything is drawn from.
+     */
+    private val recentDocuments = RecentDocumentsStore(application)
+    val recents: StateFlow<List<RecentDocument>> = recentDocuments.documents
+
+    /** Theme, viewfinder, and anything else that outlives a document. */
+    private val settingsStore = AppSettingsStore(application)
+    val settings: StateFlow<AppSettings> = settingsStore.settings
+
+    fun setTheme(choice: ThemeChoice) {
+        viewModelScope.launch { settingsStore.update { it.copy(theme = choice) } }
+    }
+
+    /** The hard off: no viewfinder while zoomed, and no handle to bring one back. */
+    fun setShowViewfinder(show: Boolean) {
+        viewModelScope.launch { settingsStore.update { it.copy(showViewfinder = show) } }
+    }
+
+    /** Where the folded handle was dragged to, in fractions of the reader. */
+    fun setViewfinderHandle(position: Offset) {
+        viewModelScope.launch {
+            settingsStore.update {
+                it.copy(
+                    viewfinderHandleX = position.x.coerceIn(0f, 1f),
+                    viewfinderHandleY = position.y.coerceIn(0f, 1f),
+                )
+            }
+        }
+    }
+
+    /** The soft one: collapse it to its handle, or open it again. */
+    fun setViewfinderMinimized(minimized: Boolean) {
+        viewModelScope.launch { settingsStore.update { it.copy(viewfinderMinimized = minimized) } }
+    }
+
+    init {
+        viewModelScope.launch { recentDocuments.load() }
+        viewModelScope.launch { settingsStore.load() }
+    }
+
+    /**
+     * Close the document and go back to the library.
+     *
+     * The reader keeps nothing once the document is gone — see [closeDocument] —
+     * so this is a full reset rather than a screen change with state left behind.
+     */
+    fun returnToLibrary() {
+        closeDocument()
+        pendingUri = null
+        _state.value = PdfReaderState(
+            documentRevision = _state.value.documentRevision,
+            showThumbnails = _state.value.showThumbnails,
+        )
+    }
+
+    /** Forget every document in the library. */
+    fun clearLibrary() {
+        viewModelScope.launch { recentDocuments.clear() }
+    }
+
+    /** Drop a document from the library — moved, deleted, or no longer permitted. */
+    fun forgetDocument(uri: String) {
+        viewModelScope.launch { recentDocuments.forget(uri) }
+    }
+
     fun open(uri: Uri, password: String? = null) {
         pendingUri = uri
         closeDocument()
@@ -139,6 +215,19 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                         documentRevision = it.documentRevision + 1,
                     )
                 }
+                // Remembered only once it has actually opened. A document that
+                // failed, or that asked for a password and never got one, is not
+                // something to offer again from the library as if it worked.
+                recentDocuments.remember(
+                    RecentDocument(
+                        uri = uri.toString(),
+                        name = opened.sourceName,
+                        sizeBytes = repository.sizeOf(uri),
+                        pageCount = opened.pageCount,
+                        openedAtMillis = System.currentTimeMillis(),
+                    ),
+                )
+
                 schedulePrefetch()
                 warmThumbnails()
                 measureAllPages(opened)
@@ -426,6 +515,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     fun showMetadata(show: Boolean) = _state.update { it.copy(showMetadataSheet = show) }
 
     fun toggleThumbnails() = _state.update { it.copy(showThumbnails = !it.showThumbnails) }
+
+    /** Set the rail directly, which is what a settings switch means. */
+    fun setThumbnails(show: Boolean) = _state.update { it.copy(showThumbnails = show) }
 
     /**
      * The reader is on a narrow screen; put the thumbnail rail away.
@@ -1700,6 +1792,14 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     fun setMarkupColor(color: Long) = _state.update { it.copy(markupColor = color) }
 
     /**
+     * Choose the line type the next mark is drawn in.
+     *
+     * It applies to every tool that draws a line, so unlike the tools it sits
+     * beside, choosing one does not change what you are drawing with.
+     */
+    fun setMarkupStyle(style: MarkupStyle) = _state.update { it.copy(markupStyle = style) }
+
+    /**
      * How heavy the current tool draws: nib width, or intensity for the
      * highlighter.
      *
@@ -1719,6 +1819,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 tool = tool,
                 color = it.markupColor,
                 size = it.markupSizes[tool] ?: tool.defaultSize,
+                style = it.markupStyle,
             ),
         )
     }

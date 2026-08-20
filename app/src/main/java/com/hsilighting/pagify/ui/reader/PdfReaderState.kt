@@ -8,6 +8,7 @@ import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.CaptureFill
 import com.hsilighting.pagify.core.CaptureRequest
 import com.hsilighting.pagify.core.Markup
+import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.defaultMarkupSizes
 import com.hsilighting.pagify.core.AnnotationTool
@@ -207,6 +208,13 @@ data class PdfReaderState(
      */
     val markup: List<Markup> = emptyList(),
     val markupTool: MarkupTool = MarkupTool.Pen,
+    /**
+     * Solid, dashed or dash-dot, for the line tool.
+     *
+     * Sticky like the colour: a drawing marked up with dashed setting-out
+     * lines wants the next one dashed too.
+     */
+    val markupStyle: MarkupStyle = MarkupStyle.SOLID,
     val markupColor: Long = AnnotationColors.RED,
     /**
      * How heavy each tool draws — nib width for the ones that draw a line, wash

@@ -90,6 +90,7 @@ import com.hsilighting.pagify.core.captureTilesFor
 import com.hsilighting.pagify.ui.components.captureOverlay
 import com.hsilighting.pagify.ui.components.doubleTapToZoom
 import com.hsilighting.pagify.core.MarkupShape
+import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.defaultSize
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
@@ -139,6 +140,12 @@ fun PdfReaderScreen(
     onToggleThumbnails: () -> Unit,
     /** The window is too narrow to give a quarter of it to the thumbnail rail. */
     onNarrowScreen: () -> Unit,
+    /** Whether the viewfinder may appear at all, and whether it is folded away. */
+    showViewfinder: Boolean,
+    viewfinderMinimized: Boolean,
+    onViewfinderMinimized: (Boolean) -> Unit,
+    viewfinderHandle: Offset,
+    onViewfinderHandleMoved: (Offset) -> Unit,
     /** Start or stop the render-timeline recording. */
     onToggleRecording: () -> Unit,
     /** Fired on every zoom gesture event, to drive the blank-frame watcher. */
@@ -231,6 +238,8 @@ fun PdfReaderScreen(
     onMarkupColor: (Long) -> Unit,
     /** Nib width, or the highlighter's intensity — see `MarkupTool.isIntensity`. */
     onMarkupSize: (MarkupTool, Float) -> Unit,
+    /** Solid, dashed or dash-dot, for the line tool. */
+    onMarkupStyle: (MarkupStyle) -> Unit,
     onCommitMarkup: (MarkupShape) -> Unit,
     /** A stroke that was held still before lifting; ask what shape it is. */
     onRecogniseMarkup: (List<Offset>) -> Unit,
@@ -422,6 +431,11 @@ fun PdfReaderScreen(
                     onAddAnnotation = onAddAnnotation,
                     onRequestNote = onRequestNote,
                     onPageMarksNeeded = onPageMarksNeeded,
+                    showViewfinder = showViewfinder,
+                    viewfinderMinimized = viewfinderMinimized,
+                    onViewfinderMinimized = onViewfinderMinimized,
+                    viewfinderHandle = viewfinderHandle,
+                    onViewfinderHandleMoved = onViewfinderHandleMoved,
                     onOpenNote = onOpenNote,
                     onEraseStart = onEraseStart,
                     onErase = onErase,
@@ -548,6 +562,8 @@ fun PdfReaderScreen(
                 markupTool = state.markupTool,
                 markupColor = state.markupColor,
                 markupSize = state.markupSizes[state.markupTool] ?: state.markupTool.defaultSize,
+                markupStyle = state.markupStyle,
+                onMarkupStyle = onMarkupStyle,
                 onScaleChange = onCaptureScale,
                 onFormatChange = onCaptureFormat,
                 onMarkupTool = onMarkupTool,
@@ -664,6 +680,12 @@ private fun PageList(
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
     thumbnailRenderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
+    /** Whether the viewfinder may appear at all, and whether it is folded away. */
+    showViewfinder: Boolean,
+    viewfinderMinimized: Boolean,
+    onViewfinderMinimized: (Boolean) -> Unit,
+    viewfinderHandle: Offset,
+    onViewfinderHandleMoved: (Offset) -> Unit,
 ) {
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
@@ -1134,14 +1156,24 @@ private fun PageList(
         }
 
         // ------------------------------------------------------------ navigator --
-        if (pinnedPage != null && !window.coversEverything) {
+        if (pinnedPage != null && !window.coversEverything && showViewfinder) {
             PageNavigator(
                 pageIndex = pinnedPage,
                 pageSize = state.pageSizes[pinnedPage],
                 window = window,
                 thumbnailRenderer = thumbnailRenderer,
-                modifier = Modifier.align(Alignment.CenterEnd),
+                // Folded, it can be anywhere in the reader, so it takes the
+                // whole area and places itself; open, it keeps its corner.
+                modifier = if (viewfinderMinimized) {
+                    Modifier.matchParentSize()
+                } else {
+                    Modifier.align(Alignment.CenterEnd)
+                },
                 onRecenter = { fx, fy -> recenterRequest = Offset(fx, fy) },
+                minimized = viewfinderMinimized,
+                onMinimized = onViewfinderMinimized,
+                handlePosition = viewfinderHandle,
+                onHandleMoved = onViewfinderHandleMoved,
             )
         }
     }

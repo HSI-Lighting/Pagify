@@ -182,17 +182,51 @@ private fun DrawScope.drawMarquee(box: Rect) {
  * back on the pixel they started from.
  */
 private fun DrawScope.drawRing(points: List<Offset>) {
-    val path = Path().apply {
-        moveTo(points[0].x, points[0].y)
-        for (index in 1 until points.size) lineTo(points[index].x, points[index].y)
-        close()
-    }
+    val path = ringPath(points)
 
     clipPath(path, clipOp = ClipOp.Difference) {
         drawRect(Color.Black.copy(alpha = SHADE_ALPHA), size = size)
     }
     drawPath(path, Color.White, style = Stroke(width = BORDER_PX))
     drawPath(path, Color.Black.copy(alpha = 0.55f), style = Stroke(width = BORDER_PX / 2f))
+}
+
+/**
+ * The ring as a closed curve through its samples.
+ *
+ * Quadratics through the midpoints rather than lines between the points: touch
+ * reports samples several pixels apart on a quick drag, and joining those with
+ * straight edges shows the drag's sampling rate as a row of facets along the one
+ * edge the eye is drawn to. The engine draws the exported mask the same way, so
+ * what is dragged is what comes back.
+ *
+ * Below a handful of samples it stays a polygon, matching the engine again: too
+ * few points are a shape rather than a stroke, and a curve fitted through four of
+ * them is an invention.
+ */
+private fun ringPath(points: List<Offset>): Path = Path().apply {
+    if (points.size < SMOOTHED_RING_POINTS) {
+        moveTo(points[0].x, points[0].y)
+        for (index in 1 until points.size) lineTo(points[index].x, points[index].y)
+        close()
+        return@apply
+    }
+
+    fun at(index: Int) = points[index % points.size]
+    fun midpoint(a: Offset, b: Offset) = Offset((a.x + b.x) / 2f, (a.y + b.y) / 2f)
+
+    // Started on the closing edge's midpoint so the ring joins itself mid-curve
+    // rather than at a sample, which is where a corner would otherwise show.
+    val start = midpoint(at(points.size - 1), at(0))
+    moveTo(start.x, start.y)
+
+    for (index in points.indices) {
+        val through = at(index)
+        val to = midpoint(through, at(index + 1))
+        quadraticTo(through.x, through.y, to.x, to.y)
+    }
+
+    close()
 }
 
 /** How far the page outside a capture selection is knocked back. */
@@ -209,3 +243,11 @@ private const val BORDER_PX = 3f
  * with.
  */
 private const val RING_STEP_PX = 3f
+
+/**
+ * How many samples make a ring a stroke rather than a stated shape.
+ *
+ * Matches the engine's own figure, so the preview and the exported mask agree
+ * about when a ring is smoothed.
+ */
+private const val SMOOTHED_RING_POINTS = 8

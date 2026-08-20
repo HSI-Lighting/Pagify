@@ -11,14 +11,19 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.geometry.Offset
+import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hsilighting.pagify.core.BlankFrameDetector
 import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.core.isDark
 import com.hsilighting.pagify.ui.components.PageAction
+import com.hsilighting.pagify.ui.PagifyApp
 import com.hsilighting.pagify.ui.reader.PdfReaderScreen
 import com.hsilighting.pagify.ui.reader.PdfReaderViewModel
 import com.hsilighting.pagify.ui.theme.PagifyTheme
@@ -45,10 +50,16 @@ class MainActivity : ComponentActivity() {
         incomingDocument.value = viewableUri(intent)
 
         setContent {
-            PagifyTheme {
-                val viewModel: PdfReaderViewModel = viewModel()
+            // The view model is made *above* the theme, not inside it: the
+            // chosen theme lives in the view model, and a theme that wraps the
+            // thing holding its own setting cannot read it.
+            val viewModel: PdfReaderViewModel = viewModel()
+            val settings by viewModel.settings.collectAsStateWithLifecycle()
+
+            PagifyTheme(darkTheme = settings.theme.isDark(isSystemInDarkTheme())) {
                 val state by viewModel.state.collectAsStateWithLifecycle()
                 val incoming by incomingDocument.collectAsStateWithLifecycle()
+                val recents by viewModel.recents.collectAsStateWithLifecycle()
 
                 LaunchedEffect(incoming) {
                     incoming?.let { uri ->
@@ -117,95 +128,121 @@ class MainActivity : ComponentActivity() {
                     else viewModel.noteCaptureNeedsStorage()
                 }
 
-                PdfReaderScreen(
+                val recordingToast: () -> Unit = {
+                    // App-private external storage, so the file can be pulled
+                    // with adb without any permission prompt.
+                    viewModel.toggleRecording(getExternalFilesDir(null))?.let { message ->
+                        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+                    }
+                }
+
+                PagifyApp(
                     state = state,
+                    recents = recents,
+                    onOpenRecent = { viewModel.open(it.uri.toUri()) },
+                    onForgetRecent = { viewModel.forgetDocument(it.uri) },
                     onPickDocument = openPicker,
-                    onPageVisible = viewModel::onPageVisible,
-                    onZoomInOn = viewModel::zoomInOn,
-                    onZoomTo = viewModel::zoomTo,
-                    onZoomActivity = { blankFrameDetector.onZoomActivity() },
-                    onContentBounds = blankFrameDetector::setContentBounds,
-                    peekRenderedPage = viewModel::peekRenderedPage,
-                    annotationsForPage = viewModel.annotations::forPage,
-                    textSegmentsForPage = viewModel::textSegments,
-                    onAddAnnotation = viewModel::addAnnotation,
-                    onRequestNote = viewModel::requestNote,
-                    onPageMarksNeeded = viewModel::loadSavedMarks,
-                    onConfirmNote = viewModel::confirmNote,
-                    onCancelNote = viewModel::cancelNote,
-                    onOpenNote = viewModel::openNote,
-                    onCloseNote = viewModel::closeNote,
-                    onDeleteNote = viewModel::deleteOpenNote,
-                    onSelectTool = viewModel::selectTool,
-                    onPenModeChange = viewModel::setPenMode,
-                    onPenColorChange = viewModel::setPenColor,
-                    onUndoAnnotation = viewModel::undoAnnotation,
-                    onRedoAnnotation = viewModel::redoAnnotation,
-                    onEraseStart = viewModel::beginErase,
-                    onErase = viewModel::eraseAt,
-                    onEraseEnd = viewModel::endErase,
-                    onClearPage = viewModel::clearPage,
-                    onClearAll = viewModel::clearAllAnnotations,
-                    onHighlightMissed = viewModel::noteHighlightFoundNothing,
-                    onSelectWord = viewModel::selectWordAt,
-                    onMoveSelectionHandle = viewModel::moveSelectionHandle,
-                    onClearSelection = viewModel::clearSelection,
-                    onCopySelection = viewModel::copySelection,
-                    onHighlightSelection = viewModel::highlightSelection,
-                    onCaptureViewport = viewModel::capture,
-                    onCaptureLasso = viewModel::setCaptureLasso,
-                    onJumpHandled = viewModel::jumpHandled,
-                    onViewportWidth = viewModel::onViewportWidthChanged,
-                    onRotate = viewModel::rotate,
-                    onToggleThumbnails = viewModel::toggleThumbnails,
-                    onNarrowScreen = viewModel::onNarrowScreen,
-                    onToggleRecording = {
-                        // App-private external storage, so the file can be pulled
-                        // with adb without any permission prompt.
-                        viewModel.toggleRecording(getExternalFilesDir(null))?.let { message ->
-                            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-                        }
-                    },
-                    onShowMetadata = viewModel::showMetadata,
-                    onShowPageOrganiser = viewModel::showPageOrganiser,
-                    onPageAction = { action ->
-                        when (action) {
-                            is PageAction.Delete -> viewModel.deletePage(action.index)
-                            is PageAction.InsertBlankAt -> viewModel.insertBlankPage(action.at)
-                            is PageAction.Move -> viewModel.movePage(action.from, action.to)
-                            is PageAction.Rotate -> viewModel.rotatePage(action.index)
-                            PageAction.Undo -> viewModel.undoEdit()
-                            PageAction.Redo -> viewModel.redoEdit()
-                        }
-                    },
-                    onSaveDocument = { viewModel.save() },
-                    onSaveCopy = { copyPicker.launch(suggestedCopyName(state.documentName)) },
-                    onMessageShown = viewModel::messageShown,
-                    onCaptureScale = viewModel::setCaptureScale,
-                    onCaptureFormat = viewModel::setCaptureFormat,
-                    onCaptureFill = viewModel::setCaptureFill,
-                    onSaveCapture = {
-                        if (CaptureExport.galleryNeedsPermission()) {
-                            storagePermission.launch(WRITE_EXTERNAL_STORAGE)
-                        } else {
-                            viewModel.saveCaptureToGallery()
-                        }
-                    },
-                    onShareCapture = viewModel::shareCapture,
-                    onCopyCapture = viewModel::copyCapture,
-                    onDismissCapture = viewModel::dismissCapture,
-                    onCaptureShared = viewModel::captureShared,
-                    onMarkupTool = viewModel::setMarkupTool,
-                    onMarkupColor = viewModel::setMarkupColor,
-                    onMarkupSize = viewModel::setMarkupSize,
-                    onCommitMarkup = viewModel::addMarkup,
-                    onRecogniseMarkup = viewModel::recogniseAndAddMarkup,
-                    onUndoMarkup = viewModel::undoMarkup,
-                    onSubmitPassword = viewModel::submitPassword,
-                    pageSizeProvider = viewModel::pageSize,
-                    renderer = viewModel::renderPage,
-                    thumbnailRenderer = viewModel::renderThumbnail,
-                )
+                    onClearLibrary = viewModel::clearLibrary,
+                    onShowThumbnails = viewModel::setThumbnails,
+                    settings = settings,
+                    onThemeChange = viewModel::setTheme,
+                    onShowViewfinder = viewModel::setShowViewfinder,
+                    onToggleRecording = recordingToast,
+                    onReturnToLibrary = viewModel::returnToLibrary,
+                ) {
+                    PdfReaderScreen(
+                        state = state,
+                        onPickDocument = openPicker,
+                        onPageVisible = viewModel::onPageVisible,
+                        onZoomInOn = viewModel::zoomInOn,
+                        onZoomTo = viewModel::zoomTo,
+                        onZoomActivity = { blankFrameDetector.onZoomActivity() },
+                        onContentBounds = blankFrameDetector::setContentBounds,
+                        peekRenderedPage = viewModel::peekRenderedPage,
+                        annotationsForPage = viewModel.annotations::forPage,
+                        textSegmentsForPage = viewModel::textSegments,
+                        onAddAnnotation = viewModel::addAnnotation,
+                        onRequestNote = viewModel::requestNote,
+                        onPageMarksNeeded = viewModel::loadSavedMarks,
+                        onConfirmNote = viewModel::confirmNote,
+                        onCancelNote = viewModel::cancelNote,
+                        onOpenNote = viewModel::openNote,
+                        onCloseNote = viewModel::closeNote,
+                        onDeleteNote = viewModel::deleteOpenNote,
+                        onSelectTool = viewModel::selectTool,
+                        onPenModeChange = viewModel::setPenMode,
+                        onPenColorChange = viewModel::setPenColor,
+                        onUndoAnnotation = viewModel::undoAnnotation,
+                        onRedoAnnotation = viewModel::redoAnnotation,
+                        onEraseStart = viewModel::beginErase,
+                        onErase = viewModel::eraseAt,
+                        onEraseEnd = viewModel::endErase,
+                        onClearPage = viewModel::clearPage,
+                        onClearAll = viewModel::clearAllAnnotations,
+                        onHighlightMissed = viewModel::noteHighlightFoundNothing,
+                        onSelectWord = viewModel::selectWordAt,
+                        onMoveSelectionHandle = viewModel::moveSelectionHandle,
+                        onClearSelection = viewModel::clearSelection,
+                        onCopySelection = viewModel::copySelection,
+                        onHighlightSelection = viewModel::highlightSelection,
+                        onCaptureViewport = viewModel::capture,
+                        onCaptureLasso = viewModel::setCaptureLasso,
+                        onJumpHandled = viewModel::jumpHandled,
+                        onViewportWidth = viewModel::onViewportWidthChanged,
+                        onRotate = viewModel::rotate,
+                        onToggleThumbnails = viewModel::toggleThumbnails,
+                        onNarrowScreen = viewModel::onNarrowScreen,
+                        showViewfinder = settings.showViewfinder,
+                        viewfinderMinimized = settings.viewfinderMinimized,
+                        onViewfinderMinimized = viewModel::setViewfinderMinimized,
+                        viewfinderHandle = Offset(
+                            settings.viewfinderHandleX,
+                            settings.viewfinderHandleY,
+                        ),
+                        onViewfinderHandleMoved = viewModel::setViewfinderHandle,
+                        onToggleRecording = recordingToast,
+                        onShowMetadata = viewModel::showMetadata,
+                        onShowPageOrganiser = viewModel::showPageOrganiser,
+                        onPageAction = { action ->
+                            when (action) {
+                                is PageAction.Delete -> viewModel.deletePage(action.index)
+                                is PageAction.InsertBlankAt -> viewModel.insertBlankPage(action.at)
+                                is PageAction.Move -> viewModel.movePage(action.from, action.to)
+                                is PageAction.Rotate -> viewModel.rotatePage(action.index)
+                                PageAction.Undo -> viewModel.undoEdit()
+                                PageAction.Redo -> viewModel.redoEdit()
+                            }
+                        },
+                        onSaveDocument = { viewModel.save() },
+                        onSaveCopy = { copyPicker.launch(suggestedCopyName(state.documentName)) },
+                        onMessageShown = viewModel::messageShown,
+                        onCaptureScale = viewModel::setCaptureScale,
+                        onCaptureFormat = viewModel::setCaptureFormat,
+                        onCaptureFill = viewModel::setCaptureFill,
+                        onSaveCapture = {
+                            if (CaptureExport.galleryNeedsPermission()) {
+                                storagePermission.launch(WRITE_EXTERNAL_STORAGE)
+                            } else {
+                                viewModel.saveCaptureToGallery()
+                            }
+                        },
+                        onShareCapture = viewModel::shareCapture,
+                        onCopyCapture = viewModel::copyCapture,
+                        onDismissCapture = viewModel::dismissCapture,
+                        onCaptureShared = viewModel::captureShared,
+                        onMarkupTool = viewModel::setMarkupTool,
+                        onMarkupColor = viewModel::setMarkupColor,
+                        onMarkupSize = viewModel::setMarkupSize,
+                        onMarkupStyle = viewModel::setMarkupStyle,
+                        onCommitMarkup = viewModel::addMarkup,
+                        onRecogniseMarkup = viewModel::recogniseAndAddMarkup,
+                        onUndoMarkup = viewModel::undoMarkup,
+                        onSubmitPassword = viewModel::submitPassword,
+                        pageSizeProvider = viewModel::pageSize,
+                        renderer = viewModel::renderPage,
+                        thumbnailRenderer = viewModel::renderThumbnail,
+                    )
+                }
             }
         }
     }

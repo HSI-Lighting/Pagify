@@ -42,8 +42,38 @@ data class Markup(
     val color: Long,
     /** Stroke width in page points, so it keeps its weight at any export scale. */
     val widthPoints: Float = MARKUP_STROKE_POINTS,
+    /** Solid, dashed or dash-dot. Only the line tool offers anything but solid. */
+    val style: MarkupStyle = MarkupStyle.SOLID,
 )
 
+/**
+ * How a stroke is broken up along its length.
+ *
+ * The four broken types are the drawing-office conventions, because that is what
+ * they are for: on a plan a dashed line means something — a hidden edge, a level
+ * above, a centre — and a mark that looks *nearly* like the convention reads as a
+ * mistake to anyone who works from drawings.
+ *
+ * Applies to everything that draws a line: the pen, the line, the arrow, the box
+ * and the circle. Not the highlighter, which is a filled wash.
+ */
+enum class MarkupStyle(val label: String, val wireName: String) {
+    SOLID("Solid", "solid"),
+    DASH_1("Dash-1", "dash1"),
+    DASH_2("Dash-2", "dash2"),
+    CENTERLINE_1("Centerline-1", "centerline1"),
+    CENTERLINE_2("Centerline-2", "centerline2"),
+}
+
+/** Whether this is a broken line rather than a plain one. */
+val MarkupStyle.isBroken: Boolean get() = this != MarkupStyle.SOLID
+
+/**
+ * Whether this tool draws in a line type at all.
+ *
+ * Everything but the highlighter: a wash has no length to break up.
+ */
+val MarkupTool.hasLineStyle: Boolean get() = !isIntensity
 /** Default nib, in capture units. About a pen line on paper. */
 const val MARKUP_STROKE_POINTS = 2.4f
 
@@ -74,15 +104,16 @@ val MarkupTool.defaultSize: Float get() = if (isIntensity) 0.35f else MARKUP_STR
 /**
  * The sizes offered as a tap rather than a drag.
  *
- * Four, spread across the range, because the slider is for when none of these is
- * quite right — not the other way round. Most marks want "thin" or "thick" and
- * nothing in between, and making that a drag every time taxes the common case.
+ * Three, spread across the range, and always on screen: thin, medium and thick
+ * is the whole of what most marks need, and a size that takes a press to reach
+ * is a size nobody changes. The slider — behind a long press on the tool — is
+ * for when none of the three is quite right.
  */
 val MarkupTool.sizePresets: List<Float>
     get() = if (isIntensity) {
-        listOf(0.15f, 0.3f, 0.5f, 0.75f)
+        listOf(0.2f, 0.4f, 0.65f)
     } else {
-        listOf(1.2f, 2.4f, 5f, 10f)
+        listOf(1.2f, 3f, 8f)
     }
 
 /** Every tool at its default, for a fresh capture. */
@@ -97,7 +128,13 @@ fun defaultMarkupSizes(): Map<MarkupTool, Float> =
  * highlighter a field of its own would mean every other tool carrying one it
  * ignores.
  */
-fun markupFor(shape: MarkupShape, tool: MarkupTool, color: Long, size: Float): Markup =
+fun markupFor(
+    shape: MarkupShape,
+    tool: MarkupTool,
+    color: Long,
+    size: Float,
+    style: MarkupStyle = MarkupStyle.SOLID,
+): Markup =
     if (tool.isIntensity) {
         Markup(
             shape = shape,
@@ -105,7 +142,14 @@ fun markupFor(shape: MarkupShape, tool: MarkupTool, color: Long, size: Float): M
             widthPoints = 0f,
         )
     } else {
-        Markup(shape = shape, color = color, widthPoints = size)
+        Markup(
+            shape = shape,
+            color = color,
+            widthPoints = size,
+            // Carried only by the tool that offers it, so a style chosen for
+            // lines does not quietly follow you to the box tool.
+            style = if (tool.hasLineStyle) style else MarkupStyle.SOLID,
+        )
     }
 
 /**
@@ -142,6 +186,7 @@ fun Markup.toWireJson(): JSONObject = JSONObject().apply {
     put("shape", shape.toWireJson())
     put("color", color.colorToWireJson())
     put("widthPt", widthPoints.toDouble())
+    put("style", style.wireName)
 }
 
 fun List<Markup>.toWireJson(): String =

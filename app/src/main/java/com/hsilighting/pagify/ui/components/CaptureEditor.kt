@@ -3,6 +3,7 @@ package com.hsilighting.pagify.ui.components
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.rememberScrollState
@@ -37,6 +38,8 @@ import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -54,11 +57,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.IntOffset
@@ -75,11 +80,15 @@ import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.CaptureScale
 import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.MarkupShape
+import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.hasLineStyle
+import com.hsilighting.pagify.core.isBroken
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.isIntensity
 import com.hsilighting.pagify.core.sizePresets
 import com.hsilighting.pagify.core.sizeRange
 import com.hsilighting.pagify.ui.reader.CapturePreview
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -106,6 +115,9 @@ fun CaptureEditor(
     markupColor: Long,
     /** How heavy the current tool draws: nib width, or intensity for the wash. */
     markupSize: Float,
+    /** Solid, dashed or dash-dot, for the line tool. */
+    markupStyle: MarkupStyle,
+    onMarkupStyle: (MarkupStyle) -> Unit,
     onScaleChange: (CaptureScale) -> Unit,
     onFormatChange: (CaptureFormat) -> Unit,
     /** What fills the picture where no page reaches. */
@@ -203,6 +215,10 @@ fun CaptureEditor(
                 Box(
                     modifier = Modifier
                         .weight(1f)
+                        // A second guard, on the area rather than the picture:
+                        // whatever the canvas does, nothing inside here reaches
+                        // the controls below it.
+                        .clipToBounds()
                         .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.surfaceVariant)
                         // A checkerboard, and only for a cut-out. Over a plain grey
@@ -264,6 +280,7 @@ fun CaptureEditor(
                         tool = markupTool,
                         color = markupColor,
                         size = markupSize,
+                        style = markupStyle,
                         onCommit = onCommitMarkup,
                         onRecognise = onRecogniseMarkup,
                         zoom = zoom,
@@ -294,35 +311,57 @@ fun CaptureEditor(
                         tool = markupTool,
                         color = markupColor,
                         size = markupSize,
+                        style = markupStyle,
                         onTool = onMarkupTool,
                         onColor = onMarkupColor,
                         onSize = onMarkupSize,
+                        onStyle = onMarkupStyle,
                         onPickCustomColour = { pickingColour = true },
                     )
     
-                    // Scrollable rather than wrapped: on a phone in portrait
-                    // five chips and the padding come to more than the screen
-                    // is wide, and a chip that is simply off the edge is a
-                    // setting nobody can reach.
+                    // Two groups, not five chips in a line: how sharp and what
+                    // kind of file are different questions, and side by side with
+                    // nothing between them they read as one row of five choices
+                    // where picking any excludes the rest. The resolution sits on
+                    // its own ground at the left, the format plainly at the right.
                     Row(
-                        modifier = Modifier.horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier
+                            .fillMaxWidth(),
+                        // Pushed apart rather than spaced: the format belongs at
+                        // the right edge, opposite the resolution, so the two
+                        // groups read as two questions and not as one list that
+                        // happens to have a gap in it.
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        CaptureScale.entries.forEach { scale ->
-                            FilterChip(
-                                selected = preview.request.scale == scale,
-                                onClick = { onScaleChange(scale) },
-                                enabled = !isCapturing,
-                                label = { Text(scale.label) },
-                            )
+                        Row(
+                            modifier = Modifier
+                                .background(
+                                    MaterialTheme.colorScheme.surfaceVariant,
+                                    RoundedCornerShape(20.dp),
+                                )
+                                .padding(horizontal = 6.dp, vertical = 5.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            CaptureScale.entries.forEach { scale ->
+                                FilterChip(
+                                    selected = preview.request.scale == scale,
+                                    onClick = { onScaleChange(scale) },
+                                    enabled = !isCapturing,
+                                    label = { Text(scale.label) },
+                                )
+                            }
                         }
-                        CaptureFormat.entries.forEach { format ->
-                            FilterChip(
-                                selected = preview.request.format == format,
-                                onClick = { onFormatChange(format) },
-                                enabled = !isCapturing,
-                                label = { Text(format.extension.uppercase()) },
-                            )
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CaptureFormat.entries.forEach { format ->
+                                FilterChip(
+                                    selected = preview.request.format == format,
+                                    onClick = { onFormatChange(format) },
+                                    enabled = !isCapturing,
+                                    label = { Text(format.extension.uppercase()) },
+                                )
+                            }
                         }
                     }
 
@@ -406,9 +445,11 @@ private fun MarkupTools(
     tool: MarkupTool,
     color: Long,
     size: Float,
+    style: MarkupStyle,
     onTool: (MarkupTool) -> Unit,
     onColor: (Long) -> Unit,
     onSize: (MarkupTool, Float) -> Unit,
+    onStyle: (MarkupStyle) -> Unit,
     onPickCustomColour: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -462,17 +503,29 @@ private fun MarkupTools(
                 onTool,
                 onSize,
             )
+            LineStyleButton(
+                style = style,
+                // Lit only when a dash is actually live: the line tool on its own
+                // is the solid one, and lighting this up for it would say the
+                // opposite.
+                active = tool.hasLineStyle && style.isBroken,
+                color = color,
+                onStyle = onStyle,
+            )
         }
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            // Pushed to the two edges, like the resolution and the format below:
+            // how heavy and what colour are separate questions, and the gap in the
+            // middle is what says so.
+            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            SizeButton(tool = tool, size = size, color = color, onSize = onSize)
+            SizeGroup(tool = tool, size = size, color = color, onSize = onSize)
 
             Row(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 // The wheel first, before the palette. It is the way to *any*
@@ -496,48 +549,56 @@ private fun MarkupTools(
 }
 
 /**
- * One control for how heavy the tool draws: the current size, and the rest behind
- * a press.
+ * How heavy the tool draws: three sizes, all of them on screen.
  *
- * Four dots in a row said everything at once and cost four slots of a toolbar
- * that has to fit a phone in portrait. One dot says the thing that is true now —
- * drawn at the size it means, so it answers "how will this look" rather than
- * "which number is selected" — and a press offers the others.
+ * On its own tinted ground and on the left, with the colours to its right,
+ * because they are two different questions and a single undifferentiated row of
+ * round things made them look like one. The ground is what says "these three go
+ * together", which is also what stops the leftmost dot reading as an eighth
+ * colour.
+ *
+ * Every size is a tap. A press was one tap too many for the thing people change
+ * most often — and the size that is not one of the three is still there, behind a
+ * long press on the tool itself, where the wedge in the corner says so.
  */
 @Composable
-private fun SizeButton(
+private fun SizeGroup(
     tool: MarkupTool,
     size: Float,
     color: Long,
     onSize: (MarkupTool, Float) -> Unit,
 ) {
-    var choosing by remember { mutableStateOf(false) }
-
-    Box {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .background(MaterialTheme.colorScheme.secondaryContainer, CircleShape)
-                .combinedClickableCompat(
-                    // Tap opens it too. A control that only answers to a long
-                    // press is one most people never discover, and this one has to
-                    // be reachable — it is the only way to change the size at all.
-                    onClick = { choosing = true },
-                    onLongClick = { choosing = true },
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            SizeMark(tool = tool, size = size, color = color, diameter = 24.dp)
-        }
-
-        if (choosing) {
-            SizeChooser(
-                tool = tool,
-                size = size,
-                color = color,
-                onSize = { onSize(tool, it) },
-                onDismiss = { choosing = false },
-            )
+    Row(
+        modifier = Modifier
+            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(18.dp))
+            .padding(horizontal = 4.dp, vertical = 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        tool.sizePresets.forEach { preset ->
+            // Nearest wins rather than exact equality: the slider can leave the
+            // size a hair off a preset, and three unlit dots would then suggest no
+            // size is set at all.
+            val chosen = tool.sizePresets.minByOrNull { abs(it - size) } == preset
+            Box(
+                modifier = Modifier
+                    .size(34.dp)
+                    // A ring rather than a filled circle: the mark inside is drawn
+                    // in the ink colour, and that is half of what the control is
+                    // showing, so the selection cannot be allowed to sit on top of
+                    // it.
+                    .then(
+                        if (chosen) {
+                            Modifier.border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .clickable { onSize(tool, preset) },
+                contentAlignment = Alignment.Center,
+            ) {
+                SizeMark(tool = tool, size = preset, color = color, diameter = 24.dp)
+            }
         }
     }
 }
@@ -546,8 +607,8 @@ private fun SizeButton(
  * What a size looks like: a dot at the nib's width, or a bar at the wash's
  * strength.
  *
- * Shared by the button and the choices inside it, so the one on the toolbar is
- * literally the one that was picked.
+ * Shared by the three presets and the tool buttons, so what a size looks like is
+ * decided in one place.
  */
 @Composable
 private fun SizeMark(tool: MarkupTool, size: Float, color: Long, diameter: Dp) {
@@ -570,77 +631,6 @@ private fun SizeMark(tool: MarkupTool, size: Float, color: Long, diameter: Dp) {
     }
 }
 
-/**
- * The sizes on offer, and a slider for the ones that are not.
- *
- * Both in one popup because they answer the same question at different
- * precisions: the presets are the common answers, the slider is for when none of
- * them is quite right.
- */
-@Composable
-private fun SizeChooser(
-    tool: MarkupTool,
-    size: Float,
-    color: Long,
-    onSize: (Float) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    Popup(
-        alignment = Alignment.TopCenter,
-        offset = IntOffset(0, -POPUP_LIFT_PX),
-        onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = true),
-    ) {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            tonalElevation = 3.dp,
-            shadowElevation = 8.dp,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ) {
-            Column(
-                modifier = Modifier.width(260.dp).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text(
-                    if (tool.isIntensity) {
-                        "Intensity · ${(size * 100).roundToInt()}%"
-                    } else {
-                        "Thickness · ${"%.1f".format(size)}"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                )
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    tool.sizePresets.forEach { preset ->
-                        val chosen = kotlin.math.abs(preset - size) < 0.01f
-                        Box(
-                            modifier = Modifier
-                                .size(44.dp)
-                                .background(
-                                    color = if (chosen) {
-                                        MaterialTheme.colorScheme.secondaryContainer
-                                    } else {
-                                        Color.Transparent
-                                    },
-                                    shape = CircleShape,
-                                )
-                                .clickable { onSize(preset) },
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            SizeMark(tool = tool, size = preset, color = color, diameter = 30.dp)
-                        }
-                    }
-                }
-
-                Slider(value = size, onValueChange = onSize, valueRange = tool.sizeRange)
-            }
-        }
-    }
-}
 
 @Composable
 private fun ColourSwatch(colour: Long, selected: Boolean, onClick: () -> Unit) {
@@ -732,8 +722,12 @@ private fun MarkupToolButton(
             modifier = Modifier
                 .size(44.dp)
                 .background(
+                    // The reader's ribbon marks its live tool with the accent, and
+                    // this has to say the same thing as loudly: on a dark screen
+                    // the container tint was a shade of grey against a shade of
+                    // grey, and which tool was armed simply could not be read.
                     color = if (isSelected) {
-                        MaterialTheme.colorScheme.secondaryContainer
+                        MaterialTheme.colorScheme.primary
                     } else {
                         Color.Transparent
                     },
@@ -745,6 +739,15 @@ private fun MarkupToolButton(
                         onTool(represents)
                         adjusting = true
                     },
+                )
+                .longPressHint(
+                    // The slider behind this press is the only way to a size the
+                    // three presets do not offer, so it has to announce itself.
+                    tint = if (isSelected) {
+                        MaterialTheme.colorScheme.onPrimary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
                 ),
             contentAlignment = Alignment.Center,
         ) {
@@ -752,7 +755,7 @@ private fun MarkupToolButton(
                 imageVector = icon,
                 contentDescription = label,
                 tint = if (isSelected) {
-                    MaterialTheme.colorScheme.onSecondaryContainer
+                    MaterialTheme.colorScheme.onPrimary
                 } else {
                     MaterialTheme.colorScheme.onSurfaceVariant
                 },
@@ -900,3 +903,114 @@ private fun DrawScope.drawCheckerboard() {
 
 /** Checkerboard square, in pixels. Big enough to read, small enough to recede. */
 private const val CHECKER_SQUARE_PX = 24f
+
+/**
+ * Which line type the next mark is drawn in.
+ *
+ * The glyph *is* the setting: a line in the pattern it selects, rather than a
+ * label or an abstract icon. "Centerline-2" means nothing until you have seen
+ * one, and five names would not fit the slot in any case.
+ *
+ * A tap opens the list rather than stepping to the next type. Cycling was fine
+ * when there were two; with five, reaching the last one is four taps and a lot of
+ * squinting at a 26dp glyph.
+ *
+ * It applies to every tool that draws a line — the pen, the line, the arrow, the
+ * box, the circle — so unlike the tools beside it, this one does not change what
+ * you are drawing with. It sits lit only while a broken type is live.
+ */
+@Composable
+private fun LineStyleButton(
+    style: MarkupStyle,
+    active: Boolean,
+    color: Long,
+    onStyle: (MarkupStyle) -> Unit,
+) {
+    var choosing by remember { mutableStateOf(false) }
+
+    Box {
+        Box(
+            modifier = Modifier
+                .size(44.dp)
+                .background(
+                    color = if (active) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        Color.Transparent
+                    },
+                    shape = CircleShape,
+                )
+                .combinedClickableCompat(
+                    onClick = { choosing = true },
+                    onLongClick = { choosing = true },
+                )
+                .longPressHint(
+                    tint = if (active) {
+                        MaterialTheme.colorScheme.onPrimary
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            StylePattern(
+                style = style,
+                tint = if (active) {
+                    MaterialTheme.colorScheme.onPrimary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                width = 26.dp,
+            )
+        }
+
+        DropdownMenu(expanded = choosing, onDismissRequest = { choosing = false }) {
+            MarkupStyle.entries.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(option.label) },
+                    leadingIcon = {
+                        StylePattern(
+                            style = option,
+                            tint = if (option == style) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurface
+                            },
+                            width = 36.dp,
+                        )
+                    },
+                    onClick = {
+                        choosing = false
+                        onStyle(option)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A short line in the pattern it names.
+ *
+ * Drawn rather than three glyphs, because the dash lengths have to match what the
+ * engine will actually draw — a picture of a dashed line that dashes differently
+ * from the export is worse than no picture.
+ */
+@Composable
+private fun StylePattern(style: MarkupStyle, tint: Color, width: Dp) {
+    Canvas(Modifier.size(width, 12.dp)) {
+        val thickness = STYLE_PATTERN_WIDTH_PX
+        val effect = style.pathEffect(thickness)
+        drawLine(
+            color = tint,
+            start = Offset(0f, size.height / 2f),
+            end = Offset(size.width, size.height / 2f),
+            strokeWidth = thickness,
+            cap = StrokeCap.Round,
+            pathEffect = effect,
+        )
+    }
+}
+
+/** How thick the little pattern is drawn, in pixels. */
+private const val STYLE_PATTERN_WIDTH_PX = 4f

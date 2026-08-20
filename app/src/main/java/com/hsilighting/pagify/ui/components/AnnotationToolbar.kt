@@ -76,7 +76,6 @@ fun AnnotationToolbar(
 ) {
     var showPenPalette by remember { mutableStateOf(false) }
     var showClearMenu by remember { mutableStateOf(false) }
-    var showCaptureMenu by remember { mutableStateOf(false) }
 
     Box(modifier, contentAlignment = Alignment.BottomCenter) {
         if (showPenPalette) {
@@ -100,16 +99,6 @@ fun AnnotationToolbar(
             )
         }
 
-        if (showCaptureMenu) {
-            CapturePalette(
-                lasso = captureLasso,
-                onLasso = {
-                    onCaptureLasso(it)
-                    showCaptureMenu = false
-                },
-                modifier = Modifier.padding(bottom = CAPTURE_PALETTE_LIFT),
-            )
-        }
 
         Surface(
             shape = RoundedCornerShape(28.dp),
@@ -142,6 +131,7 @@ fun AnnotationToolbar(
                         onSelectTool(AnnotationTool.Pen)
                         showPenPalette = true
                     },
+                    hasMore = true,
                 )
                 ToolButton(
                     icon = Icons.Filled.TextFields,
@@ -169,20 +159,40 @@ fun AnnotationToolbar(
                         // followed by an armed eraser under your finger.
                         showClearMenu = true
                     },
+                    hasMore = true,
                 )
                 ToolButton(
-                    // The glyph changes with the shape, so which of the two is
-                    // armed is visible on the ribbon rather than only inside the
-                    // menu that set it.
-                    icon = if (captureLasso) Icons.Filled.Gesture else Icons.Filled.CropFree,
-                    label = if (captureLasso) "Capture a shape" else "Snapshot",
-                    selected = selectedTool == AnnotationTool.Snapshot,
-                    onClick = { onSelectTool(toggle(selectedTool, AnnotationTool.Snapshot)) },
-                    onLongClick = {
-                        // Selects the tool as well, like the pen: the shape you
-                        // pick is the one you are about to drag with.
-                        onSelectTool(AnnotationTool.Snapshot)
-                        showCaptureMenu = true
+                    icon = Icons.Filled.CropFree,
+                    label = "Snapshot",
+                    selected = selectedTool == AnnotationTool.Snapshot && !captureLasso,
+                    onClick = {
+                        onCaptureLasso(false)
+                        onSelectTool(
+                            if (selectedTool == AnnotationTool.Snapshot && !captureLasso) {
+                                AnnotationTool.None
+                            } else {
+                                AnnotationTool.Snapshot
+                            },
+                        )
+                    },
+                )
+                ToolButton(
+                    // Its own slot rather than a shape hidden behind a long press on
+                    // the one beside it. They are two tools by the time you are
+                    // choosing: a box for most things, a ring for the detail a box
+                    // cannot take without its neighbours.
+                    icon = Icons.Filled.Gesture,
+                    label = "Draw around",
+                    selected = selectedTool == AnnotationTool.Snapshot && captureLasso,
+                    onClick = {
+                        onCaptureLasso(true)
+                        onSelectTool(
+                            if (selectedTool == AnnotationTool.Snapshot && captureLasso) {
+                                AnnotationTool.None
+                            } else {
+                                AnnotationTool.Snapshot
+                            },
+                        )
                     },
                 )
             }
@@ -201,6 +211,8 @@ private fun ToolButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     accent: Color? = null,
+    /** Draws the wedge that says a long press offers more. */
+    hasMore: Boolean = false,
     onLongClick: (() -> Unit)? = null,
 ) {
     Box(
@@ -215,6 +227,19 @@ private fun ToolButton(
                     Modifier.combinedClickableCompat(onClick = onClick, onLongClick = onLongClick)
                 } else {
                     Modifier.clickable(onClick = onClick)
+                },
+            )
+            .then(
+                if (hasMore) {
+                    Modifier.longPressHint(
+                        tint = if (selected) {
+                            MaterialTheme.colorScheme.onPrimary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        },
+                    )
+                } else {
+                    Modifier
                 },
             ),
         contentAlignment = Alignment.Center,
@@ -596,86 +621,3 @@ fun NoteReader(text: String, onDelete: () -> Unit, onDismiss: () -> Unit) {
     )
 }
 
-/**
- * The two ways to frame a capture.
- *
- * A box is right for most things and is what the tool does on a plain tap. The
- * other is for what a box cannot say: a detail on a busy drawing with a title
- * block beside it, one fitting in a schedule, a column out of a table. Drawing
- * around it takes the thing and leaves its neighbours out — the picture is still
- * the ring's bounding box, but everything outside the ring comes back blank.
- *
- * Behind a long press rather than in a slot of its own because it is the same
- * tool with a different edge, and two capture buttons on a five-slot ribbon would
- * suggest otherwise.
- */
-@Composable
-private fun CapturePalette(
-    lasso: Boolean,
-    onLasso: (Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 3.dp,
-        shadowElevation = 8.dp,
-    ) {
-        Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            CaptureShapeChip(
-                icon = Icons.Filled.CropFree,
-                label = "Box",
-                selected = !lasso,
-                onClick = { onLasso(false) },
-            )
-            CaptureShapeChip(
-                icon = Icons.Filled.Gesture,
-                label = "Draw around",
-                selected = lasso,
-                onClick = { onLasso(true) },
-            )
-        }
-    }
-
-}
-
-@Composable
-private fun CaptureShapeChip(
-    icon: ImageVector,
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(14.dp),
-        color = if (selected) {
-            MaterialTheme.colorScheme.primaryContainer
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant
-        },
-    ) {
-        Row(
-            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Icon(icon, contentDescription = null, Modifier.size(20.dp))
-            Text(label, style = MaterialTheme.typography.labelLarge)
-        }
-    }
-}
-
-/**
- * How far the capture palette sits above the ribbon.
- *
- * Higher than the other two palettes because this one is the only one that shares
- * the screen with [CaptureHint] — arming the tool is what puts the hint there, and
- * at the usual height the palette lands exactly on top of it.
- */
-private val CAPTURE_PALETTE_LIFT = 132.dp

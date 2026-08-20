@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 use tiny_skia::{
     BlendMode, FillRule, LineCap, LineJoin, Paint, PathBuilder, PixmapMut, Stroke as SkStroke,
-    Transform,
+    StrokeDash, Transform,
 };
 
 use crate::document::{Color, Point, Rect};
@@ -35,7 +35,70 @@ pub struct Markup {
     /// Stroke width in page points, so a mark keeps its weight relative to the
     /// page whatever resolution the capture is exported at.
     pub width_pt: f32,
+    /// Solid, dashed or dash-dot.
+    ///
+    /// `default` so a mark written before styles existed — or by an older build —
+    /// still reads, as the solid line it was drawn as.
+    #[serde(default)]
+    pub style: StrokeStyle,
 }
+
+/// How a stroke is broken up along its length.
+///
+/// The four broken types are the drawing-office conventions, because that is what
+/// they are for: on a plan a dashed line means something specific — an edge that
+/// is hidden, a level above, a centre — and a mark that looks *nearly* like the
+/// convention reads as a mistake to anyone who works from drawings.
+///
+/// Every pattern is a multiple of the stroke width, so a heavy line and a fine
+/// one are recognisably the same kind of line rather than one being a row of
+/// squares.
+///
+/// Not offered for a highlight: that is a filled wash, and a dashed wash is not a
+/// thing anyone draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StrokeStyle {
+    #[default]
+    Solid,
+    /// Short dashes, evenly spaced.
+    Dash1,
+    /// Long dashes — the same line, read from further away.
+    Dash2,
+    /// Long dash, dot: the chain line that marks a centre or an axis.
+    Centerline1,
+    /// Long dash, dot, dot: the double-dash line, for what is beyond or before.
+    Centerline2,
+}
+
+impl StrokeStyle {
+    /// The dash pattern, in pixels, for a stroke of `width_px`.
+    ///
+    /// Round caps add half a width to each end of every segment, which is what
+    /// makes the dot in a centre line a dot: a segment with almost no length at
+    /// all still draws as a full round nib.
+    fn dash(self, width_px: f32) -> Option<StrokeDash> {
+        let w = width_px;
+        let dot = w * DOT_LENGTH;
+        let pattern = match self {
+            StrokeStyle::Solid => return None,
+            StrokeStyle::Dash1 => vec![w * 4.0, w * 3.0],
+            StrokeStyle::Dash2 => vec![w * 9.0, w * 4.0],
+            StrokeStyle::Centerline1 => vec![w * 9.0, w * 3.0, dot, w * 3.0],
+            StrokeStyle::Centerline2 => {
+                vec![w * 9.0, w * 3.0, dot, w * 3.0, dot, w * 3.0]
+            }
+        };
+
+        StrokeDash::new(pattern, 0.0)
+    }
+}
+
+/// How long a dot is, as a fraction of the stroke width.
+///
+/// Barely more than nothing: the round cap does the drawing, and a longer segment
+/// would read as a second, shorter dash.
+const DOT_LENGTH: f32 = 0.01;
 
 /// What was drawn.
 ///
@@ -128,6 +191,7 @@ fn draw(pixmap: &mut PixmapMut, mark: &Markup, scale: f32) {
         // a corner does not spike out past the shape it belongs to.
         line_cap: LineCap::Round,
         line_join: LineJoin::Round,
+        dash: mark.style.dash(width_px),
         ..SkStroke::default()
     };
 
@@ -216,6 +280,11 @@ fn segment_path(from: Point, to: Point, scale: f32) -> Option<tiny_skia::Path> {
     builder.finish()
 }
 
+/// The shaft and the two barbs at the tip.
+///
+/// One path with three contours, and a dash pattern restarts at each — so the
+/// barbs come out whole even when the shaft is broken up. That is checked
+/// rather than assumed: `an_arrow_keeps_its_head_when_its_shaft_is_broken`.
 fn arrow_path(from: Point, to: Point, width_px: f32, scale: f32) -> Option<tiny_skia::Path> {
     let (x0, y0) = to_pixels(from, scale);
     let (x1, y1) = to_pixels(to, scale);
@@ -338,13 +407,7 @@ pub fn mask_outside(
     };
     builder.push_rect(whole);
 
-    let (x, y) = to_pixels(outline[0], scale);
-    builder.move_to(x, y);
-    for point in &outline[1..] {
-        let (x, y) = to_pixels(*point, scale);
-        builder.line_to(x, y);
-    }
-    builder.close();
+    trace_ring(&mut builder, outline, scale);
 
     let Some(path) = builder.finish() else {
         return Ok(());
@@ -371,6 +434,55 @@ pub fn mask_outside(
 
     Ok(())
 }
+
+/// Add the drawn ring to `builder`, smoothed if it was drawn by a finger.
+///
+/// A ring arrives as the samples touch reported, and a fast drag reports them far
+/// apart: joining those with straight lines makes the cut edge visibly faceted,
+/// which is the one part of the picture a person looks at closely. Quadratics
+/// through the midpoints turn the same samples into the curve the hand actually
+/// made — the same treatment freehand ink already gets, for the same reason.
+///
+/// Only for a ring with enough samples to *be* a stroke. Below that the points are
+/// not a sampled curve but a stated shape — a caller with four corners means four
+/// corners — and rounding them off would be inventing a shape nobody drew.
+fn trace_ring(builder: &mut PathBuilder, outline: &[Point], scale: f32) {
+    let count = outline.len();
+
+    if count < SMOOTHED_RING_POINTS {
+        let (x, y) = to_pixels(outline[0], scale);
+        builder.move_to(x, y);
+        for point in &outline[1..] {
+            let (x, y) = to_pixels(*point, scale);
+            builder.line_to(x, y);
+        }
+        builder.close();
+        return;
+    }
+
+    let at = |index: usize| to_pixels(outline[index % count], scale);
+    let midpoint = |a: (f32, f32), b: (f32, f32)| ((a.0 + b.0) / 2.0, (a.1 + b.1) / 2.0);
+
+    // Start on the midpoint of the closing edge, so the ring joins itself in the
+    // middle of a curve rather than at a sample — a corner at the join is exactly
+    // what this exists to remove.
+    let start = midpoint(at(count - 1), at(0));
+    builder.move_to(start.0, start.1);
+
+    for index in 0..count {
+        let through = at(index);
+        let to = midpoint(through, at(index + 1));
+        builder.quad_to(through.0, through.1, to.0, to.1);
+    }
+
+    builder.close();
+}
+
+/// How many samples make a ring a stroke rather than a stated shape.
+///
+/// A finger produces dozens even on a quick loop; anything sparser is a caller
+/// naming corners.
+const SMOOTHED_RING_POINTS: usize = 8;
 
 /// The pixels, checked and borrowed for drawing.
 ///
@@ -433,6 +545,7 @@ mod tests {
             shape,
             color: red(),
             width_pt: 4.0,
+            style: StrokeStyle::Solid,
         }
     }
 
@@ -593,6 +706,338 @@ mod tests {
         assert_eq!(pixel(&bitmap, 100, 100), (0, 200, 0));
     }
 
+    /// A ring of `count` samples around a circle, the way a finger draws one.
+    fn traced_circle(count: usize, centre: f32, radius: f32) -> Vec<Point> {
+        (0..count)
+            .map(|step| {
+                let angle = step as f32 / count as f32 * std::f32::consts::TAU;
+                at(centre + radius * angle.cos(), centre + radius * angle.sin())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_traced_ring_keeps_what_it_encloses() {
+        // The smoothed path must still be the shape that was drawn. A curve fitted
+        // through the samples bulges slightly between them, so this checks well
+        // inside and well outside rather than at the edge itself.
+        let mut bitmap = green_capture();
+        mask_outside(&mut bitmap, &traced_circle(24, 50.0, 30.0), SCALE, white()).unwrap();
+
+        assert_eq!(
+            pixel(&bitmap, 100, 100),
+            (0, 200, 0),
+            "the middle was erased"
+        );
+        assert!(is_white(pixel(&bitmap, 5, 5)), "the far corner survived");
+    }
+
+    #[test]
+    fn a_sparse_ring_keeps_its_corners() {
+        // Four points are a stated shape, not a sampled curve. Smoothing them would
+        // round the corners off and quietly erase page the caller asked to keep:
+        // this pixel is inside the square and outside its inscribed curve.
+        let mut bitmap = green_capture();
+        mask_outside(&mut bitmap, &middle_square(), SCALE, white()).unwrap();
+
+        assert_eq!(
+            pixel(&bitmap, 56, 56),
+            (0, 200, 0),
+            "a corner was rounded off"
+        );
+    }
+
+    #[test]
+    fn smoothing_does_not_move_the_ring() {
+        // The two regimes have to agree about where the ring *is*, or a stroke
+        // would shift the moment it crossed the sample count. A dense ring and a
+        // sparse one around the same circle keep the same centre.
+        let mut smoothed = green_capture();
+        mask_outside(
+            &mut smoothed,
+            &traced_circle(24, 50.0, 30.0),
+            SCALE,
+            white(),
+        )
+        .unwrap();
+
+        let mut faceted = green_capture();
+        mask_outside(&mut faceted, &traced_circle(6, 50.0, 30.0), SCALE, white()).unwrap();
+
+        for (x, y) in [(100, 100), (90, 110), (110, 90)] {
+            assert_eq!(
+                pixel(&smoothed, x, y),
+                pixel(&faceted, x, y),
+                "differ at {x},{y}"
+            );
+        }
+    }
+
+    /// How the ring was actually drawn: (curves, straight edges).
+    ///
+    /// Asked of the path rather than of the pixels because that is where the
+    /// difference lives. A 24-sided polygon and a curve through the same points
+    /// cover almost the same area — every pixel test passes either way — so the
+    /// only honest way to check that a ring is smooth is to look at its segments.
+    fn segment_kinds(path: &tiny_skia::Path) -> (usize, usize) {
+        let mut curves = 0;
+        let mut lines = 0;
+        for segment in path.segments() {
+            match segment {
+                tiny_skia::PathSegment::QuadTo(..) | tiny_skia::PathSegment::CubicTo(..) => {
+                    curves += 1
+                }
+                tiny_skia::PathSegment::LineTo(..) => lines += 1,
+                _ => {}
+            }
+        }
+        (curves, lines)
+    }
+
+    fn ring_path(outline: &[Point]) -> tiny_skia::Path {
+        let mut builder = PathBuilder::new();
+        trace_ring(&mut builder, outline, SCALE);
+        builder.finish().expect("a ring")
+    }
+
+    #[test]
+    fn a_traced_ring_is_drawn_as_curves() {
+        let (curves, lines) = segment_kinds(&ring_path(&traced_circle(24, 50.0, 30.0)));
+
+        assert!(curves > 0, "a drawn ring came out as straight segments");
+        // The closing edge is a line and belongs to `close()`, not to the ring.
+        assert_eq!(lines, 0, "the ring still has {lines} faceted edges");
+    }
+
+    #[test]
+    fn a_sparse_ring_is_drawn_exactly_as_stated() {
+        let (curves, lines) = segment_kinds(&ring_path(&middle_square()));
+
+        assert_eq!(curves, 0, "four stated corners were rounded off");
+        assert!(lines > 0, "a stated shape lost its edges");
+    }
+
+    // ------------------------------------------------------------ line styles --
+
+    /// A horizontal line across the middle, drawn in `style`.
+    fn line_in(style: StrokeStyle) -> Bitmap {
+        let mut bitmap = white_capture();
+        composite(
+            &mut bitmap,
+            &[Markup {
+                shape: Shape::Line {
+                    from: at(10.0, 50.0),
+                    to: at(90.0, 50.0),
+                },
+                color: red(),
+                width_pt: 2.0,
+                style,
+            }],
+            SCALE,
+        )
+        .unwrap();
+        bitmap
+    }
+
+    /// Which pixels along the line have ink on them, from x=20 to x=180.
+    ///
+    /// Read as a run of booleans rather than counted, because "is it broken up"
+    /// and "how is it broken up" are different questions and only the second can
+    /// tell a dash from a dash-dot.
+    fn ink_along(bitmap: &Bitmap) -> Vec<bool> {
+        (20..180)
+            .map(|x| !is_white(pixel(bitmap, x, 100)))
+            .collect()
+    }
+
+    #[test]
+    fn a_solid_line_has_no_gaps() {
+        // The premise the other two rest on: if a solid line were already broken,
+        // "the dashed one has gaps" would prove nothing.
+        assert!(ink_along(&line_in(StrokeStyle::Solid))
+            .iter()
+            .all(|&inked| inked));
+    }
+
+    #[test]
+    fn a_dashed_line_is_ink_and_gaps() {
+        let ink = ink_along(&line_in(StrokeStyle::Dash1));
+
+        assert!(
+            ink.iter().any(|&inked| inked),
+            "the dashed line drew nothing"
+        );
+        assert!(
+            ink.iter().any(|&inked| !inked),
+            "the dashed line came out solid"
+        );
+    }
+
+    #[test]
+    fn a_dash_dot_line_is_not_the_same_as_a_dashed_one() {
+        // Both are broken up, so "has gaps" cannot separate them. The pattern can.
+        let dashed = ink_along(&line_in(StrokeStyle::Dash1));
+        let dash_dot = ink_along(&line_in(StrokeStyle::Centerline1));
+
+        assert_ne!(dashed, dash_dot, "dash-dot drew the same pattern as dashed");
+    }
+
+    #[test]
+    fn a_dash_dot_line_has_a_dot_between_its_dashes() {
+        // What makes it dash-*dot*: between two long runs of ink there is a short
+        // one, rather than an unbroken gap.
+        let runs = ink_runs(&ink_along(&line_in(StrokeStyle::Centerline1)));
+        let longest = runs.iter().copied().max().unwrap_or(0);
+
+        assert!(
+            runs.iter().any(|&run| run > 0 && run * 3 < longest),
+            "no short run among {runs:?}",
+        );
+    }
+
+    /// The length of each unbroken run of ink.
+    fn ink_runs(ink: &[bool]) -> Vec<usize> {
+        let mut runs = Vec::new();
+        let mut run = 0usize;
+        for &inked in ink {
+            if inked {
+                run += 1;
+            } else if run > 0 {
+                runs.push(run);
+                run = 0;
+            }
+        }
+        if run > 0 {
+            runs.push(run);
+        }
+        runs
+    }
+
+    #[test]
+    fn every_broken_style_draws_a_different_pattern() {
+        // Five names are only worth having if five things come out. Compared as
+        // whole patterns rather than pairwise "is it broken", which every one of
+        // them would pass.
+        let patterns: Vec<Vec<bool>> = [
+            StrokeStyle::Solid,
+            StrokeStyle::Dash1,
+            StrokeStyle::Dash2,
+            StrokeStyle::Centerline1,
+            StrokeStyle::Centerline2,
+        ]
+        .into_iter()
+        .map(|style| ink_along(&line_in(style)))
+        .collect();
+
+        for (first, one) in patterns.iter().enumerate() {
+            for (second, other) in patterns.iter().enumerate().skip(first + 1) {
+                assert_ne!(one, other, "styles {first} and {second} draw the same line");
+            }
+        }
+    }
+
+    #[test]
+    fn the_long_dash_is_longer_than_the_short_one() {
+        // What separates dash-1 from dash-2, said as the thing a person would
+        // check by looking.
+        let short = ink_runs(&ink_along(&line_in(StrokeStyle::Dash1)));
+        let long = ink_runs(&ink_along(&line_in(StrokeStyle::Dash2)));
+
+        let longest = |runs: &[usize]| runs.iter().copied().max().unwrap_or(0);
+        assert!(
+            longest(&long) > longest(&short),
+            "dash-2 {long:?} is not longer than dash-1 {short:?}",
+        );
+    }
+
+    #[test]
+    fn the_double_centre_line_has_two_dots_between_its_dashes() {
+        // Centreline-1 puts one dot between long dashes; centreline-2 puts two.
+        // Counting the short runs is what tells them apart.
+        let short_runs = |style: StrokeStyle| {
+            let runs = ink_runs(&ink_along(&line_in(style)));
+            let longest = runs.iter().copied().max().unwrap_or(0);
+            runs.into_iter().filter(|&run| run * 3 < longest).count()
+        };
+
+        assert!(
+            short_runs(StrokeStyle::Centerline2) > short_runs(StrokeStyle::Centerline1),
+            "centreline-2 has no more dots than centreline-1",
+        );
+    }
+
+    #[test]
+    fn an_arrow_keeps_its_head_when_its_shaft_is_broken() {
+        // A dash pattern restarts at each contour, and the barbs are contours of
+        // their own — so a broken shaft leaves the head whole. Worth pinning:
+        // nothing in the code says it, and a head that comes and goes with the
+        // arrow's angle would be a strange bug to chase.
+        let mut bitmap = white_capture();
+        composite(
+            &mut bitmap,
+            &[Markup {
+                shape: Shape::Arrow {
+                    from: at(10.0, 50.0),
+                    to: at(90.0, 50.0),
+                },
+                color: red(),
+                width_pt: 2.0,
+                style: StrokeStyle::Dash1,
+            }],
+            SCALE,
+        )
+        .unwrap();
+
+        // Sampled *along* each barb rather than at its end. A gap in the middle is
+        // what a dash pattern on a 16 px barb would leave, and an end-point check
+        // misses it: the next dash begins right about where the barb stops, so its
+        // round cap puts ink at the end either way.
+        //
+        // The barbs run back from the tip at 180,100 at about 25°, so a point t
+        // pixels along sits at (180 - 0.9t, 100 ± 0.43t). Twelve and sixteen are
+        // both well clear of the four-pixel shaft.
+        for along in [12.0f32, 16.0] {
+            let x = (180.0 - 0.9 * along) as u32;
+            let offset = (0.43 * along) as u32;
+
+            for y in [100 - offset, 100 + offset] {
+                let inked = (y - 2..=y + 2).any(|near| !is_white(pixel(&bitmap, x, near)));
+                assert!(inked, "the head is broken {along} px along, at {x},{y}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_mark_written_before_styles_existed_is_solid() {
+        // The wire has to stay backwards compatible: an older payload has no
+        // `style` at all, and must not fail to decode or arrive dashed.
+        let json = r#"{"shape":{"kind":"line","from":{"x":0,"y":0},"to":{"x":9,"y":9}},
+                       "color":{"r":255,"g":0,"b":0,"a":255},"widthPt":2.0}"#;
+        let mark: Markup = serde_json::from_str(json).expect("an older mark");
+
+        assert_eq!(StrokeStyle::Solid, mark.style);
+    }
+
+    #[test]
+    fn a_style_survives_the_wire() {
+        let mark = Markup {
+            shape: Shape::Line {
+                from: at(0.0, 0.0),
+                to: at(9.0, 9.0),
+            },
+            color: red(),
+            width_pt: 2.0,
+            style: StrokeStyle::Centerline1,
+        };
+        let json = serde_json::to_string(&mark).expect("encode");
+
+        assert!(
+            json.contains("centerline1"),
+            "not camelCase on the wire: {json}"
+        );
+        assert_eq!(mark, serde_json::from_str(&json).expect("decode"));
+    }
+
     #[test]
     fn refuses_a_bitmap_it_cannot_draw_on() {
         let mut bgr = Bitmap::new(200, 200, PixelOrder::Bgra).unwrap();
@@ -726,6 +1171,7 @@ mod tests {
                     a: 90,
                 },
                 width_pt: 0.0,
+                style: StrokeStyle::Solid,
             }],
             SCALE,
         )
@@ -761,6 +1207,7 @@ mod tests {
                         a: alpha,
                     },
                     width_pt: 0.0,
+                    style: StrokeStyle::Solid,
                 }],
                 SCALE,
             )
@@ -800,6 +1247,7 @@ mod tests {
                     a: 255,
                 },
                 width_pt: 0.0,
+                style: StrokeStyle::Solid,
             }],
             SCALE,
         )
@@ -879,6 +1327,7 @@ mod tests {
             },
             color,
             width_pt: 6.0,
+            style: StrokeStyle::Solid,
         };
 
         let mut bitmap = white_capture();
@@ -906,6 +1355,7 @@ mod tests {
                         from: at(10.0, 50.0),
                         to: at(90.0, 50.0),
                     },
+                    style: StrokeStyle::Solid,
                     color: red(),
                     width_pt,
                 }],
@@ -938,6 +1388,7 @@ mod tests {
                 },
                 color: red(),
                 width_pt: 2.5,
+                style: StrokeStyle::Solid,
             },
         );
     }
