@@ -1,7 +1,6 @@
 package com.hsilighting.pagify.ui.reader
 
 import androidx.compose.foundation.ScrollState
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -59,7 +58,10 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import com.hsilighting.pagify.ui.components.ReaderAction
+import com.hsilighting.pagify.ui.components.ReaderActionBar
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -78,12 +80,15 @@ import com.hsilighting.pagify.ui.components.AnnotationToolbar
 import com.hsilighting.pagify.ui.components.CaptureHint
 import com.hsilighting.pagify.ui.components.CaptureEditor
 import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.core.CaptureFill
 import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.CaptureScale
 import com.hsilighting.pagify.core.CaptureTile
 import com.hsilighting.pagify.core.PlacedPage
+import com.hsilighting.pagify.core.captureMaskFor
 import com.hsilighting.pagify.core.captureTilesFor
 import com.hsilighting.pagify.ui.components.captureOverlay
+import com.hsilighting.pagify.ui.components.doubleTapToZoom
 import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.defaultSize
@@ -132,6 +137,8 @@ fun PdfReaderScreen(
     onViewportWidth: (Float) -> Unit,
     onRotate: () -> Unit,
     onToggleThumbnails: () -> Unit,
+    /** The window is too narrow to give a quarter of it to the thumbnail rail. */
+    onNarrowScreen: () -> Unit,
     /** Start or stop the render-timeline recording. */
     onToggleRecording: () -> Unit,
     /** Fired on every zoom gesture event, to drive the blank-frame watcher. */
@@ -182,9 +189,12 @@ fun PdfReaderScreen(
         area: Rect,
         background: Long,
         originPage: Int,
+        mask: List<Offset>,
     ) -> Unit,
     onClearPage: (Int) -> Unit,
     onClearAll: () -> Unit,
+    /** Long-pressing the capture tool chose a shape. */
+    onCaptureLasso: (Boolean) -> Unit,
     /** The reader has taken the scroll a history step asked for. */
     onJumpHandled: () -> Unit,
     onShowMetadata: (Boolean) -> Unit,
@@ -207,6 +217,8 @@ fun PdfReaderScreen(
     /** Re-render the capture on screen at another resolution or in another format. */
     onCaptureScale: (CaptureScale) -> Unit,
     onCaptureFormat: (CaptureFormat) -> Unit,
+    /** What fills the capture where no page reaches. */
+    onCaptureFill: (CaptureFill) -> Unit,
     onSaveCapture: () -> Unit,
     onShareCapture: () -> Unit,
     onCopyCapture: () -> Unit,
@@ -227,7 +239,16 @@ fun PdfReaderScreen(
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
 ) {
+    // How much room the bar has, asked of the window rather than assumed from a
+    // device class: a tablet in portrait, a phone in landscape and a freeform
+    // window are the same question, and the width answers it for all three.
+    val compactWidth = LocalConfiguration.current.screenWidthDp < COMPACT_WIDTH_DP
+
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // Told once, when the width first says so. The rail costs a quarter of a
+    // phone screen, and the page is what someone opened the app for.
+    LaunchedEffect(compactWidth) { if (compactWidth) onNarrowScreen() }
 
     // Keyed on the message itself, so two different messages in a row both show
     // and the effect does not restart on every unrelated recomposition.
@@ -291,70 +312,84 @@ fun PdfReaderScreen(
                             onSave = onSaveDocument,
                             onSaveCopy = onSaveCopy,
                         )
-                        IconButton(onClick = onToggleRecording) {
-                            Icon(
-                                imageVector = if (state.isRecording) {
-                                    Icons.Filled.StopCircle
-                                } else {
-                                    Icons.Filled.FiberManualRecord
-                                },
-                                contentDescription = if (state.isRecording) {
-                                    "Stop recording and save the render timeline"
-                                } else {
-                                    "Record a render timeline"
-                                },
-                                tint = if (state.isRecording) {
-                                    MaterialTheme.colorScheme.error
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
+                        // Everything past this point folds into an overflow when
+                        // the bar is too narrow to hold it. Undo, redo and save
+                        // stay put at any width: they are what an edit needs.
+                        ReaderActionBar(
+                            hasRoom = !compactWidth,
+                            actions = listOf(
+                                ReaderAction(
+                                    icon = if (state.isRecording) {
+                                        Icons.Filled.StopCircle
+                                    } else {
+                                        Icons.Filled.FiberManualRecord
+                                    },
+                                    label = if (state.isRecording) {
+                                        "Stop recording and save the render timeline"
+                                    } else {
+                                        "Record a render timeline"
+                                    },
+                                    tint = if (state.isRecording) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    onClick = onToggleRecording,
+                                ),
+                                ReaderAction(
+                                    icon = Icons.AutoMirrored.Filled.ViewSidebar,
+                                    label = if (state.showThumbnails) {
+                                        "Hide page thumbnails"
+                                    } else {
+                                        "Show page thumbnails"
+                                    },
+                                    tint = if (state.showThumbnails) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    onClick = onToggleThumbnails,
+                                ),
+                                ReaderAction(
+                                    icon = Icons.AutoMirrored.Filled.RotateRight,
+                                    label = "Rotate",
+                                    onClick = onRotate,
+                                ),
+                                ReaderAction(
+                                    icon = Icons.Filled.GridView,
+                                    // The tint is the only thing distinguishing a
+                                    // document with unsaved page changes from one
+                                    // without, so it belongs in the label too.
+                                    label = if (state.editState.dirty) {
+                                        "Organise pages — unsaved changes"
+                                    } else {
+                                        "Organise pages"
+                                    },
+                                    tint = if (state.editState.dirty) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    onClick = { onShowPageOrganiser(true) },
+                                ),
+                                ReaderAction(
+                                    icon = Icons.Filled.Info,
+                                    label = "Document details",
+                                    onClick = { onShowMetadata(true) },
+                                ),
+                                ReaderAction(
+                                    icon = Icons.Filled.FolderOpen,
+                                    label = "Open a PDF",
+                                    onClick = onPickDocument,
+                                ),
+                            ),
+                        )
+                    } else {
+                        // Nothing open yet, so the only thing worth offering is
+                        // the way to open something.
+                        IconButton(onClick = onPickDocument) {
+                            Icon(Icons.Filled.FolderOpen, contentDescription = "Open a PDF")
                         }
-                        IconButton(onClick = onToggleThumbnails) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.ViewSidebar,
-                                contentDescription = if (state.showThumbnails) {
-                                    "Hide page thumbnails"
-                                } else {
-                                    "Show page thumbnails"
-                                },
-                                tint = if (state.showThumbnails) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
-                        }
-                        IconButton(onClick = onRotate) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.RotateRight,
-                                contentDescription = "Rotate",
-                            )
-                        }
-                        IconButton(onClick = { onShowPageOrganiser(true) }) {
-                            Icon(
-                                Icons.Filled.GridView,
-                                // The tint is the only thing distinguishing a
-                                // document with unsaved page changes from one
-                                // without, so it belongs in the label too.
-                                contentDescription = if (state.editState.dirty) {
-                                    "Organise pages — unsaved changes"
-                                } else {
-                                    "Organise pages"
-                                },
-                                tint = if (state.editState.dirty) {
-                                    MaterialTheme.colorScheme.primary
-                                } else {
-                                    MaterialTheme.colorScheme.onSurfaceVariant
-                                },
-                            )
-                        }
-                        IconButton(onClick = { onShowMetadata(true) }) {
-                            Icon(Icons.Filled.Info, contentDescription = "Document details")
-                        }
-                    }
-                    IconButton(onClick = onPickDocument) {
-                        Icon(Icons.Filled.FolderOpen, contentDescription = "Open a PDF")
                     }
                 },
             )
@@ -444,6 +479,7 @@ fun PdfReaderScreen(
                 // complaint that led here.
                 if (state.tool == AnnotationTool.Snapshot && state.capture == null) {
                     CaptureHint(
+                        lasso = state.captureLasso,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
                             .padding(bottom = 94.dp),
@@ -492,6 +528,8 @@ fun PdfReaderScreen(
                     marksInDocument = state.annotationsInDocument,
                     onClearPage = { onClearPage(state.currentPage) },
                     onClearAll = onClearAll,
+                    captureLasso = state.captureLasso,
+                    onCaptureLasso = onCaptureLasso,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 20.dp),
@@ -518,6 +556,8 @@ fun PdfReaderScreen(
                 onCommitMarkup = onCommitMarkup,
                 onRecogniseMarkup = onRecogniseMarkup,
                 onUndoMarkup = onUndoMarkup,
+                fill = state.captureFill,
+                onFillChange = onCaptureFill,
                 onSaveToGallery = onSaveCapture,
                 onShare = onShareCapture,
                 onCopy = onCopyCapture,
@@ -611,6 +651,7 @@ private fun PageList(
         area: Rect,
         background: Long,
         originPage: Int,
+        mask: List<Offset>,
     ) -> Unit,
     onJumpHandled: () -> Unit,
     onPageVisible: (Int) -> Unit,
@@ -771,6 +812,7 @@ private fun PageList(
                 },
                 textSegments = pinnedSegments,
                 tool = state.tool,
+                captureLasso = state.captureLasso,
                 penMode = state.penMode,
                 penColor = state.penColor,
                 onAddAnnotation = onAddAnnotation,
@@ -805,6 +847,7 @@ private fun PageList(
             }
 
             fun enterZoom(position: Offset, targetZoom: Float) {
+                SessionRecorder.record("ZOOM_ENTER", "target=$targetZoom at=$position")
                 val (page, fraction) = focusAt(position) ?: return
                 recenterRequest = fraction
                 onZoomInOn(page, targetZoom)
@@ -951,15 +994,17 @@ private fun PageList(
                                 pinchProgress = 1f
                             }
                         }
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onDoubleTap = {
-                                    onZoomActivity()
-                                    // A double-tap is a request for a specific
-                                    // magnification, so the jump here is the point.
-                                    enterZoom(it, DOUBLE_TAP_ZOOM)
-                                },
-                            )
+                        // Watched on the Initial pass, not detected on the Main
+                        // one: every page carries its own tap handler, a child is
+                        // served first, and `detectTapGestures` consumes what it
+                        // handles — so the zoom never saw a tap at all. See
+                        // `doubleTapToZoom`.
+                        .doubleTapToZoom { position ->
+                            SessionRecorder.record("ZOOM_DTAP_LIST", "at=$position")
+                            onZoomActivity()
+                            // A double-tap is a request for a specific
+                            // magnification, so the jump here is the point.
+                            enterZoom(position, DOUBLE_TAP_ZOOM)
                         },
                 ) {
                     // The rail takes its width out of the reader, so pages must be
@@ -1042,7 +1087,7 @@ private fun PageList(
                                 .onGloballyPositioned {
                                     overlayOrigin = it.boundsInWindow().topLeft
                                 }
-                                .captureOverlay { local ->
+                                .captureOverlay(lasso = state.captureLasso) { local, ring ->
                                     val box = local.translate(overlayOrigin.x, overlayOrigin.y)
                                     val pages = pageBounds.entries
                                         .sortedBy { it.key }
@@ -1072,6 +1117,14 @@ private fun PageList(
                                         // like it looked on screen.
                                         readerBackground,
                                         tiles.firstOrNull()?.pageIndex ?: state.currentPage,
+                                        // The ring is in the overlay's own
+                                        // pixels like the box was, so it moves
+                                        // to window space the same way before
+                                        // being made relative to the picture.
+                                        captureMaskFor(
+                                            box,
+                                            ring.map { it + overlayOrigin },
+                                        ),
                                     )
                                 },
                         )
@@ -1304,3 +1357,12 @@ private const val DOUBLE_TAP_ZOOM = 2.5f
 /** How long to ignore visibility echoes after scrolling the reader ourselves. */
 private const val SCROLL_SETTLE_MILLIS = 250L
 
+
+/**
+ * Below this width the top bar folds its extras into an overflow.
+ *
+ * 600dp is the platform's own compact/medium boundary, and it lands where it
+ * needs to: a phone in portrait is around 360dp and cannot hold nine icon
+ * buttons, while a tablet in portrait is 800 and holds them comfortably.
+ */
+private const val COMPACT_WIDTH_DP = 600

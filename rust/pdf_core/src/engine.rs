@@ -7,12 +7,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::command::Command;
-use crate::document::{Document, RegionRequest, RenderRequest, Rotation};
+use crate::document::Color;
+use crate::document::{Document, Point, RegionRequest, RenderRequest, Rotation};
 use crate::error::{PdfError, Result};
 use crate::registry::DocumentSession;
 use crate::render::bitmap::{Bitmap, PixelOrder};
-use crate::document::Color;
-use crate::render::{CacheKey, ImageFormat, Markup, RegionPixels, RenderTarget, ViewportPlan, ViewportRequest};
+use crate::render::{
+    CacheKey, ImageFormat, Markup, RegionPixels, RenderTarget, ViewportPlan, ViewportRequest,
+};
 
 /// Pixel dimensions a page occupies for the given request, accounting for rotation.
 pub fn page_pixel_size(
@@ -110,7 +112,10 @@ pub fn prefetch_page(
 
     // Size first, without loading the page: if the raster would be too large to
     // cache there is no point paying for a page load at all.
-    let (mut w, mut h) = session.document.page_size(index)?.pixel_size(effective.scale);
+    let (mut w, mut h) = session
+        .document
+        .page_size(index)?
+        .pixel_size(effective.scale);
     if effective.rotation.swaps_axes() {
         std::mem::swap(&mut w, &mut h);
     }
@@ -166,11 +171,8 @@ pub fn export_region(
         // pure function of the same three inputs, so the two agree by
         // construction — including when the ceiling lowered the scale, which is
         // exactly the case where a separately-computed transform would drift.
-        let region = RegionPixels::resolve(
-            document.page_size(index)?,
-            request.crop,
-            request.scale,
-        )?;
+        let region =
+            RegionPixels::resolve(document.page_size(index)?, request.crop, request.scale)?;
         crate::render::markup::composite(&mut bitmap, marks, region.scale)?;
     }
 
@@ -198,6 +200,8 @@ pub fn export_viewport(
     request: &ViewportRequest,
     format: ImageFormat,
     marks: &[Markup],
+    // The ring to keep, in capture units; empty means the whole rectangle.
+    mask: &[Point],
 ) -> Result<Vec<u8>> {
     let plan = ViewportPlan::resolve(request)?;
     let mut bitmap = Bitmap::new(plan.width, plan.height, PixelOrder::Rgba)?;
@@ -222,6 +226,13 @@ pub fn export_viewport(
         };
 
         blit(&mut bitmap, &rendered, placed.left, placed.top);
+    }
+
+    // Before the marks, not after. A mark drawn near the edge of the ring is
+    // still the user's mark; erasing it because the finger strayed a pixel
+    // outside would be the tool eating the annotation it was made for.
+    if !mask.is_empty() {
+        crate::render::markup::mask_outside(&mut bitmap, mask, plan.scale, request.background)?;
     }
 
     if !marks.is_empty() {
@@ -274,7 +285,6 @@ fn blit(destination: &mut Bitmap, source: &Bitmap, left: i32, top: i32) {
             .copy_from_slice(&source.data[source_start..source_end]);
     }
 }
-
 
 // ------------------------------------------------------------------- editing --
 
@@ -886,7 +896,10 @@ mod tests {
         let (undone, _) = undo(&mut session).unwrap();
         let (redone, _) = redo(&mut session).unwrap();
 
-        assert!(!undone, "nothing to undo is a no-op, not a thrown exception");
+        assert!(
+            !undone,
+            "nothing to undo is a no-op, not a thrown exception"
+        );
         assert!(!redone);
     }
 
@@ -1046,10 +1059,7 @@ mod tests {
         let marks = [
             highlight_over(30.0),
             Annotation::Ink {
-                strokes: vec![vec![
-                    Point { x: 1.0, y: 2.0 },
-                    Point { x: 3.0, y: 4.0 },
-                ]],
+                strokes: vec![vec![Point { x: 1.0, y: 2.0 }, Point { x: 3.0, y: 4.0 }]],
                 color: yellow(),
                 width: 3.5,
             },

@@ -222,6 +222,8 @@ internal object NativeBridge {
      * @param format `"png"` or `"jpeg"`.
      * @param quality 1–100, ignored for PNG.
      * @param markupJson marks to draw on it, in capture units. `[]` for none.
+     * @param maskJson a ring to keep, in capture units; everything outside it is
+     *   painted over with [background]. `[]` captures the whole rectangle.
      */
     @Throws(PdfException::class)
     external fun captureViewport(
@@ -234,6 +236,7 @@ internal object NativeBridge {
         format: String,
         quality: Int,
         markupJson: String,
+        maskJson: String,
     ): ByteArray
 
     /**

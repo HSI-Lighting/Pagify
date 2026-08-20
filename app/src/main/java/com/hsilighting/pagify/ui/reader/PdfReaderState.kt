@@ -5,6 +5,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.ImageBitmap
 import com.hsilighting.pagify.core.AnnotationColors
+import com.hsilighting.pagify.core.CaptureFill
 import com.hsilighting.pagify.core.CaptureRequest
 import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.MarkupTool
@@ -43,6 +44,20 @@ data class PdfReaderState(
     val showMetadataSheet: Boolean = false,
     /** The thumbnail rail. On by default: it is the cheap way to move around. */
     val showThumbnails: Boolean = true,
+    /**
+     * The capture tool draws a ring instead of dragging a box.
+     *
+     * Sticky, like the pen colour: someone lifting several details off one
+     * drawing should not have to re-choose the shape between each.
+     */
+    val captureLasso: Boolean = false,
+    /**
+     * What fills a capture where no page reaches.
+     *
+     * Sticky like the shape and the scale: someone lifting several
+     * details onto the same slide wants the same fill behind each.
+     */
+    val captureFill: CaptureFill = CaptureFill.PAGE,
     /** A render-timeline recording is in progress. See `SessionRecorder`. */
     val isRecording: Boolean = false,
 

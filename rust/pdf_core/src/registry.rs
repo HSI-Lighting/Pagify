@@ -108,7 +108,10 @@ pub fn insert_with(open: impl FnOnce() -> Result<Box<dyn Document>>) -> Result<i
 /// of the *same* process, which is acceptable because PDFium is itself serialised
 /// by pdfium-render's `thread_safe` feature — a finer-grained lock here would buy
 /// no parallelism while adding a second way to deadlock.
-pub fn with_session<T>(handle: i64, f: impl FnOnce(&mut DocumentSession) -> Result<T>) -> Result<T> {
+pub fn with_session<T>(
+    handle: i64,
+    f: impl FnOnce(&mut DocumentSession) -> Result<T>,
+) -> Result<T> {
     let mut guard = lock();
     let session = guard
         .get_mut(&handle)

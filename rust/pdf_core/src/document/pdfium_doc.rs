@@ -1,24 +1,22 @@
 //! Read-only [`Document`] backed by PDFium — the phase 1 implementation.
 
-use std::fs::File;
 use std::ffi::c_void;
+use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::os::raw::{c_int, c_uint, c_ulong};
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::{
-    PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfPage, PdfPageRenderRotation,
-    PdfPagePaperSize, PdfPoints, PdfRenderConfig, Pdfium, PdfiumLibraryBindingsAccessor,
+    PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfPage, PdfPagePaperSize,
+    PdfPageRenderRotation, PdfPoints, PdfRenderConfig, Pdfium, PdfiumLibraryBindingsAccessor,
     FPDFANNOT_COLORTYPE, FPDF_ANNOTATION, FPDF_ANNOTATION_SUBTYPE, FPDF_DOCUMENT, FPDF_FILEWRITE,
     FPDF_PAGE, FS_POINTF, FS_QUADPOINTSF, FS_RECTF,
 };
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
-    PageCharacters,
-    Annotation, Color, Document, DocumentMut, IndexedAnnotation, Page, PageSize, Point, Rect,
-    RegionRequest, RemovedPage, RenderRequest, Rotation,
-    TextSegment,
+    Annotation, Color, Document, DocumentMut, IndexedAnnotation, Page, PageCharacters, PageSize,
+    Point, Rect, RegionRequest, RemovedPage, RenderRequest, Rotation, TextSegment,
 };
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
 use crate::render::bitmap::{self, Bitmap, PixelOrder};
@@ -61,7 +59,9 @@ pub enum DocumentSource {
     Path(String),
     /// A file descriptor handed over by the Storage Access Framework.
     FileDescriptor(i32),
-    Memory { byte_len: usize },
+    Memory {
+        byte_len: usize,
+    },
 }
 
 pub struct PdfiumDocument {
@@ -163,7 +163,6 @@ impl PdfiumDocument {
     pub fn source(&self) -> &DocumentSource {
         &self.source
     }
-
 
     /// Save through `FPDF_SaveWithVersion`, which is the only route to the
     /// incremental flag; the binding's own save hardcodes flags to zero.
@@ -663,12 +662,17 @@ impl DocumentMut for PdfiumDocument {
             .get(page_index)
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
-        Ok(match page.rotation().map_err(|e| PdfError::Pdfium(e.to_string()))? {
-            PdfPageRenderRotation::Degrees90 => 1,
-            PdfPageRenderRotation::Degrees180 => 2,
-            PdfPageRenderRotation::Degrees270 => 3,
-            _ => 0,
-        })
+        Ok(
+            match page
+                .rotation()
+                .map_err(|e| PdfError::Pdfium(e.to_string()))?
+            {
+                PdfPageRenderRotation::Degrees90 => 1,
+                PdfPageRenderRotation::Degrees180 => 2,
+                PdfPageRenderRotation::Degrees270 => 3,
+                _ => 0,
+            },
+        )
     }
 
     fn add_annotation(&mut self, page_index: usize, annotation: &Annotation) -> Result<usize> {
@@ -699,12 +703,16 @@ impl DocumentMut for PdfiumDocument {
         let page_number = i32::try_from(page_index).map_err(|_| {
             PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
         })?;
-        let annot_index = i32::try_from(index)
-            .map_err(|_| PdfError::InvalidArgument(format!("annotation index {index} is out of range")))?;
+        let annot_index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument(format!("annotation index {index} is out of range"))
+        })?;
 
         let page = RawPage::open(self.document.handle(), page_number)?;
-        let removed =
-            unsafe { pdfium()?.bindings().FPDFPage_RemoveAnnot(page.handle, annot_index) };
+        let removed = unsafe {
+            pdfium()?
+                .bindings()
+                .FPDFPage_RemoveAnnot(page.handle, annot_index)
+        };
         if removed == 0 {
             return Err(PdfError::Pdfium(format!(
                 "page {page_index} has no annotation at index {index}"
@@ -851,9 +859,8 @@ impl DocumentMut for PdfiumDocument {
                 count: self.page_count,
             });
         }
-        let destination = i32::try_from(at).map_err(|_| {
-            PdfError::InvalidArgument(format!("page index {at} is out of range"))
-        })?;
+        let destination = i32::try_from(at)
+            .map_err(|_| PdfError::InvalidArgument(format!("page index {at} is out of range")))?;
 
         // The payload is a one-page document; importing from it puts the original
         // content back rather than a blank page of the same size.
@@ -908,7 +915,10 @@ impl DocumentMut for PdfiumDocument {
 
         for position in 0..wanted.len() {
             let target = wanted[position];
-            let at = current.iter().position(|&p| p == target).unwrap_or(position);
+            let at = current
+                .iter()
+                .position(|&p| p == target)
+                .unwrap_or(position);
             if at == position {
                 continue;
             }
@@ -931,7 +941,6 @@ impl DocumentMut for PdfiumDocument {
         self.dirty = true;
         Ok(())
     }
-
 
     fn is_dirty(&self) -> bool {
         self.dirty
@@ -1325,7 +1334,10 @@ mod page_space_tests {
         assert!(old < 0.0, "the old conversion put this run above the page");
 
         let (_, new) = price_list().to_top_left(65.78, 698.32);
-        assert!((new - old - 90.0).abs() < 0.01, "the inset is exactly 90 pt");
+        assert!(
+            (new - old - 90.0).abs() < 0.01,
+            "the inset is exactly 90 pt"
+        );
     }
 
     #[test]
@@ -1426,8 +1438,9 @@ impl PdfiumDocument {
                     // Sized first with a null buffer, as every counted PDFium
                     // getter wants: asking for the length and the data in one call
                     // is what silently truncates a long stroke.
-                    let len =
-                        unsafe { bindings.FPDFAnnot_GetInkListPath(annot, path, std::ptr::null_mut(), 0) };
+                    let len = unsafe {
+                        bindings.FPDFAnnot_GetInkListPath(annot, path, std::ptr::null_mut(), 0)
+                    };
                     if len == 0 {
                         continue;
                     }
@@ -1674,7 +1687,9 @@ fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.is_empty() || haystack.len() < needle.len() {
         return None;
     }
-    (0..=haystack.len() - needle.len()).rev().find(|&i| &haystack[i..i + needle.len()] == needle)
+    (0..=haystack.len() - needle.len())
+        .rev()
+        .find(|&i| &haystack[i..i + needle.len()] == needle)
 }
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -1711,8 +1726,7 @@ mod trailing_object_tests {
         //
         // The `xref` keyword sits at offset 32 here, which is what `startxref`
         // says, so nothing may be inserted before it.
-        let classic =
-            b"1 0 obj
+        let classic = b"1 0 obj
 <<>>stream
 xx
 endstream
@@ -1724,8 +1738,12 @@ startxref
 32
 %%EOF
 "
-                .to_vec();
-        assert_eq!(b"xref", &classic[32..36], "the fixture's own offset is wrong");
+        .to_vec();
+        assert_eq!(
+            b"xref",
+            &classic[32..36],
+            "the fixture's own offset is wrong"
+        );
         assert_eq!(classic.clone(), close_trailing_xref_object(classic));
     }
 
@@ -1733,7 +1751,8 @@ startxref
     fn a_classic_xref_table_is_left_alone() {
         // No stream at the end at all — the small fixtures, and every file that
         // saved cleanly before this was found.
-        let classic = b"xref\n0 1\n0000000000 65535 f \ntrailer\n<<>>\nstartxref\n9\n%%EOF\n".to_vec();
+        let classic =
+            b"xref\n0 1\n0000000000 65535 f \ntrailer\n<<>>\nstartxref\n9\n%%EOF\n".to_vec();
         assert_eq!(classic.clone(), close_trailing_xref_object(classic));
     }
 
@@ -1750,12 +1769,16 @@ endobj
 startxref
 0
 %%EOF
-".to_vec();
+"
+        .to_vec();
         let fixed = close_trailing_xref_object(broken);
         let text = String::from_utf8_lossy(&fixed);
 
         assert!(text.contains("/Type/XRef"), "got {text}");
-        assert!(text.contains("/Size 5"), "the rest of the dictionary survives: {text}");
+        assert!(
+            text.contains("/Size 5"),
+            "the rest of the dictionary survives: {text}"
+        );
     }
 
     #[test]
@@ -1768,7 +1791,8 @@ endobj
 startxref
 0
 %%EOF
-".to_vec();
+"
+        .to_vec();
         let fixed = close_trailing_xref_object(good.clone());
 
         assert_eq!(good, fixed);

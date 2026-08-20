@@ -356,9 +356,8 @@ fn convex_hull(points: &[Point]) -> Vec<Point> {
         return sorted;
     }
 
-    let cross = |o: Point, a: Point, b: Point| {
-        (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
-    };
+    let cross =
+        |o: Point, a: Point, b: Point| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
 
     let mut hull: Vec<Point> = Vec::with_capacity(sorted.len() * 2);
     for &p in sorted.iter().chain(sorted.iter().rev()) {

@@ -24,6 +24,7 @@ import com.hsilighting.pagify.core.AnnotationStore
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.BitmapPools
 import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.core.CaptureFill
 import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.CaptureRequest
 import com.hsilighting.pagify.core.CaptureScale
@@ -107,6 +108,11 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             // Carried across the reset so it keeps increasing; a fresh state would
             // put it back to zero and the effects keyed on it would not re-run.
             documentRevision = _state.value.documentRevision,
+            // Carried for the same reason: the rail is hidden once on a
+            // narrow screen, and a fresh state would put it back over the
+            // page every time a document was opened. The hide is a
+            // decision about the screen, not about the document.
+            showThumbnails = _state.value.showThumbnails,
         )
 
         viewModelScope.launch {
@@ -420,6 +426,22 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     fun showMetadata(show: Boolean) = _state.update { it.copy(showMetadataSheet = show) }
 
     fun toggleThumbnails() = _state.update { it.copy(showThumbnails = !it.showThumbnails) }
+
+    /**
+     * The reader is on a narrow screen; put the thumbnail rail away.
+     *
+     * Once, and only once. The rail is 104dp, which is a quarter of a phone in
+     * portrait and takes that quarter from the page — but a reader who turns it
+     * back on means it, and a rule that hid it on every recomposition would be
+     * arguing with them.
+     */
+    fun onNarrowScreen() {
+        if (railHiddenForNarrowScreen) return
+        railHiddenForNarrowScreen = true
+        _state.update { it.copy(showThumbnails = false) }
+    }
+
+    private var railHiddenForNarrowScreen = false
 
     // ---------------------------------------------------------- annotations --
 
@@ -1516,17 +1538,31 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * page sits on a screen. A capture that stopped at the page the drag began on
      * is what made this feel broken: a box drawn across a page join came back
      * holding half of what was inside it.
+     *
+     * [mask] is the lasso's ring, in capture units and empty for a plain box. It
+     * is carried on the request rather than applied once, so re-exporting at 4×
+     * keeps the shape someone drew instead of quietly reverting to its box.
      */
-    fun capture(tiles: List<CaptureTile>, area: Rect, background: Long, originPage: Int) {
+    fun capture(
+        tiles: List<CaptureTile>,
+        area: Rect,
+        background: Long,
+        originPage: Int,
+        mask: List<Offset> = emptyList(),
+    ) {
         if (tiles.isEmpty() || !area.isWorthCapturing()) return
+        // Remembered before it is overridden, so "the page" is still an
+        // answer after another fill has been chosen.
+        readerBackground = background
         val existing = _state.value.capture?.request
         takeCapture(
             CaptureRequest(
                 tiles = tiles,
                 width = area.width,
                 height = area.height,
-                background = background,
+                background = _state.value.captureFill.colour ?: background,
                 originPage = originPage,
+                mask = mask,
                 // Whatever was chosen last, so a second capture does not silently
                 // come back at a different resolution from the first.
                 scale = existing?.scale ?: CaptureScale.X2,
@@ -1534,6 +1570,40 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             ),
         )
     }
+
+    /**
+     * Choose what fills the capture where no page reaches.
+     *
+     * Re-renders what is on screen rather than only applying to the next capture:
+     * the fill is a decision about the picture in front of you, and the way to
+     * judge it is to see it.
+     *
+     * Picking [CaptureFill.TRANSPARENT] also moves the export to PNG, because JPEG
+     * has no alpha channel: leaving it on JPEG would flatten the cut-out back to a
+     * colour and hand back a picture that quietly ignored the choice.
+     */
+    fun setCaptureFill(fill: CaptureFill) {
+        if (_state.value.captureFill == fill) return
+        _state.update { it.copy(captureFill = fill) }
+
+        val request = _state.value.capture?.request ?: return
+        takeCapture(
+            request.copy(
+                background = fill.colour ?: readerBackground,
+                format = if (fill == CaptureFill.TRANSPARENT) CaptureFormat.PNG else request.format,
+            ),
+        )
+    }
+
+    /**
+     * The reader's own backdrop, as of the last capture.
+     *
+     * Kept so [CaptureFill.PAGE] can be chosen again after another fill has
+     * overwritten the request's colour. Only the reader knows this — it comes from
+     * the theme — and by the time the editor is open the reader is not on screen
+     * to ask.
+     */
+    private var readerBackground: Long = 0xFFFFFFFFL
 
     /** Re-render the capture on screen at a different resolution. */
     fun setCaptureScale(scale: CaptureScale) {
@@ -1611,6 +1681,15 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
         return decoded.asImageBitmap()
     }
+
+    /**
+     * Choose between dragging a box and drawing a ring.
+     *
+     * Remembered rather than reset after each capture: lifting six details
+     * off one drawing is the case this tool is for, and re-choosing the shape
+     * between each of them is six long presses nobody would forgive.
+     */
+    fun setCaptureLasso(lasso: Boolean) = _state.update { it.copy(captureLasso = lasso) }
 
     fun dismissCapture() = _state.update { it.copy(capture = null, markup = emptyList()) }
 

@@ -104,6 +104,7 @@ class PdfDocument private constructor(
             request.format.wireName,
             request.quality,
             markup.toWireJson(),
+            request.mask.strokeToWireJson(),
         )
 
     /**

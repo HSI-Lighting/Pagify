@@ -3,7 +3,6 @@ package com.hsilighting.pagify.ui.reader
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -32,6 +31,7 @@ import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.CaptureTile
 import com.hsilighting.pagify.core.PlacedPage
 import com.hsilighting.pagify.core.SessionRecorder
+import com.hsilighting.pagify.core.captureMaskFor
 import com.hsilighting.pagify.core.captureTilesFor
 import com.hsilighting.pagify.core.zoomedPageBounds
 import com.hsilighting.pagify.core.PageSize
@@ -41,6 +41,7 @@ import com.hsilighting.pagify.core.RenderScale
 import com.hsilighting.pagify.ui.components.ViewportWindow
 import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.captureOverlay
+import com.hsilighting.pagify.ui.components.doubleTapToZoom
 import com.hsilighting.pagify.ui.components.pinchToZoom
 import com.hsilighting.pagify.ui.components.twoFingerPanXY
 import kotlinx.coroutines.delay
@@ -120,12 +121,15 @@ fun ZoomedPage(
     onEraseStart: () -> Unit,
     onErase: (point: Offset, tolerancePoints: Float) -> Unit,
     onEraseEnd: () -> Unit,
+    /** Whether the capture tool draws a ring instead of dragging a box. */
+    captureLasso: Boolean,
     /** A box was dragged around part of the page; capture what it framed. */
     onCaptureViewport: (
         tiles: List<CaptureTile>,
         area: Rect,
         background: Long,
         originPage: Int,
+        mask: List<Offset>,
     ) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -200,6 +204,7 @@ fun ZoomedPage(
         LaunchedEffect(Unit) {
             snapshotFlow { scale }.collectLatest { settled ->
                 delay(SETTLE_MILLIS)
+                SessionRecorder.record("ZOOM_SETTLED", "scale=$settled")
                 committedScale = settled
                 onZoomSettled(settled)
             }
@@ -313,29 +318,29 @@ fun ZoomedPage(
                         }
                     },
                 )
-                .pointerInput(Unit) {
-                    detectTapGestures(
-                        onDoubleTap = { position ->
-                            onZoomActivity()
-                            // Back to fit-width, about the tapped point. Reported
-                            // immediately rather than after the settle delay so the
-                            // pinned page is released without a visible lag.
-                            if (scale > PdfReaderState.FIT_WIDTH_ZOOM + 0.01f) {
-                                zoomAbout(PdfReaderState.FIT_WIDTH_ZOOM / scale, position)
-                            } else {
-                                zoomAbout(DOUBLE_TAP_ZOOM / scale, position)
-                            }
-                            committedScale = scale
-                            onZoomSettled(scale)
-                        },
-                    )
+                // Watched rather than detected, for the same reason as the list:
+                // the annotation surface below handles taps and consumes them, so
+                // a detector here is starved. See `doubleTapToZoom`.
+                .doubleTapToZoom { position ->
+                    SessionRecorder.record("ZOOM_DTAP_PINNED", "scale=$scale")
+                    onZoomActivity()
+                    // Back to fit-width, about the tapped point. Reported
+                    // immediately rather than after the settle delay so the
+                    // pinned page is released without a visible lag.
+                    if (scale > PdfReaderState.FIT_WIDTH_ZOOM + 0.01f) {
+                        zoomAbout(PdfReaderState.FIT_WIDTH_ZOOM / scale, position)
+                    } else {
+                        zoomAbout(DOUBLE_TAP_ZOOM / scale, position)
+                    }
+                    committedScale = scale
+                    onZoomSettled(scale)
                 }
                 // Capture is dragged here too, not only in the list. The zoomed
                 // view is a separate composable, and leaving it out is what made
                 // the snapshot tool do nothing the moment a page was zoomed into.
                 .then(
                     if (tool == AnnotationTool.Snapshot && pageSize != null) {
-                        Modifier.captureOverlay { box ->
+                        Modifier.captureOverlay(lasso = captureLasso) { box, ring ->
                             // The page is drawn translated by `offset` at `scale`,
                             // in this element's own pixels — the same frame the drag
                             // is reported in, so nothing needs converting.
@@ -353,7 +358,16 @@ fun ZoomedPage(
                                     "${onScreen.right.toInt()},${onScreen.bottom.toInt()} " +
                                     "tiles=${tiles.size}",
                             )
-                            onCaptureViewport(tiles, box, captureBackground, pageIndex)
+                            // No translation here: the ring, the box and the
+                            // page rectangle are all in this element's own
+                            // pixels already.
+                            onCaptureViewport(
+                                tiles,
+                                box,
+                                captureBackground,
+                                pageIndex,
+                                captureMaskFor(box, ring),
+                            )
                         }
                     } else {
                         Modifier

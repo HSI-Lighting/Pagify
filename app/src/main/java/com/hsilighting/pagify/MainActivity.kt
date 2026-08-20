@@ -153,10 +153,12 @@ class MainActivity : ComponentActivity() {
                     onCopySelection = viewModel::copySelection,
                     onHighlightSelection = viewModel::highlightSelection,
                     onCaptureViewport = viewModel::capture,
+                    onCaptureLasso = viewModel::setCaptureLasso,
                     onJumpHandled = viewModel::jumpHandled,
                     onViewportWidth = viewModel::onViewportWidthChanged,
                     onRotate = viewModel::rotate,
                     onToggleThumbnails = viewModel::toggleThumbnails,
+                    onNarrowScreen = viewModel::onNarrowScreen,
                     onToggleRecording = {
                         // App-private external storage, so the file can be pulled
                         // with adb without any permission prompt.
@@ -181,6 +183,7 @@ class MainActivity : ComponentActivity() {
                     onMessageShown = viewModel::messageShown,
                     onCaptureScale = viewModel::setCaptureScale,
                     onCaptureFormat = viewModel::setCaptureFormat,
+                    onCaptureFill = viewModel::setCaptureFill,
                     onSaveCapture = {
                         if (CaptureExport.galleryNeedsPermission()) {
                             storagePermission.launch(WRITE_EXTERNAL_STORAGE)

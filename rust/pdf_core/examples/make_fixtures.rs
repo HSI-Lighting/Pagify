@@ -36,7 +36,12 @@ fn main() {
     write(
         &pdfium,
         &format!("{out}/mixed-sizes.pdf"),
-        &[(595.0, 842.0), (420.0, 595.0), (612.0, 792.0), (842.0, 1191.0)],
+        &[
+            (595.0, 842.0),
+            (420.0, 595.0),
+            (612.0, 792.0),
+            (842.0, 1191.0),
+        ],
     );
     write_quadrants(&pdfium, &format!("{out}/quadrants.pdf"));
     write_spread(&pdfium, &format!("{out}/spread.pdf"));
@@ -70,12 +75,17 @@ fn write_text_lines(pdfium: &Pdfium, path: &str) {
     // Well apart vertically, so a test can aim at one line without ambiguity
     // about which it hit.
     for (index, line) in TEXT_LINES.iter().enumerate() {
-        let mut object = PdfPageTextObject::new(&doc, line, font, PdfPoints::new(14.0))
-            .expect("build the line");
+        let mut object =
+            PdfPageTextObject::new(&doc, line, font, PdfPoints::new(14.0)).expect("build the line");
         object
-            .translate(PdfPoints::new(40.0), PdfPoints::new(240.0 - index as f32 * 60.0))
+            .translate(
+                PdfPoints::new(40.0),
+                PdfPoints::new(240.0 - index as f32 * 60.0),
+            )
             .expect("place the line");
-        page.objects_mut().add_text_object(object).expect("add the line");
+        page.objects_mut()
+            .add_text_object(object)
+            .expect("add the line");
     }
 
     page.regenerate_content().expect("regenerate");
@@ -92,10 +102,7 @@ fn write_text_lines(pdfium: &Pdfium, path: &str) {
 /// since the bottom of one page and the top of the next are the same shape.
 fn write_spread(pdfium: &Pdfium, path: &str) {
     const SIDE: f32 = 400.0;
-    let colours = [
-        PdfColor::new(255, 0, 0, 255),
-        PdfColor::new(0, 0, 255, 255),
-    ];
+    let colours = [PdfColor::new(255, 0, 0, 255), PdfColor::new(0, 0, 255, 255)];
 
     let mut doc = pdfium.create_new_pdf().expect("create");
     for colour in colours {
@@ -115,7 +122,9 @@ fn write_spread(pdfium: &Pdfium, path: &str) {
             Some(colour),
         )
         .expect("build page fill");
-        page.objects_mut().add_path_object(object).expect("add fill");
+        page.objects_mut()
+            .add_path_object(object)
+            .expect("add fill");
         page.regenerate_content().expect("regenerate");
     }
 
@@ -160,7 +169,9 @@ fn write_quadrants(pdfium: &Pdfium, path: &str) {
         let rect = PdfRect::new_from_values(bottom, left, top, right);
         let object = PdfPagePathObject::new_rect(&doc, rect, None, None, Some(colour))
             .expect("build quadrant");
-        page.objects_mut().add_path_object(object).expect("add quadrant");
+        page.objects_mut()
+            .add_path_object(object)
+            .expect("add quadrant");
     }
 
     page.regenerate_content().expect("regenerate");

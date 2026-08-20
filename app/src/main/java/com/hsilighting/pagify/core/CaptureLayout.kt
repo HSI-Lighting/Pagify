@@ -96,3 +96,79 @@ fun zoomedPageBounds(
     right = offset.x + baseWidthPx * scale,
     bottom = offset.y + baseHeightPx * scale,
 )
+
+/**
+ * The rectangle a drawn ring will be captured as.
+ *
+ * An image is a rectangle, so a lasso still produces one: its bounding box. What
+ * the ring changes is what survives *inside* that box — see [captureMaskFor].
+ *
+ * Returns null for anything that does not enclose a usable area, which is a
+ * stricter question than "is the box big enough". Measured on a phone: a drag
+ * straight across the page in lasso mode passes every size check — a 500-pixel
+ * box — and encloses nothing at all, so the capture came back blank and the
+ * editor opened on an empty grey rectangle. The area is what the ring means.
+ */
+fun lassoBounds(outline: List<Offset>): Rect? {
+    if (outline.size < 3) return null
+    var left = Float.MAX_VALUE
+    var top = Float.MAX_VALUE
+    var right = -Float.MAX_VALUE
+    var bottom = -Float.MAX_VALUE
+    for (point in outline) {
+        if (!point.x.isFinite() || !point.y.isFinite()) return null
+        left = minOf(left, point.x)
+        top = minOf(top, point.y)
+        right = maxOf(right, point.x)
+        bottom = maxOf(bottom, point.y)
+    }
+    val box = Rect(left, top, right, bottom)
+    if (!box.isWorthCapturing()) return null
+
+    val enclosed = enclosedArea(outline)
+    // Two floors, because they catch different mistakes. The absolute one rejects
+    // a ring around nothing; the proportional one rejects a long thin smear, which
+    // has plenty of absolute area and still shows almost nothing of the page.
+    if (enclosed < MINIMUM_CAPTURE_POINTS * MINIMUM_CAPTURE_POINTS) return null
+    if (enclosed < box.width * box.height * MINIMUM_RING_FULLNESS) return null
+    return box
+}
+
+/**
+ * How much a drawn ring actually encloses, by the shoelace formula.
+ *
+ * Unsigned, because a ring drawn anticlockwise encloses exactly as much as the
+ * same ring drawn clockwise. Closed for us, as everywhere else the ring is
+ * treated: the last point joins the first.
+ */
+private fun enclosedArea(outline: List<Offset>): Float {
+    var twiceArea = 0f
+    for (index in outline.indices) {
+        val here = outline[index]
+        val next = outline[(index + 1) % outline.size]
+        twiceArea += here.x * next.y - next.x * here.y
+    }
+    return kotlin.math.abs(twiceArea) / 2f
+}
+
+/**
+ * The least of its own bounding box a ring may enclose.
+ *
+ * Low on purpose: a ring around an L-shaped detail, or a crescent along the edge
+ * of a drawing, is a legitimate shape that fills very little of its box. This is
+ * only here to reject the shapes that enclose *nothing* — a straight drag, a
+ * scribble back and forth — which no amount of size checking catches.
+ */
+private const val MINIMUM_RING_FULLNESS = 0.02f
+
+/**
+ * A drawn ring in the picture's own coordinates.
+ *
+ * The same move `captureTilesFor` makes for a tile's destination: the picture's
+ * origin is the drag's top-left, not the reader's, so every point shifts by the
+ * bounding box's corner. Without it the ring would be masked against the top-left
+ * of the screen and the capture would come back almost entirely blank — the kind
+ * of mistake that produces a plausible picture of the wrong thing.
+ */
+fun captureMaskFor(drag: Rect, outline: List<Offset>): List<Offset> =
+    if (outline.size < 3) emptyList() else outline.map { it - drag.topLeft }

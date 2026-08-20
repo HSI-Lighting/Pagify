@@ -13,7 +13,7 @@
 mod harness;
 
 use harness::{open_fixture, serial, skip_without_pdfium};
-use pdf_core::document::{Color, RegionRequest, Rect};
+use pdf_core::document::{Color, Point, Rect, RegionRequest};
 use pdf_core::render::{Bitmap, Tile, ViewportRequest};
 
 /// Colours as they appear in the fixture, in RGB.
@@ -162,7 +162,13 @@ fn the_same_crop_at_a_higher_scale_frames_the_same_content() {
 
     // Sample the same *fractions* of each image. Equal colours mean the two
     // frames cover the same points of the page and differ only in resolution.
-    for (fx, fy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75), (0.5, 0.1)] {
+    for (fx, fy) in [
+        (0.25, 0.25),
+        (0.75, 0.25),
+        (0.25, 0.75),
+        (0.75, 0.75),
+        (0.5, 0.1),
+    ] {
         let at = |bitmap: &Bitmap| {
             nearest_colour(pixel(
                 bitmap,
@@ -194,12 +200,14 @@ fn an_export_scale_beyond_the_ceiling_clamps_rather_than_failing() {
 
     assert!(bitmap.width <= pdf_core::render::bitmap::MAX_DIMENSION_PX);
     assert!(
-        u64::from(bitmap.width) * u64::from(bitmap.height)
-            <= pdf_core::render::bitmap::MAX_PIXELS
+        u64::from(bitmap.width) * u64::from(bitmap.height) <= pdf_core::render::bitmap::MAX_PIXELS
     );
     assert_eq!(
         colours_present(&bitmap),
-        vec![RED, GREEN, BLUE, YELLOW].into_iter().collect::<Vec<_>>().tap_sorted(),
+        vec![RED, GREEN, BLUE, YELLOW]
+            .into_iter()
+            .collect::<Vec<_>>()
+            .tap_sorted(),
         "a clamped export is still the whole crop, just at a lower resolution",
     );
 }
@@ -236,7 +244,12 @@ fn capture_spread(tiles: Vec<Tile>, width: f32, height: f32, scale: f32) -> Bitm
         width,
         height,
         scale,
-        background: Color { r: GAP.0, g: GAP.1, b: GAP.2, a: 255 },
+        background: Color {
+            r: GAP.0,
+            g: GAP.1,
+            b: GAP.2,
+            a: 255,
+        },
         render_annotations: true,
         render_form_data: true,
     };
@@ -249,6 +262,7 @@ fn capture_spread(tiles: Vec<Tile>, width: f32, height: f32, scale: f32) -> Bitm
         &request,
         pdf_core::render::ImageFormat::Png,
         &[],
+        &[],
     )
     .expect("export the viewport");
 
@@ -256,7 +270,9 @@ fn capture_spread(tiles: Vec<Tile>, width: f32, height: f32, scale: f32) -> Bitm
 }
 
 fn decode(png: &[u8]) -> Bitmap {
-    let decoded = image::load_from_memory(png).expect("decode the export").to_rgba8();
+    let decoded = image::load_from_memory(png)
+        .expect("decode the export")
+        .to_rgba8();
     let (width, height) = decoded.dimensions();
     let mut bitmap = Bitmap::new(width, height, pdf_core::render::PixelOrder::Rgba).unwrap();
     bitmap.data.copy_from_slice(decoded.as_raw());
@@ -268,7 +284,11 @@ fn nearest_of(sample: (u8, u8, u8), palette: &[(u8, u8, u8)]) -> (u8, u8, u8) {
         let d = |a: u8, b: u8| (a as i32 - b as i32).pow(2);
         d(sample.0, c.0) + d(sample.1, c.1) + d(sample.2, c.2)
     };
-    palette.iter().copied().min_by_key(|&c| distance(c)).expect("a palette")
+    palette
+        .iter()
+        .copied()
+        .min_by_key(|&c| distance(c))
+        .expect("a palette")
 }
 
 /// What a pixel is, out of red page / blue page / the gap between them.
@@ -309,8 +329,16 @@ fn a_capture_across_a_join_holds_both_pages() {
     let bitmap = capture_spread(across_the_join(), 100.0, 100.0, 2.0);
     assert_eq!((bitmap.width, bitmap.height), (200, 200));
 
-    assert_eq!(source_of(&bitmap, 100, 30), RED, "the upper page is missing");
-    assert_eq!(source_of(&bitmap, 100, 160), BLUE, "the lower page is missing");
+    assert_eq!(
+        source_of(&bitmap, 100, 30),
+        RED,
+        "the upper page is missing"
+    );
+    assert_eq!(
+        source_of(&bitmap, 100, 160),
+        BLUE,
+        "the lower page is missing"
+    );
 }
 
 #[test]
@@ -324,7 +352,11 @@ fn the_gap_between_two_pages_is_the_background_rather_than_either_page() {
     // a page stretched to fill the space.
     let bitmap = capture_spread(across_the_join(), 100.0, 100.0, 2.0);
 
-    assert_eq!(source_of(&bitmap, 100, 60), GAP, "the gap is not the background");
+    assert_eq!(
+        source_of(&bitmap, 100, 60),
+        GAP,
+        "the gap is not the background"
+    );
 }
 
 #[test]
@@ -338,16 +370,33 @@ fn each_page_lands_where_the_layout_put_it_rather_than_at_the_top() {
     // Scan the column and record where each source starts and stops. Getting the
     // order or the boundaries wrong is the failure a "both colours present" check
     // would sail past.
-    let column: Vec<(u8, u8, u8)> = (0..bitmap.height).map(|y| source_of(&bitmap, 100, y)).collect();
+    let column: Vec<(u8, u8, u8)> = (0..bitmap.height)
+        .map(|y| source_of(&bitmap, 100, y))
+        .collect();
 
-    let first_blue = column.iter().position(|&c| c == BLUE).expect("blue somewhere");
-    let last_red = column.iter().rposition(|&c| c == RED).expect("red somewhere");
+    let first_blue = column
+        .iter()
+        .position(|&c| c == BLUE)
+        .expect("blue somewhere");
+    let last_red = column
+        .iter()
+        .rposition(|&c| c == RED)
+        .expect("red somewhere");
 
-    assert!(last_red < first_blue, "the pages came out in the wrong order");
+    assert!(
+        last_red < first_blue,
+        "the pages came out in the wrong order"
+    );
     // Page 0's share is 25 units tall and the gap is 10, so at 2x red ends near
     // 50 px and blue starts near 70.
-    assert!((48..=52).contains(&last_red), "red ends at {last_red}, expected ~50");
-    assert!((68..=72).contains(&first_blue), "blue starts at {first_blue}, expected ~70");
+    assert!(
+        (48..=52).contains(&last_red),
+        "red ends at {last_red}, expected ~50"
+    );
+    assert!(
+        (68..=72).contains(&first_blue),
+        "blue starts at {first_blue}, expected ~70"
+    );
 }
 
 #[test]
@@ -367,7 +416,11 @@ fn a_tile_scrolled_half_off_the_top_is_clipped_rather_than_moved() {
 
     let bitmap = capture_spread(tiles, 100.0, 100.0, 2.0);
 
-    assert_eq!(source_of(&bitmap, 100, 10), RED, "the visible half is missing");
+    assert_eq!(
+        source_of(&bitmap, 100, 10),
+        RED,
+        "the visible half is missing"
+    );
     assert_eq!(
         source_of(&bitmap, 100, 190),
         GAP,
@@ -452,5 +505,254 @@ fn a_tile_is_never_stretched_to_fill_a_destination_that_does_not_match() {
         source_of(&bitmap, 100, 80),
         GAP,
         "the page was stretched to fill the destination",
+    );
+}
+
+// -------------------------------------------------------------- the lasso --
+
+/// A capture of the whole of `quadrants.pdf`, framed by a drawn ring.
+///
+/// The whole page every time, so the framing is constant and the *only* thing
+/// changing between the masked and unmasked cases is the ring. A test that also
+/// moved the crop could not tell "the ring worked" from "the crop moved".
+fn capture_quadrants_masked(mask: &[Point]) -> Bitmap {
+    let _lock = serial();
+    let pdfium = ();
+    let doc = open_fixture(&pdfium, "quadrants.pdf");
+
+    let request = ViewportRequest {
+        tiles: vec![Tile {
+            page_index: 0,
+            crop: crop(0.0, 0.0, 400.0, 400.0),
+            dest: crop(0.0, 0.0, 400.0, 400.0),
+        }],
+        width: 400.0,
+        height: 400.0,
+        scale: 1.0,
+        // Deliberately not white: "the mask erased this" and "the page is blank
+        // here" have to be distinguishable, and `quadrants.pdf` has no white in
+        // it at all.
+        background: Color {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        },
+        render_annotations: true,
+        render_form_data: true,
+    };
+
+    let png = pdf_core::engine::export_viewport(
+        doc.as_ref(),
+        &request,
+        pdf_core::render::ImageFormat::Png,
+        &[],
+        mask,
+    )
+    .expect("export the viewport");
+
+    decode(&png)
+}
+
+fn point(x: f32, y: f32) -> Point {
+    Point { x, y }
+}
+
+/// A ring around the top-left quadrant, inset so its edge is not the thing under
+/// test.
+fn ring_around_the_top_left() -> Vec<Point> {
+    vec![
+        point(10.0, 10.0),
+        point(190.0, 10.0),
+        point(190.0, 190.0),
+        point(10.0, 190.0),
+    ]
+}
+
+#[test]
+fn a_ring_keeps_what_is_inside_it_and_erases_the_rest() {
+    let Some(()) = skip_without_pdfium() else {
+        return;
+    };
+
+    let bitmap = capture_quadrants_masked(&ring_around_the_top_left());
+
+    // The picture is still the whole page — an image is a rectangle.
+    assert_eq!((bitmap.width, bitmap.height), (400, 400));
+
+    assert_eq!(
+        pixel(&bitmap, 100, 100),
+        RED,
+        "the ringed quadrant was erased"
+    );
+    for (x, y, was) in [
+        (300, 100, "green"),
+        (100, 300, "blue"),
+        (300, 300, "yellow"),
+    ] {
+        assert_eq!(
+            pixel(&bitmap, x, y),
+            (255, 255, 255),
+            "the {was} quadrant survived outside the ring",
+        );
+    }
+}
+
+#[test]
+fn the_ring_erases_inside_its_own_quadrant_too() {
+    let Some(()) = skip_without_pdfium() else {
+        return;
+    };
+
+    // The distinction the previous test cannot make: this pixel is red page, in
+    // the same quadrant as everything that was kept, and it is outside the ring by
+    // five points. If the mask were quietly snapping to the crop — or to anything
+    // else rectangular and convenient — this would still be red.
+    let bitmap = capture_quadrants_masked(&ring_around_the_top_left());
+
+    assert_eq!(
+        pixel(&bitmap, 4, 4),
+        (255, 255, 255),
+        "the corner outside the ring but inside the red quadrant survived",
+    );
+}
+
+#[test]
+fn a_ring_can_take_a_piece_of_every_page_it_crosses() {
+    let Some(()) = skip_without_pdfium() else {
+        return;
+    };
+
+    // A diamond through the middle of the page, which is one corner of each of the
+    // four quadrants and nothing else. Nothing rectangular can express this, which
+    // is the whole reason the tool exists.
+    let diamond = vec![
+        point(200.0, 100.0),
+        point(300.0, 200.0),
+        point(200.0, 300.0),
+        point(100.0, 200.0),
+    ];
+    let bitmap = capture_quadrants_masked(&diamond);
+
+    assert_eq!(pixel(&bitmap, 190, 190), RED);
+    assert_eq!(pixel(&bitmap, 210, 190), GREEN);
+    assert_eq!(pixel(&bitmap, 190, 210), BLUE);
+    assert_eq!(pixel(&bitmap, 210, 210), YELLOW);
+    // And the corners of the picture, which the diamond does not reach.
+    for (x, y) in [(10, 10), (390, 10), (10, 390), (390, 390)] {
+        assert_eq!(pixel(&bitmap, x, y), (255, 255, 255), "kept {x},{y}");
+    }
+}
+
+#[test]
+fn no_ring_is_the_whole_rectangle() {
+    let Some(()) = skip_without_pdfium() else {
+        return;
+    };
+
+    // The premise the other tests rest on: without a mask this capture holds all
+    // four colours. If it did not, "the mask erased it" would be indistinguishable
+    // from "it was never rendered".
+    let bitmap = capture_quadrants_masked(&[]);
+
+    assert_eq!(pixel(&bitmap, 100, 100), RED);
+    assert_eq!(pixel(&bitmap, 300, 100), GREEN);
+    assert_eq!(pixel(&bitmap, 100, 300), BLUE);
+    assert_eq!(pixel(&bitmap, 300, 300), YELLOW);
+}
+
+/// The same capture, with a chosen fill instead of the default white.
+fn capture_quadrants_filled(mask: &[Point], fill: Color) -> Vec<u8> {
+    let _lock = serial();
+    let pdfium = ();
+    let doc = open_fixture(&pdfium, "quadrants.pdf");
+
+    let request = ViewportRequest {
+        tiles: vec![Tile {
+            page_index: 0,
+            crop: crop(0.0, 0.0, 400.0, 400.0),
+            dest: crop(0.0, 0.0, 400.0, 400.0),
+        }],
+        width: 400.0,
+        height: 400.0,
+        scale: 1.0,
+        background: fill,
+        render_annotations: true,
+        render_form_data: true,
+    };
+
+    pdf_core::engine::export_viewport(
+        doc.as_ref(),
+        &request,
+        pdf_core::render::ImageFormat::Png,
+        &[],
+        mask,
+    )
+    .expect("export the viewport")
+}
+
+#[test]
+fn a_transparent_fill_cuts_the_outside_out_of_the_file() {
+    let Some(()) = skip_without_pdfium() else {
+        return;
+    };
+
+    // Not "is the bitmap right" but "is the *file* right": a cut-out that survives
+    // in memory and is flattened by the encoder is no use to anyone, and the file
+    // is what leaves the app.
+    let png = capture_quadrants_filled(
+        &ring_around_the_top_left(),
+        Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 0,
+        },
+    );
+    let decoded = image::load_from_memory(&png).expect("decode").to_rgba8();
+
+    assert_eq!(decoded.get_pixel(0, 0).0[3], 0, "the outside was filled in");
+    assert_eq!(
+        decoded.get_pixel(100, 100).0[3],
+        255,
+        "the kept part went see-through"
+    );
+    assert_eq!(
+        [
+            decoded.get_pixel(100, 100).0[0],
+            decoded.get_pixel(100, 100).0[1],
+            decoded.get_pixel(100, 100).0[2],
+        ],
+        [255, 0, 0],
+        "the kept part is still the red quadrant",
+    );
+}
+
+#[test]
+fn a_chosen_fill_is_the_colour_that_comes_back() {
+    let Some(()) = skip_without_pdfium() else {
+        return;
+    };
+
+    let png = capture_quadrants_filled(
+        &ring_around_the_top_left(),
+        Color {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        },
+    );
+    let decoded = image::load_from_memory(&png).expect("decode").to_rgba8();
+
+    assert_eq!(
+        decoded.get_pixel(0, 0).0,
+        [0, 0, 0, 255],
+        "not the chosen fill"
+    );
+    assert_eq!(
+        decoded.get_pixel(100, 100).0[0],
+        255,
+        "the kept part changed"
     );
 }

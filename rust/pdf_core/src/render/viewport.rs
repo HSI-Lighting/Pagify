@@ -121,11 +121,7 @@ impl ViewportPlan {
         }
         // Wholly off one side. Callers list the pages that *might* contribute and
         // let this decide, so this is an ordinary outcome rather than a mistake.
-        if right <= 0.0
-            || bottom <= 0.0
-            || left >= self.width as f32
-            || top >= self.height as f32
-        {
+        if right <= 0.0 || bottom <= 0.0 || left >= self.width as f32 || top >= self.height as f32 {
             return None;
         }
 
@@ -163,7 +159,12 @@ mod tests {
     use super::*;
 
     fn rect(left: f32, top: f32, right: f32, bottom: f32) -> Rect {
-        Rect { left, top, right, bottom }
+        Rect {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 
     fn request(tiles: Vec<Tile>) -> ViewportRequest {
@@ -172,14 +173,23 @@ mod tests {
             width: 400.0,
             height: 300.0,
             scale: 2.0,
-            background: Color { r: 255, g: 255, b: 255, a: 255 },
+            background: Color {
+                r: 255,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
             render_annotations: true,
             render_form_data: true,
         }
     }
 
     fn tile(page_index: usize, crop: Rect, dest: Rect) -> Tile {
-        Tile { page_index, crop, dest }
+        Tile {
+            page_index,
+            crop,
+            dest,
+        }
     }
 
     #[test]
@@ -193,7 +203,11 @@ mod tests {
     fn a_tile_lands_where_the_layout_put_it() {
         let plan = ViewportPlan::resolve(&request(vec![])).unwrap();
         let placed = plan
-            .place(&tile(0, rect(0.0, 0.0, 100.0, 100.0), rect(50.0, 20.0, 150.0, 120.0)))
+            .place(&tile(
+                0,
+                rect(0.0, 0.0, 100.0, 100.0),
+                rect(50.0, 20.0, 150.0, 120.0),
+            ))
             .expect("inside");
 
         assert_eq!((placed.left, placed.top), (100, 40));
@@ -209,13 +223,26 @@ mod tests {
         let plan = ViewportPlan::resolve(&request(vec![])).unwrap();
 
         let wide = plan
-            .place(&tile(0, rect(0.0, 0.0, 842.0, 100.0), rect(0.0, 0.0, 400.0, 50.0)))
+            .place(&tile(
+                0,
+                rect(0.0, 0.0, 842.0, 100.0),
+                rect(0.0, 0.0, 400.0, 50.0),
+            ))
             .expect("inside");
         let narrow = plan
-            .place(&tile(1, rect(0.0, 0.0, 420.0, 100.0), rect(0.0, 50.0, 400.0, 100.0)))
+            .place(&tile(
+                1,
+                rect(0.0, 0.0, 420.0, 100.0),
+                rect(0.0, 50.0, 400.0, 100.0),
+            ))
             .expect("inside");
 
-        assert!(narrow.scale > wide.scale * 1.9, "{} vs {}", narrow.scale, wide.scale);
+        assert!(
+            narrow.scale > wide.scale * 1.9,
+            "{} vs {}",
+            narrow.scale,
+            wide.scale
+        );
     }
 
     #[test]
@@ -224,7 +251,11 @@ mod tests {
         // be placed with a negative top and clipped when it is drawn, not moved.
         let plan = ViewportPlan::resolve(&request(vec![])).unwrap();
         let placed = plan
-            .place(&tile(0, rect(0.0, 0.0, 100.0, 100.0), rect(0.0, -60.0, 100.0, 40.0)))
+            .place(&tile(
+                0,
+                rect(0.0, 0.0, 100.0, 100.0),
+                rect(0.0, -60.0, 100.0, 40.0),
+            ))
             .expect("partly inside");
 
         assert_eq!(placed.top, -120);
@@ -234,10 +265,18 @@ mod tests {
     fn a_tile_entirely_outside_the_picture_is_dropped() {
         let plan = ViewportPlan::resolve(&request(vec![])).unwrap();
         assert!(plan
-            .place(&tile(0, rect(0.0, 0.0, 10.0, 10.0), rect(0.0, 400.0, 100.0, 500.0)))
+            .place(&tile(
+                0,
+                rect(0.0, 0.0, 10.0, 10.0),
+                rect(0.0, 400.0, 100.0, 500.0)
+            ))
             .is_none());
         assert!(plan
-            .place(&tile(0, rect(0.0, 0.0, 10.0, 10.0), rect(-200.0, 0.0, -100.0, 50.0)))
+            .place(&tile(
+                0,
+                rect(0.0, 0.0, 10.0, 10.0),
+                rect(-200.0, 0.0, -100.0, 50.0)
+            ))
             .is_none());
     }
 
@@ -245,7 +284,11 @@ mod tests {
     fn a_tile_thinner_than_a_pixel_is_dropped_rather_than_rendered_at_zero() {
         let plan = ViewportPlan::resolve(&request(vec![])).unwrap();
         assert!(plan
-            .place(&tile(0, rect(0.0, 0.0, 10.0, 10.0), rect(0.0, 0.0, 0.1, 50.0)))
+            .place(&tile(
+                0,
+                rect(0.0, 0.0, 10.0, 10.0),
+                rect(0.0, 0.0, 0.1, 50.0)
+            ))
             .is_none());
     }
 
@@ -253,7 +296,11 @@ mod tests {
     fn a_tile_with_an_empty_crop_is_dropped() {
         let plan = ViewportPlan::resolve(&request(vec![])).unwrap();
         assert!(plan
-            .place(&tile(0, rect(50.0, 0.0, 50.0, 10.0), rect(0.0, 0.0, 100.0, 50.0)))
+            .place(&tile(
+                0,
+                rect(50.0, 0.0, 50.0, 10.0),
+                rect(0.0, 0.0, 100.0, 50.0)
+            ))
             .is_none());
     }
 
@@ -276,7 +323,10 @@ mod tests {
             wanted.width = width;
             wanted.height = height;
             assert!(
-                matches!(ViewportPlan::resolve(&wanted), Err(PdfError::InvalidArgument(_))),
+                matches!(
+                    ViewportPlan::resolve(&wanted),
+                    Err(PdfError::InvalidArgument(_))
+                ),
                 "{width}x{height} should have been rejected",
             );
         }
@@ -319,10 +369,18 @@ mod tests {
         let plan = ViewportPlan::resolve(&request(vec![])).unwrap();
 
         let upper = plan
-            .place(&tile(0, rect(0.0, 700.0, 595.0, 842.0), rect(0.0, 0.0, 400.0, 95.5)))
+            .place(&tile(
+                0,
+                rect(0.0, 700.0, 595.0, 842.0),
+                rect(0.0, 0.0, 400.0, 95.5),
+            ))
             .expect("upper");
         let lower = plan
-            .place(&tile(1, rect(0.0, 0.0, 595.0, 142.0), rect(0.0, 95.5, 400.0, 191.0)))
+            .place(&tile(
+                1,
+                rect(0.0, 0.0, 595.0, 142.0),
+                rect(0.0, 95.5, 400.0, 191.0),
+            ))
             .expect("lower");
 
         let upper_bottom = upper.top + (95.5f32 * plan.scale).round() as i32;

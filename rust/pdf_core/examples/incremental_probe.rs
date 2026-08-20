@@ -54,7 +54,10 @@ fn main() {
         let doc = bindings.FPDF_LoadMemDocument64(&original, None);
         assert!(!doc.is_null(), "could not load the document");
 
-        for (label, flags) in [("FPDF_INCREMENTAL", 1u32), ("flags = 0 (what the safe API sends)", 0u32)] {
+        for (label, flags) in [
+            ("FPDF_INCREMENTAL", 1u32),
+            ("flags = 0 (what the safe API sends)", 0u32),
+        ] {
             let mut bytes: Vec<u8> = Vec::new();
             let mut sink = Sink {
                 base: FPDF_FILEWRITE {

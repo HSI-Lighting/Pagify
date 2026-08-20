@@ -100,11 +100,11 @@ mod tests {
 
     #[test]
     fn page_range_errors_map_to_index_out_of_bounds() {
-        let err = PdfError::PageOutOfRange {
-            index: 9,
-            count: 3,
-        };
-        assert_eq!(err.java_exception_class(), "java/lang/IndexOutOfBoundsException");
+        let err = PdfError::PageOutOfRange { index: 9, count: 3 };
+        assert_eq!(
+            err.java_exception_class(),
+            "java/lang/IndexOutOfBoundsException"
+        );
         assert_eq!(
             err.to_string(),
             "page 9 out of range (document has 3 pages)"

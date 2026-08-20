@@ -104,15 +104,28 @@ pub enum Command {
 pub enum UndoRecord {
     /// Restores a deleted page. Owns the content, which is why this type cannot
     /// be cloned or serialised.
-    RestorePage { at: usize, page: RemovedPage },
+    RestorePage {
+        at: usize,
+        page: RemovedPage,
+    },
     /// The permutation that puts the pages back where they were.
-    ReorderPages { order: Vec<usize> },
+    ReorderPages {
+        order: Vec<usize>,
+    },
     /// Removes a page that an insert added.
-    RemovePage { index: usize },
-    SetPageRotation { index: usize, quarter_turns: u8 },
+    RemovePage {
+        index: usize,
+    },
+    SetPageRotation {
+        index: usize,
+        quarter_turns: u8,
+    },
 
     /// Removes a mark that an add put there.
-    RemoveAnnotation { page_index: usize, index: usize },
+    RemoveAnnotation {
+        page_index: usize,
+        index: usize,
+    },
     /// Puts back a mark that a remove took away.
     ///
     /// Re-adding appends, so a restored annotation lands at the end of the page's
@@ -415,14 +428,27 @@ mod tests {
                 Command::AddAnnotation {
                     page_index: 0,
                     annotation: Annotation::Highlight {
-                        rects: vec![Rect { left: 1.0, top: 2.0, right: 3.0, bottom: 4.0 }],
-                        color: Color { r: 255, g: 224, b: 102, a: 128 },
+                        rects: vec![Rect {
+                            left: 1.0,
+                            top: 2.0,
+                            right: 3.0,
+                            bottom: 4.0,
+                        }],
+                        color: Color {
+                            r: 255,
+                            g: 224,
+                            b: 102,
+                            a: 128,
+                        },
                     },
                 },
             ),
             (
                 r#"{"op":"removeAnnotation","pageIndex":3,"index":7}"#,
-                Command::RemoveAnnotation { page_index: 3, index: 7 },
+                Command::RemoveAnnotation {
+                    page_index: 3,
+                    index: 7,
+                },
             ),
         ];
 
@@ -447,7 +473,10 @@ mod tests {
             encoded.contains(r#""quarterTurns":3"#),
             "fields must be camelCase like the tag, got {encoded}",
         );
-        assert!(encoded.contains(r#""op":"setPageRotation""#), "got {encoded}");
+        assert!(
+            encoded.contains(r#""op":"setPageRotation""#),
+            "got {encoded}"
+        );
     }
 
     /// An unknown operation must be an error rather than a silent no-op.

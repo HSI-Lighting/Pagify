@@ -125,7 +125,10 @@ fn a_deletion_undone_before_saving_leaves_the_document_untouched() {
 
     let mut history = CommandHistory::default();
     history
-        .execute(Command::DeletePage { index: 0 }, doc.as_document_mut().expect("mutable"))
+        .execute(
+            Command::DeletePage { index: 0 },
+            doc.as_document_mut().expect("mutable"),
+        )
         .expect("delete");
     history
         .undo(doc.as_document_mut().expect("mutable"))
@@ -591,7 +594,11 @@ fn a_saved_highlight_can_be_read_back_where_it_was_put() {
             // Within a point: the round trip goes through f32 PDF coordinates.
             assert!((r.left - placed.left).abs() < 1.0, "left was {}", r.left);
             assert!((r.top - placed.top).abs() < 1.0, "top was {}", r.top);
-            assert!((r.right - placed.right).abs() < 1.0, "right was {}", r.right);
+            assert!(
+                (r.right - placed.right).abs() < 1.0,
+                "right was {}",
+                r.right
+            );
             assert!(
                 (r.bottom - placed.bottom).abs() < 1.0,
                 "bottom was {}",
@@ -657,7 +664,11 @@ fn a_saved_mark_can_be_erased_and_the_erase_undone() {
     match &marks[0].annotation {
         Annotation::Ink { strokes, .. } => {
             assert_eq!(1, strokes.len());
-            assert_eq!(3, strokes[0].len(), "the stroke lost points on the way back");
+            assert_eq!(
+                3,
+                strokes[0].len(),
+                "the stroke lost points on the way back"
+            );
             assert!((strokes[0][0].x - 10.0).abs() < 1.0);
             assert!((strokes[0][0].y - 20.0).abs() < 1.0);
         }

@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.Backspace
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Draw
+import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.HistoryEdu
 import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material3.AlertDialog
@@ -68,10 +69,14 @@ fun AnnotationToolbar(
     marksInDocument: Int,
     onClearPage: () -> Unit,
     onClearAll: () -> Unit,
+    /** Whether the capture tool draws a ring instead of dragging a box. */
+    captureLasso: Boolean,
+    onCaptureLasso: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var showPenPalette by remember { mutableStateOf(false) }
     var showClearMenu by remember { mutableStateOf(false) }
+    var showCaptureMenu by remember { mutableStateOf(false) }
 
     Box(modifier, contentAlignment = Alignment.BottomCenter) {
         if (showPenPalette) {
@@ -92,6 +97,17 @@ fun AnnotationToolbar(
                 onClearAll = onClearAll,
                 onDismiss = { showClearMenu = false },
                 modifier = Modifier.padding(bottom = 74.dp),
+            )
+        }
+
+        if (showCaptureMenu) {
+            CapturePalette(
+                lasso = captureLasso,
+                onLasso = {
+                    onCaptureLasso(it)
+                    showCaptureMenu = false
+                },
+                modifier = Modifier.padding(bottom = CAPTURE_PALETTE_LIFT),
             )
         }
 
@@ -155,10 +171,19 @@ fun AnnotationToolbar(
                     },
                 )
                 ToolButton(
-                    icon = Icons.Filled.CropFree,
-                    label = "Snapshot",
+                    // The glyph changes with the shape, so which of the two is
+                    // armed is visible on the ribbon rather than only inside the
+                    // menu that set it.
+                    icon = if (captureLasso) Icons.Filled.Gesture else Icons.Filled.CropFree,
+                    label = if (captureLasso) "Capture a shape" else "Snapshot",
                     selected = selectedTool == AnnotationTool.Snapshot,
                     onClick = { onSelectTool(toggle(selectedTool, AnnotationTool.Snapshot)) },
+                    onLongClick = {
+                        // Selects the tool as well, like the pen: the shape you
+                        // pick is the one you are about to drag with.
+                        onSelectTool(AnnotationTool.Snapshot)
+                        showCaptureMenu = true
+                    },
                 )
             }
         }
@@ -493,7 +518,7 @@ fun RecognisingTextHint(modifier: Modifier = Modifier) {
  * tool is indistinguishable from a tool that does not work.
  */
 @Composable
-fun CaptureHint(modifier: Modifier = Modifier) {
+fun CaptureHint(lasso: Boolean, modifier: Modifier = Modifier) {
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(20.dp),
@@ -502,7 +527,11 @@ fun CaptureHint(modifier: Modifier = Modifier) {
         shadowElevation = 8.dp,
     ) {
         Text(
-            text = "Drag a box around what you want to keep",
+            text = if (lasso) {
+                "Draw around what you want to keep"
+            } else {
+                "Drag a box around what you want to keep"
+            },
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSecondaryContainer,
@@ -566,3 +595,87 @@ fun NoteReader(text: String, onDelete: () -> Unit, onDismiss: () -> Unit) {
         dismissButton = { TextButton(onClick = onDelete) { Text("Delete") } },
     )
 }
+
+/**
+ * The two ways to frame a capture.
+ *
+ * A box is right for most things and is what the tool does on a plain tap. The
+ * other is for what a box cannot say: a detail on a busy drawing with a title
+ * block beside it, one fitting in a schedule, a column out of a table. Drawing
+ * around it takes the thing and leaves its neighbours out — the picture is still
+ * the ring's bounding box, but everything outside the ring comes back blank.
+ *
+ * Behind a long press rather than in a slot of its own because it is the same
+ * tool with a different edge, and two capture buttons on a five-slot ribbon would
+ * suggest otherwise.
+ */
+@Composable
+private fun CapturePalette(
+    lasso: Boolean,
+    onLasso: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            CaptureShapeChip(
+                icon = Icons.Filled.CropFree,
+                label = "Box",
+                selected = !lasso,
+                onClick = { onLasso(false) },
+            )
+            CaptureShapeChip(
+                icon = Icons.Filled.Gesture,
+                label = "Draw around",
+                selected = lasso,
+                onClick = { onLasso(true) },
+            )
+        }
+    }
+
+}
+
+@Composable
+private fun CaptureShapeChip(
+    icon: ImageVector,
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Surface(
+        onClick = onClick,
+        shape = RoundedCornerShape(14.dp),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
+    ) {
+        Row(
+            Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(icon, contentDescription = null, Modifier.size(20.dp))
+            Text(label, style = MaterialTheme.typography.labelLarge)
+        }
+    }
+}
+
+/**
+ * How far the capture palette sits above the ribbon.
+ *
+ * Higher than the other two palettes because this one is the only one that shares
+ * the screen with [CaptureHint] — arming the tool is what puts the hint there, and
+ * at the usual height the palette lands exactly on top of it.
+ */
+private val CAPTURE_PALETTE_LIFT = 132.dp

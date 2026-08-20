@@ -5,8 +5,8 @@
 
 use std::path::PathBuf;
 
-use pdf_core::document::Document;
 use pdf_core::document::pdfium_doc::PdfiumDocument;
+use pdf_core::document::Document;
 
 /// The desktop PDFium, or `None` if it is not configured.
 ///

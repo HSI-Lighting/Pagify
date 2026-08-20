@@ -18,13 +18,13 @@
 
 use serde::{Deserialize, Serialize};
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Paint, PathBuilder, PixmapMut, Stroke as SkStroke, Transform,
+    BlendMode, FillRule, LineCap, LineJoin, Paint, PathBuilder, PixmapMut, Stroke as SkStroke,
+    Transform,
 };
 
 use crate::document::{Color, Point, Rect};
 use crate::error::{PdfError, Result};
 use crate::render::bitmap::{Bitmap, PixelOrder};
-
 
 /// One committed mark on a capture.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,17 +44,35 @@ pub struct Markup {
 /// app send `quarter_turns` against a decoder expecting `quarterTurns`, and only
 /// on the variants that happened to have a two-word field.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Shape {
     /// The stroke as drawn, unrecognised.
-    Freehand { points: Vec<Point> },
-    Line { from: Point, to: Point },
+    Freehand {
+        points: Vec<Point>,
+    },
+    Line {
+        from: Point,
+        to: Point,
+    },
     /// A line with a head at `to`.
-    Arrow { from: Point, to: Point },
-    Rect { rect: Rect },
-    Ellipse { rect: Rect },
+    Arrow {
+        from: Point,
+        to: Point,
+    },
+    Rect {
+        rect: Rect,
+    },
+    Ellipse {
+        rect: Rect,
+    },
     /// A translucent wash, for picking something out rather than ringing it.
-    Highlight { rect: Rect },
+    Highlight {
+        rect: Rect,
+    },
 }
 
 /// The most opaque a highlight may be drawn, whatever alpha it carries.
@@ -84,21 +102,7 @@ pub fn composite(bitmap: &mut Bitmap, marks: &[Markup], scale: f32) -> Result<()
     if marks.is_empty() {
         return Ok(());
     }
-    if bitmap.order != PixelOrder::Rgba {
-        return Err(PdfError::InvalidBitmap(format!(
-            "markup needs an RGBA bitmap, got {:?}",
-            bitmap.order
-        )));
-    }
-    if bitmap.stride != bitmap.width as usize * 4 {
-        return Err(PdfError::InvalidBitmap(
-            "markup needs a tightly packed bitmap".to_string(),
-        ));
-    }
-
-    let mut pixmap = PixmapMut::from_bytes(&mut bitmap.data, bitmap.width, bitmap.height)
-        .ok_or_else(|| PdfError::InvalidBitmap("could not borrow the capture".to_string()))?;
-
+    let mut pixmap = borrow_pixmap(bitmap)?;
     for mark in marks {
         draw(&mut pixmap, mark, scale);
     }
@@ -153,13 +157,18 @@ fn draw(pixmap: &mut PixmapMut, mark: &Markup, scale: f32) {
             );
             let mut builder = PathBuilder::new();
             builder.push_rect(
-                tiny_skia::Rect::from_ltrb(left, top, right, bottom).unwrap_or(
-                    tiny_skia::Rect::from_xywh(left, top, 1.0, 1.0).expect("unit rect"),
-                ),
+                tiny_skia::Rect::from_ltrb(left, top, right, bottom)
+                    .unwrap_or(tiny_skia::Rect::from_xywh(left, top, 1.0, 1.0).expect("unit rect")),
             );
             match builder.finish() {
                 Some(path) => {
-                    pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+                    pixmap.fill_path(
+                        &path,
+                        &paint,
+                        FillRule::Winding,
+                        Transform::identity(),
+                        None,
+                    );
                     return;
                 }
                 None => return,
@@ -207,12 +216,7 @@ fn segment_path(from: Point, to: Point, scale: f32) -> Option<tiny_skia::Path> {
     builder.finish()
 }
 
-fn arrow_path(
-    from: Point,
-    to: Point,
-    width_px: f32,
-    scale: f32,
-) -> Option<tiny_skia::Path> {
+fn arrow_path(from: Point, to: Point, width_px: f32, scale: f32) -> Option<tiny_skia::Path> {
     let (x0, y0) = to_pixels(from, scale);
     let (x1, y1) = to_pixels(to, scale);
 
@@ -291,6 +295,104 @@ fn ellipse_path(rect: Rect, scale: f32) -> Option<tiny_skia::Path> {
     builder.finish()
 }
 
+/// Erase everything outside a drawn outline.
+///
+/// The other capture tool drags a rectangle. This one is for the thing that is
+/// not rectangular — a plan detail with a title block beside it, one column of a
+/// table, a fitting on a busy drawing — where a box around what you want also
+/// takes what you do not. The picture is still the outline's bounding box, since
+/// an image is; what changes is that everything outside the ring is painted over
+/// with the capture's own background instead of showing the page.
+///
+/// `outline` is in **capture-local units**, the same space as the marks, and is
+/// treated as closed whether or not the last point meets the first: a lasso is a
+/// ring by intent, and asking someone to land their finger back on the exact
+/// pixel they started from is asking for a gesture nobody completes.
+///
+/// Even-odd against a path that also contains the whole picture, so the fill
+/// lands *outside* the ring: inside is enclosed twice and therefore not filled.
+/// This is also what makes a lasso that crosses itself behave sensibly — the
+/// doubled-back part reads as a hole rather than as a smear.
+///
+/// Fewer than three points encloses nothing. That is returned as success and
+/// leaves the picture alone, because the alternative reading — "nothing is
+/// inside, so erase all of it" — hands back a blank rectangle for a slip of the
+/// finger.
+pub fn mask_outside(
+    bitmap: &mut Bitmap,
+    outline: &[Point],
+    scale: f32,
+    colour: Color,
+) -> Result<()> {
+    if outline.len() < 3 {
+        return Ok(());
+    }
+
+    let width = bitmap.width as f32;
+    let height = bitmap.height as f32;
+    let mut pixmap = borrow_pixmap(bitmap)?;
+
+    let mut builder = PathBuilder::new();
+    let Some(whole) = tiny_skia::Rect::from_xywh(0.0, 0.0, width, height) else {
+        return Ok(());
+    };
+    builder.push_rect(whole);
+
+    let (x, y) = to_pixels(outline[0], scale);
+    builder.move_to(x, y);
+    for point in &outline[1..] {
+        let (x, y) = to_pixels(*point, scale);
+        builder.line_to(x, y);
+    }
+    builder.close();
+
+    let Some(path) = builder.finish() else {
+        return Ok(());
+    };
+
+    let mut paint = Paint::default();
+    paint.anti_alias = true;
+    // Two fills, never anything between them: the colour as given, or nothing at
+    // all. A *partly* transparent fill would leave the page faintly readable
+    // outside the ring, which is the one thing this tool exists to prevent, so any
+    // alpha short of opaque is read as "cut it out" rather than "veil it".
+    let alpha = if colour.a == u8::MAX { u8::MAX } else { 0 };
+    paint.set_color_rgba8(colour.r, colour.g, colour.b, alpha);
+    // Replace rather than blend, which is what lets a transparent fill actually
+    // clear the pixels instead of leaving the page under a no-op composite.
+    paint.blend_mode = BlendMode::Source;
+    pixmap.fill_path(
+        &path,
+        &paint,
+        FillRule::EvenOdd,
+        Transform::identity(),
+        None,
+    );
+
+    Ok(())
+}
+
+/// The pixels, checked and borrowed for drawing.
+///
+/// Both entry points need the same three things to be true, and a bitmap that is
+/// padded or in the wrong order fails in a way that looks like a drawing bug
+/// rather than a bad argument.
+fn borrow_pixmap(bitmap: &mut Bitmap) -> Result<PixmapMut<'_>> {
+    if bitmap.order != PixelOrder::Rgba {
+        return Err(PdfError::InvalidBitmap(format!(
+            "markup needs an RGBA bitmap, got {:?}",
+            bitmap.order
+        )));
+    }
+    if bitmap.stride != bitmap.width as usize * 4 {
+        return Err(PdfError::InvalidBitmap(
+            "markup needs a tightly packed bitmap".to_string(),
+        ));
+    }
+    PixmapMut::from_bytes(&mut bitmap.data, bitmap.width, bitmap.height)
+        .ok_or_else(|| PdfError::InvalidBitmap("could not borrow the capture".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,19 +420,195 @@ mod tests {
     }
 
     fn red() -> Color {
-        Color { r: 255, g: 0, b: 0, a: 255 }
+        Color {
+            r: 255,
+            g: 0,
+            b: 0,
+            a: 255,
+        }
     }
 
     fn mark(shape: Shape) -> Markup {
-        Markup { shape, color: red(), width_pt: 4.0 }
+        Markup {
+            shape,
+            color: red(),
+            width_pt: 4.0,
+        }
     }
 
+    // ------------------------------------------------------------- the lasso --
+
+    /// A capture painted a distinguishable colour, so "was this erased?" is a
+    /// question the pixels can answer. White would be indistinguishable from the
+    /// white the mask paints.
+    fn green_capture() -> Bitmap {
+        let mut bitmap = Bitmap::new(200, 200, PixelOrder::Rgba).unwrap();
+        for pixel in bitmap.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 200, 0, 255]);
+        }
+        bitmap
+    }
+
+    fn white() -> Color {
+        Color {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 255,
+        }
+    }
+
+    /// A square ring in the middle of the capture: 25..75 in capture units.
+    fn middle_square() -> Vec<Point> {
+        vec![
+            at(25.0, 25.0),
+            at(75.0, 25.0),
+            at(75.0, 75.0),
+            at(25.0, 75.0),
+        ]
+    }
+
+    #[test]
+    fn keeps_what_is_inside_the_outline() {
+        let mut bitmap = green_capture();
+        mask_outside(&mut bitmap, &middle_square(), SCALE, white()).unwrap();
+
+        // Dead centre, and just inside each edge in pixels (50..150).
+        for (x, y) in [(100, 100), (55, 100), (145, 100), (100, 55), (100, 145)] {
+            assert_eq!(
+                pixel(&bitmap, x, y),
+                (0, 200, 0),
+                "erased inside at {x},{y}"
+            );
+        }
+    }
+
+    #[test]
+    fn erases_what_is_outside_the_outline() {
+        let mut bitmap = green_capture();
+        mask_outside(&mut bitmap, &middle_square(), SCALE, white()).unwrap();
+
+        // The four corners and the four bands between the ring and the edge.
+        for (x, y) in [(0, 0), (199, 0), (0, 199), (199, 199), (100, 10), (10, 100)] {
+            assert!(
+                is_white(pixel(&bitmap, x, y)),
+                "kept outside at {x},{y}: {:?}",
+                pixel(&bitmap, x, y),
+            );
+        }
+    }
+
+    #[test]
+    fn masks_in_capture_units_not_pixels() {
+        // The whole point of the unit split: the same outline at a higher export
+        // scale must cover the same *part* of the picture, not the same pixels.
+        let mut bitmap = Bitmap::new(400, 400, PixelOrder::Rgba).unwrap();
+        for pixel in bitmap.data.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[0, 200, 0, 255]);
+        }
+        mask_outside(&mut bitmap, &middle_square(), 4.0, white()).unwrap();
+
+        assert_eq!(pixel(&bitmap, 200, 200), (0, 200, 0), "centre erased at 4x");
+        // 110 px is inside the ring at 2x (50..150) and outside it at 4x
+        // (100..300 would keep it — so check a point outside at 4x instead).
+        assert!(is_white(pixel(&bitmap, 60, 200)), "kept outside at 4x");
+    }
+
+    #[test]
+    fn an_open_outline_is_closed_for_us() {
+        // No point repeats the first, and the ring must still hold. A gesture that
+        // has to land back on its own start pixel is one nobody completes.
+        let mut bitmap = green_capture();
+        let three_sides = vec![
+            at(25.0, 25.0),
+            at(75.0, 25.0),
+            at(75.0, 75.0),
+            at(25.0, 75.0),
+        ];
+        mask_outside(&mut bitmap, &three_sides, SCALE, white()).unwrap();
+
+        assert_eq!(pixel(&bitmap, 100, 100), (0, 200, 0));
+        assert!(is_white(pixel(&bitmap, 100, 30)));
+    }
+
+    #[test]
+    fn too_few_points_leaves_the_picture_alone() {
+        // The dangerous reading of "nothing is enclosed" is "erase everything".
+        for outline in [
+            vec![],
+            vec![at(10.0, 10.0)],
+            vec![at(10.0, 10.0), at(90.0, 90.0)],
+        ] {
+            let mut bitmap = green_capture();
+            mask_outside(&mut bitmap, &outline, SCALE, white()).unwrap();
+            assert_eq!(
+                pixel(&bitmap, 100, 100),
+                (0, 200, 0),
+                "{} points blanked the capture",
+                outline.len(),
+            );
+            assert_eq!(pixel(&bitmap, 0, 0), (0, 200, 0));
+        }
+    }
+
+    #[test]
+    fn a_see_through_background_cuts_out_rather_than_veiling() {
+        // The fill is the user's choice and "transparent" is one of the answers,
+        // for lifting a detail onto something else. What must never happen is the
+        // reading in between: a half-opaque wash that leaves the page legible
+        // outside the ring. Anything short of opaque cuts out completely.
+        let mut bitmap = green_capture();
+        let ghost = Color {
+            r: 255,
+            g: 255,
+            b: 255,
+            a: 8,
+        };
+        mask_outside(&mut bitmap, &middle_square(), SCALE, ghost).unwrap();
+
+        assert_eq!(
+            bitmap.data[3], 0,
+            "the fill veiled the page instead of cutting it"
+        );
+        assert_eq!(
+            pixel(&bitmap, 100, 100),
+            (0, 200, 0),
+            "the kept part changed"
+        );
+    }
+
+    #[test]
+    fn an_opaque_background_is_painted_as_given() {
+        let mut bitmap = green_capture();
+        let navy = Color {
+            r: 16,
+            g: 24,
+            b: 64,
+            a: 255,
+        };
+        mask_outside(&mut bitmap, &middle_square(), SCALE, navy).unwrap();
+
+        assert_eq!(pixel(&bitmap, 0, 0), (16, 24, 64));
+        assert_eq!(bitmap.data[3], 255);
+        assert_eq!(pixel(&bitmap, 100, 100), (0, 200, 0));
+    }
+
+    #[test]
+    fn refuses_a_bitmap_it_cannot_draw_on() {
+        let mut bgr = Bitmap::new(200, 200, PixelOrder::Bgra).unwrap();
+        assert!(mask_outside(&mut bgr, &middle_square(), SCALE, white()).is_err());
+    }
     fn at(x: f32, y: f32) -> Point {
         Point { x, y }
     }
 
     fn rect(left: f32, top: f32, right: f32, bottom: f32) -> Rect {
-        Rect { left, top, right, bottom }
+        Rect {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 
     #[test]
@@ -339,14 +617,20 @@ mod tests {
         // Across the middle: y = 50 units, which is 100 px down the capture.
         composite(
             &mut bitmap,
-            &[mark(Shape::Line { from: at(10.0, 50.0), to: at(90.0, 50.0) })],
+            &[mark(Shape::Line {
+                from: at(10.0, 50.0),
+                to: at(90.0, 50.0),
+            })],
             SCALE,
         )
         .unwrap();
 
         assert!(!is_white(pixel(&bitmap, 100, 100)), "the line is not on it");
         assert!(is_white(pixel(&bitmap, 100, 20)), "ink well above the line");
-        assert!(is_white(pixel(&bitmap, 100, 180)), "ink well below the line");
+        assert!(
+            is_white(pixel(&bitmap, 100, 180)),
+            "ink well below the line"
+        );
     }
 
     #[test]
@@ -357,13 +641,22 @@ mod tests {
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Line { from: at(5.0, 10.0), to: at(15.0, 10.0) })],
+            &[mark(Shape::Line {
+                from: at(5.0, 10.0),
+                to: at(15.0, 10.0),
+            })],
             SCALE,
         )
         .unwrap();
 
-        assert!(!is_white(pixel(&bitmap, 20, 20)), "not where the units put it");
-        assert!(is_white(pixel(&bitmap, 120, 120)), "drawn somewhere else entirely");
+        assert!(
+            !is_white(pixel(&bitmap, 20, 20)),
+            "not where the units put it"
+        );
+        assert!(
+            is_white(pixel(&bitmap, 120, 120)),
+            "drawn somewhere else entirely"
+        );
     }
 
     #[test]
@@ -371,14 +664,19 @@ mod tests {
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Rect { rect: rect(20.0, 20.0, 80.0, 80.0) })],
+            &[mark(Shape::Rect {
+                rect: rect(20.0, 20.0, 80.0, 80.0),
+            })],
             SCALE,
         )
         .unwrap();
 
         assert!(!is_white(pixel(&bitmap, 40, 100)), "left edge missing");
         assert!(!is_white(pixel(&bitmap, 160, 100)), "right edge missing");
-        assert!(is_white(pixel(&bitmap, 100, 100)), "the middle was filled in");
+        assert!(
+            is_white(pixel(&bitmap, 100, 100)),
+            "the middle was filled in"
+        );
     }
 
     #[test]
@@ -386,7 +684,9 @@ mod tests {
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Ellipse { rect: rect(20.0, 20.0, 80.0, 80.0) })],
+            &[mark(Shape::Ellipse {
+                rect: rect(20.0, 20.0, 80.0, 80.0),
+            })],
             SCALE,
         )
         .unwrap();
@@ -394,7 +694,10 @@ mod tests {
         assert!(!is_white(pixel(&bitmap, 100, 40)), "top of the ellipse");
         assert!(!is_white(pixel(&bitmap, 40, 100)), "left of the ellipse");
         // A rectangle drawn instead of an ellipse would put ink here.
-        assert!(is_white(pixel(&bitmap, 42, 42)), "the corner should be clear");
+        assert!(
+            is_white(pixel(&bitmap, 42, 42)),
+            "the corner should be clear"
+        );
         assert!(is_white(pixel(&bitmap, 100, 100)), "not filled");
     }
 
@@ -412,9 +715,16 @@ mod tests {
         composite(
             &mut bitmap,
             &[Markup {
-                shape: Shape::Highlight { rect: rect(20.0, 45.0, 80.0, 55.0) },
+                shape: Shape::Highlight {
+                    rect: rect(20.0, 45.0, 80.0, 55.0),
+                },
                 // Alpha is the intensity, which is the user's to set.
-                color: Color { r: 255, g: 224, b: 102, a: 90 },
+                color: Color {
+                    r: 255,
+                    g: 224,
+                    b: 102,
+                    a: 90,
+                },
                 width_pt: 0.0,
             }],
             SCALE,
@@ -426,7 +736,10 @@ mod tests {
             over_text.0 < 200,
             "the black band was covered rather than washed: {over_text:?}",
         );
-        assert!(over_text.0 > 0, "the wash left no colour at all: {over_text:?}");
+        assert!(
+            over_text.0 > 0,
+            "the wash left no colour at all: {over_text:?}"
+        );
     }
 
     #[test]
@@ -438,8 +751,15 @@ mod tests {
             composite(
                 &mut bitmap,
                 &[Markup {
-                    shape: Shape::Highlight { rect: rect(20.0, 20.0, 80.0, 80.0) },
-                    color: Color { r: 0, g: 0, b: 0, a: alpha },
+                    shape: Shape::Highlight {
+                        rect: rect(20.0, 20.0, 80.0, 80.0),
+                    },
+                    color: Color {
+                        r: 0,
+                        g: 0,
+                        b: 0,
+                        a: alpha,
+                    },
                     width_pt: 0.0,
                 }],
                 SCALE,
@@ -448,7 +768,10 @@ mod tests {
             pixel(&bitmap, 100, 100).0 as i32
         }
 
-        assert!(wash(200) < wash(90), "a stronger alpha should darken further");
+        assert!(
+            wash(200) < wash(90),
+            "a stronger alpha should darken further"
+        );
         assert!(wash(30) > wash(90), "a weaker alpha should darken less");
     }
 
@@ -467,8 +790,15 @@ mod tests {
         composite(
             &mut bitmap,
             &[Markup {
-                shape: Shape::Highlight { rect: rect(20.0, 45.0, 80.0, 55.0) },
-                color: Color { r: 255, g: 255, b: 0, a: 255 },
+                shape: Shape::Highlight {
+                    rect: rect(20.0, 45.0, 80.0, 55.0),
+                },
+                color: Color {
+                    r: 255,
+                    g: 255,
+                    b: 0,
+                    a: 255,
+                },
                 width_pt: 0.0,
             }],
             SCALE,
@@ -485,7 +815,10 @@ mod tests {
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Arrow { from: at(10.0, 10.0), to: at(90.0, 90.0) })],
+            &[mark(Shape::Arrow {
+                from: at(10.0, 10.0),
+                to: at(90.0, 90.0),
+            })],
             SCALE,
         )
         .unwrap();
@@ -502,7 +835,9 @@ mod tests {
         let mut bitmap = white_capture();
         composite(
             &mut bitmap,
-            &[mark(Shape::Freehand { points: vec![at(50.0, 50.0)] })],
+            &[mark(Shape::Freehand {
+                points: vec![at(50.0, 50.0)],
+            })],
             SCALE,
         )
         .unwrap();
@@ -514,7 +849,9 @@ mod tests {
         // A capture that composites differently run to run cannot be compared with
         // anything, including a later export of the same markup.
         let marks = vec![
-            mark(Shape::Ellipse { rect: rect(20.0, 20.0, 80.0, 70.0) }),
+            mark(Shape::Ellipse {
+                rect: rect(20.0, 20.0, 80.0, 70.0),
+            }),
             mark(Shape::Freehand {
                 points: vec![at(10.0, 10.0), at(40.0, 60.0), at(80.0, 20.0)],
             }),
@@ -529,9 +866,17 @@ mod tests {
 
     #[test]
     fn marks_are_drawn_in_order_so_the_last_one_is_on_top() {
-        let blue = Color { r: 0, g: 0, b: 255, a: 255 };
+        let blue = Color {
+            r: 0,
+            g: 0,
+            b: 255,
+            a: 255,
+        };
         let across = |color: Color| Markup {
-            shape: Shape::Line { from: at(10.0, 50.0), to: at(90.0, 50.0) },
+            shape: Shape::Line {
+                from: at(10.0, 50.0),
+                to: at(90.0, 50.0),
+            },
             color,
             width_pt: 6.0,
         };
@@ -557,14 +902,19 @@ mod tests {
             composite(
                 &mut bitmap,
                 &[Markup {
-                    shape: Shape::Line { from: at(10.0, 50.0), to: at(90.0, 50.0) },
+                    shape: Shape::Line {
+                        from: at(10.0, 50.0),
+                        to: at(90.0, 50.0),
+                    },
                     color: red(),
                     width_pt,
                 }],
                 SCALE,
             )
             .unwrap();
-            (0..bitmap.height).filter(|&y| !is_white(pixel(&bitmap, 100, y))).count()
+            (0..bitmap.height)
+                .filter(|&y| !is_white(pixel(&bitmap, 100, y)))
+                .count()
         };
 
         // 4 units at 2x is 8 px; 2 units is 4 px. The exact counts depend on
@@ -582,7 +932,10 @@ mod tests {
         assert_eq!(
             decoded,
             Markup {
-                shape: Shape::Arrow { from: at(1.0, 2.0), to: at(3.0, 4.0) },
+                shape: Shape::Arrow {
+                    from: at(1.0, 2.0),
+                    to: at(3.0, 4.0)
+                },
                 color: red(),
                 width_pt: 2.5,
             },

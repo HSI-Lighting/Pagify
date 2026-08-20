@@ -1,5 +1,6 @@
 package com.hsilighting.pagify.core
 
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 
 /**
@@ -91,6 +92,19 @@ data class CaptureRequest(
     val format: CaptureFormat = CaptureFormat.PNG,
     /** 1–100. Ignored for PNG. */
     val quality: Int = 92,
+    /**
+     * The ring drawn with the lasso, in capture units; empty for a plain box.
+     *
+     * The picture is still the ring's bounding box — an image is a rectangle — but
+     * everything outside the ring is painted over with [background] by the engine,
+     * so a detail can be lifted off a busy drawing without the things beside it.
+     *
+     * Part of the request rather than a one-off argument because the editor
+     * re-exports at other scales and formats, and a mask that survived only the
+     * first render would quietly come back as a rectangle the moment someone
+     * chose 4×.
+     */
+    val mask: List<Offset> = emptyList(),
 ) {
     /**
      * The picture's own coordinate space, which is what markup is drawn in.
@@ -147,4 +161,35 @@ fun captureFileName(
         .take(48)
         .ifEmpty { "Pagify" }
     return "$stem p${pageIndex + 1} $timestamp.${format.extension}"
+}
+
+/**
+ * What fills a capture where no page reaches.
+ *
+ * Two places show it: the gap between two pages, and — the reason this is a choice
+ * at all — everything outside a ring drawn with the lasso. A detail lifted off a
+ * drawing is usually going somewhere else, and where it is going decides what
+ * should be behind it: white for a document, black for a dark slide, nothing at
+ * all for dropping it onto a background that already exists.
+ *
+ * [PAGE] is the default and follows the reader's own backdrop, so a capture looks
+ * like what was on screen. Its colour is null because only the reader knows it —
+ * it comes from the theme, and the theme can change between one capture and the
+ * next.
+ */
+enum class CaptureFill(val label: String, val colour: Long?) {
+    PAGE("Page", null),
+    WHITE("White", 0xFFFFFFFFL),
+    BLACK("Black", 0xFF000000L),
+
+    /**
+     * No fill at all: those pixels are cut out of the picture.
+     *
+     * Only PNG can carry this, so choosing it moves the export to PNG — see
+     * `setCaptureFill`. The engine reads any alpha short of opaque as a cut-out
+     * rather than a veil, because a half-transparent fill would leave the page
+     * faintly readable outside the ring, which is what the ring was drawn to
+     * prevent.
+     */
+    TRANSPARENT("Transparent", 0x00000000L),
 }

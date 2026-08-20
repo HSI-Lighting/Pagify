@@ -23,7 +23,9 @@ use crate::render::bitmap::{Bitmap, PixelOrder, BYTES_PER_PIXEL};
 pub enum ImageFormat {
     Png,
     /// Quality is clamped to 1..=100.
-    Jpeg { quality: u8 },
+    Jpeg {
+        quality: u8,
+    },
 }
 
 impl ImageFormat {
@@ -56,15 +58,30 @@ impl ImageFormat {
 
 /// Encode a rendered region.
 ///
-/// Both formats are written as **opaque RGB**. A capture is a picture of a page,
-/// and a page is opaque — it was rendered onto white. Carrying an alpha channel
-/// through would only invite a viewer somewhere to composite the capture over
-/// something dark and show the user a page they do not recognise.
+/// JPEG is always **opaque RGB**; the format has no alpha, and a capture is a
+/// picture of a page, which was rendered onto a background.
+///
+/// PNG keeps transparency when the picture actually has any, and drops the
+/// channel when it does not. Only one thing produces a transparent pixel — the
+/// lasso, when the fill outside the drawn ring is set to transparent — and that is
+/// the whole point of offering it: a detail lifted off a drawing can be dropped
+/// onto something else without carrying a white box with it. Everything else still
+/// encodes as three channels, so the ordinary capture is exactly as it was.
 pub fn encode(bitmap: &Bitmap, format: ImageFormat) -> Result<Vec<u8>> {
-    let rgb = to_rgb(bitmap);
     let mut out = Vec::new();
 
     match format {
+        ImageFormat::Png if has_transparency(bitmap) => {
+            PngEncoder::new_with_quality(&mut out, CompressionType::Best, FilterType::Adaptive)
+                .write_image(
+                    &to_rgba(bitmap),
+                    bitmap.width,
+                    bitmap.height,
+                    ColorType::Rgba8.into(),
+                )
+                .map_err(|e| PdfError::InvalidBitmap(format!("png encode failed: {e}")))?
+        }
+
         ImageFormat::Png => PngEncoder::new_with_quality(
             &mut out,
             // The capture is written once and looked at many times, usually after
@@ -72,17 +89,69 @@ pub fn encode(bitmap: &Bitmap, format: ImageFormat) -> Result<Vec<u8>> {
             CompressionType::Best,
             FilterType::Adaptive,
         )
-        .write_image(&rgb, bitmap.width, bitmap.height, ColorType::Rgb8.into())
+        .write_image(
+            &to_rgb(bitmap),
+            bitmap.width,
+            bitmap.height,
+            ColorType::Rgb8.into(),
+        )
         .map_err(|e| PdfError::InvalidBitmap(format!("png encode failed: {e}")))?,
 
         ImageFormat::Jpeg { quality } => {
             JpegEncoder::new_with_quality(&mut out, quality.clamp(1, 100))
-                .write_image(&rgb, bitmap.width, bitmap.height, ColorType::Rgb8.into())
+                .write_image(
+                    &to_rgb(bitmap),
+                    bitmap.width,
+                    bitmap.height,
+                    ColorType::Rgb8.into(),
+                )
                 .map_err(|e| PdfError::InvalidBitmap(format!("jpeg encode failed: {e}")))?
         }
     }
 
     Ok(out)
+}
+
+/// Whether any pixel is less than fully opaque.
+///
+/// Asked of the pixels rather than tracked alongside them, because the alpha can
+/// be introduced anywhere in the capture path — the background fill, the mask —
+/// and a flag threaded through all of it is a flag that will one day disagree with
+/// the picture.
+fn has_transparency(bitmap: &Bitmap) -> bool {
+    let width = bitmap.width as usize;
+    (0..bitmap.height as usize).any(|row| {
+        let start = row * bitmap.stride;
+        bitmap.data[start..start + width * BYTES_PER_PIXEL]
+            .chunks_exact(BYTES_PER_PIXEL)
+            .any(|pixel| pixel[3] != u8::MAX)
+    })
+}
+
+/// The visible rows, alpha kept, in RGBA order whatever the source order is.
+///
+/// The alpha arriving here is **premultiplied** — it is what tiny-skia left behind
+/// — so a cut-out pixel is `0,0,0,0` rather than a colour with a zero alpha. That
+/// is the same thing to every viewer, and the only alpha this path ever sees is
+/// fully clear or fully opaque, so there is nothing to un-multiply.
+fn to_rgba(bitmap: &Bitmap) -> Vec<u8> {
+    let width = bitmap.width as usize;
+    let mut rgba = Vec::with_capacity(width * bitmap.height as usize * BYTES_PER_PIXEL);
+
+    for row in 0..bitmap.height as usize {
+        let start = row * bitmap.stride;
+        let visible = &bitmap.data[start..start + width * BYTES_PER_PIXEL];
+        for pixel in visible.chunks_exact(BYTES_PER_PIXEL) {
+            match bitmap.order {
+                PixelOrder::Rgba => rgba.extend_from_slice(pixel),
+                PixelOrder::Bgra => {
+                    rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]])
+                }
+            }
+        }
+    }
+
+    rgba
 }
 
 /// Drop the alpha channel, and the row padding with it.
@@ -115,12 +184,7 @@ mod tests {
     /// Two pixels wide, two tall: red, green / blue, white.
     fn swatch(order: PixelOrder) -> Bitmap {
         let mut bitmap = Bitmap::new(2, 2, order).unwrap();
-        let pixels: [[u8; 3]; 4] = [
-            [255, 0, 0],
-            [0, 255, 0],
-            [0, 0, 255],
-            [255, 255, 255],
-        ];
+        let pixels: [[u8; 3]; 4] = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
         for (i, rgb) in pixels.iter().enumerate() {
             let at = i * BYTES_PER_PIXEL;
             let stored = match order {
@@ -136,6 +200,50 @@ mod tests {
     fn decode(bytes: &[u8]) -> Vec<[u8; 3]> {
         let decoded = image::load_from_memory(bytes).expect("decode").to_rgb8();
         decoded.pixels().map(|p| p.0).collect()
+    }
+
+    /// The swatch with its top-left pixel cut out, as the lasso leaves it.
+    fn swatch_with_a_hole() -> Bitmap {
+        let mut bitmap = swatch(PixelOrder::Rgba);
+        bitmap.data[0..4].copy_from_slice(&[0, 0, 0, 0]);
+        bitmap
+    }
+
+    #[test]
+    fn a_png_keeps_transparency_when_the_picture_has_any() {
+        let encoded = encode(&swatch_with_a_hole(), ImageFormat::Png).unwrap();
+        let decoded = image::load_from_memory(&encoded)
+            .expect("decode")
+            .to_rgba8();
+
+        assert_eq!(decoded.get_pixel(0, 0).0[3], 0, "the cut-out was filled in");
+        assert_eq!(
+            decoded.get_pixel(1, 0).0[3],
+            255,
+            "the page went see-through"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_png_still_has_no_alpha_channel() {
+        // The common capture must not grow a channel it has no use for: it is a
+        // bigger file for nothing, and some viewers composite it differently.
+        let encoded = encode(&swatch(PixelOrder::Rgba), ImageFormat::Png).unwrap();
+        let decoded = image::load_from_memory(&encoded).expect("decode");
+
+        assert_eq!(decoded.color(), image::ColorType::Rgb8);
+    }
+
+    #[test]
+    fn a_jpeg_flattens_a_cut_out_rather_than_failing() {
+        // JPEG has no alpha at all. Someone who picks a transparent fill and then
+        // picks JPEG has asked for two things that cannot both happen; the picture
+        // still has to arrive.
+        let encoded = encode(&swatch_with_a_hole(), ImageFormat::Jpeg { quality: 90 }).unwrap();
+        let decoded = image::load_from_memory(&encoded).expect("decode");
+
+        assert_eq!(decoded.color(), image::ColorType::Rgb8);
+        assert_eq!(decoded.width(), 2);
     }
 
     #[test]
@@ -181,8 +289,16 @@ mod tests {
         // recognisably its own colour is the right one.
         let decoded = decode(&encoded);
         assert_eq!(decoded.len(), 4);
-        assert!(decoded[0][0] > 200 && decoded[0][1] < 80, "red became {:?}", decoded[0]);
-        assert!(decoded[3].iter().all(|&c| c > 200), "white became {:?}", decoded[3]);
+        assert!(
+            decoded[0][0] > 200 && decoded[0][1] < 80,
+            "red became {:?}",
+            decoded[0]
+        );
+        assert!(
+            decoded[3].iter().all(|&c| c > 200),
+            "white became {:?}",
+            decoded[3]
+        );
     }
 
     #[test]

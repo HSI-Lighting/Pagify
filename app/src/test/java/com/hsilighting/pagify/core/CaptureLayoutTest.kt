@@ -160,4 +160,130 @@ class CaptureLayoutTest {
         val tiles = captureTilesFor(Rect(0f, 0f, 500f, 2020f), spread())
         assertEquals(listOf(0, 1), tiles.map { it.pageIndex })
     }
+
+    // -------------------------------------------------------------- the lasso --
+
+    /** A ring drawn around something in the middle of the first page. */
+    private fun ring(): List<Offset> = listOf(
+        Offset(100f, 200f),
+        Offset(300f, 180f),
+        Offset(320f, 400f),
+        Offset(120f, 420f),
+    )
+
+    @Test
+    fun `a ring is captured as its bounding box`() {
+        val box = lassoBounds(ring())
+        assertEquals(Rect(100f, 180f, 320f, 420f), box)
+    }
+
+    @Test
+    fun `a ring too small to mean it is not a capture`() {
+        val smudge = listOf(Offset(100f, 100f), Offset(104f, 101f), Offset(102f, 104f))
+        assertEquals(null, lassoBounds(smudge))
+    }
+
+    @Test
+    fun `two points enclose nothing`() {
+        assertEquals(null, lassoBounds(listOf(Offset(0f, 0f), Offset(500f, 500f))))
+        assertEquals(emptyList<Offset>(), captureMaskFor(Rect(0f, 0f, 500f, 500f), listOf(Offset(0f, 0f))))
+    }
+
+    @Test
+    fun `the mask is in the picture's coordinates, not the reader's`() {
+        val outline = ring()
+        val box = lassoBounds(outline)!!
+        val mask = captureMaskFor(box, outline)
+
+        // The ring's own top-left corner is the picture's origin, so the leftmost
+        // point sits at x = 0 and the topmost at y = 0.
+        assertEquals(0f, mask.minOf { it.x }, 0.001f)
+        assertEquals(0f, mask.minOf { it.y }, 0.001f)
+        // And the shape is unchanged — a translation, not a rescale.
+        assertEquals(box.width, mask.maxOf { it.x }, 0.001f)
+        assertEquals(box.height, mask.maxOf { it.y }, 0.001f)
+    }
+
+    @Test
+    fun `the mask lines up with the tiles it will be drawn over`() {
+        // Both are relative to the same origin. This is the pairing that matters:
+        // a mask in one frame and tiles in another produces a picture of the right
+        // region with the wrong part of it erased.
+        val outline = ring()
+        val box = lassoBounds(outline)!!
+        val tile = captureTilesFor(box, spread()).single()
+        val mask = captureMaskFor(box, outline)
+
+        assertEquals(0f, tile.dest.left, 0.001f)
+        assertEquals(0f, tile.dest.top, 0.001f)
+        assertTrue(mask.all { it.x >= -0.001f && it.x <= tile.dest.width + 0.001f })
+    }
+
+    @Test
+    fun `a ring drawn across a page join still gives one picture`() {
+        val across = listOf(
+            Offset(100f, 900f),
+            Offset(400f, 900f),
+            Offset(400f, 1200f),
+            Offset(100f, 1200f),
+        )
+        val box = lassoBounds(across)!!
+        assertEquals(listOf(0, 1), captureTilesFor(box, spread()).map { it.pageIndex })
+        assertEquals(4, captureMaskFor(box, across).size)
+    }
+
+    @Test
+    fun `an unmeasured point cannot produce a capture`() {
+        val broken = listOf(Offset(0f, 0f), Offset(Float.NaN, 10f), Offset(10f, 10f))
+        assertEquals(null, lassoBounds(broken))
+    }
+
+    @Test
+    fun `a straight drag in lasso mode encloses nothing`() {
+        // Observed on a phone: this passed every size check — the box is 500 by
+        // 500 — and came back as a blank grey picture, because a line encloses no
+        // area for the mask to keep.
+        val straight = (0..20).map { Offset(200f + it * 25f, 400f + it * 25f) }
+        assertEquals(null, lassoBounds(straight))
+    }
+
+    @Test
+    fun `a ring around one line of text is thin but real`() {
+        // 500 by 9. The fullness floor is about rings that enclose nothing,
+        // not about rings that are narrow.
+        val smear = listOf(
+            Offset(100f, 400f),
+            Offset(600f, 403f),
+            Offset(600f, 409f),
+            Offset(100f, 406f),
+        )
+        // Thin, but not blank: this is what ringing a single line of text
+        // gives, and the strip it produces is exactly what was drawn.
+        assertEquals(Rect(100f, 400f, 600f, 409f), lassoBounds(smear))
+    }
+
+    @Test
+    fun `a crescent that fills little of its box is still a ring`() {
+        // The shape the fullness floor must not reject: a thin arc around the edge
+        // of a drawing fills a small part of its bounding box and is exactly what
+        // someone means to draw.
+        val crescent = listOf(
+            Offset(100f, 100f),
+            Offset(300f, 130f),
+            Offset(500f, 100f),
+            Offset(500f, 150f),
+            Offset(300f, 190f),
+            Offset(100f, 150f),
+        )
+        assertEquals(Rect(100f, 100f, 500f, 190f), lassoBounds(crescent))
+    }
+
+    @Test
+    fun `a ring drawn the other way round is the same ring`() {
+        // Shoelace area is signed; winding must not decide whether a capture
+        // happens.
+        val clockwise = ring()
+        val anticlockwise = ring().reversed()
+        assertEquals(lassoBounds(clockwise), lassoBounds(anticlockwise))
+    }
 }

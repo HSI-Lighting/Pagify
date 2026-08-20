@@ -3,6 +3,9 @@ package com.hsilighting.pagify.ui.components
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -50,12 +53,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 import androidx.compose.ui.window.Popup
@@ -63,6 +70,7 @@ import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.hsilighting.pagify.core.AnnotationColors
+import com.hsilighting.pagify.core.CaptureFill
 import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.CaptureScale
 import com.hsilighting.pagify.core.Markup
@@ -100,6 +108,9 @@ fun CaptureEditor(
     markupSize: Float,
     onScaleChange: (CaptureScale) -> Unit,
     onFormatChange: (CaptureFormat) -> Unit,
+    /** What fills the picture where no page reaches. */
+    fill: CaptureFill,
+    onFillChange: (CaptureFill) -> Unit,
     onMarkupTool: (MarkupTool) -> Unit,
     onMarkupColor: (Long) -> Unit,
     onMarkupSize: (MarkupTool, Float) -> Unit,
@@ -194,6 +205,17 @@ fun CaptureEditor(
                         .weight(1f)
                         .fillMaxWidth()
                         .background(MaterialTheme.colorScheme.surfaceVariant)
+                        // A checkerboard, and only for a cut-out. Over a plain grey
+                        // panel "transparent" and "the reader's grey backdrop" look
+                        // exactly alike, and the whole reason to pick transparent is
+                        // that it is *not* a colour.
+                        .then(
+                            if (fill == CaptureFill.TRANSPARENT) {
+                                Modifier.drawBehind { drawCheckerboard() }
+                            } else {
+                                Modifier
+                            },
+                        )
                         // Two fingers zoom and pan; one finger is left alone so it
                         // reaches the drawing surface underneath. Both handlers claim
                         // events on the Initial pass once a second finger lands, which
@@ -202,7 +224,37 @@ fun CaptureEditor(
                             zoom = (zoom * factor).coerceIn(MINIMUM_ZOOM, MAXIMUM_ZOOM)
                             if (zoom == 1f) pan = Offset.Zero
                         }
-                        .twoFingerPanXY { delta -> pan += delta },
+                        .twoFingerPanXY { delta -> pan += delta }
+                        // Double-tap zooms about the tapped point, the same as the
+                        // reader. A pinch needs two fingers and a deliberate spread;
+                        // this is the one-handed way in, and it matters most here
+                        // because the picture is what the whole screen is for.
+                        //
+                        // Safe alongside drawing: a tap that never moves is not a
+                        // drag, so the canvas underneath does not claim it, and a
+                        // stroke that *does* move never reaches the tap detector.
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onDoubleTap = { position ->
+                                    val target = if (zoom > MINIMUM_ZOOM + ZOOM_EPSILON) {
+                                        MINIMUM_ZOOM
+                                    } else {
+                                        EDITOR_DOUBLE_TAP_ZOOM
+                                    }
+                                    // Keep whatever was under the finger under the
+                                    // finger. Without this the picture jumps to its
+                                    // centre and the detail being aimed at is gone.
+                                    val ratio = target / zoom
+                                    val centre = Offset(size.width / 2f, size.height / 2f)
+                                    pan = if (target == MINIMUM_ZOOM) {
+                                        Offset.Zero
+                                    } else {
+                                        (position - centre) * (1f - ratio) + pan * ratio
+                                    }
+                                    zoom = target
+                                },
+                            )
+                        },
                     contentAlignment = Alignment.Center,
                 ) {
                     CaptureCanvas(
@@ -248,7 +300,14 @@ fun CaptureEditor(
                         onPickCustomColour = { pickingColour = true },
                     )
     
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Scrollable rather than wrapped: on a phone in portrait
+                    // five chips and the padding come to more than the screen
+                    // is wide, and a chip that is simply off the edge is a
+                    // setting nobody can reach.
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         CaptureScale.entries.forEach { scale ->
                             FilterChip(
                                 selected = preview.request.scale == scale,
@@ -264,6 +323,30 @@ fun CaptureEditor(
                                 enabled = !isCapturing,
                                 label = { Text(format.extension.uppercase()) },
                             )
+                        }
+                    }
+
+                    // Only for a picture that has an outside. A box capture is all
+                    // page, so a fill would be a control with nothing to act on.
+                    if (preview.request.mask.isNotEmpty()) {
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                "Around it",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            CaptureFill.entries.forEach { option ->
+                                FilterChip(
+                                    selected = fill == option,
+                                    onClick = { onFillChange(option) },
+                                    enabled = !isCapturing,
+                                    label = { Text(option.label) },
+                                )
+                            }
                         }
                     }
     
@@ -329,7 +412,10 @@ private fun MarkupTools(
     onPickCustomColour: () -> Unit,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            modifier = Modifier.horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
             MarkupToolButton(Icons.Filled.Draw, "Pen", MarkupTool.Pen, tool, size, onTool, onSize)
             MarkupToolButton(
                 Icons.Filled.HorizontalRule,
@@ -383,12 +469,20 @@ private fun MarkupTools(
             horizontalArrangement = Arrangement.spacedBy(16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            SizePresets(tool = tool, size = size, color = color, onSize = onSize)
+            SizeButton(tool = tool, size = size, color = color, onSize = onSize)
 
             Row(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
+                // The wheel first, before the palette. It is the way to *any*
+                // colour, so it belongs where the eye starts rather than tucked
+                // behind six that happened to be chosen in advance.
+                CustomColourSwatch(
+                    current = color,
+                    isCustom = color !in MARKUP_COLOURS,
+                    onClick = onPickCustomColour,
+                )
                 MARKUP_COLOURS.forEach { swatch ->
                     ColourSwatch(
                         colour = swatch,
@@ -396,66 +490,153 @@ private fun MarkupTools(
                         onClick = { onColor(swatch) },
                     )
                 }
-                CustomColourSwatch(
-                    current = color,
-                    isCustom = color !in MARKUP_COLOURS,
-                    onClick = onPickCustomColour,
-                )
             }
         }
     }
 }
 
 /**
- * The four sizes a tap away, drawn at the size they mean.
+ * One control for how heavy the tool draws: the current size, and the rest behind
+ * a press.
  *
- * A dot the size of the nib, or a bar at the intensity of the wash — because a
- * row of identical dots labelled 1 to 4 answers the question with a number when
- * the question was about how it will look.
+ * Four dots in a row said everything at once and cost four slots of a toolbar
+ * that has to fit a phone in portrait. One dot says the thing that is true now —
+ * drawn at the size it means, so it answers "how will this look" rather than
+ * "which number is selected" — and a press offers the others.
  */
 @Composable
-private fun SizePresets(
+private fun SizeButton(
     tool: MarkupTool,
     size: Float,
     color: Long,
     onSize: (MarkupTool, Float) -> Unit,
 ) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    var choosing by remember { mutableStateOf(false) }
+
+    Box {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .background(MaterialTheme.colorScheme.secondaryContainer, CircleShape)
+                .combinedClickableCompat(
+                    // Tap opens it too. A control that only answers to a long
+                    // press is one most people never discover, and this one has to
+                    // be reachable — it is the only way to change the size at all.
+                    onClick = { choosing = true },
+                    onLongClick = { choosing = true },
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            SizeMark(tool = tool, size = size, color = color, diameter = 24.dp)
+        }
+
+        if (choosing) {
+            SizeChooser(
+                tool = tool,
+                size = size,
+                color = color,
+                onSize = { onSize(tool, it) },
+                onDismiss = { choosing = false },
+            )
+        }
+    }
+}
+
+/**
+ * What a size looks like: a dot at the nib's width, or a bar at the wash's
+ * strength.
+ *
+ * Shared by the button and the choices inside it, so the one on the toolbar is
+ * literally the one that was picked.
+ */
+@Composable
+private fun SizeMark(tool: MarkupTool, size: Float, color: Long, diameter: Dp) {
+    Canvas(Modifier.size(diameter)) {
+        if (tool.isIntensity) {
+            drawRect(
+                color = Color(color).copy(alpha = size),
+                topLeft = Offset(0f, this.size.height * 0.25f),
+                size = Size(this.size.width, this.size.height * 0.5f),
+            )
+        } else {
+            // Scaled rather than true to size: a 16-unit nib drawn actual-size
+            // would fill the slot and a 0.6 one would be invisible. The order is
+            // what carries the meaning, and the clamps keep both ends usable.
+            drawCircle(
+                color = Color(color),
+                radius = (size * PRESET_DOT_SCALE).coerceIn(2f, this.size.minDimension / 2f),
+            )
+        }
+    }
+}
+
+/**
+ * The sizes on offer, and a slider for the ones that are not.
+ *
+ * Both in one popup because they answer the same question at different
+ * precisions: the presets are the common answers, the slider is for when none of
+ * them is quite right.
+ */
+@Composable
+private fun SizeChooser(
+    tool: MarkupTool,
+    size: Float,
+    color: Long,
+    onSize: (Float) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Popup(
+        alignment = Alignment.TopCenter,
+        offset = IntOffset(0, -POPUP_LIFT_PX),
+        onDismissRequest = onDismiss,
+        properties = PopupProperties(focusable = true),
     ) {
-        tool.sizePresets.forEach { preset ->
-            val chosen = kotlin.math.abs(preset - size) < 0.01f
-            Box(
-                modifier = Modifier
-                    .size(30.dp)
-                    .background(
-                        color = if (chosen) {
-                            MaterialTheme.colorScheme.secondaryContainer
-                        } else {
-                            Color.Transparent
-                        },
-                        shape = CircleShape,
-                    )
-                    .clickable { onSize(tool, preset) },
-                contentAlignment = Alignment.Center,
+        Surface(
+            shape = RoundedCornerShape(16.dp),
+            tonalElevation = 3.dp,
+            shadowElevation = 8.dp,
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ) {
+            Column(
+                modifier = Modifier.width(260.dp).padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Canvas(Modifier.size(22.dp)) {
+                Text(
                     if (tool.isIntensity) {
-                        drawRect(
-                            color = Color(color).copy(alpha = preset),
-                            topLeft = Offset(0f, this.size.height * 0.25f),
-                            size = Size(this.size.width, this.size.height * 0.5f),
-                        )
+                        "Intensity · ${(size * 100).roundToInt()}%"
                     } else {
-                        // Half the nib, so the dot is the width the tool draws,
-                        // clamped to something still visible and still inside.
-                        drawCircle(
-                            color = Color(color),
-                            radius = (preset * PRESET_DOT_SCALE).coerceIn(2f, this.size.minDimension / 2f),
-                        )
+                        "Thickness · ${"%.1f".format(size)}"
+                    },
+                    style = MaterialTheme.typography.labelLarge,
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    tool.sizePresets.forEach { preset ->
+                        val chosen = kotlin.math.abs(preset - size) < 0.01f
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .background(
+                                    color = if (chosen) {
+                                        MaterialTheme.colorScheme.secondaryContainer
+                                    } else {
+                                        Color.Transparent
+                                    },
+                                    shape = CircleShape,
+                                )
+                                .clickable { onSize(preset) },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            SizeMark(tool = tool, size = preset, color = color, diameter = 30.dp)
+                        }
                     }
                 }
+
+                Slider(value = size, onValueChange = onSize, valueRange = tool.sizeRange)
             }
         }
     }
@@ -663,6 +844,12 @@ private const val MINIMUM_ZOOM = 1f
  */
 private const val MAXIMUM_ZOOM = 8f
 
+/** Where a double-tap lands. The reader's figure, so the two feel like one app. */
+private const val EDITOR_DOUBLE_TAP_ZOOM = 2.5f
+
+/** Float slack for "is it zoomed": a pinch rarely leaves the scale at exactly 1. */
+private const val ZOOM_EPSILON = 0.01f
+
 /**
  * How far a preset dot's radius is from the nib width it stands for.
  *
@@ -674,3 +861,42 @@ private const val PRESET_DOT_SCALE = 2.2f
 
 /** How far above the tool row the size popup sits, in pixels. */
 private const val POPUP_LIFT_PX = 240
+
+/**
+ * The backdrop that says "nothing here".
+ *
+ * The same two-tone grid every image editor uses, for the same reason: it is the
+ * one pattern nobody mistakes for part of the picture.
+ */
+private fun DrawScope.drawCheckerboard() {
+    val step = CHECKER_SQUARE_PX
+    val light = Color(0xFF3A3A3E)
+    val dark = Color(0xFF2C2C30)
+    drawRect(light)
+
+    var row = 0
+    var y = 0f
+    while (y < size.height) {
+        var column = 0
+        var x = 0f
+        while (x < size.width) {
+            if ((row + column) % 2 == 0) {
+                drawRect(
+                    color = dark,
+                    topLeft = Offset(x, y),
+                    size = Size(
+                        minOf(step, size.width - x),
+                        minOf(step, size.height - y),
+                    ),
+                )
+            }
+            x += step
+            column++
+        }
+        y += step
+        row++
+    }
+}
+
+/** Checkerboard square, in pixels. Big enough to read, small enough to recede. */
+private const val CHECKER_SQUARE_PX = 24f

@@ -313,8 +313,9 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_prefetchPag
     guard(&mut env, JNI_FALSE, |_| {
         let index = page_index_from(page_index)?;
         let request = request_from(zoom, rotation_quarter_turns)?;
-        let did_work =
-            registry::with_session(handle, |session| engine::prefetch_page(session, index, &request))?;
+        let did_work = registry::with_session(handle, |session| {
+            engine::prefetch_page(session, index, &request)
+        })?;
         Ok(if did_work { JNI_TRUE } else { JNI_FALSE })
     })
 }
@@ -637,10 +638,9 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureRegi
             ..Default::default()
         };
 
-        let bytes =
-            registry::with_session(handle, |session| {
-                engine::export_region(session.document.as_ref(), index, &request, format, &marks)
-            })?;
+        let bytes = registry::with_session(handle, |session| {
+            engine::export_region(session.document.as_ref(), index, &request, format, &marks)
+        })?;
 
         Ok(env
             .byte_array_from_slice(&bytes)
@@ -673,10 +673,12 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureView
     format: JString<'local>,
     quality: jint,
     markup_json: JString<'local>,
+    mask_json: JString<'local>,
 ) -> jbyteArray {
     guard(&mut env, std::ptr::null_mut(), |env| {
-        let tiles: Vec<Tile> = serde_json::from_str(&required_string(env, &tiles_json, "tiles")?)
-            .map_err(|e| PdfError::InvalidArgument(format!("could not read the tiles: {e}")))?;
+        let tiles: Vec<Tile> =
+            serde_json::from_str(&required_string(env, &tiles_json, "tiles")?)
+                .map_err(|e| PdfError::InvalidArgument(format!("could not read the tiles: {e}")))?;
         let format = ImageFormat::parse(
             &required_string(env, &format, "format")?,
             quality.clamp(1, 100) as u8,
@@ -684,6 +686,12 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureView
         let marks: Vec<Markup> = match optional_string(env, &markup_json)? {
             Some(json) if !json.trim().is_empty() => serde_json::from_str(&json)
                 .map_err(|e| PdfError::InvalidArgument(format!("could not read markup: {e}")))?,
+            _ => Vec::new(),
+        };
+
+        let mask: Vec<Point> = match optional_string(env, &mask_json)? {
+            Some(json) if !json.trim().is_empty() => serde_json::from_str(&json)
+                .map_err(|e| PdfError::InvalidArgument(format!("could not read the mask: {e}")))?,
             _ => Vec::new(),
         };
 
@@ -704,7 +712,7 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_captureView
         };
 
         let bytes = registry::with_session(handle, |session| {
-            engine::export_viewport(session.document.as_ref(), &request, format, &marks)
+            engine::export_viewport(session.document.as_ref(), &request, format, &marks, &mask)
         })?;
 
         Ok(env
@@ -754,7 +762,9 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_recogniseSt
 /// Costlier than the runs — a dense page is thousands of boxes — so it is a
 /// separate call, made only when someone actually selects.
 #[no_mangle]
-pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getPageCharactersJson<'local>(
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getPageCharactersJson<
+    'local,
+>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
