@@ -1600,8 +1600,25 @@ fn close_trailing_xref_object(bytes: Vec<u8>) -> Vec<u8> {
         // No trailer to speak of. Not this function's business to invent one.
         return bytes;
     };
+    // Only when the trailing cross-reference really is a *stream*. Everything
+    // below inserts bytes, and inserting is safe only because nothing the
+    // trailing stream's own table points at lies after it.
+    //
+    // The first version asked "is there an `endstream` before `startxref`?" and
+    // read a no as "classic table". That is a different question: a document with
+    // a classic table still has content streams, so the answer was yes, and the
+    // repair went to work on an ordinary object in the middle of the file —
+    // pushing the table ten bytes past where `startxref` said it was. The
+    // fixtures could not catch it, because every one of them was a blank page
+    // with no stream in it at all.
+    //
+    // So ask the file rather than infer: follow `startxref` and look at what is
+    // there. A classic table announces itself with the `xref` keyword.
+    if !trailing_xref_is_a_stream(&bytes, startxref) {
+        return bytes;
+    }
+
     let Some(endstream) = find_last(&bytes[..startxref], ENDSTREAM) else {
-        // A classic `xref` table rather than a stream: nothing is left open.
         return bytes;
     };
 
@@ -1669,13 +1686,47 @@ mod trailing_object_tests {
     use super::{close_trailing_xref_object, find_last};
 
     /// The exact shape PDFium produced on a real document.
+    ///
+    /// `startxref` names offset 0, where the object begins, as it does in a real
+    /// cross-reference stream. That is not decoration: the repair follows the
+    /// offset to decide whether the trailing cross-reference is a stream at all,
+    /// so a fixture pointing nowhere would be declined — correctly — and would
+    /// prove nothing.
     #[test]
     fn an_unclosed_xref_stream_is_closed() {
-        let broken = b"1 0 obj\n<<>>stream\nxx\nendstream\nstartxref\n99\n%%EOF\n".to_vec();
+        let broken = b"1 0 obj\n<<>>stream\nxx\nendstream\nstartxref\n0\n%%EOF\n".to_vec();
         let fixed = close_trailing_xref_object(broken);
         let text = String::from_utf8_lossy(&fixed);
 
         assert!(text.contains("endstream\nendobj\nstartxref"), "got {text}");
+    }
+
+    #[test]
+    fn a_classic_table_in_a_file_that_has_streams_is_left_alone() {
+        // The regression, and the one that mattered: a document with a classic
+        // table still contains content streams. Keying on "is there an endstream
+        // somewhere?" found one belonging to an ordinary object in the middle of
+        // the file and inserted there, pushing the table ten bytes past the offset
+        // `startxref` names — turning a valid save into a damaged one.
+        //
+        // The `xref` keyword sits at offset 32 here, which is what `startxref`
+        // says, so nothing may be inserted before it.
+        let classic =
+            b"1 0 obj
+<<>>stream
+xx
+endstream
+xref
+0 1
+trailer
+<<>>
+startxref
+32
+%%EOF
+"
+                .to_vec();
+        assert_eq!(b"xref", &classic[32..36], "the fixture's own offset is wrong");
+        assert_eq!(classic.clone(), close_trailing_xref_object(classic));
     }
 
     #[test]
@@ -1749,4 +1800,33 @@ startxref
         );
         assert_eq!(broken[..header], fixed[..header], "bytes before it changed");
     }
+}
+
+/// Whether the cross-reference `startxref` names is a stream rather than a table.
+///
+/// Read from the file's own declaration: the offset is parsed and the bytes there
+/// are examined. A classic table begins with the `xref` keyword; anything else is
+/// an object, which for a valid trailer means a cross-reference stream.
+///
+/// Conservative on every doubt — an offset that will not parse, or points past
+/// the end, or names something unrecognisable — because the caller's next act is
+/// to insert bytes into the file. Declining to repair leaves a file that at worst
+/// still has the defect; repairing the wrong file makes one.
+fn trailing_xref_is_a_stream(bytes: &[u8], startxref: usize) -> bool {
+    let after = &bytes[startxref + b"startxref".len()..];
+    let digits: Vec<u8> = after
+        .iter()
+        .copied()
+        .skip_while(|b| b.is_ascii_whitespace())
+        .take_while(u8::is_ascii_digit)
+        .collect();
+
+    let Ok(offset) = std::str::from_utf8(&digits).unwrap_or("").parse::<usize>() else {
+        return false;
+    };
+    let Some(target) = bytes.get(offset..) else {
+        return false;
+    };
+
+    !target.starts_with(b"xref")
 }

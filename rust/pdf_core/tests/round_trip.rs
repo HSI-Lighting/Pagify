@@ -689,6 +689,12 @@ fn every_save_path_produces_a_file_an_external_reader_accepts() {
         "pages-ladder.pdf",
         "mixed-sizes.pdf",
         "single-page.pdf",
+        // Carries content streams, which the others do not. The repair that
+        // closes a trailing xref stream keys on `stream`, so a fixture set with
+        // no streams in it cannot exercise that branch at all — the same shape of
+        // gap that let the xref-stream defect through in the first place.
+        "text-lines.pdf",
+        "quadrants.pdf",
     ] {
         // Untouched first. An incremental save of a document nobody has edited
         // must still be a valid file, and that is the case that was broken.

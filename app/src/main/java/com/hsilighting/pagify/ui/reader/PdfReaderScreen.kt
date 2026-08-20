@@ -91,6 +91,7 @@ import com.hsilighting.pagify.ui.components.NoTextOnPageHint
 import com.hsilighting.pagify.ui.components.NoteComposer
 import com.hsilighting.pagify.ui.components.NoteReader
 import com.hsilighting.pagify.ui.components.RecognisingTextHint
+import com.hsilighting.pagify.ui.components.SaveAction
 import com.hsilighting.pagify.ui.components.TextSelectionBar
 import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.twoFingerPan
@@ -278,6 +279,18 @@ fun PdfReaderScreen(
                                 contentDescription = "Redo the last undone edit",
                             )
                         }
+                        // Saving lived only inside the page-organiser sheet, which
+                        // is where you go to reorder and delete pages — not
+                        // anywhere a reader who has just highlighted something
+                        // would look. The work was saveable all along and appeared
+                        // not to be, which comes to the same thing.
+                        SaveAction(
+                            hasUnsavedWork = state.editState.dirty ||
+                                state.unsavedMarkCount > 0,
+                            isSaving = state.isSaving,
+                            onSave = onSaveDocument,
+                            onSaveCopy = onSaveCopy,
+                        )
                         IconButton(onClick = onToggleRecording) {
                             Icon(
                                 imageVector = if (state.isRecording) {
