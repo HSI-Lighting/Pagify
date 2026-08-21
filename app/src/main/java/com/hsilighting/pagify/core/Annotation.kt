@@ -466,41 +466,28 @@ val DRAWING_TOOLS = listOf(
 )
 
 /**
- * The two ways of ringing a region, in the order they are always offered.
+ * The drawing tools, in the slots the ribbon gives them.
  *
- * A fixed order because the row appears under a finger that is already moving
- * towards it: if the armed one came first, the same press would land on a
+ * Grouped by what the mark *is*, not by how it is made: a line and an arrow are
+ * one question, and so are the three ways of going round something. A slot shows
+ * everything in its group at once with the armed one picked out, so the ribbon
+ * says what is available as well as what is on — and a tap opens the group to
+ * choose from rather than cycling, which reaches any member in one tap however
+ * many the group grows to.
+ *
+ * The order inside a group is fixed. The row opens under a finger already moving
+ * towards it, and if the armed one came first the same tap would land on a
  * different tool depending on what was armed when it opened.
  */
-val RING_TOOLS = listOf(AnnotationTool.Ellipse, AnnotationTool.Cloud)
-
-/**
- * The tools sharing this one's slot, itself included, or just itself.
- *
- * Circle and cloud take turns in the last slot of the palette: whichever is
- * armed is the one shown, and a long press opens both to choose from.
- */
-val AnnotationTool.slotMates: List<AnnotationTool>
-    get() = if (this in RING_TOOLS) RING_TOOLS else listOf(this)
-
-/** The other tool sharing this one's slot, if it shares one. */
-val AnnotationTool.alternate: AnnotationTool?
-    get() = slotMates.firstOrNull { it != this }
-
-/**
- * The five slots the palette shows, given what is armed.
- *
- * Five rather than six because the last one is shared. A sixth icon would fit,
- * but a cloud is a once-in-a-while mark and the palette is meant to be read at a
- * glance rather than searched.
- */
-fun paletteTools(armed: AnnotationTool): List<AnnotationTool> = listOf(
-    AnnotationTool.Pen,
-    AnnotationTool.Line,
-    AnnotationTool.Arrow,
-    AnnotationTool.Rectangle,
-    if (armed == AnnotationTool.Cloud) AnnotationTool.Cloud else AnnotationTool.Ellipse,
+val DRAWING_GROUPS: List<List<AnnotationTool>> = listOf(
+    listOf(AnnotationTool.Line, AnnotationTool.Arrow),
+    listOf(AnnotationTool.Rectangle),
+    listOf(AnnotationTool.Pen, AnnotationTool.Ellipse, AnnotationTool.Cloud),
 )
+
+/** The tools sharing this one's slot, itself included, or just itself. */
+val AnnotationTool.slotMates: List<AnnotationTool>
+    get() = DRAWING_GROUPS.firstOrNull { this in it } ?: listOf(this)
 
 /**
  * Whether this tool makes a mark, and so takes settings of its own.

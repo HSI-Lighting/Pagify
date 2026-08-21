@@ -61,9 +61,6 @@ import com.hsilighting.pagify.core.DRAWING_TOOLS
 import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.draws
 import com.hsilighting.pagify.core.marks
-import com.hsilighting.pagify.core.alternate
-import com.hsilighting.pagify.core.slotMates
-import com.hsilighting.pagify.core.paletteTools
 import kotlin.math.roundToInt
 
 /**
@@ -110,38 +107,6 @@ fun AnnotationToolbar(
     var showDrawPalette by remember { mutableStateOf(false) }
     var showClearMenu by remember { mutableStateOf(false) }
 
-    /**
-     * The two tools sharing a slot, once a press has asked to see them.
-     *
-     * Shown rather than swapped. A long press that silently exchanged circle for
-     * cloud left nothing on screen to say a choice had been made, or that there
-     * was a choice at all — every other press in this ribbon opens something.
-     */
-    var alternatesFor by remember { mutableStateOf<AnnotationTool?>(null) }
-
-    /**
-     * Where the row that opened them sits, so they open *over* it.
-     *
-     * All in window pixels, because the button and the ribbon are in different
-     * layouts and only the window is common to both. Centred under the ribbon,
-     * the two circles appeared halfway across the screen from the circle that was
-     * pressed, and nothing connected the one to the other.
-     */
-    var anchorCentre by remember { mutableStateOf(0f) }
-    var ribbonLeft by remember { mutableStateOf(0f) }
-    var ribbonWidth by remember { mutableStateOf(0f) }
-    var alternatesWidth by remember { mutableStateOf(0f) }
-    val edgeGap = with(LocalDensity.current) { 8.dp.toPx() }
-
-    // How far to shift the row from centre to sit under the button, clamped so it
-    // stays on screen: a tool at the end of the ribbon would otherwise open its
-    // alternates half off the edge.
-    val alternatesShift = if (ribbonWidth <= 0f || alternatesWidth <= 0f) {
-        0f
-    } else {
-        val limit = (ribbonWidth / 2f - alternatesWidth / 2f - edgeGap).coerceAtLeast(0f)
-        (anchorCentre - (ribbonLeft + ribbonWidth / 2f)).coerceIn(-limit, limit)
-    }
 
     /**
      * Whether the band of settings is showing.
@@ -180,7 +145,6 @@ fun AnnotationToolbar(
     fun select(tool: AnnotationTool) {
         showDrawPalette = false
         showClearMenu = false
-        alternatesFor = null
         showParameters = false
         onSelectTool(tool)
     }
@@ -195,7 +159,6 @@ fun AnnotationToolbar(
     fun openParameters(tool: AnnotationTool) {
         showDrawPalette = false
         showClearMenu = false
-        alternatesFor = null
         if (selectedTool != tool) onSelectTool(tool)
         showParameters = true
     }
@@ -203,41 +166,25 @@ fun AnnotationToolbar(
     // Everything stacked in one column rather than floated at a fixed height
     // above the ribbon: with the parameters band there too, a palette lifted by a
     // constant lands on top of it — and being drawn first, underneath it.
-    Box(
-        modifier.onGloballyPositioned {
-            ribbonLeft = it.boundsInWindow().left
-            ribbonWidth = it.boundsInWindow().width
-        },
-        contentAlignment = Alignment.BottomCenter,
-    ) {
+    Box(modifier, contentAlignment = Alignment.BottomCenter) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Directly above the button it came from, with the palette it opened
-            // out of still on screen underneath.
-            alternatesFor?.let { opened ->
-                DrawingToolPalette(
-                    tools = opened.slotMates,
-                    selectedTool = selectedTool,
-                    onSelectTool = { select(toggle(selectedTool, it)) },
-                    modifier = Modifier
-                        .offset { IntOffset(alternatesShift.roundToInt(), 0) }
-                        .onGloballyPositioned { alternatesWidth = it.size.width.toFloat() },
-                )
-            }
             if (showDrawPalette) {
-                DrawingToolPalette(
-                    tools = paletteTools(selectedTool),
+                DrawingRibbon(
                     selectedTool = selectedTool,
-                    // Tapping the one already armed puts it down again, which is
-                    // the way out now that the ribbon slot opens this instead of
-                    // toggling.
-                    onSelectTool = { select(toggle(selectedTool, it)) },
-                    onOpenAlternates = { tool, centre ->
-                        anchorCentre = centre
-                        alternatesFor = tool
-                    },
+                    color = penColor,
+                    strokeWidth = strokeWidth,
+                    lineStyle = lineStyle,
+                    // The row stays open when a tool is chosen from it. It is a
+                    // workspace, not a menu: the next thing after picking a shape
+                    // is usually setting the colour or the weight for it.
+                    onSelectTool = onSelectTool,
+                    onColor = onPenColorChange,
+                    onStrokeWidth = onStrokeWidth,
+                    onLineStyle = onLineStyle,
+                    onPickCustomColour = { pickingColour = true },
                 )
             }
             if (showClearMenu) {
@@ -250,11 +197,10 @@ fun AnnotationToolbar(
                 )
             }
 
-            // One band, for whatever is armed, and only when asked for: the
-            // highlighter used to carry its own colour palette behind a long
-            // press, and with the band there too the colours appeared twice on
-            // screen at once.
-            if (showParameters && selectedTool.marks) {
+            // The highlighter's colours. The drawing tools carry theirs in the
+            // drawing ribbon above; the highlighter is not part of that row, and
+            // one colour is all it has.
+            if (showParameters && selectedTool == AnnotationTool.Highlight) {
                 MarkParameters(
                     tool = selectedTool,
                     color = penColor,
@@ -303,7 +249,6 @@ fun AnnotationToolbar(
                         // tool was armed took a third of the page uninvited.
                         onClick = {
                             showParameters = false
-                            alternatesFor = null
                             showDrawPalette = !showDrawPalette
                         },
                         onLongClick = {
@@ -385,7 +330,7 @@ private fun toggle(current: AnnotationTool, tapped: AnnotationTool): AnnotationT
     if (current == tapped) AnnotationTool.None else tapped
 
 @Composable
-private fun ToolButton(
+internal fun ToolButton(
     icon: ImageVector,
     label: String,
     selected: Boolean,
@@ -457,7 +402,7 @@ private fun ToolButton(
 private val DRAWING_COLOURS = AnnotationColors.markerPalette
 
 @Composable
-private fun ColourDot(colour: Long, selected: Boolean, onClick: () -> Unit) {
+internal fun ColourDot(colour: Long, selected: Boolean, onClick: () -> Unit) {
     Box(
         Modifier
             .size(30.dp)
@@ -764,68 +709,6 @@ private fun drawingToolLabel(tool: AnnotationTool): String = when (tool) {
     else -> "Pen"
 }
 
-/**
- * A row of tools to choose from.
- *
- * Glyphs rather than a menu of names: they are shapes, and a shape is quicker to
- * recognise than the word for it.
- *
- * Used twice — for the drawing tools, and for the two that share the last of
- * those slots. A press that *offers* is the pattern every other press in this
- * ribbon follows; a press that silently swapped the tool under your finger read
- * as the app doing something of its own accord.
- */
-@Composable
-private fun DrawingToolPalette(
-    tools: List<AnnotationTool>,
-    selectedTool: AnnotationTool,
-    onSelectTool: (AnnotationTool) -> Unit,
-    modifier: Modifier = Modifier,
-    /**
-     * Offered on any tool that has an [alternate]; null where none is.
-     *
-     * Carries the button's centre in window pixels, so the row that opens can be
-     * put over the button rather than in the middle of the ribbon.
-     */
-    onOpenAlternates: ((AnnotationTool, centreX: Float) -> Unit)? = null,
-) {
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(24.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 3.dp,
-        shadowElevation = 8.dp,
-    ) {
-        Row(
-            Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            tools.forEach { tool ->
-                val hasAlternates = onOpenAlternates != null && tool.alternate != null
-                // Where this button ended up, so what opens from it can open over
-                // it. Window coordinates: the row that opens is laid out somewhere
-                // else entirely, and the window is the space they share.
-                var centreX by remember(tool) { mutableStateOf(0f) }
-                ToolButton(
-                    icon = drawingToolIcon(tool),
-                    label = drawingToolLabel(tool),
-                    selected = tool == selectedTool,
-                    onClick = { onSelectTool(tool) },
-                    modifier = Modifier.onGloballyPositioned {
-                        centreX = it.boundsInWindow().center.x
-                    },
-                    onLongClick = if (hasAlternates) {
-                        { onOpenAlternates(tool, centreX) }
-                    } else {
-                        null
-                    },
-                    hasMore = hasAlternates,
-                )
-            }
-        }
-    }
-}
 
 /**
  * What the armed tool draws with: how heavy, in what colour, as what kind of line.
@@ -942,21 +825,21 @@ private fun MarkParameters(
                 } else {
                     DRAWING_COLOURS
                 }
-                // The wheel first, before the six, exactly as in the screenshot
-                // editor: it is the way to *any* colour, so it belongs where the
+                // The wheel first, before the six, exactly as in the drawing
+                // ribbon: it is the way to *any* colour, so it belongs where the
                 // eye starts rather than tucked behind the ones chosen in advance.
                 //
-                // Ink only. A highlighter colour has to be pale enough to read
-                // through, which is the whole reason those six exist; a wheel
-                // there would mostly offer ways to black out the text.
-                if (tool != AnnotationTool.Highlight) {
-                    CustomColourSwatch(
-                        current = color,
-                        isCustom = color !in palette,
-                        onClick = onPickCustomColour,
-                        size = 30.dp,
-                    )
-                }
+                // Offered for the wash too. Six pale colours are what a highlighter
+                // usually wants, but "usually" is not "only" — a document already
+                // marked up in a house colour needs that colour, and deciding on
+                // someone else's behalf that they could not want it was not ours
+                // to make.
+                CustomColourSwatch(
+                    current = color,
+                    isCustom = color !in palette,
+                    onClick = onPickCustomColour,
+                    size = 30.dp,
+                )
                 palette.forEach { swatch ->
                     ColourDot(
                         colour = swatch,
@@ -970,7 +853,7 @@ private fun MarkParameters(
 }
 
 /** The nib sizes on offer, in page points. Fine, medium, heavy. */
-private val ANNOTATION_STROKE_WIDTHS = listOf(1.2f, 2.4f, 5f)
+internal val ANNOTATION_STROKE_WIDTHS = listOf(1.2f, 2.4f, 5f)
 
 /** How much a nib width is scaled to draw its dot. See the capture editor's. */
 private const val NIB_DOT_SCALE = 2.2f

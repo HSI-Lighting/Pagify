@@ -17,13 +17,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -35,10 +38,12 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.roundToInt
 import kotlin.math.sin
 
 /**
@@ -118,6 +123,23 @@ fun ColourWheelDialog(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+
+                // Typed, for when the colour is already known.
+                //
+                // A wheel is for finding a colour you are looking at. It is no use
+                // for matching one you have been handed as three numbers, which is
+                // how a house colour or a drawing standard arrives. These drive the
+                // same hue and saturation the wheel does, so the marker moves to
+                // what is typed and the two can never disagree.
+                RgbFields(
+                    colour = picked,
+                    onColour = { changed ->
+                        val hsv = hsvOf(changed.toArgbLong())
+                        hue = hsv[0]
+                        saturation = hsv[1]
+                        value = hsv[2]
+                    },
+                )
             }
         },
     )
@@ -328,6 +350,59 @@ fun CustomColourSwatch(
                     ),
                 )
             }
+        }
+    }
+}
+
+/**
+ * Red, green and blue, as three numbers you can type.
+ *
+ * Each field holds its own text while it is being edited rather than being
+ * re-derived from the colour on every keystroke: clearing a field to type a new
+ * number leaves it momentarily empty, and a field that rewrote itself to "0" the
+ * instant you deleted the last digit would be impossible to type in.
+ *
+ * Out-of-range and half-typed values are simply not applied. Nothing is rejected
+ * or flagged — the colour just does not move until the number makes sense.
+ */
+@Composable
+private fun RgbFields(colour: Color, onColour: (Color) -> Unit) {
+    val channels = listOf(
+        "R" to (colour.red * 255f).roundToInt(),
+        "G" to (colour.green * 255f).roundToInt(),
+        "B" to (colour.blue * 255f).roundToInt(),
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        channels.forEachIndexed { index, (label, current) ->
+            var text by remember(current) { mutableStateOf(current.toString()) }
+
+            OutlinedTextField(
+                value = text,
+                onValueChange = { typed ->
+                    val digits = typed.filter { it.isDigit() }.take(3)
+                    text = digits
+                    val entered = digits.toIntOrNull() ?: return@OutlinedTextField
+                    if (entered !in 0..255) return@OutlinedTextField
+
+                    val channel = entered / 255f
+                    onColour(
+                        Color(
+                            red = if (index == 0) channel else colour.red,
+                            green = if (index == 1) channel else colour.green,
+                            blue = if (index == 2) channel else colour.blue,
+                        ),
+                    )
+                },
+                label = { Text(label) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                textStyle = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f),
+            )
         }
     }
 }
