@@ -135,6 +135,57 @@ class PageMappingTest {
     }
 
     @Test
+    fun `the sheet's bounds are the page and nothing around it`() {
+        // What ink is clipped to. The page is drawn into a taller row with grey
+        // either side, and this is the part of it that is paper.
+        val at = mapping(turns = 0, scale = 2f, origin = Offset(10f, 20f))
+        val sheet = at.screenBounds
+
+        assertEquals(10f, sheet.left, 0.01f)
+        assertEquals(20f, sheet.top, 0.01f)
+        assertEquals(10f + 800f, sheet.right, 0.01f)
+        assertEquals(20f + 1600f, sheet.bottom, 0.01f)
+    }
+
+    @Test
+    fun `a turned page's bounds turn with it`() {
+        // And stay a rectangle with positive width: a quarter turn sends the
+        // top-left corner to the top right, and corners left in their original
+        // roles would give an inside-out rectangle that clips everything away.
+        val sheet = mapping(turns = 1, scale = 1f).screenBounds
+
+        assertEquals(800f, sheet.width, 0.01f)
+        assertEquals(400f, sheet.height, 0.01f)
+    }
+
+    @Test
+    fun `a point off the page is held at the edge`() {
+        // Held rather than dropped: a stroke taken past the margin should run
+        // along it. Dropping the points would break the stroke into pieces.
+        val at = mapping(turns = 0)
+
+        assertOffset(Offset(0f, 0f), at.clampToPage(Offset(-50f, -50f)))
+        assertOffset(Offset(400f, 800f), at.clampToPage(Offset(999f, 999f)))
+        assertOffset(Offset(400f, 400f), at.clampToPage(Offset(500f, 400f)))
+    }
+
+    @Test
+    fun `a point on the page is left alone`() {
+        val at = mapping(turns = 0)
+        assertOffset(Offset(137f, 611f), at.clampToPage(Offset(137f, 611f)))
+    }
+
+    @Test
+    fun `an unmeasured page clamps nothing rather than clamping to a dot`() {
+        // Zero-by-zero bounds would pin every point of a stroke to the corner,
+        // which is a worse failure than letting it through until the page is known.
+        assertOffset(
+            Offset(137f, 611f),
+            PageMapping.Unmeasured.clampToPage(Offset(137f, 611f)),
+        )
+    }
+
+    @Test
     fun `an unmeasured page converts nothing rather than dividing by zero`() {
         assertFalse(PageMapping.Unmeasured.isUsable)
         assertOffset(Offset.Zero, PageMapping.Unmeasured.toPage(Offset(10f, 10f)))

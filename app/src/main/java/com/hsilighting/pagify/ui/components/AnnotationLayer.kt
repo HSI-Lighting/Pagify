@@ -19,6 +19,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -160,7 +161,10 @@ fun Modifier.annotationLayer(
      */
     val painted = remember { intArrayOf(-1) }
 
-    fun toPage(position: Offset): Offset = at.toPage(position)
+    // Clamped, so a drag taken past the margin runs along the edge instead of off
+    // the sheet. See PageMapping.clampToPage — this is the half that keeps the
+    // saved annotation on the page; the clip at draw time is only the half you see.
+    fun toPage(position: Offset): Offset = at.clampToPage(at.toPage(position))
 
     // A fixed touch radius in dp, converted to page points through the current
     // scale. Expressing the eraser's reach in points instead would make it a
@@ -453,38 +457,51 @@ fun Modifier.annotationLayer(
                     detail = "page=$pageIndex rev=$revision marks=${marks.size}",
                 )
             }
-            marks.forEach { drawAnnotation(it, at) }
-            if (wetHighlight.isNotEmpty()) {
-                drawHighlightRects(wetHighlight, currentColor, at)
-            }
-            // The shape as it is being dragged, drawn exactly as it will be
-            // committed — same builder, same dashes — so what is released is
-            // what was aimed at.
-            wetShape.forEach { stroke ->
-                drawInkStroke(
-                    points = stroke,
-                    color = currentColor,
-                    widthPoints = currentWidth,
-                    at = at,
-                    smooth = tool == AnnotationTool.Pen,
-                )
-            }
-            if (wetStroke.size > 1) {
-                // The cloud is previewed as a cloud, rebuilt on every frame from
-                // the same call that will commit it. Watching a plain trace turn
-                // into scallops only on lift means aiming at something you cannot
-                // see; the scallops do shuffle as the ring grows, but they shuffle
-                // into the ones you are going to get.
-                if (tool == AnnotationTool.Cloud) {
+            // Clipped to the sheet, not to this element. The page is drawn into a
+            // taller row with grey above and below it, and Compose clips a canvas
+            // to nothing by default — so ink taken past the bottom edge hung in
+            // the gap between two pages, on no page at all. Clipped to the page
+            // rather than to the row, so it holds in the magnified view too, where
+            // the element is the whole viewport.
+            //
+            // Only the marks. The eraser ring is a cursor and a selection handle
+            // hangs deliberately below the line it belongs to; cutting either at
+            // the margin would make a correct thing look broken.
+            val sheet = at.screenBounds
+            clipRect(sheet.left, sheet.top, sheet.right, sheet.bottom) {
+                marks.forEach { drawAnnotation(it, at) }
+                if (wetHighlight.isNotEmpty()) {
+                    drawHighlightRects(wetHighlight, currentColor, at)
+                }
+                // The shape as it is being dragged, drawn exactly as it will be
+                // committed — same builder, same dashes — so what is released is
+                // what was aimed at.
+                wetShape.forEach { stroke ->
                     drawInkStroke(
-                        points = cloudOutline(wetStroke, currentWidth),
+                        points = stroke,
                         color = currentColor,
                         widthPoints = currentWidth,
                         at = at,
-                        smooth = false,
+                        smooth = tool == AnnotationTool.Pen,
                     )
-                } else {
-                    drawInkStroke(wetStroke, currentColor, currentWidth, at)
+                }
+                if (wetStroke.size > 1) {
+                    // The cloud is previewed as a cloud, rebuilt on every frame
+                    // from the same call that will commit it. Watching a plain
+                    // trace turn into scallops only on lift means aiming at
+                    // something you cannot see; the scallops do shuffle as the ring
+                    // grows, but they shuffle into the ones you are going to get.
+                    if (tool == AnnotationTool.Cloud) {
+                        drawInkStroke(
+                            points = cloudOutline(wetStroke, currentWidth),
+                            color = currentColor,
+                            widthPoints = currentWidth,
+                            at = at,
+                            smooth = false,
+                        )
+                    } else {
+                        drawInkStroke(wetStroke, currentColor, currentWidth, at)
+                    }
                 }
             }
             currentSelection?.let { drawSelection(it, at) }

@@ -47,6 +47,46 @@ data class PageMapping(
     }
 
     /**
+     * The sheet itself, in the pixels it is drawn at.
+     *
+     * What a mark may not leave. The page is drawn into a taller list with grey
+     * either side of it, and nothing was stopping a stroke from running out onto
+     * that grey — a drag that carried on past the bottom edge left ink hanging in
+     * the gap between two pages, on no page at all.
+     */
+    val screenBounds: Rect
+        get() {
+            val a = toScreen(Offset.Zero)
+            val b = toScreen(Offset(pageWidthPoints, pageHeightPoints))
+            return Rect(
+                left = minOf(a.x, b.x),
+                top = minOf(a.y, b.y),
+                right = maxOf(a.x, b.x),
+                bottom = maxOf(a.y, b.y),
+            )
+        }
+
+    /**
+     * A page point, pulled back onto the page if it has left it.
+     *
+     * Held at the edge rather than dropped: a stroke taken past the margin should
+     * run along it, which is what every drawing tool does and what a hand expects.
+     * Dropping the points instead would break the stroke into pieces, and
+     * discarding the whole gesture would lose a mark someone meant to make.
+     *
+     * Clamping on the way *in* is what keeps the file honest. Clipping the drawing
+     * alone would leave the points in the annotation, off the page, where another
+     * viewer might well show them.
+     */
+    fun clampToPage(point: Offset): Offset {
+        if (pageWidthPoints <= 0f || pageHeightPoints <= 0f) return point
+        return Offset(
+            x = point.x.coerceIn(0f, pageWidthPoints),
+            y = point.y.coerceIn(0f, pageHeightPoints),
+        )
+    }
+
+    /**
      * A rectangle of page points, as the box it covers on screen.
      *
      * Both corners go through the turn and the result is normalised, because a
