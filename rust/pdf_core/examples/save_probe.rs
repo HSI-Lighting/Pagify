@@ -26,7 +26,11 @@ fn main() {
 
     let original = std::fs::read(path).expect("read input");
     let doc = pdfium.load_pdf_from_file(path, None).expect("open");
-    println!("input   : {} bytes, {} pages", original.len(), doc.pages().len());
+    println!(
+        "input   : {} bytes, {} pages",
+        original.len(),
+        doc.pages().len()
+    );
     println!("signatures on input: {}", doc.signatures().len());
 
     // Save with no modification at all. Anything the save path does to the bytes

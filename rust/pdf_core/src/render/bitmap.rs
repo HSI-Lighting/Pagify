@@ -173,10 +173,7 @@ mod tests {
         swap_red_blue_rows(&mut buf, 1, 2, 8);
         assert_eq!(
             buf,
-            vec![
-                3, 2, 1, 4, 0xAA, 0xBB, 0xCC, 0xDD,
-                7, 6, 5, 8, 0xAA, 0xBB, 0xCC, 0xDD,
-            ],
+            vec![3, 2, 1, 4, 0xAA, 0xBB, 0xCC, 0xDD, 7, 6, 5, 8, 0xAA, 0xBB, 0xCC, 0xDD,],
             "padding bytes must survive untouched"
         );
     }

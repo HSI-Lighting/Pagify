@@ -743,3 +743,74 @@ fn every_save_path_produces_a_file_an_external_reader_accepts() {
         harness::check_both_saves(&mut edited, &format!("{fixture}-edited"));
     }
 }
+
+/// A mark's colour has to come back the colour it went in.
+///
+/// Measured on a phone: a red arrow drawn, saved and reopened came back yellow.
+/// PDFium refuses to report `/C` for any annotation carrying an appearance
+/// stream — which every mark this engine writes has, because that is what makes
+/// other viewers draw it — so the colour is recorded under a key of our own and
+/// read from there first.
+#[test]
+fn a_marks_colour_survives_a_save() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "single-page.pdf");
+    let crimson = Color {
+        r: 224,
+        g: 49,
+        b: 49,
+        a: 255,
+    };
+
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::AddAnnotation {
+                page_index: 0,
+                annotation: Annotation::Ink {
+                    strokes: vec![vec![
+                        Point { x: 100.0, y: 100.0 },
+                        Point { x: 200.0, y: 150.0 },
+                    ]],
+                    color: crimson,
+                    width: 2.0,
+                },
+            },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("add the mark");
+
+    // Rendered before saving, which is what the app does and what makes this
+    // reproduce: PDFium generates and stores an appearance stream when it draws
+    // an annotation, and from then on it refuses to report `/C`.
+    doc.page(0)
+        .expect("page")
+        .render_region(&pdf_core::document::RegionRequest {
+            crop: Rect {
+                left: 0.0,
+                top: 0.0,
+                right: 300.0,
+                bottom: 300.0,
+            },
+            scale: 1.0,
+            render_annotations: true,
+            render_form_data: true,
+        })
+        .expect("render the page");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    let marks = reopened.annotations(0).expect("read them back");
+
+    let colour = match marks.first().map(|m| &m.annotation) {
+        Some(Annotation::Ink { color, .. }) => *color,
+        other => panic!("expected one ink mark, got {other:?}"),
+    };
+    assert_eq!(
+        crimson, colour,
+        "the mark changed colour on the way through"
+    );
+}

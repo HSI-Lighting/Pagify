@@ -19,7 +19,9 @@ use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = args.get(1).expect("usage: text_cost <pdf> <page> [repeats]");
+    let path = args
+        .get(1)
+        .expect("usage: text_cost <pdf> <page> [repeats]");
     let index: i32 = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(0);
     let repeats: usize = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(3);
 

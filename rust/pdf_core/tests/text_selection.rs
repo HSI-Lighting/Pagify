@@ -45,7 +45,10 @@ fn every_character_of_the_page_comes_back_in_reading_order() {
     let first = characters.text.find(LINES[0]).expect("first line");
     let second = characters.text.find(LINES[1]).expect("second line");
     let third = characters.text.find(LINES[2]).expect("third line");
-    assert!(first < second && second < third, "the lines came back out of order");
+    assert!(
+        first < second && second < third,
+        "the lines came back out of order"
+    );
 }
 
 #[test]
@@ -85,14 +88,23 @@ fn a_characters_box_is_where_that_character_is() {
 
     // The 'T' of "The", placed at x = 40 pt in the fixture.
     let (left, top, right, bottom) = box_of(at);
-    assert!((left - 40.0).abs() < 4.0, "the line starts at {left}, expected ~40");
+    assert!(
+        (left - 40.0).abs() < 4.0,
+        "the line starts at {left}, expected ~40"
+    );
     assert!(right > left, "a character with no width");
     assert!(bottom > top, "a character with no height");
 
     // Characters run left to right along a line, at the same height.
     let (next_left, next_top, _, _) = box_of(at + 1);
-    assert!(next_left > left, "the second character is not to the right of the first");
-    assert!((next_top - top).abs() < 1.0, "the two are not on the same line");
+    assert!(
+        next_left > left,
+        "the second character is not to the right of the first"
+    );
+    assert!(
+        (next_top - top).abs() < 1.0,
+        "the two are not on the same line"
+    );
 }
 
 #[test]

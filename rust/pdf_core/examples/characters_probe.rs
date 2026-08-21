@@ -22,8 +22,7 @@ fn main() {
     let path = args.get(1).expect("usage: characters_probe <pdf> [page]");
     let page_index: usize = args.get(2).and_then(|a| a.parse().ok()).unwrap_or(0);
 
-    let doc: Box<dyn Document> =
-        Box::new(PdfiumDocument::open_path(path, None).expect("open"));
+    let doc: Box<dyn Document> = Box::new(PdfiumDocument::open_path(path, None).expect("open"));
     if args.get(2).map(String::as_str) == Some("all") {
         // A sweep, because "which pages have text" is a question about the
         // document rather than about one page — and on a 2.9 GB file, opening it
@@ -54,7 +53,10 @@ fn main() {
     println!("page {page_index}");
     println!("  runs from text_segments : {runs}");
     println!("  chars from text()       : {flat}");
-    println!("  chars from characters() : {}", characters.text.chars().count());
+    println!(
+        "  chars from characters() : {}",
+        characters.text.chars().count()
+    );
     println!("  boxes                   : {}", characters.boxes.len() / 4);
 
     if characters.text.is_empty() && flat > 0 {

@@ -86,7 +86,9 @@ fn count_objects<'a>(
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = args.get(1).expect("usage: catalogue_text_probe <pdf> [first] [count]");
+    let path = args
+        .get(1)
+        .expect("usage: catalogue_text_probe <pdf> [first] [count]");
     let first: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
     let count: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(6);
 

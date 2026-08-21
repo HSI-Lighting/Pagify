@@ -25,7 +25,9 @@ use pdf_core::document::Document;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = args.get(1).expect("usage: inspect_text <pdf> <page-index> [tsv]");
+    let path = args
+        .get(1)
+        .expect("usage: inspect_text <pdf> <page-index> [tsv]");
     let index: usize = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(0);
     let tsv = args.get(3).map(|s| s == "tsv").unwrap_or(false);
 
@@ -54,9 +56,7 @@ fn main() {
         if tsv {
             println!("{left:.2}\t{top:.2}\t{right:.2}\t{bottom:.2}\t{content}");
         } else {
-            println!(
-                "{i:4}  L {left:7.2} T {top:7.2} R {right:7.2} B {bottom:7.2}  {content:?}",
-            );
+            println!("{i:4}  L {left:7.2} T {top:7.2} R {right:7.2} B {bottom:7.2}  {content:?}",);
         }
     }
 

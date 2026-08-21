@@ -380,12 +380,18 @@ mod tests {
         history
             .execute(Command::DeletePage { index: 1 }, &mut doc)
             .unwrap();
-        assert_eq!(Some("Delete page 2".to_string()), history.undo_description());
+        assert_eq!(
+            Some("Delete page 2".to_string()),
+            history.undo_description()
+        );
         assert_eq!(None, history.redo_description());
 
         history.undo(&mut doc).unwrap();
         assert_eq!(None, history.undo_description());
-        assert_eq!(Some("Delete page 2".to_string()), history.redo_description());
+        assert_eq!(
+            Some("Delete page 2".to_string()),
+            history.redo_description()
+        );
     }
 
     /// A script is intent alone. If undo records ever leaked into one, replaying

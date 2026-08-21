@@ -26,9 +26,7 @@ fn main() {
     let doc = pdfium.load_pdf_from_file(path, None).expect("open");
 
     for limited in [true, false] {
-        println!(
-            "\nlimit_render_image_cache_size({limited})"
-        );
+        println!("\nlimit_render_image_cache_size({limited})");
         for pass in 1..=3 {
             let t = Instant::now();
             let page = doc.pages().get(index).expect("page");

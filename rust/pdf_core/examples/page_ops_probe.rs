@@ -27,7 +27,9 @@ fn widths(doc: &dyn Document) -> Vec<i32> {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: page_ops_probe <pdf>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: page_ops_probe <pdf>");
 
     let mut doc = PdfiumDocument::open_path(&path, None).expect("open");
     println!("opened          : {:?}", widths(&doc));

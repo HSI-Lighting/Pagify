@@ -1161,6 +1161,19 @@ impl PdfiumDocument {
             )
         };
 
+        // The colour again, as a string on a key of our own.
+        //
+        // PDFium's `FPDFAnnot_GetColor` refuses to report `/C` for any annotation
+        // that carries an appearance stream — which every mark this engine writes
+        // does, because that is what makes other viewers draw it. So a mark saved
+        // and reopened came back in the fallback colour: measured on a phone as a
+        // red arrow that turned yellow the moment the file was reopened.
+        //
+        // Writing it a second time under a key PDFium will hand back verbatim
+        // costs nine bytes and makes the round trip faithful. Anyone else's
+        // annotations are unaffected, and still read through `/C`.
+        set_annotation_colour_key(bindings, annot, colour);
+
         match annotation {
             Annotation::Highlight { rects, .. } => {
                 for r in rects {
@@ -1510,6 +1523,12 @@ impl PdfiumDocument {
         let Ok(pdfium) = pdfium() else {
             return DEFAULT_MARK_COLOUR;
         };
+        // Our own key first: PDFium will not report `/C` once an appearance
+        // stream exists, and every mark this engine writes has one.
+        if let Some(colour) = annotation_colour_key(annot) {
+            return colour;
+        }
+
         let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
         let ok = unsafe {
             pdfium.bindings().FPDFAnnot_GetColor(
@@ -1537,6 +1556,49 @@ impl PdfiumDocument {
         }
     }
 }
+
+/// Write a mark's colour to a key of this engine's own.
+///
+/// See the call site: PDFium will not report `/C` for an annotation that has an
+/// appearance stream, so the colour has to be recorded somewhere it *will* hand
+/// back. `AARRGGBB` in hex, which is how the app holds a colour anyway.
+fn set_annotation_colour_key(
+    bindings: &dyn pdfium_render::prelude::PdfiumLibraryBindings,
+    annot: FPDF_ANNOTATION,
+    colour: Color,
+) {
+    let packed = format!(
+        "{:02X}{:02X}{:02X}{:02X}",
+        colour.a, colour.r, colour.g, colour.b
+    );
+    let mut value: Vec<u16> = packed.encode_utf16().collect();
+    value.push(0);
+    unsafe {
+        bindings.FPDFAnnot_SetStringValue(annot, COLOUR_KEY, value.as_ptr());
+    }
+}
+
+/// Read back what [`set_annotation_colour_key`] wrote, if it is there.
+///
+/// Only this engine's own marks carry it. Anything else falls through to `/C`,
+/// which is the right answer for an annotation somebody else wrote.
+fn annotation_colour_key(annot: FPDF_ANNOTATION) -> Option<Color> {
+    let packed = read_annotation_string(annot, COLOUR_KEY)?;
+    if packed.len() != 8 {
+        return None;
+    }
+
+    let byte = |at: usize| u8::from_str_radix(&packed[at..at + 2], 16).ok();
+    Some(Color {
+        a: byte(0)?,
+        r: byte(2)?,
+        g: byte(4)?,
+        b: byte(6)?,
+    })
+}
+
+/// The key this engine records a mark's colour under.
+const COLOUR_KEY: &str = "PagifyColor";
 
 /// Read a UTF-16LE string value off an annotation.
 fn read_annotation_string(annot: FPDF_ANNOTATION, key: &str) -> Option<String> {

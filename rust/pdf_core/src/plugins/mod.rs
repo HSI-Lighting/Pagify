@@ -108,8 +108,6 @@ mod tests {
     fn dispatching_to_an_empty_registry_is_a_no_op() {
         let mut registry = PluginRegistry::default();
         assert!(registry.is_empty());
-        assert!(registry
-            .dispatch(PluginEvent::DocumentClosing)
-            .is_empty());
+        assert!(registry.dispatch(PluginEvent::DocumentClosing).is_empty());
     }
 }

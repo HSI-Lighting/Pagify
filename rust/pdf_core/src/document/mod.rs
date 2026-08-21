@@ -457,7 +457,11 @@ pub struct Point {
 /// that does not map onto one of them — a form widget, a link — is left alone
 /// rather than modelled badly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum Annotation {
     /// Text picked out with the highlighter: one rect per line covered, which is
     /// why this is a list rather than a rect. A selection spanning three lines is

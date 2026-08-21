@@ -178,8 +178,7 @@ mod tests {
         // ARGB_8888 agree, so the zero-copy handover must touch nothing.
         let mut buf: Vec<u8> = (0u8..16).collect();
         let original = buf.clone();
-        let mut target =
-            RenderTarget::new(2, 2, 8, bitmap::PDFIUM_OUTPUT_ORDER, &mut buf).unwrap();
+        let mut target = RenderTarget::new(2, 2, 8, bitmap::PDFIUM_OUTPUT_ORDER, &mut buf).unwrap();
         target.normalise_from_pdfium();
         assert_eq!(
             buf, original,

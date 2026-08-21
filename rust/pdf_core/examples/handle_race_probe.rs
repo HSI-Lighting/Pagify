@@ -64,7 +64,8 @@ fn main() {
         let pdfium = Arc::clone(&pdfium);
         std::thread::spawn(move || {
             for round in 0..400 {
-                let _guard = serialised().then(|| LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner()));
+                let _guard =
+                    serialised().then(|| LIFECYCLE.lock().unwrap_or_else(|p| p.into_inner()));
                 let Ok(doc) = pdfium.load_pdf_from_file(&path, None) else {
                     FAILED_OPENS.fetch_add(1, Ordering::Relaxed);
                     continue;

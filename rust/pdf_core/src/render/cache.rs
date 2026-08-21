@@ -325,7 +325,11 @@ mod tests {
         cache.put(key, bitmap_of(10));
         cache.put(key, bitmap_of(10));
         assert_eq!(cache.len(), 1);
-        assert_eq!(cache.used_bytes(), 400, "the old entry's bytes were reclaimed");
+        assert_eq!(
+            cache.used_bytes(),
+            400,
+            "the old entry's bytes were reclaimed"
+        );
     }
 
     #[test]
@@ -354,7 +358,11 @@ mod tests {
 
         assert_eq!(cache.len(), 1);
         assert!(cache.contains(&CacheKey::new(4, 1.0, 0)));
-        assert_eq!(cache.used_bytes(), 400, "byte accounting survives invalidation");
+        assert_eq!(
+            cache.used_bytes(),
+            400,
+            "byte accounting survives invalidation"
+        );
     }
 
     #[test]
