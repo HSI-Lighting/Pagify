@@ -237,6 +237,8 @@ fun PdfReaderScreen(
     // Markup on the capture. The shapes are Kotlin's until they are committed,
     // and the engine's from then on — see roadmap decision 4.7.
     onMarkupTool: (MarkupTool) -> Unit,
+    /** Put the markup tool down, so a stray finger cannot draw on the picture. */
+    onDisarmMarkup: () -> Unit,
     onMarkupColor: (Long) -> Unit,
     /** Nib width, or the highlighter's intensity — see `MarkupTool.isIntensity`. */
     onMarkupSize: (MarkupTool, Float) -> Unit,
@@ -563,6 +565,8 @@ fun PdfReaderScreen(
                 isCapturing = state.isCapturing,
                 markup = state.markup,
                 markupTool = state.markupTool,
+                markupArmed = state.markupArmed,
+                onDisarmMarkup = onDisarmMarkup,
                 markupColor = state.markupColor,
                 markupSize = state.markupSizes[state.markupTool] ?: state.markupTool.defaultSize,
                 markupStyle = state.markupStyle,

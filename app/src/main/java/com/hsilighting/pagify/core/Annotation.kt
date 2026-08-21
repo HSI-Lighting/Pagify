@@ -441,6 +441,16 @@ enum class AnnotationTool {
      */
     Cloud,
 
+    /**
+     * A curved line, and a curved arrow.
+     *
+     * Traced rather than dragged, and corrected: nobody draws a clean curve with
+     * a finger, so the wobble is thrown away and replaced by the one smooth bend
+     * it was meant to be. See `curveThrough`.
+     */
+    Curve,
+    CurvedArrow,
+
     Note,
     Signature,
 
@@ -480,7 +490,12 @@ val DRAWING_TOOLS = listOf(
  * different tool depending on what was armed when it opened.
  */
 val DRAWING_GROUPS: List<List<AnnotationTool>> = listOf(
-    listOf(AnnotationTool.Line, AnnotationTool.Arrow),
+    listOf(
+        AnnotationTool.Line,
+        AnnotationTool.Arrow,
+        AnnotationTool.Curve,
+        AnnotationTool.CurvedArrow,
+    ),
     listOf(AnnotationTool.Rectangle),
     listOf(AnnotationTool.Pen, AnnotationTool.Ellipse, AnnotationTool.Cloud),
 )
@@ -504,12 +519,19 @@ val AnnotationTool.draws: Boolean get() = this in DRAWING_TOOLS
 /**
  * Whether this tool follows the finger rather than taking two corners.
  *
- * The pen keeps the path as drawn; the cloud replaces it with scallops. Either
- * way the gesture is the same — trace the thing — which is why they share a
- * branch in the layer that captures it.
+ * The pen keeps the path as drawn; the others replace it — the cloud with
+ * scallops, the curves with the one smooth bend they were meant to be. Either way
+ * the gesture is the same, trace the thing, which is why they share a branch in
+ * the layer that captures it.
  */
-val AnnotationTool.tracesPath: Boolean
-    get() = this == AnnotationTool.Pen || this == AnnotationTool.Cloud
+val AnnotationTool.tracesPath: Boolean get() = this in TRACED_TOOLS
+
+private val TRACED_TOOLS = setOf(
+    AnnotationTool.Pen,
+    AnnotationTool.Cloud,
+    AnnotationTool.Curve,
+    AnnotationTool.CurvedArrow,
+)
 
 /** Whether this tool builds its shape from two corners rather than tracing a path. */
 val AnnotationTool.isDragged: Boolean get() = draws && !tracesPath

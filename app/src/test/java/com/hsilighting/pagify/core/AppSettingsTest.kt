@@ -79,6 +79,40 @@ class AppSettingsTest {
     }
 
     @Test
+    fun `how a picture was last exported survives a round trip`() {
+        val chosen = AppSettings(
+            captureScale = CaptureScale.LOW,
+            captureFormat = CaptureFormat.JPEG,
+            captureFill = CaptureFill.TRANSPARENT,
+        )
+
+        val read = settingsFromJson(chosen.toSettingsJson())
+
+        assertEquals(CaptureScale.LOW, read.captureScale)
+        assertEquals(CaptureFormat.JPEG, read.captureFormat)
+        assertEquals(CaptureFill.TRANSPARENT, read.captureFill)
+    }
+
+    @Test
+    fun `a fresh install exports at the best quality it can`() {
+        // A picture that comes out too coarse cannot be sharpened afterwards, so
+        // the default is the one that cannot be regretted.
+        assertEquals(CaptureScale.HIGH, AppSettings().captureScale)
+        assertEquals(CaptureFormat.PNG, AppSettings().captureFormat)
+    }
+
+    @Test
+    fun `an export setting written by another build falls back rather than shifting`() {
+        // Stored by name, not by ordinal. The scales were renumbered when they
+        // stopped being 1x, 2x and 4x, and an ordinal written before that would
+        // have come back meaning a different sharpness — silently.
+        val read = settingsFromJson("""{"captureScale":"X2","captureFormat":"WEBP"}""")
+
+        assertEquals(CaptureScale.HIGH, read.captureScale)
+        assertEquals(CaptureFormat.PNG, read.captureFormat)
+    }
+
+    @Test
     fun `the handle starts where the viewfinder itself appears`() {
         // Folding it away should not also move it: the map sits at the right-hand
         // edge, halfway down, and so does the handle it leaves behind.

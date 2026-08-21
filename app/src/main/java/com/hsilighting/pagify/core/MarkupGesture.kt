@@ -32,17 +32,42 @@ class MarkupGesture(
     var isDwelling: Boolean = false
         private set
 
-    /** What to draw while the finger is down, or null before it lands. */
-    val preview: MarkupShape?
+    /**
+     * What to draw while the finger is down; empty before it lands.
+     *
+     * A list because one gesture is not always one shape: a curved arrow is the
+     * curve and two barbs, kept apart so the tip stays sharp — a single polyline
+     * running out to one barb and back would round off exactly where an arrow
+     * needs its point.
+     *
+     * Built by the same call that will commit it, so what is under the finger is
+     * what is released. Showing a raw trace and swapping it for scallops or a
+     * clean arc on lift means aiming at something you cannot see.
+     */
+    val preview: List<MarkupShape>
         get() = when {
-            points.size < 2 -> null
-            tool.isDragged -> tool.shapeFor(points.first(), points.last())
-            // The cloud is previewed as a cloud, rebuilt from the same call that
-            // will commit it. Showing the raw trace and swapping it for scallops
-            // on lift means aiming at something you cannot see.
-            tool == MarkupTool.Cloud -> MarkupShape.Freehand(cloudOutline(points, sizePoints))
-            else -> MarkupShape.Freehand(points.toList())
+            points.size < 2 -> emptyList()
+            tool.isDragged -> listOf(tool.shapeFor(points.first(), points.last()))
+            // Shown as traced, corrected on lift. See `correctsOnRelease`:
+            // re-deciding what a whole curve meant on every frame made the line
+            // thrash about under the finger.
+            tool.correctsOnRelease -> listOf(MarkupShape.Freehand(points.toList()))
+            else -> tracedShapes(points)
         }
+
+    /**
+     * What a traced stroke becomes, for whichever tool traced it.
+     *
+     * The pen keeps its trace; the others replace it — the cloud with scallops,
+     * the curves with the bends they were meant to be.
+     */
+    private fun tracedShapes(stroke: List<Offset>): List<MarkupShape> = when (tool) {
+        MarkupTool.Cloud -> listOf(MarkupShape.Freehand(cloudOutline(stroke, sizePoints)))
+        MarkupTool.Curve -> listOf(MarkupShape.Freehand(curveThrough(stroke)))
+        MarkupTool.CurvedArrow ->
+            curvedArrowStrokes(stroke, sizePoints).map { MarkupShape.Freehand(it) }
+        else -> listOf(MarkupShape.Freehand(stroke.toList()))
+    }.filter { it.isBigEnough() }
 
     fun down(at: Offset) {
         points.clear()
@@ -83,19 +108,17 @@ class MarkupGesture(
         return when {
             tool.isDragged -> {
                 val shape = tool.shapeFor(stroke.first(), stroke.last())
-                if (shape.isBigEnough()) Outcome.Commit(shape) else Outcome.Nothing
+                if (shape.isBigEnough()) Outcome.Commit(listOf(shape)) else Outcome.Nothing
             }
             // Held still at the end: ask the engine what this is.
             dwelled -> Outcome.Recognise(stroke)
-            // A traced ring, replaced by the scallops that stand for it. Nothing
-            // is asked of the engine: the cloud is already the shape it means.
-            tool == MarkupTool.Cloud ->
-                cloudOutline(stroke, sizePoints)
-                    .takeIf { it.size > 1 }
-                    ?.let { Outcome.Commit(MarkupShape.Freehand(it)) }
-                    ?: Outcome.Nothing
-            // Lifted straight away: keep it exactly as drawn.
-            else -> Outcome.Commit(MarkupShape.Freehand(stroke))
+            // Traced. Nothing is asked of the engine — a cloud and a curve are
+            // already the shapes they mean, and recognising one would hand back
+            // the ellipse it was drawn around.
+            else -> tracedShapes(stroke)
+                .takeIf { it.isNotEmpty() }
+                ?.let { Outcome.Commit(it) }
+                ?: Outcome.Nothing
         }
     }
 
@@ -109,8 +132,13 @@ class MarkupGesture(
         /** Too small to be meant, or nothing was drawn. */
         data object Nothing : Outcome
 
-        /** Ready to add, with no engine involved. */
-        data class Commit(val shape: MarkupShape) : Outcome
+        /**
+         * Ready to add, with no engine involved.
+         *
+         * Several shapes, because one gesture is not always one mark: a curved
+         * arrow is a curve and two barbs, kept apart so its tip stays sharp.
+         */
+        data class Commit(val shapes: List<MarkupShape>) : Outcome
 
         /**
          * Hand these points to the recogniser, then commit whatever comes back.

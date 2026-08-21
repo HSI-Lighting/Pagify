@@ -232,6 +232,7 @@ class MainActivity : ComponentActivity() {
                         onDismissCapture = viewModel::dismissCapture,
                         onCaptureShared = viewModel::captureShared,
                         onMarkupTool = viewModel::setMarkupTool,
+                        onDisarmMarkup = viewModel::disarmMarkup,
                         onMarkupColor = viewModel::setMarkupColor,
                         onMarkupSize = viewModel::setMarkupSize,
                         onMarkupStyle = viewModel::setMarkupStyle,

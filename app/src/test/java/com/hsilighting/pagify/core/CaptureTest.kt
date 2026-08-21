@@ -105,8 +105,12 @@ class CaptureTest {
     }
 
     @Test
-    fun `the offered scales are multipliers, in order`() {
-        assertEquals(listOf(1f, 2f, 4f), CaptureScale.entries.map { it.factor })
+    fun `the offered scales are multipliers, sharpest first`() {
+        // The order is the order they are offered in, and the first of them is the
+        // default: a capture that comes out too coarse cannot be sharpened later,
+        // while one that comes out large can always be sent again smaller.
+        assertEquals(listOf(4f, 2f, 1f), CaptureScale.entries.map { it.factor })
+        assertEquals(listOf("Hi", "Mid", "Lo"), CaptureScale.entries.map { it.label })
     }
 
     private fun assertFalse(condition: Boolean, message: String) =

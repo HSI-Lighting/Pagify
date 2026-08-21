@@ -60,6 +60,8 @@ fun CaptureCanvas(
     crop: Rect,
     markup: List<Markup>,
     tool: MarkupTool,
+    /** Whether the tool is held. Nothing draws when it is not. */
+    armed: Boolean,
     color: Long,
     /** Nib width, or the highlighter's intensity. */
     size: Float,
@@ -117,6 +119,7 @@ fun CaptureCanvas(
                 crop = crop,
                 markup = markup,
                 tool = tool,
+                armed = armed,
                 color = color,
                 size = size,
                 style = style,
@@ -134,6 +137,7 @@ private fun MarkupSurface(
     crop: Rect,
     markup: List<Markup>,
     tool: MarkupTool,
+    armed: Boolean,
     color: Long,
     size: Float,
     /** The style the *next* mark will use; each committed mark carries its own. */
@@ -154,7 +158,7 @@ private fun MarkupSurface(
     // the size changes, because the cloud sizes its scallops from it and a gesture
     // holding the number from before would draw a cloud nobody asked for.
     val gesture = remember(tool, size) { MarkupGesture(tool, size) }
-    var preview by remember(tool) { mutableStateOf<MarkupShape?>(null) }
+    var preview by remember(tool) { mutableStateOf<List<MarkupShape>>(emptyList()) }
     var dwelling by remember(tool) { mutableStateOf(false) }
 
     /** Displayed pixels to page points. */
@@ -180,14 +184,21 @@ private fun MarkupSurface(
             // part beyond the edge is not in the export either, so showing it was
             // a promise the file would not keep.
             .clipToBounds()
-            .pointerInput(tool, crop, widthPx, heightPx) {
+            // No tool held, no input at all — exactly as the reader does it. A
+            // disabled handler that consumed the events and did nothing would
+            // still swallow the pinch this exists to protect.
+            .then(
+                if (!armed) {
+                    Modifier
+                } else {
+                    Modifier.pointerInput(tool, crop, widthPx, heightPx) {
                 awaitPointerEventScope {
                     while (true) {
                         val down = awaitPointerEvent().changes.firstOrNull { it.pressed }
                             ?: continue
                         gesture.down(toPage(down.position))
                         down.consume()
-                        preview = null
+                        preview = emptyList()
                         dwelling = false
 
                         var lifted = false
@@ -217,15 +228,18 @@ private fun MarkupSurface(
                         }
 
                         when (val outcome = gesture.up()) {
-                            is MarkupGesture.Outcome.Commit -> commit(outcome.shape)
+                            is MarkupGesture.Outcome.Commit ->
+                                outcome.shapes.forEach { commit(it) }
                             is MarkupGesture.Outcome.Recognise -> recognise(outcome.points)
                             MarkupGesture.Outcome.Nothing -> Unit
                         }
-                        preview = null
+                        preview = emptyList()
                         dwelling = false
                     }
                 }
-            },
+                    }
+                },
+            ),
     ) {
         androidx.compose.foundation.Canvas(Modifier.fillMaxSize()) {
             marks.forEach {
@@ -234,7 +248,7 @@ private fun MarkupSurface(
             // The wet stroke is drawn through the same builder the commit uses, so
             // what is under the finger is what ends up in the file — including the
             // highlighter's intensity, which rides in the colour's alpha.
-            preview?.let { shape ->
+            preview.forEach { shape ->
                 val wet = markupFor(shape, currentTool, ink, currentSize, currentStyle)
                 drawMarkup(wet.shape, wet.color, wet.widthPoints * scale, wet.style, ::toPixels)
             }

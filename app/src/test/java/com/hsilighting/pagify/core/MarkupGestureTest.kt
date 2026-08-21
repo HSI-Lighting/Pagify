@@ -43,7 +43,7 @@ class MarkupGestureTest {
 
         val outcome = gesture.up()
         assertTrue("expected a plain commit, got $outcome", outcome is MarkupGesture.Outcome.Commit)
-        assertTrue((outcome as MarkupGesture.Outcome.Commit).shape is MarkupShape.Freehand)
+        assertTrue((outcome as MarkupGesture.Outcome.Commit).shapes.single() is MarkupShape.Freehand)
     }
 
     @Test
@@ -105,7 +105,7 @@ class MarkupGestureTest {
         val gesture = MarkupGesture(MarkupTool.Arrow)
         stroke(gesture, listOf(Offset(10f, 10f), Offset(50f, 50f), Offset(90f, 70f)))
 
-        val shape = (gesture.up() as MarkupGesture.Outcome.Commit).shape
+        val shape = (gesture.up() as MarkupGesture.Outcome.Commit).shapes.single()
         assertEquals(MarkupShape.Arrow(Offset(10f, 10f), Offset(90f, 70f)), shape)
     }
 
@@ -114,7 +114,7 @@ class MarkupGestureTest {
         val gesture = MarkupGesture(MarkupTool.Rectangle)
         stroke(gesture, listOf(Offset(90f, 70f), Offset(10f, 10f)))
 
-        val shape = (gesture.up() as MarkupGesture.Outcome.Commit).shape as MarkupShape.Rectangle
+        val shape = (gesture.up() as MarkupGesture.Outcome.Commit).shapes.single() as MarkupShape.Rectangle
         assertEquals(10f, shape.rect.left)
         assertEquals(10f, shape.rect.top)
         assertEquals(90f, shape.rect.right)
@@ -149,17 +149,17 @@ class MarkupGestureTest {
     @Test
     fun `the preview follows the finger and disappears when it lifts`() {
         val gesture = MarkupGesture(MarkupTool.Ellipse)
-        assertNull("there is nothing to draw before a touch", gesture.preview)
+        assertEquals("there is nothing to draw before a touch", emptyList<MarkupShape>(), gesture.preview)
 
         gesture.down(Offset(10f, 10f))
         gesture.move(Offset(60f, 40f))
         assertEquals(
-            MarkupShape.Ellipse(rectFromCorners(10f, 10f, 60f, 40f)),
+            listOf(MarkupShape.Ellipse(rectFromCorners(10f, 10f, 60f, 40f))),
             gesture.preview,
         )
 
         gesture.up()
-        assertNull("the preview outlived the gesture", gesture.preview)
+        assertEquals("the preview outlived the gesture", emptyList<MarkupShape>(), gesture.preview)
     }
 
     @Test
@@ -169,7 +169,7 @@ class MarkupGestureTest {
         gesture.still()
         gesture.cancel()
 
-        assertNull(gesture.preview)
+        assertEquals(emptyList<MarkupShape>(), gesture.preview)
         assertEquals(MarkupGesture.Outcome.Nothing, gesture.up())
     }
 
@@ -178,7 +178,7 @@ class MarkupGestureTest {
         val gesture = MarkupGesture(MarkupTool.Cloud, size)
         stroke(gesture, ringPoints())
 
-        val shape = (gesture.up() as MarkupGesture.Outcome.Commit).shape as MarkupShape.Freehand
+        val shape = (gesture.up() as MarkupGesture.Outcome.Commit).shapes.single() as MarkupShape.Freehand
         assertEquals(cloudOutline(ringPoints(), size), shape.points)
         assertTrue("the trace came back unscalloped", shape.points.size > ringPoints().size)
     }
@@ -190,8 +190,8 @@ class MarkupGestureTest {
         val gesture = MarkupGesture(MarkupTool.Cloud, size)
         stroke(gesture, ringPoints())
 
-        val preview = gesture.preview as MarkupShape.Freehand
-        val committed = (gesture.up() as MarkupGesture.Outcome.Commit).shape as MarkupShape.Freehand
+        val preview = gesture.preview.single() as MarkupShape.Freehand
+        val committed = (gesture.up() as MarkupGesture.Outcome.Commit).shapes.single() as MarkupShape.Freehand
         assertEquals(preview.points, committed.points)
     }
 
@@ -225,7 +225,7 @@ class MarkupGestureTest {
 
         gesture.down(Offset(0f, 0f))
         gesture.move(Offset(20f, 0f))
-        val shape = (gesture.up() as MarkupGesture.Outcome.Commit).shape as MarkupShape.Freehand
+        val shape = (gesture.up() as MarkupGesture.Outcome.Commit).shapes.single() as MarkupShape.Freehand
         assertEquals(2, shape.points.size)
     }
 }

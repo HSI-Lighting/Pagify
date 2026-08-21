@@ -40,13 +40,21 @@ enum class CaptureFormat(
  *
  * Independent of the on-screen zoom on purpose. The display can only show so many
  * pixels; a capture is kept, zoomed into and printed, so it is worth more than the
- * screen can render. [X2] is the default — visibly sharper than the display on
- * every device we target, and still a file small enough to send.
+ * screen can render.
+ *
+ * Named by what they are for rather than by their factor. "1×, 2×, 4×" is a
+ * multiple of something the reader never sees — not the screen, not the file, but
+ * the page's natural size — so it gave no way to tell which one you wanted. High,
+ * medium and low are the question actually being asked.
+ *
+ * Highest first, and [HIGH] is the default: a capture usually outlives the moment
+ * it was taken, and a picture that turns out too coarse cannot be sharpened later
+ * while one that turns out large can always be sent again smaller.
  */
 enum class CaptureScale(val factor: Float, val label: String) {
-    X1(1f, "1×"),
-    X2(2f, "2×"),
-    X4(4f, "4×"),
+    HIGH(4f, "Hi"),
+    MEDIUM(2f, "Mid"),
+    LOW(1f, "Lo"),
 }
 
 /**
@@ -88,7 +96,7 @@ data class CaptureRequest(
      * they would name it after.
      */
     val originPage: Int,
-    val scale: CaptureScale = CaptureScale.X2,
+    val scale: CaptureScale = CaptureScale.HIGH,
     val format: CaptureFormat = CaptureFormat.PNG,
     /** 1–100. Ignored for PNG. */
     val quality: Int = 92,
@@ -102,7 +110,7 @@ data class CaptureRequest(
      * Part of the request rather than a one-off argument because the editor
      * re-exports at other scales and formats, and a mask that survived only the
      * first render would quietly come back as a rectangle the moment someone
-     * chose 4×.
+     * chose a sharper one.
      */
     val mask: List<Offset> = emptyList(),
 ) {
@@ -191,5 +199,5 @@ enum class CaptureFill(val label: String, val colour: Long?) {
      * faintly readable outside the ring, which is what the ring was drawn to
      * prevent.
      */
-    TRANSPARENT("Transparent", 0x00000000L),
+    TRANSPARENT("None", 0x00000000L),
 }

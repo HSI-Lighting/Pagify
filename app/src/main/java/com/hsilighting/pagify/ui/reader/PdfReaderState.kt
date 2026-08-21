@@ -217,6 +217,20 @@ data class PdfReaderState(
     val markup: List<Markup> = emptyList(),
     val markupTool: MarkupTool = MarkupTool.Pen,
     /**
+     * Whether the markup tool is actually held.
+     *
+     * Separate from [markupTool] rather than making that nullable, so putting a
+     * tool down and picking it back up returns the one you had.
+     *
+     * The editor used to draw with one finger unconditionally — a tool was always
+     * held, on the reasoning that a finger on the picture had nothing else it
+     * could mean. It does: while pinching to zoom, a finger that lands a moment
+     * before or after its partner is one finger, and every one of those left a
+     * mark on the picture. The reader has always been able to put its tools down;
+     * this is the same escape.
+     */
+    val markupArmed: Boolean = true,
+    /**
      * Solid, dashed or dash-dot, for the line tool.
      *
      * Sticky like the colour: a drawing marked up with dashed setting-out

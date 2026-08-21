@@ -115,6 +115,9 @@ fun CaptureEditor(
     isCapturing: Boolean,
     markup: List<Markup>,
     markupTool: MarkupTool,
+    /** Whether that tool is actually held; see `PdfReaderState.markupArmed`. */
+    markupArmed: Boolean,
+    onDisarmMarkup: () -> Unit,
     markupColor: Long,
     /** How heavy the current tool draws: nib width, or intensity for the wash. */
     markupSize: Float,
@@ -140,6 +143,34 @@ fun CaptureEditor(
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
     var pickingColour by remember { mutableStateOf(false) }
+
+    /** Which export is being set up, if one is. */
+    var exporting by remember { mutableStateOf<ExportAction?>(null) }
+
+    exporting?.let { action ->
+        ExportSheet(
+            action = action,
+            scale = preview.request.scale,
+            format = preview.request.format,
+            fill = fill,
+            // A box capture is all page, so there is nothing around it to fill and
+            // the question is not asked. A drawn-around one always has an outside.
+            hasBareArea = preview.request.mask.isNotEmpty(),
+            isCapturing = isCapturing,
+            onScale = onScaleChange,
+            onFormat = onFormatChange,
+            onFill = onFillChange,
+            onDismiss = { exporting = null },
+            onConfirm = {
+                exporting = null
+                when (action) {
+                    ExportAction.Save -> onSaveToGallery()
+                    ExportAction.Share -> onShare()
+                    ExportAction.Copy -> onCopy()
+                }
+            },
+        )
+    }
 
     // A window of its own rather than a box inside the reader, so it covers the
     // app bar and the thumbnail rail too. Placed in the reader's content area it
@@ -281,6 +312,7 @@ fun CaptureEditor(
                         crop = preview.request.localBounds,
                         markup = markup,
                         tool = markupTool,
+                        armed = markupArmed,
                         color = markupColor,
                         size = markupSize,
                         style = markupStyle,
@@ -310,8 +342,10 @@ fun CaptureEditor(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    MarkupTools(
+                    MarkupRibbon(
                         tool = markupTool,
+                        armed = markupArmed,
+                        onDisarm = onDisarmMarkup,
                         color = markupColor,
                         size = markupSize,
                         style = markupStyle,
@@ -321,83 +355,19 @@ fun CaptureEditor(
                         onStyle = onMarkupStyle,
                         onPickCustomColour = { pickingColour = true },
                     )
-    
-                    // Two groups, not five chips in a line: how sharp and what
-                    // kind of file are different questions, and side by side with
-                    // nothing between them they read as one row of five choices
-                    // where picking any excludes the rest. The resolution sits on
-                    // its own ground at the left, the format plainly at the right.
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth(),
-                        // Pushed apart rather than spaced: the format belongs at
-                        // the right edge, opposite the resolution, so the two
-                        // groups read as two questions and not as one list that
-                        // happens to have a gap in it.
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .background(
-                                    MaterialTheme.colorScheme.surfaceVariant,
-                                    RoundedCornerShape(20.dp),
-                                )
-                                .padding(horizontal = 6.dp, vertical = 5.dp),
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            CaptureScale.entries.forEach { scale ->
-                                FilterChip(
-                                    selected = preview.request.scale == scale,
-                                    onClick = { onScaleChange(scale) },
-                                    enabled = !isCapturing,
-                                    label = { Text(scale.label) },
-                                )
-                            }
-                        }
 
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            CaptureFormat.entries.forEach { format ->
-                                FilterChip(
-                                    selected = preview.request.format == format,
-                                    onClick = { onFormatChange(format) },
-                                    enabled = !isCapturing,
-                                    label = { Text(format.extension.uppercase()) },
-                                )
-                            }
-                        }
-                    }
-
-                    // Only for a picture that has an outside. A box capture is all
-                    // page, so a fill would be a control with nothing to act on.
-                    if (preview.request.mask.isNotEmpty()) {
-                        Row(
-                            modifier = Modifier.horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                "Around it",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                            CaptureFill.entries.forEach { option ->
-                                FilterChip(
-                                    selected = fill == option,
-                                    onClick = { onFillChange(option) },
-                                    enabled = !isCapturing,
-                                    label = { Text(option.label) },
-                                )
-                            }
-                        }
-                    }
-    
+                    // How sharp and what kind of file used to sit here, on screen
+                    // the whole time the picture was being marked up. They are not
+                    // markup: they are questions about the *file*, and the moment
+                    // to ask them is the moment there is going to be one. Asking
+                    // then also means the answers can be remembered, so the common
+                    // case is a sheet that is already right.
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Button(
-                            onClick = onSaveToGallery,
+                            onClick = { exporting = ExportAction.Save },
                             enabled = !isCapturing,
                             modifier = Modifier.weight(1f),
                         ) {
@@ -405,7 +375,7 @@ fun CaptureEditor(
                             Text("  Save")
                         }
                         OutlinedButton(
-                            onClick = onShare,
+                            onClick = { exporting = ExportAction.Share },
                             enabled = !isCapturing,
                             modifier = Modifier.weight(1f),
                         ) {
@@ -413,7 +383,7 @@ fun CaptureEditor(
                             Text("  Share")
                         }
                         OutlinedButton(
-                            onClick = onCopy,
+                            onClick = { exporting = ExportAction.Copy },
                             enabled = !isCapturing,
                             modifier = Modifier.weight(1f),
                         ) {
@@ -431,475 +401,6 @@ fun CaptureEditor(
     }
 }
 
-/**
- * What to draw with, how heavy, and in what colour.
- *
- * The pen is first and selected by default: it needs no aiming, and holding still
- * at the end of a stroke turns a rough circle or box into the tidy version anyway,
- * so the other tools are for when someone wants the shape without the hold.
- *
- * The sizes sit beside the colours and are always on screen, because "how thick"
- * is asked as often as "what colour" and burying it behind a press would make the
- * common case the slow one. The long press on a tool is for the size that is not
- * one of the four.
- */
-@Composable
-private fun MarkupTools(
-    tool: MarkupTool,
-    color: Long,
-    size: Float,
-    style: MarkupStyle,
-    onTool: (MarkupTool) -> Unit,
-    onColor: (Long) -> Unit,
-    onSize: (MarkupTool, Float) -> Unit,
-    onStyle: (MarkupStyle) -> Unit,
-    onPickCustomColour: () -> Unit,
-) {
-    /**
-     * Which tool's fine size is open, if any.
-     *
-     * Held for the whole row rather than inside each button, so choosing another
-     * tool closes it. It used to be a focusable popup, which swallowed the very
-     * tap that was choosing: the slider went away and the tool did not change, so
-     * every switch took two taps and looked like the first one had missed.
-     */
-    var adjusting by remember { mutableStateOf<Pair<MarkupTool, String>?>(null) }
-
-    /**
-     * The two tools sharing a slot, once a press has asked to see them.
-     *
-     * Shown rather than swapped, as in the reader. A press that silently exchanged
-     * the tool under your finger left nothing on screen to say a choice had been
-     * made, or that there was one to make.
-     */
-    var alternatesOpen by remember { mutableStateOf(false) }
-
-    /**
-     * Where the button that opened them sits, so they open *over* it.
-     *
-     * Window pixels, as in the reader: the row that opens and the button that
-     * opened it are laid out separately, and the window is what they share.
-     */
-    var anchorCentre by remember { mutableStateOf(0f) }
-    var bandLeft by remember { mutableStateOf(0f) }
-    var bandWidth by remember { mutableStateOf(0f) }
-    var alternatesWidth by remember { mutableStateOf(0f) }
-
-    // Shifted from the left edge of the band, clamped so it cannot hang off
-    // either end: the circle is near the middle of the row, but the row scrolls.
-    val alternatesShift = if (bandWidth <= 0f || alternatesWidth <= 0f) {
-        0f
-    } else {
-        (anchorCentre - bandLeft - alternatesWidth / 2f)
-            .coerceIn(0f, (bandWidth - alternatesWidth).coerceAtLeast(0f))
-    }
-
-    // Any tool tap puts both away, whichever tool was tapped: they belong to a
-    // choice that has just been superseded.
-    val chooseTool: (MarkupTool) -> Unit = { chosen ->
-        adjusting = null
-        alternatesOpen = false
-        onTool(chosen)
-    }
-
-    // A long press arms the tool as well as opening its fine size: a size control
-    // for a tool you are not using would be a strange thing to offer.
-    val adjustTool: (MarkupTool, String) -> Unit = { chosen, label ->
-        alternatesOpen = false
-        adjusting = chosen to label
-        onTool(chosen)
-    }
-
-    Column(
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-        modifier = Modifier.onGloballyPositioned {
-            bandLeft = it.boundsInWindow().left
-            bandWidth = it.boundsInWindow().width
-        },
-    ) {
-        adjusting?.let { (open, label) ->
-            SizeSlider(
-                tool = open,
-                label = label,
-                size = size,
-                onSize = { onSize(open, it) },
-            )
-        }
-
-        if (alternatesOpen) {
-            Surface(
-                shape = RoundedCornerShape(16.dp),
-                tonalElevation = 3.dp,
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                modifier = Modifier
-                    .offset { IntOffset(alternatesShift.roundToInt(), 0) }
-                    .onGloballyPositioned { alternatesWidth = it.size.width.toFloat() },
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(2.dp),
-                ) {
-                    RING_MARKUP_TOOLS.forEach { ring ->
-                        MarkupToolButton(
-                            markupToolIcon(ring),
-                            markupToolLabel(ring),
-                            ring,
-                            tool,
-                            chooseTool,
-                            onAdjust = { _, _ -> },
-                            hasMore = false,
-                        )
-                    }
-                }
-            }
-        }
-
-        Row(
-            modifier = Modifier.horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            MarkupToolButton(
-                Icons.Filled.Draw,
-                "Pen",
-                MarkupTool.Pen,
-                tool,
-                chooseTool,
-                adjustTool,
-            )
-            MarkupToolButton(
-                Icons.Filled.HorizontalRule,
-                "Line",
-                MarkupTool.Line,
-                tool,
-                chooseTool,
-                adjustTool,
-            )
-            MarkupToolButton(
-                Icons.AutoMirrored.Filled.ArrowRightAlt,
-                "Arrow",
-                MarkupTool.Arrow,
-                tool,
-                chooseTool,
-                adjustTool,
-            )
-            MarkupToolButton(
-                Icons.Filled.CheckBoxOutlineBlank,
-                "Box",
-                MarkupTool.Rectangle,
-                tool,
-                chooseTool,
-                adjustTool,
-            )
-            // Circle and cloud share this slot: whichever is armed is the one
-            // shown, and the long press opens both to pick from rather than a
-            // size slider. That press is the cloud's only way in, here and in the
-            // reader both — one gesture to learn, not two.
-            val ringing = if (tool == MarkupTool.Cloud) MarkupTool.Cloud else MarkupTool.Ellipse
-            var ringCentre by remember { mutableStateOf(0f) }
-            MarkupToolButton(
-                markupToolIcon(ringing),
-                markupToolLabel(ringing),
-                ringing,
-                tool,
-                chooseTool,
-                onAdjust = { _, _ ->
-                    anchorCentre = ringCentre
-                    alternatesOpen = true
-                },
-                modifier = Modifier.onGloballyPositioned {
-                    ringCentre = it.boundsInWindow().center.x
-                },
-            )
-            MarkupToolButton(
-                Icons.Filled.Highlight,
-                "Highlight",
-                MarkupTool.Highlight,
-                tool,
-                chooseTool,
-                adjustTool,
-            )
-            LineStyleButton(
-                style = style,
-                // Lit only when a dash is actually live: the line tool on its own
-                // is the solid one, and lighting this up for it would say the
-                // opposite.
-                active = tool.hasLineStyle && style.isBroken,
-                color = color,
-                onStyle = onStyle,
-            )
-        }
-
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            // Pushed to the two edges, like the resolution and the format below:
-            // how heavy and what colour are separate questions, and the gap in the
-            // middle is what says so.
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            SizeGroup(tool = tool, size = size, color = color, onSize = onSize)
-
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                // The wheel first, before the palette. It is the way to *any*
-                // colour, so it belongs where the eye starts rather than tucked
-                // behind six that happened to be chosen in advance.
-                CustomColourSwatch(
-                    current = color,
-                    isCustom = color !in MARKUP_COLOURS,
-                    onClick = onPickCustomColour,
-                )
-                MARKUP_COLOURS.forEach { swatch ->
-                    ColourSwatch(
-                        colour = swatch,
-                        selected = swatch == color,
-                        onClick = { onColor(swatch) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * How heavy the tool draws: three sizes, all of them on screen.
- *
- * On its own tinted ground and on the left, with the colours to its right,
- * because they are two different questions and a single undifferentiated row of
- * round things made them look like one. The ground is what says "these three go
- * together", which is also what stops the leftmost dot reading as an eighth
- * colour.
- *
- * Every size is a tap. A press was one tap too many for the thing people change
- * most often — and the size that is not one of the three is still there, behind a
- * long press on the tool itself, where the wedge in the corner says so.
- */
-@Composable
-private fun SizeGroup(
-    tool: MarkupTool,
-    size: Float,
-    color: Long,
-    onSize: (MarkupTool, Float) -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(18.dp))
-            .padding(horizontal = 4.dp, vertical = 3.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        tool.sizePresets.forEach { preset ->
-            // Nearest wins rather than exact equality: the slider can leave the
-            // size a hair off a preset, and three unlit dots would then suggest no
-            // size is set at all.
-            val chosen = tool.sizePresets.minByOrNull { abs(it - size) } == preset
-            Box(
-                modifier = Modifier
-                    .size(34.dp)
-                    // A ring rather than a filled circle: the mark inside is drawn
-                    // in the ink colour, and that is half of what the control is
-                    // showing, so the selection cannot be allowed to sit on top of
-                    // it.
-                    .then(
-                        if (chosen) {
-                            Modifier.border(2.dp, MaterialTheme.colorScheme.primary, CircleShape)
-                        } else {
-                            Modifier
-                        },
-                    )
-                    .clickable { onSize(tool, preset) },
-                contentAlignment = Alignment.Center,
-            ) {
-                SizeMark(tool = tool, size = preset, color = color, diameter = 24.dp)
-            }
-        }
-    }
-}
-
-/**
- * What a size looks like: a dot at the nib's width, or a bar at the wash's
- * strength.
- *
- * Shared by the three presets and the tool buttons, so what a size looks like is
- * decided in one place.
- */
-@Composable
-private fun SizeMark(tool: MarkupTool, size: Float, color: Long, diameter: Dp) {
-    Canvas(Modifier.size(diameter)) {
-        if (tool.isIntensity) {
-            drawRect(
-                color = Color(color).copy(alpha = size),
-                topLeft = Offset(0f, this.size.height * 0.25f),
-                size = Size(this.size.width, this.size.height * 0.5f),
-            )
-        } else {
-            // Scaled rather than true to size: a 16-unit nib drawn actual-size
-            // would fill the slot and a 0.6 one would be invisible. The order is
-            // what carries the meaning, and the clamps keep both ends usable.
-            drawCircle(
-                color = Color(color),
-                radius = (size * PRESET_DOT_SCALE).coerceIn(2f, this.size.minDimension / 2f),
-            )
-        }
-    }
-}
-
-
-@Composable
-private fun ColourSwatch(colour: Long, selected: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(26.dp)
-            .background(Color(colour), CircleShape)
-            .border(
-                width = if (selected) 3.dp else 1.dp,
-                color = if (selected) {
-                    MaterialTheme.colorScheme.onSurface
-                } else {
-                    MaterialTheme.colorScheme.outlineVariant
-                },
-                shape = CircleShape,
-            )
-            .clickable(onClick = onClick),
-    )
-}
-
-/** The glyph for a markup tool. Shapes, because a shape reads faster than a word. */
-private fun markupToolIcon(tool: MarkupTool): ImageVector = when (tool) {
-    MarkupTool.Line -> Icons.Filled.HorizontalRule
-    MarkupTool.Arrow -> Icons.AutoMirrored.Filled.ArrowRightAlt
-    MarkupTool.Rectangle -> Icons.Filled.CheckBoxOutlineBlank
-    MarkupTool.Ellipse -> Icons.Filled.RadioButtonUnchecked
-    MarkupTool.Cloud -> Icons.Outlined.Cloud
-    MarkupTool.Highlight -> Icons.Filled.Highlight
-    MarkupTool.Pen -> Icons.Filled.Draw
-}
-
-private fun markupToolLabel(tool: MarkupTool): String = when (tool) {
-    MarkupTool.Line -> "Line"
-    MarkupTool.Arrow -> "Arrow"
-    MarkupTool.Rectangle -> "Box"
-    MarkupTool.Ellipse -> "Circle"
-    MarkupTool.Cloud -> "Cloud"
-    MarkupTool.Highlight -> "Highlight"
-    MarkupTool.Pen -> "Pen"
-}
-
-/**
- * A tool, with its size a long press away.
- *
- * Long press selects the tool as well as opening the slider. Opening a size
- * control for a tool you are not using would be a strange thing to offer, and
- * having to tap first and then press again is a step for nothing.
- *
- * Which tool's slider is open is the row's business, not this button's — see
- * [MarkupTools]. A button that owned it could only close its own.
- */
-@Composable
-private fun MarkupToolButton(
-    icon: ImageVector,
-    label: String,
-    represents: MarkupTool,
-    selected: MarkupTool,
-    onTool: (MarkupTool) -> Unit,
-    onAdjust: (MarkupTool, String) -> Unit,
-    modifier: Modifier = Modifier,
-    /** Whether to draw the wedge that says a long press leads somewhere. */
-    hasMore: Boolean = true,
-) {
-    val isSelected = represents == selected
-
-    Box(modifier) {
-        Box(
-            modifier = Modifier
-                .size(44.dp)
-                .background(
-                    // The reader's ribbon marks its live tool with the accent, and
-                    // this has to say the same thing as loudly: on a dark screen
-                    // the container tint was a shade of grey against a shade of
-                    // grey, and which tool was armed simply could not be read.
-                    color = if (isSelected) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        Color.Transparent
-                    },
-                    shape = CircleShape,
-                )
-                .combinedClickableCompat(
-                    onClick = { onTool(represents) },
-                    onLongClick = { onAdjust(represents, label) },
-                )
-                .longPressHint(
-                    // The slider behind this press is the only way to a size the
-                    // three presets do not offer, so it has to announce itself.
-                    // Nothing is behind the press inside the circle-or-cloud row,
-                    // so it says nothing there.
-                    tint = if (!hasMore) {
-                        Color.Transparent
-                    } else if (isSelected) {
-                        MaterialTheme.colorScheme.onPrimary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = label,
-                tint = if (isSelected) {
-                    MaterialTheme.colorScheme.onPrimary
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
-            )
-        }
-    }
-}
-
-/**
- * The fine size, as a row of the band rather than a layer over the picture.
- *
- * It was a popup, floating above the tool it belonged to. Two things were wrong
- * with that: it covered the very picture being marked up, and being focusable it
- * ate the tap that chose the next tool — so switching tools while it was open did
- * nothing visible except close the slider. As a row it pushes the band up instead
- * of covering anything, and every other control stays live underneath.
- */
-@Composable
-private fun SizeSlider(
-    tool: MarkupTool,
-    label: String,
-    size: Float,
-    onSize: (Float) -> Unit,
-) {
-    Surface(
-        shape = RoundedCornerShape(16.dp),
-        tonalElevation = 3.dp,
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(
-                if (tool.isIntensity) {
-                    "$label · ${(size * 100).roundToInt()}%"
-                } else {
-                    "$label · ${"%.1f".format(size)}"
-                },
-                style = MaterialTheme.typography.labelLarge,
-            )
-            Slider(
-                value = size,
-                onValueChange = onSize,
-                valueRange = tool.sizeRange,
-            )
-        }
-    }
-}
 
 /**
  * Ink colours.
@@ -907,7 +408,7 @@ private fun SizeSlider(
  * Red first, and the default: markup on a page is almost always pointing
  * something out, and it has to hold up next to black text.
  */
-private val MARKUP_COLOURS = listOf(
+internal val MARKUP_COLOURS = listOf(
     AnnotationColors.RED,
     AnnotationColors.BLUE,
     AnnotationColors.GREEN,

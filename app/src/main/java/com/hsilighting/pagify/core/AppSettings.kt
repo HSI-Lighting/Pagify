@@ -38,6 +38,17 @@ data class AppSettings(
      */
     val viewfinderHandleX: Float = 1f,
     val viewfinderHandleY: Float = 0.5f,
+    /**
+     * How the last capture was exported.
+     *
+     * Kept here rather than with the open document because it is a habit, not a
+     * property of the file: somebody who sends screenshots into a report wants the
+     * same sharpness and the same format every time, and being asked afresh on
+     * every export is being asked a question already answered.
+     */
+    val captureScale: CaptureScale = CaptureScale.HIGH,
+    val captureFormat: CaptureFormat = CaptureFormat.PNG,
+    val captureFill: CaptureFill = CaptureFill.PAGE,
 )
 
 /** The settings as the file holds them. */
@@ -47,6 +58,9 @@ fun AppSettings.toSettingsJson(): String = JSONObject()
     .put(VIEWFINDER_MINIMIZED_KEY, viewfinderMinimized)
     .put(HANDLE_X_KEY, viewfinderHandleX.toDouble())
     .put(HANDLE_Y_KEY, viewfinderHandleY.toDouble())
+    .put(CAPTURE_SCALE_KEY, captureScale.name)
+    .put(CAPTURE_FORMAT_KEY, captureFormat.name)
+    .put(CAPTURE_FILL_KEY, captureFill.name)
     .toString()
 
 /**
@@ -75,11 +89,27 @@ fun settingsFromJson(json: String): AppSettings {
             .optDouble(HANDLE_Y_KEY, defaults.viewfinderHandleY.toDouble())
             .toFloat()
             .coerceIn(0f, 1f),
+        captureScale = stored.optString(CAPTURE_SCALE_KEY).toEnum(defaults.captureScale),
+        captureFormat = stored.optString(CAPTURE_FORMAT_KEY).toEnum(defaults.captureFormat),
+        captureFill = stored.optString(CAPTURE_FILL_KEY).toEnum(defaults.captureFill),
     )
 }
+
+/**
+ * One stored name back to its value, or the default.
+ *
+ * By name rather than by ordinal: the scales were renumbered when they stopped
+ * being 1x, 2x and 4x, and an ordinal written before that would have come back as
+ * a different sharpness entirely.
+ */
+private inline fun <reified T : Enum<T>> String?.toEnum(fallback: T): T =
+    enumValues<T>().firstOrNull { it.name == this } ?: fallback
 
 private const val THEME_KEY = "theme"
 private const val SHOW_VIEWFINDER_KEY = "showViewfinder"
 private const val VIEWFINDER_MINIMIZED_KEY = "viewfinderMinimized"
 private const val HANDLE_X_KEY = "viewfinderHandleX"
 private const val HANDLE_Y_KEY = "viewfinderHandleY"
+private const val CAPTURE_SCALE_KEY = "captureScale"
+private const val CAPTURE_FORMAT_KEY = "captureFormat"
+private const val CAPTURE_FILL_KEY = "captureFill"

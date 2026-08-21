@@ -33,7 +33,8 @@ import com.hsilighting.pagify.core.isHitBy
 
 
 import com.hsilighting.pagify.core.MarkupStyle
-import com.hsilighting.pagify.core.cloudOutline
+import com.hsilighting.pagify.core.correctsOnRelease
+import com.hsilighting.pagify.core.tracedStrokes
 import com.hsilighting.pagify.core.dashed
 import com.hsilighting.pagify.core.isDragged
 import com.hsilighting.pagify.core.tracesPath
@@ -241,23 +242,22 @@ fun Modifier.annotationLayer(
                     wetStroke = wetStroke + toPage(change.position)
                 },
                 onDragEnd = {
-                    // What is drawn is what was traced, for the pen. For the cloud
-                    // it is the scalloped ring — built here, by the same call the
+                    // What is drawn is what was traced, for the pen. The others
+                    // replace it — the cloud with scallops, the curves with the
+                    // bend they were meant to be — through the same call the
                     // preview used, so the mark is the one that was on screen when
                     // the finger came up.
-                    val path = if (tool == AnnotationTool.Cloud) {
-                        cloudOutline(wetStroke, currentWidth)
-                    } else {
-                        wetStroke
-                    }
-                    if (path.size > 1) {
-                        // Dashed through the same splitter the shapes use, so a
-                        // line type means the same thing whichever tool drew it.
-                        val strokes = dashed(path, currentStyle, currentWidth)
+                    val strokes = tracedStrokes(
+                        tool = tool,
+                        path = wetStroke,
+                        style = currentStyle,
+                        widthPoints = currentWidth,
+                    )
+                    if (strokes.isNotEmpty()) {
                         SessionRecorder.record(
                             kind = "SHAPE_COMMIT",
                             detail = "page=$pageIndex tool=$tool traced=${wetStroke.size} " +
-                                "points=${path.size} strokes=${strokes.size}",
+                                "strokes=${strokes.size}",
                         )
                         add(
                             Annotation.Shape(
@@ -486,21 +486,26 @@ fun Modifier.annotationLayer(
                     )
                 }
                 if (wetStroke.size > 1) {
-                    // The cloud is previewed as a cloud, rebuilt on every frame
-                    // from the same call that will commit it. Watching a plain
-                    // trace turn into scallops only on lift means aiming at
-                    // something you cannot see; the scallops do shuffle as the ring
-                    // grows, but they shuffle into the ones you are going to get.
-                    if (tool == AnnotationTool.Cloud) {
+                    // Previewed as what it will become — except for the tools that
+                    // correct on lift, which are shown as traced. See
+                    // `correctsOnRelease`: re-deciding what a whole curve meant on
+                    // every frame made the line thrash under the finger.
+                    val wet = if (tool.correctsOnRelease) {
+                        listOf(wetStroke)
+                    } else {
+                        tracedStrokes(tool, wetStroke, currentStyle, currentWidth)
+                    }
+                    wet.forEach { stroke ->
                         drawInkStroke(
-                            points = cloudOutline(wetStroke, currentWidth),
+                            points = stroke,
                             color = currentColor,
                             widthPoints = currentWidth,
                             at = at,
-                            smooth = false,
+                            // Touch samples get the smoothing, because the curve
+                            // between them is what the hand did. A tool that has
+                            // already decided its own points does not.
+                            smooth = tool == AnnotationTool.Pen || tool.correctsOnRelease,
                         )
-                    } else {
-                        drawInkStroke(wetStroke, currentColor, currentWidth, at)
                     }
                 }
             }

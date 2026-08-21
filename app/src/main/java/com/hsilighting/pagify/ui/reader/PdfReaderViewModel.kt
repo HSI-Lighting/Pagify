@@ -147,7 +147,15 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     init {
         viewModelScope.launch { recentDocuments.load() }
-        viewModelScope.launch { settingsStore.load() }
+        viewModelScope.launch {
+            settingsStore.load()
+            // The fill lives in two places — here, for the chips to read, and in
+            // the settings so it outlives the app — and this is where the two are
+            // put back in step. Without it a remembered fill would be used for the
+            // capture while the sheet still showed the default: the kind of
+            // disagreement nobody thinks to look for.
+            _state.update { it.copy(captureFill = settings.value.captureFill) }
+        }
     }
 
     /**
@@ -1683,13 +1691,14 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 tiles = tiles,
                 width = area.width,
                 height = area.height,
-                background = _state.value.captureFill.colour ?: background,
+                background = settings.value.captureFill.colour ?: background,
                 originPage = originPage,
                 mask = mask,
-                // Whatever was chosen last, so a second capture does not silently
-                // come back at a different resolution from the first.
-                scale = existing?.scale ?: CaptureScale.X2,
-                format = existing?.format ?: CaptureFormat.PNG,
+                // Whatever was chosen last, kept with the settings rather than
+                // with the document: sending screenshots at a particular quality
+                // is a habit, not a property of the file being read.
+                scale = settings.value.captureScale,
+                format = settings.value.captureFormat,
             ),
         )
     }
@@ -1708,6 +1717,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     fun setCaptureFill(fill: CaptureFill) {
         if (_state.value.captureFill == fill) return
         _state.update { it.copy(captureFill = fill) }
+        rememberExport { it.copy(captureFill = fill) }
 
         val request = _state.value.capture?.request ?: return
         takeCapture(
@@ -1730,14 +1740,28 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Re-render the capture on screen at a different resolution. */
     fun setCaptureScale(scale: CaptureScale) {
+        rememberExport { it.copy(captureScale = scale) }
         val request = _state.value.capture?.request ?: return
         if (request.scale != scale) takeCapture(request.copy(scale = scale))
     }
 
     /** Re-render the capture on screen in the other format. */
     fun setCaptureFormat(format: CaptureFormat) {
+        rememberExport { it.copy(captureFormat = format) }
         val request = _state.value.capture?.request ?: return
         if (request.format != format) takeCapture(request.copy(format = format))
+    }
+
+    /**
+     * Keep an export choice for next time.
+     *
+     * With the sheet only appearing at save, share or copy, a choice made once and
+     * forgotten would mean answering the same three questions on every picture.
+     * Kept with the settings rather than the document, because which quality and
+     * which format is a habit and not a property of the file.
+     */
+    private fun rememberExport(change: (AppSettings) -> AppSettings) {
+        viewModelScope.launch { settingsStore.update(change) }
     }
 
     private fun takeCapture(request: CaptureRequest) {
@@ -1760,7 +1784,9 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 SessionRecorder.record(
                     kind = "CAPTURE",
                     detail = "page=${request.originPage} pages=${request.tiles.size} " +
-                        "scale=${request.scale.label} " +
+                        "scale=${request.scale.label} units=${request.width.toInt()}x" +
+                        "${request.height.toInt()} px=${(request.width * request.scale.factor).toInt()}x" +
+                        "${(request.height * request.scale.factor).toInt()} " +
                         "format=${request.format.wireName} bytes=${taken.bytes.size}",
                 )
                 _state.update { it.copy(isCapturing = false, capture = taken) }
@@ -1777,11 +1803,20 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /**
-     * Decode a copy small enough to show.
+     * Decode a copy to show, big enough to be worth looking at.
      *
-     * The preview is a thumbnail on a sheet. Decoding a 4× capture at full size to
-     * fill it would allocate tens of megabytes of Java heap for something a few
-     * hundred pixels across — on top of the encoded bytes already being held.
+     * This used to cap either edge at 1024 px, from when the preview really was a
+     * thumbnail on a sheet. It is a full-screen workspace now, on a screen wider
+     * than 1024, that can be pinched to 8× — so the cap was below what the display
+     * could show even before anyone zoomed. Worse, the sampling halves: a capture
+     * 2499 px across came back at 624 and was then stretched over a thousand
+     * pixels of screen. The file was always sharp; only the picture of it was not.
+     *
+     * Capped by total pixels instead, because that is what the memory cost
+     * actually is — an edge cap throws away four times the detail on a square
+     * capture and none at all on a thin one. At this figure a typical capture
+     * decodes at full size, and the extremes still cannot allocate more than
+     * [PREVIEW_MAX_PIXELS] times four bytes.
      */
     private fun decodeForPreview(bytes: ByteArray): ImageBitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -1789,8 +1824,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
         var sample = 1
         while (
-            bounds.outWidth / sample > PREVIEW_MAX_EDGE_PX ||
-            bounds.outHeight / sample > PREVIEW_MAX_EDGE_PX
+            (bounds.outWidth.toLong() / sample) * (bounds.outHeight.toLong() / sample) >
+            PREVIEW_MAX_PIXELS
         ) {
             sample *= 2
         }
@@ -1818,7 +1853,17 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     // ------------------------------------------------------- markup on a capture --
 
-    fun setMarkupTool(tool: MarkupTool) = _state.update { it.copy(markupTool = tool) }
+    /** Pick a tool up. Choosing one is also how you arm it. */
+    fun setMarkupTool(tool: MarkupTool) =
+        _state.update { it.copy(markupTool = tool, markupArmed = true) }
+
+    /**
+     * Put the markup tool down, so a stray finger cannot draw.
+     *
+     * The tool itself is remembered: picking it back up returns the one you had,
+     * with its colour and its weight, rather than starting again at the pen.
+     */
+    fun disarmMarkup() = _state.update { it.copy(markupArmed = false) }
 
     fun setMarkupColor(color: Long) = _state.update { it.copy(markupColor = color) }
 
@@ -2014,12 +2059,17 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         const val A4_HEIGHT_POINTS = 842f
 
         /**
-         * Longest edge of a decoded capture preview, in pixels.
+         * How many pixels a decoded capture preview may be, in total.
          *
-         * The preview fills part of a sheet; 1024 is past what any of our target
-         * screens can show of it, and it keeps a 4× capture's decode at a few
-         * megabytes rather than tens.
+         * Six megapixels is 24 MB decoded, held for one picture that is on screen
+         * and being worked on — against an engine cache of 160 MB. It is enough
+         * that a capture of a page at the best quality decodes untouched, so what
+         * is on screen is what is in the file.
+         *
+         * The cost of being wrong here is asymmetric, which is why it is generous:
+         * too low and every capture looks soft and nobody can tell whether the
+         * *file* is soft too; too high and one decode is a few megabytes more.
          */
-        const val PREVIEW_MAX_EDGE_PX = 1024
+        const val PREVIEW_MAX_PIXELS = 6_000_000L
     }
 }

@@ -78,7 +78,7 @@ val MarkupTool.hasLineStyle: Boolean get() = !isIntensity
 const val MARKUP_STROKE_POINTS = 2.4f
 
 /** What the markup toolbar can draw. */
-enum class MarkupTool { Pen, Line, Arrow, Rectangle, Ellipse, Cloud, Highlight }
+enum class MarkupTool { Pen, Line, Arrow, Curve, CurvedArrow, Rectangle, Ellipse, Cloud, Highlight }
 
 /**
  * The two ways of ringing a region, in the order they are always offered.
@@ -173,10 +173,18 @@ fun markupFor(
 /**
  * Whether this tool follows the finger rather than taking two corners.
  *
- * The pen keeps the path as drawn; the cloud replaces it with scallops. Either
- * way the whole stroke matters, so neither can be previewed from the drag alone.
+ * The pen keeps the path as drawn; the others replace it — the cloud with
+ * scallops, the curves with the bends they were meant to be. Either way the whole
+ * stroke matters, so none of them can be previewed from the drag alone.
  */
-val MarkupTool.tracesPath: Boolean get() = this == MarkupTool.Pen || this == MarkupTool.Cloud
+val MarkupTool.tracesPath: Boolean get() = this in TRACED_MARKUP_TOOLS
+
+private val TRACED_MARKUP_TOOLS = setOf(
+    MarkupTool.Pen,
+    MarkupTool.Cloud,
+    MarkupTool.Curve,
+    MarkupTool.CurvedArrow,
+)
 
 /**
  * Whether this tool's shape is dragged corner to corner rather than traced.
@@ -203,7 +211,8 @@ fun MarkupTool.shapeFor(start: Offset, end: Offset): MarkupShape = when (this) {
     MarkupTool.Ellipse -> MarkupShape.Ellipse(rectFromCorners(start.x, start.y, end.x, end.y))
     MarkupTool.Highlight -> MarkupShape.Highlight(rectFromCorners(start.x, start.y, end.x, end.y))
     // These trace rather than drag; their shape comes from the whole stroke.
-    MarkupTool.Pen, MarkupTool.Cloud -> MarkupShape.Freehand(listOf(start, end))
+    MarkupTool.Pen, MarkupTool.Cloud, MarkupTool.Curve, MarkupTool.CurvedArrow ->
+        MarkupShape.Freehand(listOf(start, end))
 }
 
 // ------------------------------------------------------------------- the wire --
