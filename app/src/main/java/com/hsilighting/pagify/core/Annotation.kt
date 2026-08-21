@@ -47,6 +47,26 @@ sealed interface Annotation {
         val color: Long,
     ) : Annotation
 
+    /**
+     * A line, an arrow, a box or a circle, as the strokes it is made of.
+     *
+     * Several strokes rather than one because an arrow has three, and a dashed
+     * anything has as many as it has dashes — the line type is baked in when the
+     * shape is committed, since a dash array on an ink annotation is a thing most
+     * viewers ignore.
+     *
+     * Saved into the PDF as ink, which is what a signature is too: every viewer
+     * draws it correctly, and the app carries one mechanism rather than two.
+     */
+    data class Shape(
+        override val id: Long,
+        override val pageIndex: Int,
+        val strokes: List<List<Offset>>,
+        val color: Long,
+        /** Stroke width in page points, so it scales with the page. */
+        val strokeWidth: Float,
+    ) : Annotation
+
     /** A drawn signature, stored as strokes so it stays sharp at any zoom. */
     data class Signature(
         override val id: Long,
@@ -72,6 +92,9 @@ fun Annotation.isHitBy(point: Offset, tolerance: Float): Boolean = when (this) {
     // expect to be able to rub out.
     is Annotation.Ink -> points.isNear(point, tolerance + strokeWidth / 2f)
     is Annotation.Signature -> strokes.any { it.isNear(point, tolerance) }
+    // Every dash of a dashed shape is a stroke of its own, so a tap anywhere
+    // along the shape finds it — including in a gap, within the tolerance.
+    is Annotation.Shape -> strokes.any { it.isNear(point, tolerance + strokeWidth / 2f) }
     is Annotation.Note -> (point - anchor).getDistance() <= tolerance + NOTE_MARKER_RADIUS_POINTS
 }
 
@@ -391,22 +414,119 @@ class AnnotationStore {
 enum class AnnotationTool {
     /** No tool: taps and drags scroll and zoom as usual. */
     None,
+
+    /**
+     * Picks out words. Drag across text and it snaps to the lines covered.
+     *
+     * Text only. Freehand used to be this tool's other mode, reached by a long
+     * press that nobody would guess at; it is the pen now, in a slot of its own.
+     */
+    Highlight,
+
+    // The drawing tools. One ribbon slot between them: the armed one is shown,
+    // and a long press offers the rest.
     Pen,
+    Line,
+    Arrow,
+    Rectangle,
+    Ellipse,
+
+    /**
+     * A revision cloud: trace roughly around something and it is ringed in
+     * scallops — the drawing-office way of saying "this part changed".
+     *
+     * Shares the circle's place in the palette rather than taking one of its own.
+     * They answer the same question — how do I ring this — and the palette is
+     * already five wide.
+     */
+    Cloud,
+
     Note,
     Signature,
+
     /** Rubs out whole marks. Tap one, or sweep across several. */
     Eraser,
     Snapshot,
 }
 
 /**
- * What the pen does. Long-pressing the pen swaps between these.
+ * The tools that draw, in the order the palette offers them.
  *
- * Highlight is the default because it is the common case on a document you are
- * reading, and it is the one that needs the engine's text geometry; the marker is
- * free-drawing and needs nothing but the touch points.
+ * The pen first because it is the one most reached for, and the shapes after it
+ * in the order a drawing needs them. The cloud is last and is not a slot of its
+ * own — see [paletteTools].
  */
-enum class PenMode { Highlight, Marker }
+val DRAWING_TOOLS = listOf(
+    AnnotationTool.Pen,
+    AnnotationTool.Line,
+    AnnotationTool.Arrow,
+    AnnotationTool.Rectangle,
+    AnnotationTool.Ellipse,
+    AnnotationTool.Cloud,
+)
+
+/**
+ * The two ways of ringing a region, in the order they are always offered.
+ *
+ * A fixed order because the row appears under a finger that is already moving
+ * towards it: if the armed one came first, the same press would land on a
+ * different tool depending on what was armed when it opened.
+ */
+val RING_TOOLS = listOf(AnnotationTool.Ellipse, AnnotationTool.Cloud)
+
+/**
+ * The tools sharing this one's slot, itself included, or just itself.
+ *
+ * Circle and cloud take turns in the last slot of the palette: whichever is
+ * armed is the one shown, and a long press opens both to choose from.
+ */
+val AnnotationTool.slotMates: List<AnnotationTool>
+    get() = if (this in RING_TOOLS) RING_TOOLS else listOf(this)
+
+/** The other tool sharing this one's slot, if it shares one. */
+val AnnotationTool.alternate: AnnotationTool?
+    get() = slotMates.firstOrNull { it != this }
+
+/**
+ * The five slots the palette shows, given what is armed.
+ *
+ * Five rather than six because the last one is shared. A sixth icon would fit,
+ * but a cloud is a once-in-a-while mark and the palette is meant to be read at a
+ * glance rather than searched.
+ */
+fun paletteTools(armed: AnnotationTool): List<AnnotationTool> = listOf(
+    AnnotationTool.Pen,
+    AnnotationTool.Line,
+    AnnotationTool.Arrow,
+    AnnotationTool.Rectangle,
+    if (armed == AnnotationTool.Cloud) AnnotationTool.Cloud else AnnotationTool.Ellipse,
+)
+
+/**
+ * Whether this tool makes a mark, and so takes settings of its own.
+ *
+ * The highlighter is one: it has a colour, even though it has neither a nib
+ * width nor a line type. One band serves them all — a second colour palette
+ * behind a long press put the same colours on screen twice.
+ */
+val AnnotationTool.marks: Boolean get() = draws || this == AnnotationTool.Highlight
+
+/** Whether this tool draws ink, and so takes a size, a colour and a line type. */
+val AnnotationTool.draws: Boolean get() = this in DRAWING_TOOLS
+
+/**
+ * Whether this tool follows the finger rather than taking two corners.
+ *
+ * The pen keeps the path as drawn; the cloud replaces it with scallops. Either
+ * way the gesture is the same — trace the thing — which is why they share a
+ * branch in the layer that captures it.
+ */
+val AnnotationTool.tracesPath: Boolean
+    get() = this == AnnotationTool.Pen || this == AnnotationTool.Cloud
+
+/** Whether this tool builds its shape from two corners rather than tracing a path. */
+val AnnotationTool.isDragged: Boolean get() = draws && !tracesPath
+
 
 /** Palette offered when long-pressing the pen. */
 object AnnotationColors {

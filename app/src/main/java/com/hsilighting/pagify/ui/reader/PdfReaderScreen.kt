@@ -70,9 +70,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.Annotation
 import com.hsilighting.pagify.core.AnnotationTool
+import com.hsilighting.pagify.core.PageMapping
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfMetadata
-import com.hsilighting.pagify.core.PenMode
 import com.hsilighting.pagify.core.pinchProgressAfter
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
@@ -172,7 +172,9 @@ fun PdfReaderScreen(
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
     onSelectTool: (AnnotationTool) -> Unit,
-    onPenModeChange: (PenMode) -> Unit,
+    /** How heavy the drawing tools are, and what kind of line they draw. */
+    onStrokeWidth: (Float) -> Unit,
+    onLineStyle: (MarkupStyle) -> Unit,
     onPenColorChange: (Long) -> Unit,
     onUndoAnnotation: () -> Unit,
     onRedoAnnotation: () -> Unit,
@@ -466,8 +468,7 @@ fun PdfReaderScreen(
                 // Only while the highlighter is the live tool: the marker, the
                 // eraser and plain reading all work perfectly well on a scan, so
                 // saying anything then would be noise.
-                val highlighterOnScan = state.tool == AnnotationTool.Pen &&
-                    state.penMode == PenMode.Highlight &&
+                val highlighterOnScan = state.tool == AnnotationTool.Highlight &&
                     state.currentPage in state.pagesWithoutSelectableText
                 var hintDismissed by remember(state.currentPage) { mutableStateOf(false) }
 
@@ -475,8 +476,7 @@ fun PdfReaderScreen(
                 // the only time the answer is interesting — and it is the line
                 // that separates "the page has text we failed to find" from "the
                 // hint is showing and the reader ignored it".
-                val highlighterLive = state.tool == AnnotationTool.Pen &&
-                    state.penMode == PenMode.Highlight
+                val highlighterLive = state.tool == AnnotationTool.Highlight
                 LaunchedEffect(highlighterLive, highlighterOnScan, state.currentPage, hintDismissed) {
                     if (!highlighterLive) return@LaunchedEffect
                     SessionRecorder.record(
@@ -507,7 +507,7 @@ fun PdfReaderScreen(
                 } else if (highlighterOnScan && !hintDismissed) {
                     NoTextOnPageHint(
                         onUseMarker = {
-                            onPenModeChange(PenMode.Marker)
+                            onSelectTool(AnnotationTool.Pen)
                             hintDismissed = true
                         },
                         onDismiss = { hintDismissed = true },
@@ -533,10 +533,13 @@ fun PdfReaderScreen(
 
                 AnnotationToolbar(
                     selectedTool = state.tool,
-                    penMode = state.penMode,
+
                     penColor = state.penColor,
                     onSelectTool = onSelectTool,
-                    onPenModeChange = onPenModeChange,
+                    strokeWidth = state.annotationStrokeWidth,
+                    lineStyle = state.annotationStyle,
+                    onStrokeWidth = onStrokeWidth,
+                    onLineStyle = onLineStyle,
                     onPenColorChange = onPenColorChange,
                     marksOnPage = state.annotationsOnPage,
                     marksInDocument = state.annotationsInDocument,
@@ -805,8 +808,7 @@ private fun PageList(
             // the list. Keyed on the tool as well as the page so switching to the
             // highlighter while already magnified loads them rather than waiting
             // for the page to change.
-            val wantsText = state.tool == AnnotationTool.Pen &&
-                state.penMode == PenMode.Highlight
+            val wantsText = state.tool == AnnotationTool.Highlight
             var pinnedSegments by remember(pinnedPage) {
                 mutableStateOf<List<TextSegment>>(emptyList())
             }
@@ -821,6 +823,7 @@ private fun PageList(
                 pageIndex = pinnedPage,
                 initialZoom = state.zoom,
                 pageSize = state.pageSizes[pinnedPage],
+                quarterTurns = state.rotationQuarterTurns,
                 onZoomSettled = onZoomTo,
                 onZoomActivity = onZoomActivity,
                 onWindowChanged = { window = it },
@@ -832,11 +835,14 @@ private fun PageList(
                 annotations = remember(pinnedPage, state.annotationRevision) {
                     annotationsForPage(pinnedPage)
                 },
+                annotationRevision = state.annotationRevision,
                 textSegments = pinnedSegments,
                 tool = state.tool,
                 captureLasso = state.captureLasso,
-                penMode = state.penMode,
+
                 penColor = state.penColor,
+                strokeWidth = state.annotationStrokeWidth,
+                lineStyle = state.annotationStyle,
                 onAddAnnotation = onAddAnnotation,
                 onRequestNote = onRequestNote,
                 onPageMarksNeeded = onPageMarksNeeded,
@@ -925,7 +931,11 @@ private fun PageList(
                                 // the page pinned to the top — the exact symptom
                                 // reported. Measuring is cheap now (page_size does
                                 // not load the page), so it is simply awaited.
-                                val size = state.pageSizes[page] ?: pageSizeProvider(page)
+                                // Turned, like the row it is measuring: this offset
+                                // is how far down the list the page starts, and a
+                                // rotated page is a different height.
+                                val size = state.displaySize(page)
+                                    ?: pageSizeProvider(page)?.turned(state.rotationQuarterTurns)
 
                                 val width = viewportWidth -
                                     (if (state.showThumbnails) THUMBNAIL_STRIP_WIDTH else 0.dp) -
@@ -1218,19 +1228,43 @@ private fun AnnotatablePage(
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
 ) {
     val density = LocalDensity.current
+    // The page's own size for the geometry, and its laid-out size for the box:
+    // a turned page is drawn across its height, so the scale has to come from
+    // the turned width or the raster would not fill what it is drawn into.
     val pageSize = state.pageSizes[pageIndex]
+    val laidOut = state.displaySize(pageIndex)
+    val turns = state.rotationQuarterTurns
 
     // Pixels per page point, at the width this page is actually drawn.
-    val renderScale = remember(pageSize, pageWidth, density) {
-        val size = pageSize ?: return@remember 0f
-        if (size.widthPoints <= 0f) return@remember 0f
-        with(density) { pageWidth.toPx() } / size.widthPoints
+    val mapping = remember(pageSize, laidOut, turns, pageWidth, density) {
+        val size = laidOut ?: return@remember PageMapping.Unmeasured
+        if (size.widthPoints <= 0f) return@remember PageMapping.Unmeasured
+        PageMapping(
+            scale = with(density) { pageWidth.toPx() } / size.widthPoints,
+            quarterTurns = turns,
+            pageWidthPoints = pageSize?.widthPoints ?: 0f,
+            pageHeightPoints = pageSize?.heightPoints ?: 0f,
+        )
+    }
+
+    // What the marks on this page are about to be drawn through.
+    //
+    // Recorded because a mark in the wrong place is either the mark or the
+    // mapping, and a screenshot cannot tell those apart: ink that failed to turn
+    // with its page looks exactly like ink that turned the wrong way.
+    LaunchedEffect(mapping, pageIndex) {
+        SessionRecorder.record(
+            kind = "PAGE_MAPPING",
+            detail = "page=$pageIndex turns=${mapping.quarterTurns} " +
+                "scale=${mapping.scale} " +
+                "pts=${mapping.pageWidthPoints}x${mapping.pageHeightPoints}",
+        )
     }
 
     // Only loaded when the highlighter is actually in use: walking every text run
     // on a page is real work, and no other tool needs it.
     var segments by remember(pageIndex) { mutableStateOf<List<TextSegment>>(emptyList()) }
-    val wantsText = state.tool == AnnotationTool.Pen && state.penMode == PenMode.Highlight
+    val wantsText = state.tool == AnnotationTool.Highlight
     LaunchedEffect(pageIndex, wantsText) {
         if (wantsText && segments.isEmpty()) segments = textSegmentsForPage(pageIndex)
     }
@@ -1255,8 +1289,8 @@ private fun AnnotatablePage(
         pageIndex = pageIndex,
         pageWidth = pageWidth,
         readable = readable,
-        knownSize = pageSize,
-        pageSizeProvider = pageSizeProvider,
+        knownSize = laidOut,
+        pageSizeProvider = { index -> pageSizeProvider(index)?.turned(turns) },
         renderer = renderer,
         // Read straight off the state this composable already has, rather than
         // threaded down from the screen: it changes for exactly the same reason
@@ -1268,11 +1302,14 @@ private fun AnnotatablePage(
             .annotationLayer(
             pageIndex = pageIndex,
             annotations = annotations,
+            revision = state.annotationRevision,
             textSegments = segments,
             tool = state.tool,
-            penMode = state.penMode,
+
             penColor = state.penColor,
-            renderScale = renderScale,
+            strokeWidth = state.annotationStrokeWidth,
+            lineStyle = state.annotationStyle,
+            mapping = mapping,
             onAdd = onAddAnnotation,
             onRequestNote = { anchor -> onRequestNote(pageIndex, anchor) },
             onOpenNote = onOpenNote,

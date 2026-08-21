@@ -48,7 +48,6 @@ import com.hsilighting.pagify.core.PageRemap
 import com.hsilighting.pagify.core.PdfCommand
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
-import com.hsilighting.pagify.core.PenMode
 import com.hsilighting.pagify.core.RecentDocument
 import com.hsilighting.pagify.core.ThemeChoice
 import com.hsilighting.pagify.data.AppSettingsStore
@@ -299,6 +298,27 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     @Synchronized
     private fun dropRecentRasters() = recentPageRasters.clear()
 
+    /**
+     * The pixels already on screen no longer match the document.
+     *
+     * A page keeps what it has drawn and the scale it drew it at, and re-renders
+     * only when asked for something bigger — which is what stops a scroll from
+     * re-rasterising the whole document. [PdfReaderState.pageContentRevision] is
+     * how it is told that "what it has" is no longer the page. Without the bump
+     * that guard suppresses the very render the change needs, and the page comes
+     * back only when a zoom happens to ask for a larger scale: that is the
+     * "rotate, then pinch before anything happens" bug, and it applied equally to
+     * undo, redo and every page edit.
+     *
+     * Clearing the caches without bumping the counter does nothing on its own.
+     * The caches are what the *next* request reads, and nothing was going to ask.
+     */
+    private fun invalidateRenderedPages() {
+        thumbnailCache.clear()
+        dropRecentRasters()
+        _state.update { it.copy(pageContentRevision = it.pageContentRevision + 1) }
+    }
+
     @Synchronized
     fun peekRenderedPage(pageIndex: Int): Bitmap? = recentPageRasters[pageIndex]
 
@@ -509,6 +529,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         // Rotation changes every page's pixel dimensions, so nothing already
         // cached can be reused.
         document?.let { doc -> viewModelScope.launch { runCatching { doc.clearCache() } } }
+        invalidateRenderedPages()
         schedulePrefetch()
     }
 
@@ -558,30 +579,42 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     private val recognitionJobs = mutableMapOf<Int, Deferred<List<TextSegment>>>()
 
     fun selectTool(tool: AnnotationTool) {
-        _state.update { it.copy(tool = tool) }
+        _state.update { current ->
+            // Each family carries its own palette, so a colour chosen for one
+            // would be wrong in the other: highlighter washes have to read behind
+            // text, ink has to read on white. Switching moves to that palette's
+            // default rather than keeping a colour that cannot be seen.
+            val palette = if (tool == AnnotationTool.Highlight) {
+                AnnotationColors.highlightPalette
+            } else {
+                AnnotationColors.markerPalette
+            }
+            current.copy(
+                tool = tool,
+                penColor = if (current.penColor in palette) {
+                    current.penColor
+                } else {
+                    palette.first()
+                },
+            )
+        }
         // Recorded because tool state decides how every subsequent touch is
         // routed: with a tool live one finger annotates and the list stops
         // scrolling, so a recording without this cannot explain why a drag did
         // or did not scroll.
         SessionRecorder.record(
             kind = "TOOL_SELECT",
-            detail = "tool=$tool penMode=${_state.value.penMode} " +
-                "oneFingerPans=${tool == AnnotationTool.None}",
+            detail = "tool=$tool oneFingerPans=${tool == AnnotationTool.None}",
         )
     }
 
-    fun setPenMode(mode: PenMode) = _state.update { current ->
-        // Each mode carries its own palette, so a colour chosen for one would be
-        // wrong for the other -- switching resets to that palette's default.
-        val palette = when (mode) {
-            PenMode.Highlight -> AnnotationColors.highlightPalette
-            PenMode.Marker -> AnnotationColors.markerPalette
-        }
-        current.copy(
-            penMode = mode,
-            penColor = if (current.penColor in palette) current.penColor else palette.first(),
-        )
+    /** How heavy the drawing tools draw, in page points. */
+    fun setStrokeWidth(width: Float) = _state.update {
+        it.copy(annotationStrokeWidth = width.coerceIn(0.5f, 24f))
     }
+
+    /** Solid, dashed or a centre line, for everything that draws a line. */
+    fun setLineStyle(style: MarkupStyle) = _state.update { it.copy(annotationStyle = style) }
 
     fun setPenColor(color: Long) = _state.update { it.copy(penColor = color) }
 
@@ -633,6 +666,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             is Annotation.Highlight -> annotation.copy(id = annotations.nextId())
             is Annotation.Ink -> annotation.copy(id = annotations.nextId())
             is Annotation.Note -> annotation.copy(id = annotations.nextId())
+            is Annotation.Shape -> annotation.copy(id = annotations.nextId())
             is Annotation.Signature -> annotation.copy(id = annotations.nextId())
         }
         annotations.add(withId)
@@ -644,6 +678,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             is Annotation.Highlight -> "highlight page=${withId.pageIndex} lines=${withId.rects.size}"
             is Annotation.Ink -> "ink page=${withId.pageIndex} points=${withId.points.size}"
             is Annotation.Note -> "note page=${withId.pageIndex}"
+            is Annotation.Shape -> "shape page=${withId.pageIndex} strokes=${withId.strokes.size}"
             is Annotation.Signature -> "signature page=${withId.pageIndex}"
         }
         SessionRecorder.record("ANNOTATION_ADD", detail)
@@ -669,6 +704,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                         is Annotation.Highlight -> "H${m.rects.firstOrNull()}"
                         is Annotation.Ink -> "I${m.points.size}"
                         is Annotation.Note -> "N${m.anchor}"
+                        is Annotation.Shape -> "P${m.strokes.size}"
                         is Annotation.Signature -> "S"
                     }
                 }}",
@@ -1466,9 +1502,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         message: String?,
         follow: Int? = null,
     ) {
-        thumbnailCache.clear()
+        invalidateRenderedPages()
         textSegmentCache.clear()
-        dropRecentRasters()
         unwarmablePages.clear()
 
         val pageCount = state.pageCount
@@ -1597,11 +1632,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             }
 
             // The mark was part of the drawn page, so the pixels are now wrong.
-            thumbnailCache.clear()
-            dropRecentRasters()
-            _state.update {
-                it.copy(pageContentRevision = it.pageContentRevision + 1)
-            }
+            invalidateRenderedPages()
             refreshEditState()
         }
     }

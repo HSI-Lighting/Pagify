@@ -24,6 +24,7 @@ fun Annotation.movedTo(pageIndex: Int): Annotation = when (this) {
     is Annotation.Highlight -> copy(pageIndex = pageIndex)
     is Annotation.Ink -> copy(pageIndex = pageIndex)
     is Annotation.Note -> copy(pageIndex = pageIndex)
+    is Annotation.Shape -> copy(pageIndex = pageIndex)
     is Annotation.Signature -> copy(pageIndex = pageIndex)
 }
 
@@ -75,6 +76,12 @@ fun Annotation.rotatedInPage(quarterTurns: Int, width: Float, height: Float): An
 
         is Annotation.Note ->
             copy(anchor = anchor.rotatedInPage(quarterTurns, width, height))
+
+        is Annotation.Shape -> copy(
+            strokes = strokes.map { stroke ->
+                stroke.map { it.rotatedInPage(quarterTurns, width, height) }
+            },
+        )
 
         is Annotation.Signature -> {
             val turned = strokes.map { stroke ->

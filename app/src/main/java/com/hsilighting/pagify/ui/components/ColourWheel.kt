@@ -2,6 +2,8 @@ package com.hsilighting.pagify.ui.components
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -32,6 +34,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -274,3 +277,57 @@ private fun Color.toHex(): String = "#%06X".format(toArgbLong() and 0xFFFFFFL)
 private const val WEDGES = 180
 
 private const val MARKER_RADIUS_PX = 14f
+
+/**
+ * The way out of a fixed palette, and into [ColourWheelDialog].
+ *
+ * Shows the wheel it opens until a colour has been picked from it, and the colour
+ * itself afterwards — otherwise choosing a custom colour makes the selection ring
+ * vanish from the row and nothing on screen says what is being drawn with.
+ *
+ * Shared by the reader's tool band and the screenshot editor's, because "any
+ * colour" is the same offer in both and two drawings of it would drift apart.
+ */
+@Composable
+fun CustomColourSwatch(
+    current: Long,
+    isCustom: Boolean,
+    onClick: () -> Unit,
+    size: Dp = 26.dp,
+) {
+    Box(
+        modifier = Modifier
+            .size(size)
+            .border(
+                width = if (isCustom) 3.dp else 1.dp,
+                color = if (isCustom) {
+                    MaterialTheme.colorScheme.onSurface
+                } else {
+                    MaterialTheme.colorScheme.outlineVariant
+                },
+                shape = CircleShape,
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(Modifier.size(size - 4.dp)) {
+            if (isCustom) {
+                drawCircle(Color(current))
+            } else {
+                drawCircle(
+                    brush = Brush.sweepGradient(
+                        listOf(
+                            Color.Red,
+                            Color.Yellow,
+                            Color.Green,
+                            Color.Cyan,
+                            Color.Blue,
+                            Color.Magenta,
+                            Color.Red,
+                        ),
+                    ),
+                )
+            }
+        }
+    }
+}

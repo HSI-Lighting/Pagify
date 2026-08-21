@@ -34,8 +34,9 @@ import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.captureMaskFor
 import com.hsilighting.pagify.core.captureTilesFor
 import com.hsilighting.pagify.core.zoomedPageBounds
+import com.hsilighting.pagify.core.PageMapping
 import com.hsilighting.pagify.core.PageSize
-import com.hsilighting.pagify.core.PenMode
+import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.core.RenderScale
 import com.hsilighting.pagify.ui.components.ViewportWindow
@@ -76,7 +77,10 @@ import kotlin.math.roundToInt
 fun ZoomedPage(
     pageIndex: Int,
     initialZoom: Float,
+    /** The page's own size, upright — which is the space marks are stored in. */
     pageSize: PageSize?,
+    /** View rotation, clockwise. The page is laid out and drawn turned by this. */
+    quarterTurns: Int = 0,
     /** Called when a gesture settles, with the scale to render and prefetch at. */
     onZoomSettled: (Float) -> Unit,
     /** Fired on every zoom gesture event, to drive the blank-frame watcher. */
@@ -108,9 +112,13 @@ fun ZoomedPage(
      * pan handler below instead.
      */
     annotations: List<Annotation>,
+    /** Bumped whenever the marks change; see `annotationLayer`'s `revision`. */
+    annotationRevision: Int,
     textSegments: List<TextSegment>,
     tool: AnnotationTool,
-    penMode: PenMode,
+    /** How heavy the drawing tools are, and what kind of line they draw. */
+    strokeWidth: Float,
+    lineStyle: MarkupStyle,
     penColor: Long,
     onAddAnnotation: (Annotation) -> Unit,
     /** The Note tool was tapped at this page point. */
@@ -138,7 +146,10 @@ fun ZoomedPage(
         val viewportW = with(density) { maxWidth.toPx() }
         val viewportH = with(density) { maxHeight.toPx() }
 
-        val aspect = pageSize?.aspectRatio ?: DEFAULT_ASPECT
+        // Everything about the box on screen — its shape, and the scale the raster
+        // is asked for — is the *turned* page. Only the marks stay upright.
+        val laidOut = pageSize?.turned(quarterTurns)
+        val aspect = laidOut?.aspectRatio ?: DEFAULT_ASPECT
         // Scale 1.0 is exactly what the list was showing, so handing over is
         // pixel-identical and every zoom grows continuously from there.
         val baseW = if (basePageWidthPx > 0f) basePageWidthPx else viewportW
@@ -219,8 +230,8 @@ fun ZoomedPage(
         var pageBitmap by remember(pageIndex) { mutableStateOf(initialBitmap) }
         var bitmapScale by remember(pageIndex) { mutableStateOf(0f) }
 
-        val renderScale = remember(pageSize, committedScale, baseW) {
-            val size = pageSize ?: return@remember null
+        val renderScale = remember(laidOut, committedScale, baseW) {
+            val size = laidOut ?: return@remember null
             RenderScale.forPage(size, baseW * committedScale)
         }
 
@@ -231,8 +242,8 @@ fun ZoomedPage(
         // documents where the sharp render takes longest. The proxy is the same
         // cheap raster the list already drew, so it is almost always a cache hit
         // and appears at once; it is then replaced, never blanked.
-        LaunchedEffect(pageIndex, pageSize) {
-            val size = pageSize ?: return@LaunchedEffect
+        LaunchedEffect(pageIndex, laidOut) {
+            val size = laidOut ?: return@LaunchedEffect
             if (pageBitmap != null) return@LaunchedEffect // already seeded or drawn
             val proxy = RenderScale.proxyFor(size, baseW)
             renderer(pageIndex, proxy)?.let {
@@ -278,10 +289,18 @@ fun ZoomedPage(
         // is the live scale rather than the committed one: the bitmap may still be
         // the previous rasterisation stretched to fit, and a mark has to sit on the
         // text as it appears now, not as it will appear once the render catches up.
-        val annotationScale = pageSize
+        val mapping = laidOut
             ?.takeIf { it.widthPoints > 0f }
-            ?.let { baseW * scale / it.widthPoints }
-            ?: 0f
+            ?.let {
+                PageMapping(
+                    scale = baseW * scale / it.widthPoints,
+                    origin = offset,
+                    quarterTurns = quarterTurns,
+                    pageWidthPoints = pageSize?.widthPoints ?: 0f,
+                    pageHeightPoints = pageSize?.heightPoints ?: 0f,
+                )
+            }
+            ?: PageMapping.Unmeasured
 
         // With a tool live one finger belongs to the tool, exactly as in the list.
         // Leaving the pan on one finger is what made the pen appear disabled here:
@@ -379,14 +398,15 @@ fun ZoomedPage(
                 .annotationLayer(
                     pageIndex = pageIndex,
                     annotations = annotations,
+                    revision = annotationRevision,
                     textSegments = textSegments,
                     tool = tool,
-                    penMode = penMode,
+                    strokeWidth = strokeWidth,
+                    lineStyle = lineStyle,
                     penColor = penColor,
-                    renderScale = annotationScale,
-                    // The page is drawn translated by `offset`, so the layer has to
-                    // be told where its top-left corner actually is.
-                    contentOffset = offset,
+                    // Carries the translation too: the page is drawn offset, so the
+                    // layer has to be told where its top-left corner actually is.
+                    mapping = mapping,
                     onAdd = onAddAnnotation,
                     onRequestNote = { anchor -> onRequestNote(pageIndex, anchor) },
                     onOpenNote = onOpenNote,

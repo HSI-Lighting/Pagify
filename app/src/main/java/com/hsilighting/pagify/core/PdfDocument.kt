@@ -274,4 +274,17 @@ data class PageSize(val widthPoints: Float, val heightPoints: Float) {
     fun pixelSize(zoom: Float): Pair<Int, Int> =
         Math.round(widthPoints * zoom).coerceAtLeast(1) to
             Math.round(heightPoints * zoom).coerceAtLeast(1)
+
+    /**
+     * The page as it is laid out after [quarterTurns] of view rotation.
+     *
+     * Turning the *size* rather than teaching every caller about rotation keeps
+     * one fact in one place: a page on its side is a page whose width is its
+     * height. It is also what makes the render scale come out right — the
+     * renderer takes a zoom against the upright page and swaps the pixels
+     * afterwards, so the zoom that fills a turned box is the one derived from the
+     * turned width.
+     */
+    fun turned(quarterTurns: Int): PageSize =
+        if (quarterTurns % 2 == 0) this else PageSize(heightPoints, widthPoints)
 }

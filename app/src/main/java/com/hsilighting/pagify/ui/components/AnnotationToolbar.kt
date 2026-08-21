@@ -4,17 +4,27 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Backspace
+import androidx.compose.material.icons.automirrored.filled.ArrowRightAlt
 import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.HorizontalRule
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Draw
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.HistoryEdu
 import androidx.compose.material.icons.filled.TextFields
@@ -36,13 +46,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.AnnotationTool
-import com.hsilighting.pagify.core.PenMode
+import com.hsilighting.pagify.core.DRAWING_TOOLS
+import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.draws
+import com.hsilighting.pagify.core.marks
+import com.hsilighting.pagify.core.alternate
+import com.hsilighting.pagify.core.slotMates
+import com.hsilighting.pagify.core.paletteTools
+import kotlin.math.roundToInt
 
 /**
  * The floating tool ribbon along the bottom of the reader.
@@ -51,19 +73,30 @@ import com.hsilighting.pagify.core.PenMode
  * back to plain scrolling — a tool that can only be turned on is a trap, since
  * every touch would keep drawing.
  *
- * The pen additionally opens a palette on long press, carrying both the colour
- * and the choice between highlighting text and free drawing. Those belong
- * together: they are the two ways the same pen behaves, and separating them into
- * two ribbon slots would imply they can both be active.
+ * The drawing tools share one slot. Pen, line, arrow, box, circle and cloud would
+ * be six slots on a ribbon that already has seven, and they are one question
+ * anyway: what shape is this mark. The armed one is what the slot shows.
+ *
+ * Two gestures, and the same two throughout: **a tap chooses, a press adjusts.**
+ * Tapping the drawing slot opens the shapes; pressing it opens what they draw
+ * *with* — the size, the colour, the line type. Pressing the highlighter does the
+ * same for its colours. Choosing the shape is the frequent act and the settings
+ * are the occasional one, so the frequent one is the tap.
+ *
+ * The one press that goes deeper is on the circle, inside the shapes: it offers
+ * the cloud, which is the mark rare enough to sit a level down.
  */
 @Composable
 fun AnnotationToolbar(
     selectedTool: AnnotationTool,
-    penMode: PenMode,
     penColor: Long,
+    /** How heavy the drawing tools are, in page points, and what line they draw. */
+    strokeWidth: Float,
+    lineStyle: MarkupStyle,
     onSelectTool: (AnnotationTool) -> Unit,
-    onPenModeChange: (PenMode) -> Unit,
     onPenColorChange: (Long) -> Unit,
+    onStrokeWidth: (Float) -> Unit,
+    onLineStyle: (MarkupStyle) -> Unit,
     /** Marks on the page being read, and in the document as a whole. */
     marksOnPage: Int,
     marksInDocument: Int,
@@ -74,127 +107,275 @@ fun AnnotationToolbar(
     onCaptureLasso: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var showPenPalette by remember { mutableStateOf(false) }
+    var showDrawPalette by remember { mutableStateOf(false) }
     var showClearMenu by remember { mutableStateOf(false) }
 
-    Box(modifier, contentAlignment = Alignment.BottomCenter) {
-        if (showPenPalette) {
-            PenPalette(
-                penMode = penMode,
-                penColor = penColor,
-                onPenModeChange = onPenModeChange,
-                onPenColorChange = onPenColorChange,
-                onDismiss = { showPenPalette = false },
-                modifier = Modifier.padding(bottom = 74.dp),
-            )
-        }
-        if (showClearMenu) {
-            ClearMenu(
-                marksOnPage = marksOnPage,
-                marksInDocument = marksInDocument,
-                onClearPage = onClearPage,
-                onClearAll = onClearAll,
-                onDismiss = { showClearMenu = false },
-                modifier = Modifier.padding(bottom = 74.dp),
-            )
-        }
+    /**
+     * The two tools sharing a slot, once a press has asked to see them.
+     *
+     * Shown rather than swapped. A long press that silently exchanged circle for
+     * cloud left nothing on screen to say a choice had been made, or that there
+     * was a choice at all — every other press in this ribbon opens something.
+     */
+    var alternatesFor by remember { mutableStateOf<AnnotationTool?>(null) }
 
+    /**
+     * Where the row that opened them sits, so they open *over* it.
+     *
+     * All in window pixels, because the button and the ribbon are in different
+     * layouts and only the window is common to both. Centred under the ribbon,
+     * the two circles appeared halfway across the screen from the circle that was
+     * pressed, and nothing connected the one to the other.
+     */
+    var anchorCentre by remember { mutableStateOf(0f) }
+    var ribbonLeft by remember { mutableStateOf(0f) }
+    var ribbonWidth by remember { mutableStateOf(0f) }
+    var alternatesWidth by remember { mutableStateOf(0f) }
+    val edgeGap = with(LocalDensity.current) { 8.dp.toPx() }
 
-        Surface(
-            shape = RoundedCornerShape(28.dp),
-            color = MaterialTheme.colorScheme.surface,
-            tonalElevation = 3.dp,
-            shadowElevation = 6.dp,
+    // How far to shift the row from centre to sit under the button, clamped so it
+    // stays on screen: a tool at the end of the ribbon would otherwise open its
+    // alternates half off the edge.
+    val alternatesShift = if (ribbonWidth <= 0f || alternatesWidth <= 0f) {
+        0f
+    } else {
+        val limit = (ribbonWidth / 2f - alternatesWidth / 2f - edgeGap).coerceAtLeast(0f)
+        (anchorCentre - (ribbonLeft + ribbonWidth / 2f)).coerceIn(-limit, limit)
+    }
+
+    /**
+     * Whether the band of settings is showing.
+     *
+     * Asked for rather than automatic. It used to appear the moment anything was
+     * armed, which put a row of controls over the page every time a tool was
+     * picked up — for a mark that usually wants the same colour and weight as the
+     * last one.
+     */
+    var showParameters by remember { mutableStateOf(false) }
+
+    /** Whether the colour wheel is open, for a colour the six do not offer. */
+    var pickingColour by remember { mutableStateOf(false) }
+
+    if (pickingColour) {
+        ColourWheelDialog(
+            initial = penColor,
+            onPick = {
+                onPenColorChange(it)
+                pickingColour = false
+            },
+            onDismiss = { pickingColour = false },
+        )
+    }
+
+    /**
+     * Arm a tool, and put every palette away.
+     *
+     * A palette is a way of *choosing*; once something is chosen it has nothing
+     * left to say. Closing only on its own selection is what left the pen's five
+     * shapes hanging above the highlighter's colours — two bands offering two
+     * different tools, one of them already dismissed in every sense but the
+     * visible one. Routed through here rather than fixed per button, so the next
+     * tool added to the ribbon cannot forget it.
+     */
+    fun select(tool: AnnotationTool) {
+        showDrawPalette = false
+        showClearMenu = false
+        alternatesFor = null
+        showParameters = false
+        onSelectTool(tool)
+    }
+
+    /**
+     * Show what a tool draws with, arming it if it is not already.
+     *
+     * Arming it is the point: the width, the colour and the line type are one set
+     * shared by every tool that draws, so opening them for a tool you are not
+     * holding would change the next mark rather than this one.
+     */
+    fun openParameters(tool: AnnotationTool) {
+        showDrawPalette = false
+        showClearMenu = false
+        alternatesFor = null
+        if (selectedTool != tool) onSelectTool(tool)
+        showParameters = true
+    }
+
+    // Everything stacked in one column rather than floated at a fixed height
+    // above the ribbon: with the parameters band there too, a palette lifted by a
+    // constant lands on top of it — and being drawn first, underneath it.
+    Box(
+        modifier.onGloballyPositioned {
+            ribbonLeft = it.boundsInWindow().left
+            ribbonWidth = it.boundsInWindow().width
+        },
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                verticalAlignment = Alignment.CenterVertically,
+            // Directly above the button it came from, with the palette it opened
+            // out of still on screen underneath.
+            alternatesFor?.let { opened ->
+                DrawingToolPalette(
+                    tools = opened.slotMates,
+                    selectedTool = selectedTool,
+                    onSelectTool = { select(toggle(selectedTool, it)) },
+                    modifier = Modifier
+                        .offset { IntOffset(alternatesShift.roundToInt(), 0) }
+                        .onGloballyPositioned { alternatesWidth = it.size.width.toFloat() },
+                )
+            }
+            if (showDrawPalette) {
+                DrawingToolPalette(
+                    tools = paletteTools(selectedTool),
+                    selectedTool = selectedTool,
+                    // Tapping the one already armed puts it down again, which is
+                    // the way out now that the ribbon slot opens this instead of
+                    // toggling.
+                    onSelectTool = { select(toggle(selectedTool, it)) },
+                    onOpenAlternates = { tool, centre ->
+                        anchorCentre = centre
+                        alternatesFor = tool
+                    },
+                )
+            }
+            if (showClearMenu) {
+                ClearMenu(
+                    marksOnPage = marksOnPage,
+                    marksInDocument = marksInDocument,
+                    onClearPage = onClearPage,
+                    onClearAll = onClearAll,
+                    onDismiss = { showClearMenu = false },
+                )
+            }
+
+            // One band, for whatever is armed, and only when asked for: the
+            // highlighter used to carry its own colour palette behind a long
+            // press, and with the band there too the colours appeared twice on
+            // screen at once.
+            if (showParameters && selectedTool.marks) {
+                MarkParameters(
+                    tool = selectedTool,
+                    color = penColor,
+                    strokeWidth = strokeWidth,
+                    lineStyle = lineStyle,
+                    onColor = onPenColorChange,
+                    onStrokeWidth = onStrokeWidth,
+                    onLineStyle = onLineStyle,
+                    onPickCustomColour = { pickingColour = true },
+                )
+            }
+
+            Surface(
+                shape = RoundedCornerShape(28.dp),
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 3.dp,
+                shadowElevation = 6.dp,
             ) {
-                ToolButton(
-                    icon = if (penMode == PenMode.Marker) Icons.Filled.Brush else Icons.Filled.Draw,
-                    label = if (penMode == PenMode.Marker) "Marker" else "Highlighter",
-                    selected = selectedTool == AnnotationTool.Pen,
-                    accent = Color(penColor),
-                    onClick = {
-                        onSelectTool(
-                            if (selectedTool == AnnotationTool.Pen) {
-                                AnnotationTool.None
-                            } else {
-                                AnnotationTool.Pen
-                            },
-                        )
-                    },
-                    onLongClick = {
-                        // Long press opens the palette and selects the pen, so the
-                        // colour you just picked is immediately the one in use.
-                        onSelectTool(AnnotationTool.Pen)
-                        showPenPalette = true
-                    },
-                    hasMore = true,
-                )
-                ToolButton(
-                    icon = Icons.Filled.TextFields,
-                    label = "Note",
-                    selected = selectedTool == AnnotationTool.Note,
-                    onClick = { onSelectTool(toggle(selectedTool, AnnotationTool.Note)) },
-                )
-                ToolButton(
-                    // Distinct from the pen on purpose: both were Draw, and two
-                    // identical glyphs in a four-slot ribbon is unreadable.
-                    icon = Icons.Filled.HistoryEdu,
-                    label = "Signature",
-                    selected = selectedTool == AnnotationTool.Signature,
-                    onClick = { onSelectTool(toggle(selectedTool, AnnotationTool.Signature)) },
-                )
-                ToolButton(
-                    icon = Icons.Filled.Backspace,
-                    label = "Eraser",
-                    selected = selectedTool == AnnotationTool.Eraser,
-                    onClick = { onSelectTool(toggle(selectedTool, AnnotationTool.Eraser)) },
-                    onLongClick = {
-                        // Clearing a page or the document lives behind the eraser
-                        // because that is what it means — the same action, wider.
-                        // Long press does not select the tool, so a wipe is not
-                        // followed by an armed eraser under your finger.
-                        showClearMenu = true
-                    },
-                    hasMore = true,
-                )
-                ToolButton(
-                    icon = Icons.Filled.CropFree,
-                    label = "Snapshot",
-                    selected = selectedTool == AnnotationTool.Snapshot && !captureLasso,
-                    onClick = {
-                        onCaptureLasso(false)
-                        onSelectTool(
-                            if (selectedTool == AnnotationTool.Snapshot && !captureLasso) {
-                                AnnotationTool.None
-                            } else {
-                                AnnotationTool.Snapshot
-                            },
-                        )
-                    },
-                )
-                ToolButton(
-                    // Its own slot rather than a shape hidden behind a long press on
-                    // the one beside it. They are two tools by the time you are
-                    // choosing: a box for most things, a ring for the detail a box
-                    // cannot take without its neighbours.
-                    icon = Icons.Filled.Gesture,
-                    label = "Draw around",
-                    selected = selectedTool == AnnotationTool.Snapshot && captureLasso,
-                    onClick = {
-                        onCaptureLasso(true)
-                        onSelectTool(
-                            if (selectedTool == AnnotationTool.Snapshot && captureLasso) {
-                                AnnotationTool.None
-                            } else {
-                                AnnotationTool.Snapshot
-                            },
-                        )
-                    },
-                )
+                Row(
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ToolButton(
+                        icon = Icons.Filled.Draw,
+                        label = "Highlighter",
+                        selected = selectedTool == AnnotationTool.Highlight,
+                        accent = Color(penColor),
+                        onClick = {
+                            select(toggle(selectedTool, AnnotationTool.Highlight))
+                        },
+                        onLongClick = { openParameters(AnnotationTool.Highlight) },
+                        hasMore = true,
+                    )
+                    ToolButton(
+                        // The armed tool's own glyph, so the ribbon says what a
+                        // drag will draw rather than naming the group.
+                        icon = drawingToolIcon(selectedTool),
+                        label = drawingToolLabel(selectedTool),
+                        selected = selectedTool.draws,
+                        accent = Color(penColor),
+                        // Tap opens the tools; the press opens what they draw
+                        // with. That way round because choosing the shape is the
+                        // frequent thing and the settings are the occasional one,
+                        // and because a band that appeared by itself the moment a
+                        // tool was armed took a third of the page uninvited.
+                        onClick = {
+                            showParameters = false
+                            alternatesFor = null
+                            showDrawPalette = !showDrawPalette
+                        },
+                        onLongClick = {
+                            openParameters(
+                                if (selectedTool.draws) selectedTool else AnnotationTool.Pen,
+                            )
+                        },
+                        hasMore = true,
+                    )
+                    ToolButton(
+                        icon = Icons.Filled.TextFields,
+                        label = "Note",
+                        selected = selectedTool == AnnotationTool.Note,
+                        onClick = { select(toggle(selectedTool, AnnotationTool.Note)) },
+                    )
+                    ToolButton(
+                        // Distinct from the pen on purpose: both were Draw, and two
+                        // identical glyphs in a four-slot ribbon is unreadable.
+                        icon = Icons.Filled.HistoryEdu,
+                        label = "Signature",
+                        selected = selectedTool == AnnotationTool.Signature,
+                        onClick = { select(toggle(selectedTool, AnnotationTool.Signature)) },
+                    )
+                    ToolButton(
+                        icon = EraserIcon,
+                        label = "Eraser",
+                        selected = selectedTool == AnnotationTool.Eraser,
+                        onClick = { select(toggle(selectedTool, AnnotationTool.Eraser)) },
+                        onLongClick = {
+                            // Clearing a page or the document lives behind the eraser
+                            // because that is what it means — the same action, wider.
+                            // Long press does not select the tool, so a wipe is not
+                            // followed by an armed eraser under your finger.
+                            showClearMenu = true
+                        },
+                        hasMore = true,
+                    )
+                    ToolButton(
+                        icon = Icons.Filled.CropFree,
+                        label = "Snapshot",
+                        selected = selectedTool == AnnotationTool.Snapshot && !captureLasso,
+                        onClick = {
+                            onCaptureLasso(false)
+                            select(
+                                if (selectedTool == AnnotationTool.Snapshot && !captureLasso) {
+                                    AnnotationTool.None
+                                } else {
+                                    AnnotationTool.Snapshot
+                                },
+                            )
+                        },
+                    )
+                    ToolButton(
+                        // Its own slot rather than a shape hidden behind a long press on
+                        // the one beside it. They are two tools by the time you are
+                        // choosing: a box for most things, a ring for the detail a box
+                        // cannot take without its neighbours.
+                        icon = Icons.Filled.Gesture,
+                        label = "Draw around",
+                        selected = selectedTool == AnnotationTool.Snapshot && captureLasso,
+                        onClick = {
+                            onCaptureLasso(true)
+                            select(
+                                if (selectedTool == AnnotationTool.Snapshot && captureLasso) {
+                                    AnnotationTool.None
+                                } else {
+                                    AnnotationTool.Snapshot
+                                },
+                            )
+                        },
+                    )
+                }
             }
         }
     }
@@ -267,92 +448,34 @@ private fun ToolButton(
         }
     }
 }
+/**
+ * The colours the ribbon offers.
+ *
+ * Ink rather than highlighter: these are for lines drawn on a page, and a wash
+ * yellow that reads well behind text is nearly invisible as a line on white.
+ */
+private val DRAWING_COLOURS = AnnotationColors.markerPalette
 
 @Composable
-private fun PenPalette(
-    penMode: PenMode,
-    penColor: Long,
-    onPenModeChange: (PenMode) -> Unit,
-    onPenColorChange: (Long) -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val palette = when (penMode) {
-        PenMode.Highlight -> AnnotationColors.highlightPalette
-        PenMode.Marker -> AnnotationColors.markerPalette
-    }
-
-    Surface(
-        modifier = modifier,
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 3.dp,
-        shadowElevation = 8.dp,
-    ) {
-        Row(
-            Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            ModeChip(
-                label = "Highlight",
-                selected = penMode == PenMode.Highlight,
-                onClick = { onPenModeChange(PenMode.Highlight) },
+private fun ColourDot(colour: Long, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .size(30.dp)
+            .clip(CircleShape)
+            .background(Color(colour))
+            .border(
+                width = if (selected) 3.dp else 1.dp,
+                color = if (selected) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.outlineVariant
+                },
+                shape = CircleShape,
             )
-            ModeChip(
-                label = "Marker",
-                selected = penMode == PenMode.Marker,
-                onClick = { onPenModeChange(PenMode.Marker) },
-            )
-
-            palette.forEach { color ->
-                Box(
-                    Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(Color(color))
-                        .border(
-                            width = if (color == penColor) 3.dp else 1.dp,
-                            color = if (color == penColor) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.outlineVariant
-                            },
-                            shape = CircleShape,
-                        )
-                        .clickable {
-                            onPenColorChange(color)
-                            onDismiss()
-                        },
-                )
-            }
-        }
-    }
+            .clickable(onClick = onClick),
+    )
 }
 
-@Composable
-private fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = if (selected) {
-            MaterialTheme.colorScheme.primary
-        } else {
-            MaterialTheme.colorScheme.surfaceVariant
-        },
-        modifier = Modifier.clickable(onClick = onClick),
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelMedium,
-            color = if (selected) {
-                MaterialTheme.colorScheme.onPrimary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-        )
-    }
-}
 
 /**
  * The wider erasures, behind a long press on the eraser.
@@ -621,3 +744,236 @@ fun NoteReader(text: String, onDelete: () -> Unit, onDismiss: () -> Unit) {
     )
 }
 
+
+/** The glyph for whichever drawing tool is armed, or the pen when none is. */
+private fun drawingToolIcon(tool: AnnotationTool): ImageVector = when (tool) {
+    AnnotationTool.Line -> Icons.Filled.HorizontalRule
+    AnnotationTool.Arrow -> Icons.AutoMirrored.Filled.ArrowRightAlt
+    AnnotationTool.Rectangle -> Icons.Filled.CheckBoxOutlineBlank
+    AnnotationTool.Ellipse -> Icons.Filled.RadioButtonUnchecked
+    AnnotationTool.Cloud -> Icons.Outlined.Cloud
+    else -> Icons.Filled.Brush
+}
+
+private fun drawingToolLabel(tool: AnnotationTool): String = when (tool) {
+    AnnotationTool.Line -> "Line"
+    AnnotationTool.Arrow -> "Arrow"
+    AnnotationTool.Rectangle -> "Box"
+    AnnotationTool.Ellipse -> "Circle"
+    AnnotationTool.Cloud -> "Cloud"
+    else -> "Pen"
+}
+
+/**
+ * A row of tools to choose from.
+ *
+ * Glyphs rather than a menu of names: they are shapes, and a shape is quicker to
+ * recognise than the word for it.
+ *
+ * Used twice — for the drawing tools, and for the two that share the last of
+ * those slots. A press that *offers* is the pattern every other press in this
+ * ribbon follows; a press that silently swapped the tool under your finger read
+ * as the app doing something of its own accord.
+ */
+@Composable
+private fun DrawingToolPalette(
+    tools: List<AnnotationTool>,
+    selectedTool: AnnotationTool,
+    onSelectTool: (AnnotationTool) -> Unit,
+    modifier: Modifier = Modifier,
+    /**
+     * Offered on any tool that has an [alternate]; null where none is.
+     *
+     * Carries the button's centre in window pixels, so the row that opens can be
+     * put over the button rather than in the middle of the ribbon.
+     */
+    onOpenAlternates: ((AnnotationTool, centreX: Float) -> Unit)? = null,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 8.dp,
+    ) {
+        Row(
+            Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            tools.forEach { tool ->
+                val hasAlternates = onOpenAlternates != null && tool.alternate != null
+                // Where this button ended up, so what opens from it can open over
+                // it. Window coordinates: the row that opens is laid out somewhere
+                // else entirely, and the window is the space they share.
+                var centreX by remember(tool) { mutableStateOf(0f) }
+                ToolButton(
+                    icon = drawingToolIcon(tool),
+                    label = drawingToolLabel(tool),
+                    selected = tool == selectedTool,
+                    onClick = { onSelectTool(tool) },
+                    modifier = Modifier.onGloballyPositioned {
+                        centreX = it.boundsInWindow().center.x
+                    },
+                    onLongClick = if (hasAlternates) {
+                        { onOpenAlternates(tool, centreX) }
+                    } else {
+                        null
+                    },
+                    hasMore = hasAlternates,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * What the armed tool draws with: how heavy, in what colour, as what kind of line.
+ *
+ * A band of its own above the ribbon rather than a palette behind a press. These
+ * are the settings that change between one mark and the next — a thick red circle
+ * around a fault, then a fine dashed line to where it goes — and a setting changed
+ * that often should not cost a long press each time.
+ *
+ * The line type is offered for every drawing tool, the pen included: a dashed
+ * freehand line is a legitimate mark, and the tool that drew it makes no
+ * difference to what a dash means.
+ */
+@Composable
+private fun MarkParameters(
+    tool: AnnotationTool,
+    color: Long,
+    strokeWidth: Float,
+    lineStyle: MarkupStyle,
+    onColor: (Long) -> Unit,
+    onStrokeWidth: (Float) -> Unit,
+    /** Opens the wheel, for a colour none of the six offers. */
+    onPickCustomColour: () -> Unit,
+    onLineStyle: (MarkupStyle) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 6.dp,
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 10.dp, vertical = 8.dp)
+                .widthIn(max = PARAMETER_BAND_WIDTH),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            // The highlighter has a colour and nothing else: no nib width, no
+            // line type. Showing it controls that do nothing to a wash would be
+            // three-quarters of a band pretending to work.
+            if (tool.draws) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Sizes on their own ground at the left, colours opposite: two
+                    // questions, and a single row of round things made them look like
+                    // one. The same arrangement as the capture editor's.
+                    Row(
+                        modifier = Modifier
+                            .background(
+                                MaterialTheme.colorScheme.surfaceVariant,
+                                RoundedCornerShape(18.dp),
+                            )
+                            .padding(horizontal = 4.dp, vertical = 3.dp),
+                        horizontalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        ANNOTATION_STROKE_WIDTHS.forEach { width ->
+                            val chosen = ANNOTATION_STROKE_WIDTHS.minByOrNull {
+                                kotlin.math.abs(it - strokeWidth)
+                            } == width
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .then(
+                                        if (chosen) {
+                                            Modifier.border(
+                                                2.dp,
+                                                MaterialTheme.colorScheme.primary,
+                                                CircleShape,
+                                            )
+                                        } else {
+                                            Modifier
+                                        },
+                                    )
+                                    .clickable { onStrokeWidth(width) },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Canvas(Modifier.size(22.dp)) {
+                                    drawCircle(
+                                        color = Color(color),
+                                        radius = (width * NIB_DOT_SCALE)
+                                            .coerceIn(2f, size.minDimension / 2f),
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    LineStylePicker(
+                        style = lineStyle,
+                        color = color,
+                        onStyle = onLineStyle,
+                        size = 40.dp,
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // The highlighter's washes have to read behind text; ink has to
+                // read on white. Same row, different set.
+                val palette = if (tool == AnnotationTool.Highlight) {
+                    AnnotationColors.highlightPalette
+                } else {
+                    DRAWING_COLOURS
+                }
+                // The wheel first, before the six, exactly as in the screenshot
+                // editor: it is the way to *any* colour, so it belongs where the
+                // eye starts rather than tucked behind the ones chosen in advance.
+                //
+                // Ink only. A highlighter colour has to be pale enough to read
+                // through, which is the whole reason those six exist; a wheel
+                // there would mostly offer ways to black out the text.
+                if (tool != AnnotationTool.Highlight) {
+                    CustomColourSwatch(
+                        current = color,
+                        isCustom = color !in palette,
+                        onClick = onPickCustomColour,
+                        size = 30.dp,
+                    )
+                }
+                palette.forEach { swatch ->
+                    ColourDot(
+                        colour = swatch,
+                        selected = swatch == color,
+                        onClick = { onColor(swatch) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** The nib sizes on offer, in page points. Fine, medium, heavy. */
+private val ANNOTATION_STROKE_WIDTHS = listOf(1.2f, 2.4f, 5f)
+
+/** How much a nib width is scaled to draw its dot. See the capture editor's. */
+private const val NIB_DOT_SCALE = 2.2f
+
+/** How wide the parameters band may grow before its colours start scrolling. */
+private val PARAMETER_BAND_WIDTH = 360.dp

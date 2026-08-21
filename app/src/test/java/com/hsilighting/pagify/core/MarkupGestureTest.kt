@@ -27,6 +27,14 @@ class MarkupGestureTest {
         Offset(100f + 30f * kotlin.math.cos(t), 100f + 30f * kotlin.math.sin(t))
     }
 
+    /** Big enough to carry several scallops at [size]. */
+    private fun ringPoints(): List<Offset> = List(24) { i ->
+        val t = i / 24f * 2f * Math.PI.toFloat()
+        Offset(200f + 120f * kotlin.math.cos(t), 200f + 90f * kotlin.math.sin(t))
+    }
+
+    private val size = MARKUP_STROKE_POINTS
+
     @Test
     fun `a stroke lifted straight away is kept exactly as drawn`() {
         // The anti-surprise rule. Nothing is recognised unless it was asked for.
@@ -162,6 +170,50 @@ class MarkupGestureTest {
         gesture.cancel()
 
         assertNull(gesture.preview)
+        assertEquals(MarkupGesture.Outcome.Nothing, gesture.up())
+    }
+
+    @Test
+    fun `a traced ring comes up as a cloud, not as the trace`() {
+        val gesture = MarkupGesture(MarkupTool.Cloud, size)
+        stroke(gesture, ringPoints())
+
+        val shape = (gesture.up() as MarkupGesture.Outcome.Commit).shape as MarkupShape.Freehand
+        assertEquals(cloudOutline(ringPoints(), size), shape.points)
+        assertTrue("the trace came back unscalloped", shape.points.size > ringPoints().size)
+    }
+
+    @Test
+    fun `the cloud preview is the cloud that will be committed`() {
+        // Otherwise the mark changes shape as the finger leaves the glass, and you
+        // have spent the whole drag aiming at something that was never drawn.
+        val gesture = MarkupGesture(MarkupTool.Cloud, size)
+        stroke(gesture, ringPoints())
+
+        val preview = gesture.preview as MarkupShape.Freehand
+        val committed = (gesture.up() as MarkupGesture.Outcome.Commit).shape as MarkupShape.Freehand
+        assertEquals(preview.points, committed.points)
+    }
+
+    @Test
+    fun `holding still does not send a cloud to the recogniser`() {
+        // A cloud is already the shape it means. Recognising it would hand back the
+        // ellipse it was traced around — the one thing a cloud is deliberately not.
+        val gesture = MarkupGesture(MarkupTool.Cloud, size)
+        stroke(gesture, ringPoints())
+        gesture.still()
+
+        val outcome = gesture.up()
+        assertTrue("sent for recognition: $outcome", outcome is MarkupGesture.Outcome.Commit)
+    }
+
+    @Test
+    fun `a ring too small to scallop commits nothing`() {
+        val gesture = MarkupGesture(MarkupTool.Cloud, size)
+        gesture.down(Offset(10f, 10f))
+        gesture.move(Offset(11f, 10f))
+        gesture.move(Offset(10f, 11f))
+
         assertEquals(MarkupGesture.Outcome.Nothing, gesture.up())
     }
 

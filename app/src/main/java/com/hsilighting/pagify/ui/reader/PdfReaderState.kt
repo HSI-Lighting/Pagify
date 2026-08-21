@@ -15,7 +15,6 @@ import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfMetadata
-import com.hsilighting.pagify.core.PenMode
 
 /**
  * Everything the reader screen draws from. One immutable snapshot per emission,
@@ -103,8 +102,17 @@ data class PdfReaderState(
 
     // ------------------------------------------------------------ annotation --
     val tool: AnnotationTool = AnnotationTool.None,
-    val penMode: PenMode = PenMode.Highlight,
     val penColor: Long = AnnotationColors.YELLOW,
+    /**
+     * How heavy the drawing tools draw, in page points.
+     *
+     * One width for all of them rather than one each: a drawing marked up
+     * with a fine pen wants fine boxes round it too, and five separate
+     * settings would be four surprises.
+     */
+    val annotationStrokeWidth: Float = 2.4f,
+    /** Solid, dashed or a centre line, for everything that draws a line. */
+    val annotationStyle: MarkupStyle = MarkupStyle.SOLID,
     /**
      * Bumped whenever the annotations change at all.
      *
@@ -243,6 +251,17 @@ data class PdfReaderState(
 
         data class Failed(val message: String) : Phase
     }
+
+    /**
+     * A page's size as the reader currently lays it out — turned, if the view is.
+     *
+     * Distinct from [pageSizes], which stays the document's own: marks, text runs
+     * and everything the engine is asked for are in upright page points, and a map
+     * that quietly turned underneath them would put a mark a quarter turn from
+     * where it belongs. Layout asks this; geometry asks [pageSizes].
+     */
+    fun displaySize(pageIndex: Int): PageSize? =
+        pageSizes[pageIndex]?.turned(rotationQuarterTurns)
 
     companion object {
         /** Page exactly fills the viewport width. Below this, zoom is released. */

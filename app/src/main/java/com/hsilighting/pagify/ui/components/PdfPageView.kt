@@ -65,6 +65,17 @@ fun PdfPageView(
     // under LazyColumn's anchor and dragged a jumped-to page away from where it
     // had correctly landed.
     var pageSize by remember(pageIndex) { mutableStateOf(knownSize) }
+
+    // A page that is already measured and is then *turned* is the same page with a
+    // different shape, and the box has to follow it. Seeding alone kept whatever
+    // the page was first laid out at: rotating the view produced a landscape
+    // raster that was then letterboxed inside a portrait box, and every mark drawn
+    // over it was placed against a page corner that was no longer there.
+    //
+    // Only a real size is adopted. A transient null would collapse the box for a
+    // frame, which is the resize the seeding above exists to avoid.
+    LaunchedEffect(knownSize) { knownSize?.let { pageSize = it } }
+
     var bitmap by remember(pageIndex) { mutableStateOf<Bitmap?>(null) }
     /** Scale of what is currently on screen, so an upgrade is not redone. */
     // Reset when the document changes, so the guards below stop suppressing the

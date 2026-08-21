@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.Draw
 import androidx.compose.material.icons.filled.Highlight
 import androidx.compose.material.icons.filled.HorizontalRule
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.outlined.Cloud
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -57,6 +58,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.layout.offset
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -66,12 +71,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.hsilighting.pagify.core.AnnotationColors
@@ -81,6 +83,7 @@ import com.hsilighting.pagify.core.CaptureScale
 import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.RING_MARKUP_TOOLS
 import com.hsilighting.pagify.core.hasLineStyle
 import com.hsilighting.pagify.core.isBroken
 import com.hsilighting.pagify.core.MarkupTool
@@ -452,56 +455,168 @@ private fun MarkupTools(
     onStyle: (MarkupStyle) -> Unit,
     onPickCustomColour: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    /**
+     * Which tool's fine size is open, if any.
+     *
+     * Held for the whole row rather than inside each button, so choosing another
+     * tool closes it. It used to be a focusable popup, which swallowed the very
+     * tap that was choosing: the slider went away and the tool did not change, so
+     * every switch took two taps and looked like the first one had missed.
+     */
+    var adjusting by remember { mutableStateOf<Pair<MarkupTool, String>?>(null) }
+
+    /**
+     * The two tools sharing a slot, once a press has asked to see them.
+     *
+     * Shown rather than swapped, as in the reader. A press that silently exchanged
+     * the tool under your finger left nothing on screen to say a choice had been
+     * made, or that there was one to make.
+     */
+    var alternatesOpen by remember { mutableStateOf(false) }
+
+    /**
+     * Where the button that opened them sits, so they open *over* it.
+     *
+     * Window pixels, as in the reader: the row that opens and the button that
+     * opened it are laid out separately, and the window is what they share.
+     */
+    var anchorCentre by remember { mutableStateOf(0f) }
+    var bandLeft by remember { mutableStateOf(0f) }
+    var bandWidth by remember { mutableStateOf(0f) }
+    var alternatesWidth by remember { mutableStateOf(0f) }
+
+    // Shifted from the left edge of the band, clamped so it cannot hang off
+    // either end: the circle is near the middle of the row, but the row scrolls.
+    val alternatesShift = if (bandWidth <= 0f || alternatesWidth <= 0f) {
+        0f
+    } else {
+        (anchorCentre - bandLeft - alternatesWidth / 2f)
+            .coerceIn(0f, (bandWidth - alternatesWidth).coerceAtLeast(0f))
+    }
+
+    // Any tool tap puts both away, whichever tool was tapped: they belong to a
+    // choice that has just been superseded.
+    val chooseTool: (MarkupTool) -> Unit = { chosen ->
+        adjusting = null
+        alternatesOpen = false
+        onTool(chosen)
+    }
+
+    // A long press arms the tool as well as opening its fine size: a size control
+    // for a tool you are not using would be a strange thing to offer.
+    val adjustTool: (MarkupTool, String) -> Unit = { chosen, label ->
+        alternatesOpen = false
+        adjusting = chosen to label
+        onTool(chosen)
+    }
+
+    Column(
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier.onGloballyPositioned {
+            bandLeft = it.boundsInWindow().left
+            bandWidth = it.boundsInWindow().width
+        },
+    ) {
+        adjusting?.let { (open, label) ->
+            SizeSlider(
+                tool = open,
+                label = label,
+                size = size,
+                onSize = { onSize(open, it) },
+            )
+        }
+
+        if (alternatesOpen) {
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                tonalElevation = 3.dp,
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                modifier = Modifier
+                    .offset { IntOffset(alternatesShift.roundToInt(), 0) }
+                    .onGloballyPositioned { alternatesWidth = it.size.width.toFloat() },
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    RING_MARKUP_TOOLS.forEach { ring ->
+                        MarkupToolButton(
+                            markupToolIcon(ring),
+                            markupToolLabel(ring),
+                            ring,
+                            tool,
+                            chooseTool,
+                            onAdjust = { _, _ -> },
+                            hasMore = false,
+                        )
+                    }
+                }
+            }
+        }
+
         Row(
             modifier = Modifier.horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            MarkupToolButton(Icons.Filled.Draw, "Pen", MarkupTool.Pen, tool, size, onTool, onSize)
+            MarkupToolButton(
+                Icons.Filled.Draw,
+                "Pen",
+                MarkupTool.Pen,
+                tool,
+                chooseTool,
+                adjustTool,
+            )
             MarkupToolButton(
                 Icons.Filled.HorizontalRule,
                 "Line",
                 MarkupTool.Line,
                 tool,
-                size,
-                onTool,
-                onSize,
+                chooseTool,
+                adjustTool,
             )
             MarkupToolButton(
                 Icons.AutoMirrored.Filled.ArrowRightAlt,
                 "Arrow",
                 MarkupTool.Arrow,
                 tool,
-                size,
-                onTool,
-                onSize,
+                chooseTool,
+                adjustTool,
             )
             MarkupToolButton(
                 Icons.Filled.CheckBoxOutlineBlank,
                 "Box",
                 MarkupTool.Rectangle,
                 tool,
-                size,
-                onTool,
-                onSize,
+                chooseTool,
+                adjustTool,
             )
+            // Circle and cloud share this slot: whichever is armed is the one
+            // shown, and the long press opens both to pick from rather than a
+            // size slider. That press is the cloud's only way in, here and in the
+            // reader both — one gesture to learn, not two.
+            val ringing = if (tool == MarkupTool.Cloud) MarkupTool.Cloud else MarkupTool.Ellipse
+            var ringCentre by remember { mutableStateOf(0f) }
             MarkupToolButton(
-                Icons.Filled.RadioButtonUnchecked,
-                "Circle",
-                MarkupTool.Ellipse,
+                markupToolIcon(ringing),
+                markupToolLabel(ringing),
+                ringing,
                 tool,
-                size,
-                onTool,
-                onSize,
+                chooseTool,
+                onAdjust = { _, _ ->
+                    anchorCentre = ringCentre
+                    alternatesOpen = true
+                },
+                modifier = Modifier.onGloballyPositioned {
+                    ringCentre = it.boundsInWindow().center.x
+                },
             )
             MarkupToolButton(
                 Icons.Filled.Highlight,
                 "Highlight",
                 MarkupTool.Highlight,
                 tool,
-                size,
-                onTool,
-                onSize,
+                chooseTool,
+                adjustTool,
             )
             LineStyleButton(
                 style = style,
@@ -651,50 +766,25 @@ private fun ColourSwatch(colour: Long, selected: Boolean, onClick: () -> Unit) {
     )
 }
 
-/**
- * The way out of the palette.
- *
- * Shows the wheel it opens until a colour has been picked from it, and the colour
- * itself afterwards — otherwise choosing a custom colour makes the selection ring
- * vanish from the row and nothing on screen says what is being drawn with.
- */
-@Composable
-private fun CustomColourSwatch(current: Long, isCustom: Boolean, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .size(26.dp)
-            .border(
-                width = if (isCustom) 3.dp else 1.dp,
-                color = if (isCustom) {
-                    MaterialTheme.colorScheme.onSurface
-                } else {
-                    MaterialTheme.colorScheme.outlineVariant
-                },
-                shape = CircleShape,
-            )
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(Modifier.size(22.dp)) {
-            if (isCustom) {
-                drawCircle(Color(current))
-            } else {
-                drawCircle(
-                    brush = Brush.sweepGradient(
-                        listOf(
-                            Color.Red,
-                            Color.Yellow,
-                            Color.Green,
-                            Color.Cyan,
-                            Color.Blue,
-                            Color.Magenta,
-                            Color.Red,
-                        ),
-                    ),
-                )
-            }
-        }
-    }
+/** The glyph for a markup tool. Shapes, because a shape reads faster than a word. */
+private fun markupToolIcon(tool: MarkupTool): ImageVector = when (tool) {
+    MarkupTool.Line -> Icons.Filled.HorizontalRule
+    MarkupTool.Arrow -> Icons.AutoMirrored.Filled.ArrowRightAlt
+    MarkupTool.Rectangle -> Icons.Filled.CheckBoxOutlineBlank
+    MarkupTool.Ellipse -> Icons.Filled.RadioButtonUnchecked
+    MarkupTool.Cloud -> Icons.Outlined.Cloud
+    MarkupTool.Highlight -> Icons.Filled.Highlight
+    MarkupTool.Pen -> Icons.Filled.Draw
+}
+
+private fun markupToolLabel(tool: MarkupTool): String = when (tool) {
+    MarkupTool.Line -> "Line"
+    MarkupTool.Arrow -> "Arrow"
+    MarkupTool.Rectangle -> "Box"
+    MarkupTool.Ellipse -> "Circle"
+    MarkupTool.Cloud -> "Cloud"
+    MarkupTool.Highlight -> "Highlight"
+    MarkupTool.Pen -> "Pen"
 }
 
 /**
@@ -703,6 +793,9 @@ private fun CustomColourSwatch(current: Long, isCustom: Boolean, onClick: () -> 
  * Long press selects the tool as well as opening the slider. Opening a size
  * control for a tool you are not using would be a strange thing to offer, and
  * having to tap first and then press again is a step for nothing.
+ *
+ * Which tool's slider is open is the row's business, not this button's — see
+ * [MarkupTools]. A button that owned it could only close its own.
  */
 @Composable
 private fun MarkupToolButton(
@@ -710,14 +803,15 @@ private fun MarkupToolButton(
     label: String,
     represents: MarkupTool,
     selected: MarkupTool,
-    size: Float,
     onTool: (MarkupTool) -> Unit,
-    onSize: (MarkupTool, Float) -> Unit,
+    onAdjust: (MarkupTool, String) -> Unit,
+    modifier: Modifier = Modifier,
+    /** Whether to draw the wedge that says a long press leads somewhere. */
+    hasMore: Boolean = true,
 ) {
     val isSelected = represents == selected
-    var adjusting by remember { mutableStateOf(false) }
 
-    Box {
+    Box(modifier) {
         Box(
             modifier = Modifier
                 .size(44.dp)
@@ -735,15 +829,16 @@ private fun MarkupToolButton(
                 )
                 .combinedClickableCompat(
                     onClick = { onTool(represents) },
-                    onLongClick = {
-                        onTool(represents)
-                        adjusting = true
-                    },
+                    onLongClick = { onAdjust(represents, label) },
                 )
                 .longPressHint(
                     // The slider behind this press is the only way to a size the
                     // three presets do not offer, so it has to announce itself.
-                    tint = if (isSelected) {
+                    // Nothing is behind the press inside the circle-or-cloud row,
+                    // so it says nothing there.
+                    tint = if (!hasMore) {
+                        Color.Transparent
+                    } else if (isSelected) {
                         MaterialTheme.colorScheme.onPrimary
                     } else {
                         MaterialTheme.colorScheme.onSurfaceVariant
@@ -761,64 +856,47 @@ private fun MarkupToolButton(
                 },
             )
         }
-
-        if (adjusting) {
-            SizePopup(
-                tool = represents,
-                label = label,
-                size = size,
-                onSize = { onSize(represents, it) },
-                onDismiss = { adjusting = false },
-            )
-        }
     }
 }
 
 /**
- * The slider, over the tool it belongs to.
+ * The fine size, as a row of the band rather than a layer over the picture.
  *
- * A popup rather than a dialog: it is a small adjustment to something visible,
- * and a dialog would take the whole screen away from the picture being marked up.
+ * It was a popup, floating above the tool it belonged to. Two things were wrong
+ * with that: it covered the very picture being marked up, and being focusable it
+ * ate the tap that chose the next tool — so switching tools while it was open did
+ * nothing visible except close the slider. As a row it pushes the band up instead
+ * of covering anything, and every other control stays live underneath.
  */
 @Composable
-private fun SizePopup(
+private fun SizeSlider(
     tool: MarkupTool,
     label: String,
     size: Float,
     onSize: (Float) -> Unit,
-    onDismiss: () -> Unit,
 ) {
-    Popup(
-        alignment = Alignment.TopCenter,
-        // Above the button, which is near the bottom of the screen.
-        offset = IntOffset(0, -POPUP_LIFT_PX),
-        onDismissRequest = onDismiss,
-        properties = PopupProperties(focusable = true),
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        tonalElevation = 3.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
     ) {
-        Surface(
-            shape = RoundedCornerShape(16.dp),
-            tonalElevation = 3.dp,
-            shadowElevation = 8.dp,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Column(
-                modifier = Modifier.width(240.dp).padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                Text(
-                    if (tool.isIntensity) {
-                        "$label · ${(size * 100).roundToInt()}%"
-                    } else {
-                        "$label · ${"%.1f".format(size)}"
-                    },
-                    style = MaterialTheme.typography.labelLarge,
-                )
-                Slider(
-                    value = size,
-                    onValueChange = onSize,
-                    valueRange = tool.sizeRange,
-                )
-            }
+            Text(
+                if (tool.isIntensity) {
+                    "$label · ${(size * 100).roundToInt()}%"
+                } else {
+                    "$label · ${"%.1f".format(size)}"
+                },
+                style = MaterialTheme.typography.labelLarge,
+            )
+            Slider(
+                value = size,
+                onValueChange = onSize,
+                valueRange = tool.sizeRange,
+            )
         }
     }
 }
@@ -861,9 +939,6 @@ private const val ZOOM_EPSILON = 0.01f
  * clamps keep both ends usable.
  */
 private const val PRESET_DOT_SCALE = 2.2f
-
-/** How far above the tool row the size popup sits, in pixels. */
-private const val POPUP_LIFT_PX = 240
 
 /**
  * The backdrop that says "nothing here".

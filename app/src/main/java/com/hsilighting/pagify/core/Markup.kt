@@ -78,7 +78,25 @@ val MarkupTool.hasLineStyle: Boolean get() = !isIntensity
 const val MARKUP_STROKE_POINTS = 2.4f
 
 /** What the markup toolbar can draw. */
-enum class MarkupTool { Pen, Line, Arrow, Rectangle, Ellipse, Highlight }
+enum class MarkupTool { Pen, Line, Arrow, Rectangle, Ellipse, Cloud, Highlight }
+
+/**
+ * The two ways of ringing a region, in the order they are always offered.
+ *
+ * As in the reader, and for the same reasons: they answer one question, so they
+ * share one slot, and the order is fixed so the press that opens them and the tap
+ * that follows always land on the same thing. It costs the circle its fine-size
+ * slider — the three presets are still there — which is the price of the two
+ * toolbars reaching the cloud by the same press.
+ */
+val RING_MARKUP_TOOLS = listOf(MarkupTool.Ellipse, MarkupTool.Cloud)
+
+/** The tools sharing this one's place in the row, itself included. */
+val MarkupTool.slotMates: List<MarkupTool>
+    get() = if (this in RING_MARKUP_TOOLS) RING_MARKUP_TOOLS else listOf(this)
+
+/** The other tool sharing this one's place in the row, if it shares one. */
+val MarkupTool.alternate: MarkupTool? get() = slotMates.firstOrNull { it != this }
 
 /**
  * How heavy a tool draws.
@@ -153,23 +171,39 @@ fun markupFor(
     }
 
 /**
+ * Whether this tool follows the finger rather than taking two corners.
+ *
+ * The pen keeps the path as drawn; the cloud replaces it with scallops. Either
+ * way the whole stroke matters, so neither can be previewed from the drag alone.
+ */
+val MarkupTool.tracesPath: Boolean get() = this == MarkupTool.Pen || this == MarkupTool.Cloud
+
+/**
  * Whether this tool's shape is dragged corner to corner rather than traced.
  *
- * Everything but the pen is: the finger gives two points and the shape is built
- * from them, so the preview can be drawn from the drag alone with no stroke to
- * recognise afterwards.
+ * The finger gives two points and the shape is built from them, so the preview
+ * can be drawn from the drag alone with no stroke to recognise afterwards.
  */
-val MarkupTool.isDragged: Boolean get() = this != MarkupTool.Pen
+val MarkupTool.isDragged: Boolean get() = !tracesPath
 
-/** Build the shape a drag defines, for every tool but the pen. */
+/**
+ * Whether holding still at the end of a stroke asks for the shape recogniser.
+ *
+ * The pen only. A cloud is already the shape it is going to be — asking the
+ * engine what a hand-traced ring "really" was would turn it into an ellipse, and
+ * an ellipse is the one thing a cloud is deliberately not.
+ */
+val MarkupTool.recognises: Boolean get() = this == MarkupTool.Pen
+
+/** Build the shape a drag defines, for every tool but the traced ones. */
 fun MarkupTool.shapeFor(start: Offset, end: Offset): MarkupShape = when (this) {
     MarkupTool.Line -> MarkupShape.Line(start, end)
     MarkupTool.Arrow -> MarkupShape.Arrow(start, end)
     MarkupTool.Rectangle -> MarkupShape.Rectangle(rectFromCorners(start.x, start.y, end.x, end.y))
     MarkupTool.Ellipse -> MarkupShape.Ellipse(rectFromCorners(start.x, start.y, end.x, end.y))
     MarkupTool.Highlight -> MarkupShape.Highlight(rectFromCorners(start.x, start.y, end.x, end.y))
-    // The pen traces rather than drags; its shape comes from the whole stroke.
-    MarkupTool.Pen -> MarkupShape.Freehand(listOf(start, end))
+    // These trace rather than drag; their shape comes from the whole stroke.
+    MarkupTool.Pen, MarkupTool.Cloud -> MarkupShape.Freehand(listOf(start, end))
 }
 
 // ------------------------------------------------------------------- the wire --

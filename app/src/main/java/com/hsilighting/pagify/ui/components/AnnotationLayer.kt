@@ -27,10 +27,16 @@ import androidx.compose.ui.draw.drawWithContent
 import com.hsilighting.pagify.core.Annotation
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.NOTE_MARKER_RADIUS_POINTS
+import com.hsilighting.pagify.core.PageMapping
 import com.hsilighting.pagify.core.isHitBy
 
 
-import com.hsilighting.pagify.core.PenMode
+import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.cloudOutline
+import com.hsilighting.pagify.core.dashed
+import com.hsilighting.pagify.core.isDragged
+import com.hsilighting.pagify.core.tracesPath
+import com.hsilighting.pagify.core.shapeStrokes
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.core.TextSelection
@@ -41,9 +47,9 @@ import com.hsilighting.pagify.ui.reader.PageTextSelection
  * creates new ones.
  *
  * Everything here works in **page points**, converting to pixels only at draw
- * time via [renderScale]. Storing a stroke in screen pixels would freeze it to
- * the zoom level it was drawn at, and it would drift the moment the page was
- * re-rendered at another size.
+ * time via [mapping]. Storing a stroke in screen pixels would freeze it to the
+ * zoom level it was drawn at, and it would drift the moment the page was
+ * re-rendered at another size — or turned.
  *
  * When no tool is selected this adds no pointer input at all, so scrolling and
  * zooming behave exactly as before — an always-on input layer would swallow the
@@ -53,21 +59,35 @@ import com.hsilighting.pagify.ui.reader.PageTextSelection
 fun Modifier.annotationLayer(
     pageIndex: Int,
     annotations: List<Annotation>,
+    /**
+     * Bumped whenever the marks change at all.
+     *
+     * Captured by the draw lambda below, which is the only reason it is here: a
+     * lambda whose captures are unchanged is reused, the draw node is never
+     * updated, and the page keeps painting the picture it painted last time. That
+     * is not a theory — undo took a mark out of the store, the page recomposed
+     * with a shorter list, and the mark stayed on screen until a zoom happened to
+     * force a redraw. An `Int` that differs is what makes this a different lambda.
+     */
+    revision: Int,
     textSegments: List<TextSegment>,
     tool: AnnotationTool,
-    penMode: PenMode,
+    /** How heavy the drawing tools are set, in page points. */
+    strokeWidth: Float,
+    /** Solid, dashed or a centre line — baked into the strokes on commit. */
+    lineStyle: MarkupStyle,
     penColor: Long,
-    renderScale: Float,
     /**
-     * Where the page's top-left corner sits inside this element, in pixels.
+     * How a page point becomes a pixel here: the scale, the page's corner, and
+     * the view rotation.
      *
-     * Zero in the list, where the layer is applied straight to the page. The
-     * magnified view draws a translated page into a viewport-sized canvas, so
-     * without this the layer would map page points as though the page still
-     * began at the corner — marks would land at the wrong place and a touch
+     * The corner is zero in the list, where the layer is applied straight to the
+     * page. The magnified view draws a translated page into a viewport-sized
+     * canvas, so without it the layer would map page points as though the page
+     * still began at the corner — marks would land in the wrong place and a touch
      * would be read as pointing somewhere else entirely.
      */
-    contentOffset: Offset = Offset.Zero,
+    mapping: PageMapping,
     onAdd: (Annotation) -> Unit,
     onRequestNote: (Offset) -> Unit,
     /** A note marker was tapped; show what it says. */
@@ -105,14 +125,14 @@ fun Modifier.annotationLayer(
     // current when the gesture handler started rather than the latest ones.
     android.util.Log.i("AnnotationLayer", "compose page=$pageIndex marks=${annotations.size} tool=$tool")
     val currentColor by rememberUpdatedState(penColor)
-    val currentMode by rememberUpdatedState(penMode)
+    val currentStyle by rememberUpdatedState(lineStyle)
+    val currentWidth by rememberUpdatedState(strokeWidth)
     val currentSegments by rememberUpdatedState(textSegments)
     val add by rememberUpdatedState(onAdd)
     val requestNote by rememberUpdatedState(onRequestNote)
     val openNote by rememberUpdatedState(onOpenNote)
     val currentAnnotations by rememberUpdatedState(annotations)
-    val scale by rememberUpdatedState(renderScale)
-    val origin by rememberUpdatedState(contentOffset)
+    val at by rememberUpdatedState(mapping)
     val eraseStart by rememberUpdatedState(onEraseStart)
     val erase by rememberUpdatedState(onErase)
     val eraseEnd by rememberUpdatedState(onEraseEnd)
@@ -126,20 +146,31 @@ fun Modifier.annotationLayer(
     var wetStroke by remember { mutableStateOf<List<Offset>>(emptyList()) }
     /** Live highlight rects while a highlight drag is in progress. */
     var wetHighlight by remember { mutableStateOf<List<Rect>>(emptyList()) }
+    /** Live shape, in page points, while a line or box is being dragged. */
+    var wetShape by remember { mutableStateOf<List<List<Offset>>>(emptyList()) }
     /** Where the eraser is, in page points, while it is down. Drawn as a ring. */
     var eraserAt by remember { mutableStateOf<Offset?>(null) }
 
-    fun toPage(position: Offset): Offset =
-        if (scale > 0f) (position - origin) / scale else Offset.Zero
+    /**
+     * How many marks the last draw actually painted.
+     *
+     * A plain array, not state: it is written from inside the draw pass, and a
+     * snapshot write there would schedule another frame to record the frame that
+     * just happened.
+     */
+    val painted = remember { intArrayOf(-1) }
+
+    fun toPage(position: Offset): Offset = at.toPage(position)
 
     // A fixed touch radius in dp, converted to page points through the current
     // scale. Expressing the eraser's reach in points instead would make it a
     // pinhead when zoomed in and a paint roller when zoomed out.
     val eraserRadiusPx = with(LocalDensity.current) { ERASER_TOUCH_RADIUS.toPx() }
-    fun tolerancePoints(): Float = if (scale > 0f) eraserRadiusPx / scale else 0f
+    fun tolerancePoints(): Float = at.toPage(eraserRadiusPx)
 
-    val inputModifier = when (tool) {
-        AnnotationTool.Pen -> Modifier.pointerInput(pageIndex, tool) {
+    val inputModifier = when {
+        // Text only. Drag across words and it snaps to the lines they sit on.
+        tool == AnnotationTool.Highlight -> Modifier.pointerInput(pageIndex, tool) {
             var start = Offset.Zero
             /** Distinguishes a sweep that found nothing from a stray tap. */
             var swept = false
@@ -147,76 +178,142 @@ fun Modifier.annotationLayer(
                 onDragStart = { position ->
                     start = toPage(position)
                     swept = false
-                    wetStroke = listOf(start)
                     wetHighlight = emptyList()
                 },
                 onDrag = { change, _ ->
                     change.consume()
                     swept = true
-                    val here = toPage(change.position)
-                    when (currentMode) {
-                        PenMode.Marker -> wetStroke = wetStroke + here
-                        PenMode.Highlight ->
-                            wetHighlight = TextSelection.rectsBetween(currentSegments, start, here)
-                    }
+                    wetHighlight =
+                        TextSelection.rectsBetween(currentSegments, start, toPage(change.position))
                 },
                 onDragEnd = {
-                    when (currentMode) {
-                        PenMode.Marker -> if (wetStroke.size > 1) {
-                            add(
-                                Annotation.Ink(
-                                    id = 0L,
-                                    pageIndex = pageIndex,
-                                    points = wetStroke,
-                                    color = currentColor,
-                                    strokeWidth = MARKER_WIDTH_POINTS,
-                                ),
-                            )
-                        }
-                        PenMode.Highlight -> if (wetHighlight.isNotEmpty()) {
-                            // The span the rects cover is recorded alongside their
-                            // count, because a count on its own cannot distinguish
-                            // "selected a paragraph" from "selected the page" —
-                            // which is what the previous selection actually did.
-                            SessionRecorder.record(
-                                kind = "HIGHLIGHT_SELECT",
-                                detail = "page=$pageIndex rects=${wetHighlight.size} " +
-                                    "x=${wetHighlight.minOf { it.left }.toInt()}.." +
-                                    "${wetHighlight.maxOf { it.right }.toInt()} " +
-                                    "y=${wetHighlight.minOf { it.top }.toInt()}.." +
-                                    "${wetHighlight.maxOf { it.bottom }.toInt()} " +
-                                    "runsOnPage=${currentSegments.size} zoomed=${origin != Offset.Zero}",
-                            )
-                            add(
-                                Annotation.Highlight(
-                                    id = 0L,
-                                    pageIndex = pageIndex,
-                                    rects = wetHighlight,
-                                    color = currentColor,
-                                ),
-                            )
-                        } else if (swept) {
-                            // Dragged across the page and selected nothing. On a
-                            // scan that is every drag, and without saying so the
-                            // tool simply looks broken.
-                            SessionRecorder.record(
-                                kind = "HIGHLIGHT_MISSED",
-                                detail = "page=$pageIndex runsOnPage=${currentSegments.size}",
-                            )
-                            highlightMissed()
-                        }
+                    if (wetHighlight.isNotEmpty()) {
+                        // The span the rects cover is recorded alongside their
+                        // count, because a count on its own cannot distinguish
+                        // "selected a paragraph" from "selected the page" —
+                        // which is what the previous selection actually did.
+                        SessionRecorder.record(
+                            kind = "HIGHLIGHT_SELECT",
+                            detail = "page=$pageIndex rects=${wetHighlight.size} " +
+                                "x=${wetHighlight.minOf { it.left }.toInt()}.." +
+                                "${wetHighlight.maxOf { it.right }.toInt()} " +
+                                "y=${wetHighlight.minOf { it.top }.toInt()}.." +
+                                "${wetHighlight.maxOf { it.bottom }.toInt()} " +
+                                "runsOnPage=${currentSegments.size} " +
+                                "zoomed=${at.origin != Offset.Zero} turns=${at.quarterTurns}",
+                        )
+                        add(
+                            Annotation.Highlight(
+                                id = 0L,
+                                pageIndex = pageIndex,
+                                rects = wetHighlight,
+                                color = currentColor,
+                            ),
+                        )
+                    } else if (swept) {
+                        // Dragged across the page and selected nothing. On a
+                        // scan that is every drag, and without saying so the
+                        // tool simply looks broken.
+                        SessionRecorder.record(
+                            kind = "HIGHLIGHT_MISSED",
+                            detail = "page=$pageIndex runsOnPage=${currentSegments.size}",
+                        )
+                        highlightMissed()
                     }
-                    wetStroke = emptyList()
                     wetHighlight = emptyList()
                 },
-                onDragCancel = {
-                    wetStroke = emptyList()
-                    wetHighlight = emptyList()
-                },
+                onDragCancel = { wetHighlight = emptyList() },
             )
         }
 
-        AnnotationTool.Note -> Modifier.pointerInput(pageIndex, tool) {
+        // Traced: the pen keeps the touch points, thinned only by the sampling
+        // rate of the screen; the cloud throws them away and scallops the ring
+        // they enclosed. Same gesture, so the same branch captures it.
+        tool.tracesPath -> Modifier.pointerInput(pageIndex, tool) {
+            detectDragGestures(
+                onDragStart = { position -> wetStroke = listOf(toPage(position)) },
+                onDrag = { change, _ ->
+                    change.consume()
+                    wetStroke = wetStroke + toPage(change.position)
+                },
+                onDragEnd = {
+                    // What is drawn is what was traced, for the pen. For the cloud
+                    // it is the scalloped ring — built here, by the same call the
+                    // preview used, so the mark is the one that was on screen when
+                    // the finger came up.
+                    val path = if (tool == AnnotationTool.Cloud) {
+                        cloudOutline(wetStroke, currentWidth)
+                    } else {
+                        wetStroke
+                    }
+                    if (path.size > 1) {
+                        // Dashed through the same splitter the shapes use, so a
+                        // line type means the same thing whichever tool drew it.
+                        val strokes = dashed(path, currentStyle, currentWidth)
+                        SessionRecorder.record(
+                            kind = "SHAPE_COMMIT",
+                            detail = "page=$pageIndex tool=$tool traced=${wetStroke.size} " +
+                                "points=${path.size} strokes=${strokes.size}",
+                        )
+                        add(
+                            Annotation.Shape(
+                                id = 0L,
+                                pageIndex = pageIndex,
+                                strokes = strokes,
+                                color = currentColor,
+                                strokeWidth = currentWidth,
+                            ),
+                        )
+                    }
+                    wetStroke = emptyList()
+                },
+                onDragCancel = { wetStroke = emptyList() },
+            )
+        }
+
+        // A line, an arrow, a box or a circle: two corners rather than a path, so
+        // the shape is rebuilt from the drag on every event and only committed
+        // when the finger lifts.
+        tool.isDragged -> Modifier.pointerInput(pageIndex, tool) {
+            var start = Offset.Zero
+            detectDragGestures(
+                onDragStart = { position ->
+                    start = toPage(position)
+                    wetShape = emptyList()
+                },
+                onDrag = { change, _ ->
+                    change.consume()
+                    wetShape = shapeStrokes(
+                        tool = tool,
+                        start = start,
+                        end = toPage(change.position),
+                        style = currentStyle,
+                        widthPoints = currentWidth,
+                    )
+                },
+                onDragEnd = {
+                    SessionRecorder.record(
+                        kind = "SHAPE_COMMIT",
+                        detail = "page=$pageIndex tool=$tool strokes=${wetShape.size}",
+                    )
+                    if (wetShape.isNotEmpty()) {
+                        add(
+                            Annotation.Shape(
+                                id = 0L,
+                                pageIndex = pageIndex,
+                                strokes = wetShape,
+                                color = currentColor,
+                                strokeWidth = currentWidth,
+                            ),
+                        )
+                    }
+                    wetShape = emptyList()
+                },
+                onDragCancel = { wetShape = emptyList() },
+            )
+        }
+
+        tool == AnnotationTool.Note -> Modifier.pointerInput(pageIndex, tool) {
             detectTapGestures { position ->
                 val at = toPage(position)
                 // A tap on an existing marker opens it; anywhere else starts a new
@@ -237,7 +334,7 @@ fun Modifier.annotationLayer(
         // A tap rubs out the mark it lands on; a drag sweeps across several. Both
         // are needed: a drag never fires for a tap, because it has to pass touch
         // slop first, and a tap on a single highlight is the common case.
-        AnnotationTool.Eraser -> Modifier
+        tool == AnnotationTool.Eraser -> Modifier
             .pointerInput(pageIndex, tool) {
                 detectTapGestures { position ->
                     eraseStart()
@@ -342,36 +439,86 @@ fun Modifier.annotationLayer(
             // the display list is reused and the lambda never runs again — the
             // page composed with the new mark and kept painting the old picture.
             val marks = currentAnnotations
-            android.util.Log.i("AnnotationLayer", "draw page=$pageIndex marks=${marks.size}")
-            marks.forEach { drawAnnotation(it, scale, origin) }
+            // What was actually painted, recorded when it changes.
+            //
+            // Composition reporting a new list is not the same as the page having
+            // drawn it: a draw node that never re-runs leaves the old picture on
+            // screen while every counter says the mark is gone. PAGE_MARKS says
+            // what the page was told; this says what it did about it, and only the
+            // pair of them can tell those two failures apart.
+            if (painted[0] != revision) {
+                painted[0] = revision
+                SessionRecorder.record(
+                    kind = "PAGE_PAINT",
+                    detail = "page=$pageIndex rev=$revision marks=${marks.size}",
+                )
+            }
+            marks.forEach { drawAnnotation(it, at) }
             if (wetHighlight.isNotEmpty()) {
-                drawHighlightRects(wetHighlight, currentColor, scale, origin)
+                drawHighlightRects(wetHighlight, currentColor, at)
+            }
+            // The shape as it is being dragged, drawn exactly as it will be
+            // committed — same builder, same dashes — so what is released is
+            // what was aimed at.
+            wetShape.forEach { stroke ->
+                drawInkStroke(
+                    points = stroke,
+                    color = currentColor,
+                    widthPoints = currentWidth,
+                    at = at,
+                    smooth = tool == AnnotationTool.Pen,
+                )
             }
             if (wetStroke.size > 1) {
-                drawInkStroke(wetStroke, currentColor, MARKER_WIDTH_POINTS, scale, origin)
+                // The cloud is previewed as a cloud, rebuilt on every frame from
+                // the same call that will commit it. Watching a plain trace turn
+                // into scallops only on lift means aiming at something you cannot
+                // see; the scallops do shuffle as the ring grows, but they shuffle
+                // into the ones you are going to get.
+                if (tool == AnnotationTool.Cloud) {
+                    drawInkStroke(
+                        points = cloudOutline(wetStroke, currentWidth),
+                        color = currentColor,
+                        widthPoints = currentWidth,
+                        at = at,
+                        smooth = false,
+                    )
+                } else {
+                    drawInkStroke(wetStroke, currentColor, currentWidth, at)
+                }
             }
-            currentSelection?.let { drawSelection(it, scale, origin) }
-            eraserAt?.let { at ->
+            currentSelection?.let { drawSelection(it, at) }
+            eraserAt?.let { point ->
                 // Shows exactly how far the eraser reaches, so a miss reads as a
                 // miss rather than as the tool not working.
                 drawCircle(
                     color = Color.Black.copy(alpha = 0.35f),
                     radius = eraserRadiusPx,
-                    center = at * scale + origin,
+                    center = at.toScreen(point),
                     style = Stroke(width = ERASER_RING_PX),
                 )
             }
         }
 }
 
-private fun DrawScope.drawAnnotation(annotation: Annotation, scale: Float, origin: Offset) {
+private fun DrawScope.drawAnnotation(annotation: Annotation, at: PageMapping) {
     when (annotation) {
         is Annotation.Highlight ->
-            drawHighlightRects(annotation.rects, annotation.color, scale, origin)
+            drawHighlightRects(annotation.rects, annotation.color, at)
         is Annotation.Ink ->
-            drawInkStroke(annotation.points, annotation.color, annotation.strokeWidth, scale, origin)
+            drawInkStroke(annotation.points, annotation.color, annotation.strokeWidth, at)
+        is Annotation.Shape -> annotation.strokes.forEach { stroke ->
+            // Not smoothed: these points are corners, not samples.
+            drawInkStroke(
+                points = stroke,
+                color = annotation.color,
+                widthPoints = annotation.strokeWidth,
+                at = at,
+                smooth = false,
+            )
+        }
         is Annotation.Signature -> annotation.strokes.forEach { stroke ->
-            drawInkStroke(stroke, annotation.color, SIGNATURE_WIDTH_POINTS, scale, origin)
+            drawInkStroke(stroke, annotation.color, SIGNATURE_WIDTH_POINTS, at)
         }
         is Annotation.Note -> {
             // An anchored marker; the note's text is shown in a sheet rather than
@@ -381,14 +528,14 @@ private fun DrawScope.drawAnnotation(annotation: Annotation, scale: Float, origi
             // dot on white paper is genuinely hard to find, and the first version
             // of this was reported as the note not being added at all — which is
             // exactly what an invisible marker looks like.
-            val centre = annotation.anchor * scale + origin
-            val radius = NOTE_MARKER_RADIUS_POINTS * scale
+            val centre = at.toScreen(annotation.anchor)
+            val radius = at.toScreen(NOTE_MARKER_RADIUS_POINTS)
             drawCircle(Color(annotation.color), radius = radius, center = centre)
             drawCircle(
                 Color.Black.copy(alpha = NOTE_OUTLINE_ALPHA),
                 radius = radius,
                 center = centre,
-                style = Stroke(width = NOTE_OUTLINE_WIDTH_POINTS * scale),
+                style = Stroke(width = at.toScreen(NOTE_OUTLINE_WIDTH_POINTS)),
             )
             // A pip in the middle, so it reads as a marker rather than as a stray
             // blob of highlighter.
@@ -404,16 +551,16 @@ private fun DrawScope.drawAnnotation(annotation: Annotation, scale: Float, origi
 private fun DrawScope.drawHighlightRects(
     rects: List<Rect>,
     color: Long,
-    scale: Float,
-    origin: Offset,
+    at: PageMapping,
 ) {
     // Multiply, so the page's own text stays legible through the wash rather than
     // being covered by a flat translucent block.
     rects.forEach { r ->
+        val box = at.toScreen(r)
         drawRect(
             color = Color(color).copy(alpha = HIGHLIGHT_ALPHA),
-            topLeft = Offset(r.left, r.top) * scale + origin,
-            size = Size(r.width * scale, r.height * scale),
+            topLeft = box.topLeft,
+            size = Size(box.width, box.height),
         )
     }
 }
@@ -422,30 +569,45 @@ private fun DrawScope.drawInkStroke(
     points: List<Offset>,
     color: Long,
     widthPoints: Float,
-    scale: Float,
-    origin: Offset,
+    at: PageMapping,
+    /**
+     * Whether to round the corners off.
+     *
+     * True for freehand, where the points are touch samples and the curve is
+     * what the hand actually did. False for a shape: its points are its corners,
+     * and smoothing them turns a rectangle into an oval — which is precisely what
+     * it did the first time this drew one.
+     */
+    smooth: Boolean = true,
 ) {
     if (points.size < 2) return
-    fun at(p: Offset) = p * scale + origin
+    fun place(p: Offset) = at.toScreen(p)
 
     val path = Path().apply {
-        val start = at(points[0])
+        val start = place(points[0])
         moveTo(start.x, start.y)
-        // Quadratic midpoints, so a fast drag reads as a smooth line instead of
-        // the visible polygon that joining raw touch samples produces.
-        for (i in 1 until points.size) {
-            val prev = at(points[i - 1])
-            val cur = at(points[i])
-            quadraticBezierTo(prev.x, prev.y, (prev.x + cur.x) / 2f, (prev.y + cur.y) / 2f)
+        if (smooth) {
+            // Quadratic midpoints, so a fast drag reads as a smooth line instead
+            // of the visible polygon that joining raw touch samples produces.
+            for (i in 1 until points.size) {
+                val prev = place(points[i - 1])
+                val cur = place(points[i])
+                quadraticBezierTo(prev.x, prev.y, (prev.x + cur.x) / 2f, (prev.y + cur.y) / 2f)
+            }
+            val last = place(points.last())
+            lineTo(last.x, last.y)
+        } else {
+            for (i in 1 until points.size) {
+                val cur = place(points[i])
+                lineTo(cur.x, cur.y)
+            }
         }
-        val last = at(points.last())
-        lineTo(last.x, last.y)
     }
     drawPath(
         path = path,
         color = Color(color),
         style = Stroke(
-            width = widthPoints * scale,
+            width = at.toScreen(widthPoints),
             cap = StrokeCap.Round,
             join = StrokeJoin.Round,
         ),
@@ -490,27 +652,28 @@ private const val NOTE_PIP_FRACTION = 0.32f
  */
 private fun DrawScope.drawSelection(
     selection: PageTextSelection,
-    scale: Float,
-    origin: Offset,
+    at: PageMapping,
 ) {
     if (selection.rects.isEmpty()) return
 
     selection.rects.forEach { rect ->
+        val box = at.toScreen(rect)
         drawRect(
             color = SELECTION_COLOUR.copy(alpha = SELECTION_ALPHA),
-            topLeft = Offset(rect.left, rect.top) * scale + origin,
-            size = Size(rect.width * scale, rect.height * scale),
+            topLeft = box.topLeft,
+            size = Size(box.width, box.height),
         )
     }
 
-    listOf(selection.startHandle, selection.endHandle).forEach { at ->
-        val centre = at * scale + origin + Offset(0f, HANDLE_RADIUS_PX)
+    listOf(selection.startHandle, selection.endHandle).forEach { handle ->
+        val anchor = at.toScreen(handle)
+        val centre = anchor + Offset(0f, HANDLE_RADIUS_PX)
         drawCircle(SELECTION_COLOUR, radius = HANDLE_RADIUS_PX, center = centre)
         // The stem, so the circle reads as attached to the text rather than
         // floating below it.
         drawLine(
             color = SELECTION_COLOUR,
-            start = at * scale + origin,
+            start = anchor,
             end = centre,
             strokeWidth = HANDLE_STEM_PX,
         )

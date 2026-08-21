@@ -150,8 +150,10 @@ private fun MarkupSurface(
     val currentStyle by rememberUpdatedState(style)
 
     // Re-made when the tool changes: a gesture belongs to one tool, and carrying a
-    // half-drawn stroke into another would commit it as the wrong shape.
-    val gesture = remember(tool) { MarkupGesture(tool) }
+    // half-drawn stroke into another would commit it as the wrong shape. Also when
+    // the size changes, because the cloud sizes its scallops from it and a gesture
+    // holding the number from before would draw a cloud nobody asked for.
+    val gesture = remember(tool, size) { MarkupGesture(tool, size) }
     var preview by remember(tool) { mutableStateOf<MarkupShape?>(null) }
     var dwelling by remember(tool) { mutableStateOf(false) }
 

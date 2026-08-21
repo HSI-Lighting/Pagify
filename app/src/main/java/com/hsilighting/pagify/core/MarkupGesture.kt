@@ -13,7 +13,18 @@ import androidx.compose.ui.geometry.Offset
  *
  * Everything is in page points; the caller converts before it gets here.
  */
-class MarkupGesture(private val tool: MarkupTool) {
+class MarkupGesture(
+    private val tool: MarkupTool,
+    /**
+     * How heavy the tool is set, in page points.
+     *
+     * Only the cloud reads it, and only to size its scallops. It is a constructor
+     * argument rather than something handed to [up] because the preview needs the
+     * same number: a cloud previewed with one bump size and committed with
+     * another would change shape as the finger left the glass.
+     */
+    private val sizePoints: Float = MARKUP_STROKE_POINTS,
+) {
 
     private val points = mutableListOf<Offset>()
 
@@ -26,6 +37,10 @@ class MarkupGesture(private val tool: MarkupTool) {
         get() = when {
             points.size < 2 -> null
             tool.isDragged -> tool.shapeFor(points.first(), points.last())
+            // The cloud is previewed as a cloud, rebuilt from the same call that
+            // will commit it. Showing the raw trace and swapping it for scallops
+            // on lift means aiming at something you cannot see.
+            tool == MarkupTool.Cloud -> MarkupShape.Freehand(cloudOutline(points, sizePoints))
             else -> MarkupShape.Freehand(points.toList())
         }
 
@@ -46,7 +61,7 @@ class MarkupGesture(private val tool: MarkupTool) {
 
     /** The finger has been still for the dwell. Only meaningful for the pen. */
     fun still() {
-        if (!tool.isDragged && points.size >= MINIMUM_STROKE_POINTS) isDwelling = true
+        if (tool.recognises && points.size >= MINIMUM_STROKE_POINTS) isDwelling = true
     }
 
     /**
@@ -72,6 +87,13 @@ class MarkupGesture(private val tool: MarkupTool) {
             }
             // Held still at the end: ask the engine what this is.
             dwelled -> Outcome.Recognise(stroke)
+            // A traced ring, replaced by the scallops that stand for it. Nothing
+            // is asked of the engine: the cloud is already the shape it means.
+            tool == MarkupTool.Cloud ->
+                cloudOutline(stroke, sizePoints)
+                    .takeIf { it.size > 1 }
+                    ?.let { Outcome.Commit(MarkupShape.Freehand(it)) }
+                    ?: Outcome.Nothing
             // Lifted straight away: keep it exactly as drawn.
             else -> Outcome.Commit(MarkupShape.Freehand(stroke))
         }

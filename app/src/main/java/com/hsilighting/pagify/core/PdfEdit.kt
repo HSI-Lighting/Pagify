@@ -126,6 +126,16 @@ fun Annotation.toWireJson(): JSONObject = when (this) {
         put("width", strokeWidth.toDouble())
     }
 
+    is Annotation.Shape -> JSONObject().apply {
+        // Ink, like a signature: several strokes, which is what an arrow
+        // needs and what a dashed anything comes out as. Every viewer draws
+        // ink correctly, which a Square annotation cannot be relied on for.
+        put("kind", "ink")
+        put("strokes", JSONArray(strokes.map { it.toWireJson() }))
+        put("color", color.colorToWireJson())
+        put("width", strokeWidth.toDouble())
+    }
+
     is Annotation.Signature -> JSONObject().apply {
         // Deliberately ink: a signature *is* a set of strokes, and giving it its
         // own annotation type would mean a second thing to read back, render and
