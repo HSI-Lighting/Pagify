@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -23,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,8 +39,16 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.sin
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.PdfFont
 import kotlin.math.roundToInt
 
 /**
@@ -50,7 +60,20 @@ import kotlin.math.roundToInt
  * two quietly drifted apart. [key] is whichever enum value the caller uses; the
  * ribbon only ever compares it and hands it back.
  */
-data class RibbonTool(val key: Any, val icon: ImageVector, val name: String)
+data class RibbonTool(
+    val key: Any,
+    val icon: ImageVector,
+    val name: String,
+    /**
+     * Whether the slot's glyph previews this one.
+     *
+     * A group can hold more than a slot can show. The ones a group is *known* for
+     * go in the preview; variations of them are still one tap away in the picker
+     * but would only crowd the row. Nothing is hidden by this — the picker always
+     * lists the whole group.
+     */
+    val inPreview: Boolean = true,
+)
 
 /**
  * Everything a mark-making tool needs, in one row.
@@ -86,6 +109,25 @@ fun MarkRibbon(
     widthPresets: List<Float>,
     widthRange: ClosedFloatingPointRange<Float>,
     lineStyle: MarkupStyle?,
+    /**
+     * The font, when the armed tool writes words rather than drawing.
+     *
+     * Non-null swaps two slots: the weight becomes a point size and the line type
+     * becomes the font. Neither a nib width nor a dash means anything to a letter,
+     * and a row that kept them would be offering controls that do nothing.
+     */
+    font: PdfFont? = null,
+    onFont: (PdfFont) -> Unit = {},
+    /**
+     * How far the baseline turns from end to end, in degrees, or null when the
+     * armed tool writes on a straight line.
+     *
+     * A slot of its own rather than a mode of the others, because it is a
+     * different question — the size says how big, the font says in what, and this
+     * says along what.
+     */
+    curve: Float? = null,
+    onCurve: (Float) -> Unit = {},
     onTool: (Any) -> Unit,
     onColour: (Long) -> Unit,
     onWidth: (Float) -> Unit,
@@ -120,8 +162,11 @@ fun MarkRibbon(
     }
 
     // A slot that vanishes must not leave its panel behind: the line type drops
-    // out of the row the moment the highlighter is armed.
+    // out of the row the moment the highlighter is armed, and the font slot only
+    // exists while something that writes words is held.
     if (lineStyle == null && open == RibbonPanel.LineType) open = null
+    if (font == null && open == RibbonPanel.Font) open = null
+    if (curve == null && open == RibbonPanel.Curve) open = null
 
     Column(
         modifier = modifier,
@@ -165,6 +210,19 @@ fun MarkRibbon(
                         },
                     )
 
+                    RibbonPanel.Font -> FontChoices(
+                        font = font ?: PdfFont.HELVETICA,
+                        onFont = {
+                            onFont(it)
+                            open = null
+                        },
+                    )
+
+                    RibbonPanel.Curve -> CurveChoices(
+                        degrees = curve ?: 0f,
+                        onDegrees = onCurve,
+                    )
+
                     is RibbonPanel.Tools -> ToolChoices(
                         tools = panel.tools,
                         armed = armed,
@@ -194,15 +252,33 @@ fun MarkRibbon(
             },
         ) {
             Row(
-                Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                // Scrolled, so the slots keep their own size instead of being
+                // squeezed by whatever width is left. A Row given too little
+                // measures its last child at nothing: the text slot's glyph went
+                // on drawing at full size, over a tap target zero pixels wide, and
+                // the tool simply could not be picked. A scrolling row wraps its
+                // content while it fits and slides when it does not.
+                Modifier
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 RibbonSlot("Colour", { toggle(RibbonPanel.Colour, it) }) { ColourGlyph(colour) }
-                RibbonSlot("Thickness", { toggle(RibbonPanel.Thickness, it) }) {
-                    ThicknessGlyph(width, widthPresets)
+                // The same two slots ask a different question when what is armed
+                // writes words: how big, and in what face.
+                RibbonSlot(
+                    label = if (font != null) "Size" else "Thickness",
+                    onOpen = { toggle(RibbonPanel.Thickness, it) },
+                ) {
+                    if (font != null) SizeGlyph(width) else ThicknessGlyph(width, widthPresets)
                 }
-                if (lineStyle != null) {
+                if (curve != null) {
+                    RibbonSlot("Bend", { toggle(RibbonPanel.Curve, it) }) { CurveGlyph(curve) }
+                }
+                if (font != null) {
+                    RibbonSlot("Font", { toggle(RibbonPanel.Font, it) }) { FontGlyph(font) }
+                } else if (lineStyle != null) {
                     RibbonSlot("Line type", { toggle(RibbonPanel.LineType, it) }) {
                         LineTypeGlyph(lineStyle)
                     }
@@ -247,8 +323,26 @@ private sealed interface RibbonPanel {
 
     data object LineType : RibbonPanel
 
+    data object Font : RibbonPanel
+
+    data object Curve : RibbonPanel
+
     data class Tools(val tools: List<RibbonTool>) : RibbonPanel
 }
+
+/** The members a slot previews, at most [PREVIEW_MEMBERS] of them. */
+private fun previewOf(group: List<RibbonTool>, armed: Any?): List<RibbonTool> {
+    val shown = group.filter { it.inPreview }.take(PREVIEW_MEMBERS)
+    if (shown.isEmpty()) return group.take(PREVIEW_MEMBERS)
+    if (shown.any { it.key == armed }) return shown
+    // Whatever is armed always shows, even when it is one of the ones the row
+    // does not normally preview: a slot with nothing lit in it looks like no tool
+    // is held at all, and that is the one thing the glyph has to say.
+    val held = group.firstOrNull { it.key == armed } ?: return shown
+    return shown.dropLast(1) + held
+}
+
+private const val PREVIEW_MEMBERS = 4
 
 /**
  * One slot: a glyph, a tap target, and the wedge that says it opens something.
@@ -368,32 +462,37 @@ private fun LineTypeGlyph(style: MarkupStyle) {
  */
 @Composable
 private fun GroupGlyph(group: List<RibbonTool>, armed: Any?) {
-    when (group.size) {
-        1 -> GroupMember(group.single(), armed, 26.dp)
+    // A slot is a glyph, not a list. Past four members they stop being tellable
+    // apart at 14dp, so the preview shows the first four and makes room for
+    // whatever is armed when it is not one of them — otherwise picking the fifth
+    // tool would leave the row with nothing lit and no way to see what was held.
+    val shown = previewOf(group, armed)
+    when (shown.size) {
+        1 -> GroupMember(shown.single(), armed, 26.dp)
 
         // Turned upright, and only here. A horizontal bar beside a right-pointing
         // arrow is two wide glyphs in a slot with room for two tall ones, and the
         // pair reads as one arrow with a dash in front of it. Stood on end they
         // read as two things.
         2 -> Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-            group.forEach { GroupMember(it, armed, 20.dp, Modifier.rotate(-90f)) }
+            shown.forEach { GroupMember(it, armed, 20.dp, Modifier.rotate(-90f)) }
         }
 
         // Two above and one below, rather than three in a row: three glyphs across
         // a 46dp slot leaves each of them too small to tell apart.
         3 -> Box(Modifier.size(34.dp)) {
-            GroupMember(group[0], armed, 15.dp, Modifier.align(Alignment.TopStart))
-            GroupMember(group[1], armed, 15.dp, Modifier.align(Alignment.TopEnd))
-            GroupMember(group[2], armed, 15.dp, Modifier.align(Alignment.BottomCenter))
+            GroupMember(shown[0], armed, 15.dp, Modifier.align(Alignment.TopStart))
+            GroupMember(shown[1], armed, 15.dp, Modifier.align(Alignment.TopEnd))
+            GroupMember(shown[2], armed, 15.dp, Modifier.align(Alignment.BottomCenter))
         }
 
         // Four to a corner each. Beyond this a slot stops being a glyph and starts
         // being a list, and the group should be split rather than shrunk further.
         else -> Box(Modifier.size(34.dp)) {
-            GroupMember(group[0], armed, 14.dp, Modifier.align(Alignment.TopStart))
-            GroupMember(group[1], armed, 14.dp, Modifier.align(Alignment.TopEnd))
-            GroupMember(group[2], armed, 14.dp, Modifier.align(Alignment.BottomStart))
-            GroupMember(group[3], armed, 14.dp, Modifier.align(Alignment.BottomEnd))
+            GroupMember(shown[0], armed, 14.dp, Modifier.align(Alignment.TopStart))
+            GroupMember(shown[1], armed, 14.dp, Modifier.align(Alignment.TopEnd))
+            GroupMember(shown[2], armed, 14.dp, Modifier.align(Alignment.BottomStart))
+            GroupMember(shown[3], armed, 14.dp, Modifier.align(Alignment.BottomEnd))
         }
     }
 }
@@ -636,3 +735,151 @@ private const val GLYPH_HEAVIEST_PX = 7f
 
 /** How thick the line-type patterns are drawn, in pixels. */
 private const val GLYPH_LINE_PX = 3.5f
+
+/**
+ * The point size, as the number it is.
+ *
+ * A number rather than a picture, because that is how a size is asked for: nobody
+ * chooses type by pointing at a specimen of it, they say twelve. The other slots
+ * are glyphs because their answers have no names anybody uses.
+ */
+@Composable
+private fun SizeGlyph(sizePoints: Float) {
+    Text(
+        text = sizePoints.roundToInt().toString(),
+        style = MaterialTheme.typography.titleMedium,
+        color = RIBBON_ACCENT,
+    )
+}
+
+/** The face, shown in itself — the one label that can be its own specimen. */
+@Composable
+private fun FontGlyph(font: PdfFont) {
+    Text(
+        text = "Aa",
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        fontFamily = font.composeFamily(),
+        fontWeight = if (font.bold) FontWeight.Bold else FontWeight.Normal,
+        style = MaterialTheme.typography.titleMedium,
+    )
+}
+
+/**
+ * The five faces, each written in itself.
+ *
+ * A list of names in one font tells you nothing about any of them. These are the
+ * standard PDF set, so what is on screen is only a likeness — the phone does not
+ * have Helvetica — but the difference between a serif and a sans is exactly what
+ * the choice is about, and that much a likeness carries.
+ */
+@Composable
+private fun FontChoices(font: PdfFont, onFont: (PdfFont) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        PdfFont.entries.forEach { option ->
+            val live = option == font
+            Text(
+                text = option.label,
+                color = if (live) ACCENT_INK else MaterialTheme.colorScheme.onSurface,
+                fontFamily = option.composeFamily(),
+                fontWeight = if (option.bold) FontWeight.Bold else FontWeight.Normal,
+                style = MaterialTheme.typography.bodyLarge,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(if (live) RIBBON_ACCENT else Color.Transparent)
+                    .clickable { onFont(option) }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+            )
+        }
+    }
+}
+
+/** The nearest face the phone has. See [PdfFont.family]. */
+private fun PdfFont.composeFamily(): FontFamily = when (family) {
+    "serif" -> FontFamily.Serif
+    "monospace" -> FontFamily.Monospace
+    else -> FontFamily.SansSerif
+}
+
+/**
+ * How far the line bends, as a row of shapes and a slider.
+ *
+ * The presets are the three answers most captions want — sagging, straight,
+ * arching — and the slider is there for the one that wants something else.
+ */
+@Composable
+private fun CurveChoices(degrees: Float, onDegrees: (Float) -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CURVE_PRESETS.forEach { preset ->
+                Box(
+                    Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .clickable { onDegrees(preset) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CurveGlyph(preset, lit = preset == degrees, size = 26.dp)
+                }
+            }
+            Text(
+                text = "${degrees.roundToInt()}°",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Slider(
+            value = degrees,
+            onValueChange = onDegrees,
+            valueRange = -CURVE_LIMIT..CURVE_LIMIT,
+            modifier = Modifier.width(220.dp),
+        )
+    }
+}
+
+/** The bend itself, drawn: an arc turning through the amount it stands for. */
+@Composable
+private fun CurveGlyph(degrees: Float, lit: Boolean = true, size: Dp = 24.dp) {
+    val ink = if (lit) RIBBON_ACCENT else MaterialTheme.colorScheme.onSurfaceVariant
+    Canvas(Modifier.size(size)) {
+        val turn = Math.toRadians(degrees.toDouble()).toFloat()
+        val span = this.size.width * 0.82f
+        val left = (this.size.width - span) / 2f
+        val middle = this.size.height / 2f
+        val path = Path()
+
+        if (abs(turn) < 0.02f) {
+            path.moveTo(left, middle)
+            path.lineTo(left + span, middle)
+        } else {
+            // The same arithmetic the baseline uses, so the glyph is a preview of
+            // the line rather than a picture of one.
+            val radius = span / turn
+            val start = -turn / 2f
+            val steps = 24
+            for (step in 0..steps) {
+                val along = start + turn * step / steps
+                val x = left + radius * (sin(along) - sin(start))
+                val y = middle + radius * (cos(start) - cos(along))
+                if (step == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+        }
+
+        drawPath(
+            path = path,
+            color = ink,
+            style = Stroke(width = this.size.width * 0.09f, cap = StrokeCap.Round),
+        )
+    }
+}
+
+/** Sag, straight, arch: the three bends a caption usually wants. */
+private val CURVE_PRESETS = listOf(-60f, 0f, 60f)
+
+/** Past half a turn the words start meeting themselves. */
+private const val CURVE_LIMIT = 180f

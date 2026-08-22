@@ -136,6 +136,16 @@ pub enum Shape {
     Highlight {
         rect: Rect,
     },
+    /// Letters, as the outlines they are made of.
+    ///
+    /// A picture has no text layer to put words into, so text drawn on a capture
+    /// arrives here already flattened: one closed contour per stroke of each
+    /// letter, filled rather than stroked. Counters — the hole in an `o` — are
+    /// contours of their own wound the other way, which is why this fills by
+    /// winding and why the contours must stay separate all the way here.
+    Glyphs {
+        contours: Vec<Vec<Point>>,
+    },
 }
 
 /// The most opaque a highlight may be drawn, whatever alpha it carries.
@@ -174,6 +184,26 @@ pub fn composite(bitmap: &mut Bitmap, marks: &[Markup], scale: f32) -> Result<()
 }
 
 /// Capture-local units to pixels.
+/// One path holding every contour of every letter, ready to fill.
+fn glyph_path(contours: &[Vec<Point>], scale: f32) -> Option<tiny_skia::Path> {
+    let mut builder = PathBuilder::new();
+    for contour in contours {
+        if contour.len() < 3 {
+            continue;
+        }
+        let (x, y) = to_pixels(contour[0], scale);
+        builder.move_to(x, y);
+        for point in &contour[1..] {
+            let (x, y) = to_pixels(*point, scale);
+            builder.line_to(x, y);
+        }
+        // Closed whether or not the sender closed it: an open contour fills to a
+        // straight line across the gap, which on a letter is a slash through it.
+        builder.close();
+    }
+    builder.finish()
+}
+
 fn to_pixels(p: Point, scale: f32) -> (f32, f32) {
     (p.x * scale, p.y * scale)
 }
@@ -237,6 +267,12 @@ fn draw(pixmap: &mut PixmapMut, mark: &Markup, scale: f32) {
                 }
                 None => return,
             }
+        }
+        Shape::Glyphs { contours } => {
+            if let Some(path) = glyph_path(contours, scale) {
+                pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+            }
+            return;
         }
         Shape::Freehand { points } => freehand_path(points, scale),
         Shape::Line { from, to } => segment_path(*from, *to, scale),
@@ -1276,6 +1312,75 @@ mod tests {
         assert!(!is_white(pixel(&bitmap, 180, 180)), "the tip is missing");
         let barb_side = (165..180).any(|x| !is_white(pixel(&bitmap, x, 150)));
         assert!(barb_side, "no head — this drew a plain line");
+    }
+
+    #[test]
+    fn glyph_contours_are_filled_rather_than_outlined() {
+        // A letter is a shape, not a line. Stroking its outline would leave the
+        // inside of every letter the colour of the page.
+        let mut bitmap = white_capture();
+        composite(
+            &mut bitmap,
+            &[mark(Shape::Glyphs {
+                contours: vec![vec![
+                    at(20.0, 20.0),
+                    at(60.0, 20.0),
+                    at(60.0, 60.0),
+                    at(20.0, 60.0),
+                ]],
+            })],
+            SCALE,
+        )
+        .unwrap();
+
+        assert!(!is_white(pixel(&bitmap, 80, 80)), "the middle was left blank");
+        assert!(is_white(pixel(&bitmap, 150, 150)), "it painted outside itself");
+    }
+
+    #[test]
+    fn a_counter_stays_a_hole() {
+        // The inside of an "o". Wound against the outer contour, so filling by
+        // winding takes it back out again — fill it by even-odd or run the two
+        // contours together and every closed letter comes out as a blob.
+        let mut bitmap = white_capture();
+        composite(
+            &mut bitmap,
+            &[mark(Shape::Glyphs {
+                contours: vec![
+                    vec![
+                        at(20.0, 20.0),
+                        at(80.0, 20.0),
+                        at(80.0, 80.0),
+                        at(20.0, 80.0),
+                    ],
+                    vec![
+                        at(40.0, 40.0),
+                        at(40.0, 60.0),
+                        at(60.0, 60.0),
+                        at(60.0, 40.0),
+                    ],
+                ],
+            })],
+            SCALE,
+        )
+        .unwrap();
+
+        assert!(!is_white(pixel(&bitmap, 60, 60)), "the letter itself is missing");
+        assert!(is_white(pixel(&bitmap, 100, 100)), "the counter filled in");
+    }
+
+    #[test]
+    fn a_contour_of_two_points_draws_nothing_rather_than_panicking() {
+        let mut bitmap = white_capture();
+        composite(
+            &mut bitmap,
+            &[mark(Shape::Glyphs {
+                contours: vec![vec![at(10.0, 10.0), at(50.0, 50.0)]],
+            })],
+            SCALE,
+        )
+        .unwrap();
+        assert!(bitmap.data.iter().all(|&b| b == 0xFF));
     }
 
     #[test]

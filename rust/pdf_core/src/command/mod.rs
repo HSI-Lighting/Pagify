@@ -40,7 +40,7 @@ pub use history::CommandHistory;
 use serde::{Deserialize, Serialize};
 
 use crate::document::{Annotation, DocumentMut, PageSize, RemovedPage};
-use crate::error::Result;
+use crate::error::{PdfError, Result};
 
 /// What the user asked for. Parameters only, and serialisable.
 ///
@@ -92,6 +92,16 @@ pub enum Command {
     RemoveAnnotation {
         page_index: usize,
         index: usize,
+    },
+    /// Take words off a page.
+    ///
+    /// By the app's own id rather than by position, because text is page content
+    /// and page content has no annotation index. The id is on every object the
+    /// write put there, so this finds all of them however the page has been
+    /// edited since.
+    RemoveText {
+        page_index: usize,
+        id: i32,
     },
 }
 
@@ -201,6 +211,20 @@ impl Command {
                     annotation,
                 })
             }
+            Command::RemoveText { page_index, id } => {
+                // Read what is there before taking it out, so undo can put the
+                // words back. The blob is the app's own description of the mark,
+                // stored alongside it when it was written.
+                let restore = doc.text_mark_restore(*page_index, *id)?;
+                let annotation: Annotation = serde_json::from_str(&restore).map_err(|error| {
+                    PdfError::InvalidArgument(format!("unreadable text mark {id}: {error}"))
+                })?;
+                doc.remove_text(*page_index, *id)?;
+                Ok(UndoRecord::RestoreAnnotation {
+                    page_index: *page_index,
+                    annotation,
+                })
+            }
         }
     }
 
@@ -221,6 +245,9 @@ impl Command {
             Command::RemoveAnnotation { page_index, .. } => {
                 format!("Erase on page {}", page_index + 1)
             }
+            Command::RemoveText { page_index, .. } => {
+                format!("Erase text on page {}", page_index + 1)
+            }
         }
     }
 
@@ -239,7 +266,8 @@ impl Command {
             // cache survives — which matters, because marks are made far more
             // often than pages are moved.
             Command::AddAnnotation { page_index, .. }
-            | Command::RemoveAnnotation { page_index, .. } => vec![*page_index],
+            | Command::RemoveAnnotation { page_index, .. }
+            | Command::RemoveText { page_index, .. } => vec![*page_index],
         }
     }
 }
@@ -251,6 +279,7 @@ impl Annotation {
             Annotation::Highlight { .. } => "Highlight",
             Annotation::Ink { .. } => "Drawing",
             Annotation::Note { .. } => "Note",
+            Annotation::Text { .. } => "Text",
         }
     }
 }

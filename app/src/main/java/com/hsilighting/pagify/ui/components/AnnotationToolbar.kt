@@ -59,6 +59,7 @@ import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.DRAWING_TOOLS
 import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.PdfFont
 import com.hsilighting.pagify.core.draws
 import com.hsilighting.pagify.core.marks
 import kotlin.math.roundToInt
@@ -90,6 +91,16 @@ fun AnnotationToolbar(
     /** How heavy the drawing tools are, in page points, and what line they draw. */
     strokeWidth: Float,
     lineStyle: MarkupStyle,
+    /** What text is written in, and how big. */
+    textFont: PdfFont,
+    textSizePoints: Float,
+    textCurveDegrees: Float,
+    /** The largest size a caption can take and still fit the page. */
+    textSizeCeiling: Float,
+    onTextFont: (PdfFont) -> Unit,
+    /** How far a curved caption bends, end to end, in degrees. */
+    onTextCurve: (Float) -> Unit,
+    onTextSize: (Float) -> Unit,
     onSelectTool: (AnnotationTool) -> Unit,
     onPenColorChange: (Long) -> Unit,
     onStrokeWidth: (Float) -> Unit,
@@ -177,6 +188,13 @@ fun AnnotationToolbar(
                     color = penColor,
                     strokeWidth = strokeWidth,
                     lineStyle = lineStyle,
+                    font = textFont,
+                    sizePoints = textSizePoints,
+                    curveDegrees = textCurveDegrees,
+                    sizeCeiling = textSizeCeiling,
+                    onFont = onTextFont,
+                    onCurve = onTextCurve,
+                    onSizePoints = onTextSize,
                     // The row stays open when a tool is chosen from it. It is a
                     // workspace, not a menu: the next thing after picking a shape
                     // is usually setting the colour or the weight for it.
@@ -860,3 +878,42 @@ private const val NIB_DOT_SCALE = 2.2f
 
 /** How wide the parameters band may grow before its colours start scrolling. */
 private val PARAMETER_BAND_WIDTH = 360.dp
+
+/**
+ * The words for text already placed on the page.
+ *
+ * The baseline is chosen first and the words come second, so by the time this
+ * opens the place is decided and only the text is missing. It says which kind it
+ * is asking for, because a tap and a traced curve are two different gestures with
+ * the same dialog at the end of them and nothing else on screen distinguishes the
+ * result until the words appear.
+ */
+@Composable
+fun TextComposer(curved: Boolean, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var text by remember { mutableStateOf("") }
+    val focus = remember { FocusRequester() }
+
+    LaunchedEffect(Unit) { focus.requestFocus() }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (curved) "Text along the curve" else "Text") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                placeholder = { Text("Type here") },
+                modifier = Modifier.focusRequester(focus),
+            )
+        },
+        confirmButton = {
+            // Blank adds nothing rather than an invisible mark: text with no
+            // letters cannot be seen, so it could only be found by erasing at
+            // random until it went away.
+            TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) {
+                Text("Add")
+            }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}

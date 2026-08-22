@@ -26,6 +26,7 @@ fun Annotation.movedTo(pageIndex: Int): Annotation = when (this) {
     is Annotation.Note -> copy(pageIndex = pageIndex)
     is Annotation.Shape -> copy(pageIndex = pageIndex)
     is Annotation.Signature -> copy(pageIndex = pageIndex)
+    is Annotation.Text -> copy(pageIndex = pageIndex)
 }
 
 /**
@@ -89,6 +90,11 @@ fun Annotation.rotatedInPage(quarterTurns: Int, width: Float, height: Float): An
             }
             copy(strokes = turned, bounds = bounds.rotatedInPage(quarterTurns, width, height))
         }
+
+        // The baseline turns and the words follow it: the layout is derived from
+        // the path, so nothing else has to know the page moved.
+        is Annotation.Text ->
+            copy(path = path.map { it.rotatedInPage(quarterTurns, width, height) })
     }
 }
 

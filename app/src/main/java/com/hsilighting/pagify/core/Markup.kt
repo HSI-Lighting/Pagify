@@ -34,6 +34,27 @@ sealed interface MarkupShape {
 
     /** A translucent wash, for picking something out rather than ringing it. */
     data class Highlight(val rect: Rect) : MarkupShape
+
+    /**
+     * Words written on the picture.
+     *
+     * Kept as words all the way to the export, and flattened to outlines only
+     * there. Storing the outlines instead would make the mark unreadable to
+     * everything that handles it — undo, hit tests, the live preview — and would
+     * pin the letters to whatever size they were first drawn at.
+     */
+    data class Text(
+        val text: String,
+        /** The baseline, in capture units. One point for straight text. */
+        val path: List<Offset>,
+        val font: PdfFont,
+        val sizePoints: Float,
+        val frame: TextFrame = TextFrame.None,
+        /** How far the baseline turns from end to end, in degrees. */
+        val curveDegrees: Float = 0f,
+    ) : MarkupShape {
+        val isCurved: Boolean get() = path.size > 2
+    }
 }
 
 /** One committed mark, with how it is drawn. */
@@ -78,7 +99,54 @@ val MarkupTool.hasLineStyle: Boolean get() = !isIntensity
 const val MARKUP_STROKE_POINTS = 2.4f
 
 /** What the markup toolbar can draw. */
-enum class MarkupTool { Pen, Line, Arrow, Curve, CurvedArrow, Rectangle, Ellipse, Cloud, Highlight }
+enum class MarkupTool {
+    Pen,
+    Line,
+    Arrow,
+    Curve,
+    CurvedArrow,
+    Rectangle,
+    Ellipse,
+    Cloud,
+    Highlight,
+
+    /**
+     * Words on the picture, straight, along a curve, or inside a frame.
+     *
+     * The same five the reader offers, because a picture of a page is marked up
+     * for the same reasons the page is. What differs is only what a file can
+     * hold: page text is real text, and a picture has no text layer to put words
+     * into, so these end up as the outlines of their letters.
+     */
+    Text,
+    CurvedText,
+    CloudText,
+    BoxText,
+    EllipseText,
+}
+
+/** Whether this tool writes words rather than drawing. */
+val MarkupTool.writesText: Boolean get() = this in TEXT_MARKUP_TOOLS
+
+private val TEXT_MARKUP_TOOLS = setOf(
+    MarkupTool.Text,
+    MarkupTool.CurvedText,
+    MarkupTool.CloudText,
+    MarkupTool.BoxText,
+    MarkupTool.EllipseText,
+)
+
+/** Whether this tool writes on a bent line. As in the reader, the bend is set. */
+val MarkupTool.bendsText: Boolean get() = this == MarkupTool.CurvedText
+
+/** What this tool draws around the words it writes, if anything. */
+val MarkupTool.textFrame: TextFrame
+    get() = when (this) {
+        MarkupTool.CloudText -> TextFrame.Cloud
+        MarkupTool.BoxText -> TextFrame.Box
+        MarkupTool.EllipseText -> TextFrame.Ellipse
+        else -> TextFrame.None
+    }
 
 /**
  * The two ways of ringing a region, in the order they are always offered.
@@ -192,7 +260,7 @@ private val TRACED_MARKUP_TOOLS = setOf(
  * The finger gives two points and the shape is built from them, so the preview
  * can be drawn from the drag alone with no stroke to recognise afterwards.
  */
-val MarkupTool.isDragged: Boolean get() = !tracesPath
+val MarkupTool.isDragged: Boolean get() = !tracesPath && !writesText
 
 /**
  * Whether holding still at the end of a stroke asks for the shape recogniser.
@@ -213,6 +281,12 @@ fun MarkupTool.shapeFor(start: Offset, end: Offset): MarkupShape = when (this) {
     // These trace rather than drag; their shape comes from the whole stroke.
     MarkupTool.Pen, MarkupTool.Cloud, MarkupTool.Curve, MarkupTool.CurvedArrow ->
         MarkupShape.Freehand(listOf(start, end))
+    // And these are not dragged at all: text is placed, then typed. The canvas
+    // never asks this for one, and a shape built from two stray points would be
+    // an empty mark somewhere nobody meant.
+    MarkupTool.Text, MarkupTool.CurvedText, MarkupTool.CloudText,
+    MarkupTool.BoxText, MarkupTool.EllipseText ->
+        MarkupShape.Freehand(emptyList())
 }
 
 // ------------------------------------------------------------------- the wire --
@@ -233,7 +307,39 @@ fun Markup.toWireJson(): JSONObject = JSONObject().apply {
 }
 
 fun List<Markup>.toWireJson(): String =
-    JSONArray(map { it.toWireJson() }).toString()
+    JSONArray(flatMap { it.forWire() }.map { it.toWireJson() }).toString()
+
+/**
+ * One mark as the marks the engine draws.
+ *
+ * Nearly always itself. Framed text is two: the ring is a stroked line and the
+ * letters are a filled shape, and no single drawing operation is both. They stay
+ * one mark everywhere else — one undo, one thing to move — and come apart only
+ * here, on the way out.
+ */
+internal fun Markup.forWire(): List<Markup> {
+    val shape = shape
+    if (shape !is MarkupShape.Text || shape.frame == TextFrame.None) return listOf(this)
+    val box = textFrameBounds(
+        anchor = shape.path.firstOrNull() ?: Offset.Zero,
+        runWidth = shape.font.widthOf(shape.text, shape.sizePoints),
+        sizePoints = shape.sizePoints,
+    )
+    val ring = textFrameOutline(box, shape.sizePoints, shape.frame)
+    if (ring.size < 2) return listOf(this)
+    // The ring first, so the letters are drawn over it where they meet.
+    return listOf(
+        copy(
+            shape = MarkupShape.Freehand(ring),
+            widthPoints = shape.sizePoints * TEXT_FRAME_STROKE,
+            style = MarkupStyle.SOLID,
+        ),
+        this,
+    )
+}
+
+/** How thick a frame round words is drawn, per point of type. */
+const val TEXT_FRAME_STROKE = 0.08f
 
 private fun MarkupShape.toWireJson(): JSONObject = when (this) {
     is MarkupShape.Freehand -> JSONObject().apply {
@@ -261,6 +367,11 @@ private fun MarkupShape.toWireJson(): JSONObject = when (this) {
     is MarkupShape.Highlight -> JSONObject().apply {
         put("kind", "highlight")
         put("rect", rect.toMarkupWireJson())
+    }
+    // Never sent as itself: see the expansion in List<Markup>.toWireJson.
+    is MarkupShape.Text -> JSONObject().apply {
+        put("kind", "glyphs")
+        put("contours", JSONArray(glyphContours().map { JSONArray(it.map { p -> p.toWireJson() }) }))
     }
 }
 
@@ -347,3 +458,40 @@ fun List<CaptureTile>.tilesToWireJson(): String = JSONArray(
         }
     },
 ).toString()
+
+/** True when [point] lands on this text, allowing [tolerance] either side. */
+fun MarkupShape.Text.isHitBy(point: Offset, tolerance: Float): Boolean {
+    val anchor = path.firstOrNull() ?: return false
+    if (frame != TextFrame.None) {
+        return textFrameBounds(anchor, font.widthOf(text, sizePoints), sizePoints)
+            .inflate(tolerance)
+            .contains(point)
+    }
+    // The words run to the right of where they were placed, so the run has to be
+    // measured out: testing the anchor alone makes a mark grabbable by its first
+    // letter and nowhere else.
+    val line = if (isCurved) {
+        path
+    } else {
+        listOf(anchor, anchor + Offset(font.widthOf(text, sizePoints), 0f))
+    }
+    if (line.size == 1) return (line[0] - point).getDistance() <= tolerance + sizePoints
+    for (i in 1 until line.size) {
+        val a = line[i - 1]
+        val b = line[i]
+        val span = b - a
+        val length = span.getDistance()
+        val along = if (length <= 0f) 0f else
+            (((point - a).x * span.x + (point - a).y * span.y) / (length * length)).coerceIn(0f, 1f)
+        val nearest = a + Offset(span.x * along, span.y * along)
+        if ((point - nearest).getDistance() <= tolerance + sizePoints) return true
+    }
+    return false
+}
+
+/** The same text, shifted by [delta] capture units. */
+fun MarkupShape.Text.movedBy(delta: Offset): MarkupShape.Text =
+    copy(path = path.map { it + delta })
+
+/** How near a finger has to be to grab words on a picture, in capture units. */
+const val TEXT_GRAB_POINTS = 14f

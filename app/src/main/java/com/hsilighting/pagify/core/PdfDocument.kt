@@ -1,5 +1,7 @@
 package com.hsilighting.pagify.core
 
+import org.json.JSONArray
+
 import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.net.Uri
@@ -137,6 +139,21 @@ class PdfDocument private constructor(
             pageIndex,
             nextId,
         )
+
+    /**
+     * The text marks on this page, rebuilt from what was stored beside them.
+     *
+     * Empty for a page whose text nobody placed — including every page of every
+     * document this app has never written to.
+     */
+    fun textMarks(pageIndex: Int): List<Annotation.Text> {
+        val array = JSONArray(NativeBridge.getTextMarksJson(requireOpen(), pageIndex))
+        return buildList(array.length()) {
+            for (i in 0 until array.length()) {
+                textMarkFromJson(array.getString(i), pageIndex)?.let { add(it) }
+            }
+        }
+    }
 
     /** Persisted rotation of a page, in quarter turns. Zero if not editable. */
     fun pageRotation(pageIndex: Int): Int = NativeBridge.getPageRotation(requireOpen(), pageIndex)

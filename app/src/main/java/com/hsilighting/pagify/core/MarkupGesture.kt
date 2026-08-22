@@ -183,6 +183,9 @@ fun MarkupShape.isBigEnough(): Boolean = when (this) {
     is MarkupShape.Highlight -> rect.width >= MINIMUM_MARKUP_POINTS &&
         rect.height >= MINIMUM_MARKUP_POINTS
     is MarkupShape.Freehand -> points.size > 1
+    // Text is placed and then typed; blank words make no mark rather than an
+    // invisible one, which could only be found by rubbing out at random.
+    is MarkupShape.Text -> text.isNotBlank() && path.isNotEmpty()
 }
 
 /** Smallest mark worth committing, in page points. */

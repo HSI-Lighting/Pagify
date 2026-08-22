@@ -9,6 +9,9 @@ import com.hsilighting.pagify.core.CaptureFill
 import com.hsilighting.pagify.core.CaptureRequest
 import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.MAXIMUM_TEXT_POINTS
+import com.hsilighting.pagify.core.PdfFont
+import com.hsilighting.pagify.core.TextFrame
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.defaultMarkupSizes
 import com.hsilighting.pagify.core.AnnotationTool
@@ -113,6 +116,45 @@ data class PdfReaderState(
     val annotationStrokeWidth: Float = 2.4f,
     /** Solid, dashed or a centre line, for everything that draws a line. */
     val annotationStyle: MarkupStyle = MarkupStyle.SOLID,
+    /**
+     * What text is written in, and how big.
+     *
+     * Sticky like the colour and the nib: somebody labelling six details on a
+     * drawing wants the sixth to match the first, and being asked again each time
+     * is being asked a question already answered.
+     */
+    val textFont: PdfFont = PdfFont.HELVETICA,
+    /**
+     * How far a curved caption bends from end to end, in degrees.
+     *
+     * A setting rather than something drawn: 0 is a straight line, positive
+     * arches upward, negative sags.
+     */
+    val textCurveDegrees: Float = 60f,
+    /**
+     * The caption the ribbon is currently editing, if one is picked up.
+     *
+     * Null means the controls set what the next caption will look like. With one
+     * selected they do both: the caption changes, and the next one inherits it.
+     */
+    val selectedTextId: Long? = null,
+    /**
+     * The largest size the caption in hand can take and still fit the page.
+     *
+     * The ceiling is the sheet rather than a number: type is only as big as
+     * useful while the words still fit across the page they are on. Falls back to
+     * the backstop when nothing is selected.
+     */
+    val textSizeCeiling: Float = MAXIMUM_TEXT_POINTS,
+    val textSizePoints: Float = 12f,
+    /**
+     * Where text is being typed, if it is.
+     *
+     * Holds the baseline it will sit on — two points for a tap, a traced curve for
+     * the curved tool — so the same composer serves both and neither has to know
+     * which it is.
+     */
+    val textBeingWritten: PendingText? = null,
     /**
      * Bumped whenever the annotations change at all.
      *
@@ -247,6 +289,9 @@ data class PdfReaderState(
      * also survive the editor being closed and another capture taken.
      */
     val markupSizes: Map<MarkupTool, Float> = defaultMarkupSizes(),
+
+    /** The caption on the capture the ribbon is editing, if one is picked up. */
+    val selectedMarkupIndex: Int? = null,
 ) {
     val isReady: Boolean get() = phase is Phase.Ready
     /** 1-based, for display. */
@@ -346,3 +391,26 @@ class CapturePreview(
 
 /** A capture written to the cache and ready to leave the app. */
 data class CaptureShare(val uri: Uri, val mimeType: String)
+
+/**
+ * Text that has been placed but not yet typed.
+ *
+ * The baseline is decided first — by a tap for straight text, by a traced curve
+ * for curved — and the words come after. Keeping the two apart is what lets one
+ * composer serve both: by the time anybody is typing, the difference between a
+ * line and a curve is just how many points are in [path].
+ */
+data class PendingText(
+    val pageIndex: Int,
+    val path: List<Offset>,
+    /**
+     * What will be drawn around the words, if anything.
+     *
+     * Taken when the baseline was placed, not when the words come back: the
+     * dialog is open across a keyboard, and a tool changed behind it must not
+     * change what was already begun.
+     */
+    val frame: TextFrame = TextFrame.None,
+    /** Whether the words run along a bent line. Taken with the frame, and why. */
+    val bends: Boolean = false,
+)

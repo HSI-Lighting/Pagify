@@ -150,6 +150,14 @@ mod tests {
     }
 
     impl DocumentMut for FakeDoc {
+        fn text_mark_restore(&mut self, _page_index: usize, id: i32) -> Result<String> {
+            Err(PdfError::InvalidArgument(format!("no text mark {id}")))
+        }
+
+        fn remove_text(&mut self, _page_index: usize, id: i32) -> Result<()> {
+            Err(PdfError::InvalidArgument(format!("no text mark {id}")))
+        }
+
         fn reorder_pages(&mut self, order: &[usize]) -> Result<()> {
             let mut moved = vec![0f32; self.widths.len()];
             let mut turned = vec![0u8; self.widths.len()];

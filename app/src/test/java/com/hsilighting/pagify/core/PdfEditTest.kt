@@ -256,8 +256,93 @@ class PdfEditTest {
         assertEquals(7, json.getInt("index"))
     }
 
+    @Test
+    fun `text goes over the wire as placed glyphs, not as a string to lay out`() {
+        // The engine is told where every letter goes. Both sides could walk the
+        // baseline, but only one can be the authority on where a glyph sits, and
+        // it has to be the side the person was looking at when they placed it.
+        val mark = Annotation.Text(
+            id = 1L,
+            pageIndex = 0,
+            text = "Hi",
+            path = straightBaseline(Offset(100f, 200f), "Hi", PdfFont.HELVETICA, 24f),
+            font = PdfFont.HELVETICA,
+            sizePoints = 24f,
+            color = 0xFF141414L,
+        )
+
+        val wire = mark.toWireJson()
+
+        assertEquals("text", wire.getString("kind"))
+        assertEquals("Hi", wire.getString("text"))
+        // The engine loads standard fonts by this exact name.
+        assertEquals("Helvetica", wire.getString("font"))
+        assertEquals(24.0, wire.getDouble("size"), 0.001)
+
+        val glyphs = wire.getJSONArray("glyphs")
+        assertEquals(2, glyphs.length())
+        assertEquals("H", glyphs.getJSONObject(0).getString("ch"))
+        assertEquals(100.0, glyphs.getJSONObject(0).getDouble("x"), 0.01)
+        // Helvetica's H is 722 thousandths: the second glyph is that far along.
+        assertEquals(
+            100.0 + 722.0 * 24.0 / 1000.0,
+            glyphs.getJSONObject(1).getDouble("x"),
+            0.01,
+        )
+    }
+
     private fun op(command: PdfCommand): String = JSONObject(command.toJson()).getString("op")
 
     private fun turns(command: PdfCommand): Int =
         JSONObject(command.toJson()).getInt("quarterTurns")
+
+    // -------------------------------------------------------- saved captions --
+
+    @Test
+    fun `a text mark survives the round trip through what is stored beside it`() {
+        // The blob is read back by two different readers — the engine, to write
+        // the words again when an erase is undone, and the app, to make a saved
+        // caption an editable mark. This is the app's half.
+        val placed = Annotation.Text(
+            id = 42L,
+            pageIndex = 3,
+            text = "Check this",
+            path = curvedBaseline(Offset(50f, 200f), "Check this", PdfFont.TIMES, 18f, 45f),
+            font = PdfFont.TIMES,
+            sizePoints = 18f,
+            color = AnnotationColors.RED,
+            frame = TextFrame.Cloud,
+        )
+
+        val stored = placed.textWireJson(withRestore = true).getString("restore")
+        val back = textMarkFromJson(stored, pageIndex = 3)
+
+        assertEquals(placed, back)
+    }
+
+    @Test
+    fun `the stored blob is also the annotation the engine writes`() {
+        // The engine parses it as a command payload, so it has to carry the
+        // fields the engine needs — a blob that only the app could read failed
+        // exactly here, and the erase it was meant to undo could not be undone.
+        val placed = Annotation.Text(
+            id = 9L,
+            pageIndex = 0,
+            text = "Hi",
+            path = straightBaseline(Offset(10f, 20f), "Hi", PdfFont.HELVETICA, 12f),
+            font = PdfFont.HELVETICA,
+            sizePoints = 12f,
+            color = AnnotationColors.RED,
+            frame = TextFrame.Box,
+        )
+
+        val stored = JSONObject(placed.textWireJson(withRestore = true).getString("restore"))
+        assertEquals("text", stored.getString("kind"))
+        assertEquals(9, stored.getInt("id"))
+        assertTrue(stored.getJSONArray("glyphs").length() == 2)
+        // The ring travels with the words rather than as its own mark.
+        assertTrue(stored.getJSONArray("frame").length() >= 5)
+        // And it does not nest: one level of restore, not a blob inside a blob.
+        assertTrue(!stored.has("restore"))
+    }
 }

@@ -1,6 +1,9 @@
 package com.hsilighting.pagify.ui.components
 
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
@@ -21,6 +24,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
@@ -30,14 +34,22 @@ import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.NOTE_MARKER_RADIUS_POINTS
 import com.hsilighting.pagify.core.PageMapping
 import com.hsilighting.pagify.core.isHitBy
+import com.hsilighting.pagify.core.movedBy
+import com.hsilighting.pagify.core.scaledBy
 
 
 import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.correctsOnRelease
+import com.hsilighting.pagify.core.curveThrough
+import com.hsilighting.pagify.core.layOutText
+import com.hsilighting.pagify.core.TextFrame
+import com.hsilighting.pagify.core.textFrameBounds
+import com.hsilighting.pagify.core.textFrameOutline
 import com.hsilighting.pagify.core.tracedStrokes
 import com.hsilighting.pagify.core.dashed
 import com.hsilighting.pagify.core.isDragged
 import com.hsilighting.pagify.core.tracesPath
+import com.hsilighting.pagify.core.writesText
 import com.hsilighting.pagify.core.shapeStrokes
 import com.hsilighting.pagify.core.SessionRecorder
 import com.hsilighting.pagify.core.TextSegment
@@ -92,6 +104,31 @@ fun Modifier.annotationLayer(
     mapping: PageMapping,
     onAdd: (Annotation) -> Unit,
     onRequestNote: (Offset) -> Unit,
+    /**
+     * A baseline for text has been placed; ask for the words.
+     *
+     * Two points for a tap, a corrected curve for the curved tool. The layer
+     * places the line and nothing more: the typing happens in a dialog, by which
+     * time this page may have scrolled out from under the keyboard.
+     */
+    onPlaceText: (List<Offset>) -> Unit = {},
+    /**
+     * Text already on the page has been dragged somewhere else.
+     *
+     * The delta is the whole drag, handed over once when the finger lifts. The
+     * layer shows the mark under the finger while it moves, so the reader is
+     * aiming at the words themselves rather than at a number.
+     */
+    onMoveText: (id: Long, delta: Offset) -> Unit = { _, _ -> },
+    /**
+     * A caption has been tapped, or the tap landed on empty page.
+     *
+     * Picking one up is what the ribbon's controls then act on: size, font, bend
+     * and colour all belong to whichever caption is in hand. Null clears it.
+     */
+    onSelectText: (id: Long?) -> Unit = {},
+    /** The caption the ribbon is editing, drawn picked out. */
+    selectedText: Long? = null,
     /** A note marker was tapped; show what it says. */
     onOpenNote: (Annotation.Note) -> Unit = {},
     /** Opens an eraser stroke; everything it takes until [onEraseEnd] is one undo. */
@@ -125,13 +162,20 @@ fun Modifier.annotationLayer(
     // Read through `rememberUpdatedState`: the pointerInput block below is keyed
     // on the tool, so without this it would capture the colour and mode that were
     // current when the gesture handler started rather than the latest ones.
-    android.util.Log.i("AnnotationLayer", "compose page=$pageIndex marks=${annotations.size} tool=$tool")
     val currentColor by rememberUpdatedState(penColor)
     val currentStyle by rememberUpdatedState(lineStyle)
     val currentWidth by rememberUpdatedState(strokeWidth)
     val currentSegments by rememberUpdatedState(textSegments)
     val add by rememberUpdatedState(onAdd)
     val requestNote by rememberUpdatedState(onRequestNote)
+    val placeText by rememberUpdatedState(onPlaceText)
+    val moveText by rememberUpdatedState(onMoveText)
+    val selectText by rememberUpdatedState(onSelectText)
+    // Read through this, not captured: the gesture block below is keyed on the
+    // tool, so a plain capture holds whatever was selected when the tool was
+    // picked up — which was nothing. The first tap on empty page then placed a
+    // caption instead of putting the current one down.
+    val heldCaption by rememberUpdatedState(selectedText)
     val openNote by rememberUpdatedState(onOpenNote)
     val currentAnnotations by rememberUpdatedState(annotations)
     val at by rememberUpdatedState(mapping)
@@ -146,6 +190,11 @@ fun Modifier.annotationLayer(
 
     /** Live stroke, in page points, while a marker drag is in progress. */
     var wetStroke by remember { mutableStateOf<List<Offset>>(emptyList()) }
+
+    /** The mark being dragged, and how far it has come, while a move is in progress. */
+    var movingId by remember { mutableStateOf<Long?>(null) }
+    var moveShift by remember { mutableStateOf(Offset.Zero) }
+
     /** Live highlight rects while a highlight drag is in progress. */
     var wetHighlight by remember { mutableStateOf<List<Rect>>(emptyList()) }
     /** Live shape, in page points, while a line or box is being dragged. */
@@ -228,6 +277,93 @@ fun Modifier.annotationLayer(
                     wetHighlight = emptyList()
                 },
                 onDragCancel = { wetHighlight = emptyList() },
+            )
+        }
+
+        // Text sits on a baseline, and the baseline is placed before the words
+        // exist: a tap for straight text, a traced curve for curved. Neither
+        // commits anything by itself — the words are asked for afterwards, which
+        // is why these hand a path out rather than adding a mark.
+        // Clouded text is placed by a tap like plain text: the cloud is measured
+        // from the words, so there is nothing to draw first.
+        tool.writesText -> Modifier
+            // Grabbing comes first, so that a drag which starts on words moves
+            // them rather than leaving a second copy behind.
+            //
+            // Written out of awaitFirstDown rather than detectDragGestures
+            // because that one claims every drag the moment it passes the touch
+            // slop, including the ones meant for the pager: with the tool armed
+            // and nothing under the finger, the page has to still scroll.
+            .pointerInput(pageIndex, tool) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var last = toPage(down.position)
+                    val grabbed = currentAnnotations.lastOrNull {
+                        it is Annotation.Text && it.isHitBy(last, tolerancePoints())
+                    } ?: return@awaitEachGesture
+
+                    var shifted = Offset.Zero
+                    drag(down.id) { change ->
+                        change.consume()
+                        val now = toPage(change.position)
+                        shifted += now - last
+                        last = now
+                        movingId = grabbed.id
+                        moveShift = shifted
+                    }
+
+                    // Nothing to record for a press that never went anywhere;
+                    // that gesture is a tap, and the tap handler has it.
+                    if (movingId != null) {
+                        SessionRecorder.record(
+                            kind = "TEXT_MOVE",
+                            detail = "page=$pageIndex id=${grabbed.id} " +
+                                "by=${shifted.x.toInt()},${shifted.y.toInt()}",
+                        )
+                        moveText(grabbed.id, shifted)
+                        movingId = null
+                        moveShift = Offset.Zero
+                    }
+                }
+            }
+            .pointerInput(pageIndex, tool) {
+                detectTapGestures { position ->
+                    val at = toPage(position)
+                    val caption = currentAnnotations.lastOrNull {
+                        it is Annotation.Text && it.isHitBy(at, tolerancePoints())
+                    }
+                    if (caption != null) {
+                        // Picked up rather than written over. The ribbon's size,
+                        // font, bend and colour then act on this one.
+                        selectText(caption.id)
+                    } else if (heldCaption != null) {
+                        // Somewhere empty with a caption in hand: put it down.
+                        // That is also how the page gets its pinch back — while
+                        // one is held, two fingers resize it rather than zoom.
+                        selectText(null)
+                    } else {
+                        // Nothing in hand: place one, and it becomes the caption
+                        // the controls are about.
+                        placeText(listOf(at))
+                    }
+                }
+            }
+
+        tool == AnnotationTool.CurvedText -> Modifier.pointerInput(pageIndex, tool) {
+            detectDragGestures(
+                onDragStart = { position -> wetStroke = listOf(toPage(position)) },
+                onDrag = { change, _ ->
+                    change.consume()
+                    wetStroke = wetStroke + toPage(change.position)
+                },
+                onDragEnd = {
+                    // Corrected by the same call the curve tool uses, so the line
+                    // the text runs along is the line that tool would have drawn.
+                    val baseline = curveThrough(wetStroke)
+                    wetStroke = emptyList()
+                    if (baseline.size > 1) placeText(baseline)
+                },
+                onDragCancel = { wetStroke = emptyList() },
             )
         }
 
@@ -469,7 +605,18 @@ fun Modifier.annotationLayer(
             // the margin would make a correct thing look broken.
             val sheet = at.screenBounds
             clipRect(sheet.left, sheet.top, sheet.right, sheet.bottom) {
-                marks.forEach { drawAnnotation(it, at) }
+                // The mark under a finger is drawn where the finger has taken
+                // it, not where it is still recorded: the move is committed on
+                // release, and until then this is the only thing showing it.
+                marks.forEach { mark ->
+                    val shown = if (mark.id == movingId) mark.movedBy(moveShift) else mark
+                    drawAnnotation(shown, at)
+                    // The caption the ribbon is editing, picked out so the
+                    // controls are visibly about *something*.
+                    if (shown is Annotation.Text && shown.id == selectedText) {
+                        drawSelection(shown, at)
+                    }
+                }
                 if (wetHighlight.isNotEmpty()) {
                     drawHighlightRects(wetHighlight, currentColor, at)
                 }
@@ -542,6 +689,7 @@ private fun DrawScope.drawAnnotation(annotation: Annotation, at: PageMapping) {
         is Annotation.Signature -> annotation.strokes.forEach { stroke ->
             drawInkStroke(stroke, annotation.color, SIGNATURE_WIDTH_POINTS, at)
         }
+        is Annotation.Text -> drawPageText(annotation, at)
         is Annotation.Note -> {
             // An anchored marker; the note's text is shown in a sheet rather than
             // painted onto the page, where it would obscure what it annotates.
@@ -711,3 +859,111 @@ private const val SELECTION_ALPHA = 0.32f
 /** Handles in pixels, not page points: a grab target is a finger, not a font. */
 private const val HANDLE_RADIUS_PX = 18f
 private const val HANDLE_STEM_PX = 3f
+
+/**
+ * Words on the page, drawn glyph by glyph.
+ *
+ * Every glyph is placed by [layOutText] rather than handed to the platform as a
+ * string, and that is the whole reason this is not two lines of `drawText`. The
+ * phone does not have Helvetica; it has something that looks like it, with its own
+ * advance widths. Letting Android space the line would put the preview and the
+ * saved PDF a word apart by the end of it — and the person would have aimed at the
+ * preview.
+ *
+ * So the platform draws each letter, one at a time, exactly where the layout says.
+ * The shapes are the phone's; the positions are the font's.
+ *
+ * The same call serves straight text and curved: a straight baseline is a path of
+ * two points, so every glyph simply comes back with the same angle.
+ */
+/** How thick the frame round words is drawn, per point of type. */
+private const val TEXT_FRAME_STROKE = 0.08f
+
+private fun DrawScope.drawPageText(text: Annotation.Text, at: PageMapping) {
+    if (!at.isUsable) return
+
+    // The frame first, so the words sit on top of it where they overlap.
+    if (text.frame != TextFrame.None) {
+        drawInkStroke(
+            points = text.textFrameOutline(),
+            color = text.color,
+            widthPoints = text.sizePoints * TEXT_FRAME_STROKE,
+            at = at,
+            smooth = false,
+        )
+    }
+
+    val paint = android.graphics.Paint().apply {
+        isAntiAlias = true
+        color = android.graphics.Color.argb(
+            (text.color ushr 24 and 0xFF).toInt(),
+            (text.color ushr 16 and 0xFF).toInt(),
+            (text.color ushr 8 and 0xFF).toInt(),
+            (text.color and 0xFF).toInt(),
+        )
+        textSize = at.toScreen(text.sizePoints)
+        typeface = android.graphics.Typeface.create(
+            text.font.family,
+            if (text.font.bold) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL,
+        )
+    }
+
+    drawIntoCanvas { canvas ->
+        layOutText(text.text, text.font, text.sizePoints, text.path).forEach { glyph ->
+            val origin = at.toScreen(glyph.origin)
+            val native = canvas.nativeCanvas
+            val saved = native.save()
+            native.translate(origin.x, origin.y)
+            // The turn is the baseline's, plus the page's own if the view is
+            // rotated — a letter has to lie along the line it sits on, whichever
+            // way round the page is being read.
+            native.rotate(
+                Math.toDegrees((glyph.radians + at.quarterTurns * QUARTER_TURN).toDouble())
+                    .toFloat(),
+            )
+            native.drawText(glyph.character.toString(), 0f, 0f, paint)
+            native.restoreToCount(saved)
+        }
+    }
+}
+
+/** A quarter turn in radians, for carrying the view's rotation into a glyph's. */
+private const val QUARTER_TURN = (Math.PI / 2.0).toFloat()
+
+/**
+ * The caption the ribbon is editing, picked out.
+ *
+ * A dashed rectangle round what the words occupy, in the ribbon's own accent so
+ * it reads as "this is what the controls are about" rather than as a mark of its
+ * own. Nothing is drawn inside it: the caption has to stay legible, and a wash
+ * over words the size of these would swallow them.
+ */
+private fun DrawScope.drawSelection(text: Annotation.Text, at: PageMapping) {
+    if (!at.isUsable) return
+
+    // Through the mapping's own rect conversion, so the box turns with a rotated
+    // page instead of standing square on a page that no longer is.
+    val box = at.toScreen(text.textFrameBounds().inflate(at.toPage(SELECTION_GAP_PX)))
+    val stroke = at.toScreen(text.sizePoints * SELECTION_STROKE).coerceIn(1.5f, 6f)
+
+    drawRect(
+        color = SELECTION_INK,
+        topLeft = box.topLeft,
+        size = box.size,
+        style = Stroke(
+            width = stroke,
+            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                floatArrayOf(stroke * 3f, stroke * 2.5f),
+            ),
+        ),
+    )
+}
+
+/** How far the box stands off the words, in screen pixels at any zoom. */
+private const val SELECTION_GAP_PX = 6f
+
+/** How heavy the box is drawn, per point of type. */
+private const val SELECTION_STROKE = 0.09f
+
+/** The ribbon's amber, so the box and the controls plainly belong together. */
+private val SELECTION_INK = Color(0xFFF2A93B)

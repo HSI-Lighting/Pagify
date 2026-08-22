@@ -156,6 +156,16 @@ internal object NativeBridge {
     external fun getAnnotationsJson(handle: Long, pageIndex: Int): String
 
     /**
+     * The text marks on a page, each as the blob the app stored with it.
+     *
+     * Separate from the annotations because text is page content: it has no
+     * annotation index, so it does not appear there and cannot be erased by one.
+     * These are what make words on a saved page a mark again.
+     */
+    @Throws(PdfException::class)
+    external fun getTextMarksJson(handle: Long, pageIndex: Int): String
+
+    /**
      * The rotation a page currently carries, in quarter turns.
      *
      * [PdfCommand.SetPageRotation] is absolute rather than relative, because an

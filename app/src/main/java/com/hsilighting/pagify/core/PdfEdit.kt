@@ -99,6 +99,21 @@ sealed interface PdfCommand {
             put("index", index)
         }.toString()
     }
+
+    /**
+     * Take words off a page, by the id the app gave the mark.
+     *
+     * By id rather than by position, because text is page content and page
+     * content has no annotation index. The id is on every object the write put
+     * there, so this finds all of them however the page has been edited since.
+     */
+    data class RemoveText(val pageIndex: Int, val id: Long) : PdfCommand {
+        override fun toJson(): String = JSONObject().apply {
+            put("op", "removeText")
+            put("pageIndex", pageIndex)
+            put("id", id.toInt())
+        }.toString()
+    }
 }
 
 /**
@@ -145,6 +160,8 @@ fun Annotation.toWireJson(): JSONObject = when (this) {
         put("color", color.colorToWireJson())
         put("width", SIGNATURE_STROKE_WIDTH_POINTS.toDouble())
     }
+
+    is Annotation.Text -> textWireJson(withRestore = true)
 
     is Annotation.Note -> JSONObject().apply {
         put("kind", "note")
@@ -372,4 +389,111 @@ private fun List<Offset>.boundsOf(): Rect {
         maxOf { it.x },
         maxOf { it.y },
     )
+}
+
+/**
+ * A text mark on the wire.
+ *
+ * One object serves two readers, which is why it carries more than either needs.
+ * The engine takes the glyphs, the ring and the colour and writes them; the app
+ * takes the baseline, the frame kind and the packed colour and rebuilds the mark
+ * from them when it reads the file again. Two objects would be two chances for
+ * the same caption to come back as something slightly different.
+ *
+ * The glyphs are placed *here*, not by the engine, so the words land exactly
+ * where the preview showed them. Both sides could walk the baseline, but only one
+ * of them can be the authority on where a letter sits, and it has to be the side
+ * the person was looking at when they put it there.
+ */
+internal fun Annotation.Text.textWireJson(withRestore: Boolean): JSONObject = JSONObject().apply {
+    put("kind", "text")
+    put("text", text)
+    put("font", font.wireName)
+    put("size", sizePoints.toDouble())
+    put("color", color.colorToWireJson())
+    put(
+        "glyphs",
+        JSONArray(
+            layOutText(text, font, sizePoints, path).map { glyph ->
+                JSONObject().apply {
+                    put("ch", glyph.character.toString())
+                    put("x", glyph.origin.x.toDouble())
+                    put("y", glyph.origin.y.toDouble())
+                    put("radians", glyph.radians.toDouble())
+                }
+            },
+        ),
+    )
+    put("id", id.toInt())
+    // The ring goes with the words rather than beside them as its own mark.
+    // Written separately it *was* separate once the file was reopened, and the
+    // eraser took the ring off a clouded caption and left the words in place.
+    put(
+        "frame",
+        JSONArray(
+            textFrameOutline().map { point ->
+                JSONObject().apply {
+                    put("x", point.x.toDouble())
+                    put("y", point.y.toDouble())
+                }
+            },
+        ),
+    )
+    put("frameWidth", (sizePoints * TEXT_FRAME_STROKE).toDouble())
+
+    // The app's half. The engine ignores fields it does not know, which is what
+    // lets one object be both the instruction to write and the record of what
+    // was written.
+    put("argb", color)
+    put("textFrame", frame.name)
+    put(
+        "path",
+        JSONArray(
+            path.map { point ->
+                JSONObject().apply {
+                    put("x", point.x.toDouble())
+                    put("y", point.y.toDouble())
+                }
+            },
+        ),
+    )
+
+    // Stored beside the words and handed back untouched. It is what makes a saved
+    // caption a mark again rather than part of the page, and what lets erasing one
+    // be undone — the engine reads it back as the annotation to write again.
+    if (withRestore) put("restore", textWireJson(withRestore = false).toString())
+}
+
+/**
+ * Rebuild a text mark from what was stored beside it.
+ *
+ * Returns null for anything it cannot read rather than a half-built mark: a
+ * caption that comes back with the wrong words in the wrong place is worse than
+ * one that stays part of the page.
+ */
+fun textMarkFromJson(json: String, pageIndex: Int): Annotation.Text? = try {
+    val o = JSONObject(json)
+    val points = o.getJSONArray("path")
+    val path = (0 until points.length()).map { at ->
+        val point = points.getJSONObject(at)
+        Offset(point.getDouble("x").toFloat(), point.getDouble("y").toFloat())
+    }
+    if (path.isEmpty()) {
+        null
+    } else {
+        Annotation.Text(
+            id = o.getLong("id"),
+            pageIndex = pageIndex,
+            text = o.getString("text"),
+            path = path,
+            font = PdfFont.entries.firstOrNull { it.wireName == o.getString("font") }
+                ?: PdfFont.HELVETICA,
+            sizePoints = o.getDouble("size").toFloat(),
+            color = o.getLong("argb"),
+            frame = TextFrame.entries.firstOrNull { it.name == o.optString("textFrame") }
+                ?: TextFrame.None,
+        )
+    }
+} catch (_: org.json.JSONException) {
+    null
 }

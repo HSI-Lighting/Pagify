@@ -33,8 +33,12 @@ import com.hsilighting.pagify.core.captureFileName
 import com.hsilighting.pagify.core.isWorthCapturing
 import com.hsilighting.pagify.core.Markup
 import com.hsilighting.pagify.core.AppSettings
+import com.hsilighting.pagify.core.movedBy
+import com.hsilighting.pagify.core.scaledBy
 import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.PdfFont
+import com.hsilighting.pagify.core.straightBaseline
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.defaultSize
 import com.hsilighting.pagify.core.markupFor
@@ -56,6 +60,16 @@ import com.hsilighting.pagify.core.TextSegment
 import com.hsilighting.pagify.core.RenderScale
 import com.hsilighting.pagify.core.reorderForMove
 import com.hsilighting.pagify.core.SessionRecorder
+import com.hsilighting.pagify.core.TextFrame
+import com.hsilighting.pagify.core.bendsText
+import com.hsilighting.pagify.core.curvedBaseline
+import com.hsilighting.pagify.core.MAXIMUM_TEXT_POINTS
+import com.hsilighting.pagify.core.sizeThatFits
+import com.hsilighting.pagify.core.rebuilt
+import com.hsilighting.pagify.core.rebuiltMarkup
+import com.hsilighting.pagify.core.writesText
+import com.hsilighting.pagify.core.textFrame
+import com.hsilighting.pagify.core.textFrameOutline
 import com.hsilighting.pagify.core.ThumbnailCache
 import com.hsilighting.pagify.data.PdfRepository
 import kotlinx.coroutines.CancellationException
@@ -196,6 +210,23 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             // page every time a document was opened. The hide is a
             // decision about the screen, not about the document.
             showThumbnails = _state.value.showThumbnails,
+            // And the tools, for the same reason again: a save reopens the file,
+            // and a fresh state put the pen down every time. Somebody who had just
+            // written a caption found the tool gone — so the words could not be
+            // dragged, could not be resized, and a tap placed nothing. It read as
+            // "once it is saved you cannot touch it again". What is in your hand
+            // is a decision about the work, not about the document.
+            tool = _state.value.tool,
+            markupTool = _state.value.markupTool,
+            markupArmed = _state.value.markupArmed,
+            penColor = _state.value.penColor,
+            annotationStyle = _state.value.annotationStyle,
+            textFont = _state.value.textFont,
+            textSizePoints = _state.value.textSizePoints,
+            textCurveDegrees = _state.value.textCurveDegrees,
+            markupColor = _state.value.markupColor,
+            markupStyle = _state.value.markupStyle,
+            markupSizes = _state.value.markupSizes,
         )
 
         viewModelScope.launch {
@@ -599,6 +630,10 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             }
             current.copy(
                 tool = tool,
+                // Putting one tool down puts the caption down with it. A box left
+                // round words while the eraser is in hand says the ribbon is
+                // still about them, and it is not.
+                selectedTextId = current.selectedTextId.takeIf { tool.writesText },
                 penColor = if (current.penColor in palette) {
                     current.penColor
                 } else {
@@ -622,9 +657,91 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     /** Solid, dashed or a centre line, for everything that draws a line. */
+    /** What the next text is written in, and how big. Both are sticky. */
+    fun setTextFont(font: PdfFont) {
+        _state.update { it.copy(textFont = font) }
+        restyleSelected("font") { it.rebuilt(font = font) }
+        restyleSelectedMarkup { it.rebuiltMarkup(font = font) }
+    }
+
+    fun setTextSize(points: Float) {
+        _state.update { it.copy(textSizePoints = points) }
+        restyleSelected("size") { it.rebuilt(sizePoints = points) }
+        restyleSelectedMarkup { it.rebuiltMarkup(sizePoints = points) }
+    }
+
+    /**
+     * A baseline has been placed; ask for the words.
+     *
+     * The path decides nothing except where the text will sit — a tap gives two
+     * points, a traced curve gives many — so one composer serves both and the
+     * difference never reaches it.
+     */
+    fun setTextCurve(degrees: Float) {
+        _state.update { it.copy(textCurveDegrees = degrees) }
+        restyleSelected("bend") { it.rebuilt(curveDegrees = degrees) }
+        restyleSelectedMarkup { it.rebuiltMarkup(curveDegrees = degrees) }
+    }
+
+    fun beginText(pageIndex: Int, path: List<Offset>) =
+        _state.update {
+            it.copy(
+                textBeingWritten = PendingText(
+                    pageIndex = pageIndex,
+                    path = path,
+                    frame = it.tool.textFrame,
+                    bends = it.tool.bendsText,
+                ),
+            )
+        }
+
+    fun cancelText() = _state.update { it.copy(textBeingWritten = null) }
+
+    /**
+     * Commit the words onto the baseline they were placed on.
+     *
+     * Blank text adds nothing rather than an invisible mark: an empty annotation
+     * cannot be seen, so it can only be found by erasing at random.
+     */
+    fun commitText(text: String) {
+        val pending = _state.value.textBeingWritten ?: return
+        _state.update { it.copy(textBeingWritten = null) }
+        if (text.isBlank()) return
+
+        val state = _state.value
+        addAnnotation(
+            Annotation.Text(
+                id = 0L,
+                pageIndex = pending.pageIndex,
+                text = text,
+                // A tap gives only the point it landed on. The baseline has to be
+                // as long as the words, and that is not known until they exist.
+                // A tap gives only the point it landed on, and the layout walks
+                // a line. The bend is a setting, so the line is built here rather
+                // than traced: see curvedBaseline for why drawing it by hand read
+                // as broken however carefully it was drawn.
+                path = curvedBaseline(
+                    anchor = pending.path.first(),
+                    text = text,
+                    font = state.textFont,
+                    sizePoints = state.textSizePoints,
+                    degrees = if (pending.bends) state.textCurveDegrees else 0f,
+                ),
+                curveDegrees = if (pending.bends) state.textCurveDegrees else 0f,
+                font = state.textFont,
+                sizePoints = state.textSizePoints,
+                color = state.penColor,
+frame = pending.frame,
+            ),
+        )
+    }
+
     fun setLineStyle(style: MarkupStyle) = _state.update { it.copy(annotationStyle = style) }
 
-    fun setPenColor(color: Long) = _state.update { it.copy(penColor = color) }
+    fun setPenColor(color: Long) {
+        _state.update { it.copy(penColor = color) }
+        restyleSelected("colour") { it.rebuilt(color = color) }
+    }
 
     /** The Note tool was tapped at [anchor] on [pageIndex]; ask for the text. */
     fun requestNote(pageIndex: Int, anchor: Offset) = _state.update {
@@ -676,8 +793,13 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             is Annotation.Note -> annotation.copy(id = annotations.nextId())
             is Annotation.Shape -> annotation.copy(id = annotations.nextId())
             is Annotation.Signature -> annotation.copy(id = annotations.nextId())
+            is Annotation.Text -> annotation.copy(id = annotations.nextId())
         }
         annotations.add(withId)
+        // A caption you have just written is the one in hand: the ribbon's size,
+        // font, bend and colour act on it straight away, which is the whole
+        // reason for picking one up at all.
+        if (withId is Annotation.Text) _state.update { it.copy(selectedTextId = withId.id) }
         refreshAnnotations()
 
         // The count is what distinguishes "the gesture never reached the tool"
@@ -688,8 +810,107 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             is Annotation.Note -> "note page=${withId.pageIndex}"
             is Annotation.Shape -> "shape page=${withId.pageIndex} strokes=${withId.strokes.size}"
             is Annotation.Signature -> "signature page=${withId.pageIndex}"
+            is Annotation.Text ->
+                "text page=${withId.pageIndex} chars=${withId.text.length} " +
+                    "curved=${withId.isCurved} font=${withId.font.wireName}"
         }
         SessionRecorder.record("ANNOTATION_ADD", detail)
+    }
+
+    /**
+     * Move the mark with this [id] by [delta] page points.
+     *
+     * One undo step for the whole drag, because that is what the reader did: the
+     * layer draws the mark under the finger as it goes and calls this once, when
+     * the finger lifts.
+     *
+     * A mark that has already been written into the open document cannot follow
+     * along — its text is page content by then, and there is no command to take
+     * page content back out. That only happens after "Save a copy", which is the
+     * one save that leaves the marks in the store, so the move is refused rather
+     * than accepted on screen and quietly lost on the next save.
+     */
+    fun moveMark(id: Long, delta: Offset) {
+        val moved = annotations.move(id, delta)
+        Log.i(TAG, "move: id=$id by=${delta.x.toInt()},${delta.y.toInt()} moved=$moved " +
+            "saved=${savedTextPages.containsKey(id)}")
+        if (moved) {
+            refreshAnnotations()
+            rewriteSavedText(id)
+        }
+        SessionRecorder.record(
+            kind = "MARK_MOVE",
+            detail = "id=$id by=${delta.x.toInt()},${delta.y.toInt()} moved=$moved",
+        )
+    }
+
+    /**
+     * Select the caption at [id], or clear the selection with null.
+     *
+     * A selected caption is what the ribbon's controls act on. Without one they
+     * set what the *next* caption will look like — the same controls, answering
+     * the same questions, about whichever caption is in hand.
+     */
+    fun selectText(id: Long?) {
+        val caption = id?.let { annotations.textMark(it) }
+        Log.i(TAG, "select: asked=$id found=${caption?.id}")
+        _state.update {
+            it.copy(
+                selectedTextId = caption?.id,
+                textSizeCeiling = ceilingFor(caption, it),
+                // The controls show what the selected caption *is*, so picking one
+                // up does not silently restyle it the moment anything is touched.
+                textFont = caption?.font ?: it.textFont,
+                textSizePoints = caption?.sizePoints ?: it.textSizePoints,
+                textCurveDegrees = caption?.curveDegrees ?: it.textCurveDegrees,
+                penColor = caption?.color ?: it.penColor,
+            )
+        }
+    }
+
+    /**
+     * Restyle the selected caption, if there is one.
+     *
+     * Every ribbon control goes through here: they set what the next caption will
+     * look like *and* change the one in hand, which is the whole point of picking
+     * one up. Nothing selected means only the first half happens.
+     */
+    private fun restyleSelected(label: String, change: (Annotation.Text) -> Annotation.Text) {
+        val id = _state.value.selectedTextId ?: return
+        if (!annotations.restyle(id, label, change)) return
+        refreshAnnotations()
+        // The words may be longer or in a wider face now, so what still fits has
+        // changed with them.
+        _state.update { it.copy(textSizeCeiling = ceilingFor(annotations.textMark(id), it)) }
+        rewriteSavedText(id)
+        SessionRecorder.record("TEXT_RESTYLE", "id=$id what=$label")
+    }
+
+    /**
+     * Take the old copy of a moved or resized caption out of the file.
+     *
+     * The mark itself has already changed; this only removes what was written
+     * from where it used to be, and clears the bookkeeping so the next save
+     * writes it again in its new place. Nothing to do for a caption that has
+     * never been written.
+     */
+    private fun rewriteSavedText(id: Long) {
+        val doc = document ?: return
+        val page = savedTextPages[id] ?: return
+        if (!annotations.contains(page, id)) return
+
+        viewModelScope.launch {
+            try {
+                repository.execute(doc, PdfCommand.RemoveText(page, id))
+                savedTextPages.remove(id)
+                committedMarkIds.remove(id)
+                invalidateRenderedPages()
+            } catch (t: CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                Log.w(TAG, "could not take the old copy of mark $id out of the page", t)
+            }
+        }
     }
 
     // ------------------------------------------------------------- the eraser --
@@ -713,6 +934,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                         is Annotation.Ink -> "I${m.points.size}"
                         is Annotation.Note -> "N${m.anchor}"
                         is Annotation.Shape -> "P${m.strokes.size}"
+                        is Annotation.Text -> "T${m.text.length}"
                         is Annotation.Signature -> "S"
                     }
                 }}",
@@ -721,6 +943,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             refreshAnnotations()
             // A mark that came out of the file has to come out of the file.
             commitErasedSavedMarks(pageIndex)
+            commitErasedSavedText(pageIndex)
         }
         // Misses are recorded too, and matter more than hits: "the gesture never
         // reached the tool" and "it arrived and found nothing there" are the same
@@ -929,7 +1152,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             // Marks read out of the file are already in it. Counting them as
             // unsaved made a document with saved marks claim unsaved changes the
             // moment it opened.
-            unsavedMarkCount = (annotations.total - savedMarkLocations.size).coerceAtLeast(0),
+            unsavedMarkCount = (annotations.total - savedMarkLocations.size - savedTextPages.size)
+                .coerceAtLeast(0),
         )
     }
 
@@ -1222,6 +1446,8 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         // Marks belong to the file that is going away, and so does the mapping
         // from their ids to indices in it.
         savedMarkLocations.clear()
+        committedMarkIds.clear()
+        savedTextPages.clear()
         loadedMarkPages.clear()
     }
 
@@ -1433,6 +1659,11 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         _state.update { it.copy(isSaving = true) }
         viewModelScope.launch {
             try {
+                // The marks go in first, exactly as they do for a save. Without
+                // this the copy came out as the document *without* the session's
+                // markup — every stroke, highlight and word missing, silently,
+                // from a file whose whole purpose was to carry them.
+                commitMarks(doc)
                 repository.writeTo(doc, destination, scratchDir(), incremental = true)
                 SessionRecorder.record("SAVED_COPY", "to=$destination")
                 _state.update { it.copy(isSaving = false, message = "Copy saved.") }
@@ -1467,10 +1698,40 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                 // again on every save would duplicate every highlight each time
                 // the reader pressed Save.
                 if (savedMarkLocations.containsKey(mark.id)) continue
+                // Words read back out of the page are in it already, for the same
+                // reason. Writing them again would leave two copies of every
+                // caption, one on top of the other, after every save.
+                if (savedTextPages.containsKey(mark.id)) continue
+                // And marks this session has already written are in it too.
+                //
+                // A save reopens the file afterwards, which empties the store and
+                // makes that impossible; saving a *copy* does not, because the
+                // reader stays on the document they were reading. So the second
+                // copy would have carried every mark twice.
+                if (!committedMarkIds.add(mark.id)) continue
+                // The frame goes in with the words — see the text wire form.
                 repository.execute(doc, PdfCommand.AddAnnotation(page, mark))
             }
         }
     }
+
+    /**
+     * Marks already written into the open document by this session.
+     *
+     * Distinct from [savedMarkLocations], which is marks that were in the file
+     * when it was opened: these were put there by a save, and the difference
+     * matters only in that these have no annotation index to erase by — text has
+     * none at all, since it is page content.
+     */
+    private val committedMarkIds = mutableSetOf<Long>()
+
+    /**
+     * How much of the page a caption may span before it is too big.
+     *
+     * A little short of the full width, so the biggest a caption can go still has
+     * air either side rather than touching both edges.
+     */
+    private val TEXT_PAGE_FRACTION get() = 0.94f
 
     /** Where [PdfDocument.saveVia] puts its scratch copy. */
     private fun scratchDir(): File = getApplication<Application>().cacheDir
@@ -1570,6 +1831,31 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
         viewModelScope.launch {
             try {
+                // Words written into the page come back as marks too. Without
+                // this they stop being marks the moment they are saved: the
+                // eraser took the ring off a clouded caption and left the words,
+                // because a ring is an annotation and words are page content.
+                val words = try {
+                    repository.textMarks(doc, pageIndex)
+                } catch (t: CancellationException) {
+                    throw t
+                } catch (t: Throwable) {
+                    Log.w(TAG, "could not read the text marks on page $pageIndex", t)
+                    emptyList()
+                }
+                Log.i(TAG, "text marks: page=$pageIndex read=${words.size}")
+                for (mark in words) {
+                    // The id it was written with, so it is the same caption it
+                    // was yesterday — and so erasing it can name it.
+                    annotations.observeId(mark.id)
+                    annotations.addFromDocument(mark)
+                    savedTextPages[mark.id] = pageIndex
+                }
+                if (words.isNotEmpty()) {
+                    refreshAnnotations()
+                    SessionRecorder.record("TEXT_MARKS_LOADED", "page=$pageIndex count=${words.size}")
+                }
+
                 val marks = repository.savedMarks(doc, pageIndex) { annotations.nextId() }
                 Log.i(TAG, "marks: page=$pageIndex read=${marks.size}")
                 if (marks.isEmpty()) return@launch
@@ -1602,6 +1888,47 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * can take several marks and can mix session marks with saved ones; each needs
      * different treatment and this way neither has to know about the other.
      */
+    /**
+     * Words already in the file that this session has, and which page each is on.
+     *
+     * Distinct from [savedMarkLocations] because these have no annotation index:
+     * they are page content, found and erased by the id tagged onto them.
+     */
+    private val savedTextPages = mutableMapOf<Long, Int>()
+
+    /**
+     * Take out of the file any words the eraser has just removed.
+     *
+     * The same reconciliation [commitErasedSavedMarks] does for annotations, kept
+     * separate because the two are removed by different things — an index for one,
+     * an id for the other — and mixing them is how the wrong mark gets erased.
+     */
+    private fun commitErasedSavedText(pageIndex: Int) {
+        val doc = document ?: return
+        val gone = savedTextPages
+            .filter { (id, page) -> page == pageIndex && !annotations.contains(pageIndex, id) }
+            .keys
+            .toList()
+        if (gone.isEmpty()) return
+
+        viewModelScope.launch {
+            for (id in gone) {
+                try {
+                    repository.execute(doc, PdfCommand.RemoveText(pageIndex, id))
+                    savedTextPages.remove(id)
+                    committedMarkIds.remove(id)
+                } catch (t: CancellationException) {
+                    throw t
+                } catch (t: Throwable) {
+                    Log.w(TAG, "could not erase the words of mark $id", t)
+                    _state.update { it.copy(message = "Those words could not be erased.") }
+                }
+            }
+            invalidateRenderedPages()
+            refreshAnnotations()
+        }
+    }
+
     private fun commitErasedSavedMarks(pageIndex: Int) {
         val doc = document ?: return
         val gone = savedMarkLocations
@@ -1889,14 +2216,20 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     /** Add a mark that needed no recognition — a dragged shape, or a plain stroke. */
     fun addMarkup(shape: MarkupShape) = _state.update {
         val tool = it.markupTool
+        val marks = it.markup + markupFor(
+            shape = shape,
+            tool = tool,
+            color = it.markupColor,
+            size = it.markupSizes[tool] ?: tool.defaultSize,
+            style = it.markupStyle,
+        )
         it.copy(
-            markup = it.markup + markupFor(
-                shape = shape,
-                tool = tool,
-                color = it.markupColor,
-                size = it.markupSizes[tool] ?: tool.defaultSize,
-                style = it.markupStyle,
-            ),
+            markup = marks,
+            // A caption you have just written is the one in hand, as in the
+            // reader: the ribbon's controls act on it straight away, and two
+            // fingers resize it rather than moving the picture underneath. Only
+            // words — a stroke has nothing for the controls to change.
+            selectedMarkupIndex = if (shape is MarkupShape.Text) marks.lastIndex else null,
         )
     }
 
@@ -1930,6 +2263,117 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun clearMarkup() = _state.update { it.copy(markup = emptyList()) }
+
+    /**
+     * Move the words at [index] on the capture by [delta] capture units.
+     *
+     * By position rather than by identity, because a capture mark has none: the
+     * list *is* the drawing, in the order it was drawn. Nothing reorders it, so
+     * the index a drag started on is the mark it started on.
+     */
+    fun moveMarkup(index: Int, delta: Offset) {
+        if (delta == Offset.Zero) return
+        _state.update { state ->
+            val mark = state.markup.getOrNull(index) ?: return@update state
+            val shape = mark.shape
+            if (shape !is MarkupShape.Text) return@update state
+            state.copy(
+                markup = state.markup.toMutableList().also {
+                    it[index] = mark.copy(shape = shape.movedBy(delta))
+                },
+            )
+        }
+        SessionRecorder.record(
+            kind = "MARKUP_MOVE",
+            detail = "index=$index by=${delta.x.toInt()},${delta.y.toInt()}",
+        )
+    }
+
+    /**
+     * Pick up the caption at [index] on the capture, or put it down with -1.
+     *
+     * By position rather than by identity, as the rest of the capture's markup
+     * is: the list *is* the drawing, in the order it was made.
+     */
+    fun selectMarkup(index: Int) {
+        _state.update { state ->
+            val shape = state.markup.getOrNull(index)?.shape as? MarkupShape.Text
+            state.copy(
+                selectedMarkupIndex = if (shape == null || index < 0) null else index,
+                textFont = shape?.font ?: state.textFont,
+                textSizePoints = shape?.sizePoints ?: state.textSizePoints,
+                markupColor = state.markup.getOrNull(index)?.color?.takeIf { shape != null }
+                    ?: state.markupColor,
+            )
+        }
+    }
+
+    /**
+     * Resize the caption in hand by [factor].
+     *
+     * The pinch's own arithmetic: a factor rather than a size, because that is
+     * what two fingers say. Held to what the page can carry — past that the words
+     * run off the sheet, which is not a size anybody wants.
+     */
+    fun scaleSelectedText(factor: Float) {
+        if (factor == 1f) return
+        restyleSelected("size") { caption ->
+            val wanted = caption.sizePoints * factor
+            caption.rebuilt(sizePoints = wanted.coerceAtMost(_state.value.textSizeCeiling))
+        }
+        // The slider follows the pinch, so the two controls never disagree about
+        // how big the caption in hand is.
+        annotations.textMark(_state.value.selectedTextId ?: return)?.let { caption ->
+            _state.update { it.copy(textSizePoints = caption.sizePoints) }
+        }
+    }
+
+    /**
+     * The largest size [caption] can take and still fit across its page.
+     *
+     * A caption with no page to measure against falls back to the backstop —
+     * which is far past anything a sheet allows, so it never bites first.
+     */
+    private fun ceilingFor(caption: Annotation.Text?, state: PdfReaderState): Float {
+        if (caption == null) return MAXIMUM_TEXT_POINTS
+        val page = state.pageSizes[caption.pageIndex] ?: return MAXIMUM_TEXT_POINTS
+        return caption.font.sizeThatFits(caption.text, page.widthPoints * TEXT_PAGE_FRACTION)
+    }
+
+    /**
+     * Resize the caption in hand on the capture by [factor].
+     *
+     * Held to what the picture can carry, the same way a page holds a caption: a
+     * run wider than the picture is words nobody can read.
+     */
+    fun scaleSelectedMarkup(factor: Float) {
+        if (factor == 1f) return
+        val across = _state.value.capture?.request?.localBounds?.width ?: return
+        restyleSelectedMarkup { caption ->
+            val ceiling = caption.font.sizeThatFits(caption.text, across * TEXT_PAGE_FRACTION)
+            caption.rebuiltMarkup(
+                sizePoints = (caption.sizePoints * factor).coerceAtMost(ceiling),
+            )
+        }
+        // The slider follows the pinch, so the two never disagree.
+        val index = _state.value.selectedMarkupIndex ?: return
+        val caption = _state.value.markup.getOrNull(index)?.shape as? MarkupShape.Text ?: return
+        _state.update { it.copy(textSizePoints = caption.sizePoints) }
+    }
+
+    /** Restyle the caption in hand on the capture, if there is one. */
+    private fun restyleSelectedMarkup(change: (MarkupShape.Text) -> MarkupShape.Text) {
+        val index = _state.value.selectedMarkupIndex ?: return
+        _state.update { state ->
+            val mark = state.markup.getOrNull(index) ?: return@update state
+            val shape = mark.shape as? MarkupShape.Text ?: return@update state
+            state.copy(
+                markup = state.markup.toMutableList().also {
+                    it[index] = mark.copy(shape = change(shape))
+                },
+            )
+        }
+    }
 
     /**
      * The bytes to export: the capture with its markup drawn in.

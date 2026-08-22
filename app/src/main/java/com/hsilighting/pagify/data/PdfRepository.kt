@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.OpenableColumns
+import com.hsilighting.pagify.core.Annotation
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfCommand
@@ -164,6 +165,9 @@ class PdfRepository(
         pageIndex: Int,
         nextId: () -> Long,
     ): List<SavedMark> = withContext(ioDispatcher) { document.savedMarks(pageIndex, nextId) }
+
+    suspend fun textMarks(document: PdfDocument, pageIndex: Int): List<Annotation.Text> =
+        withContext(ioDispatcher) { document.textMarks(pageIndex) }
 
     suspend fun pageRotation(document: PdfDocument, pageIndex: Int): Int =
         withContext(ioDispatcher) { document.pageRotation(pageIndex) }

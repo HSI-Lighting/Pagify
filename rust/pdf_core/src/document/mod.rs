@@ -266,6 +266,16 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Every text mark on a page, as the blobs the app stored beside them.
+    ///
+    /// Empty by default, and empty for every page this app has never written
+    /// words onto. Text is page content rather than an annotation, so it appears
+    /// in neither [`Document::annotations`] nor any index — these blobs are what
+    /// make saved words a mark again instead of part of the page.
+    fn text_marks(&self, _page_index: usize) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// How many annotations a page carries, of any type.
     ///
     /// Separate from [`Document::annotations`] because it answers a different
@@ -389,6 +399,20 @@ pub trait DocumentMut {
     /// Remove a mark and hand it back, so the removal can be undone.
     fn take_annotation(&mut self, page_index: usize, index: usize) -> Result<Annotation>;
 
+    /// The app's own description of the text mark [`id`] on this page.
+    ///
+    /// Stored beside the words when they were written, and handed back untouched.
+    /// It is what lets a caption be rebuilt as an editable mark after a save, and
+    /// what lets erasing one be undone.
+    fn text_mark_restore(&mut self, page_index: usize, id: i32) -> Result<String>;
+
+    /// Take the words of one text mark off the page.
+    ///
+    /// Every object the write put there carries the id, so this finds all of them
+    /// however the page has been edited since — and leaves everything else,
+    /// including the document's own text, exactly where it was.
+    fn remove_text(&mut self, page_index: usize, id: i32) -> Result<()>;
+
     /// A new document holding copies of the given pages. Does not mutate self.
     fn extract_pages(&self, range: &[usize]) -> Result<Box<dyn Document>>;
 
@@ -479,6 +503,65 @@ pub enum Annotation {
         contents: String,
         color: Color,
     },
+    /// Words written onto the page, straight or along a curve.
+    ///
+    /// The one variant here that is **not** an annotation. The others are marks
+    /// laid over a page; this becomes page content — real text objects — so a
+    /// reader can select it, search it and copy it out. That is the whole reason
+    /// for writing text rather than drawing letters.
+    ///
+    /// Every object written carries a marked-content tag naming this app and the
+    /// mark's own id, and the first of them carries [`restore`] as well. That is
+    /// what lets words be found again after any number of saves and taken back
+    /// out — without it, text stopped being a mark the moment it was saved and
+    /// the eraser could no longer touch it, which is exactly how a clouded
+    /// caption came apart: the ring erased and the words stayed.
+    ///
+    /// The glyphs arrive already placed. The app walks the baseline with the
+    /// font's own metrics and so does its preview; only one side can be the
+    /// authority on where a letter sits, and it has to be the side the person was
+    /// looking at when they put it there.
+    Text {
+        text: String,
+        /// A standard-14 name, as `FPDFText_LoadStandardFont` expects.
+        font: String,
+        size: f32,
+        color: Color,
+        glyphs: Vec<Glyph>,
+        /// The app's own id for this mark, tagged onto every object written.
+        #[serde(default)]
+        id: i32,
+        /// Whatever the app needs in order to rebuild this mark when it reads the
+        /// file again. Opaque here: the engine stores it and hands it back.
+        #[serde(default)]
+        restore: String,
+        /// The ring drawn around the words, if any, as one closed polyline.
+        ///
+        /// Page content like the letters, and tagged with the same id, so the two
+        /// are one thing in the file as well as on screen. Written as a separate
+        /// ink annotation it was a separate mark the moment the file was reopened,
+        /// and the eraser took the ring off a clouded caption and left the words.
+        #[serde(default)]
+        frame: Vec<Point>,
+        /// How thick that ring is drawn, in points.
+        #[serde(default)]
+        frame_width: f32,
+    },
+}
+
+/// One placed glyph: what it is, where it goes, and which way it leans.
+///
+/// In the app's space — page points from the top left, y downwards, angles
+/// clockwise. The flip to PDF's bottom-left convention happens once, at the
+/// PDFium boundary, exactly as it does for every other mark.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Glyph {
+    /// The character as a string: one glyph, but not always one `char`.
+    pub ch: String,
+    pub x: f32,
+    pub y: f32,
+    pub radians: f32,
 }
 
 /// An annotation together with **PDFium's own index** for it on the page.

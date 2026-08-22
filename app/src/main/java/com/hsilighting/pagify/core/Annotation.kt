@@ -67,6 +67,50 @@ sealed interface Annotation {
         val strokeWidth: Float,
     ) : Annotation
 
+    /**
+     * Words written onto the page, straight or along a traced curve.
+     *
+     * Held as the string and the baseline it sits on rather than as the glyphs it
+     * will become, because it is still text right up until it is saved: the size
+     * can change, the font can change, and none of that should mean re-deriving
+     * shapes. [layOutText] turns it into glyphs wherever glyphs are needed.
+     *
+     * A straight line and a curve are the same thing here — a straight baseline is
+     * a [path] of two points — so nothing downstream needs two cases.
+     */
+    data class Text(
+        override val id: Long,
+        override val pageIndex: Int,
+        val text: String,
+        /** The baseline, in page points. Two points for straight text. */
+        val path: List<Offset>,
+        val font: PdfFont,
+        /** Point size, as a printer means it. */
+        val sizePoints: Float,
+        val color: Long,
+        /**
+         * What is drawn around the words, if anything.
+         *
+         * Carried on the text rather than kept as a second mark beside it: the
+         * frame is measured from the words every time it is drawn, so it cannot
+         * drift out of step with them, and moving or rubbing out the text takes
+         * it along.
+         */
+        val frame: TextFrame = TextFrame.None,
+        /**
+         * How far the baseline turns from end to end, in degrees.
+         *
+         * Kept on the mark rather than worked back out of the path, because a
+         * caption that can be edited has to be able to say what it *is*: the
+         * ribbon shows this number while the caption is selected, and rebuilding
+         * the line at a new size or in a new face needs it.
+         */
+        val curveDegrees: Float = 0f,
+    ) : Annotation {
+        /** Whether it follows a bent line rather than a straight one. */
+        val isCurved: Boolean get() = path.size > 2
+    }
+
     /** A drawn signature, stored as strokes so it stays sharp at any zoom. */
     data class Signature(
         override val id: Long,
@@ -96,6 +140,48 @@ fun Annotation.isHitBy(point: Offset, tolerance: Float): Boolean = when (this) {
     // along the shape finds it — including in a gap, within the tolerance.
     is Annotation.Shape -> strokes.any { it.isNear(point, tolerance + strokeWidth / 2f) }
     is Annotation.Note -> (point - anchor).getDistance() <= tolerance + NOTE_MARKER_RADIUS_POINTS
+    // Along the baseline, allowing the height of the letters either side of it:
+    // the baseline runs under the text, so a tap on the words themselves is above
+    // it and would otherwise miss everything.
+    //
+    // Straight text keeps only the point it was tapped at, and the words run off
+    // to the right of it. Testing that one point would make the mark grabbable by
+    // its first letter and nowhere else, so the run is measured out to its end.
+    // A framed mark is grabbable anywhere inside its frame, which is what it
+    // looks like: a shape with words in it, not a line of words.
+    is Annotation.Text ->
+        if (frame != TextFrame.None) textFrameBounds().inflate(tolerance).contains(point)
+        else textBaseline().isNear(point, tolerance + sizePoints)
+}
+
+/**
+ * The baseline as a line with length: the stored path for curved text, and the
+ * measured extent of the run for straight text.
+ */
+internal fun Annotation.Text.textBaseline(): List<Offset> {
+    if (isCurved || path.isEmpty()) return path
+    val start = path.first()
+    return listOf(start, start + Offset(font.widthOf(text, sizePoints), 0f))
+}
+
+/**
+ * The same mark, shifted by [delta] page points.
+ *
+ * Every kind moves, so that dragging one is a property of a mark rather than of
+ * the one tool that happens to offer it today. The id is kept: this is the same
+ * mark in a new place, which is what lets undo put it back instead of leaving a
+ * duplicate behind.
+ */
+fun Annotation.movedBy(delta: Offset): Annotation = when (this) {
+    is Annotation.Highlight -> copy(rects = rects.map { it.translate(delta) })
+    is Annotation.Ink -> copy(points = points.map { it + delta })
+    is Annotation.Shape -> copy(strokes = strokes.map { stroke -> stroke.map { it + delta } })
+    is Annotation.Signature -> copy(
+        strokes = strokes.map { stroke -> stroke.map { it + delta } },
+        bounds = bounds.translate(delta.x, delta.y),
+    )
+    is Annotation.Note -> copy(anchor = anchor + delta)
+    is Annotation.Text -> copy(path = path.map { it + delta })
 }
 
 /** Radius of a note's marker dot, in page points. Shared with the layer that draws it. */
@@ -223,6 +309,19 @@ class AnnotationStore {
     fun contains(pageIndex: Int, id: Long): Boolean =
         byPage[pageIndex]?.any { it.id == id } == true
 
+    /**
+     * Note that [id] is in use, so no later mark is given the same one.
+     *
+     * Marks read out of a file keep the ids they were written with — that is how
+     * a caption saved yesterday is still the same caption today — and those ids
+     * were handed out by an earlier run of this counter. Without this, the next
+     * mark of the session would be given one of them, and erasing either would
+     * take both.
+     */
+    fun observeId(id: Long) {
+        if (id >= nextId) nextId = id + 1
+    }
+
     fun add(annotation: Annotation) {
         pageOf(annotation.pageIndex).add(annotation)
         record(AnnotationEdit(label = "mark", added = listOf(annotation)))
@@ -263,6 +362,79 @@ class AnnotationStore {
         }
         return true
     }
+
+    // ------------------------------------------------------------------ move --
+
+    /**
+     * Shift the mark with this [id] by [delta] page points.
+     *
+     * One edit for a whole drag, not one per moved pixel: the caller shows the
+     * mark under the finger itself and calls this once, when the finger lifts.
+     * Recording every frame would bury the rest of the history under a few
+     * hundred one-point nudges.
+     *
+     * @return true when a mark was found and moved.
+     */
+    fun move(id: Long, delta: Offset): Boolean {
+        if (delta == Offset.Zero) return false
+        for (page in byPage.values) {
+            val index = page.indexOfFirst { it.id == id }
+            if (index < 0) continue
+            val before = page[index]
+            val after = before.movedBy(delta)
+            // In place, so the mark keeps the depth it was drawn at: a moved
+            // highlight that jumped to the top would come out over ink that had
+            // been drawn on top of it.
+            page[index] = after
+            record(
+                AnnotationEdit(
+                    label = "move",
+                    removed = listOf(PlacedAnnotation(index, before)),
+                    added = listOf(after),
+                ),
+            )
+            return true
+        }
+        return false
+    }
+
+    /**
+     * Put a changed version of the text with this [id] in its place.
+     *
+     * One undo step per change, and the mark keeps both its id and its depth: it
+     * is the same caption, restyled, not a new one dropped on top. [change] is
+     * given the current version and returns the new one; returning the same thing
+     * records nothing, so a control moved back to where it was does not leave an
+     * undo step that does nothing.
+     *
+     * @return true when a caption was found and changed.
+     */
+    fun restyle(id: Long, label: String, change: (Annotation.Text) -> Annotation.Text): Boolean {
+        for (page in byPage.values) {
+            val index = page.indexOfFirst { it.id == id }
+            if (index < 0) continue
+            val before = page[index] as? Annotation.Text ?: return false
+            val after = change(before)
+            if (after == before) return false
+
+            page[index] = after
+            record(
+                AnnotationEdit(
+                    label = label,
+                    removed = listOf(PlacedAnnotation(index, before)),
+                    added = listOf(after),
+                ),
+            )
+            return true
+        }
+        return false
+    }
+
+    /** The text with this [id], if it is one. */
+    fun textMark(id: Long): Annotation.Text? =
+        byPage.values.firstNotNullOfOrNull { page ->
+            page.firstOrNull { it.id == id } as? Annotation.Text
+        }
 
     /** Close the stroke, committing everything it rubbed out as one step. */
     fun endErase() {
@@ -379,7 +551,14 @@ class AnnotationStore {
         edit.removed.forEach { (_, annotation) ->
             pageOf(annotation.pageIndex).removeAll { it.id == annotation.id }
         }
-        edit.added.forEach { pageOf(it.pageIndex).add(it) }
+        edit.added.forEach { annotation ->
+            val page = pageOf(annotation.pageIndex)
+            // A move records the same mark as both removed and added, and the
+            // index it was removed from is the depth it is meant to keep. Only
+            // marks that are genuinely new go on top.
+            val index = edit.removed.firstOrNull { it.annotation.id == annotation.id }?.index
+            if (index == null) page.add(annotation) else page.add(index.coerceIn(0, page.size), annotation)
+        }
         done.addLast(edit)
         return edit
     }
@@ -451,6 +630,27 @@ enum class AnnotationTool {
     Curve,
     CurvedArrow,
 
+    /**
+     * Text written onto the page, straight or along a traced curve.
+     *
+     * Not a [Note], which is a marker with words behind it. This is text *on*
+     * the page, and once saved it is real PDF text — selectable, searchable, and
+     * part of the document rather than a mark laid over it.
+     */
+    Text,
+    CurvedText,
+
+    /**
+     * Words with something drawn round them — a cloud, a box, an ellipse.
+     *
+     * One tool each rather than two marks made to line up by hand: the frame is
+     * measured from the words, so choosing a point size sets its size too and
+     * there is nothing to keep in step afterwards.
+     */
+    CloudText,
+    BoxText,
+    EllipseText,
+
     Note,
     Signature,
 
@@ -470,10 +670,60 @@ val DRAWING_TOOLS = listOf(
     AnnotationTool.Pen,
     AnnotationTool.Line,
     AnnotationTool.Arrow,
+    AnnotationTool.Curve,
+    AnnotationTool.CurvedArrow,
     AnnotationTool.Rectangle,
     AnnotationTool.Ellipse,
     AnnotationTool.Cloud,
+    AnnotationTool.Text,
+    AnnotationTool.CurvedText,
+    AnnotationTool.CloudText,
+    AnnotationTool.BoxText,
+    AnnotationTool.EllipseText,
 )
+
+/**
+ * Whether this tool writes words rather than drawing.
+ *
+ * It takes the same band as the drawing tools, but two of the slots mean
+ * something else: the weight becomes a font size and the line type becomes the
+ * font itself. Neither a nib width nor a dash means anything to a letter.
+ */
+val AnnotationTool.writesText: Boolean
+    get() = this in TEXT_TOOLS
+
+private val TEXT_TOOLS = setOf(
+    AnnotationTool.Text,
+    AnnotationTool.CurvedText,
+    AnnotationTool.CloudText,
+    AnnotationTool.BoxText,
+    AnnotationTool.EllipseText,
+)
+
+/**
+ * What this tool draws around the words it writes, if anything.
+ *
+ * The frame belongs to the tool rather than to a separate setting: picking
+ * "clouded text" is picking the cloud, and there is no state in which a tool that
+ * says it draws a box does not.
+ */
+/**
+ * Whether this tool writes on a bent line.
+ *
+ * The bend is a setting rather than something drawn: a hand-drawn curve looked
+ * broken however carefully it was traced, because a short caption covers only the
+ * first part of a long stroke and the first part of any hand-drawn arc is its
+ * straightest.
+ */
+val AnnotationTool.bendsText: Boolean get() = this == AnnotationTool.CurvedText
+
+val AnnotationTool.textFrame: TextFrame
+    get() = when (this) {
+        AnnotationTool.CloudText -> TextFrame.Cloud
+        AnnotationTool.BoxText -> TextFrame.Box
+        AnnotationTool.EllipseText -> TextFrame.Ellipse
+        else -> TextFrame.None
+    }
 
 /**
  * The drawing tools, in the slots the ribbon gives them.
@@ -498,6 +748,13 @@ val DRAWING_GROUPS: List<List<AnnotationTool>> = listOf(
     ),
     listOf(AnnotationTool.Rectangle),
     listOf(AnnotationTool.Pen, AnnotationTool.Ellipse, AnnotationTool.Cloud),
+    listOf(
+        AnnotationTool.Text,
+        AnnotationTool.CurvedText,
+        AnnotationTool.CloudText,
+        AnnotationTool.BoxText,
+        AnnotationTool.EllipseText,
+    ),
 )
 
 /** The tools sharing this one's slot, itself included, or just itself. */
@@ -557,4 +814,23 @@ object AnnotationColors {
         0xFF212529L, // near-black
         0xFF9C36B5L, // purple
     )
+}
+
+/**
+ * What is drawn around a line of text.
+ *
+ * Sized from the type rather than dragged out: the point size decides the words
+ * and the frame together, which is the whole reason these are one tool each
+ * rather than a text mark and a shape that have to be lined up by hand.
+ */
+enum class TextFrame {
+    None,
+
+    /** The drawing-office revision cloud, scalloped outward. */
+    Cloud,
+
+    Box,
+
+    /** An ellipse wide enough that the words sit inside it, not across it. */
+    Ellipse,
 }

@@ -123,6 +123,21 @@ fun ZoomedPage(
     onAddAnnotation: (Annotation) -> Unit,
     /** The Note tool was tapped at this page point. */
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
+    /**
+     * The text tools, which this view had none of.
+     *
+     * Their absence is why nothing could be written, picked up or moved while
+     * magnified: the layer was built here without them, so every tap and drag a
+     * text tool made went nowhere. Zooming in to place a caption exactly is
+     * precisely when you would want them.
+     */
+    onPlaceText: (pageIndex: Int, path: List<Offset>) -> Unit,
+    onMoveText: (id: Long, delta: Offset) -> Unit,
+    onSelectText: (id: Long?) -> Unit,
+    /** The caption the ribbon is editing, drawn picked out. */
+    selectedText: Long?,
+    /** Two fingers with a caption in hand: that big. */
+    onScaleText: (factor: Float) -> Unit,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
     onOpenNote: (com.hsilighting.pagify.core.Annotation.Note) -> Unit,
@@ -317,13 +332,23 @@ fun ZoomedPage(
             Modifier
                 .fillMaxSize()
                 .pinchToZoom { factor, centroid ->
+                    // A caption in hand takes the pinch here too: magnified is
+                    // exactly where you would size one carefully.
+                    if (selectedText != null) {
+                        onScaleText(factor)
+                        return@pinchToZoom
+                    }
                     onZoomActivity()
                     zoomAbout(factor, centroid)
                 }
                 // Two fingers always pan, for the same reason as in the list: the
                 // pinch handler claims every two-finger event, so nothing else
                 // would ever receive one.
-                .twoFingerPanXY { drag -> offset = clamp(offset + drag, scale) }
+                // As with the zoom: a caption in hand takes the whole gesture,
+                // so the page does not slide out from under it.
+                .twoFingerPanXY { drag ->
+                    if (selectedText == null) offset = clamp(offset + drag, scale)
+                }
                 // One finger pans only when it is not busy annotating.
                 .then(
                     if (toolActive) {
@@ -409,6 +434,10 @@ fun ZoomedPage(
                     mapping = mapping,
                     onAdd = onAddAnnotation,
                     onRequestNote = { anchor -> onRequestNote(pageIndex, anchor) },
+                    onPlaceText = { path -> onPlaceText(pageIndex, path) },
+                    onMoveText = onMoveText,
+                    onSelectText = onSelectText,
+                    selectedText = selectedText,
                     onOpenNote = onOpenNote,
                     onEraseStart = onEraseStart,
                     onErase = onErase,

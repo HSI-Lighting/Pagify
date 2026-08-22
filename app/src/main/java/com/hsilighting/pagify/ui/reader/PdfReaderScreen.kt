@@ -72,6 +72,7 @@ import com.hsilighting.pagify.core.Annotation
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.PageMapping
 import com.hsilighting.pagify.core.PageSize
+import com.hsilighting.pagify.core.PdfFont
 import com.hsilighting.pagify.core.PdfMetadata
 import com.hsilighting.pagify.core.pinchProgressAfter
 import com.hsilighting.pagify.core.SessionRecorder
@@ -95,6 +96,7 @@ import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.defaultSize
 import com.hsilighting.pagify.ui.components.NoTextOnPageHint
 import com.hsilighting.pagify.ui.components.NoteComposer
+import com.hsilighting.pagify.ui.components.TextComposer
 import com.hsilighting.pagify.ui.components.NoteReader
 import com.hsilighting.pagify.ui.components.RecognisingTextHint
 import com.hsilighting.pagify.ui.components.SaveAction
@@ -175,6 +177,20 @@ fun PdfReaderScreen(
     /** How heavy the drawing tools are, and what kind of line they draw. */
     onStrokeWidth: (Float) -> Unit,
     onLineStyle: (MarkupStyle) -> Unit,
+    /** What text is written in and how big, and the words themselves. */
+    onTextFont: (PdfFont) -> Unit,
+    onTextSize: (Float) -> Unit,
+    /** How far a curved caption bends, end to end, in degrees. */
+    onTextCurve: (Float) -> Unit,
+    onPlaceText: (pageIndex: Int, path: List<Offset>) -> Unit,
+    /** Placed text was dragged to a new spot on the same page. */
+    onMoveText: (id: Long, delta: Offset) -> Unit,
+    /** A caption was tapped, so the ribbon's controls now belong to it. */
+    onSelectText: (id: Long?) -> Unit,
+    /** Two fingers with a caption in hand: that big. */
+    onScaleText: (factor: Float) -> Unit,
+    onCommitText: (String) -> Unit,
+    onCancelText: () -> Unit,
     onPenColorChange: (Long) -> Unit,
     onUndoAnnotation: () -> Unit,
     onRedoAnnotation: () -> Unit,
@@ -248,6 +264,12 @@ fun PdfReaderScreen(
     /** A stroke that was held still before lifting; ask what shape it is. */
     onRecogniseMarkup: (List<Offset>) -> Unit,
     onUndoMarkup: () -> Unit,
+    /** Words on a capture were dragged to a new place. */
+    onMoveMarkup: (index: Int, delta: Offset) -> Unit,
+    /** A caption on a capture was tapped; the ribbon now edits it. */
+    onSelectMarkup: (index: Int) -> Unit,
+    /** Two fingers with a caption in hand on a capture: that big. */
+    onScaleMarkup: (factor: Float) -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
@@ -434,6 +456,10 @@ fun PdfReaderScreen(
                     textSegmentsForPage = textSegmentsForPage,
                     onAddAnnotation = onAddAnnotation,
                     onRequestNote = onRequestNote,
+                    onPlaceText = onPlaceText,
+                    onMoveText = onMoveText,
+                    onSelectText = onSelectText,
+                    onScaleText = onScaleText,
                     onPageMarksNeeded = onPageMarksNeeded,
                     showViewfinder = showViewfinder,
                     viewfinderMinimized = viewfinderMinimized,
@@ -540,6 +566,13 @@ fun PdfReaderScreen(
                     onSelectTool = onSelectTool,
                     strokeWidth = state.annotationStrokeWidth,
                     lineStyle = state.annotationStyle,
+                    textFont = state.textFont,
+                    textSizePoints = state.textSizePoints,
+                    textCurveDegrees = state.textCurveDegrees,
+                    textSizeCeiling = state.textSizeCeiling,
+                    onTextFont = onTextFont,
+                    onTextSize = onTextSize,
+                    onTextCurve = onTextCurve,
                     onStrokeWidth = onStrokeWidth,
                     onLineStyle = onLineStyle,
                     onPenColorChange = onPenColorChange,
@@ -579,6 +612,16 @@ fun PdfReaderScreen(
                 onCommitMarkup = onCommitMarkup,
                 onRecogniseMarkup = onRecogniseMarkup,
                 onUndoMarkup = onUndoMarkup,
+                onMoveMarkup = onMoveMarkup,
+                onSelectMarkup = onSelectMarkup,
+                onScaleMarkup = onScaleMarkup,
+                selectedMarkup = state.selectedMarkupIndex,
+                textFont = state.textFont,
+                textSizePoints = state.textSizePoints,
+                textCurveDegrees = state.textCurveDegrees,
+                onTextFont = onTextFont,
+                onTextSize = onTextSize,
+                onTextCurve = onTextCurve,
                 fill = state.captureFill,
                 onFillChange = onCaptureFill,
                 onSaveToGallery = onSaveCapture,
@@ -609,6 +652,17 @@ fun PdfReaderScreen(
 
         state.pendingNote?.let {
             NoteComposer(onConfirm = onConfirmNote, onDismiss = onCancelNote)
+        }
+
+        state.textBeingWritten?.let { pending ->
+            TextComposer(
+                // What the tool is, not what the path looks like: the bend is a
+                // setting now, so a curved caption starts life as a single tap
+                // like any other and the path cannot say which tool made it.
+                curved = pending.bends,
+                onConfirm = onCommitText,
+                onDismiss = onCancelText,
+            )
         }
 
         if (state.showMetadataSheet && state.metadata != null) {
@@ -657,6 +711,13 @@ private fun PageList(
     textSegmentsForPage: suspend (Int) -> List<TextSegment>,
     onAddAnnotation: (Annotation) -> Unit,
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
+    onPlaceText: (pageIndex: Int, path: List<Offset>) -> Unit,
+    /** Placed text was dragged to a new spot on the same page. */
+    onMoveText: (id: Long, delta: Offset) -> Unit,
+    /** A caption was tapped, so the ribbon's controls now belong to it. */
+    onSelectText: (id: Long?) -> Unit,
+    /** Two fingers with a caption in hand: that big. */
+    onScaleText: (factor: Float) -> Unit,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
     onOpenNote: (Annotation.Note) -> Unit,
@@ -849,6 +910,11 @@ private fun PageList(
                 lineStyle = state.annotationStyle,
                 onAddAnnotation = onAddAnnotation,
                 onRequestNote = onRequestNote,
+                onPlaceText = onPlaceText,
+                onMoveText = onMoveText,
+                onSelectText = onSelectText,
+                selectedText = state.selectedTextId,
+                onScaleText = onScaleText,
                 onPageMarksNeeded = onPageMarksNeeded,
                 onOpenNote = onOpenNote,
                 onEraseStart = onEraseStart,
@@ -1020,6 +1086,15 @@ private fun PageList(
                             )
                         }
                         .pinchToZoom(onGestureEnd = { pinchProgress = 1f }) { factor, centroid ->
+                            // A caption in hand takes the pinch. Not a race with
+                            // the page's zoom but a decision made before the
+                            // fingers land: while one is held, two fingers mean
+                            // "this big", and the page holds still. Putting it
+                            // down — a tap on empty page — gives the zoom back.
+                            if (state.selectedTextId != null) {
+                                onScaleText(factor)
+                                return@pinchToZoom
+                            }
                             onZoomActivity()
                             pinchProgress = pinchProgressAfter(pinchProgress, factor)
                             if (pinchProgress >= PINCH_HANDOVER_ZOOM) {
@@ -1073,6 +1148,10 @@ private fun PageList(
                             // the rest of the time — and, before the gate in
                             // `pinchToZoom`, slowly zooming instead.
                             .twoFingerPan { delta ->
+                                // Nothing while a caption is in hand: the two
+                                // fingers resizing it must not also scroll the
+                                // document out from under it.
+                                if (state.selectedTextId != null) return@twoFingerPan
                                 coroutineScope.launch { listState.scrollBy(-delta) }
                             },
                         userScrollEnabled = !toolActive,
@@ -1089,6 +1168,9 @@ private fun PageList(
                                 textSegmentsForPage = textSegmentsForPage,
                                 onAddAnnotation = onAddAnnotation,
                                 onRequestNote = onRequestNote,
+                                onPlaceText = onPlaceText,
+                                onMoveText = onMoveText,
+                                onSelectText = onSelectText,
                                 onPageMarksNeeded = onPageMarksNeeded,
                                 onOpenNote = onOpenNote,
                                 onEraseStart = onEraseStart,
@@ -1210,6 +1292,11 @@ private fun AnnotatablePage(
     textSegmentsForPage: suspend (Int) -> List<TextSegment>,
     onAddAnnotation: (Annotation) -> Unit,
     onRequestNote: (pageIndex: Int, anchor: Offset) -> Unit,
+    onPlaceText: (pageIndex: Int, path: List<Offset>) -> Unit,
+    /** Placed text was dragged to a new spot on the same page. */
+    onMoveText: (id: Long, delta: Offset) -> Unit,
+    /** A caption was tapped, so the ribbon's controls now belong to it. */
+    onSelectText: (id: Long?) -> Unit,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
     onOpenNote: (Annotation.Note) -> Unit,
@@ -1316,6 +1403,10 @@ private fun AnnotatablePage(
             mapping = mapping,
             onAdd = onAddAnnotation,
             onRequestNote = { anchor -> onRequestNote(pageIndex, anchor) },
+            onPlaceText = { path -> onPlaceText(pageIndex, path) },
+            onMoveText = onMoveText,
+            onSelectText = onSelectText,
+            selectedText = state.selectedTextId,
             onOpenNote = onOpenNote,
             onEraseStart = onEraseStart,
             onErase = { point, tolerance -> onErase(pageIndex, point, tolerance) },

@@ -10,7 +10,7 @@ use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfPage, PdfPagePaperSize,
     PdfPageRenderRotation, PdfPoints, PdfRenderConfig, Pdfium, PdfiumLibraryBindingsAccessor,
     FPDFANNOT_COLORTYPE, FPDF_ANNOTATION, FPDF_ANNOTATION_SUBTYPE, FPDF_DOCUMENT, FPDF_FILEWRITE,
-    FPDF_PAGE, FS_POINTF, FS_QUADPOINTSF, FS_RECTF,
+    FPDF_PAGE, FPDF_PAGEOBJECT, FPDF_PAGEOBJECTMARK, FS_POINTF, FS_QUADPOINTSF, FS_RECTF,
 };
 
 use crate::document::metadata::DocumentMetadata;
@@ -254,6 +254,34 @@ impl PdfiumDocument {
 }
 
 impl Document for PdfiumDocument {
+    fn text_marks(&self, page_index: usize) -> Result<Vec<String>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let mut found = Vec::new();
+
+        // Safety: as above.
+        unsafe {
+            for index in 0..bindings.FPDFPage_CountObjects(page.handle) {
+                let object = bindings.FPDFPage_GetObject(page.handle, index);
+                if object.is_null() || text_mark_id(bindings, object).is_none() {
+                    continue;
+                }
+                // Only the first object of each caption carries the blob, so this
+                // yields one entry per mark rather than one per letter.
+                if let Some(blob) = text_mark_restore_of(bindings, object) {
+                    found.push(blob);
+                }
+            }
+        }
+
+        Ok(found)
+    }
+
     fn page_count(&self) -> usize {
         self.page_count
     }
@@ -682,6 +710,20 @@ impl DocumentMut for PdfiumDocument {
         })?;
 
         let page = RawPage::open(self.document.handle(), index)?;
+
+        // Text is not an annotation. It goes into the page's own content so that
+        // a reader can select and search it, which means there is no annotation
+        // index to hand back and nothing for `remove_annotation` to take away
+        // afterwards — see `write_text`. The count is returned unchanged, which is
+        // the honest answer: this call added no annotation.
+        if let Annotation::Text { .. } = annotation {
+            self.write_text(&page, annotation)?;
+            self.dirty = true;
+            let count =
+                unsafe { pdfium()?.bindings().FPDFPage_GetAnnotCount(page.handle) }.max(0);
+            return Ok(count as usize);
+        }
+
         self.write_annotation(&page, annotation)?;
 
         // Read the count back rather than assume. PDFium appends, so the new mark
@@ -755,6 +797,74 @@ impl DocumentMut for PdfiumDocument {
 
         self.remove_annotation(page_index, index)?;
         Ok(taken)
+    }
+
+    fn text_mark_restore(&mut self, page_index: usize, id: i32) -> Result<String> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+
+        // Safety: the page is live for the loop and closed by RawPage's drop.
+        unsafe {
+            for index in 0..bindings.FPDFPage_CountObjects(page.handle) {
+                let object = bindings.FPDFPage_GetObject(page.handle, index);
+                if object.is_null() || text_mark_id(bindings, object) != Some(id) {
+                    continue;
+                }
+                if let Some(blob) = text_mark_restore_of(bindings, object) {
+                    return Ok(blob);
+                }
+            }
+        }
+
+        Err(PdfError::InvalidArgument(format!(
+            "page {page_index} has no text mark {id}"
+        )))
+    }
+
+    fn remove_text(&mut self, page_index: usize, id: i32) -> Result<()> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let mut taken = 0;
+
+        // Safety: the page is live for the loop; every object removed is destroyed
+        // exactly once and never touched again.
+        unsafe {
+            // Backwards, because removing an object renumbers everything after it.
+            for index in (0..bindings.FPDFPage_CountObjects(page.handle)).rev() {
+                let object = bindings.FPDFPage_GetObject(page.handle, index);
+                if object.is_null() || text_mark_id(bindings, object) != Some(id) {
+                    continue;
+                }
+                if bindings.FPDFPage_RemoveObject(page.handle, object) != 0 {
+                    bindings.FPDFPageObj_Destroy(object);
+                    taken += 1;
+                }
+            }
+
+            if taken == 0 {
+                return Err(PdfError::InvalidArgument(format!(
+                    "page {page_index} has no text mark {id}"
+                )));
+            }
+
+            if bindings.FPDFPage_GenerateContent(page.handle) == 0 {
+                return Err(PdfError::Pdfium(
+                    "text was removed but the page content was not regenerated".into(),
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn extract_pages(&self, range: &[usize]) -> Result<Box<dyn Document>> {
@@ -1100,11 +1210,174 @@ fn bounding_box(annotation: &Annotation) -> Option<Rect> {
             rect.left.max(rect.right),
             rect.top.max(rect.bottom),
         ),
+        // A glyph hangs above its own origin and a little below it, so the box
+        // has to allow the size either side: taking the origins alone would give
+        // a rectangle the height of the baseline and clip every letter away.
+        Annotation::Text { glyphs, size, .. } => {
+            for g in glyphs {
+                grow(g.x - size, g.y - size, g.x + size, g.y + size);
+            }
+        }
     }
     bounds
 }
 
 impl PdfiumDocument {
+    /// Write words into the page's own content, one text object per glyph.
+    ///
+    /// Real text, not a drawing of it: the point of the whole feature is that a
+    /// reader can select it, search it and copy it out. `text_object_probe`
+    /// established that this survives a save and comes back out of PDFium's own
+    /// text extraction, rotated glyphs included.
+    ///
+    /// One object per glyph rather than one per string, because that is what
+    /// curved text needs — every letter carries its own rotation — and because a
+    /// second path for the straight case would be a second thing to get wrong for
+    /// no difference anyone could see. PDFium is given the position and the turn;
+    /// it is never asked where a letter should go.
+    ///
+    /// `FPDFPage_GenerateContent` at the end is not optional. Without it the
+    /// objects exist in the document and not in the page's content stream:
+    /// present in memory, absent from the file.
+    fn write_text(&self, page: &RawPage, annotation: &Annotation) -> Result<()> {
+        let Annotation::Text {
+            font,
+            size,
+            color,
+            glyphs,
+            id,
+            restore,
+            frame,
+            frame_width,
+            ..
+        } = annotation
+        else {
+            return Err(PdfError::InvalidArgument("not a text annotation".into()));
+        };
+
+        let bindings = pdfium()?.bindings();
+        let space = page.space()?;
+        let document = self.document.handle();
+
+        // Safety: the document and page handles are live for the call, and every
+        // object created is either inserted into the page or the call fails.
+        unsafe {
+            let loaded = bindings.FPDFText_LoadStandardFont(document, font);
+            if loaded.is_null() {
+                return Err(PdfError::Pdfium(format!("font {font} would not load")));
+            }
+
+            let mut first = true;
+            for glyph in glyphs {
+                let object = bindings.FPDFPageObj_CreateTextObj(document, loaded, *size);
+                if object.is_null() {
+                    return Err(PdfError::Pdfium("could not create a text object".into()));
+                }
+
+                let encoded: Vec<u16> = glyph
+                    .ch
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                if bindings.FPDFText_SetText(object, encoded.as_ptr()) == 0 {
+                    return Err(PdfError::Pdfium("could not set a glyph's text".into()));
+                }
+
+                bindings.FPDFPageObj_SetFillColor(
+                    object,
+                    color.r as c_uint,
+                    color.g as c_uint,
+                    color.b as c_uint,
+                    color.a as c_uint,
+                );
+
+                // The app measures y downwards from the top of the crop and turns
+                // clockwise; PDF measures up from the bottom and turns the other
+                // way. Both flips happen here, once, as they do for every other
+                // mark — doing it anywhere else puts text on the wrong half of the
+                // page while still looking right in the app.
+                let placed = space.to_pdf(glyph.x, glyph.y);
+                let (sin, cos) = (-glyph.radians).sin_cos();
+                bindings.FPDFPageObj_Transform(
+                    object,
+                    cos as f64,
+                    sin as f64,
+                    -sin as f64,
+                    cos as f64,
+                    placed.0 as f64,
+                    placed.1 as f64,
+                );
+
+                // Tagged, so the words can be found again after any number of
+                // saves. Without this text stopped being a mark the moment it was
+                // saved: the eraser could take the ring off a clouded caption and
+                // not the words inside it.
+                let mark = bindings.FPDFPageObj_AddMark(object, TEXT_MARK_NAME);
+                if mark.is_null() {
+                    return Err(PdfError::Pdfium("could not tag a text object".into()));
+                }
+                bindings.FPDFPageObjMark_SetIntParam(document, object, mark, TEXT_MARK_ID, *id);
+                // Only on the first: the blob describes the whole caption, and a
+                // copy of it on every letter would bloat the file for nothing.
+                if first {
+                    bindings.FPDFPageObjMark_SetStringParam(
+                        document,
+                        object,
+                        mark,
+                        TEXT_MARK_RESTORE,
+                        restore,
+                    );
+                    first = false;
+                }
+
+                bindings.FPDFPage_InsertObject(page.handle, object);
+            }
+
+            // The ring around the words, if there is one. Page content like the
+            // letters and tagged with the same id, so erasing the caption takes
+            // both — as a separate annotation it came apart the moment the file
+            // was reopened.
+            if frame.len() >= 2 {
+                let path = bindings.FPDFPageObj_CreateNewPath(
+                    space.to_pdf(frame[0].x, frame[0].y).0,
+                    space.to_pdf(frame[0].x, frame[0].y).1,
+                );
+                if path.is_null() {
+                    return Err(PdfError::Pdfium("could not create the frame path".into()));
+                }
+                for point in &frame[1..] {
+                    let placed = space.to_pdf(point.x, point.y);
+                    bindings.FPDFPath_LineTo(path, placed.0, placed.1);
+                }
+                bindings.FPDFPath_Close(path);
+                bindings.FPDFPageObj_SetStrokeColor(
+                    path,
+                    color.r as c_uint,
+                    color.g as c_uint,
+                    color.b as c_uint,
+                    color.a as c_uint,
+                );
+                bindings.FPDFPageObj_SetStrokeWidth(path, frame_width.max(0.1));
+                bindings.FPDFPath_SetDrawMode(path, 0, 1);
+
+                let mark = bindings.FPDFPageObj_AddMark(path, TEXT_MARK_NAME);
+                if mark.is_null() {
+                    return Err(PdfError::Pdfium("could not tag the frame".into()));
+                }
+                bindings.FPDFPageObjMark_SetIntParam(document, path, mark, TEXT_MARK_ID, *id);
+                bindings.FPDFPage_InsertObject(page.handle, path);
+            }
+
+            if bindings.FPDFPage_GenerateContent(page.handle) == 0 {
+                return Err(PdfError::Pdfium(
+                    "text was written but the page content was not regenerated".into(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Write one mark onto an already-open page.
     ///
     /// Split out from `add_annotation` so the page stays open for exactly this
@@ -1117,6 +1390,13 @@ impl PdfiumDocument {
             Annotation::Highlight { .. } => ANNOT_HIGHLIGHT,
             Annotation::Ink { .. } => ANNOT_INK,
             Annotation::Note { .. } => ANNOT_TEXT,
+            // Routed away in `add_annotation`: text is page content, not an
+            // annotation, and there is no subtype that would make it one.
+            Annotation::Text { .. } => {
+                return Err(PdfError::InvalidArgument(
+                    "text is page content, not an annotation".into(),
+                ))
+            }
         };
 
         // Safety: the page handle is live for the duration, and the annotation is
@@ -1148,7 +1428,8 @@ impl PdfiumDocument {
         let colour = match annotation {
             Annotation::Highlight { color, .. }
             | Annotation::Ink { color, .. }
-            | Annotation::Note { color, .. } => *color,
+            | Annotation::Note { color, .. }
+            | Annotation::Text { color, .. } => *color,
         };
         unsafe {
             bindings.FPDFAnnot_SetColor(
@@ -1175,6 +1456,9 @@ impl PdfiumDocument {
         set_annotation_colour_key(bindings, annot, colour);
 
         match annotation {
+            // Unreachable: routed away in `add_annotation`, which sends text to
+            // `write_text` before this function is ever reached.
+            Annotation::Text { .. } => {}
             Annotation::Highlight { rects, .. } => {
                 for r in rects {
                     let pdf = to_pdf_rect(space, r);
@@ -1915,4 +2199,108 @@ fn trailing_xref_is_a_stream(bytes: &[u8], startxref: usize) -> bool {
     };
 
     !target.starts_with(b"xref")
+}
+
+// ------------------------------------------------------------ text marks --
+
+/// The tag every text object this app writes carries.
+///
+/// Text is page content, so it has no annotation index to find it by; this is
+/// what stands in for one. Proved by `examples/text_mark_probe.rs`: the tag
+/// survives a save and a reopen, our objects can be told apart from the
+/// document's own, and removing one leaves the rest alone.
+const TEXT_MARK_NAME: &str = "PagifyText";
+
+/// The parameter naming the mark, so one caption can be found on its own.
+const TEXT_MARK_ID: &str = "id";
+
+/// The parameter holding the app's description of the mark.
+const TEXT_MARK_RESTORE: &str = "restore";
+
+/// The Pagify id on this object, if it is one of ours.
+///
+/// Safety: `object` must be a live page object.
+unsafe fn text_mark_id(
+    bindings: &dyn pdfium_render::prelude::PdfiumLibraryBindings,
+    object: FPDF_PAGEOBJECT,
+) -> Option<i32> {
+    for slot in 0..bindings.FPDFPageObj_CountMarks(object) {
+        let mark = bindings.FPDFPageObj_GetMark(object, slot as c_ulong);
+        if mark.is_null() || !mark_is_ours(bindings, mark) {
+            continue;
+        }
+        let mut value = 0;
+        if bindings.FPDFPageObjMark_GetParamIntValue(mark, TEXT_MARK_ID, &mut value) != 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// The restore blob on this object, if it carries one.
+///
+/// Safety: as above.
+unsafe fn text_mark_restore_of(
+    bindings: &dyn pdfium_render::prelude::PdfiumLibraryBindings,
+    object: FPDF_PAGEOBJECT,
+) -> Option<String> {
+    for slot in 0..bindings.FPDFPageObj_CountMarks(object) {
+        let mark = bindings.FPDFPageObj_GetMark(object, slot as c_ulong);
+        if mark.is_null() || !mark_is_ours(bindings, mark) {
+            continue;
+        }
+
+        let mut needed: c_ulong = 0;
+        if bindings.FPDFPageObjMark_GetParamStringValue(
+            mark,
+            TEXT_MARK_RESTORE,
+            std::ptr::null_mut(),
+            0,
+            &mut needed,
+        ) == 0
+            || needed == 0
+        {
+            continue;
+        }
+
+        let mut buffer = vec![0u16; needed as usize / 2 + 1];
+        let mut written: c_ulong = 0;
+        if bindings.FPDFPageObjMark_GetParamStringValue(
+            mark,
+            TEXT_MARK_RESTORE,
+            buffer.as_mut_ptr(),
+            needed,
+            &mut written,
+        ) == 0
+        {
+            continue;
+        }
+
+        // The length is bytes and counts the terminator.
+        let characters = (written as usize / 2).saturating_sub(1);
+        return Some(String::from_utf16_lossy(&buffer[..characters]));
+    }
+    None
+}
+
+/// Whether this mark is one of ours rather than the document's own.
+///
+/// Safety: `mark` must be a live content mark.
+unsafe fn mark_is_ours(
+    bindings: &dyn pdfium_render::prelude::PdfiumLibraryBindings,
+    mark: FPDF_PAGEOBJECTMARK,
+) -> bool {
+    let mut buffer = [0u16; 64];
+    let mut length: c_ulong = 0;
+    if bindings.FPDFPageObjMark_GetName(
+        mark,
+        buffer.as_mut_ptr(),
+        (buffer.len() * 2) as c_ulong,
+        &mut length,
+    ) == 0
+    {
+        return false;
+    }
+    let characters = (length as usize / 2).saturating_sub(1);
+    String::from_utf16_lossy(&buffer[..characters]) == TEXT_MARK_NAME
 }

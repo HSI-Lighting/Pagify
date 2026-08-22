@@ -10,6 +10,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowRightAlt
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.Highlight
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.HorizontalRule
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Cloud
@@ -28,6 +29,11 @@ import com.hsilighting.pagify.core.CaptureFill
 import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.CaptureScale
 import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.MINIMUM_TEXT_POINTS
+import com.hsilighting.pagify.core.MAXIMUM_TEXT_POINTS
+import com.hsilighting.pagify.core.PdfFont
+import com.hsilighting.pagify.core.bendsText
+import com.hsilighting.pagify.core.writesText
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.hasLineStyle
 import com.hsilighting.pagify.core.isIntensity
@@ -60,35 +66,62 @@ internal fun MarkupRibbon(
     color: Long,
     size: Float,
     style: MarkupStyle,
+    font: PdfFont,
+    sizePoints: Float,
     onTool: (MarkupTool) -> Unit,
     onColor: (Long) -> Unit,
     onSize: (MarkupTool, Float) -> Unit,
     onStyle: (MarkupStyle) -> Unit,
+    curveDegrees: Float,
+    onFont: (PdfFont) -> Unit,
+    onCurve: (Float) -> Unit,
+    onSizePoints: (Float) -> Unit,
     onPickCustomColour: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     MarkRibbon(
         groups = MARKUP_GROUPS.map { group ->
-            group.map { RibbonTool(it, markupToolIcon(it), markupToolLabel(it)) }
+            group.map {
+                RibbonTool(
+                    key = it,
+                    icon = markupToolIcon(it),
+                    name = markupToolLabel(it),
+                    // As in the reader: the box and the ellipse are the cloud
+                    // with a different ring, and showing all five in one slot
+                    // costs the others the room to be legible.
+                    inPreview = it != MarkupTool.BoxText && it != MarkupTool.EllipseText,
+                )
+            }
         },
         armed = tool.takeIf { armed },
         colour = color,
         palette = MARKUP_COLOURS,
-        width = size,
-        widthPresets = tool.sizePresets,
-        widthRange = tool.sizeRange,
+        // While words are held the weight slot is a point size and the line-type
+        // slot is a font, exactly as in the reader — neither a nib width nor a
+        // dash means anything to a letter.
+        font = font.takeIf { tool.writesText },
+        width = if (tool.writesText) sizePoints else size,
+        widthPresets = if (tool.writesText) TEXT_SIZES else tool.sizePresets,
+        widthRange = if (tool.writesText) {
+            MINIMUM_TEXT_POINTS..MAXIMUM_TEXT_POINTS
+        } else {
+            tool.sizeRange
+        },
         // A wash has no length to break up, so the slot drops out rather than
         // offering five patterns that would every one of them draw the same block.
-        lineStyle = style.takeIf { tool.hasLineStyle },
+        lineStyle = style.takeIf { tool.hasLineStyle && !tool.writesText },
         onTool = { onTool(it as MarkupTool) },
         onColour = onColor,
-        onWidth = { onSize(tool, it) },
+        onWidth = { if (tool.writesText) onSizePoints(it) else onSize(tool, it) },
+        onFont = onFont,
+        curve = curveDegrees.takeIf { tool.bendsText },
+        onCurve = onCurve,
         onLineStyle = onStyle,
         onPickCustomColour = onPickCustomColour,
         modifier = modifier,
         // Same control, different question: the highlighter's is how strong the
         // wash is, not how thick the nib.
-        widthIsIntensity = tool.isIntensity,
+        widthIsIntensity = tool.isIntensity && !tool.writesText,
         // A tool can be put down here, as in the reader. It was not, on the
         // reasoning that a finger on the picture had nothing else it could mean —
         // but while pinching to zoom, a finger that lands a moment before or after
@@ -114,6 +147,13 @@ private val MARKUP_GROUPS: List<List<MarkupTool>> = listOf(
     listOf(MarkupTool.Rectangle),
     listOf(MarkupTool.Pen, MarkupTool.Ellipse, MarkupTool.Cloud),
     listOf(MarkupTool.Highlight),
+    listOf(
+        MarkupTool.Text,
+        MarkupTool.CurvedText,
+        MarkupTool.CloudText,
+        MarkupTool.BoxText,
+        MarkupTool.EllipseText,
+    ),
 )
 
 /**
@@ -227,6 +267,11 @@ private fun markupToolIcon(tool: MarkupTool): ImageVector = when (tool) {
     MarkupTool.CurvedArrow -> CurvedArrowIcon
     MarkupTool.Highlight -> Icons.Filled.Highlight
     MarkupTool.Pen -> Icons.Filled.Gesture
+    MarkupTool.Text -> Icons.Filled.TextFields
+    MarkupTool.CurvedText -> CurvedTextIcon
+    MarkupTool.CloudText -> CloudTextIcon
+    MarkupTool.BoxText -> BoxTextIcon
+    MarkupTool.EllipseText -> EllipseTextIcon
 }
 
 private fun markupToolLabel(tool: MarkupTool): String = when (tool) {
@@ -238,5 +283,10 @@ private fun markupToolLabel(tool: MarkupTool): String = when (tool) {
     MarkupTool.Curve -> "Curved line"
     MarkupTool.CurvedArrow -> "Curved arrow"
     MarkupTool.Highlight -> "Highlight"
+    MarkupTool.Text -> "Text"
+    MarkupTool.CurvedText -> "Curved text"
+    MarkupTool.CloudText -> "Clouded text"
+    MarkupTool.BoxText -> "Boxed text"
+    MarkupTool.EllipseText -> "Circled text"
     MarkupTool.Pen -> "Freehand"
 }

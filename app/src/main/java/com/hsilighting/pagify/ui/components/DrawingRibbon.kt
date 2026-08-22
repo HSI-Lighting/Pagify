@@ -4,6 +4,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowRightAlt
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.Gesture
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.HorizontalRule
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.outlined.Cloud
@@ -14,6 +15,11 @@ import com.hsilighting.pagify.core.AnnotationColors
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.DRAWING_GROUPS
 import com.hsilighting.pagify.core.MarkupStyle
+import com.hsilighting.pagify.core.MINIMUM_TEXT_POINTS
+import com.hsilighting.pagify.core.MAXIMUM_TEXT_POINTS
+import com.hsilighting.pagify.core.PdfFont
+import com.hsilighting.pagify.core.bendsText
+import com.hsilighting.pagify.core.writesText
 
 /**
  * The reader's drawing tools, in the shared ribbon.
@@ -28,6 +34,14 @@ fun DrawingRibbon(
     color: Long,
     strokeWidth: Float,
     lineStyle: MarkupStyle,
+    font: PdfFont,
+    sizePoints: Float,
+    curveDegrees: Float,
+    /** The largest size that still fits across the page. */
+    sizeCeiling: Float,
+    onFont: (PdfFont) -> Unit,
+    onCurve: (Float) -> Unit,
+    onSizePoints: (Float) -> Unit,
     onSelectTool: (AnnotationTool) -> Unit,
     onColor: (Long) -> Unit,
     onStrokeWidth: (Float) -> Unit,
@@ -37,18 +51,42 @@ fun DrawingRibbon(
 ) {
     MarkRibbon(
         groups = DRAWING_GROUPS.map { group ->
-            group.map { RibbonTool(it, drawingToolGlyph(it), drawingToolName(it)) }
+            group.map {
+                RibbonTool(
+                    key = it,
+                    icon = drawingToolGlyph(it),
+                    name = drawingToolName(it),
+                    // The box and the ellipse are the cloud with a different ring
+                    // round the words. Showing all three in one slot says nothing
+                    // the cloud does not already say, and costs the other members
+                    // the room to be legible.
+                    inPreview = it != AnnotationTool.BoxText && it != AnnotationTool.EllipseText,
+                )
+            }
         },
         armed = selectedTool,
         colour = color,
         palette = AnnotationColors.markerPalette,
-        width = strokeWidth,
-        widthPresets = ANNOTATION_STROKE_WIDTHS,
-        widthRange = MINIMUM_STROKE_POINTS..MAXIMUM_STROKE_POINTS,
-        lineStyle = lineStyle,
+        // The weight slot is a point size while text is armed, so it has to be
+        // fed the size and hand back the size — the row asks one question with
+        // one control, and which question it is depends on what is held.
+        width = if (selectedTool.writesText) sizePoints else strokeWidth,
+        widthPresets = if (selectedTool.writesText) TEXT_SIZES else ANNOTATION_STROKE_WIDTHS,
+        widthRange = if (selectedTool.writesText) {
+            MINIMUM_TEXT_POINTS..sizeCeiling
+        } else {
+            MINIMUM_STROKE_POINTS..MAXIMUM_STROKE_POINTS
+        },
+        lineStyle = lineStyle.takeIf { !selectedTool.writesText },
+        font = font.takeIf { selectedTool.writesText },
+        onFont = onFont,
+        // Only while a tool that bends is held: a straight caption has no bend to
+        // set, and a slot that does nothing is worse than no slot.
+        curve = curveDegrees.takeIf { selectedTool.bendsText },
+        onCurve = onCurve,
         onTool = { onSelectTool(it as AnnotationTool) },
         onColour = onColor,
-        onWidth = onStrokeWidth,
+        onWidth = if (selectedTool.writesText) onSizePoints else onStrokeWidth,
         onLineStyle = onLineStyle,
         onPickCustomColour = onPickCustomColour,
         modifier = modifier,
@@ -72,6 +110,11 @@ internal fun drawingToolGlyph(tool: AnnotationTool): ImageVector = when (tool) {
     AnnotationTool.Rectangle -> Icons.Filled.CheckBoxOutlineBlank
     AnnotationTool.Ellipse -> Icons.Filled.RadioButtonUnchecked
     AnnotationTool.Cloud -> Icons.Outlined.Cloud
+    AnnotationTool.Text -> Icons.Filled.TextFields
+    AnnotationTool.CurvedText -> CurvedTextIcon
+    AnnotationTool.CloudText -> CloudTextIcon
+    AnnotationTool.BoxText -> BoxTextIcon
+    AnnotationTool.EllipseText -> EllipseTextIcon
     AnnotationTool.Curve -> CurvedLineIcon
     AnnotationTool.CurvedArrow -> CurvedArrowIcon
     else -> Icons.Filled.Gesture
@@ -83,6 +126,11 @@ internal fun drawingToolName(tool: AnnotationTool): String = when (tool) {
     AnnotationTool.Rectangle -> "Box"
     AnnotationTool.Ellipse -> "Circle"
     AnnotationTool.Cloud -> "Cloud"
+    AnnotationTool.Text -> "Text"
+    AnnotationTool.CurvedText -> "Curved text"
+    AnnotationTool.CloudText -> "Clouded text"
+    AnnotationTool.BoxText -> "Boxed text"
+    AnnotationTool.EllipseText -> "Circled text"
     AnnotationTool.Curve -> "Curved line"
     AnnotationTool.CurvedArrow -> "Curved arrow"
     else -> "Freehand"
@@ -96,3 +144,16 @@ internal fun drawingToolName(tool: AnnotationTool): String = when (tool) {
  */
 private const val MINIMUM_STROKE_POINTS = 0.6f
 private const val MAXIMUM_STROKE_POINTS = 16f
+
+/**
+ * The sizes offered as a tap, in points.
+ *
+ * Printers' sizes rather than round numbers: these are the ones type actually
+ * comes in, and somebody marking up a drawing is usually matching something
+ * already on it.
+ */
+internal val TEXT_SIZES = listOf(9f, 12f, 18f)
+
+/** What the size slider will go down to and up to, in points. */
+
+

@@ -25,7 +25,7 @@
 
 use pdf_core::command::{Command, CommandHistory};
 use pdf_core::document::pdfium_doc::PdfiumDocument;
-use pdf_core::document::{Annotation, Color, Document, Point, Rect};
+use pdf_core::document::{Annotation, Color, Document, Glyph, Point, Rect};
 use pdf_core::registry;
 
 mod harness;
@@ -813,4 +813,234 @@ fn a_marks_colour_survives_a_save() {
         crimson, colour,
         "the mark changed colour on the way through"
     );
+}
+
+/// Text written onto a page has to come back out as *text*.
+///
+/// The whole reason text is page content rather than an annotation is that a
+/// reader can select it, search it and copy it. Nothing about a drawing of
+/// letters would fail a test that only looked at the pixels, so this asks the one
+/// question that separates the two: does PDFium's own text extraction find it.
+///
+/// The glyphs go in rotated, because that is what curved text is and it is the
+/// part most likely to break quietly — a matrix in the wrong space still produces
+/// text, just not where it was put.
+#[test]
+fn written_text_comes_back_as_text() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "single-page.pdf");
+    let ink = Color {
+        r: 20,
+        g: 20,
+        b: 20,
+        a: 255,
+    };
+
+    // "Hi" on a slant: two glyphs is enough to prove both the placement and the
+    // turn, and few enough that a failure names the character that went wrong.
+    let glyphs = vec![
+        Glyph {
+            ch: "H".into(),
+            x: 100.0,
+            y: 200.0,
+            radians: 0.3,
+        },
+        Glyph {
+            ch: "i".into(),
+            x: 118.0,
+            y: 206.0,
+            radians: 0.3,
+        },
+    ];
+
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::AddAnnotation {
+                page_index: 0,
+                annotation: Annotation::Text {
+                    text: "Hi".into(),
+                    font: "Helvetica".into(),
+                    size: 24.0,
+                    color: ink,
+                    glyphs,
+                    id: 0,
+                    restore: String::new(),
+                    frame: Vec::new(),
+                    frame_width: 0.0,
+                },
+            },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("write the text");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    let extracted = reopened.page(0).expect("page").text().expect("page text");
+
+    assert!(
+        extracted.contains("Hi"),
+        "the text was written but does not come back as text: {extracted:?}",
+    );
+
+    // And it is *not* an annotation. Being page content is the point; if it
+    // turned up in the annotation list, something has quietly made it a mark
+    // again and it would no longer be selectable.
+    let marks = reopened.annotations(0).expect("read the annotations");
+    assert!(
+        marks.is_empty(),
+        "text should be page content, but it came back as {marks:?}",
+    );
+}
+
+/// Words written into a page can be found again after a save, and taken back out.
+///
+/// The bug this pins: text is page content, so once saved it had no mark to
+/// erase and the eraser could not touch it. A clouded caption came apart — the
+/// ring erased, because a ring *is* an annotation, and the words stayed.
+///
+/// Two captions, because a fix that removed every tagged object would pass with
+/// one and wipe the page in use.
+#[test]
+fn saved_text_can_be_found_again_and_erased() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "single-page.pdf");
+    let ink = Color {
+        r: 20,
+        g: 20,
+        b: 20,
+        a: 255,
+    };
+
+    let mut history = CommandHistory::default();
+    for (id, words, y) in [(7, "Keeper", 200.0f32), (9, "Doomed", 260.0)] {
+        let glyphs: Vec<Glyph> = words
+            .chars()
+            .enumerate()
+            .map(|(at, ch)| Glyph {
+                ch: ch.to_string(),
+                x: 100.0 + at as f32 * 14.0,
+                y,
+                radians: 0.0,
+            })
+            .collect();
+
+        // The blob is the mark itself, as the app sends it: everything needed to
+        // write these words again, which is what undo does with it. Built the
+        // same way here rather than hand-written, because a literal missing the
+        // glyphs would still erase correctly and quietly fail to come back.
+        let build = |restore: String| Annotation::Text {
+            text: words.into(),
+            font: "Helvetica".into(),
+            size: 24.0,
+            color: ink,
+            glyphs: glyphs.clone(),
+            id,
+            restore,
+            // A ring round the second caption, because a framed one is the case
+            // that came apart: the words and the ring have to erase together.
+            frame: if id == 9 {
+                vec![
+                    Point { x: 90.0, y: y - 20.0 },
+                    Point { x: 200.0, y: y - 20.0 },
+                    Point { x: 200.0, y: y + 10.0 },
+                    Point { x: 90.0, y: y + 10.0 },
+                ]
+            } else {
+                Vec::new()
+            },
+            frame_width: 1.5,
+        };
+        let blob = serde_json::to_string(&build(String::new())).expect("encode the mark");
+
+        history
+            .execute(
+                Command::AddAnnotation {
+                    page_index: 0,
+                    annotation: build(blob),
+                },
+                doc.as_document_mut().expect("mutable"),
+            )
+            .expect("write the text");
+    }
+
+    let mut reopened = save_and_reopen(&pdfium, &mut doc);
+
+    // Found again, after the save that used to lose them.
+    let marks = reopened.text_marks(0).expect("read the text marks");
+    assert_eq!(marks.len(), 2, "the tags did not survive the save: {marks:?}");
+    assert!(marks.iter().any(|m| m.contains("Keeper")));
+
+    // And one can be taken out on its own.
+    let mut after = CommandHistory::default();
+    after
+        .execute(
+            Command::RemoveText {
+                page_index: 0,
+                id: 9,
+            },
+            reopened.as_document_mut().expect("mutable"),
+        )
+        .expect("erase the text");
+
+    let left = reopened.page(0).expect("page").text().expect("page text");
+    assert!(left.contains("Keeper"), "erasing one caption took the other");
+    assert!(!left.contains("Doomed"), "the erased words are still there");
+
+    // Undo puts the words back, so the eraser is as reversible for text as it is
+    // for every other mark.
+    after
+        .undo(reopened.as_document_mut().expect("mutable"))
+        .expect("undo the erase");
+    let restored = reopened.page(0).expect("page").text().expect("page text");
+    assert!(restored.contains("Doomed"), "undo did not put the words back");
+}
+
+/// The text wire form, pinned to a literal.
+///
+/// Both sides hold the same shape written out by hand rather than sharing a
+/// builder, because a shared builder lets the two agree on the wrong thing. That
+/// is not hypothetical here: the annotation wire once sent `quarter_turns` to a
+/// decoder expecting `quarterTurns`, with green tests on both sides of it.
+#[test]
+fn text_decodes_from_the_wire_the_app_writes() {
+    let wire = r#"{
+        "kind": "text",
+        "text": "Hi",
+        "font": "Helvetica",
+        "size": 24.0,
+        "color": {"r": 20, "g": 20, "b": 20, "a": 255},
+        "glyphs": [
+            {"ch": "H", "x": 100.0, "y": 200.0, "radians": 0.3},
+            {"ch": "i", "x": 118.0, "y": 206.0, "radians": 0.3}
+        ]
+    }"#;
+
+    let decoded: Annotation = serde_json::from_str(wire).expect("decode the app's text");
+
+    match decoded {
+        Annotation::Text {
+            text,
+            font,
+            size,
+            glyphs,
+            ..
+        } => {
+            assert_eq!("Hi", text);
+            assert_eq!("Helvetica", font);
+            assert_eq!(24.0, size);
+            assert_eq!(2, glyphs.len());
+            assert_eq!("H", glyphs[0].ch);
+            assert_eq!(100.0, glyphs[0].x);
+            assert_eq!(0.3, glyphs[1].radians);
+        }
+        other => panic!("expected text, got {other:?}"),
+    }
 }

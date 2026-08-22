@@ -584,6 +584,35 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getAnnotati
     })
 }
 
+/// Every text mark on a page, as the blobs the app stored with them.
+///
+/// Text is page content rather than an annotation, so it does not appear in
+/// `getAnnotationsJson` and has no index to erase by. These come back instead:
+/// each is the app's own description of one caption, put there when it was
+/// written, and what makes words on a saved page a mark again rather than part
+/// of the page.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getTextMarksJson<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    page_index: jint,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let index = page_index_from(page_index)?;
+        let json = registry::with_session(handle, |session| {
+            let marks = session.document.text_marks(index)?;
+            serde_json::to_string(&marks)
+                .map_err(|e| PdfError::Pdfium(format!("could not encode text marks: {e}")))
+        })?;
+
+        Ok(env
+            .new_string(json)
+            .map_err(|e| PdfError::Pdfium(format!("could not allocate Java string: {e}")))?
+            .into_raw())
+    })
+}
+
 // ----------------------------------------------------------------- capture --
 
 /// Re-render one region of a page and hand back an encoded image.

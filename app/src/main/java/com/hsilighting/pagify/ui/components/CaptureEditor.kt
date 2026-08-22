@@ -81,6 +81,16 @@ import com.hsilighting.pagify.core.CaptureFill
 import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.CaptureScale
 import com.hsilighting.pagify.core.Markup
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
+import com.hsilighting.pagify.core.PdfFont
+import com.hsilighting.pagify.core.bendsText
+import com.hsilighting.pagify.core.curvedBaseline
+import com.hsilighting.pagify.core.straightBaseline
+import com.hsilighting.pagify.core.textFrame
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.RING_MARKUP_TOOLS
@@ -132,9 +142,24 @@ fun CaptureEditor(
     onMarkupTool: (MarkupTool) -> Unit,
     onMarkupColor: (Long) -> Unit,
     onMarkupSize: (MarkupTool, Float) -> Unit,
+    /** The face words are written in, shared with the reader's text tools. */
+    textFont: PdfFont,
+    textSizePoints: Float,
+    textCurveDegrees: Float,
+    onTextFont: (PdfFont) -> Unit,
+    onTextSize: (Float) -> Unit,
+    onTextCurve: (Float) -> Unit,
     onCommitMarkup: (MarkupShape) -> Unit,
     onRecogniseMarkup: (List<Offset>) -> Unit,
     onUndoMarkup: () -> Unit,
+    /** Words already on the picture have been dragged; move that mark. */
+    onMoveMarkup: (index: Int, delta: Offset) -> Unit,
+    /** A caption on the picture was tapped; the ribbon's controls now edit it. */
+    onSelectMarkup: (index: Int) -> Unit,
+    /** Two fingers with a caption in hand: that big. */
+    onScaleMarkup: (factor: Float) -> Unit,
+    /** Which caption the ribbon is editing, if one is picked up. */
+    selectedMarkup: Int?,
     onSaveToGallery: () -> Unit,
     onShare: () -> Unit,
     onCopy: () -> Unit,
@@ -142,7 +167,19 @@ fun CaptureEditor(
 ) {
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
+
+    /**
+     * The baseline waiting for its words.
+     *
+     * Kept here rather than in the reader's state: it lives and dies with this
+     * sheet, and a half-typed caption has no meaning once the picture is gone.
+     */
+    var pendingText by remember { mutableStateOf<List<Offset>?>(null) }
+
+    /** The picture area's size, for zooming about a point rather than the middle. */
+    var viewport by remember { mutableStateOf(IntSize.Zero) }
     var pickingColour by remember { mutableStateOf(false) }
+    var typed by remember { mutableStateOf("") }
 
     /** Which export is being set up, if one is. */
     var exporting by remember { mutableStateOf<ExportAction?>(null) }
@@ -198,6 +235,71 @@ fun CaptureEditor(
                     pickingColour = false
                 },
                 onDismiss = { pickingColour = false },
+            )
+        }
+
+        pendingText?.let { baseline ->
+            AlertDialog(
+                onDismissRequest = {
+                    pendingText = null
+                    typed = ""
+                },
+                title = { Text("Text") },
+                text = {
+                    OutlinedTextField(
+                        value = typed,
+                        onValueChange = { typed = it },
+                        singleLine = false,
+                        placeholder = { Text("Type here") },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = typed.isNotBlank(),
+                        onClick = {
+                            // Blank words make no mark rather than an invisible
+                            // one: nothing to see, and nothing to rub out except
+                            // by guessing where it was.
+                            onCommitMarkup(
+                                MarkupShape.Text(
+                                    text = typed,
+                                    // A tap gives only the point it landed on,
+                                    // and the layout walks a line: the baseline
+                                    // has to be as long as the words, which is
+                                    // not known until the words exist.
+                                    // A tap gives one point and the layout walks
+                                    // a line; the bend is a setting, so the line
+                                    // is built rather than traced.
+                                    path = curvedBaseline(
+                                        anchor = baseline.first(),
+                                        text = typed,
+                                        font = textFont,
+                                        sizePoints = textSizePoints,
+                                        degrees = if (markupTool.bendsText) {
+                                            textCurveDegrees
+                                        } else {
+                                            0f
+                                        },
+                                    ),
+                                    font = textFont,
+                                    sizePoints = textSizePoints,
+                                    frame = markupTool.textFrame,
+                                ),
+                            )
+                            pendingText = null
+                            typed = ""
+                        },
+                    ) { Text("Add") }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = {
+                            pendingText = null
+                            typed = ""
+                        },
+                    ) { Text("Cancel") }
+                },
             )
         }
 
@@ -271,39 +373,52 @@ fun CaptureEditor(
                         // events on the Initial pass once a second finger lands, which
                         // is what stops a pinch turning into a stroke.
                         .pinchToZoom { factor, _ ->
+                            // A caption in hand takes the pinch, as in the reader:
+                            // while one is held two fingers mean "this big", and
+                            // the picture holds still. Tapping empty picture puts
+                            // it down and gives the zoom back.
+                            if (selectedMarkup != null) {
+                                onScaleMarkup(factor)
+                                return@pinchToZoom
+                            }
                             zoom = (zoom * factor).coerceIn(MINIMUM_ZOOM, MAXIMUM_ZOOM)
                             if (zoom == 1f) pan = Offset.Zero
                         }
-                        .twoFingerPanXY { delta -> pan += delta }
+                        // The pan half of the same gesture. Gating only the zoom
+                        // left the picture sliding about under a caption being
+                        // resized — the two handlers read the same two fingers, so
+                        // both have to stand down, not one.
+                        .twoFingerPanXY { delta ->
+                            if (selectedMarkup == null) pan += delta
+                        }
                         // Double-tap zooms about the tapped point, the same as the
                         // reader. A pinch needs two fingers and a deliberate spread;
                         // this is the one-handed way in, and it matters most here
                         // because the picture is what the whole screen is for.
                         //
-                        // Safe alongside drawing: a tap that never moves is not a
-                        // drag, so the canvas underneath does not claim it, and a
-                        // stroke that *does* move never reaches the tap detector.
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onDoubleTap = { position ->
-                                    val target = if (zoom > MINIMUM_ZOOM + ZOOM_EPSILON) {
-                                        MINIMUM_ZOOM
-                                    } else {
-                                        EDITOR_DOUBLE_TAP_ZOOM
-                                    }
-                                    // Keep whatever was under the finger under the
-                                    // finger. Without this the picture jumps to its
-                                    // centre and the detail being aimed at is gone.
-                                    val ratio = target / zoom
-                                    val centre = Offset(size.width / 2f, size.height / 2f)
-                                    pan = if (target == MINIMUM_ZOOM) {
-                                        Offset.Zero
-                                    } else {
-                                        (position - centre) * (1f - ratio) + pan * ratio
-                                    }
-                                    zoom = target
-                                },
-                            )
+                        // Watched on the Initial pass, not detected on the Main
+                        // one — the same trap the reader documents. The canvas
+                        // underneath claims the press the moment a tool is armed,
+                        // and `detectTapGestures` asks for one nobody has claimed,
+                        // so with anything in hand the zoom never saw a tap at all.
+                        .onSizeChanged { viewport = it }
+                        .doubleTapToZoom { position ->
+                            val target = if (zoom > MINIMUM_ZOOM + ZOOM_EPSILON) {
+                                MINIMUM_ZOOM
+                            } else {
+                                EDITOR_DOUBLE_TAP_ZOOM
+                            }
+                            // Keep whatever was under the finger under the finger.
+                            // Without this the picture jumps to its centre and the
+                            // detail being aimed at is gone.
+                            val ratio = target / zoom
+                            val centre = Offset(viewport.width / 2f, viewport.height / 2f)
+                            pan = if (target == MINIMUM_ZOOM) {
+                                Offset.Zero
+                            } else {
+                                (position - centre) * (1f - ratio) + pan * ratio
+                            }
+                            zoom = target
                         },
                     contentAlignment = Alignment.Center,
                 ) {
@@ -318,6 +433,10 @@ fun CaptureEditor(
                         style = markupStyle,
                         onCommit = onCommitMarkup,
                         onRecognise = onRecogniseMarkup,
+                        onPlaceText = { pendingText = it },
+                        onMoveText = onMoveMarkup,
+                        onSelectText = onSelectMarkup,
+                        selectedText = selectedMarkup,
                         zoom = zoom,
                         pan = pan,
                         modifier = Modifier.fillMaxSize().padding(8.dp),
@@ -349,10 +468,16 @@ fun CaptureEditor(
                         color = markupColor,
                         size = markupSize,
                         style = markupStyle,
+                        font = textFont,
+                        sizePoints = textSizePoints,
                         onTool = onMarkupTool,
                         onColor = onMarkupColor,
                         onSize = onMarkupSize,
                         onStyle = onMarkupStyle,
+                        curveDegrees = textCurveDegrees,
+                        onFont = onTextFont,
+                        onCurve = onTextCurve,
+                        onSizePoints = onTextSize,
                         onPickCustomColour = { pickingColour = true },
                     )
 

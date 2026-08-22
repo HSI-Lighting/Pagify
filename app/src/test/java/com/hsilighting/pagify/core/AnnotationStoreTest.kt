@@ -239,4 +239,162 @@ class AnnotationStoreTest {
         assertFalse(store.canRedo)
         assertTrue(store.isEmpty)
     }
+
+    // ------------------------------------------------------------------ move --
+
+    private fun text(page: Int = 0, at: Offset = Offset(50f, 200f)) =
+        Annotation.Text(
+            id = store.nextId(),
+            pageIndex = page,
+            text = "Approved",
+            // A real baseline, as the view model builds one: a tap gives a point
+            // and the layout walks a line, so a mark holding only the point is a
+            // mark no glyph would ever land on.
+            path = straightBaseline(at, "Approved", PdfFont.HELVETICA, 12f),
+            font = PdfFont.HELVETICA,
+            sizePoints = 12f,
+            color = AnnotationColors.RED,
+        ).also { store.add(it) }
+
+    @Test
+    fun `moving text takes it to the new place and keeps its id`() {
+        val placed = text()
+        assertTrue(store.move(placed.id, Offset(30f, -20f)))
+
+        val moved = store.forPage(0).single() as Annotation.Text
+        assertEquals(placed.id, moved.id)
+        assertEquals(Offset(80f, 180f), moved.path.first())
+        assertEquals("Approved", moved.text)
+    }
+
+    @Test
+    fun `a move is one undo step back to where it started`() {
+        val placed = text()
+        store.move(placed.id, Offset(30f, -20f))
+
+        store.undo()
+        assertEquals(Offset(50f, 200f), (store.forPage(0).single() as Annotation.Text).path.first())
+        // And only one step: the mark itself is still there, not undone away.
+        assertEquals(1, store.forPage(0).size)
+
+        store.redo()
+        assertEquals(Offset(80f, 180f), (store.forPage(0).single() as Annotation.Text).path.first())
+    }
+
+    @Test
+    fun `redoing a move leaves the mark at the depth it was drawn at`() {
+        val under = text(at = Offset(10f, 10f))
+        val over = ink()
+        store.move(under.id, Offset(5f, 5f))
+
+        store.undo()
+        store.redo()
+        // Ink was drawn on top and has to stay on top: a moved mark that came
+        // back at the end of the list would be painted over it.
+        assertEquals(listOf(under.id, over.id), store.forPage(0).map { it.id })
+    }
+
+    @Test
+    fun `moving nothing changes nothing`() {
+        val placed = text()
+        assertFalse(store.move(placed.id, Offset.Zero))
+        assertFalse(store.move(placed.id + 999L, Offset(10f, 10f)))
+        assertFalse(store.canUndo && store.undo()?.label == "move")
+    }
+
+    @Test
+    fun `every kind of mark moves`() {
+        val marks = listOf(highlight(), ink())
+        marks.forEach { store.move(it.id, Offset(7f, 11f)) }
+
+        val movedHighlight = store.forPage(0).filterIsInstance<Annotation.Highlight>().single()
+        assertEquals(Rect(17f, 111f, 117f, 121f), movedHighlight.rects.single())
+        val movedInk = store.forPage(0).filterIsInstance<Annotation.Ink>().single()
+        assertEquals(listOf(Offset(7f, 11f), Offset(107f, 11f)), movedInk.points)
+    }
+
+    @Test
+    fun `restyling text rebuilds the line it sits on`() {
+        val placed = text()
+        assertTrue(store.restyle(placed.id, "size") { it.rebuilt(sizePoints = 24f) })
+
+        val bigger = store.forPage(0).single() as Annotation.Text
+        assertEquals(24f, bigger.sizePoints, 0.01f)
+        // The layout walks the baseline and drops any glyph that runs off the
+        // end, so type that grew on a line that did not would lose its last
+        // letters. Every letter still lands.
+        assertEquals(
+            bigger.text.length,
+            layOutText(bigger.text, bigger.font, bigger.sizePoints, bigger.path).size,
+        )
+        // And it grew from where it was placed, not from the page corner.
+        assertEquals(placed.path.first(), bigger.path.first())
+    }
+
+    @Test
+    fun `a new face gets a line long enough for it`() {
+        val placed = text()
+        store.restyle(placed.id, "font") { it.rebuilt(font = PdfFont.COURIER) }
+
+        val reset = store.forPage(0).single() as Annotation.Text
+        // Courier is wider than Helvetica at the same size. Keeping the old line
+        // would drop the last letters off the end of it.
+        assertEquals(
+            reset.text.length,
+            layOutText(reset.text, reset.font, reset.sizePoints, reset.path).size,
+        )
+    }
+
+    @Test
+    fun `a restyle is one undo step`() {
+        val placed = text()
+        store.restyle(placed.id, "size") { it.rebuilt(sizePoints = 24f) }
+        store.undo()
+        assertEquals(12f, (store.forPage(0).single() as Annotation.Text).sizePoints, 0.01f)
+        assertEquals(1, store.forPage(0).size)
+    }
+
+    @Test
+    fun `a control moved back to where it was records nothing`() {
+        val placed = text()
+        // Otherwise dragging a slider across and back leaves a pile of undo steps
+        // that each do nothing, and the one real edit before them is unreachable.
+        assertFalse(store.restyle(placed.id, "size") { it.rebuilt(sizePoints = 12f) })
+        // Nothing recorded, so one undo still reaches past it to the placement
+        // itself — which it could not do with a pile of no-op steps in the way.
+        store.undo()
+        assertTrue(store.forPage(0).isEmpty())
+    }
+
+    @Test
+    fun `bending a caption keeps its words and where it starts`() {
+        val placed = text()
+        store.restyle(placed.id, "bend") { it.rebuilt(curveDegrees = 90f) }
+
+        val bent = store.forPage(0).single() as Annotation.Text
+        assertEquals(placed.text, bent.text)
+        assertEquals(placed.path.first(), bent.path.first())
+        assertEquals(90f, bent.curveDegrees, 0.01f)
+
+        val placedGlyphs = layOutText(bent.text, bent.font, bent.sizePoints, bent.path)
+        val turned = kotlin.math.abs(placedGlyphs.last().radians - placedGlyphs.first().radians)
+        assertTrue("the line did not bend: $turned radians", turned > 1.0f)
+    }
+
+    @Test
+    fun `restyling something that is not text changes nothing`() {
+        val stroke = ink()
+        assertFalse(store.restyle(stroke.id, "size") { it.rebuilt(sizePoints = 24f) })
+    }
+
+    @Test
+    fun `straight text can be grabbed by its last letter, not only its first`() {
+        val placed = text(at = Offset(50f, 200f))
+        val end = 50f + PdfFont.HELVETICA.widthOf("Approved", 12f)
+        // Just short of the end of the run, on the baseline: the point a reader
+        // aiming at the final letter would touch.
+        assertTrue(placed.isHitBy(Offset(end - 2f, 200f), tolerance = 1f))
+        // And not far past it, or the whole line would be one big target.
+        assertFalse(placed.isHitBy(Offset(end + 60f, 200f), tolerance = 1f))
+    }
 }
