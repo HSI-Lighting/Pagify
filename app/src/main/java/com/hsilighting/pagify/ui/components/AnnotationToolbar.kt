@@ -97,6 +97,8 @@ fun AnnotationToolbar(
     textCurveDegrees: Float,
     /** The largest size a caption can take and still fit the page. */
     textSizeCeiling: Float,
+    /** Whether the bend still means anything for the caption in hand. */
+    textBendApplies: Boolean,
     onTextFont: (PdfFont) -> Unit,
     /** How far a curved caption bends, end to end, in degrees. */
     onTextCurve: (Float) -> Unit,
@@ -192,6 +194,7 @@ fun AnnotationToolbar(
                     sizePoints = textSizePoints,
                     curveDegrees = textCurveDegrees,
                     sizeCeiling = textSizeCeiling,
+                    bendApplies = textBendApplies,
                     onFont = onTextFont,
                     onCurve = onTextCurve,
                     onSizePoints = onTextSize,
@@ -203,6 +206,7 @@ fun AnnotationToolbar(
                     onStrokeWidth = onStrokeWidth,
                     onLineStyle = onLineStyle,
                     onPickCustomColour = { pickingColour = true },
+                    onDismiss = { showDrawPalette = false },
                 )
             }
             if (showClearMenu) {
@@ -265,9 +269,18 @@ fun AnnotationToolbar(
                         // frequent thing and the settings are the occasional one,
                         // and because a band that appeared by itself the moment a
                         // tool was armed took a third of the page uninvited.
+                        // Tapping the group while one of its tools is armed puts
+                        // the pen down. Going into the palette to tap the exact
+                        // tool again was the only way to stop drawing, which is a
+                        // lot of aim for "I am finished".
                         onClick = {
                             showParameters = false
-                            showDrawPalette = !showDrawPalette
+                            if (selectedTool.draws) {
+                                showDrawPalette = false
+                                onSelectTool(AnnotationTool.None)
+                            } else {
+                                showDrawPalette = !showDrawPalette
+                            }
                         },
                         onLongClick = {
                             openParameters(
@@ -889,29 +902,53 @@ private val PARAMETER_BAND_WIDTH = 360.dp
  * result until the words appear.
  */
 @Composable
-fun TextComposer(curved: Boolean, onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
-    var text by remember { mutableStateOf("") }
+fun TextComposer(
+    curved: Boolean,
+    /** The words already there, when an existing caption is being edited. */
+    initial: String = "",
+    /** Whether this is editing a caption that exists rather than writing a new one. */
+    editing: Boolean = false,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    // Keyed on what came in, so opening the dialog on a different caption shows
+    // that caption's words rather than the last one's.
+    var text by remember(initial) { mutableStateOf(initial) }
     val focus = remember { FocusRequester() }
 
     LaunchedEffect(Unit) { focus.requestFocus() }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (curved) "Text along the curve" else "Text") },
+        title = {
+            Text(
+                when {
+                    editing -> "Edit text"
+                    curved -> "Text along the curve"
+                    else -> "Text"
+                },
+            )
+        },
         text = {
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
                 placeholder = { Text("Type here") },
+                // Several lines, and the return key makes one rather than
+                // closing the dialog. A caption is often a sentence that wants
+                // breaking, and one long line runs off the sheet.
+                singleLine = false,
+                minLines = 2,
+                maxLines = 6,
                 modifier = Modifier.focusRequester(focus),
             )
         },
         confirmButton = {
-            // Blank adds nothing rather than an invisible mark: text with no
-            // letters cannot be seen, so it could only be found by erasing at
-            // random until it went away.
-            TextButton(onClick = { onConfirm(text) }, enabled = text.isNotBlank()) {
-                Text("Add")
+            // Blank words are how you say "delete this" while editing. Writing a
+            // new one, blank adds nothing rather than an invisible mark: text with
+            // no letters could only be found by erasing at random.
+            TextButton(onClick = { onConfirm(text) }, enabled = editing || text.isNotBlank()) {
+                Text(if (editing) "Save" else "Add")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },

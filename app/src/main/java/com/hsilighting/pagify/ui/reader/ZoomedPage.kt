@@ -45,6 +45,9 @@ import com.hsilighting.pagify.ui.components.captureOverlay
 import com.hsilighting.pagify.ui.components.doubleTapToZoom
 import com.hsilighting.pagify.ui.components.pinchToZoom
 import com.hsilighting.pagify.ui.components.twoFingerPanXY
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.animation.core.animate
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlin.math.roundToInt
@@ -138,6 +141,15 @@ fun ZoomedPage(
     selectedText: Long?,
     /** Two fingers with a caption in hand: that big. */
     onScaleText: (factor: Float) -> Unit,
+    /** A caption was double-tapped; rewrite its words. */
+    onEditText: (id: Long) -> Unit,
+    /**
+     * Move to the next page (+1) or the previous one (-1), staying magnified.
+     *
+     * @return true when there was a page to move to. False springs the pull back
+     *   instead, which is what says "this is the end of the document".
+     */
+    onTurnPage: (delta: Int) -> Boolean,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
     onOpenNote: (com.hsilighting.pagify.core.Annotation.Note) -> Unit,
@@ -175,6 +187,20 @@ fun ZoomedPage(
         var offset by remember { mutableStateOf(Offset.Zero) }
 
         /**
+         * How far the page has been pulled past its own end, in pixels.
+         *
+         * Signed the way the offset is: negative is pulled up past the bottom,
+         * positive pulled down past the top. It gives a little and springs back,
+         * which says "the page has run out" without a word on screen — and a
+         * fresh swipe that pulls far enough turns to the next page.
+         */
+        var pull by remember { mutableFloatStateOf(0f) }
+
+        /** Where to sit on a page just turned to, applied once its size is known. */
+        var landing by remember { mutableStateOf<Int?>(null) }
+        val scope = rememberCoroutineScope()
+
+        /**
          * Keep the content covering the viewport, and centred on any axis where it
          * is smaller. Without this a pan could strand the page off screen.
          */
@@ -194,6 +220,23 @@ fun ZoomedPage(
             return Offset(x, y)
         }
 
+        // A page just turned to sits at the edge the reader arrived from: the top
+        // when moving forward, the bottom when moving back, and always at the same
+        // horizontal position, so reading down one column carries on in the same
+        // column of the next page.
+        LaunchedEffect(pageIndex, baseH, landing) {
+            val towards = landing ?: return@LaunchedEffect
+            offset = clamp(
+                Offset(offset.x, if (towards > 0) 0f else viewportH - baseH * scale),
+                scale,
+            )
+        }
+
+        // The marks on a page turned to have to be read, exactly as the list reads
+        // them when a page scrolls into view. Without this a magnified page turned
+        // to came up with none of its highlights.
+        LaunchedEffect(pageIndex) { onPageMarksNeeded(pageIndex) }
+
         // Open centred on whatever the entering gesture was aimed at.
         LaunchedEffect(initialFocus, baseW, baseH) {
             val focus = initialFocus ?: return@LaunchedEffect
@@ -204,6 +247,31 @@ fun ZoomedPage(
                 ),
                 scale,
             )
+        }
+
+        /**
+         * Let the pull go: turn the page if it went far enough, or spring back.
+         *
+         * The turn keeps the zoom and the horizontal position; only the page
+         * changes. Nowhere to go — the first page or the last — springs back too,
+         * which is what says the document has ended rather than the page.
+         */
+        fun settle() {
+            val pulled = pull
+            val towards = when {
+                pulled <= -PULL_TO_TURN -> 1
+                pulled >= PULL_TO_TURN -> -1
+                else -> 0
+            }
+            if (towards != 0 && onTurnPage(towards)) {
+                landing = towards
+                pull = 0f
+                return
+            }
+            if (pulled == 0f) return
+            scope.launch {
+                animate(initialValue = pulled, targetValue = 0f) { value, _ -> pull = value }
+            }
         }
 
         /**
@@ -304,12 +372,13 @@ fun ZoomedPage(
         // is the live scale rather than the committed one: the bitmap may still be
         // the previous rasterisation stretched to fit, and a mark has to sit on the
         // text as it appears now, not as it will appear once the render catches up.
+        val shown = Offset(offset.x, offset.y + pull)
         val mapping = laidOut
             ?.takeIf { it.widthPoints > 0f }
             ?.let {
                 PageMapping(
                     scale = baseW * scale / it.widthPoints,
-                    origin = offset,
+                    origin = shown,
                     quarterTurns = quarterTurns,
                     pageWidthPoints = pageSize?.widthPoints ?: 0f,
                     pageHeightPoints = pageSize?.heightPoints ?: 0f,
@@ -355,9 +424,30 @@ fun ZoomedPage(
                         Modifier
                     } else {
                         Modifier.pointerInput(Unit) {
-                            detectDragGestures { change, drag ->
+                            detectDragGestures(
+                                // A fresh swipe turns the page, not a long drag
+                                // that runs off the end: the drag stops dead at
+                                // the edge, and lifting is what decides. You
+                                // cannot shoot through three pages by flicking.
+                                onDragEnd = { settle() },
+                                onDragCancel = { settle() },
+                            ) { change, drag ->
                                 change.consume()
-                                offset = clamp(offset + drag, scale)
+                                // The reader is moving under their own hand now,
+                                // so wherever the turn put them is where they are.
+                                landing = null
+                                val wanted = offset + drag
+                                val held = clamp(wanted, scale)
+                                offset = held
+                                // Whatever the clamp refused vertically is the
+                                // page having run out. It gives, dampened, up to
+                                // a limit, and springs back when the finger
+                                // lifts unless it went far enough to turn.
+                                val refused = wanted.y - held.y
+                                if (refused != 0f) {
+                                    pull = (pull + refused * PULL_DAMPING)
+                                        .coerceIn(-PULL_LIMIT, PULL_LIMIT)
+                                }
                             }
                         }
                     },
@@ -388,7 +478,7 @@ fun ZoomedPage(
                             // The page is drawn translated by `offset` at `scale`,
                             // in this element's own pixels — the same frame the drag
                             // is reported in, so nothing needs converting.
-                            val onScreen = zoomedPageBounds(offset, baseW, baseH, scale)
+                            val onScreen = zoomedPageBounds(shown, baseW, baseH, scale)
                             val tiles = captureTilesFor(
                                 box,
                                 listOf(PlacedPage(pageIndex, onScreen, pageSize)),
@@ -438,6 +528,7 @@ fun ZoomedPage(
                     onMoveText = onMoveText,
                     onSelectText = onSelectText,
                     selectedText = selectedText,
+                    onEditText = onEditText,
                     onOpenNote = onOpenNote,
                     onEraseStart = onEraseStart,
                     onErase = onErase,
@@ -455,7 +546,7 @@ fun ZoomedPage(
                 val bmp = pageBitmap ?: return@Canvas
                 drawImage(
                     image = bmp.asImageBitmap(),
-                    dstOffset = IntOffset(offset.x.roundToInt(), offset.y.roundToInt()),
+                    dstOffset = IntOffset(shown.x.roundToInt(), shown.y.roundToInt()),
                     dstSize = IntSize(
                         (baseW * scale).roundToInt().coerceAtLeast(1),
                         (baseH * scale).roundToInt().coerceAtLeast(1),
@@ -474,3 +565,22 @@ private const val DOUBLE_TAP_ZOOM = 2.5f
 
 /** How long after the last gesture event to re-rasterise at the new scale. */
 private const val SETTLE_MILLIS = 180L
+
+/**
+ * How much of a drag past the page's end actually moves it.
+ *
+ * Less than all of it, so the edge feels like an edge: the page follows the
+ * finger at half speed once it has run out, which is what tells you it has.
+ */
+private const val PULL_DAMPING = 0.45f
+
+/** As far as the page will give, however hard it is pulled. */
+private const val PULL_LIMIT = 240f
+
+/**
+ * How far it has to be pulled for a lift to turn the page.
+ *
+ * Comfortably short of [PULL_LIMIT], so the page turns before the pull runs out
+ * of room and the gesture stops meaning anything.
+ */
+private const val PULL_TO_TURN = 110f

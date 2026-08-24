@@ -46,12 +46,28 @@ sealed interface PdfCommand {
         val at: Int,
         val widthPoints: Float,
         val heightPoints: Float,
+        /**
+         * What the sheet is made of, or null for a plain one.
+         *
+         * A PDF page has no background colour: white is only what an empty page
+         * looks like. A coloured sheet is a filled rectangle covering it, so it
+         * prints and it survives being opened anywhere else.
+         */
+        val fill: Long? = null,
+        /**
+         * What is printed on the sheet before anything is written on it: 0 plain,
+         * then lined, squared, dotted. A sheet added to a notebook should match
+         * the sheets already in it.
+         */
+        val ruling: Int = 0,
     ) : PdfCommand {
         override fun toJson(): String = JSONObject().apply {
             put("op", "insertBlankPage")
             put("at", at)
             put("widthPt", widthPoints.toDouble())
             put("heightPt", heightPoints.toDouble())
+            fill?.let { put("fill", it.colorToWireJson()) }
+            put("ruling", ruling)
         }.toString()
     }
 
@@ -409,14 +425,18 @@ internal fun Annotation.Text.textWireJson(withRestore: Boolean): JSONObject = JS
     put("kind", "text")
     put("text", text)
     put("font", font.wireName)
+    // The file to embed, when this font is one. Absent for a standard-14, which
+    // is named rather than embedded and written by character.
+    font.asset?.let { put("fontAsset", it) }
     put("size", sizePoints.toDouble())
     put("color", color.colorToWireJson())
     put(
         "glyphs",
         JSONArray(
-            layOutText(text, font, sizePoints, path).map { glyph ->
+            layOutBlock().map { glyph ->
                 JSONObject().apply {
-                    put("ch", glyph.character.toString())
+                    put("ch", glyph.text)
+                    put("id", glyph.id)
                     put("x", glyph.origin.x.toDouble())
                     put("y", glyph.origin.y.toDouble())
                     put("radians", glyph.radians.toDouble())

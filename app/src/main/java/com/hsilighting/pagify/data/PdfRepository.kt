@@ -10,6 +10,7 @@ import com.hsilighting.pagify.core.PageSize
 import com.hsilighting.pagify.core.PdfCommand
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfMetadata
+import com.hsilighting.pagify.core.NativeBridge
 import com.hsilighting.pagify.core.PdfNativeException
 import com.hsilighting.pagify.core.RenderScale
 import com.hsilighting.pagify.core.SavedMark
@@ -198,6 +199,38 @@ class PdfRepository(
                 ?.use { out -> scratch.inputStream().use { it.copyTo(out) } }
                 ?: throw PdfNativeException("could not open $uri for writing")
         }
+    }
+
+    /**
+     * Write a new blank document to a destination the reader chose.
+     *
+     * Straight to the destination rather than through a scratch file: the save
+     * path needs one because PDFium reads the source while writing, and here
+     * there is no source to read.
+     */
+    suspend fun createBlank(
+        uri: Uri,
+        pages: Int,
+        widthPoints: Float,
+        heightPoints: Float,
+        fill: Int,
+        ruling: Int,
+    ): Unit = withContext(ioDispatcher) {
+        // "rwt" truncates, so choosing an existing file replaces it rather than
+        // leaving the tail of the old one after the new %%EOF.
+        resolver.openFileDescriptor(uri, "rwt")?.use { descriptor ->
+            // Detached, because the native side adopts it. Closing the
+            // ParcelFileDescriptor afterwards is then a no-op rather than a
+            // double close.
+            NativeBridge.createBlankDocument(
+                descriptor.detachFd(),
+                pages,
+                widthPoints,
+                heightPoints,
+                fill,
+                ruling,
+            )
+        } ?: throw PdfNativeException("could not open $uri for writing")
     }
 
     /**

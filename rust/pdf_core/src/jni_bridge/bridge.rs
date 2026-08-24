@@ -3,13 +3,16 @@
 //! Symbol names must match `com.hsilighting.pagify.core.NativeBridge` exactly;
 //! changing the Kotlin package means changing every `#[no_mangle]` name here.
 
-use jni::objects::{JClass, JFloatArray, JObject, JString};
+use jni::objects::{JByteArray, JClass, JFloatArray, JObject, JString};
 use jni::sys::{jboolean, jbyteArray, jfloat, jint, jlong, jstring, JNI_FALSE, JNI_TRUE};
 use jni::JNIEnv;
 
 use crate::command::Command;
 use crate::document::pdfium_doc::PdfiumDocument;
-use crate::document::{Color, Document, Point, Rect, RegionRequest, RenderRequest, Rotation};
+use crate::document::blank::{blank_document, Ruling};
+use crate::document::{
+    Color, Document, PageSize, Point, Rect, RegionRequest, RenderRequest, Rotation,
+};
 use crate::engine;
 use crate::error::{PdfError, Result};
 use crate::jni_bridge::android_bitmap::LockedPixels;
@@ -525,6 +528,163 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_saveToFd(
         // which would report a successful save of a truncated file.
         std::io::Write::flush(&mut writer)?;
         Ok(())
+    })
+}
+
+/// Write a brand-new blank document straight to a file descriptor.
+///
+/// Takes no handle: there is no document yet, which is the whole point. The
+/// descriptor is one Kotlin opened on a destination the reader chose, so the file
+/// exists in their storage from the moment it exists at all, and is then opened
+/// by the ordinary path like any other file.
+///
+/// `fill` is an ARGB colour, or 0 for paper left the colour paper already is.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_createBlankDocument(
+    mut env: JNIEnv,
+    _class: JClass,
+    fd: jint,
+    pages: jint,
+    width_pt: jfloat,
+    height_pt: jfloat,
+    fill: jint,
+    ruling: jint,
+) {
+    guard(&mut env, (), |_| {
+        // Adopted first, as in `saveToFd`: on every path from here the descriptor
+        // is owned by this call.
+        // Safety: the contract above places ownership of `fd` with this call.
+        let file = unsafe { PdfiumDocument::adopt_fd(fd)? };
+        let mut writer = std::io::BufWriter::new(file);
+
+        let pages = usize::try_from(pages.max(0)).unwrap_or(0);
+        let size = PageSize { width_pt, height_pt };
+        // Zero means "no fill" rather than transparent black: a colour the reader
+        // never chose cannot be told apart from one they did, and white paper is
+        // sent as no rectangle at all.
+        let paint = if fill == 0 {
+            None
+        } else {
+            let argb = fill as u32;
+            Some(Color {
+                a: ((argb >> 24) & 0xff) as u8,
+                r: ((argb >> 16) & 0xff) as u8,
+                g: ((argb >> 8) & 0xff) as u8,
+                b: (argb & 0xff) as u8,
+            })
+        };
+
+        let bytes = blank_document(pages, size, paint, Ruling::from_code(ruling))?;
+        std::io::Write::write_all(&mut writer, &bytes)?;
+        // Flushed explicitly: a `BufWriter` that fails on drop swallows the error,
+        // which would report a written file that is truncated.
+        std::io::Write::flush(&mut writer)?;
+        Ok(())
+    })
+}
+
+/// Hand the engine a font file, under a name the app will ask for later.
+///
+/// Registered once at startup rather than passed with every caption: a font file
+/// is most of a megabyte and a caption is a few dozen bytes.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_registerFont<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    name: JString<'local>,
+    data: JByteArray<'local>,
+) {
+    guard(&mut env, (), |env| {
+        let name = required_string(env, &name, "name")?;
+        let bytes = env
+            .convert_byte_array(&data)
+            .map_err(|e| PdfError::InvalidArgument(format!("could not read the font: {e}")))?;
+        crate::text::register(&name, bytes)
+    })
+}
+
+/// Whether a registered font can draw every character of some text.
+///
+/// What lets the app pick a font the reader did not: typing Persian into a
+/// caption set in Helvetica should produce Persian, not a row of empty boxes.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_fontCovers<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    name: JString<'local>,
+    text: JString<'local>,
+) -> jboolean {
+    guard(&mut env, JNI_FALSE, |env| {
+        let name = required_string(env, &name, "name")?;
+        let text = required_string(env, &text, "text")?;
+        Ok(if crate::text::covers(&name, &text) {
+            JNI_TRUE
+        } else {
+            JNI_FALSE
+        })
+    })
+}
+
+/// Shape text in a registered font.
+///
+/// Returns the glyphs in the order they are drawn, left to right, as
+/// `{"rtl":bool,"glyphs":[{"id":u32,"from":u32,"to":u32,"advance":f32,"dx":f32,"dy":f32}]}`.
+/// Advances and offsets are fractions of the point size, so the app scales them
+/// by whatever size the reader chose without asking again.
+///
+/// `from`/`to` are byte offsets into the text: which characters this glyph stands
+/// for. The app sends them back with the glyph when it saves, and they become the
+/// ToUnicode — without which the words draw perfectly and cannot be copied.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_shapeTextJson<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    name: JString<'local>,
+    text: JString<'local>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let name = required_string(env, &name, "name")?;
+        let text = required_string(env, &text, "text")?;
+        let shaped = crate::text::shape(&name, &text)?;
+
+        // The characters each glyph stands for, worked out here rather than in
+        // Kotlin: the cluster boundaries are a fact about the shaping, and the
+        // app has no way to recover them.
+        let mut boundaries: Vec<usize> =
+            shaped.glyphs.iter().map(|g| g.cluster as usize).collect();
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        let glyphs: Vec<serde_json::Value> = shaped
+            .glyphs
+            .iter()
+            .map(|g| {
+                let from = g.cluster as usize;
+                let to = boundaries
+                    .iter()
+                    .find(|&&b| b > from)
+                    .copied()
+                    .unwrap_or(text.len());
+                serde_json::json!({
+                    "id": g.id,
+                    "from": from,
+                    "to": to,
+                    "advance": g.advance,
+                    "dx": g.offset_x,
+                    "dy": g.offset_y,
+                })
+            })
+            .collect();
+
+        let payload = serde_json::json!({
+            "rtl": shaped.right_to_left,
+            "glyphs": glyphs,
+        })
+        .to_string();
+
+        env.new_string(payload)
+            .map(|s| s.into_raw())
+            .map_err(|e| PdfError::InvalidArgument(format!("could not return the shaping: {e}")))
     })
 }
 

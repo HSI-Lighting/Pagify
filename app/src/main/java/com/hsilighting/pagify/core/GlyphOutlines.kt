@@ -33,7 +33,7 @@ fun MarkupShape.Text.glyphContours(): List<List<Offset>> {
     }
 
     val letters = Path()
-    layOutText(text, font, sizePoints, path).forEach { placement ->
+    layOutBlock().forEach { placement ->
         val glyph = Path()
         val letter = placement.character.toString()
         paint.getTextPath(letter, 0, letter.length, 0f, 0f, glyph)

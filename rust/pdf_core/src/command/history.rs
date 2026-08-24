@@ -125,7 +125,7 @@ impl CommandHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Annotation, Document, PageSize, RemovedPage};
+    use crate::document::{Annotation, Color, Document, PageSize, RemovedPage};
     use crate::error::PdfError;
     use std::io::Write;
 
@@ -191,7 +191,13 @@ mod tests {
             Ok(())
         }
 
-        fn insert_blank_page(&mut self, at: usize, size: PageSize) -> Result<()> {
+        fn insert_blank_page(
+            &mut self,
+            at: usize,
+            size: PageSize,
+            _fill: Option<Color>,
+            _ruling: crate::document::Ruling,
+        ) -> Result<()> {
             self.widths.insert(at, size.width_pt);
             self.rotations.insert(at, 0);
             Ok(())
@@ -316,6 +322,8 @@ mod tests {
                     at: 1,
                     width_pt: 99.0,
                     height_pt: 100.0,
+                                    fill: None,
+                                    ruling: 0,
                 },
                 &mut doc,
             )

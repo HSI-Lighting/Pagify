@@ -5,18 +5,13 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.SaveAs
 import androidx.compose.material3.Badge
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -29,10 +24,10 @@ import androidx.compose.ui.unit.dp
  * closed the app lost the highlight and had no way of knowing they were about to.
  * The dot says there is unsaved work; its absence says there is not.
  *
- * A long press offers "Save a copy" rather than a menu on every tap, because
- * saving is the common case by a wide margin. It is also the way out when the
- * document cannot be written to — a PDF opened from a mail attachment arrives
- * read-only, and no amount of trying the first option will change that.
+ * Save as sits beside it rather than behind a long press. It was reachable only by
+ * holding the save button down, which is not a gesture anybody tries on a button
+ * that already does something — and it is the only way out for a document that
+ * cannot be written to, which a PDF from a mail attachment always is.
  */
 @Composable
 fun SaveAction(
@@ -41,65 +36,49 @@ fun SaveAction(
     onSave: () -> Unit,
     onSaveCopy: () -> Unit,
 ) {
-    var showingMenu by remember { mutableStateOf(false) }
-
-    Box {
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .combinedClickableCompat(
-                    onClick = { if (hasUnsavedWork && !isSaving) onSave() },
-                    // Available even with nothing unsaved: "save a copy" of the
-                    // document as it stands is a reasonable thing to want.
-                    onLongClick = { if (!isSaving) showingMenu = true },
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (isSaving) {
-                // The save itself can take seconds on a large document, and a
-                // button that looks idle invites a second press.
-                CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-            } else {
+    Box(
+        modifier = Modifier.size(48.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (isSaving) {
+            // The save itself can take seconds on a large document, and a button
+            // that looks idle invites a second press.
+            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+        } else {
+            IconButton(
+                onClick = onSave,
+                enabled = hasUnsavedWork,
+            ) {
                 Icon(
                     imageVector = Icons.Filled.Save,
                     contentDescription = if (hasUnsavedWork) {
                         "Save the document — there are unsaved changes"
                     } else {
-                        "Save a copy"
-                    },
-                    tint = if (hasUnsavedWork) {
-                        MaterialTheme.colorScheme.onSurface
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
+                        "Save the document — everything is saved"
                     },
                 )
-                if (hasUnsavedWork) {
-                    Badge(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .offset(x = (-8).dp, y = 10.dp)
-                            .size(8.dp),
-                    )
-                }
+            }
+            if (hasUnsavedWork) {
+                Badge(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .offset(x = (-8).dp, y = 10.dp)
+                        .size(8.dp),
+                )
             }
         }
+    }
 
-        DropdownMenu(expanded = showingMenu, onDismissRequest = { showingMenu = false }) {
-            DropdownMenuItem(
-                text = { Text("Save") },
-                enabled = hasUnsavedWork,
-                onClick = {
-                    showingMenu = false
-                    onSave()
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("Save a copy…") },
-                onClick = {
-                    showingMenu = false
-                    onSaveCopy()
-                },
-            )
-        }
+    IconButton(
+        onClick = onSaveCopy,
+        // Always available, unlike Save: a copy of the document as it stands is a
+        // reasonable thing to want whether or not anything has been changed.
+        enabled = !isSaving,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.SaveAs,
+            contentDescription = "Save as a new file",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }

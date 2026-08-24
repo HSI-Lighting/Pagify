@@ -740,7 +740,13 @@ mod tests {
             self.dirty = true;
             Ok(())
         }
-        fn insert_blank_page(&mut self, at: usize, size: PageSize) -> Result<()> {
+        fn insert_blank_page(
+            &mut self,
+            at: usize,
+            size: PageSize,
+            _fill: Option<Color>,
+            _ruling: crate::document::Ruling,
+        ) -> Result<()> {
             self.widths.insert(at, size.width_pt);
             self.rotations.insert(at, 0);
             self.dirty = true;
@@ -886,6 +892,8 @@ mod tests {
                 at: 0,
                 width_pt: 200.0,
                 height_pt: 300.0,
+                            fill: None,
+                            ruling: 0,
             },
         )
         .unwrap();

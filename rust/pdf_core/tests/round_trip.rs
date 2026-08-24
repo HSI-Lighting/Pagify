@@ -105,6 +105,8 @@ fn an_inserted_blank_page_survives_a_save() {
                 at: 1,
                 width_pt: 999.0,
                 height_pt: 400.0,
+                fill: None,
+                ruling: 0,
             },
             doc.as_document_mut().expect("mutable"),
         )
@@ -204,6 +206,8 @@ fn an_inserted_page_survives_a_full_copy_save() {
                 at: 1,
                 width_pt: 999.0,
                 height_pt: 400.0,
+                fill: None,
+                ruling: 0,
             },
             doc.as_document_mut().expect("mutable"),
         )
@@ -844,12 +848,14 @@ fn written_text_comes_back_as_text() {
     // turn, and few enough that a failure names the character that went wrong.
     let glyphs = vec![
         Glyph {
+            id: 0,
             ch: "H".into(),
             x: 100.0,
             y: 200.0,
             radians: 0.3,
         },
         Glyph {
+            id: 0,
             ch: "i".into(),
             x: 118.0,
             y: 206.0,
@@ -863,6 +869,7 @@ fn written_text_comes_back_as_text() {
             Command::AddAnnotation {
                 page_index: 0,
                 annotation: Annotation::Text {
+                    font_asset: None,
                     text: "Hi".into(),
                     font: "Helvetica".into(),
                     size: 24.0,
@@ -925,6 +932,7 @@ fn saved_text_can_be_found_again_and_erased() {
             .chars()
             .enumerate()
             .map(|(at, ch)| Glyph {
+                id: 0,
                 ch: ch.to_string(),
                 x: 100.0 + at as f32 * 14.0,
                 y,
@@ -937,6 +945,7 @@ fn saved_text_can_be_found_again_and_erased() {
         // same way here rather than hand-written, because a literal missing the
         // glyphs would still erase correctly and quietly fail to come back.
         let build = |restore: String| Annotation::Text {
+            font_asset: None,
             text: words.into(),
             font: "Helvetica".into(),
             size: 24.0,

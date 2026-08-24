@@ -159,6 +159,94 @@ class TextLayoutTest {
         assertEquals("Check this".length, run.size)
     }
 
+    // ------------------------------------------------------------ many lines --
+
+    private fun block(words: String, points: Float = 12f) = Annotation.Text(
+        id = 1L,
+        pageIndex = 0,
+        text = words,
+        path = straightBaseline(Offset(100f, 200f), words.captionLines().first(), font, points),
+        font = font,
+        sizePoints = points,
+        color = 0xFFFF0000,
+    )
+
+    @Test
+    fun `every line of a caption gets its letters`() {
+        val words = "Check this\nbefore you send it\nplease"
+        val placed = block(words).layOutBlock()
+
+        // Every character but the breaks themselves.
+        assertEquals(words.count { it != '\n' }, placed.size)
+    }
+
+    @Test
+    fun `the lines stack down the page, one line height apart`() {
+        val placed = block("Top\nMiddle\nBottom").layOutBlock()
+
+        val tops = placed.filter { it.character == 'T' }.map { it.origin.y }
+        val middles = placed.filter { it.character == 'M' }.map { it.origin.y }
+        val bottoms = placed.filter { it.character == 'B' }.map { it.origin.y }
+        assertTrue(tops.first() < middles.first())
+        assertTrue(middles.first() < bottoms.first())
+
+        // Evenly spaced: the gap between lines one and two is the gap between
+        // two and three, or the block drifts apart as it grows.
+        assertEquals(
+            middles.first() - tops.first(),
+            bottoms.first() - middles.first(),
+            0.01f,
+        )
+    }
+
+    @Test
+    fun `the lines are centred on each other`() {
+        // A short line between two long ones sits in the middle of them, which is
+        // what makes a frame drawn round the block look deliberate.
+        val placed = block("A very long line indeed\nshort").layOutBlock()
+        val long = placed.filter { it.origin.y < 210f }
+        val short = placed.filter { it.origin.y > 210f }
+
+        val longCentre = (long.minOf { it.origin.x } + long.maxOf { it.origin.x }) / 2f
+        val shortCentre = (short.minOf { it.origin.x } + short.maxOf { it.origin.x }) / 2f
+        assertEquals(longCentre, shortCentre, font.widthOf("n", 12f))
+    }
+
+    @Test
+    fun `the box round a block covers every line`() {
+        val one = block("Only one line").textBlockBounds()
+        val three = block("Only one line\nand another\nand a third").textBlockBounds()
+
+        assertTrue("three lines are no taller", three.height > one.height * 2.5f)
+        // As wide as its widest line, not the sum of them.
+        assertEquals(one.width, three.width, 0.5f)
+    }
+
+    @Test
+    fun `a block does not bend`() {
+        // Stacked arcs curl into each other and there is no answer for where the
+        // second one sits, so a caption that gains a line straightens — and the
+        // bend is remembered, so losing the line brings it back.
+        val bent = block("One line").rebuilt(curveDegrees = 90f)
+        assertTrue(baselineLength(bent.path) > 0f)
+
+        val broken = bent.rebuilt(text = "One line\nand two")
+        assertEquals(90f, broken.curveDegrees, 0.01f)
+        val laid = broken.layOutBlock()
+        val turned = abs(laid.last().radians - laid.first().radians)
+        assertEquals("a block bent anyway", 0f, turned, 0.001f)
+    }
+
+    @Test
+    fun `the ceiling is set by the longest line`() {
+        val page = 595f
+        // Measuring the whole string as one run would make two short lines look
+        // far too wide and hold the caption down to a size it did not need.
+        val asOneRun = font.sizeThatFits("Check this before you send it", page)
+        val asTwoLines = font.sizeThatFits("Check this\nbefore you send it", page)
+        assertTrue("one=$asOneRun two=$asTwoLines", asTwoLines > asOneRun)
+    }
+
     // ------------------------------------------------------ how big it may go --
 
     @Test

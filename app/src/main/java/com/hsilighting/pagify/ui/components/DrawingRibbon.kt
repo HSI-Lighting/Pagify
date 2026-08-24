@@ -39,6 +39,8 @@ fun DrawingRibbon(
     curveDegrees: Float,
     /** The largest size that still fits across the page. */
     sizeCeiling: Float,
+    /** Whether the bend still means anything for the caption in hand. */
+    bendApplies: Boolean,
     onFont: (PdfFont) -> Unit,
     onCurve: (Float) -> Unit,
     onSizePoints: (Float) -> Unit,
@@ -47,9 +49,12 @@ fun DrawingRibbon(
     onStrokeWidth: (Float) -> Unit,
     onLineStyle: (MarkupStyle) -> Unit,
     onPickCustomColour: () -> Unit,
+    /** Puts the band away. Null where it is always on screen. */
+    onDismiss: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     MarkRibbon(
+        onDismiss = onDismiss,
         groups = DRAWING_GROUPS.map { group ->
             group.map {
                 RibbonTool(
@@ -82,7 +87,9 @@ fun DrawingRibbon(
         onFont = onFont,
         // Only while a tool that bends is held: a straight caption has no bend to
         // set, and a slot that does nothing is worse than no slot.
-        curve = curveDegrees.takeIf { selectedTool.bendsText },
+        // Gone once the caption has more than one line: a block does not bend,
+        // so the slot would be a control that does nothing.
+        curve = curveDegrees.takeIf { selectedTool.bendsText && bendApplies },
         onCurve = onCurve,
         onTool = { onSelectTool(it as AnnotationTool) },
         onColour = onColor,

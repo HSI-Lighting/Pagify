@@ -1,7 +1,9 @@
 package com.hsilighting.pagify.ui.reader
 
+import com.hsilighting.pagify.core.EditState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -61,6 +63,45 @@ class PdfReaderStateTest {
     fun theZoomBoundsBracketFitWidth() {
         assertTrue(PdfReaderState.MIN_ZOOM <= PdfReaderState.FIT_WIDTH_ZOOM)
         assertTrue(PdfReaderState.MAX_ZOOM > PdfReaderState.FIT_WIDTH_ZOOM)
+    }
+
+    // ----------------------------------------- turning pages while magnified --
+
+    @Test
+    fun aSwipePastTheEndMovesToTheNextPage() {
+        val magnified = PdfReaderState(zoomedPage = 3, pageCount = 51)
+        assertEquals(4, magnified.pageAfterTurn(1))
+        assertEquals(2, magnified.pageAfterTurn(-1))
+    }
+
+    @Test
+    fun thereIsNowhereToGoPastEitherEndOfTheDocument() {
+        // The pull springs back instead, which is what says the document has
+        // ended rather than the page.
+        assertNull(PdfReaderState(zoomedPage = 0, pageCount = 5).pageAfterTurn(-1))
+        assertNull(PdfReaderState(zoomedPage = 4, pageCount = 5).pageAfterTurn(1))
+    }
+
+    @Test
+    fun nothingTurnsWhenNoPageIsMagnified() {
+        // At fit-width the list scrolls; there is no pinned page to move from,
+        // and a turn here would fight the scroll for the same gesture.
+        assertNull(PdfReaderState(zoomedPage = null, pageCount = 51).pageAfterTurn(1))
+    }
+
+    /**
+     * Both halves of "unsaved" count.
+     *
+     * Reordered pages and unwritten marks are separately losable, and a prompt
+     * that only knew about one of them would let the other go silently — which is
+     * the whole failure this guard exists to stop.
+     */
+    @Test
+    fun unsavedMarksCountAsWorkToLose() {
+        val clean = PdfReaderState()
+        assertFalse(clean.hasUnsavedWork)
+        assertTrue(clean.copy(unsavedMarkCount = 1).hasUnsavedWork)
+        assertTrue(clean.copy(editState = EditState(dirty = true)).hasUnsavedWork)
     }
 }
 

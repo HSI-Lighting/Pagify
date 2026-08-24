@@ -144,8 +144,8 @@ private val MARKUP_GROUPS: List<List<MarkupTool>> = listOf(
         MarkupTool.Curve,
         MarkupTool.CurvedArrow,
     ),
-    listOf(MarkupTool.Rectangle),
-    listOf(MarkupTool.Pen, MarkupTool.Ellipse, MarkupTool.Cloud),
+    listOf(MarkupTool.Rectangle, MarkupTool.Ellipse),
+    listOf(MarkupTool.Pen, MarkupTool.Cloud),
     listOf(MarkupTool.Highlight),
     listOf(
         MarkupTool.Text,

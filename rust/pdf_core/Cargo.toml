@@ -51,6 +51,10 @@ image = { version = "0.25.6", default-features = false, features = ["png", "jpeg
 # the Android build. `vello`/`femtovg` are GPU renderers and would need surface
 # management for a still image; `imageproc` has no proper anti-aliased stroking.
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
+rustybuzz = "0.20"
+ttf-parser = "0.25"
+unicode-bidi = "0.3"
+subsetter = "0.2.2"
 
 # No `lopdf`. PDFium is the single writer: two independent object models writing
 # one file is a corruption class that is very hard to diagnose, and PDFium covers

@@ -39,7 +39,7 @@ pub use history::CommandHistory;
 
 use serde::{Deserialize, Serialize};
 
-use crate::document::{Annotation, DocumentMut, PageSize, RemovedPage};
+use crate::document::{Annotation, Color, DocumentMut, PageSize, RemovedPage};
 use crate::error::{PdfError, Result};
 
 /// What the user asked for. Parameters only, and serialisable.
@@ -70,6 +70,20 @@ pub enum Command {
         at: usize,
         width_pt: f32,
         height_pt: f32,
+        /// What the sheet is made of.
+        ///
+        /// A PDF page has no background colour of its own — white is simply what
+        /// you see through an empty page. So a coloured sheet is a filled
+        /// rectangle covering it, written as page content, and it prints.
+        /// Defaulted so an older caller still gets the plain white page it asked
+        /// for.
+        #[serde(default)]
+        fill: Option<Color>,
+        /// What is printed on the sheet before anything is written on it: 0 for
+        /// plain, then lined, squared, dotted. Defaulted for the same reason
+        /// `fill` is — an older caller asked for plain paper.
+        #[serde(default)]
+        ruling: i32,
     },
     SetPageRotation {
         index: usize,
@@ -169,6 +183,8 @@ impl Command {
                 at,
                 width_pt,
                 height_pt,
+                fill,
+                ruling,
             } => {
                 doc.insert_blank_page(
                     *at,
@@ -176,6 +192,8 @@ impl Command {
                         width_pt: *width_pt,
                         height_pt: *height_pt,
                     },
+                    *fill,
+                    crate::document::Ruling::from_code(*ruling),
                 )?;
                 Ok(UndoRecord::RemovePage { index: *at })
             }
@@ -359,6 +377,8 @@ mod tests {
                 at: 1,
                 width_pt: 595.0,
                 height_pt: 842.0,
+                            fill: None,
+                            ruling: 0,
             },
             Command::SetPageRotation {
                 index: 7,
@@ -439,6 +459,8 @@ mod tests {
                     at: 1,
                     width_pt: 595.0,
                     height_pt: 842.0,
+                                    fill: None,
+                                    ruling: 0,
                 },
             ),
             (

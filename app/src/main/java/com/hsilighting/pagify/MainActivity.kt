@@ -24,6 +24,10 @@ import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.isDark
 import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.PagifyApp
+import com.hsilighting.pagify.ui.components.BlankPageSheet
+import com.hsilighting.pagify.ui.components.NewDocumentChooser
+import com.hsilighting.pagify.ui.components.LeavePrompt
+import com.hsilighting.pagify.ui.reader.LeaveIntent
 import com.hsilighting.pagify.ui.reader.PdfReaderScreen
 import com.hsilighting.pagify.ui.reader.PdfReaderViewModel
 import com.hsilighting.pagify.ui.theme.PagifyTheme
@@ -80,23 +84,7 @@ class MainActivity : ComponentActivity() {
                         // to the file the user opened needs it, and it cannot be
                         // asked for later — the grant is fixed when the picker
                         // returns.
-                        runCatching {
-                            contentResolver.takePersistableUriPermission(
-                                uri,
-                                Intent.FLAG_GRANT_READ_URI_PERMISSION or
-                                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-                            )
-                        }.onFailure {
-                            // A read-only provider refuses the write half. The
-                            // document still opens, and "Save a copy" is the way
-                            // out; failing the open over it would be worse.
-                            runCatching {
-                                contentResolver.takePersistableUriPermission(
-                                    uri,
-                                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                                )
-                            }
-                        }
+                        keepAccessTo(uri)
                         viewModel.open(uri)
                     }
                 }
@@ -110,9 +98,38 @@ class MainActivity : ComponentActivity() {
                  */
                 val copyPicker = rememberLauncherForActivityResult(
                     ActivityResultContracts.CreateDocument(PDF_MIME_TYPE),
-                ) { uri -> uri?.let(viewModel::saveCopyTo) }
+                ) { uri ->
+                    if (uri == null) {
+                        viewModel.copyDestinationAbandoned()
+                    } else {
+                        keepAccessTo(uri)
+                        viewModel.saveCopyTo(uri)
+                    }
+                }
 
                 val openPicker = remember { { picker.launch(arrayOf(PDF_MIME_TYPE)) } }
+
+                /**
+                 * Where a new blank document is written.
+                 *
+                 * The same contract as "Save a copy": the reader names it and
+                 * says where it goes, which is both the only way to write outside
+                 * the sandbox and what makes it findable again afterwards.
+                 */
+                val createPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument(PDF_MIME_TYPE),
+                ) { uri ->
+                    if (uri == null) {
+                        viewModel.newDocumentAbandoned()
+                    } else {
+                        // The same grant the open picker takes, for the same reason
+                        // and one more: a document made here goes straight into the
+                        // library, and without it that entry is dead the next time
+                        // the app starts.
+                        keepAccessTo(uri)
+                        viewModel.createNewDocument(uri)
+                    }
+                }
 
                 /**
                  * Saving a capture to the gallery, below API 29 only.
@@ -136,23 +153,76 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                /**
+                 * Leaving, once the reader has answered for their unsaved work.
+                 *
+                 * Acted on here rather than in the view model because one of the two
+                 * destinations is the system file picker, which only an activity can
+                 * open.
+                 */
+                state.leaveNow?.let { intent ->
+                    LaunchedEffect(intent) {
+                        viewModel.leftDocument()
+                        when (intent) {
+                            LeaveIntent.Library -> viewModel.returnToLibrary()
+                            LeaveIntent.AnotherDocument -> openPicker()
+                        }
+                    }
+                }
+
+                if (state.showNewDocumentChooser) {
+                    NewDocumentChooser(
+                        onBlankPages = viewModel::describeNewDocument,
+                        onOpenFile = {
+                            viewModel.dismissNewDocument()
+                            openPicker()
+                        },
+                        onDismiss = viewModel::dismissNewDocument,
+                    )
+                }
+
+                if (state.showNewDocumentSheet) {
+                    BlankPageSheet(
+                        // No page to match: this is the first one.
+                        template = null,
+                        newDocument = true,
+                        onAdd = { sheet ->
+                            createPicker.launch(viewModel.newDocumentDescribed(sheet))
+                        },
+                        onDismiss = viewModel::dismissNewDocument,
+                    )
+                }
+
+                state.pendingLeave?.let { intent ->
+                    LeavePrompt(
+                        intent = intent,
+                        onSave = viewModel::saveThenLeave,
+                        onSaveAs = {
+                            viewModel.leaveViaCopy()
+                            copyPicker.launch(suggestedCopyName(state.documentName))
+                        },
+                        onExit = viewModel::leaveWithoutSaving,
+                        onClose = viewModel::cancelLeaving,
+                    )
+                }
+
                 PagifyApp(
                     state = state,
                     recents = recents,
                     onOpenRecent = { viewModel.open(it.uri.toUri()) },
                     onForgetRecent = { viewModel.forgetDocument(it.uri) },
-                    onPickDocument = openPicker,
+                    onPickDocument = { viewModel.showNewDocumentChooser(true) },
                     onClearLibrary = viewModel::clearLibrary,
                     onShowThumbnails = viewModel::setThumbnails,
                     settings = settings,
                     onThemeChange = viewModel::setTheme,
                     onShowViewfinder = viewModel::setShowViewfinder,
                     onToggleRecording = recordingToast,
-                    onReturnToLibrary = viewModel::returnToLibrary,
+                    onReturnToLibrary = { viewModel.askBeforeLeaving(LeaveIntent.Library) },
                 ) {
                     PdfReaderScreen(
                         state = state,
-                        onPickDocument = openPicker,
+                        onPickDocument = { viewModel.askBeforeLeaving(LeaveIntent.AnotherDocument) },
                         onPageVisible = viewModel::onPageVisible,
                         onZoomInOn = viewModel::zoomInOn,
                         onZoomTo = viewModel::zoomTo,
@@ -204,6 +274,10 @@ class MainActivity : ComponentActivity() {
                         onToggleRecording = recordingToast,
                         onShowMetadata = viewModel::showMetadata,
                         onShowPageOrganiser = viewModel::showPageOrganiser,
+                        onShowBlankPage = { viewModel.showBlankPageSheet(true) },
+                        onAddBlankPage = viewModel::insertBlankPage,
+                        onDismissBlankPage = { viewModel.showBlankPageSheet(false) },
+                        onDeleteCurrentPage = viewModel::deleteCurrentPage,
                         onPageAction = { action ->
                             when (action) {
                                 is PageAction.Delete -> viewModel.deletePage(action.index)
@@ -238,6 +312,8 @@ class MainActivity : ComponentActivity() {
                         onMoveText = viewModel::moveMark,
                         onSelectText = viewModel::selectText,
                         onScaleText = viewModel::scaleSelectedText,
+                        onEditText = viewModel::editText,
+                        onTurnZoomedPage = viewModel::turnZoomedPage,
                         onCommitText = viewModel::commitText,
                         onCancelText = viewModel::cancelText,
                         onMarkupTool = viewModel::setMarkupTool,
@@ -251,6 +327,8 @@ class MainActivity : ComponentActivity() {
                         onMoveMarkup = viewModel::moveMarkup,
                         onSelectMarkup = viewModel::selectMarkup,
                         onScaleMarkup = viewModel::scaleSelectedMarkup,
+                        onRewriteMarkup = viewModel::rewriteMarkup,
+                        onEraseMarkup = viewModel::eraseMarkup,
                         onSubmitPassword = viewModel::submitPassword,
                         pageSizeProvider = viewModel::pageSize,
                         renderer = viewModel::renderPage,
@@ -288,6 +366,36 @@ class MainActivity : ComponentActivity() {
         fun suggestedCopyName(documentName: String): String {
             val base = documentName.ifBlank { "Document" }.removeSuffix(".pdf")
             return "$base (edited).pdf"
+        }
+    }
+
+    /**
+     * Hold on to a document past this process.
+     *
+     * Without it the grant expires when the app does, so a document reopened
+     * after a low-memory kill — or listed in the library after a restart — fails
+     * with a permission denial on a file the reader plainly chose.
+     *
+     * Write is taken alongside read because saving edits back to the file needs
+     * it and it cannot be asked for later: the grant is fixed when the picker
+     * returns.
+     */
+    private fun keepAccessTo(uri: Uri) {
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }.onFailure {
+            // A read-only provider refuses the write half. The document still
+            // opens, and "Save a copy" is the way out; failing over it is worse.
+            runCatching {
+                contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
         }
     }
 }

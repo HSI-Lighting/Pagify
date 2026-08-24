@@ -7,9 +7,11 @@
 //! editing path, which is exactly how the old `editing` feature came to declare a
 //! module nobody had written.
 
+pub mod blank;
 pub mod metadata;
 pub mod pdfium_doc;
 
+pub use blank::{blank_document, Ruling};
 pub use metadata::DocumentMetadata;
 
 use std::io::Write;
@@ -365,7 +367,13 @@ pub trait DocumentMut {
     /// Put a previously removed page back.
     fn insert_page(&mut self, at: usize, page: RemovedPage) -> Result<()>;
 
-    fn insert_blank_page(&mut self, at: usize, size: PageSize) -> Result<()>;
+    fn insert_blank_page(
+        &mut self,
+        at: usize,
+        size: PageSize,
+        fill: Option<Color>,
+        ruling: Ruling,
+    ) -> Result<()>;
 
     /// Persisted rotation, unlike the view rotation the reader applies at render
     /// time — this one survives a save.
@@ -525,6 +533,13 @@ pub enum Annotation {
         text: String,
         /// A standard-14 name, as `FPDFText_LoadStandardFont` expects.
         font: String,
+        /// A font registered by the app, when the words need one.
+        ///
+        /// The standard-14 have no Arabic, no Devanagari, no CJK — nothing but
+        /// Latin-1 — and they are not embedded, so there is nothing to add. A
+        /// script they cannot draw needs a real font file in the file itself.
+        #[serde(default)]
+        font_asset: Option<String>,
         size: f32,
         color: Color,
         glyphs: Vec<Glyph>,
@@ -558,7 +573,17 @@ pub enum Annotation {
 #[serde(rename_all = "camelCase")]
 pub struct Glyph {
     /// The character as a string: one glyph, but not always one `char`.
+    ///
+    /// Still what a standard-14 font is written from. For an embedded font it is
+    /// carried anyway, because it is what the glyph *means* — the ToUnicode is
+    /// built from it, and without that the words draw and cannot be copied.
     pub ch: String,
+    /// The glyph's id in an embedded font, from the shaper.
+    ///
+    /// Zero where there is none, which is both "no embedded font" and glyph 0,
+    /// the notdef box — a glyph nothing should ever deliberately draw.
+    #[serde(default)]
+    pub id: u32,
     pub x: f32,
     pub y: f32,
     pub radians: f32,

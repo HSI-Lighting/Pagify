@@ -157,11 +157,30 @@ val MarkupTool.textFrame: TextFrame
  * slider — the three presets are still there — which is the price of the two
  * toolbars reaching the cloud by the same press.
  */
-val RING_MARKUP_TOOLS = listOf(MarkupTool.Ellipse, MarkupTool.Cloud)
+val RING_MARKUP_TOOLS = listOf(MarkupTool.Pen, MarkupTool.Cloud)
 
-/** The tools sharing this one's place in the row, itself included. */
+/**
+ * The tools sharing this one's place in the row, itself included.
+ *
+ * The box and the circle are one slot because they answer one question — what
+ * shape goes round this — and the pen keeps the cloud, which is the freehand way
+ * of going round something.
+ */
 val MarkupTool.slotMates: List<MarkupTool>
-    get() = if (this in RING_MARKUP_TOOLS) RING_MARKUP_TOOLS else listOf(this)
+    get() = MARKUP_SLOTS.firstOrNull { this in it } ?: listOf(this)
+
+private val MARKUP_SLOTS: List<List<MarkupTool>> = listOf(
+    listOf(MarkupTool.Line, MarkupTool.Arrow, MarkupTool.Curve, MarkupTool.CurvedArrow),
+    listOf(MarkupTool.Rectangle, MarkupTool.Ellipse),
+    listOf(MarkupTool.Pen, MarkupTool.Cloud),
+    listOf(
+        MarkupTool.Text,
+        MarkupTool.CurvedText,
+        MarkupTool.CloudText,
+        MarkupTool.BoxText,
+        MarkupTool.EllipseText,
+    ),
+)
 
 /** The other tool sharing this one's place in the row, if it shares one. */
 val MarkupTool.alternate: MarkupTool? get() = slotMates.firstOrNull { it != this }
@@ -462,9 +481,11 @@ fun List<CaptureTile>.tilesToWireJson(): String = JSONArray(
 /** True when [point] lands on this text, allowing [tolerance] either side. */
 fun MarkupShape.Text.isHitBy(point: Offset, tolerance: Float): Boolean {
     val anchor = path.firstOrNull() ?: return false
-    if (frame != TextFrame.None) {
-        return textFrameBounds(anchor, font.widthOf(text, sizePoints), sizePoints)
-            .inflate(tolerance)
+    if (frame != TextFrame.None || text.contains('\n')) {
+        // A block, or anything with a ring round it, is grabbable anywhere over
+        // the words — which is what it looks like.
+        return textBlockBounds()
+            .inflate(tolerance + sizePoints * CLOUD_TEXT_MARGIN_FRACTION)
             .contains(point)
     }
     // The words run to the right of where they were placed, so the run has to be

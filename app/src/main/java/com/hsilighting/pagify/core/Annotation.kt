@@ -149,9 +149,14 @@ fun Annotation.isHitBy(point: Offset, tolerance: Float): Boolean = when (this) {
     // its first letter and nowhere else, so the run is measured out to its end.
     // A framed mark is grabbable anywhere inside its frame, which is what it
     // looks like: a shape with words in it, not a line of words.
-    is Annotation.Text ->
-        if (frame != TextFrame.None) textFrameBounds().inflate(tolerance).contains(point)
-        else textBaseline().isNear(point, tolerance + sizePoints)
+    is Annotation.Text -> when {
+        frame != TextFrame.None -> textFrameBounds().inflate(tolerance).contains(point)
+        // A block is grabbable anywhere over the words, which is what it looks
+        // like. Testing only the first line's baseline would leave every line
+        // below it untouchable.
+        text.contains('\n') -> textBlockBounds().inflate(tolerance).contains(point)
+        else -> textBaseline().isNear(point, tolerance + sizePoints)
+    }
 }
 
 /**
@@ -746,8 +751,8 @@ val DRAWING_GROUPS: List<List<AnnotationTool>> = listOf(
         AnnotationTool.Curve,
         AnnotationTool.CurvedArrow,
     ),
-    listOf(AnnotationTool.Rectangle),
-    listOf(AnnotationTool.Pen, AnnotationTool.Ellipse, AnnotationTool.Cloud),
+    listOf(AnnotationTool.Rectangle, AnnotationTool.Ellipse),
+    listOf(AnnotationTool.Pen, AnnotationTool.Cloud),
     listOf(
         AnnotationTool.Text,
         AnnotationTool.CurvedText,

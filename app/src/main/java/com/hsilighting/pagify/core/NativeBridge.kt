@@ -187,6 +187,49 @@ internal object NativeBridge {
     @Throws(PdfException::class)
     external fun saveToFd(handle: Long, fd: Int, incremental: Boolean)
 
+    // ----------------------------------------------------------------- text --
+
+    /**
+     * Hands the engine a font file under a name it will be asked for later.
+     *
+     * Once at startup rather than with every caption: a font file is most of a
+     * megabyte and a caption is a few dozen bytes.
+     */
+    @Throws(PdfException::class)
+    external fun registerFont(name: String, data: ByteArray)
+
+    /** Whether a registered font can draw every character of [text]. */
+    @Throws(PdfException::class)
+    external fun fontCovers(name: String, text: String): Boolean
+
+    /**
+     * Shapes [text] in a registered font.
+     *
+     * Returns the glyphs in the order they are drawn, left to right, with
+     * advances as fractions of the point size. Shaping is what turns Arabic
+     * letters into their joined forms and puts a right-to-left line the right way
+     * round — neither of which any amount of per-character layout can do.
+     */
+    @Throws(PdfException::class)
+    external fun shapeTextJson(name: String, text: String): String
+
+    /**
+     * Writes a brand-new blank document to [fd], taking ownership of it exactly
+     * as [openDocumentFd] does.
+     *
+     * No handle, because there is no document yet: this is what makes the first
+     * one. [fill] is ARGB, or 0 for paper left the colour paper already is.
+     */
+    @Throws(PdfException::class)
+    external fun createBlankDocument(
+        fd: Int,
+        pages: Int,
+        widthPoints: Float,
+        heightPoints: Float,
+        fill: Int,
+        ruling: Int,
+    )
+
     // ----------------------------------------------------------------- cache --
 
     @Throws(PdfException::class)

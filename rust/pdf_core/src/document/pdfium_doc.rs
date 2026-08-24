@@ -10,13 +10,16 @@ use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfPage, PdfPagePaperSize,
     PdfPageRenderRotation, PdfPoints, PdfRenderConfig, Pdfium, PdfiumLibraryBindingsAccessor,
     FPDFANNOT_COLORTYPE, FPDF_ANNOTATION, FPDF_ANNOTATION_SUBTYPE, FPDF_DOCUMENT, FPDF_FILEWRITE,
-    FPDF_PAGE, FPDF_PAGEOBJECT, FPDF_PAGEOBJECTMARK, FS_POINTF, FS_QUADPOINTSF, FS_RECTF,
+    FPDF_FONT, FPDF_PAGE, FPDF_PAGEOBJECT, FPDF_PAGEOBJECTMARK, FS_POINTF, FS_QUADPOINTSF,
+    FS_RECTF,
 };
+use pdfium_render::prelude::PdfiumLibraryBindings;
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
-    Annotation, Color, Document, DocumentMut, IndexedAnnotation, Page, PageCharacters, PageSize,
-    Point, Rect, RegionRequest, RemovedPage, RenderRequest, Rotation, TextSegment,
+    Annotation, Color, Document, DocumentMut, Glyph, IndexedAnnotation, Page, PageCharacters,
+    PageSize,
+    Point, Rect, RegionRequest, RemovedPage, RenderRequest, Rotation, Ruling, TextSegment,
 };
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
 use crate::render::bitmap::{self, Bitmap, PixelOrder};
@@ -630,7 +633,13 @@ fn build_render_config(request: &RenderRequest, width: u32, height: u32) -> PdfR
 /// handle public unblocks page deletion, reordering and incremental save
 /// together. Adding a save variant alone would not.
 impl DocumentMut for PdfiumDocument {
-    fn insert_blank_page(&mut self, at: usize, size: PageSize) -> Result<()> {
+    fn insert_blank_page(
+        &mut self,
+        at: usize,
+        size: PageSize,
+        fill: Option<Color>,
+        ruling: Ruling,
+    ) -> Result<()> {
         let index = i32::try_from(at)
             .map_err(|_| PdfError::InvalidArgument(format!("page index {at} is out of range")))?;
 
@@ -647,6 +656,63 @@ impl DocumentMut for PdfiumDocument {
 
         self.page_count += 1;
         self.dirty = true;
+
+        let page = RawPage::open(self.document.handle(), index)?;
+        let bindings = pdfium()?.bindings();
+
+        // A page has no colour of its own: white is what an empty one looks like.
+        // A coloured sheet is therefore a rectangle covering it, filled and
+        // written into the page's content — so it prints, and it is still there
+        // when the file is opened anywhere else.
+        // Safety: the page is live for the block and closed by RawPage's drop.
+        unsafe {
+            if let Some(paint) = fill {
+                let rect = bindings.FPDFPageObj_CreateNewRect(
+                    0.0,
+                    0.0,
+                    size.width_pt,
+                    size.height_pt,
+                );
+                if rect.is_null() {
+                    return Err(PdfError::Pdfium("could not create the sheet".into()));
+                }
+                bindings.FPDFPageObj_SetFillColor(
+                    rect,
+                    paint.r as c_uint,
+                    paint.g as c_uint,
+                    paint.b as c_uint,
+                    paint.a as c_uint,
+                );
+                // Filled, not stroked: an outline round the edge of the sheet is
+                // a border, which is not what was asked for.
+                bindings.FPDFPath_SetDrawMode(rect, 1, 0);
+                bindings.FPDFPage_InsertObject(page.handle, rect);
+            }
+
+            // The same ruling a whole new document gets, so a sheet added to a
+            // notebook matches the sheets already in it.
+            crate::document::blank::rule_page(
+                bindings,
+                page.handle,
+                size,
+                ruling,
+                crate::document::blank::ruling_ink(
+                    fill.unwrap_or(Color { r: 255, g: 255, b: 255, a: 255 }),
+                ),
+            )?;
+
+            // Once, after everything: generating content per object rewrites the
+            // stream each time, and skipping it entirely leaves a page whose
+            // objects exist but are not drawn.
+            if (fill.is_some() || ruling != Ruling::None)
+                && bindings.FPDFPage_GenerateContent(page.handle) == 0
+            {
+                return Err(PdfError::Pdfium(
+                    "the sheet was made but its content was not written".into(),
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -1242,6 +1308,7 @@ impl PdfiumDocument {
     fn write_text(&self, page: &RawPage, annotation: &Annotation) -> Result<()> {
         let Annotation::Text {
             font,
+            font_asset,
             size,
             color,
             glyphs,
@@ -1262,25 +1329,56 @@ impl PdfiumDocument {
         // Safety: the document and page handles are live for the call, and every
         // object created is either inserted into the page or the call fails.
         unsafe {
-            let loaded = bindings.FPDFText_LoadStandardFont(document, font);
-            if loaded.is_null() {
-                return Err(PdfError::Pdfium(format!("font {font} would not load")));
-            }
+            // Two ways to get a font, and which one decides how every glyph
+            // below is written.
+            //
+            // A standard-14 font is named, not embedded, and addressed by
+            // character — free, tiny, and Latin-only. An asset font is a real
+            // file that goes into the document, addressed by glyph id, which is
+            // the only way to write a form that has no character of its own: a
+            // joined Arabic letter, a Devanagari conjunct, a ligature.
+            let embedded = match font_asset {
+                Some(name) => Some(load_embedded_font(bindings, document, name, glyphs)?),
+                None => None,
+            };
+            // The ids as they are *in the subset*, which is what has to be
+            // written: subsetting renumbers everything that survives.
+            let written_ids = embedded.as_ref().map(|(_, ids)| ids.clone());
+            let loaded = match &embedded {
+                Some((handle, _)) => *handle,
+                None => {
+                    let handle = bindings.FPDFText_LoadStandardFont(document, font);
+                    if handle.is_null() {
+                        return Err(PdfError::Pdfium(format!("font {font} would not load")));
+                    }
+                    handle
+                }
+            };
 
             let mut first = true;
-            for glyph in glyphs {
+            for (index, glyph) in glyphs.iter().enumerate() {
                 let object = bindings.FPDFPageObj_CreateTextObj(document, loaded, *size);
                 if object.is_null() {
                     return Err(PdfError::Pdfium("could not create a text object".into()));
                 }
 
-                let encoded: Vec<u16> = glyph
-                    .ch
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect();
-                if bindings.FPDFText_SetText(object, encoded.as_ptr()) == 0 {
-                    return Err(PdfError::Pdfium("could not set a glyph's text".into()));
+                if let Some(ids) = &written_ids {
+                    // Charcodes, not characters. With Identity-H the code *is*
+                    // the glyph id, which is what the shaper handed us and the
+                    // only way to ask for a joined form.
+                    let code = [ids.get(index).copied().unwrap_or(0)];
+                    if bindings.FPDFText_SetCharcodes(object, code.as_ptr(), 1) == 0 {
+                        return Err(PdfError::Pdfium("a glyph id was refused".into()));
+                    }
+                } else {
+                    let encoded: Vec<u16> = glyph
+                        .ch
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    if bindings.FPDFText_SetText(object, encoded.as_ptr()) == 0 {
+                        return Err(PdfError::Pdfium("could not set a glyph's text".into()));
+                    }
                 }
 
                 bindings.FPDFPageObj_SetFillColor(
@@ -2303,4 +2401,55 @@ unsafe fn mark_is_ours(
     }
     let characters = (length as usize / 2).saturating_sub(1);
     String::from_utf16_lossy(&buffer[..characters]) == TEXT_MARK_NAME
+}
+
+/// Embed a registered font in the document, ready to be written by glyph id.
+///
+/// Three things have to be right and each was found the hard way:
+///
+/// * `FPDFText_LoadCidType2Font`, not `FPDFText_LoadFont`. The simpler call
+///   embeds the font perfectly and builds its own ToUnicode by running the
+///   font's cmap backwards — and a joined form has no character to run back to.
+///   The words drew correctly and came out of the file as `اϨʹ۰ՍЪة`:
+///   unsearchable, uncopyable, and completely silent about it.
+/// * a ToUnicode CMap of our own, built from the shaper's clusters, so the words
+///   are still words afterwards.
+/// * an explicit identity CID-to-glyph table. Passing none makes the call return
+///   null with nothing said about why.
+///
+/// Safety: `document` must be live for the call.
+unsafe fn load_embedded_font(
+    bindings: &dyn PdfiumLibraryBindings,
+    document: FPDF_DOCUMENT,
+    name: &str,
+    glyphs: &[Glyph],
+) -> Result<(FPDF_FONT, Vec<u32>)> {
+    // Cut the font down to the glyphs this caption uses. Embedded whole, a
+    // four-character Chinese note put sixteen megabytes into the document.
+    let wanted: Vec<u32> = glyphs.iter().map(|g| g.id).collect();
+    let subset = crate::text::subset(name, &wanted)?;
+    let cid_to_gid = crate::text::identity_table(subset.glyph_count);
+
+    // Renumbered, so the ToUnicode is keyed by the ids that are actually in
+    // the page. Built from the glyphs as written rather than by shaping again:
+    // shaping twice is two chances to disagree.
+    let renumbered: Vec<Glyph> = glyphs
+        .iter()
+        .zip(&subset.ids)
+        .map(|(glyph, &id)| Glyph { id, ..glyph.clone() })
+        .collect();
+    let to_unicode = crate::text::to_unicode_from_glyphs(&renumbered);
+
+    let font = bindings.FPDFText_LoadCidType2Font(
+        document,
+        subset.data.as_ptr(),
+        subset.data.len() as c_uint,
+        &to_unicode,
+        cid_to_gid.as_ptr(),
+        cid_to_gid.len() as c_uint,
+    );
+    if font.is_null() {
+        return Err(PdfError::Pdfium(format!("{name} would not embed")));
+    }
+    Ok((font, subset.ids))
 }

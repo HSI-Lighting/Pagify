@@ -40,6 +40,7 @@ fn main() {
             .chars()
             .enumerate()
             .map(|(at, ch)| Glyph {
+                id: 0,
                 ch: ch.to_string(),
                 x: 100.0 + at as f32 * 12.0,
                 y: 200.0 + round as f32 * 30.0,
@@ -54,6 +55,7 @@ fn main() {
             Point { x: 90.0, y: top + 35.0 },
         ];
         let build = |restore: String| Annotation::Text {
+            font_asset: None,
             text: "Caption".into(),
             font: "Helvetica".into(),
             size: 18.0,

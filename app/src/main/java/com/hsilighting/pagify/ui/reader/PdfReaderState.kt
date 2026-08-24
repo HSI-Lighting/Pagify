@@ -98,6 +98,27 @@ data class PdfReaderState(
     val documentRevision: Int = 0,
     /** The page-organisation sheet: reorder, rotate, delete, insert. */
     val showPageOrganiser: Boolean = false,
+    /** Where a new sheet would go, while the reader is being asked about it. */
+    val blankPageAfter: Int? = null,
+    /**
+     * The library's + has been pressed and the two things it can mean are being
+     * offered: paper of their own, or a file they already have.
+     */
+    val showNewDocumentChooser: Boolean = false,
+    /** They chose paper, and are describing it. */
+    val showNewDocumentSheet: Boolean = false,
+    /**
+     * Somewhere the reader is trying to go, while they are being asked about
+     * unsaved work. Null when nothing is being asked.
+     */
+    val pendingLeave: LeaveIntent? = null,
+    /**
+     * Somewhere they have settled on going. The UI acts on it once and clears it.
+     *
+     * Separate from [pendingLeave] because leaving is the UI's job — one of the
+     * two destinations is a system file picker, which no view model can open.
+     */
+    val leaveNow: LeaveIntent? = null,
     /** A save is running. Blocks a second one and drives the progress indicator. */
     val isSaving: Boolean = false,
     /** One-shot message for the snackbar. Cleared by `messageShown`. */
@@ -146,6 +167,13 @@ data class PdfReaderState(
      * the backstop when nothing is selected.
      */
     val textSizeCeiling: Float = MAXIMUM_TEXT_POINTS,
+    /**
+     * Whether the bend still means anything for the caption in hand.
+     *
+     * False once it has more than one line: a block does not bend, so a slot
+     * offering to bend it would be a control that does nothing.
+     */
+    val textBendApplies: Boolean = true,
     val textSizePoints: Float = 12f,
     /**
      * Where text is being typed, if it is.
@@ -295,6 +323,28 @@ data class PdfReaderState(
 ) {
     val isReady: Boolean get() = phase is Phase.Ready
     /** 1-based, for display. */
+    /**
+     * The page a magnified swipe past the end would land on, or null for none.
+     *
+     * Null both when nothing is magnified — there is no pinned page to move from
+     * — and at the two ends of the document, where the pull springs back instead.
+     * Kept here rather than in the view model because it is a decision about a
+     * snapshot, and this is the half of the reader a test can reach.
+     */
+    fun pageAfterTurn(delta: Int): Int? {
+        val from = zoomedPage ?: return null
+        val to = from + delta
+        return to.takeIf { it in 0 until pageCount }
+    }
+
+    /**
+     * Whether anything would be lost by walking away.
+     *
+     * Both halves count: pages moved or deleted, and marks made since the last
+     * save. Either on its own is work somebody did.
+     */
+    val hasUnsavedWork: Boolean get() = editState.dirty || unsavedMarkCount > 0
+
     val currentPageLabel: Int get() = (currentPage + 1).coerceAtMost(pageCount.coerceAtLeast(1))
 
     sealed interface Phase {
@@ -413,4 +463,27 @@ data class PendingText(
     val frame: TextFrame = TextFrame.None,
     /** Whether the words run along a bent line. Taken with the frame, and why. */
     val bends: Boolean = false,
+    /**
+     * The caption being rewritten, when this is an edit rather than a new one.
+     *
+     * Null for a fresh caption. With an id the words replace that caption's, and
+     * clearing them removes it — emptying it is the plainest way to say "delete".
+     */
+    val editing: Long? = null,
+    /** The words already there, so the dialog opens on them. */
+    val initial: String = "",
 )
+
+/**
+ * Where the reader was heading when they were asked about unsaved work.
+ *
+ * Held so the answer can be acted on afterwards: "don't save" has to know what
+ * it was you were doing before the question interrupted you.
+ */
+enum class LeaveIntent {
+    /** Back to the document library. */
+    Library,
+
+    /** Opening a different document. */
+    AnotherDocument,
+}

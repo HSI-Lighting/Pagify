@@ -29,6 +29,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.draw.drawWithContent
+import com.hsilighting.pagify.core.BundledFonts
 import com.hsilighting.pagify.core.Annotation
 import com.hsilighting.pagify.core.AnnotationTool
 import com.hsilighting.pagify.core.NOTE_MARKER_RADIUS_POINTS
@@ -41,7 +42,7 @@ import com.hsilighting.pagify.core.scaledBy
 import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.correctsOnRelease
 import com.hsilighting.pagify.core.curveThrough
-import com.hsilighting.pagify.core.layOutText
+import com.hsilighting.pagify.core.layOutBlock
 import com.hsilighting.pagify.core.TextFrame
 import com.hsilighting.pagify.core.textFrameBounds
 import com.hsilighting.pagify.core.textFrameOutline
@@ -129,6 +130,8 @@ fun Modifier.annotationLayer(
     onSelectText: (id: Long?) -> Unit = {},
     /** The caption the ribbon is editing, drawn picked out. */
     selectedText: Long? = null,
+    /** A caption was double-tapped; rewrite its words. */
+    onEditText: (id: Long) -> Unit = {},
     /** A note marker was tapped; show what it says. */
     onOpenNote: (Annotation.Note) -> Unit = {},
     /** Opens an eraser stroke; everything it takes until [onEraseEnd] is one undo. */
@@ -176,6 +179,7 @@ fun Modifier.annotationLayer(
     // picked up — which was nothing. The first tap on empty page then placed a
     // caption instead of putting the current one down.
     val heldCaption by rememberUpdatedState(selectedText)
+    val editText by rememberUpdatedState(onEditText)
     val openNote by rememberUpdatedState(onOpenNote)
     val currentAnnotations by rememberUpdatedState(annotations)
     val at by rememberUpdatedState(mapping)
@@ -327,7 +331,18 @@ fun Modifier.annotationLayer(
                 }
             }
             .pointerInput(pageIndex, tool) {
-                detectTapGestures { position ->
+                detectTapGestures(
+                    // Double-tapping words opens them for rewriting. The page's
+                    // own double-tap zoom stands down while a caption is in hand,
+                    // the same way its pinch does, so the two never fight.
+                    onDoubleTap = { position ->
+                        val at = toPage(position)
+                        val caption = currentAnnotations.lastOrNull {
+                            it is Annotation.Text && it.isHitBy(at, tolerancePoints())
+                        }
+                        if (caption != null) editText(caption.id)
+                    },
+                ) { position ->
                     val at = toPage(position)
                     val caption = currentAnnotations.lastOrNull {
                         it is Annotation.Text && it.isHitBy(at, tolerancePoints())
@@ -902,14 +917,27 @@ private fun DrawScope.drawPageText(text: Annotation.Text, at: PageMapping) {
             (text.color and 0xFF).toInt(),
         )
         textSize = at.toScreen(text.sizePoints)
-        typeface = android.graphics.Typeface.create(
-            text.font.family,
-            if (text.font.bold) android.graphics.Typeface.BOLD else android.graphics.Typeface.NORMAL,
-        )
+        // The bundled file itself where there is one, so the preview is drawn
+        // with the same face the document will embed rather than a likeness.
+        typeface = BundledFonts.typefaceFor(text.font)
+            ?: android.graphics.Typeface.create(
+                text.font.family,
+                if (text.font.bold) {
+                    android.graphics.Typeface.BOLD
+                } else {
+                    android.graphics.Typeface.NORMAL
+                },
+            )
+    }
+
+    val glyphFont = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+        BundledFonts.glyphFontFor(text.font)
+    } else {
+        null
     }
 
     drawIntoCanvas { canvas ->
-        layOutText(text.text, text.font, text.sizePoints, text.path).forEach { glyph ->
+        text.layOutBlock().forEach { glyph ->
             val origin = at.toScreen(glyph.origin)
             val native = canvas.nativeCanvas
             val saved = native.save()
@@ -921,7 +949,23 @@ private fun DrawScope.drawPageText(text: Annotation.Text, at: PageMapping) {
                 Math.toDegrees((glyph.radians + at.quarterTurns * QUARTER_TURN).toDouble())
                     .toFloat(),
             )
-            native.drawText(glyph.character.toString(), 0f, 0f, paint)
+            // By glyph id where the font is embedded and the platform can:
+            // a joined Arabic form has no character to pass to drawText, so
+            // asking for one draws the isolated letter and the preview shows
+            // a bug the file does not have.
+            if (glyph.id != 0 && glyphFont != null) {
+                native.drawGlyphs(
+                    intArrayOf(glyph.id),
+                    0,
+                    floatArrayOf(0f, 0f),
+                    0,
+                    1,
+                    glyphFont,
+                    paint,
+                )
+            } else {
+                native.drawText(glyph.text, 0f, 0f, paint)
+            }
             native.restoreToCount(saved)
         }
     }

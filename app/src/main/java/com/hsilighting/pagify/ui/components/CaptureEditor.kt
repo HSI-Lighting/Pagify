@@ -158,6 +158,10 @@ fun CaptureEditor(
     onSelectMarkup: (index: Int) -> Unit,
     /** Two fingers with a caption in hand: that big. */
     onScaleMarkup: (factor: Float) -> Unit,
+    /** A caption on the picture was rewritten. */
+    onRewriteMarkup: (index: Int, text: String) -> Unit,
+    /** Its words were cleared, which is how one is deleted. */
+    onEraseMarkup: (index: Int) -> Unit,
     /** Which caption the ribbon is editing, if one is picked up. */
     selectedMarkup: Int?,
     onSaveToGallery: () -> Unit,
@@ -175,6 +179,9 @@ fun CaptureEditor(
      * sheet, and a half-typed caption has no meaning once the picture is gone.
      */
     var pendingText by remember { mutableStateOf<List<Offset>?>(null) }
+
+    /** The caption being rewritten, when a double tap opened one. */
+    var editingMarkup by remember { mutableStateOf<Int?>(null) }
 
     /** The picture area's size, for zooming about a point rather than the middle. */
     var viewport by remember { mutableStateOf(IntSize.Zero) }
@@ -238,41 +245,59 @@ fun CaptureEditor(
             )
         }
 
-        pendingText?.let { baseline ->
+        // One dialog for both: writing a new caption, and rewriting one that a
+        // double tap opened. They ask the same question of the same field, and
+        // two dialogs would be two chances for them to drift apart.
+        val rewriting = editingMarkup
+        if (pendingText != null || rewriting != null) {
+            fun close() {
+                pendingText = null
+                editingMarkup = null
+                typed = ""
+            }
+
             AlertDialog(
-                onDismissRequest = {
-                    pendingText = null
-                    typed = ""
-                },
-                title = { Text("Text") },
+                onDismissRequest = { close() },
+                title = { Text(if (rewriting != null) "Edit text" else "Text") },
                 text = {
                     OutlinedTextField(
                         value = typed,
                         onValueChange = { typed = it },
+                        // Several lines, and the return key makes one rather than
+                        // closing the dialog: a caption is often a sentence that
+                        // wants breaking, and one long line runs off the picture.
                         singleLine = false,
+                        minLines = 2,
+                        maxLines = 6,
                         placeholder = { Text("Type here") },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 },
                 confirmButton = {
                     TextButton(
-                        enabled = typed.isNotBlank(),
+                        // Blank words are how you delete a caption you are
+                        // editing. Writing a new one, blank adds nothing rather
+                        // than an invisible mark: nothing to see, and nothing to
+                        // rub out except by guessing where it was.
+                        enabled = rewriting != null || typed.isNotBlank(),
                         onClick = {
-                            // Blank words make no mark rather than an invisible
-                            // one: nothing to see, and nothing to rub out except
-                            // by guessing where it was.
+                            if (rewriting != null) {
+                                if (typed.isBlank()) {
+                                    onEraseMarkup(rewriting)
+                                } else {
+                                    onRewriteMarkup(rewriting, typed)
+                                }
+                                close()
+                                return@TextButton
+                            }
                             onCommitMarkup(
                                 MarkupShape.Text(
                                     text = typed,
-                                    // A tap gives only the point it landed on,
-                                    // and the layout walks a line: the baseline
-                                    // has to be as long as the words, which is
-                                    // not known until the words exist.
                                     // A tap gives one point and the layout walks
                                     // a line; the bend is a setting, so the line
                                     // is built rather than traced.
                                     path = curvedBaseline(
-                                        anchor = baseline.first(),
+                                        anchor = pendingText?.firstOrNull() ?: Offset.Zero,
                                         text = typed,
                                         font = textFont,
                                         sizePoints = textSizePoints,
@@ -285,21 +310,18 @@ fun CaptureEditor(
                                     font = textFont,
                                     sizePoints = textSizePoints,
                                     frame = markupTool.textFrame,
+                                    curveDegrees = if (markupTool.bendsText) {
+                                        textCurveDegrees
+                                    } else {
+                                        0f
+                                    },
                                 ),
                             )
-                            pendingText = null
-                            typed = ""
+                            close()
                         },
-                    ) { Text("Add") }
+                    ) { Text(if (rewriting != null) "Save" else "Add") }
                 },
-                dismissButton = {
-                    TextButton(
-                        onClick = {
-                            pendingText = null
-                            typed = ""
-                        },
-                    ) { Text("Cancel") }
-                },
+                dismissButton = { TextButton(onClick = { close() }) { Text("Cancel") } },
             )
         }
 
@@ -403,6 +425,9 @@ fun CaptureEditor(
                         // so with anything in hand the zoom never saw a tap at all.
                         .onSizeChanged { viewport = it }
                         .doubleTapToZoom { position ->
+                            // Nothing while a caption is in hand: a double tap on
+                            // one opens it for rewriting instead.
+                            if (selectedMarkup != null) return@doubleTapToZoom
                             val target = if (zoom > MINIMUM_ZOOM + ZOOM_EPSILON) {
                                 MINIMUM_ZOOM
                             } else {
@@ -437,6 +462,10 @@ fun CaptureEditor(
                         onMoveText = onMoveMarkup,
                         onSelectText = onSelectMarkup,
                         selectedText = selectedMarkup,
+                        onEditText = { index ->
+                            editingMarkup = index
+                            typed = (markup.getOrNull(index)?.shape as? MarkupShape.Text)?.text ?: ""
+                        },
                         zoom = zoom,
                         pan = pan,
                         modifier = Modifier.fillMaxSize().padding(8.dp),

@@ -21,6 +21,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FiberManualRecord
+import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.StopCircle
@@ -105,6 +107,8 @@ import com.hsilighting.pagify.ui.components.annotationLayer
 import com.hsilighting.pagify.ui.components.twoFingerPan
 import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.components.PageNavigator
+import com.hsilighting.pagify.ui.components.BlankPageSheet
+import com.hsilighting.pagify.ui.components.BlankSheet
 import com.hsilighting.pagify.ui.components.PageOrganiser
 import com.hsilighting.pagify.ui.components.PdfPageView
 import com.hsilighting.pagify.ui.components.THUMBNAIL_STRIP_WIDTH
@@ -189,6 +193,10 @@ fun PdfReaderScreen(
     onSelectText: (id: Long?) -> Unit,
     /** Two fingers with a caption in hand: that big. */
     onScaleText: (factor: Float) -> Unit,
+    /** Swiped past the end of a magnified page; move to the next or previous. */
+    onTurnZoomedPage: (delta: Int) -> Boolean,
+    /** A caption was double-tapped; rewrite its words. */
+    onEditText: (id: Long) -> Unit,
     onCommitText: (String) -> Unit,
     onCancelText: () -> Unit,
     onPenColorChange: (Long) -> Unit,
@@ -225,6 +233,13 @@ fun PdfReaderScreen(
     onShowMetadata: (Boolean) -> Unit,
     // ---------------------------------------------------------- page organiser --
     onShowPageOrganiser: (Boolean) -> Unit,
+    /** The reader asked for a sheet; put the question up. */
+    onShowBlankPage: () -> Unit,
+    /** They answered it: add a sheet of this size and colour. */
+    onAddBlankPage: (at: Int, sheet: BlankSheet) -> Unit,
+    onDismissBlankPage: () -> Unit,
+    /** Remove the page in view. Undoable, like every other page edit. */
+    onDeleteCurrentPage: () -> Unit,
     /**
      * One page-tree change. A single sealed type rather than a callback each,
      * because every new operation would otherwise add another parameter to an
@@ -270,6 +285,10 @@ fun PdfReaderScreen(
     onSelectMarkup: (index: Int) -> Unit,
     /** Two fingers with a caption in hand on a capture: that big. */
     onScaleMarkup: (factor: Float) -> Unit,
+    /** A caption on a capture was rewritten. */
+    onRewriteMarkup: (index: Int, text: String) -> Unit,
+    /** Its words were cleared, which is how one is deleted. */
+    onEraseMarkup: (index: Int) -> Unit,
     onSubmitPassword: (String) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> android.graphics.Bitmap?,
@@ -408,6 +427,20 @@ fun PdfReaderScreen(
                                     onClick = { onShowPageOrganiser(true) },
                                 ),
                                 ReaderAction(
+                                    icon = Icons.Filled.AddPhotoAlternate,
+                                    label = "Add a blank page",
+                                    onClick = onShowBlankPage,
+                                ),
+                                ReaderAction(
+                                    // Acts on the page in view. Deleting the page
+                                    // you are looking at meant opening the grid and
+                                    // finding it again, which is a lot of asking
+                                    // for something you are already looking at.
+                                    icon = Icons.Filled.Delete,
+                                    label = "Delete this page",
+                                    onClick = { onDeleteCurrentPage() },
+                                ),
+                                ReaderAction(
                                     icon = Icons.Filled.Info,
                                     label = "Document details",
                                     onClick = { onShowMetadata(true) },
@@ -460,6 +493,8 @@ fun PdfReaderScreen(
                     onMoveText = onMoveText,
                     onSelectText = onSelectText,
                     onScaleText = onScaleText,
+                    onTurnZoomedPage = onTurnZoomedPage,
+                    onEditText = onEditText,
                     onPageMarksNeeded = onPageMarksNeeded,
                     showViewfinder = showViewfinder,
                     viewfinderMinimized = viewfinderMinimized,
@@ -570,6 +605,7 @@ fun PdfReaderScreen(
                     textSizePoints = state.textSizePoints,
                     textCurveDegrees = state.textCurveDegrees,
                     textSizeCeiling = state.textSizeCeiling,
+                    textBendApplies = state.textBendApplies,
                     onTextFont = onTextFont,
                     onTextSize = onTextSize,
                     onTextCurve = onTextCurve,
@@ -615,6 +651,8 @@ fun PdfReaderScreen(
                 onMoveMarkup = onMoveMarkup,
                 onSelectMarkup = onSelectMarkup,
                 onScaleMarkup = onScaleMarkup,
+                onRewriteMarkup = onRewriteMarkup,
+                onEraseMarkup = onEraseMarkup,
                 selectedMarkup = state.selectedMarkupIndex,
                 textFont = state.textFont,
                 textSizePoints = state.textSizePoints,
@@ -660,6 +698,8 @@ fun PdfReaderScreen(
                 // setting now, so a curved caption starts life as a single tap
                 // like any other and the path cannot say which tool made it.
                 curved = pending.bends,
+                initial = pending.initial,
+                editing = pending.editing != null,
                 onConfirm = onCommitText,
                 onDismiss = onCancelText,
             )
@@ -669,6 +709,14 @@ fun PdfReaderScreen(
             ModalBottomSheet(onDismissRequest = { onShowMetadata(false) }) {
                 MetadataSheet(state.metadata)
             }
+        }
+
+        state.blankPageAfter?.let { at ->
+            BlankPageSheet(
+                template = state.pageSizes[state.currentPage],
+                onAdd = { sheet -> onAddBlankPage(at, sheet) },
+                onDismiss = onDismissBlankPage,
+            )
         }
 
         if (state.showPageOrganiser && state.isReady) {
@@ -718,6 +766,10 @@ private fun PageList(
     onSelectText: (id: Long?) -> Unit,
     /** Two fingers with a caption in hand: that big. */
     onScaleText: (factor: Float) -> Unit,
+    /** Swiped past the end of a magnified page; move to the next or previous. */
+    onTurnZoomedPage: (delta: Int) -> Boolean,
+    /** A caption was double-tapped; rewrite its words. */
+    onEditText: (id: Long) -> Unit,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
     onOpenNote: (Annotation.Note) -> Unit,
@@ -915,6 +967,8 @@ private fun PageList(
                 onSelectText = onSelectText,
                 selectedText = state.selectedTextId,
                 onScaleText = onScaleText,
+                onEditText = onEditText,
+                onTurnPage = onTurnZoomedPage,
                 onPageMarksNeeded = onPageMarksNeeded,
                 onOpenNote = onOpenNote,
                 onEraseStart = onEraseStart,
@@ -1111,6 +1165,10 @@ private fun PageList(
                         // handles — so the zoom never saw a tap at all. See
                         // `doubleTapToZoom`.
                         .doubleTapToZoom { position ->
+                            // Nothing while a caption is in hand: a double tap on
+                            // one opens it for rewriting, and the page must not
+                            // jump to twice its size at the same time.
+                            if (state.selectedTextId != null) return@doubleTapToZoom
                             SessionRecorder.record("ZOOM_DTAP_LIST", "at=$position")
                             onZoomActivity()
                             // A double-tap is a request for a specific
@@ -1171,6 +1229,7 @@ private fun PageList(
                                 onPlaceText = onPlaceText,
                                 onMoveText = onMoveText,
                                 onSelectText = onSelectText,
+                                onEditText = onEditText,
                                 onPageMarksNeeded = onPageMarksNeeded,
                                 onOpenNote = onOpenNote,
                                 onEraseStart = onEraseStart,
@@ -1297,6 +1356,8 @@ private fun AnnotatablePage(
     onMoveText: (id: Long, delta: Offset) -> Unit,
     /** A caption was tapped, so the ribbon's controls now belong to it. */
     onSelectText: (id: Long?) -> Unit,
+    /** A caption was double-tapped; rewrite its words. */
+    onEditText: (id: Long) -> Unit,
     /** This page is on screen; load any marks the file already holds for it. */
     onPageMarksNeeded: (Int) -> Unit,
     onOpenNote: (Annotation.Note) -> Unit,
@@ -1407,6 +1468,7 @@ private fun AnnotatablePage(
             onMoveText = onMoveText,
             onSelectText = onSelectText,
             selectedText = state.selectedTextId,
+            onEditText = onEditText,
             onOpenNote = onOpenNote,
             onEraseStart = onEraseStart,
             onErase = { point, tolerance -> onErase(pageIndex, point, tolerance) },

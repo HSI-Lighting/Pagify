@@ -46,6 +46,7 @@ import com.hsilighting.pagify.core.sizeRange
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageCharacters
 import com.hsilighting.pagify.core.PageSize
+import com.hsilighting.pagify.ui.components.BlankSheet
 import com.hsilighting.pagify.core.PageTextRecogniser
 import com.hsilighting.pagify.core.NOTE_MARKER_RADIUS_POINTS
 import com.hsilighting.pagify.core.PageRemap
@@ -65,6 +66,7 @@ import com.hsilighting.pagify.core.bendsText
 import com.hsilighting.pagify.core.curvedBaseline
 import com.hsilighting.pagify.core.MAXIMUM_TEXT_POINTS
 import com.hsilighting.pagify.core.sizeThatFits
+import com.hsilighting.pagify.core.isMultiLine
 import com.hsilighting.pagify.core.rebuilt
 import com.hsilighting.pagify.core.rebuiltMarkup
 import com.hsilighting.pagify.core.writesText
@@ -178,6 +180,83 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * The reader keeps nothing once the document is gone — see [closeDocument] —
      * so this is a full reset rather than a screen change with state left behind.
      */
+    /**
+     * The reader is trying to leave. Ask first if there is anything to lose.
+     *
+     * Walking out of a document with unsaved marks lost them without a word —
+     * and the two ways out, back and opening another file, are the two most
+     * ordinary things anybody does.
+     */
+    fun askBeforeLeaving(intent: LeaveIntent) {
+        if (!_state.value.hasUnsavedWork) {
+            _state.update { it.copy(leaveNow = intent) }
+            return
+        }
+        _state.update { it.copy(pendingLeave = intent) }
+    }
+
+    fun cancelLeaving() = _state.update { it.copy(pendingLeave = null) }
+
+    /** They chose to lose the marks. */
+    fun leaveWithoutSaving() =
+        _state.update { it.copy(pendingLeave = null, leaveNow = it.pendingLeave) }
+
+    /**
+     * Where to go once a "Save as" finishes, or null when no exit is waiting on one.
+     *
+     * The destination is chosen in a system picker, so between the answer and the
+     * write there is a whole screen the reader can back out of. Held here so that
+     * backing out of the picker leaves them where they were, with their marks,
+     * rather than walking them out of the document on the strength of an intention.
+     */
+    private var leaveAfterCopy: LeaveIntent? = null
+
+    /** They chose to write it somewhere else. The picker opens next. */
+    fun leaveViaCopy() {
+        leaveAfterCopy = _state.value.pendingLeave
+        _state.update { it.copy(pendingLeave = null) }
+    }
+
+    /** The picker was dismissed without choosing a file. */
+    fun copyDestinationAbandoned() {
+        leaveAfterCopy = null
+    }
+
+    /**
+     * Save, then go.
+     *
+     * Deliberately not the ordinary save: that one reopens the file so the reader
+     * can carry on, and we are leaving. Writing and going is both quicker and one
+     * fewer thing to go wrong on the way out.
+     */
+    fun saveThenLeave() {
+        val doc = document
+        val uri = pendingUri
+        val intent = _state.value.pendingLeave
+        if (doc == null || uri == null || intent == null) {
+            _state.update { it.copy(pendingLeave = null, leaveNow = intent) }
+            return
+        }
+
+        _state.update { it.copy(pendingLeave = null, isSaving = true) }
+        viewModelScope.launch {
+            try {
+                commitMarks(doc)
+                repository.writeTo(doc, uri, scratchDir(), incremental = true)
+                SessionRecorder.record("SAVED_ON_LEAVE", "to=$intent")
+                _state.update { it.copy(isSaving = false, leaveNow = intent) }
+            } catch (t: Throwable) {
+                // Stay put and say so. Leaving anyway would lose exactly the work
+                // they just asked to keep.
+                Log.e(TAG, "saving on the way out failed", t)
+                _state.update { it.copy(isSaving = false, message = saveFailureMessage(t)) }
+            }
+        }
+    }
+
+    /** The UI has acted on [PdfReaderState.leaveNow]. */
+    fun leftDocument() = _state.update { it.copy(leaveNow = null) }
+
     fun returnToLibrary() {
         closeDocument()
         pendingUri = null
@@ -551,6 +630,29 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      */
     fun zoomTo(zoom: Float) = setZoom(zoom)
 
+    /**
+     * Move the magnified view to the next page or the previous one.
+     *
+     * Reached by swiping again once the page has run out under the finger. The
+     * zoom is kept — the whole point is to carry on reading at the size you were
+     * reading at, and dropping back to fit-width to turn a page and zooming in
+     * again is the thing this exists to avoid.
+     *
+     * @return true when there was a page to move to.
+     */
+    fun turnZoomedPage(delta: Int): Boolean {
+        val current = _state.value
+        val to = current.pageAfterTurn(delta) ?: return false
+
+        _state.update { it.copy(zoomedPage = to, currentPage = to) }
+        SessionRecorder.record(
+            "ZOOM_PAGE_TURN",
+            "from=${current.zoomedPage} to=$to zoom=${current.zoom}",
+        )
+        schedulePrefetch()
+        return true
+    }
+
     /** Double-tap behaviour: jump to a readable zoom, or back to fit-width. */
     fun toggleZoom() {
         val current = _state.value.zoom
@@ -698,6 +800,29 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     fun cancelText() = _state.update { it.copy(textBeingWritten = null) }
 
     /**
+     * Rewrite the words of an existing caption.
+     *
+     * Reached by double-tapping one. Everything else about it — where it sits,
+     * how big, in what face, what is drawn round it — stays as it was; only the
+     * words change, and the line they sit on is rebuilt for them.
+     */
+    fun editText(id: Long) {
+        val caption = annotations.textMark(id) ?: return
+        _state.update {
+            it.copy(
+                selectedTextId = caption.id,
+                textBeingWritten = PendingText(
+                    pageIndex = caption.pageIndex,
+                    path = caption.path,
+                    bends = caption.curveDegrees != 0f,
+                    editing = caption.id,
+                    initial = caption.text,
+                ),
+            )
+        }
+    }
+
+    /**
      * Commit the words onto the baseline they were placed on.
      *
      * Blank text adds nothing rather than an invisible mark: an empty annotation
@@ -706,6 +831,18 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     fun commitText(text: String) {
         val pending = _state.value.textBeingWritten ?: return
         _state.update { it.copy(textBeingWritten = null) }
+
+        val editing = pending.editing
+        if (editing != null) {
+            if (text.isBlank()) {
+                // Emptied: that is how you say "delete this" from the editor, and
+                // it is one undo step like any other edit.
+                eraseMark(editing)
+            } else {
+                restyleSelected("words") { it.rebuilt(text = text) }
+            }
+            return
+        }
         if (text.isBlank()) return
 
         val state = _state.value
@@ -845,6 +982,24 @@ frame = pending.frame,
     }
 
     /**
+     * Remove one caption, by id.
+     *
+     * Reached by emptying its words in the editor. Goes through the eraser's own
+     * path so a caption already written into the file comes out of the file too,
+     * rather than only off the screen.
+     */
+    private fun eraseMark(id: Long) {
+        val caption = annotations.textMark(id) ?: return
+        val page = caption.pageIndex
+        annotations.eraseAt(page, caption.path.first(), caption.sizePoints)
+        refreshAnnotations()
+        commitErasedSavedMarks(page)
+        commitErasedSavedText(page)
+        if (_state.value.selectedTextId == id) selectText(null)
+        SessionRecorder.record("TEXT_EMPTIED", "id=$id")
+    }
+
+    /**
      * Select the caption at [id], or clear the selection with null.
      *
      * A selected caption is what the ribbon's controls act on. Without one they
@@ -858,6 +1013,7 @@ frame = pending.frame,
             it.copy(
                 selectedTextId = caption?.id,
                 textSizeCeiling = ceilingFor(caption, it),
+                textBendApplies = caption?.isMultiLine != true,
                 // The controls show what the selected caption *is*, so picking one
                 // up does not silently restyle it the moment anything is touched.
                 textFont = caption?.font ?: it.textFont,
@@ -881,7 +1037,13 @@ frame = pending.frame,
         refreshAnnotations()
         // The words may be longer or in a wider face now, so what still fits has
         // changed with them.
-        _state.update { it.copy(textSizeCeiling = ceilingFor(annotations.textMark(id), it)) }
+        val caption = annotations.textMark(id)
+        _state.update {
+            it.copy(
+                textSizeCeiling = ceilingFor(caption, it),
+                textBendApplies = caption?.isMultiLine != true,
+            )
+        }
         rewriteSavedText(id)
         SessionRecorder.record("TEXT_RESTYLE", "id=$id what=$label")
     }
@@ -1477,6 +1639,101 @@ frame = pending.frame,
         )
     }
 
+    /** The sheet dialog was asked for, or dismissed. */
+    fun showBlankPageSheet(show: Boolean) =
+        _state.update { it.copy(blankPageAfter = if (show) it.currentPage + 1 else null) }
+
+    /** Remove the page being read. */
+    fun deleteCurrentPage() = deletePage(_state.value.currentPage)
+
+    /**
+     * Add a sheet of this size and colour after the page in view.
+     *
+     * The size defaults to the page it follows, so a new sheet does not appear as
+     * an odd one in the middle of a uniform document — but it can be any of the
+     * standards, because a document is not always uniform on purpose.
+     */
+    fun showNewDocumentChooser(show: Boolean) =
+        _state.update { it.copy(showNewDocumentChooser = show) }
+
+    /** They chose paper rather than a file. */
+    fun describeNewDocument() =
+        _state.update { it.copy(showNewDocumentChooser = false, showNewDocumentSheet = true) }
+
+    fun dismissNewDocument() =
+        _state.update { it.copy(showNewDocumentChooser = false, showNewDocumentSheet = false) }
+
+    /**
+     * The paper they described, waiting on somewhere to put it.
+     *
+     * Held across the system Save dialog, which is a whole screen they can back
+     * out of. Backing out then leaves nothing behind rather than a file nobody
+     * asked for.
+     */
+    private var paperAwaitingADestination: BlankSheet? = null
+
+    /** Their description is complete; a destination is asked for next. */
+    fun newDocumentDescribed(sheet: BlankSheet): String {
+        paperAwaitingADestination = sheet
+        _state.update { it.copy(showNewDocumentSheet = false) }
+        return "${sheet.name}.pdf"
+    }
+
+    /** The Save dialog was dismissed without choosing anywhere. */
+    fun newDocumentAbandoned() {
+        paperAwaitingADestination = null
+    }
+
+    /** Write the paper to the destination they chose, then open it. */
+    fun createNewDocument(destination: Uri) {
+        val sheet = paperAwaitingADestination ?: return
+        paperAwaitingADestination = null
+
+        _state.update { it.copy(isSaving = true) }
+        viewModelScope.launch {
+            try {
+                repository.createBlank(
+                    uri = destination,
+                    pages = sheet.count,
+                    widthPoints = sheet.size.widthPoints,
+                    heightPoints = sheet.size.heightPoints,
+                    // Zero is "no fill": white paper is written as no rectangle
+                    // at all, so an empty page stays an empty page.
+                    fill = sheet.fill?.toInt() ?: 0,
+                    ruling = sheet.ruling.code,
+                )
+                SessionRecorder.record("CREATED_BLANK", "pages=${sheet.count}")
+                _state.update { it.copy(isSaving = false) }
+                open(destination)
+            } catch (t: Throwable) {
+                Log.e(TAG, "could not make the document", t)
+                _state.update {
+                    it.copy(
+                        isSaving = false,
+                        message = t.message ?: "The document could not be made.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun insertBlankPage(at: Int, sheet: BlankSheet) {
+        val doc = document ?: return
+        _state.update { it.copy(blankPageAfter = null) }
+        runEdit(
+            command = PdfCommand.InsertBlankPage(
+                at,
+                sheet.size.widthPoints,
+                sheet.size.heightPoints,
+                sheet.fill,
+                sheet.ruling.code,
+            ),
+            remap = PageRemap.afterInsert(at),
+            describe = { "Inserted page ${at + 1}" },
+            document = doc,
+        )
+    }
+
     fun insertBlankPage(at: Int) {
         val doc = document ?: return
         // A new page matches the one it is inserted before, so it does not appear
@@ -1666,9 +1923,17 @@ frame = pending.frame,
                 commitMarks(doc)
                 repository.writeTo(doc, destination, scratchDir(), incremental = true)
                 SessionRecorder.record("SAVED_COPY", "to=$destination")
-                _state.update { it.copy(isSaving = false, message = "Copy saved.") }
+                // A copy taken on the way out is the save; the marks are written
+                // down, so leaving now loses nothing.
+                val leaving = leaveAfterCopy
+                leaveAfterCopy = null
+                _state.update {
+                    it.copy(isSaving = false, message = "Copy saved.", leaveNow = leaving)
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "save copy failed", t)
+                // Stay put on failure, exactly as the ordinary save does.
+                leaveAfterCopy = null
                 _state.update {
                     it.copy(
                         isSaving = false,
@@ -2359,6 +2624,37 @@ frame = pending.frame,
         val index = _state.value.selectedMarkupIndex ?: return
         val caption = _state.value.markup.getOrNull(index)?.shape as? MarkupShape.Text ?: return
         _state.update { it.copy(textSizePoints = caption.sizePoints) }
+    }
+
+    /** Replace the words of the caption at [index] on the capture. */
+    fun rewriteMarkup(index: Int, text: String) {
+        _state.update { state ->
+            val mark = state.markup.getOrNull(index) ?: return@update state
+            val shape = mark.shape as? MarkupShape.Text ?: return@update state
+            state.copy(
+                markup = state.markup.toMutableList().also {
+                    it[index] = mark.copy(shape = shape.rebuiltMarkup(text = text))
+                },
+            )
+        }
+        SessionRecorder.record("MARKUP_REWRITE", "index=$index chars=${text.length}")
+    }
+
+    /**
+     * Remove the caption at [index] on the capture.
+     *
+     * Reached by clearing its words. The list is the drawing, so this takes it
+     * out of the list — and anything selected after it shifts down by one.
+     */
+    fun eraseMarkup(index: Int) {
+        _state.update { state ->
+            if (index !in state.markup.indices) return@update state
+            state.copy(
+                markup = state.markup.filterIndexed { at, _ -> at != index },
+                selectedMarkupIndex = null,
+            )
+        }
+        SessionRecorder.record("MARKUP_EMPTIED", "index=$index")
     }
 
     /** Restyle the caption in hand on the capture, if there is one. */

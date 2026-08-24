@@ -1,5 +1,9 @@
 package com.hsilighting.pagify.ui.components
 
+import com.hsilighting.pagify.core.BundledFonts
+import androidx.compose.ui.text.font.Typeface
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -16,6 +20,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
@@ -137,6 +143,11 @@ fun MarkRibbon(
     modifier: Modifier = Modifier,
     widthIsIntensity: Boolean = false,
     onDisarm: (() -> Unit)? = null,
+    /**
+     * Puts the whole band away. Null where the band is always on screen and
+     * there is nothing to close.
+     */
+    onDismiss: (() -> Unit)? = null,
 ) {
     var open by remember { mutableStateOf<RibbonPanel?>(null) }
 
@@ -178,6 +189,7 @@ fun MarkRibbon(
                 modifier = Modifier
                     .offset { IntOffset(shift.roundToInt(), 0) }
                     .onGloballyPositioned { panelWidth = it.size.width.toFloat() },
+                onClose = { open = null },
             ) {
                 when (panel) {
                     RibbonPanel.Colour -> ColourChoices(
@@ -251,6 +263,10 @@ fun MarkRibbon(
                 rowWidth = it.boundsInWindow().width
             },
         ) {
+            // The cross sits outside the scrolling row, not in it: scrolled along
+            // with the slots it spent most of its life off the edge of the screen,
+            // which is the one thing a way out cannot be.
+            Row(verticalAlignment = Alignment.CenterVertically) {
             Row(
                 // Scrolled, so the slots keep their own size instead of being
                 // squeezed by whatever width is left. A Row given too little
@@ -259,8 +275,9 @@ fun MarkRibbon(
                 // the tool simply could not be picked. A scrolling row wraps its
                 // content while it fits and slides when it does not.
                 Modifier
+                    .weight(1f, fill = false)
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                    .padding(start = 8.dp, end = 4.dp, top = 6.dp, bottom = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -304,14 +321,63 @@ fun MarkRibbon(
                     } else {
                         RibbonSlot(
                             label = group.joinToString(" or ") { it.name },
-                            onOpen = { toggle(RibbonPanel.Tools(group), it) },
+                            onOpen = { centre ->
+                                // A tool in this group is in your hand, so the
+                                // slot puts it down. Reaching the armed tool
+                                // inside the picker to disarm meant knowing which
+                                // of them was armed and finding it again; the slot
+                                // is the thing you are already looking at.
+                                // Swapping within the group is the second tap.
+                                if (group.any { it.key == armed } && onDisarm != null) {
+                                    open = null
+                                    onDisarm()
+                                } else {
+                                    toggle(RibbonPanel.Tools(group), centre)
+                                }
+                            },
                         ) {
                             GroupGlyph(group, armed)
                         }
                     }
                 }
             }
+
+            onDismiss?.let { dismiss ->
+                RibbonClose {
+                    open = null
+                    dismiss()
+                }
+            }
+            }
         }
+    }
+}
+
+/**
+ * The band's own way out.
+ *
+ * Filled, where every slot beside it is not. The cross had to sit in the same row
+ * as the tools to be anywhere near the thumb, and in that row a bare glyph reads
+ * as one more thing to draw with — so it is given a ground of its own, which is
+ * the one visual difference nothing else in the row uses.
+ */
+@Composable
+private fun RibbonClose(onClick: () -> Unit) {
+    Box(
+        Modifier
+            .padding(end = 8.dp)
+            .size(CLOSE_SIZE)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClickLabel = "Close") { onClick() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = Icons.Filled.Close,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+        )
     }
 }
 
@@ -520,7 +586,12 @@ private fun GroupMember(
 
 /** The ground every opened panel sits on. */
 @Composable
-private fun RibbonPanelSurface(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
+private fun RibbonPanelSurface(
+    modifier: Modifier = Modifier,
+    /** Shuts the panel. See the cross below for why it is worth the room. */
+    onClose: () -> Unit,
+    content: @Composable () -> Unit,
+) {
     Surface(
         modifier = modifier,
         shape = RoundedCornerShape(20.dp),
@@ -528,9 +599,37 @@ private fun RibbonPanelSurface(modifier: Modifier = Modifier, content: @Composab
         tonalElevation = 3.dp,
         shadowElevation = 8.dp,
     ) {
-        Box(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) { content() }
+        Row(
+            modifier = Modifier.padding(start = 10.dp, end = 4.dp, top = 8.dp, bottom = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            content()
+            // A way out that is visibly a way out. The panel already closes by
+            // tapping the slot that opened it or by choosing from it, but neither
+            // of those looks like closing — somebody who opened it to see what was
+            // there had to pick something to get rid of it.
+            Box(
+                Modifier
+                    .padding(start = 2.dp)
+                    .size(CLOSE_SIZE)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable(onClickLabel = "Close") { onClose() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+        }
     }
 }
+
+/** Big enough to hit, small enough not to look like one of the choices. */
+private val CLOSE_SIZE = 30.dp
 
 /** The palette, then the way to any other colour. */
 @Composable
@@ -774,23 +873,62 @@ private fun FontGlyph(font: PdfFont) {
  */
 @Composable
 private fun FontChoices(font: PdfFont, onFont: (PdfFont) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+    // Scrolls: there are twenty-odd faces now, and a column of them is taller
+    // than the phone.
+    Column(
+        modifier = Modifier
+            .heightIn(max = FONT_LIST_HEIGHT)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
         PdfFont.entries.forEach { option ->
             val live = option == font
-            Text(
-                text = option.label,
-                color = if (live) ACCENT_INK else MaterialTheme.colorScheme.onSurface,
-                fontFamily = option.composeFamily(),
-                fontWeight = if (option.bold) FontWeight.Bold else FontWeight.Normal,
-                style = MaterialTheme.typography.bodyLarge,
+            Column(
                 modifier = Modifier
                     .clip(RoundedCornerShape(10.dp))
                     .background(if (live) RIBBON_ACCENT else Color.Transparent)
                     .clickable { onFont(option) }
                     .padding(horizontal = 14.dp, vertical = 8.dp),
-            )
+            ) {
+                Text(
+                    text = option.label,
+                    color = if (live) ACCENT_INK else MaterialTheme.colorScheme.onSurface,
+                    // The face itself where there is one. Without it a name
+                    // written in Devanagari or Korean is drawn by whatever the
+                    // phone falls back to, which is the one thing the label was
+                    // meant to show.
+                    fontFamily = option.pickerFamily(),
+                    fontWeight = if (option.bold) FontWeight.Bold else FontWeight.Normal,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+                Text(
+                    text = option.script,
+                    color = if (live) {
+                        ACCENT_INK.copy(alpha = 0.75f)
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                )
+            }
         }
     }
+}
+
+/** As tall as the list may get before it starts scrolling instead. */
+private val FONT_LIST_HEIGHT = 420.dp
+
+/**
+ * The face to draw a font's own name in.
+ *
+ * The bundled file where there is one, so a name written in its own script is
+ * drawn by the font it names. Falling back to the phone's sans-serif would
+ * show tofu for half the list.
+ */
+@Composable
+private fun PdfFont.pickerFamily(): FontFamily {
+    val typeface = BundledFonts.typefaceFor(this) ?: return composeFamily()
+    return remember(this) { FontFamily(Typeface(typeface)) }
 }
 
 /** The nearest face the phone has. See [PdfFont.family]. */

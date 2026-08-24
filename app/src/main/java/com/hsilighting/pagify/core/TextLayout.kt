@@ -16,10 +16,29 @@ import kotlin.math.sin
  * is measured the way the app's coordinates run, clockwise with y downward.
  */
 data class GlyphPlacement(
-    val character: Char,
+    /**
+     * What this glyph means.
+     *
+     * Usually one character. Sometimes several — a Devanagari conjunct, an
+     * Arabic lam-alef — and sometimes none of the ones beside it, because a
+     * shaped glyph stands for whatever the shaper says it stands for. Carried
+     * through to the save, where it becomes the ToUnicode: without it the words
+     * draw perfectly and cannot be searched or copied.
+     */
+    val text: String,
     val origin: Offset,
     val radians: Float,
-)
+    /**
+     * The glyph's id in an embedded font, or 0 for one written by character.
+     *
+     * The only way to ask for a joined Arabic form, which has no character of
+     * its own to write down.
+     */
+    val id: Int = 0,
+) {
+    /** The first character, for the callers that draw one glyph at a time. */
+    val character: Char get() = text.firstOrNull() ?: ' '
+}
 
 /**
  * Text laid along a baseline, glyph by glyph.
@@ -52,9 +71,30 @@ fun layOutText(
     val placements = mutableListOf<GlyphPlacement>()
     var travelled = 0f
 
+    // A bundled font is walked as *glyphs*, not characters. In most of the
+    // world's scripts those are not the same list: Arabic letters join into
+    // forms that have no character of their own, Devanagari reorders, and a
+    // right-to-left line comes back from the shaper already in the order it is
+    // drawn. Laying out character by character is what made Persian come out as
+    // a row of isolated letters running backwards.
+    val shaped = BundledFonts.shape(font, text, sizePoints)
+    if (shaped.glyphs.isNotEmpty()) {
+        shaped.glyphs.forEach { glyph ->
+            val at = pointAlong(path, travelled) ?: return placements
+            placements += GlyphPlacement(
+                text = glyph.text,
+                origin = Offset(at.first.x + glyph.offsetX, at.first.y - glyph.offsetY),
+                radians = at.second,
+                id = glyph.id,
+            )
+            travelled += glyph.advance
+        }
+        return placements
+    }
+
     text.forEach { character ->
         val at = pointAlong(path, travelled) ?: return placements
-        placements += GlyphPlacement(character, at.first, at.second)
+        placements += GlyphPlacement(character.toString(), at.first, at.second)
         travelled += font.advanceOf(character, sizePoints)
     }
 
@@ -108,8 +148,10 @@ fun straightBaseline(anchor: Offset, text: String, font: PdfFont, sizePoints: Fl
  * point of the tool — set the point size and the cloud follows, so there is no
  * second thing to keep in step.
  */
-fun Annotation.Text.textFrameBounds(): Rect =
-    textFrameBounds(path.firstOrNull() ?: Offset.Zero, font.widthOf(text, sizePoints), sizePoints)
+fun Annotation.Text.textFrameBounds(): Rect {
+    val margin = sizePoints * CLOUD_TEXT_MARGIN_FRACTION
+    return textBlockBounds().inflate(margin)
+}
 
 /**
  * The same, for anything holding the same three numbers.
@@ -119,7 +161,7 @@ fun Annotation.Text.textFrameBounds(): Rect =
  * agreed until somebody changed the margin.
  */
 fun textFrameBounds(anchor: Offset, runWidth: Float, sizePoints: Float): Rect {
-    val margin = sizePoints * CLOUD_TEXT_MARGIN
+    val margin = sizePoints * CLOUD_TEXT_MARGIN_FRACTION
     return Rect(
         left = anchor.x - margin,
         top = anchor.y - sizePoints * CAP_HEIGHT - margin,
@@ -188,7 +230,8 @@ private const val ELLIPSE_REACH = 1.47f
 private const val CLOUD_TEXT_BUMP = 0.17f
 
 /** The margin round the words, per point of type. */
-private const val CLOUD_TEXT_MARGIN = 0.45f
+/** The margin round the words, per point of type. */
+internal const val CLOUD_TEXT_MARGIN_FRACTION = 0.45f
 
 /**
  * Cap height and descender as fractions of the point size.
@@ -317,6 +360,10 @@ fun Annotation.Text.rebuilt(
 ): Annotation.Text {
     val anchor = path.firstOrNull() ?: Offset.Zero
     val size = sizePoints.coerceIn(MINIMUM_TEXT_POINTS, MAXIMUM_TEXT_POINTS)
+    // A caption that gained a second line straightens: stacked arcs curl into
+    // each other, and there is no answer for where the second one sits. The bend
+    // is remembered, so losing the extra line brings it back.
+    val bend = if (text.contains('\n')) 0f else curveDegrees
     return copy(
         text = text,
         font = font,
@@ -324,7 +371,7 @@ fun Annotation.Text.rebuilt(
         curveDegrees = curveDegrees,
         color = color,
         frame = frame,
-        path = curvedBaseline(anchor, text, font, size, curveDegrees),
+        path = curvedBaseline(anchor, text.captionLines().first(), font, size, bend),
     )
 }
 
@@ -338,12 +385,108 @@ fun MarkupShape.Text.rebuiltMarkup(
 ): MarkupShape.Text {
     val anchor = path.firstOrNull() ?: Offset.Zero
     val size = sizePoints.coerceIn(MINIMUM_TEXT_POINTS, MAXIMUM_TEXT_POINTS)
+    val bend = if (text.contains('\n')) 0f else curveDegrees
     return copy(
         text = text,
         font = font,
         sizePoints = size,
         curveDegrees = curveDegrees,
         frame = frame,
-        path = curvedBaseline(anchor, text, font, size, curveDegrees),
+        path = curvedBaseline(anchor, text.captionLines().first(), font, size, bend),
+    )
+}
+
+/**
+ * A caption's lines, in the order they were typed.
+ *
+ * Blank lines are kept: somebody who left a gap meant it, and dropping it would
+ * shuffle everything below up by a line.
+ */
+fun String.captionLines(): List<String> = split('\n')
+
+/** Whether this caption runs over more than one line. */
+val Annotation.Text.isMultiLine: Boolean get() = text.contains('\n')
+
+/**
+ * Every glyph of a caption, over however many lines it has.
+ *
+ * One line goes along the stored baseline, bent or straight — that is the whole
+ * of what [layOutText] does. More than one is laid as a block: each line on its
+ * own baseline, one line height below the last, and every line centred on the
+ * block. Centred because a multi-line caption is usually inside a cloud or a box,
+ * and a frame drawn round ragged-left lines reads as a mistake.
+ *
+ * The bend is not applied to a block. Stacked arcs curl into each other as the
+ * bend grows, and there is no answer for where the second arc should sit — so a
+ * caption that gains a second line straightens, and the ribbon stops offering the
+ * bend for it.
+ */
+fun Annotation.Text.layOutBlock(): List<GlyphPlacement> {
+    val lines = text.captionLines()
+    if (lines.size <= 1) return layOutText(text, font, sizePoints, path)
+
+    val anchor = path.firstOrNull() ?: return emptyList()
+    val widest = lines.maxOf { font.widthOf(it, sizePoints) }
+    val leading = sizePoints * LINE_HEIGHT
+
+    return lines.flatMapIndexed { index, line ->
+        val width = font.widthOf(line, sizePoints)
+        val start = Offset(
+            anchor.x + (widest - width) / 2f,
+            anchor.y + index * leading,
+        )
+        layOutText(line, font, sizePoints, straightBaseline(start, line, font, sizePoints))
+    }
+}
+
+/**
+ * The box a caption occupies, before any margin.
+ *
+ * The widest line decides the width and the number of lines decides the height,
+ * which is what makes a frame fit a block rather than only its first line.
+ */
+fun Annotation.Text.textBlockBounds(): Rect {
+    val anchor = path.firstOrNull() ?: Offset.Zero
+    val lines = text.captionLines()
+    val widest = lines.maxOfOrNull { font.widthOf(it, sizePoints) } ?: 0f
+    val leading = sizePoints * LINE_HEIGHT
+    return Rect(
+        left = anchor.x,
+        top = anchor.y - sizePoints * CAP_HEIGHT,
+        right = anchor.x + widest,
+        bottom = anchor.y + sizePoints * DESCENDER + (lines.size - 1) * leading,
+    )
+}
+
+/** How far apart the lines sit, per point of type. Ordinary leading. */
+private const val LINE_HEIGHT = 1.25f
+
+/** A caption on a picture, over however many lines it has. */
+fun MarkupShape.Text.layOutBlock(): List<GlyphPlacement> {
+    val lines = text.captionLines()
+    if (lines.size <= 1) return layOutText(text, font, sizePoints, path)
+
+    val anchor = path.firstOrNull() ?: return emptyList()
+    val widest = lines.maxOf { font.widthOf(it, sizePoints) }
+    val leading = sizePoints * LINE_HEIGHT
+
+    return lines.flatMapIndexed { index, line ->
+        val width = font.widthOf(line, sizePoints)
+        val start = Offset(anchor.x + (widest - width) / 2f, anchor.y + index * leading)
+        layOutText(line, font, sizePoints, straightBaseline(start, line, font, sizePoints))
+    }
+}
+
+/** The box a caption on a picture occupies, before any margin. */
+fun MarkupShape.Text.textBlockBounds(): Rect {
+    val anchor = path.firstOrNull() ?: Offset.Zero
+    val lines = text.captionLines()
+    val widest = lines.maxOfOrNull { font.widthOf(it, sizePoints) } ?: 0f
+    val leading = sizePoints * LINE_HEIGHT
+    return Rect(
+        left = anchor.x,
+        top = anchor.y - sizePoints * CAP_HEIGHT,
+        right = anchor.x + widest,
+        bottom = anchor.y + sizePoints * DESCENDER + (lines.size - 1) * leading,
     )
 }

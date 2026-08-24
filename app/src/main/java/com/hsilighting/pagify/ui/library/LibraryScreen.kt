@@ -145,7 +145,7 @@ fun LibraryScreen(
                 .align(Alignment.BottomEnd)
                 .padding(20.dp),
         ) {
-            Icon(Icons.Filled.Add, contentDescription = "Open a PDF")
+            Icon(Icons.Filled.Add, contentDescription = "Add a document")
         }
     }
 }

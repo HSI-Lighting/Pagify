@@ -27,6 +27,7 @@ pub mod error;
 pub mod plugins;
 pub mod registry;
 pub mod render;
+pub mod text;
 
 #[cfg(target_os = "android")]
 pub mod jni_bridge;

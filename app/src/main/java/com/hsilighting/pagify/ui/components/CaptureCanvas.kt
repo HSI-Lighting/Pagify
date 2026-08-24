@@ -39,7 +39,7 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import com.hsilighting.pagify.core.TextFrame
-import com.hsilighting.pagify.core.layOutText
+import com.hsilighting.pagify.core.layOutBlock
 import com.hsilighting.pagify.core.textFrameBounds
 import com.hsilighting.pagify.core.textFrameOutline
 import com.hsilighting.pagify.core.widthOf
@@ -95,6 +95,8 @@ fun CaptureCanvas(
     onSelectText: (index: Int) -> Unit = {},
     /** The caption the ribbon is editing, drawn picked out. */
     selectedText: Int? = null,
+    /** A caption was double-tapped; rewrite its words. */
+    onEditText: (index: Int) -> Unit = {},
     /**
      * Magnification of the picture on screen. Nothing to do with the export
      * scale: this is for looking closely and drawing accurately, and the file is
@@ -155,6 +157,7 @@ fun CaptureCanvas(
                 onMoveText = onMoveText,
                 onSelectText = onSelectText,
                 selectedText = selectedText,
+                onEditText = onEditText,
             )
         }
     }
@@ -182,6 +185,8 @@ private fun MarkupSurface(
     onSelectText: (index: Int) -> Unit = {},
     /** The caption the ribbon is editing, drawn picked out. */
     selectedText: Int? = null,
+    /** A caption was double-tapped; rewrite its words. */
+    onEditText: (index: Int) -> Unit = {},
 ) {
     val commit by rememberUpdatedState(onCommit)
     val recognise by rememberUpdatedState(onRecognise)
@@ -191,6 +196,7 @@ private fun MarkupSurface(
     // Read live, not captured: the gesture block is keyed on the tool, so a plain
     // capture would hold whatever was selected when the tool was picked up.
     val heldCaption by rememberUpdatedState(selectedText)
+    val editText by rememberUpdatedState(onEditText)
     val marks by rememberUpdatedState(markup)
     val ink by rememberUpdatedState(color)
     val currentTool by rememberUpdatedState(tool)
@@ -204,6 +210,10 @@ private fun MarkupSurface(
     val gesture = remember(tool, size) { MarkupGesture(tool, size) }
     var preview by remember(tool) { mutableStateOf<List<MarkupShape>>(emptyList()) }
     var dwelling by remember(tool) { mutableStateOf(false) }
+
+    /** When the last tap on a caption lifted, and which one, for double taps. */
+    var lastTapAt by remember(tool) { mutableStateOf(0L) }
+    var lastTapIndex by remember(tool) { mutableStateOf(-1) }
 
     /** Which mark is being dragged, and how far it has come. */
     var movingIndex by remember(tool) { mutableStateOf(-1) }
@@ -297,8 +307,26 @@ private fun MarkupSurface(
                             }
 
                             // A press that went nowhere is a tap, and a tap on
-                            // words picks them up for the ribbon to work on.
-                            if (movingIndex >= 0) moveText(grab, shifted) else selectText(grab)
+                            // words picks them up for the ribbon to work on. A
+                            // second one soon after opens them for rewriting —
+                            // detected here rather than by a tap detector above,
+                            // because this handler claims the press first and one
+                            // asking for an unclaimed press would never fire.
+                            if (movingIndex >= 0) {
+                                moveText(grab, shifted)
+                                lastTapAt = 0L
+                            } else {
+                                val now = System.currentTimeMillis()
+                                val quick = now - lastTapAt < viewConfiguration.doubleTapTimeoutMillis
+                                if (quick && lastTapIndex == grab) {
+                                    editText(grab)
+                                    lastTapAt = 0L
+                                } else {
+                                    selectText(grab)
+                                    lastTapAt = now
+                                    lastTapIndex = grab
+                                }
+                            }
                             movingIndex = -1
                             moveShift = Offset.Zero
                         }
@@ -568,7 +596,7 @@ private fun DrawScope.drawMarkupText(
     }
 
     drawIntoCanvas { canvas ->
-        layOutText(shape.text, shape.font, shape.sizePoints, shape.path).forEach { placement ->
+        shape.layOutBlock().forEach { placement ->
             val at = toPixels(placement.origin)
             val native = canvas.nativeCanvas
             val saved = native.save()
