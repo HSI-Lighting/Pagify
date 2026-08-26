@@ -120,7 +120,7 @@ android {
         applicationId = "com.hsilighting.pagify"
         minSdk = 24
         targetSdk = 37
-        versionCode = 7
+        versionCode = 8
         versionName = "0.1.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
