@@ -120,6 +120,16 @@ fun interface PageRemap {
 
         fun afterInsert(at: Int) = PageRemap { old -> if (old >= at) old + 1 else old }
 
+        /**
+         * [count] pages inserted at [at], all in one go.
+         *
+         * Not [afterInsert] applied [count] times: each application would shift
+         * marks already shifted by the last one, so a five-page import would move
+         * everything after it by fifteen pages instead of five.
+         */
+        fun afterInsertingMany(at: Int, count: Int) =
+            PageRemap { old -> if (old >= at) old + count else old }
+
         /** [order] is a destination map: `order[i]` is where page `i` ends up. */
         fun afterReorder(order: List<Int>) = PageRemap { old ->
             order.getOrNull(old) ?: old

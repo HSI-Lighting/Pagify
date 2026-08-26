@@ -203,6 +203,27 @@ class PdfDocument private constructor(
      * still refers to the pre-publish bytes. Callers must reopen to see the saved
      * file; the reader does that as part of its save action.
      */
+    /**
+     * Write [pages] out as a new PDF on [fd], which native code takes ownership of.
+     *
+     * The order of [pages] is the order they land in: "pages 3, 1 and 2" is a
+     * thing somebody can ask for, and sorting the list would hand them a
+     * different document without saying so.
+     */
+    fun exportPagesTo(fd: Int, pages: List<Int>) {
+        NativeBridge.exportPagesToFd(handle, JSONArray(pages).toString(), fd)
+    }
+
+    /**
+     * Put [pages] of [source] into this document at [at].
+     *
+     * Both documents have to be open at once. Undoable like any other edit.
+     */
+    fun importPages(source: PdfDocument, pages: List<Int>, at: Int): EditState =
+        EditState.fromJson(
+            NativeBridge.importPages(handle, source.handle, JSONArray(pages).toString(), at),
+        )
+
     fun saveVia(scratchDir: File, incremental: Boolean = true, publish: (File) -> Unit) {
         val scratch = File.createTempFile("pagify-save", ".pdf", scratchDir)
         try {

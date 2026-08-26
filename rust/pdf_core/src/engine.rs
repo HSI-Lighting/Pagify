@@ -786,8 +786,13 @@ mod tests {
         fn extract_pages(&self, _range: &[usize]) -> Result<Box<dyn Document>> {
             Err(PdfError::Unsupported("extract in tests"))
         }
-        fn import_pages(&mut self, _f: &dyn Document, _r: &[usize], _at: usize) -> Result<()> {
-            Ok(())
+        fn import_pages(
+            &mut self,
+            _source: &dyn Document,
+            _indices: &[usize],
+            _at: usize,
+        ) -> Result<usize> {
+            Ok(0)
         }
         fn save_incremental(&mut self, dest: &mut dyn std::io::Write) -> Result<()> {
             dest.write_all(b"incremental")?;

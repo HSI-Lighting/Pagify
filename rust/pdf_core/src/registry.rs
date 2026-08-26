@@ -119,6 +119,35 @@ pub fn with_session<T>(
     f(session)
 }
 
+/// Run `f` against two sessions at once: one to change, one to read from.
+///
+/// Importing pages needs both documents open, and the registry is behind a single
+/// mutex — so the obvious spelling, a `with_session` inside a `with_session`,
+/// deadlocks rather than failing. One lock, two borrows, taken here so no caller
+/// has to know that.
+///
+/// Importing a document into itself is refused. PDFium makes no promise about
+/// what `FPDF_ImportPagesByIndex` does when handed the same document twice, and
+/// "duplicate these pages" is a different feature that deserves its own path.
+pub fn with_two_sessions<T>(
+    target: i64,
+    source: i64,
+    f: impl FnOnce(&mut DocumentSession, &mut DocumentSession) -> Result<T>,
+) -> Result<T> {
+    if target == source {
+        return Err(PdfError::InvalidArgument(
+            "a document cannot import from itself".into(),
+        ));
+    }
+
+    let mut guard = lock();
+    let [target_session, source_session] = guard
+        .get_disjoint_mut([&target, &source]);
+    let target_session = target_session.ok_or(PdfError::InvalidHandle(target))?;
+    let source_session = source_session.ok_or(PdfError::InvalidHandle(source))?;
+    f(target_session, source_session)
+}
+
 /// Close a document, returning whether a live document was actually closed.
 /// A `false` return means a double close, which the Kotlin side logs but tolerates.
 pub fn remove(handle: i64) -> bool {

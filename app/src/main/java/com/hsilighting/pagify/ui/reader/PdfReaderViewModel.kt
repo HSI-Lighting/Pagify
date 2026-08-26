@@ -1653,6 +1653,174 @@ frame = pending.frame,
      * an odd one in the middle of a uniform document — but it can be any of the
      * standards, because a document is not always uniform on purpose.
      */
+    /**
+     * Point at a page, from the organiser.
+     *
+     * The reader follows, so closing the sheet leaves you looking at the page
+     * you chose rather than the one you left — and a blank page or an import
+     * now lands where you pointed.
+     */
+    fun selectPage(index: Int) = _state.update {
+        val page = index.coerceIn(0, (it.pageCount - 1).coerceAtLeast(0))
+        it.copy(currentPage = page, jumpToPage = page)
+    }
+
+    // ------------------------------------------------------- pages in and out --
+
+    fun choosePagesToExport(show: Boolean) =
+        _state.update { it.copy(choosingPagesToExport = show) }
+
+    /**
+     * The pages chosen to export, waiting on somewhere to put them.
+     *
+     * Held across the system Save dialog, which is a whole screen they can
+     * back out of. Backing out then leaves nothing behind.
+     */
+    private var pagesAwaitingADestination: List<Int> = emptyList()
+
+    /** Their choice is made; a destination is asked for next. */
+    fun pagesChosenToExport(pages: List<Int>): String {
+        pagesAwaitingADestination = pages
+        _state.update { it.copy(choosingPagesToExport = false) }
+        val base = _state.value.documentName.ifBlank { "Document" }.removeSuffix(".pdf")
+        return if (pages.size == 1) {
+            "$base page ${pages.first() + 1}.pdf"
+        } else {
+            "$base ${pages.size} pages.pdf"
+        }
+    }
+
+    /** The Save dialog was dismissed without choosing anywhere. */
+    fun exportAbandoned() {
+        pagesAwaitingADestination = emptyList()
+    }
+
+    /** Write the chosen pages to the destination they picked. */
+    fun exportPagesTo(destination: Uri) {
+        val doc = document ?: return
+        val pages = pagesAwaitingADestination
+        pagesAwaitingADestination = emptyList()
+        if (pages.isEmpty()) return
+
+        _state.update { it.copy(isSaving = true) }
+        viewModelScope.launch {
+            try {
+                // The marks go in first, exactly as they do for a save. Without
+                // this the exported pages come out as the document *without*
+                // the session's markup — which is the bug "Save a copy" shipped
+                // with, silently, until somebody opened one of its files.
+                commitMarks(doc)
+                repository.exportPages(doc, destination, pages)
+                SessionRecorder.record("EXPORTED_PAGES", "count=${pages.size}")
+                _state.update {
+                    it.copy(
+                        isSaving = false,
+                        message = if (pages.size == 1) {
+                            "Exported 1 page."
+                        } else {
+                            "Exported ${pages.size} pages."
+                        },
+                    )
+                }
+                refreshEditState()
+            } catch (t: Throwable) {
+                Log.e(TAG, "the pages could not be exported", t)
+                _state.update {
+                    it.copy(
+                        isSaving = false,
+                        message = t.message ?: "The pages could not be exported.",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * The document pages are being taken from.
+     *
+     * Kept open while the picker is on screen: its thumbnails render from it.
+     * Closed when the picker goes, whichever way it goes.
+     */
+    private var importFrom: PdfDocument? = null
+
+    /** Open a file to take pages from. */
+    fun openImportSource(uri: Uri) {
+        viewModelScope.launch {
+            try {
+                closeImportSource()
+                val source = repository.open(uri)
+                importFrom = source
+                _state.update {
+                    it.copy(
+                        importSource = ImportSource(source.sourceName, source.pageCount),
+                    )
+                }
+            } catch (t: Throwable) {
+                Log.e(TAG, "could not open the file to import from", t)
+                _state.update {
+                    it.copy(message = t.message ?: "That file could not be opened.")
+                }
+            }
+        }
+    }
+
+    /** Page [index] of the file being imported from, for the picker. */
+    suspend fun importSourcePageSize(index: Int): PageSize? =
+        importFrom?.let { runCatching { repository.pageSize(it, index) }.getOrNull() }
+
+    suspend fun renderImportSourcePage(index: Int, zoom: Float): android.graphics.Bitmap? =
+        importFrom?.let { runCatching { repository.renderPage(it, index, zoom) }.getOrNull() }
+
+    /** Put the chosen pages in, after the page being read. */
+    fun importChosenPages(pages: List<Int>) {
+        val doc = document ?: return
+        val source = importFrom ?: return
+        if (pages.isEmpty()) return
+
+        // After the current page, which is what "put this here" means when you
+        // are looking at a page. Appending at the end would be a different
+        // request, and one nobody made.
+        val at = (_state.value.currentPage + 1).coerceIn(0, _state.value.pageCount)
+
+        viewModelScope.launch {
+            try {
+                val edit = doc.importPages(source, pages, at)
+                annotations.remapPages(PageRemap.afterInsertingMany(at, pages.size))
+
+                // Through the same path every other edit takes. Updating the state
+                // by hand here left the rendered pages alone: the thumbnail cache
+                // still held every page under its old number, so the organiser went
+                // on showing the document as it was until a save reopened it. An
+                // insert renumbers everything after it — there is no page whose
+                // cached picture is still safe.
+                afterEdit(
+                    doc = doc,
+                    state = edit,
+                    message = if (pages.size == 1) {
+                        "Imported 1 page."
+                    } else {
+                        "Imported ${pages.size} pages."
+                    },
+                    follow = at,
+                )
+            } catch (t: Throwable) {
+                Log.e(TAG, "the pages could not be imported", t)
+                _state.update {
+                    it.copy(message = t.message ?: "The pages could not be imported.")
+                }
+            } finally {
+                closeImportSource()
+            }
+        }
+    }
+
+    /** Shut the picker, and the file behind it. */
+    fun closeImportSource() {
+        importFrom?.let { runCatching { it.close() } }
+        importFrom = null
+        _state.update { it.copy(importSource = null) }
+    }
+
     fun showNewDocumentChooser(show: Boolean) =
         _state.update { it.copy(showNewDocumentChooser = show) }
 

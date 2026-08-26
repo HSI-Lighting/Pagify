@@ -108,6 +108,18 @@ data class PdfReaderState(
     /** They chose paper, and are describing it. */
     val showNewDocumentSheet: Boolean = false,
     /**
+     * Pages being chosen to export, while the picker is open. Null when it is
+     * not.
+     */
+    val choosingPagesToExport: Boolean = false,
+    /**
+     * A file opened to import pages from, and how many pages it has.
+     *
+     * Held open for as long as the picker is on screen: its thumbnails are
+     * rendered from it. Null when nothing is being imported.
+     */
+    val importSource: ImportSource? = null,
+    /**
      * Somewhere the reader is trying to go, while they are being asked about
      * unsaved work. Null when nothing is being asked.
      */
@@ -487,3 +499,14 @@ enum class LeaveIntent {
     /** Opening a different document. */
     AnotherDocument,
 }
+
+/**
+ * A document opened only to take pages out of.
+ *
+ * The document itself stays in the view model — this is what the UI needs to
+ * draw the picker, and no more.
+ */
+data class ImportSource(
+    val name: String,
+    val pageCount: Int,
+)

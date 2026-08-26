@@ -688,6 +688,120 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_shapeTextJs
     })
 }
 
+/// Write chosen pages of a document out as a new PDF.
+///
+/// `indices` is a JSON array of page numbers, taken in the order given: "pages 3,
+/// 1 and 2" is a thing somebody can ask for, and sorting the list quietly would
+/// hand them a different document.
+///
+/// Takes ownership of `fd` exactly as `saveToFd` does.
+///
+/// **Marks made this session are not in the document yet.** The caller commits
+/// them first — the same rule that "Save a copy" learned the hard way, when it
+/// silently produced files with every stroke missing.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_exportPagesToFd<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    indices_json: JString<'local>,
+    fd: jint,
+) {
+    guard(&mut env, (), |env| {
+        let indices: Vec<usize> = serde_json::from_str(&required_string(
+            env,
+            &indices_json,
+            "indices",
+        )?)
+        .map_err(|e| PdfError::InvalidArgument(format!("the page list was unreadable: {e}")))?;
+
+        // Adopted first, so on every path from here the descriptor is owned by
+        // this call.
+        // Safety: the contract above places ownership of `fd` with this call.
+        let file = unsafe { PdfiumDocument::adopt_fd(fd)? };
+        let mut writer = std::io::BufWriter::new(file);
+
+        registry::with_session(handle, |session| {
+            let document = session
+                .document
+                .as_document_mut()
+                .ok_or_else(|| PdfError::Pdfium("this document cannot be read from".into()))?;
+            let extracted = document.extract_pages(&indices)?;
+            let mut extracted = extracted;
+            extracted
+                .as_document_mut()
+                .ok_or_else(|| PdfError::Pdfium("the extracted pages are not writable".into()))?
+                .save_full_copy(&mut writer)
+        })?;
+
+        // Flushed explicitly: a `BufWriter` that fails on drop swallows the error,
+        // which would report a successful export of a truncated file.
+        std::io::Write::flush(&mut writer)?;
+        Ok(())
+    })
+}
+
+/// Put pages from another open document into this one.
+///
+/// Both documents have to be open at once, and the registry is behind a single
+/// mutex — so this goes through `with_two_sessions` rather than nesting two
+/// borrows, which would deadlock rather than fail.
+///
+/// The chosen pages are extracted into a small PDF first and the *command* holds
+/// those bytes. That is what makes the import redoable: redo re-executes against
+/// the document as it now stands, and a command pointing at the source file could
+/// not run once that file was closed.
+///
+/// Returns the edit state, as every other mutating entry does.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_importPages<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    source_handle: jlong,
+    indices_json: JString<'local>,
+    at: jint,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let indices: Vec<usize> = serde_json::from_str(&required_string(
+            env,
+            &indices_json,
+            "indices",
+        )?)
+        .map_err(|e| PdfError::InvalidArgument(format!("the page list was unreadable: {e}")))?;
+        if indices.is_empty() {
+            return Err(PdfError::InvalidArgument(
+                "no pages were chosen to import".into(),
+            ));
+        }
+        let at = usize::try_from(at)
+            .map_err(|_| PdfError::InvalidArgument(format!("cannot insert at {at}")))?;
+
+        let pdf = registry::with_two_sessions(handle, source_handle, |_target, source| {
+            // Through `as_document_mut` because `extract_pages` lives on
+            // `DocumentMut`. Nothing about the source changes — the extraction
+            // builds a new document — but the trait it sits on is the mutable one.
+            let extracted = source
+                .document
+                .as_document_mut()
+                .ok_or_else(|| PdfError::Unsupported("taking pages from this document"))?
+                .extract_pages(&indices)?;
+            let mut extracted = extracted;
+            let mut bytes = Vec::new();
+            extracted
+                .as_document_mut()
+                .ok_or_else(|| PdfError::Pdfium("the chosen pages are not writable".into()))?
+                .save_full_copy(&mut bytes)?;
+            Ok(bytes)
+        })?;
+
+        let state = registry::with_session(handle, |session| {
+            engine::execute(session, Command::ImportPages { at, pdf })
+        })?;
+        edit_state_json(env, state)
+    })
+}
+
 /// The rotation a page currently carries, in quarter turns.
 ///
 /// Needed because `Command::SetPageRotation` is absolute rather than relative: an

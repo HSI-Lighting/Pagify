@@ -257,6 +257,10 @@ impl PdfiumDocument {
 }
 
 impl Document for PdfiumDocument {
+    fn backend_handle(&self) -> Option<usize> {
+        Some(self.document.handle() as usize)
+    }
+
     fn text_marks(&self, page_index: usize) -> Result<Vec<String>> {
         self.validate_page_index(page_index)?;
         let page_number = i32::try_from(page_index).map_err(|_| {
@@ -633,6 +637,21 @@ fn build_render_config(request: &RenderRequest, width: u32, height: u32) -> PdfR
 /// handle public unblocks page deletion, reordering and incremental save
 /// together. Adding a save variant alone would not.
 impl DocumentMut for PdfiumDocument {
+    fn import_pages(
+        &mut self,
+        source: &dyn Document,
+        indices: &[usize],
+        at: usize,
+    ) -> Result<usize> {
+        let handle = source.backend_handle().ok_or_else(|| {
+            PdfError::InvalidArgument("that document is not one PDFium opened".into())
+        })?;
+        // Safety: the value came from `backend_handle` on a live document the
+        // caller is holding for the duration of this call, and only this
+        // implementation ever produces or reads it.
+        self.import_pages_from(handle as FPDF_DOCUMENT, indices, at)
+    }
+
     fn insert_blank_page(
         &mut self,
         at: usize,
@@ -964,15 +983,7 @@ impl DocumentMut for PdfiumDocument {
         Ok(Box::new(PdfiumDocument::open_bytes(bytes, None)?))
     }
 
-    fn import_pages(&mut self, _from: &dyn Document, _range: &[usize], _at: usize) -> Result<()> {
-        // Needs the source document's raw handle, which is only reachable for a
-        // `PdfiumDocument`; `&dyn Document` deliberately hides that. Landing this
-        // means either downcasting or narrowing the parameter, and the choice
-        // belongs with the merge feature that first needs it.
-        Err(PdfError::Pdfium(
-            "import_pages: needs the source document's PDFium handle; see DocumentMut".into(),
-        ))
-    }
+
 
     fn save_full_copy(&mut self, dest: &mut dyn Write) -> Result<()> {
         // A rewrite, and safe to build on the binding's own save: this is the
@@ -2452,4 +2463,75 @@ unsafe fn load_embedded_font(
         return Err(PdfError::Pdfium(format!("{name} would not embed")));
     }
     Ok((font, subset.ids))
+}
+
+/// Moving pages between documents.
+///
+/// Both directions are `FPDF_ImportPagesByIndex`. What it takes *with* a page was
+/// measured rather than assumed — `examples/page_transfer_probe.rs` builds a
+/// fixture of three differently-sized pages, each with text and one of our
+/// marked-content tags, and checks all three survive the round trip. They do.
+/// That last one mattered: nothing in PDFium's contract promises a private tag
+/// survives a cross-document import, and the tag is what makes saved words an
+/// editable and erasable mark.
+impl PdfiumDocument {
+    /// The raw PDFium handle. See [`Document::backend_handle`].
+    fn handle(&self) -> FPDF_DOCUMENT {
+        self.document.handle()
+    }
+
+    fn import_pages_from(
+        &mut self,
+        source: FPDF_DOCUMENT,
+        indices: &[usize],
+        at: usize,
+    ) -> Result<usize> {
+        if at > self.page_count {
+            return Err(PdfError::InvalidArgument(format!(
+                "cannot insert at {at}: the document has {} pages",
+                self.page_count,
+            )));
+        }
+
+        let wanted: Vec<c_int> = indices
+            .iter()
+            .map(|&index| {
+                c_int::try_from(index).map_err(|_| {
+                    PdfError::InvalidArgument(format!("page index {index} is out of range"))
+                })
+            })
+            .collect::<Result<_>>()?;
+
+        let bindings = pdfium()?.bindings();
+        let before = self.page_count;
+
+        // Safety: both documents are live for the call, and the index list is
+        // valid for the length given. A null pointer with length zero is
+        // PDFium's own spelling of "every page".
+        let ok = unsafe {
+            bindings.FPDF_ImportPagesByIndex(
+                self.handle(),
+                source,
+                if wanted.is_empty() {
+                    std::ptr::null()
+                } else {
+                    wanted.as_ptr()
+                },
+                wanted.len() as c_ulong,
+                c_int::try_from(at).map_err(|_| {
+                    PdfError::InvalidArgument(format!("insert position {at} is out of range"))
+                })?,
+            )
+        };
+        if ok == 0 {
+            return Err(PdfError::Pdfium("the pages were refused".into()));
+        }
+
+        // Counted from the document rather than from the request: with an empty
+        // list the caller does not know how many arrived, and after a partial
+        // failure neither would we.
+        self.page_count = self.document.pages().len() as usize;
+        self.dirty = true;
+        Ok(self.page_count.saturating_sub(before))
+    }
 }

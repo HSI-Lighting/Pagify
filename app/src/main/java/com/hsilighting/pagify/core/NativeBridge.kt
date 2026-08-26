@@ -187,6 +187,32 @@ internal object NativeBridge {
     @Throws(PdfException::class)
     external fun saveToFd(handle: Long, fd: Int, incremental: Boolean)
 
+    // ---------------------------------------------------------------- pages --
+
+    /**
+     * Writes [indices] of this document out as a new PDF, taking ownership of
+     * [fd] exactly as [saveToFd] does.
+     *
+     * The order of [indices] is the order the pages land in. Marks made this
+     * session are not in the document yet, so the caller commits them first.
+     */
+    @Throws(PdfException::class)
+    external fun exportPagesToFd(handle: Long, indicesJson: String, fd: Int)
+
+    /**
+     * Puts [indices] of the document at [sourceHandle] into this one at [at].
+     *
+     * Undoable and redoable like any other edit. Returns the resulting edit
+     * state as JSON.
+     */
+    @Throws(PdfException::class)
+    external fun importPages(
+        handle: Long,
+        sourceHandle: Long,
+        indicesJson: String,
+        at: Int,
+    ): String
+
     // ----------------------------------------------------------------- text --
 
     /**

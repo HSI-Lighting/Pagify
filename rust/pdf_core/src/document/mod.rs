@@ -302,6 +302,18 @@ pub trait Document: Send + Sync {
         None
     }
 
+    /// This document's handle in whatever backend opened it, as an opaque
+    /// number. `None` for a backend that has no such thing.
+    ///
+    /// The one place a backend detail reaches the trait, and it is here
+    /// because moving pages needs *two* documents at once — the trait's
+    /// methods each borrow one. Kept as a `usize` so the trait itself stays
+    /// free of PDFium types; only the implementation knows what it means, and
+    /// only that implementation may interpret it.
+    fn backend_handle(&self) -> Option<usize> {
+        None
+    }
+
     /// Bounds check shared by every implementation.
     fn validate_page_index(&self, index: usize) -> Result<()> {
         let count = self.page_count();
@@ -360,6 +372,7 @@ pub trait DocumentMut {
 
     /// Reorder in place. `order[i]` is the index the page currently at `i` moves to.
     fn reorder_pages(&mut self, order: &[usize]) -> Result<()>;
+
 
     /// Remove a page, handing back its content so the deletion can be undone.
     fn delete_page(&mut self, index: usize) -> Result<RemovedPage>;
@@ -424,7 +437,21 @@ pub trait DocumentMut {
     /// A new document holding copies of the given pages. Does not mutate self.
     fn extract_pages(&self, range: &[usize]) -> Result<Box<dyn Document>>;
 
-    fn import_pages(&mut self, from: &dyn Document, range: &[usize], at: usize) -> Result<()>;
+    /// Copy pages out of another open document into this one, at `at`.
+    ///
+    /// `indices` is taken in the order given, not sorted: "pages 3, 1 and 2"
+    /// is a thing somebody can ask for, and quietly sorting the list hands
+    /// them a different document without saying so. An empty list means every
+    /// page of the source.
+    ///
+    /// Returns how many pages arrived, which is what an undo needs in order to
+    /// take them back out.
+    fn import_pages(
+        &mut self,
+        source: &dyn Document,
+        indices: &[usize],
+        at: usize,
+    ) -> Result<usize>;
 
     // ----------------------------------------------------------- persistence --
 

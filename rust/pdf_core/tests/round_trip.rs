@@ -1053,3 +1053,70 @@ fn text_decodes_from_the_wire_the_app_writes() {
         other => panic!("expected text, got {other:?}"),
     }
 }
+
+/// Importing pages, and taking the import back out again.
+///
+/// The widths are the assertion because `pages-ladder.pdf` gives every page a
+/// different one: a list of widths says exactly which pages are where, which a
+/// page count cannot. An import that put the pages in the wrong place, in the
+/// wrong order, or dropped one, all look identical to a count.
+#[test]
+fn pages_import_where_they_were_asked_for_and_undo_takes_them_out() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+    let before = page_widths(&doc);
+    assert!(before.len() >= 4, "this test needs a fixture of four pages");
+
+    // Two pages, deliberately out of source order.
+    let mut carried = doc
+        .as_document_mut()
+        .expect("mutable")
+        .extract_pages(&[3, 1])
+        .expect("extract");
+    let mut pdf = Vec::new();
+    carried
+        .as_document_mut()
+        .expect("mutable")
+        .save_full_copy(&mut pdf)
+        .expect("save the carried pages");
+
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::ImportPages { at: 1, pdf: pdf.clone() },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("import");
+
+    let mut expected = before.clone();
+    expected.splice(1..1, [before[3], before[1]]);
+    assert_eq!(
+        expected,
+        page_widths(&doc),
+        "the imported pages did not land at index 1 in the order asked for",
+    );
+
+    history
+        .undo(doc.as_document_mut().expect("mutable"))
+        .expect("undo");
+    assert_eq!(
+        before,
+        page_widths(&doc),
+        "undoing the import did not put the document back",
+    );
+
+    // Redo is the half that decided the command's design: it re-executes against
+    // the document as it now stands, so the command has to carry its own pages
+    // rather than point at a file that is long closed.
+    history
+        .redo(doc.as_document_mut().expect("mutable"))
+        .expect("redo");
+    assert_eq!(
+        expected,
+        page_widths(&doc),
+        "redo did not put the imported pages back",
+    );
+}

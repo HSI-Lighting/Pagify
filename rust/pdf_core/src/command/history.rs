@@ -228,8 +228,13 @@ mod tests {
             Err(PdfError::Pdfium("not needed by these tests".into()))
         }
 
-        fn import_pages(&mut self, _from: &dyn Document, _r: &[usize], _at: usize) -> Result<()> {
-            Ok(())
+        fn import_pages(
+            &mut self,
+            _source: &dyn Document,
+            _indices: &[usize],
+            _at: usize,
+        ) -> Result<usize> {
+            Ok(0)
         }
 
         fn save_incremental(&mut self, _dest: &mut dyn Write) -> Result<()> {

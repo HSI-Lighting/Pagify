@@ -89,6 +89,23 @@ pub enum Command {
         index: usize,
         quarter_turns: u8,
     },
+    /// Put pages from somewhere else into this document at `at`.
+    ///
+    /// Carries the pages **as their own small PDF** rather than as a reference to
+    /// the document they came from, and that is the whole design of it. Redo
+    /// re-executes a command against the document as it now stands; a command
+    /// holding a handle to the source file could not be redone once that file was
+    /// closed, which is a minute after the import in every real use. Self
+    /// contained, it redoes like anything else.
+    ///
+    /// The cost is that the bytes sit in the undo stack until they age out of it.
+    /// That is bounded by the undo depth and by what somebody chose to import,
+    /// and it buys an import that behaves like every other edit.
+    ImportPages {
+        at: usize,
+        /// A PDF holding exactly the pages to insert, in order.
+        pdf: Vec<u8>,
+    },
 
     // ------------------------------------------------------------ annotation --
     /// Put a mark on a page.
@@ -139,6 +156,15 @@ pub enum UndoRecord {
     /// Removes a page that an insert added.
     RemovePage {
         index: usize,
+    },
+    /// Removes a run of pages that an import added.
+    ///
+    /// A count rather than a list of indices: the pages went in contiguously at
+    /// `at`, so that is what has to come back out, and a list would let a caller
+    /// ask for something that never happened.
+    RemovePages {
+        at: usize,
+        count: usize,
     },
     SetPageRotation {
         index: usize,
@@ -197,6 +223,14 @@ impl Command {
                 )?;
                 Ok(UndoRecord::RemovePage { index: *at })
             }
+            Command::ImportPages { at, pdf } => {
+                let source =
+                    crate::document::pdfium_doc::PdfiumDocument::open_bytes(pdf.clone(), None)?;
+                // An empty index list is PDFium own spelling of "every page",
+                // which is exactly what this command carries.
+                let count = doc.import_pages(&source, &[], *at)?;
+                Ok(UndoRecord::RemovePages { at: *at, count })
+            }
             Command::SetPageRotation {
                 index,
                 quarter_turns,
@@ -252,6 +286,7 @@ impl Command {
             Command::ReorderPages { .. } => "Reorder pages".into(),
             Command::DeletePage { index } => format!("Delete page {}", index + 1),
             Command::InsertBlankPage { at, .. } => format!("Insert page {}", at + 1),
+            Command::ImportPages { at, .. } => format!("Import pages at {}", at + 1),
             Command::SetPageRotation { index, .. } => format!("Rotate page {}", index + 1),
             // Named by what the user drew, not by "annotation" — the label goes
             // straight onto an undo button, and "Undo add annotation" tells nobody
@@ -278,7 +313,9 @@ impl Command {
         match self {
             Command::ReorderPages { .. }
             | Command::DeletePage { .. }
-            | Command::InsertBlankPage { .. } => Vec::new(),
+            | Command::InsertBlankPage { .. }
+            // An import renumbers every page after it, exactly as an insert does.
+            | Command::ImportPages { .. } => Vec::new(),
             Command::SetPageRotation { index, .. } => vec![*index],
             // A mark changes one page and renumbers nothing, so the rest of the
             // cache survives — which matters, because marks are made far more
@@ -310,6 +347,15 @@ impl UndoRecord {
             UndoRecord::RestorePage { at, page } => doc.insert_page(at, page),
             UndoRecord::ReorderPages { order } => doc.reorder_pages(&order),
             UndoRecord::RemovePage { index } => doc.delete_page(index).map(|_| ()),
+            // Backwards: removing a page shifts every index after it, so taking
+            // the run out front-first would delete the wrong pages from the
+            // second one on.
+            UndoRecord::RemovePages { at, count } => {
+                for index in (at..at + count).rev() {
+                    doc.delete_page(index)?;
+                }
+                Ok(())
+            }
             UndoRecord::SetPageRotation {
                 index,
                 quarter_turns,

@@ -202,6 +202,27 @@ class PdfRepository(
     }
 
     /**
+     * Write chosen pages out as a new PDF, to a destination the reader picked.
+     *
+     * Straight to the destination rather than through a scratch file: the save
+     * path needs one because PDFium reads the source while writing to it, and
+     * this writes somewhere else entirely.
+     */
+    suspend fun exportPages(
+        document: PdfDocument,
+        uri: Uri,
+        pages: List<Int>,
+    ): Unit = withContext(ioDispatcher) {
+        // "rwt" truncates, so exporting over an existing file replaces it rather
+        // than leaving the tail of the old one after the new %%EOF.
+        resolver.openFileDescriptor(uri, "rwt")?.use { descriptor ->
+            // Detached, because the native side adopts it. Closing the
+            // ParcelFileDescriptor afterwards is then a no-op, not a double close.
+            document.exportPagesTo(descriptor.detachFd(), pages)
+        } ?: throw PdfNativeException("could not open $uri for writing")
+    }
+
+    /**
      * Write a new blank document to a destination the reader chose.
      *
      * Straight to the destination rather than through a scratch file: the save

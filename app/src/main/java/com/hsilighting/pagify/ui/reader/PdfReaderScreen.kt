@@ -1,5 +1,9 @@
 package com.hsilighting.pagify.ui.reader
 
+import androidx.compose.ui.text.style.TextOverflow
+import com.hsilighting.pagify.ui.components.PagePicker
+import androidx.compose.material.icons.filled.FileUpload
+import androidx.compose.material.icons.filled.FileDownload
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
@@ -251,6 +255,19 @@ fun PdfReaderScreen(
     onSaveDocument: () -> Unit,
     /** Write the page changes to a file the user picks. */
     onSaveCopy: () -> Unit,
+    /** Open the grid for choosing pages to write out as their own PDF. */
+    onExportPages: () -> Unit,
+    /** Pick a file to bring pages in from. */
+    onImportPages: () -> Unit,
+    /** The pages chosen to export. */
+    onPagesChosenToExport: (List<Int>) -> Unit,
+    onCancelExport: () -> Unit,
+    /** The pages chosen out of the file being imported from. */
+    onPagesChosenToImport: (List<Int>) -> Unit,
+    onCancelImport: () -> Unit,
+    /** Page sizes and thumbnails of the file being imported from. */
+    importSourcePageSize: suspend (Int) -> PageSize?,
+    importSourceRenderer: suspend (Int, Float) -> android.graphics.Bitmap?,
     /** The snackbar has shown `state.message`; clear it. */
     onMessageShown: () -> Unit,
     // ----------------------------------------------------------------- capture --
@@ -328,11 +345,19 @@ fun PdfReaderScreen(
                             text = state.documentName.ifBlank { "Pagify" },
                             style = MaterialTheme.typography.titleMedium,
                             maxLines = 1,
+                            // Cut, never wrapped. Given a narrow slot the name
+                            // broke between letters and ran down the screen —
+                            // "HS / Pag / e 10 / of / 149" is not a title.
+                            softWrap = false,
+                            overflow = TextOverflow.Ellipsis,
                         )
                         if (state.isReady) {
                             Text(
                                 text = "Page ${state.currentPageLabel} of ${state.pageCount}",
                                 style = MaterialTheme.typography.labelSmall,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                     }
@@ -370,7 +395,7 @@ fun PdfReaderScreen(
                         // the bar is too narrow to hold it. Undo, redo and save
                         // stay put at any width: they are what an edit needs.
                         ReaderActionBar(
-                            hasRoom = !compactWidth,
+                            inlineLimit = if (compactWidth) 0 else WIDE_INLINE_ACTIONS,
                             actions = listOf(
                                 ReaderAction(
                                     icon = if (state.isRecording) {
@@ -430,6 +455,16 @@ fun PdfReaderScreen(
                                     icon = Icons.Filled.AddPhotoAlternate,
                                     label = "Add a blank page",
                                     onClick = onShowBlankPage,
+                                ),
+                                ReaderAction(
+                                    icon = Icons.Filled.FileUpload,
+                                    label = "Export pages…",
+                                    onClick = onExportPages,
+                                ),
+                                ReaderAction(
+                                    icon = Icons.Filled.FileDownload,
+                                    label = "Import pages…",
+                                    onClick = onImportPages,
                                 ),
                                 ReaderAction(
                                     // Acts on the page in view. Deleting the page
@@ -711,6 +746,44 @@ fun PdfReaderScreen(
             }
         }
 
+        // Choosing pages out of *this* document, to write somewhere else.
+        if (state.choosingPagesToExport) {
+            ModalBottomSheet(
+                onDismissRequest = onCancelExport,
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            ) {
+                PagePicker(
+                    pageCount = state.pageCount,
+                    confirmLabel = { count ->
+                        if (count == 1) "Export 1 page" else "Export $count pages"
+                    },
+                    onConfirm = onPagesChosenToExport,
+                    onCancel = onCancelExport,
+                    pageSizeProvider = pageSizeProvider,
+                    renderer = thumbnailRenderer,
+                )
+            }
+        }
+
+        // And choosing pages out of a file just opened, to bring in here.
+        state.importSource?.let { source ->
+            ModalBottomSheet(
+                onDismissRequest = onCancelImport,
+                sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            ) {
+                PagePicker(
+                    pageCount = source.pageCount,
+                    confirmLabel = { count ->
+                        if (count == 1) "Import 1 page" else "Import $count pages"
+                    },
+                    onConfirm = onPagesChosenToImport,
+                    onCancel = onCancelImport,
+                    pageSizeProvider = importSourcePageSize,
+                    renderer = importSourceRenderer,
+                )
+            }
+        }
+
         state.blankPageAfter?.let { at ->
             BlankPageSheet(
                 template = state.pageSizes[state.currentPage],
@@ -739,6 +812,9 @@ fun PdfReaderScreen(
                     onSave = onSaveDocument,
                     onSaveCopy = onSaveCopy,
                     onClose = { onShowPageOrganiser(false) },
+                    pageContentRevision = state.pageContentRevision,
+                    onExportPages = onExportPages,
+                    onImportPages = onImportPages,
                     pageSizeProvider = pageSizeProvider,
                     // The rail's throttled renderer, not the full-size one: this
                     // grid asks for every page at once, and a dozen full renders
@@ -1592,3 +1668,13 @@ private const val SCROLL_SETTLE_MILLIS = 250L
  * buttons, while a tablet in portrait is 800 and holds them comfortably.
  */
 private const val COMPACT_WIDTH_DP = 600
+
+/**
+ * How many actions a wide window shows in the bar before the rest fold away.
+ *
+ * Four, because undo, redo, save and save-as already sit beside them and stay
+ * put at any width — so the bar carries eight buttons at its widest, and what
+ * is left is enough for a document name to be readable rather than merely
+ * present.
+ */
+private const val WIDE_INLINE_ACTIONS = 4

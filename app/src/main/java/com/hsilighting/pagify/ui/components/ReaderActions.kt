@@ -43,26 +43,42 @@ data class ReaderAction(
  * the same question, and the width answers it for all three.
  */
 @Composable
-fun ReaderActionBar(hasRoom: Boolean, actions: List<ReaderAction>) {
-    if (hasRoom) {
-        actions.forEach { action ->
-            IconButton(onClick = action.onClick) {
-                Icon(
-                    imageVector = action.icon,
-                    contentDescription = action.label,
-                    tint = action.tint ?: androidx.compose.material3.LocalContentColor.current,
-                )
-            }
+fun ReaderActionBar(
+    /**
+     * How many actions may sit in the bar itself. The rest fold into the
+     * overflow behind a single button.
+     *
+     * A count, not a yes-or-no. On a wide window the bar used to show every
+     * action inline, and as actions were added they took the title's room with
+     * them: on a tablet the document name was squeezed to about three
+     * characters and wrapped down the screen a letter at a time. The bar has
+     * no idea how wide the title wants to be, so the only reliable fix is for
+     * it not to take everything.
+     */
+    inlineLimit: Int,
+    actions: List<ReaderAction>,
+) {
+    val inline = actions.take(inlineLimit.coerceAtLeast(0))
+    val folded = actions.drop(inline.size)
+
+    inline.forEach { action ->
+        IconButton(onClick = action.onClick) {
+            Icon(
+                imageVector = action.icon,
+                contentDescription = action.label,
+                tint = action.tint ?: androidx.compose.material3.LocalContentColor.current,
+            )
         }
-        return
     }
+
+    if (folded.isEmpty()) return
 
     var open by remember { mutableStateOf(false) }
     IconButton(onClick = { open = true }) {
         Icon(Icons.Filled.MoreVert, contentDescription = "More")
     }
     DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-        actions.forEach { action ->
+        folded.forEach { action ->
             DropdownMenuItem(
                 text = { Text(action.label) },
                 leadingIcon = {

@@ -110,6 +110,25 @@ class MainActivity : ComponentActivity() {
                 val openPicker = remember { { picker.launch(arrayOf(PDF_MIME_TYPE)) } }
 
                 /**
+                 * Where chosen pages are written out.
+                 *
+                 * The same contract as "Save a copy": the reader names it and
+                 * says where it goes. No persisted grant is taken — an export is
+                 * a file handed to somebody else, not one this app comes back to.
+                 */
+                val exportPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.CreateDocument(PDF_MIME_TYPE),
+                ) { uri ->
+                    if (uri == null) viewModel.exportAbandoned()
+                    else viewModel.exportPagesTo(uri)
+                }
+
+                /** The file to take pages from. Opened read-only and closed after. */
+                val importPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument(),
+                ) { uri -> uri?.let(viewModel::openImportSource) }
+
+                /**
                  * Where a new blank document is written.
                  *
                  * The same contract as "Save a copy": the reader names it and
@@ -280,6 +299,7 @@ class MainActivity : ComponentActivity() {
                         onDeleteCurrentPage = viewModel::deleteCurrentPage,
                         onPageAction = { action ->
                             when (action) {
+                                is PageAction.Select -> viewModel.selectPage(action.index)
                                 is PageAction.Delete -> viewModel.deletePage(action.index)
                                 is PageAction.InsertBlankAt -> viewModel.insertBlankPage(action.at)
                                 is PageAction.Move -> viewModel.movePage(action.from, action.to)
@@ -290,6 +310,16 @@ class MainActivity : ComponentActivity() {
                         },
                         onSaveDocument = { viewModel.save() },
                         onSaveCopy = { copyPicker.launch(suggestedCopyName(state.documentName)) },
+                        onExportPages = { viewModel.choosePagesToExport(true) },
+                        onImportPages = { importPicker.launch(arrayOf(PDF_MIME_TYPE)) },
+                        onPagesChosenToExport = { pages ->
+                            exportPicker.launch(viewModel.pagesChosenToExport(pages))
+                        },
+                        onCancelExport = { viewModel.choosePagesToExport(false) },
+                        onPagesChosenToImport = viewModel::importChosenPages,
+                        onCancelImport = viewModel::closeImportSource,
+                        importSourcePageSize = viewModel::importSourcePageSize,
+                        importSourceRenderer = viewModel::renderImportSourcePage,
                         onMessageShown = viewModel::messageShown,
                         onCaptureScale = viewModel::setCaptureScale,
                         onCaptureFormat = viewModel::setCaptureFormat,

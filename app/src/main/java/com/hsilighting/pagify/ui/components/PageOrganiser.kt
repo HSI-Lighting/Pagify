@@ -1,5 +1,12 @@
 package com.hsilighting.pagify.ui.components
 
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.zIndex
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.draw.scale
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
+import androidx.compose.foundation.lazy.grid.itemsIndexed
+import androidx.compose.foundation.layout.offset
 import android.graphics.Bitmap
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -22,8 +29,6 @@ import androidx.compose.material.icons.automirrored.filled.Redo
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.KeyboardArrowLeft
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
@@ -61,6 +66,17 @@ import kotlinx.coroutines.delay
  * `Command`, so the two lists can be read side by side.
  */
 sealed interface PageAction {
+    /**
+     * Point at a page.
+     *
+     * Which matters because it is where things go: a blank page and an import
+     * both land after the page in hand. Without this the only page that could
+     * be pointed at was whichever one the reader happened to be on behind the
+     * sheet, so choosing where to put something meant closing the organiser,
+     * scrolling the document, and opening it again.
+     */
+    data class Select(val index: Int) : PageAction
+
     data class Delete(val index: Int) : PageAction
     data class InsertBlankAt(val at: Int) : PageAction
     data class Move(val from: Int, val to: Int) : PageAction
@@ -112,6 +128,21 @@ fun PageOrganiser(
      * in logcat.
      */
     message: String?,
+    /** Choose pages to write out as a PDF of their own. */
+    /**
+     * Bumped whenever the rendered pages stop being what the document holds.
+     *
+     * What the thumbnails key on. [editState] was doing this job and is the wrong
+     * thing for it: it describes the *history*, so two edits that leave the same
+     * undo label leave it unchanged, and the grid then goes on showing pages
+     * where they used to be. This counter exists for exactly this and changes on
+     * every invalidation, whatever the edit was.
+     */
+    pageContentRevision: Int,
+    /** Choose pages to write out as a PDF of their own. */
+    onExportPages: () -> Unit,
+    /** Bring pages in from another PDF. */
+    onImportPages: () -> Unit,
     onMessageShown: () -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
     renderer: suspend (pageIndex: Int, zoom: Float) -> Bitmap?,
@@ -168,6 +199,12 @@ fun PageOrganiser(
             }
         }
 
+Text(
+            text = "Tap a page to put things after it · hold to drag it",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
         if (!editState.editable) {
             Text(
                 text = "This document cannot be edited.",
@@ -176,7 +213,19 @@ fun PageOrganiser(
             )
         }
 
+        val gridState = rememberLazyGridState()
+        val reorder = rememberGridReorderState(gridState) { from, to ->
+            onAction(PageAction.Move(from, to))
+        }
+
+        // The order the grid draws. Identity except while a page is being
+        // dragged, when it is what the drop would produce — so the pages shuffle
+        // under the finger and the result is visible before letting go.
+        val order = reorder.order.takeIf { it.size == pageCount }
+            ?: (0 until pageCount).toList()
+
         LazyVerticalGrid(
+            state = gridState,
             columns = GridCells.Adaptive(minSize = 132.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -187,14 +236,38 @@ fun PageOrganiser(
                 .weight(1f, fill = false)
                 .padding(vertical = 12.dp),
         ) {
-            items(
-                // A key on the index alone would let a deleted page's thumbnail
-                // stay attached to whatever moves into its position.
-                items = (0 until pageCount).toList(),
-                key = { it },
-            ) { index ->
+            itemsIndexed(
+                // Keyed by the **slot**, not the page, and that is load-bearing.
+                //
+                // A lazy grid anchors its scroll position to the key of the first
+                // visible item: when the list changes it finds that key again and
+                // scrolls so the item stays put. Keying by page turns that against
+                // us. Dragging page 1 downwards moves its key down the order, and
+                // the grid dutifully chases it — so the viewport ran away down the
+                // document, faster the further the page was dragged. It measured
+                // as pages 10 to 45 in 78 milliseconds, with the drag scroll doing
+                // nothing at all: the grid was following its own anchor.
+                //
+                // Keyed by slot, the anchor stays where it is and only the content
+                // moves. Re-rendering a shuffled cell costs nothing, because every
+                // thumbnail it could want is already in the cache.
+                items = order,
+                key = { slot, _ -> slot },
+            ) { slot, index ->
                 PageCell(
                     index = index,
+                    // What it would be numbered if the drag ended here. Outside a
+                    // drag this is the page number; during one it is the answer to
+                    // "where am I putting this".
+                    label = slot + 1,
+                    dragging = reorder.isDragging(index),
+                    displacement = reorder.displacement(index),
+                    reorderModifier = Modifier.reorderable(
+                        state = reorder,
+                        slot = slot,
+                        count = pageCount,
+                        enabled = editState.editable && !isSaving,
+                    ),
                     isCurrent = index == currentPage,
                     // Any edit invalidates every thumbnail here: rotating page 3
                     // changes how it draws, and deleting page 3 changes what page 4
@@ -202,10 +275,8 @@ fun PageOrganiser(
                     // which a rotation does not change at all — that left rotated
                     // pages showing their old orientation until the sheet was
                     // reopened.
-                    revision = editState,
+                    revision = pageContentRevision,
                     enabled = editState.editable && !isSaving,
-                    canMoveLeft = index > 0,
-                    canMoveRight = index < pageCount - 1,
                     canDelete = pageCount > 1,
                     onAction = onAction,
                     pageSizeProvider = pageSizeProvider,
@@ -241,7 +312,17 @@ fun PageOrganiser(
                 enabled = editState.editable && !isSaving,
             ) {
                 Icon(Icons.Filled.Add, contentDescription = null)
-                Text("Blank page", modifier = Modifier.padding(start = 8.dp))
+                Text("Blank", modifier = Modifier.padding(start = 8.dp))
+            }
+            TextButton(onClick = onImportPages, enabled = editState.editable && !isSaving) {
+                Icon(Icons.Filled.Add, contentDescription = null)
+                Text("Import", modifier = Modifier.padding(start = 8.dp))
+            }
+            // Available on a read-only document too: writing chosen pages
+            // somewhere else is exactly what you do when you cannot write
+            // where they are.
+            TextButton(onClick = onExportPages, enabled = !isSaving && pageCount > 0) {
+                Text("Export")
             }
 
             Box(modifier = Modifier.weight(1f))
@@ -264,12 +345,15 @@ fun PageOrganiser(
 @Composable
 private fun PageCell(
     index: Int,
+    /** The number to show: where this page would sit if a drag ended now. */
+    label: Int,
+    dragging: Boolean,
+    displacement: IntOffset,
+    reorderModifier: Modifier,
     isCurrent: Boolean,
     /** Changes whenever the document does, so the thumbnail is re-rendered. */
     revision: Any,
     enabled: Boolean,
-    canMoveLeft: Boolean,
-    canMoveRight: Boolean,
     canDelete: Boolean,
     onAction: (PageAction) -> Unit,
     pageSizeProvider: suspend (Int) -> PageSize?,
@@ -282,16 +366,27 @@ private fun PageCell(
         bitmap = renderer(index, RenderScale.thumbnailFor(size))
     }
 
-    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        // Lifted out of the flow and drawn last, so the page being dragged
+        // passes over its neighbours rather than under them.
+        modifier = Modifier
+            .zIndex(if (dragging) 1f else 0f)
+            .offset { displacement },
+    ) {
         Box(
-            modifier = Modifier
+            modifier = reorderModifier
+                // After the drag handler, so a long press that becomes a drag
+                // is consumed there and never arrives here as a tap.
+                .clickable { onAction(PageAction.Select(index)) }
                 .fillMaxWidth()
                 .aspectRatio(0.72f)
+                .scale(if (dragging) LIFTED else 1f)
                 .clip(RoundedCornerShape(4.dp))
                 .background(MaterialTheme.colorScheme.surfaceVariant)
                 .border(
-                    width = if (isCurrent) 2.dp else 1.dp,
-                    color = if (isCurrent) {
+                    width = if (isCurrent || dragging) 2.dp else 1.dp,
+                    color = if (isCurrent || dragging) {
                         MaterialTheme.colorScheme.primary
                     } else {
                         MaterialTheme.colorScheme.outlineVariant
@@ -311,18 +406,9 @@ private fun PageCell(
             }
         }
 
-        Text("${index + 1}", style = MaterialTheme.typography.labelSmall)
+        Text("$label", style = MaterialTheme.typography.labelSmall)
 
         Row(horizontalArrangement = Arrangement.spacedBy(0.dp)) {
-            IconButton(
-                onClick = { onAction(PageAction.Move(index, index - 1)) },
-                enabled = enabled && canMoveLeft,
-            ) {
-                Icon(
-                    Icons.Filled.KeyboardArrowLeft,
-                    contentDescription = "Move page ${index + 1} earlier",
-                )
-            }
             IconButton(
                 onClick = { onAction(PageAction.Rotate(index)) },
                 enabled = enabled,
@@ -335,15 +421,7 @@ private fun PageCell(
             ) {
                 Icon(Icons.Filled.Delete, contentDescription = "Delete page ${index + 1}")
             }
-            IconButton(
-                onClick = { onAction(PageAction.Move(index, index + 1)) },
-                enabled = enabled && canMoveRight,
-            ) {
-                Icon(
-                    Icons.Filled.KeyboardArrowRight,
-                    contentDescription = "Move page ${index + 1} later",
-                )
-            }
+
         }
     }
 }
@@ -358,3 +436,6 @@ private const val MESSAGE_DWELL_MILLIS = 4_000L
  * a panel over the reader rather than a separate screen.
  */
 private const val SHEET_HEIGHT_FRACTION = 0.82f
+
+/** How much a page grows while it is held, so it reads as picked up. */
+private const val LIFTED = 1.06f
