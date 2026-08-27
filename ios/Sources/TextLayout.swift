@@ -135,6 +135,18 @@ func straightBaseline(anchor: CGPoint, text: String, font: PagifyFont,
 /// `degrees` is how far the line turns from end to end: 0 is straight, positive
 /// arches upward, negative sags. The arc is exactly as long as the words, so every
 /// letter lands on it however far it bends.
+/// A page point turned about `centre`.
+///
+/// In the app's own space — y downward, so a positive angle turns clockwise on
+/// screen, the same sense as every other angle in this file.
+func turning(_ point: CGPoint, about centre: CGPoint, by radians: CGFloat) -> CGPoint {
+    guard radians != 0 else { return point }
+    let sine = sin(radians), cosine = cos(radians)
+    let dx = point.x - centre.x, dy = point.y - centre.y
+    return CGPoint(x: centre.x + dx * cosine - dy * sine,
+                   y: centre.y + dx * sine + dy * cosine)
+}
+
 func curvedBaseline(anchor: CGPoint, text: String, font: PagifyFont,
                     size: CGFloat, degrees: CGFloat) -> [CGPoint] {
     let width = font.width(of: text, size: size)
@@ -165,16 +177,81 @@ func curvedBaseline(anchor: CGPoint, text: String, font: PagifyFont,
 ///
 /// Shared by the reader and the capture editor, which cap a caption against
 /// different things — a page and a picture — by the same arithmetic.
-func sizeThatFits(_ text: String, font: PagifyFont, availableWidth: CGFloat) -> CGFloat {
+func sizeThatFits(_ text: String, font: PagifyFont, availableWidth: CGFloat,
+                  lines: Int = 1) -> CGFloat {
     let ceiling = AnnotationMetrics.textRange.upperBound
     guard !text.isEmpty, availableWidth > 0 else { return ceiling }
-    let atOnePoint = captionLines(text).map { font.width(of: $0, size: 1) }.max() ?? 0
+    let atOnePoint = captionLines(text, into: lines).map { font.width(of: $0, size: 1) }.max() ?? 0
     guard atOnePoint > 0 else { return ceiling }
     return min(max(availableWidth / atOnePoint, AnnotationMetrics.textRange.lowerBound), ceiling)
 }
 
 func captionLines(_ text: String) -> [String] {
     text.components(separatedBy: "\n")
+}
+
+/// The caption's words, broken into `lines` of roughly even length.
+///
+/// A caption is laid out along a baseline, so without this a paragraph is one
+/// baseline — a single line of type running off the sheet and out of the page,
+/// which is what a pasted paragraph looked like. Nothing in the text says where
+/// it should break: the newlines a page's own text layer reports are about how
+/// that page was typeset, not about how these words should sit here, and a
+/// paragraph copied off a page usually has none at all.
+///
+/// So the reader says how many lines they want, and the words are dealt out to
+/// fill them evenly. Balanced by character count rather than by measured width:
+/// the difference is a few points on a ragged edge, and this runs on every frame
+/// of a drag.
+///
+/// Explicit newlines still win where there are any — someone who typed their own
+/// break meant it — and each of those paragraphs is then wrapped in turn.
+func captionLines(_ text: String, into lines: Int) -> [String] {
+    let paragraphs = captionLines(text)
+    guard lines > 1 else { return paragraphs }
+
+    // Shared out between the paragraphs by length, so a long one gets the room.
+    let total = max(paragraphs.reduce(0) { $0 + $1.count }, 1)
+    var out: [String] = []
+    for (index, paragraph) in paragraphs.enumerated() {
+        let share = index == paragraphs.count - 1
+            ? max(1, lines - out.count)
+            : max(1, Int((Double(paragraph.count) / Double(total) * Double(lines)).rounded()))
+        out += wrap(paragraph, into: min(share, max(1, lines - out.count)))
+        if out.count >= lines { break }
+    }
+    return out
+}
+
+/// One paragraph, dealt into `lines` lines on word boundaries.
+private func wrap(_ paragraph: String, into lines: Int) -> [String] {
+    let words = paragraph.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+    guard lines > 1, words.count > 1 else { return [paragraph] }
+
+    // The length each line is aiming for, spaces included.
+    let target = Double(paragraph.count) / Double(lines)
+    var out: [String] = []
+    var current = ""
+    for word in words {
+        let remaining = lines - out.count
+        // The last line takes whatever is left, however long: breaking early
+        // would leave a word stranded past the end of the caption.
+        if remaining <= 1 {
+            current = current.isEmpty ? word : current + " " + word
+            continue
+        }
+        let grown = current.isEmpty ? word : current + " " + word
+        // Taken if it gets closer to the target than stopping short does — which
+        // is what keeps the last word of a line from always falling to the next.
+        if current.isEmpty || abs(Double(grown.count) - target) <= abs(Double(current.count) - target) {
+            current = grown
+        } else {
+            out.append(current)
+            current = word
+        }
+    }
+    if !current.isEmpty { out.append(current) }
+    return out
 }
 
 /// A caption, as the app holds it before it becomes glyphs.
@@ -192,6 +269,27 @@ struct TextMark: Equatable {
     var frame: TextFrame = .none
     /// How far the baseline turns from end to end, in degrees.
     var curveDegrees: CGFloat = 0
+    /// How many lines the words are broken into.
+    ///
+    /// One means "however many newlines were typed", which is what a caption has
+    /// always been. Anything more wraps the words to fill that many lines — a
+    /// paragraph pasted in from a page has no newlines at all, and without this
+    /// it became a single line of type running clean off the sheet.
+    var lines: Int = 1
+    /// How far the whole caption is turned on the page, clockwise, in radians.
+    ///
+    /// Not part of the baseline, and deliberately so. The baseline stays in the
+    /// caption's own upright frame — it is what the block stacks its lines down,
+    /// what the bounds measure, and what the bend bends — and the turn is applied
+    /// once, at the end, to whatever those produced.
+    ///
+    /// Folding it into `path` instead would work for a single straight line and
+    /// nothing else: a block's second line is built from the anchor with an
+    /// axis-aligned drop, so a tilted path would stack its lines vertically
+    /// anyway, and every box in this file is an upright rectangle. Kept out of
+    /// the path it also costs nothing to change — turning a caption never
+    /// re-measures its line, so it cannot lose the letters off the end of it.
+    var rotationRadians: CGFloat = 0
     var id: Int32 = 0
 
     var isMultiLine: Bool { text.contains("\n") }
@@ -204,6 +302,7 @@ struct TextMark: Equatable {
     /// carried across, so resizing a caption cannot also restyle it.
     func rebuilt(text: String? = nil, font: PagifyFont? = nil,
                  size: CGFloat? = nil, curveDegrees: CGFloat? = nil,
+                 rotationRadians: CGFloat? = nil,
                  color: MarkColor? = nil, frame: TextFrame? = nil) -> TextMark {
         let words = text ?? self.text
         let face = font ?? self.font
@@ -223,6 +322,9 @@ struct TextMark: Equatable {
         next.color = color ?? self.color
         next.frame = frame ?? self.frame
         next.curveDegrees = requested
+        // Carried, never rebuilt from: a turn does not change the width of the
+        // run, so the line the layout walks is the same line.
+        next.rotationRadians = rotationRadians ?? self.rotationRadians
         next.path = curvedBaseline(anchor: path.first ?? .zero,
                                    text: captionLines(words).first ?? "",
                                    font: face, size: points, degrees: bend)
@@ -240,7 +342,33 @@ struct TextMark: Equatable {
     /// The bend is not applied to a block. Stacked arcs curl into each other as
     /// the bend grows, and there is no answer for where the second arc should sit.
     func layOutBlock() -> [GlyphPlacement] {
-        let lines = captionLines(text)
+        let upright = layOutUpright()
+        guard rotationRadians != 0 else { return upright }
+        // Turned as one about the block's own centre, after the words are laid
+        // out — never before. Turning the *baseline* first and laying out along
+        // it would tilt one straight line correctly and get everything else
+        // wrong: a block's lines are stacked with an axis-aligned drop.
+        //
+        // Each glyph's own lean is added to rather than replaced, so a bent
+        // caption that is also turned keeps its bend and takes the turn on top.
+        let centre = uprightCentre
+        return upright.map {
+            GlyphPlacement(text: $0.text, id: $0.id,
+                           origin: turning($0.origin, about: centre, by: rotationRadians),
+                           radians: $0.radians + rotationRadians)
+        }
+    }
+
+    /// The block's centre before it is turned — the pivot everything turns about.
+    var uprightCentre: CGPoint {
+        let box = uprightBounds()
+        return CGPoint(x: (box.left + box.right) / 2, y: (box.top + box.bottom) / 2)
+    }
+
+    /// The same as `layOutBlock`, before the turn. The layout proper: everything
+    /// else here measures against this.
+    private func layOutUpright() -> [GlyphPlacement] {
+        let lines = captionLines(text, into: self.lines)
         if lines.count <= 1 {
             return layOutText(text, font: font, size: size, path: path)
         }
@@ -263,8 +391,19 @@ struct TextMark: Equatable {
     /// width and the number of lines the height, which is what makes a frame fit a
     /// block rather than only its first line.
     func textBlockBounds() -> PageRect {
+        // The upright box, still. A turned caption's true outline is not a
+        // rectangle, and everything that asks for this — clamping a drag to the
+        // page, sizing a frame, hit-testing a tap — wants the block's own extent
+        // rather than the axis-aligned hull of a tilted one. The ring is turned
+        // where it is drawn, in `textFrameOutline`, which is the one place the
+        // shape has to sit on the page.
+        uprightBounds()
+    }
+
+    /// The block's extent in its own upright frame.
+    func uprightBounds() -> PageRect {
         let anchor = path.first ?? .zero
-        let lines = captionLines(text)
+        let lines = captionLines(text, into: self.lines)
         let widest = lines.map { font.width(of: $0, size: size) }.max() ?? 0
         let leading = size * lineHeight
         return PageRect(left: anchor.x,
@@ -286,10 +425,18 @@ struct TextMark: Equatable {
     /// cloud round words and a cloud drawn by hand are the same notation.
     func textFrameOutline() -> [CGPoint] {
         let box = textFrameBounds()
-        let corners = [CGPoint(x: box.left, y: box.top),
+        let upright = [CGPoint(x: box.left, y: box.top),
                        CGPoint(x: box.right, y: box.top),
                        CGPoint(x: box.right, y: box.bottom),
                        CGPoint(x: box.left, y: box.bottom)]
+        // Turned about the same pivot the words are, so the ring stays around
+        // them. Turned *before* the cloud is built rather than after: a cloud is
+        // a run of arcs along each edge, and turning the finished arcs is the
+        // same shape, but turning the corners first keeps the bumps square to
+        // the edge they belong to.
+        let corners = rotationRadians == 0
+            ? upright
+            : upright.map { turning($0, about: uprightCentre, by: rotationRadians) }
         switch frame {
         case .none: return []
         case .cloud: return cloudOutline(corners, width: size * cloudTextBump)
@@ -344,6 +491,11 @@ extension TextMark {
                   color: MarkColor(argb: UInt32(bitPattern: Int32(truncatingIfNeeded: argb))),
                   frame: TextFrame(rawValue: o["textFrame"] as? String ?? "None") ?? .none,
                   curveDegrees: 0,
+                  // Kept so reopening a caption offers the count it was written
+                  // with, rather than resetting a wrapped paragraph to one line
+                  // the first time anyone edits it.
+                  lines: max(1, o["lines"] as? Int ?? 1),
+                  rotationRadians: CGFloat(o["rotationRadians"] as? Double ?? 0),
                   id: Int32(truncatingIfNeeded: o["id"] as? Int ?? 0))
     }
 }

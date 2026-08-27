@@ -162,6 +162,8 @@ extension TextMark {
         body["path"] = path.map { ["x": $0.x, "y": $0.y] }
         body["fontId"] = font.rawValue
         body["curveDegrees"] = curveDegrees
+        body["lines"] = lines
+        body["rotationRadians"] = rotationRadians
 
         // Stored beside the words and handed back untouched. It is what makes a
         // saved caption a mark again rather than part of the page, and what lets

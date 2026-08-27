@@ -62,6 +62,31 @@ enum AnnotationMetrics {
     /// hand that is not perfectly steady.
     static let tapSlop: CGFloat = 10
 
+    /// How far a drag must carry, in screen points, before it can be read as a
+    /// swipe at the document rather than as a mark.
+    ///
+    /// A floor, not a verdict: a line or a bracket down a margin clears it easily
+    /// on a phone, which is why `swipeLift` has to agree before anything is said.
+    static let swipeReach: CGFloat = 140
+
+    /// How fast the finger must still be travelling when it lifts, in screen
+    /// points per second, for the drag to have been a swipe.
+    ///
+    /// The test that separates the two long vertical drags a reader actually
+    /// makes. A line drawn down a margin is aimed: the finger slows and stops
+    /// before it leaves the glass. A finger asking the page to move is flicked
+    /// and lifts mid-flight, an order of magnitude faster.
+    ///
+    /// Lenient on purpose. Missing a swipe costs silence, which is what happens
+    /// today; catching a drawn line costs telling someone who marked up a page
+    /// exactly as they meant to that they did it wrong.
+    /// Lowered from 250: that was set against a flick, and a reader trying to
+    /// scroll a page that will not move usually makes an ordinary drag and slows
+    /// as it fails. Two strokes are now needed before anything is said, so a
+    /// single stray line no longer costs a false positive and the test can afford
+    /// to be generous.
+    static let swipeLift: CGFloat = 90
+
     /// The nib a signature is written at. Not the reader's pen width — a
     /// signature is not a pen line whose weight anyone chose.
     static let signatureWidth: CGFloat = 2

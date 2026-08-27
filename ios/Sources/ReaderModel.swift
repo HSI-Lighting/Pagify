@@ -70,6 +70,29 @@ final class ReaderModel: ObservableObject {
     private static let historyLimit = 200
     @Published var failure: String?
     @Published var notice: String?
+    /// Whether the thing being said is a warning rather than a confirmation.
+    ///
+    /// "Copied." and "A tool is held" are the same capsule and want different
+    /// weight: one is an acknowledgement nobody needs to read, the other is the
+    /// answer to something that just failed.
+    @Published var noticeIsWarning = false
+    /// Whether the reader has been told how to scroll with a tool armed.
+    ///
+    /// Armed again whenever a different tool is picked up, and whenever a
+    /// different file is opened. Once per *model* — which is what this was — meant
+    /// a single long stroke early on, made with no intention of scrolling, spent
+    /// the hint for the rest of the session and it was never seen again. Tying it
+    /// to picking a tool up is the closest thing to "once per time you could
+    /// possibly be confused by this" without nagging on every stroke.
+    private var scrollHintGiven = false
+    /// Swipes made since the tool was picked up.
+    private var scrollSwipes = 0
+
+    /// A tool was picked up or put down: the hint is worth saying once more.
+    func toolChanged() {
+        scrollHintGiven = false
+        scrollSwipes = 0
+    }
 
     /// Where the open document lives. A save writes back here, via a scratch
     /// file — never in place.
@@ -517,6 +540,12 @@ final class ReaderModel: ObservableObject {
         settings.textSize = mark.size
         settings.penColor = mark.color
         settings.curveDegrees = mark.curveDegrees
+        // Normalised into 0..<360, so the slider shows the angle the caption is
+        // actually at rather than a negative that reads as a different turn.
+        settings.textTurnDegrees = (mark.rotationRadians * 180 / .pi)
+            .truncatingRemainder(dividingBy: 360)
+            .advanced(by: 360)
+            .truncatingRemainder(dividingBy: 360)
         // A block does not bend, so the ribbon stops offering it.
         settings.textBendApplies = !mark.isMultiLine
     }
@@ -633,6 +662,8 @@ final class ReaderModel: ObservableObject {
             case "size":   return mark.rebuilt(size: settings.textSize)
             case "bend":   return mark.rebuilt(curveDegrees: settings.curveDegrees)
             case "colour": return mark.rebuilt(color: settings.penColor)
+            case "turn":   return mark.rebuilt(
+                rotationRadians: settings.textTurnDegrees * .pi / 180)
             default:       return mark
             }
         }
@@ -684,6 +715,16 @@ final class ReaderModel: ObservableObject {
     /// The reached size is mirrored back into the ribbon, so the slider and the
     /// number agree with the words on the page — and so the *next* caption is
     /// written at the size the last one ended up.
+    /// Turn the caption in hand.
+    ///
+    /// Absolute, not relative: the ribbon shows an angle and the caption is set
+    /// to it, so dragging the slider back to zero puts the words upright again
+    /// rather than turning them by another nothing.
+    func turnSelectedText(_ degrees: CGFloat) {
+        guard settings.selectedTextId != nil else { return }
+        restyleSelected("turn") { $0.rebuilt(rotationRadians: degrees * .pi / 180) }
+    }
+
     func scaleSelectedText(_ factor: CGFloat) {
         guard factor != 1, factor.isFinite, factor > 0,
               settings.selectedTextId != nil else { return }
@@ -762,7 +803,7 @@ final class ReaderModel: ObservableObject {
         if !wasLifted { run(.removeText(pageIndex: page, id: Int(textId))) }
     }
 
-    func commitEdit(_ words: String) {
+    func commitEdit(_ words: String, lines: Int = 1) {
         guard let editing = editingText else { return }
         editingText = nil
 
@@ -774,7 +815,11 @@ final class ReaderModel: ObservableObject {
             return
         }
 
-        restyleSelected("words") { $0.rebuilt(text: words) }
+        restyleSelected("words") {
+            var next = $0.rebuilt(text: words)
+            next.lines = max(1, lines)
+            return next
+        }
     }
 
     /// Commit a caption once its words are known.
@@ -782,7 +827,7 @@ final class ReaderModel: ObservableObject {
     /// The baseline is built here, from the same font metrics the preview walks —
     /// only one side can be the authority on where a letter sits, and it has to be
     /// the side the person was looking at when they put it there.
-    func commitText(_ words: String) {
+    func commitText(_ words: String, lines: Int = 1) {
         guard let placing = placingText else { return }
         placingText = nil
 
@@ -814,6 +859,7 @@ final class ReaderModel: ObservableObject {
                             color: settings.penColor,
                             frame: settings.tool.textFrame,
                             curveDegrees: bends ? settings.curveDegrees : 0,
+                            lines: max(1, lines),
                             id: Int32.random(in: 1...Int32.max))
 
         commit(.text(mark), page: placing.page)
@@ -836,7 +882,35 @@ final class ReaderModel: ObservableObject {
     }
 
     /// The highlighter swept across something that was not text.
+    /// A swipe at the pages with a tool armed.
+    ///
+    /// Both halves matter. Two fingers still scroll — that layer is fitted
+    /// whether or not a tool is live, in the list and on a magnified page alike —
+    /// so there is a way through without putting the tool down; and putting it
+    /// down is one tap on the tool that is already lit, which is the way out for
+    /// anyone with only one hand free.
+    ///
+    /// Once per document, not once per stroke. Someone who has been told and
+    /// swipes again is not confused, and a hint that repeats every time is the
+    /// tool ribbon arguing with the page.
+    func scrollBlocked() {
+        guard !scrollHintGiven else { return }
+        scrollSwipes += 1
+        // The second one, not the first.
+        //
+        // One long stroke is ordinary — a line down a margin, a sweep across a
+        // paragraph — and answering it with an instruction is the app telling
+        // someone they did it wrong. Two in a row with nothing moving is someone
+        // trying to scroll, which is the only case worth speaking for.
+        guard scrollSwipes >= 2 else { return }
+        scrollHintGiven = true
+        notice = "A tool is held — two fingers scroll, or tap the tool off."
+        noticeIsWarning = true
+        SessionRecorder.shared.record("TOOL_GESTURE", "scroll hint shown")
+    }
+
     func highlightMissed(page: Int) {
+        noticeIsWarning = true
         notice = pagesWithoutSelectableText.contains(page)
             ? "There is no selectable text on this page."
             : "Nothing to highlight there — sweep across some words."
@@ -978,6 +1052,124 @@ final class ReaderModel: ObservableObject {
                                      fill: nil, ruling: 0)) { page in
             page >= at ? page + 1 : page
         }
+    }
+
+    /// Insert the paper the reader actually chose, after `index`.
+    ///
+    /// The neighbouring page decides nothing here. Size, orientation, colour and
+    /// ruling were all answered in the blank-page sheet, and the insert above
+    /// cannot carry any of them — it sends `fill: nil, ruling: 0` and measures the
+    /// page next door, which is what made every page added from the organiser come
+    /// out plain white in its neighbour's shape whatever was picked. Android's
+    /// `insertBlankPage(at:sheet:)` is this same call.
+    ///
+    /// One edit per sheet, each after the last: the pages renumber as they go, so
+    /// the second of two lands at `index + 2`.
+    func insertBlankPage(after index: Int, sheet: BlankSheet) {
+        guard document != nil else { return }
+        for offset in 0..<max(1, sheet.count) {
+            let at = index + 1 + offset
+            runPageEdit(.insertBlankPage(at: at,
+                                         widthPt: sheet.size.size.width,
+                                         heightPt: sheet.size.size.height,
+                                         fill: sheet.fill,
+                                         ruling: sheet.ruling.rawValue)) { page in
+                page >= at ? page + 1 : page
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ selection --
+
+    /// The text selected on a page, if any.
+    @Published var selection: PageTextSelection?
+
+    /// Per-page character geometry, fetched on demand.
+    ///
+    /// Not fetched with the page: a dense page is thousands of boxes, and most
+    /// pages are read rather than selected from. Cached once asked for, because a
+    /// handle drag asks again on every move.
+    private var characterCache: [Int: PageCharacters] = [:]
+
+    private func characters(of page: Int) -> PageCharacters {
+        if let known = characterCache[page] { return known }
+        guard let document else { return .empty }
+        let found = document.pageCharacters(page: page)
+        characterCache[page] = found
+        return found
+    }
+
+    /// Select the word under a long press.
+    ///
+    /// A word rather than a character: pointing at a letter means pointing at the
+    /// word it is in, and starting from one character would mean dragging a handle
+    /// before anything useful was selected.
+    func selectWord(page: Int, at point: CGPoint) {
+        let found = characters(of: page)
+        guard let index = found.indexNear(point), let word = found.wordAround(index) else {
+            // A page with no text layer. The highlighter has a hint for this, but
+            // it only shows while the highlighter is armed — and a long press
+            // needs no tool, so without this the gesture would do nothing and
+            // look broken.
+            SessionRecorder.shared.record("SELECT_NO_TEXT", "page=\(page)")
+            notice = "No selectable text here — the page is an image or outlines."
+            return
+        }
+        apply(selection: word, page: page, characters: found)
+    }
+
+    /// Drag one end of the selection.
+    ///
+    /// The two ends are interchangeable: dragging the start past the end turns the
+    /// selection round, which is what happens if you keep going.
+    func moveSelectionHandle(isStart: Bool, to point: CGPoint) {
+        guard let current = selection else { return }
+        let found = characters(of: current.pageIndex)
+        guard let moved = found.indexNear(point) else { return }
+        let anchor = isStart ? current.range.upperBound : current.range.lowerBound
+        apply(selection: min(anchor, moved)...max(anchor, moved),
+              page: current.pageIndex, characters: found)
+    }
+
+    private func apply(selection range: ClosedRange<Int>, page: Int, characters: PageCharacters) {
+        selection = PageTextSelection(pageIndex: page,
+                                      range: range,
+                                      rects: characters.rects(of: range),
+                                      text: characters.text(of: range))
+    }
+
+    func clearSelection() { selection = nil }
+
+    /// Put the selected text on the clipboard.
+    func copySelection() { copy(selection) }
+
+    /// Told which selection, rather than reading the live one.
+    ///
+    /// The bar's buttons and the tap that puts a selection down are the same
+    /// touch as far as UIKit is concerned, and nothing orders them. Reading
+    /// `self.selection` here meant Copy raced a clear it had itself triggered and
+    /// lost — silently, because the guard simply returned.
+    func copy(_ selection: PageTextSelection?) {
+        guard let selection, !selection.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+        UIPasteboard.general.string = selection.text
+        SessionRecorder.shared.record(
+            "TEXT_COPY", "page=\(selection.pageIndex) chars=\(selection.text.count)")
+        self.selection = nil
+        notice = "Copied."
+    }
+
+    /// Turn the selection into a highlight, in the current pen colour.
+    func highlightSelection() { highlight(selection) }
+
+    /// Told which selection, for the same reason as `copy(_:)`.
+    func highlight(_ selection: PageTextSelection?) {
+        guard let selection, !selection.rects.isEmpty else { return }
+        let rects = selection.rects.map {
+            PageRect(left: $0.minX, top: $0.minY, right: $0.maxX, bottom: $0.maxY)
+        }
+        commit(.highlight(rects: rects, color: settings.penColor), page: selection.pageIndex)
+        clearSelection()
     }
 
     /// Run an edit that changes the page tree, moving the marks with it.

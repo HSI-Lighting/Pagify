@@ -322,7 +322,14 @@ final class GridReorderState: ObservableObject {
     ///
     /// After a hold, not immediately: the grid scrolls, and a cell that moved
     /// the moment a finger touched it would make scrolling impossible.
-    static let hold: TimeInterval = 0.28
+    ///
+    /// Half a second, because that is Android's. `detectDragGesturesAfterLongPress`
+    /// takes the ambient `ViewConfiguration.longPressTimeoutMillis`, which that
+    /// build never overrides, and the platform's is 500ms. This was 0.28 — barely
+    /// over half — and a scroll that began with the smallest pause was long enough
+    /// to lift a page out of a gesture the other build was still reading as a
+    /// scroll. That is pages moving around while the grid is being scrolled.
+    static let hold: TimeInterval = 0.5
 
     /// How much a page grows while it is held, so it reads as picked up.
     static let lifted: CGFloat = 1.06

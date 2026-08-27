@@ -290,6 +290,10 @@ struct DrawingRibbon: View {
             curve: settings.tool.bendsText && settings.textBendApplies
                 ? settings.curveDegrees : nil,
             onCurve: { settings.curveDegrees = $0; onRestyle("bend") },
+            // Only while a caption is in hand: a turn belongs to the words that
+            // were written, not to the ones that will be.
+            turn: settings.selectedTextId != nil ? settings.textTurnDegrees : nil,
+            onTurn: { settings.textTurnDegrees = $0; onRestyle("turn") },
             onTool: { if let tool = $0 as? AnnotationTool { settings.select(tool) } },
             onColour: { settings.penColor = $0; onRestyle("colour") },
             onWidth: { value in
@@ -346,6 +350,11 @@ struct MarkRibbon: View {
     /// says along what.
     var curve: CGFloat?
     var onCurve: (CGFloat) -> Void = { _ in }
+    /// How far the caption in hand is turned, in degrees. Nil when nothing is in
+    /// hand — a turn is about a caption that exists, not a setting for the next
+    /// one, which is why this is not on the ribbon unless one is selected.
+    var turn: CGFloat?
+    var onTurn: (CGFloat) -> Void = { _ in }
     let onTool: (AnyHashable) -> Void
     let onColour: (MarkColor) -> Void
     let onWidth: (CGFloat) -> Void
@@ -381,6 +390,7 @@ struct MarkRibbon: View {
         case lineType
         case font
         case curve
+        case turn
         case tools([RibbonTool])
     }
 
@@ -478,6 +488,14 @@ struct MarkRibbon: View {
                 }
             }
 
+            if let turn = turn {
+                RibbonSlot(label: "Turn", onOpen: { toggle(.turn, at: $0) }) {
+                    Image(systemName: "rotate.right")
+                        .font(.system(size: 17, weight: .medium))
+                        .rotationEffect(.degrees(turn))
+                }
+            }
+
             // An `else if`, not two conditions. A caption has a face where a stroke
             // has a dash, and the slot in that position asks whichever of the two
             // questions the armed tool can answer.
@@ -572,6 +590,9 @@ struct MarkRibbon: View {
 
         case .curve:
             CurveChoices(degrees: curve ?? 0, onDegrees: onCurve)
+
+        case .turn:
+            TurnChoices(degrees: turn ?? 0, onDegrees: onTurn)
 
         case .tools(let tools):
             ToolChoices(tools: tools, armed: armed,
@@ -856,6 +877,44 @@ private struct CurveChoices: View {
             }
             Slider(value: Binding(get: { degrees }, set: onDegrees),
                    in: -AnnotationMetrics.curveLimit...AnnotationMetrics.curveLimit)
+                .frame(width: 220)
+        }
+    }
+}
+
+/// How far a caption is turned on the page.
+///
+/// The quarter turns are presets because they are what anyone actually wants —
+/// words up the side of a page, or upside down against a plan — and hitting 90°
+/// exactly by dragging a slider is a game. The slider is there for the angles in
+/// between, which are the ones a drawing needs.
+private struct TurnChoices: View {
+    let degrees: CGFloat
+    let onDegrees: (CGFloat) -> Void
+
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        VStack(spacing: 2) {
+            HStack(spacing: 10) {
+                ForEach([CGFloat(0), 90, 180, 270], id: \.self) { preset in
+                    Button { onDegrees(preset) } label: {
+                        Image(systemName: "textformat")
+                            .font(.system(size: 15, weight: .medium))
+                            .rotationEffect(.degrees(preset))
+                            .frame(width: 38, height: 38)
+                            .background(abs(preset - degrees) < 0.5
+                                        ? PagifyColor.primary(scheme).opacity(0.18)
+                                        : .clear, in: Circle())
+                            .contentShape(Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Text("\(Int(degrees.rounded()))°" as String)
+                    .font(.system(size: 14, weight: .medium).monospacedDigit())
+                    .foregroundStyle(PagifyColor.onSurfaceVariant(scheme))
+            }
+            Slider(value: Binding(get: { degrees }, set: onDegrees), in: 0...359)
                 .frame(width: 220)
         }
     }

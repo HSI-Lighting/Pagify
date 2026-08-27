@@ -246,6 +246,16 @@ final class PagifyDocument: @unchecked Sendable {
         return decodeTextSegments(json)
     }
 
+    /// A box for every character on a page.
+    ///
+    /// Costlier than the runs — a dense page is thousands of boxes — so it is a
+    /// separate call, made only when someone actually selects.
+    func pageCharacters(page index: Int) -> PageCharacters {
+        guard let json = PagifyEngine.string(
+            pagify_get_page_characters_json(handle, Int32(index))) else { return .empty }
+        return decodePageCharacters(json)
+    }
+
     /// The captions on a page, rebuilt from the blob stored beside each one.
     ///
     /// Text is page content, so it is not in `getAnnotationsJson` — this is the

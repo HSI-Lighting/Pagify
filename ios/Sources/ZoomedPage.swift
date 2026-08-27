@@ -66,10 +66,41 @@ struct ZoomedPageView: View {
     let onMoveText: (Int32, CGSize) -> Void
     let onEditText: (Int32) -> Void
     let onHighlightMissed: () -> Void
+    var onScrollBlocked: () -> Void = {}
     let onRequestNote: (CGPoint) -> Void
     let onOpenNote: (Int) -> Void
     /// Two fingers with a caption in hand: that big.
     let onScaleText: (CGFloat) -> Void
+
+    /// Selecting text, magnified.
+    ///
+    /// Absent until now, and that absence was the whole of "long press does
+    /// nothing". The press layer is built on the tool alone — `settings.tool ==
+    /// .none` inside `AnnotationCanvas` — so it existed here, the recogniser
+    /// fired, and it called the canvas's defaulted no-op. No selection, no bar,
+    /// and not even the notice `selectWord` raises for a page with no text layer.
+    ///
+    /// The list had all four from the start, which is why it passed on a
+    /// simulator: on a Mac-sized window a page in the list is big enough to aim a
+    /// word at. On a phone it is a thumbnail, so the magnified page is the only
+    /// place anyone would try this — and it was the one view never handed them.
+    ///
+    /// A departure from Android, which has the same hole: `ZoomedPage.kt` calls
+    /// `annotationLayer` without any of these, so selecting text in a magnified
+    /// page does nothing there either. Fixed on this side because it is where it
+    /// was reported; the Kotlin wants the same four.
+    var selection: PageTextSelection?
+    var onSelectWord: (CGPoint) -> Void = { _ in }
+    var onMoveSelectionHandle: (Bool, CGPoint) -> Void = { _, _ in }
+    var onClearSelection: () -> Void = {}
+    /// Where the page is drawn on screen right now, in this view's coordinates.
+    ///
+    /// The snapshot tool needs it. In the list the reader already knows every
+    /// page's rectangle, because it puts them there; here the page is *drawn*
+    /// rather than laid out — at a scale and an offset only this view holds — so
+    /// nothing outside can work out where a drag landed on the sheet without
+    /// being told.
+    var onPageFrame: (CGRect) -> Void = { _ in }
     /// Raised while two fingers are down, so this page's caption layer lets go of
     /// the words rather than carrying them along under the pinch.
     @State private var pinching = false
@@ -151,6 +182,16 @@ struct ZoomedPageView: View {
             .frame(width: viewport.width, height: viewport.height)
             .background(PagifyColor.background(scheme))
             .clipped()
+            .onChange(of: CGRect(x: shown.x, y: shown.y,
+                                 width: max(baseW * scale, 1),
+                                 height: max(baseH * scale, 1))) { _, frame in
+                onPageFrame(frame)
+            }
+            .onAppear {
+                onPageFrame(CGRect(x: shown.x, y: shown.y,
+                                   width: max(baseW * scale, 1),
+                                   height: max(baseH * scale, 1)))
+            }
             .contentShape(Rectangle())
             // The UIKit pinch, not SwiftUI's.
             //
@@ -212,8 +253,13 @@ struct ZoomedPageView: View {
             // resizing outright in the magnified page. Applied out here, the pinch
             // is a subview gesture: `.subviews` turns off the page pan and leaves
             // everything else alone, which is what it always meant.
+            // Words selected stand the page pan down as well, for the same
+            // reason a tool does: the finger has something else to mean, and a
+            // page sliding under a selection being adjusted is the drag going to
+            // the wrong place.
             .gesture(pan(viewport: viewport, baseW: baseW, baseH: baseH),
-                     including: settings.tool == .none ? .all : .subviews)
+                     including: settings.tool == .none && selection == nil
+                        ? .all : .subviews)
             .environment(\.isPinching, pinching)
             .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { tap in
                 // Stands down while a caption is in hand, alongside the pinch and
@@ -260,7 +306,12 @@ struct ZoomedPageView: View {
                         onMoveText: onMoveText,
                         onEditText: onEditText,
                         segments: segments,
+                        selection: selection,
+                        onSelectWord: onSelectWord,
+                        onMoveSelectionHandle: onMoveSelectionHandle,
+                        onClearSelection: onClearSelection,
                         onHighlightMissed: onHighlightMissed,
+                        onScrollBlocked: onScrollBlocked,
                         annotationRevision: annotationRevision,
                         onRequestNote: onRequestNote,
                         onOpenNote: onOpenNote)

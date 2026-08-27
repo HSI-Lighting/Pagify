@@ -174,6 +174,12 @@ struct AnnotationSettings: Equatable {
     /// The largest size that still fits the page, recomputed as pages change.
     /// The last colour each family was set to. A custom colour off the wheel is
     /// remembered the same way a palette one is.
+    /// How far the caption in hand is turned, in degrees.
+    ///
+    /// Kept beside the ribbon's other values so the control has something to bind
+    /// to, and pulled from the caption whenever one is taken in hand — the mark is
+    /// the authority, this is only what the slider is showing.
+    var textTurnDegrees: CGFloat = 0
     var heldHighlightColor: MarkColor = AnnotationColors.highlightPalette[0]
     var heldMarkColor: MarkColor = AnnotationColors.markerPalette[0]
 

@@ -124,7 +124,15 @@ final class ScrollCommander {
         // and must not be chased.
         guard target < wanted - 1, attempt < 6 else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.scroll(toContentY: y, animated: false, attempt: attempt + 1)
+            // Asked again here, not when this was scheduled. The 300ms these
+            // retries span is ample time for the reader to take hold of the list,
+            // and a retry is the completion of an ask that was cut short — not a
+            // fresh command. Reissued under a moving finger it drags the page out
+            // from under whoever is reading it.
+            guard let self, let scroll = self.scrollView,
+                  !scroll.isDragging, !scroll.isTracking, !scroll.isDecelerating
+            else { return }
+            self.scroll(toContentY: y, animated: false, attempt: attempt + 1)
         }
     }
 }

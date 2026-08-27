@@ -72,15 +72,41 @@ struct ReaderView: View {
                         onMoveText: { model.moveMark(id: $0, delta: $1) },
                         onEditText: { model.editText(id: $0) },
                         onHighlightMissed: { model.highlightMissed(page: page) },
+                        onScrollBlocked: { model.scrollBlocked() },
                         onRequestNote: { model.requestNote(page: page, at: $0) },
                         onOpenNote: { model.openNote(page: page, index: $0) },
                         onScaleText: { model.scaleSelectedText($0) },
+                        selection: model.selection,
+                        onSelectWord: { model.selectWord(page: page, at: $0) },
+                        onMoveSelectionHandle: { isStart, at in
+                            model.moveSelectionHandle(isStart: isStart, to: at)
+                        },
+                        onClearSelection: { model.clearSelection() },
+                        onPageFrame: { zoomedPageFrame.frames = [page: $0] },
                         // The magnified page's pinch, told to the model, so a
                         // caption resize is held in the overlay and written to the
                         // document once — when the fingers lift.
                         onPinching: { raised in
                             if raised { model.beginPinch() } else { model.endPinch() }
                         })
+                    // The snapshot tool, here too.
+                    //
+                    // It was applied only to the list, so with it armed a drag on
+                    // a magnified page fell through to nothing: the annotation
+                    // canvas stands down for `.snapshot` on purpose, and there was
+                    // nothing above it to catch the drag. Magnifying a page is
+                    // exactly when someone wants a piece of it, so the tool that
+                    // takes one has to come along.
+                    //
+                    // The same overlay and the same render path as the list. Only
+                    // the page's rectangle differs, and the page itself reports
+                    // that — see `onPageFrame`.
+                    .captureOverlay(active: model.settings.tool == .snapshot,
+                                    lasso: model.settings.captureLasso) { drag, ring in
+                        takeCapture(drag, ring: ring,
+                                    viewportWidth: lastListPageWidth,
+                                    frames: zoomedPageFrame.frames)
+                    }
                 }
             case .ready:
             HStack(spacing: 0) {
@@ -150,6 +176,22 @@ struct ReaderView: View {
         // The bands float over the pages rather than insetting them: Android
         // draws them in a Box aligned to the bottom, and a page that shrank every
         // time a panel opened would reflow under the reader's finger.
+        // Above the ribbon, not over the words. A menu at the finger covers the
+        // text it belongs to, and a selection can run over several lines, so
+        // there is no "beside it" that is not on top of something.
+        .overlay(alignment: .bottom) {
+            if let selection = model.selection, !selection.rects.isEmpty {
+                TextSelectionBar(characters: selection.text.count,
+                                 // The selection this bar was built for, handed
+                                 // back — not whatever is live by the time the
+                                 // finger lifts.
+                                 onCopy: { model.copy(selection) },
+                                 onHighlight: { model.highlight(selection) },
+                                 onDismiss: { model.clearSelection() })
+                    .padding(.bottom, ribbonHeight + 12)
+                    .transition(.opacity)
+            }
+        }
         .overlay(alignment: .bottom) {
             if model.isEditable {
                 ToolRibbon(settings: $model.settings,
@@ -199,8 +241,8 @@ struct ReaderView: View {
                 TextEditorSheet(font: editing.mark.font,
                                 size: editing.mark.size,
                                 color: editing.mark.color,
-                                initial: editing.mark.text) { words in
-                    model.commitEdit(words)
+                                initial: editing.mark.text) { words, lines in
+                    model.commitEdit(words, lines: lines)
                 }
                 .presentationDetents([.medium])
             }
@@ -209,8 +251,8 @@ struct ReaderView: View {
                                     set: { if !$0 { model.placingText = nil } })) {
             TextEditorSheet(font: model.settings.font,
                             size: model.settings.textSize,
-                            color: model.settings.penColor) { words in
-                model.commitText(words)
+                            color: model.settings.penColor) { words, lines in
+                model.commitText(words, lines: lines)
             }
             .presentationDetents([.medium])
         }
@@ -285,12 +327,19 @@ struct ReaderViewportKey: PreferenceKey {
                                          onEditText: { model.editText(id: $0) },
                                          segments: model.segments[index] ?? [],
                                          onHighlightMissed: { model.highlightMissed(page: index) },
+                                         onScrollBlocked: { model.scrollBlocked() },
                                          onRequestNote: { model.requestNote(page: index, at: $0) },
                                          onOpenNote: { model.openNote(page: index, index: $0) },
                                          onAppearPage: {
                                              model.loadMarks(page: index)
                                              model.loadSegments(page: index)
                                          },
+                                         selection: model.selection,
+                                         onSelectWord: { model.selectWord(page: index, at: $0) },
+                                         onMoveSelectionHandle: { isStart, at in
+                                             model.moveSelectionHandle(isStart: isStart, to: at)
+                                         },
+                                         onClearSelection: { model.clearSelection() },
                                          pageSize: model.pageSize(index))
                                     .id(index)
                                     .background(
@@ -385,12 +434,13 @@ struct ReaderViewportKey: PreferenceKey {
     }
 
     /// Turn a drag into a picture, and open the editor on it.
-    private func takeCapture(_ drag: PageRect, ring: [CGPoint], viewportWidth: CGFloat) {
+    private func takeCapture(_ drag: PageRect, ring: [CGPoint], viewportWidth: CGFloat,
+                             frames: [Int: CGRect]? = nil) {
         guard let document = model.document else { return }
 
         // Every page the drag touched, with where it sits and how big it is in its
         // own points — the frames are already known, so nothing is measured here.
-        let placed = pageFramesBox.frames.map { page, frame in
+        let placed = (frames ?? pageFramesBox.frames).map { page, frame in
             PlacedPage(pageIndex: page,
                        bounds: PageRect(left: frame.minX, top: frame.minY,
                                         right: frame.maxX, bottom: frame.maxY),
@@ -487,7 +537,10 @@ struct ReaderViewportKey: PreferenceKey {
         return formatter.string(from: Date())
     }
 
-    private func notice(_ text: String) { model.notice = text }
+    private func notice(_ text: String) {
+        model.noticeIsWarning = false
+        model.notice = text
+    }
 
     /// Where a page begins, in content coordinates.
     /// Bring the jumped-to page to the middle, using where it says it is.
@@ -509,9 +562,48 @@ struct ReaderViewportKey: PreferenceKey {
     /// rows build, and the next pass closes what that shifted, until it stops
     /// moving.
     private func settleJump() {
-        guard let page = settlingPage, let scroll = commander.scrollView,
-              !scroll.isDragging, !scroll.isTracking,
-              settlePasses < 24 else { return }
+        guard let page = settlingPage, let scroll = commander.scrollView else { return }
+
+        // A hand that has carried the list somewhere **ends** the settle rather
+        // than pausing it.
+        //
+        // `isDragging` and `isTracking` are both false through a flick's
+        // deceleration — `isDecelerating` is the flag that is true then, and it
+        // was not being asked. That cost little while `again()`'s 0.08s chain was
+        // the only thing driving this, because a pass that returned early never
+        // scheduled the next one and the settle died where it stood. The page
+        // frames now re-enter here on every scroll frame, so it no longer dies:
+        // it waits out the whole drag, and the moment the finger lifts it writes
+        // an unanimated offset, which kills the momentum and hauls the list back
+        // towards wherever the jump was still aiming. That is the page moving out
+        // from under the reader.
+        //
+        // Wherever the reader has carried the list is where they meant to be, and
+        // the jump has nothing further to say about it.
+        if scroll.isDragging || scroll.isDecelerating {
+            settlingPage = nil
+            settleArmed = false
+            return
+        }
+
+        // A finger that is down but has carried the list nowhere is not the
+        // reader taking hold — it is a tap, or the second finger of a pinch on
+        // its way. Waited out rather than abandoned: throwing away a correction
+        // for a touch that never scrolled is how a thumbnail chosen deep in a
+        // document comes to land on the wrong page again. Nothing is spent
+        // waiting, and the wait cannot outlive the touch.
+        guard !scroll.isTracking else { return }
+
+        // A spent budget disarms too. This used to share the early return above,
+        // which left `settleArmed` true with nothing left that could act on it —
+        // so every page frame, one per scroll frame, came back here for the rest
+        // of the session only to be turned away.
+        guard settlePasses < 24 else {
+            settlingPage = nil
+            settleArmed = false
+            return
+        }
+
         let frames = realFrames.frames
         let middle = usableExtent(fallback: 0) / 2
         let width = lastListPageWidth > 0 ? lastListPageWidth : 1
@@ -527,7 +619,26 @@ struct ReaderViewportKey: PreferenceKey {
                 return
             }
             settlePasses += 1
-            commander.scroll(toContentY: scroll.contentOffset.y + gap, animated: false)
+            let before = scroll.contentOffset.y
+            commander.scroll(toContentY: before + gap, animated: false)
+
+            // The clamp had the last word, so this gap can never be closed.
+            //
+            // The last pages of a document have nothing beneath them to scroll
+            // into: the page cannot reach the middle, the gap stays above a point
+            // for ever, and the whole budget drains rewriting an offset the
+            // scroll view already has. Each of those writes cancels whatever the
+            // scroll view was doing, which is the same yank by another route. The
+            // ends of a document belong to the scroll view; there is nothing here
+            // to correct.
+            guard abs(scroll.contentOffset.y - before) > 0.5 else {
+                SessionRecorder.shared.record("NAVIGATION",
+                    String(format: "settle clamped page=%d gap=%.1f passes=%d",
+                           page, gap, settlePasses))
+                settlingPage = nil
+                settleArmed = false
+                return
+            }
             again()
             return
         }
@@ -638,6 +749,27 @@ struct ReaderViewportKey: PreferenceKey {
         SessionRecorder.shared.record("ZOOM_ENTER",
            String(format: "page=%d target=%.2f at=%.0f,%.0f base=%.0f",
                   page, target, position.x, position.y, lastListPageWidth))
+        // A jump still correcting itself is abandoned here, where the list it was
+        // correcting is known to be going away.
+        //
+        // The correction is a loop, not a scroll: armed a beat after the jump and
+        // re-entered until the page's own frame reaches the middle. The fingers
+        // that arrive for the pinch stop it dead — it waits out a touch without
+        // rescheduling — and handing over then takes the scroll view out from
+        // under it, so it can neither finish nor clear itself. This view's state
+        // outlives the list, and the rebuilt list's first frame report re-enters
+        // the loop against the page a jump from *before* the zoom was chasing,
+        // walking the reader off the page that was actually asked for. Past the
+        // mute those intermediate positions publish as page changes, so the rail
+        // follows the drift too — which is what "choosing a page from the rail
+        // moves me to the next one" is.
+        //
+        // On the way in, not on the way out: `.onAppear` on the rebuilt list is
+        // not ordered against that list's first frame report, so clearing there
+        // can arrive a frame too late.
+        settlingPage = nil
+        settleArmed = false
+        settlePasses = 0
         model.enterZoom(page: page, focus: fraction, target: target)
     }
 
@@ -685,6 +817,10 @@ struct ReaderViewportKey: PreferenceKey {
     /// The height of the floating tool ribbon, which stands in front of the
     /// bottom of the reader and of the rail.
     @State private var ribbonHeight: CGFloat = 0
+    /// Where the magnified page is drawn, so a capture there knows what it hit.
+    /// A reference, like the list's own frames: written on every frame of a pinch
+    /// and read only when a drag ends.
+    @State private var zoomedPageFrame = PageFrameBox()
     /// Where the pages actually are, as they themselves report it. Held in a
     /// reference so that reading it costs no invalidation.
     @State private var realFrames = PageFrameBox()
@@ -702,21 +838,26 @@ struct ReaderViewportKey: PreferenceKey {
     /// page the drag has carried the reader onto — coarser than Android's
     /// pixel-for-pixel pan, and the one place this is knowingly not a faithful
     /// port.
+    /// Two fingers scroll the list, point for point.
+    ///
+    /// It used to turn *pages*: the travel was accumulated and, once it passed a
+    /// third of the viewport, `jumpTo` moved to the next page and reset. That is
+    /// not scrolling — it ignored two thirds of every drag, then leapt — and with
+    /// a tool armed it is the only way through, which is what the scroll hint now
+    /// points people at. A hint that names a gesture has to name one that works.
+    ///
+    /// Android pans the list by the delta (`.twoFingerPan`), and so does this:
+    /// the scroll view is right there, and moving its offset is what the fingers
+    /// asked for.
     private func twoFingerScroll(by delta: CGFloat, viewportHeight: CGFloat) {
-        guard abs(delta) > 0, let document = model.document, document.pageCount > 0 else { return }
-        twoFingerTravel += delta
-        guard abs(twoFingerTravel) >= viewportHeight / 3 else { return }
-
-        let direction = twoFingerTravel < 0 ? 1 : -1
-        twoFingerTravel = 0
-        let next = min(max(model.currentPage + direction, 0), document.pageCount - 1)
-        guard next != model.currentPage else { return }
-        SessionRecorder.shared.record("DRAG_SCROLL",
-            String(format: "two-finger to=%d", next))
-        model.jumpTo(next)
+        guard delta != 0, let scroll = commander.scrollView else { return }
+        let limit = max(0, scroll.contentSize.height - scroll.bounds.height)
+        // Down-drag carries the content down, which is a smaller offset.
+        let target = min(max(scroll.contentOffset.y - delta, 0), limit)
+        guard abs(target - scroll.contentOffset.y) > 0.01 else { return }
+        scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: target),
+                                animated: false)
     }
-
-    @State private var twoFingerTravel: CGFloat = 0
 
     private func pages(width viewportWidth: CGFloat, viewportHeight: CGFloat) -> some View {
         // The list is never scaled. A pinch here accumulates until it is
@@ -771,8 +912,10 @@ struct ReaderViewportKey: PreferenceKey {
             .simultaneousGesture(
                 MagnifyGesture()
                     .onChanged { value in
-                        model.beginPinch()
                         guard model.settings.selectedTextId == nil else {
+                            // A caption in hand is being resized from the first
+                            // event, so the pinch is real straight away.
+                            model.beginPinch()
                             model.scaleSelectedText(value.magnification / max(lastPinch, 0.0001))
                             lastPinch = value.magnification
                             return
@@ -780,6 +923,21 @@ struct ReaderViewportKey: PreferenceKey {
                         let factor = value.magnification / max(lastPinch, 0.0001)
                         lastPinch = value.magnification
                         pinchProgress = pinchProgressAfter(pinchProgress, factor)
+                        // Raised only once the fingers have actually changed the
+                        // distance between them.
+                        //
+                        // `MagnifyGesture` reports a change the moment two fingers
+                        // move at all, and this used to call `beginPinch()` on the
+                        // first of them. Real fingers dragging together always
+                        // drift a little, so every two-finger *scroll* on a device
+                        // was a pinch within a frame — and the two-finger pan
+                        // stands down while one is running, so it never scrolled
+                        // anything. The simulator kept its two points exactly
+                        // parallel, which is why it worked there and nowhere else.
+                        //
+                        // Three per cent: below that the fingers are travelling,
+                        // not spreading, and the gesture belongs to the scroll.
+                        if abs(pinchProgress - 1) > 0.03 { model.beginPinch() }
                         SessionRecorder.shared.record("ZOOM_TOUCH",
                             String(format: "list factor=%.3f progress=%.3f at=%.0f,%.0f",
                                    factor, pinchProgress,
@@ -828,7 +986,20 @@ struct ReaderViewportKey: PreferenceKey {
                                  viewport: CGSize(width: viewportWidth, height: viewportHeight))
                     }
             )
-            .scrollDisabled(model.settings.tool != .none)
+            // Words selected take the scroller too.
+            //
+            // Compose can consume a drag inside the page before the enclosing
+            // list sees it, which is how Android stops the pages moving while a
+            // selection is being adjusted (`change.consume()` in its drag
+            // handler). SwiftUI has no such interception point, so the same end
+            // has to be reached by switching the scroller off — otherwise the
+            // list wins the drag and the selection never grows.
+            //
+            // The way out is a tap, armed on every page for exactly this reason,
+            // and Copy and Highlight both put the selection down themselves.
+            .scrollDisabled(model.settings.tool != .none || model.selection != nil)
+            // Picking a tool up arms the scroll hint again — see `toolChanged`.
+            .onChange(of: model.settings.tool) { _, _ in model.toolChanged() }
             // Fitted whether or not a tool is live. With one armed the list's own
             // scrolling is off, because a one-finger drag has to mean "draw"; and
             // with none armed the pinch claims every two-finger event, so the
@@ -956,13 +1127,28 @@ struct ReaderViewportKey: PreferenceKey {
         if let notice = model.notice {
             Text(notice)
                 .font(.footnote.weight(.medium))
+                // Orange when something did not work, so it reads as an answer
+                // rather than as an acknowledgement.
+                .foregroundStyle(model.noticeIsWarning ? .orange : Color.primary)
                 .padding(.horizontal, 14).padding(.vertical, 8)
                 .background(.regularMaterial, in: Capsule())
+                .overlay(
+                    Capsule().strokeBorder(model.noticeIsWarning
+                                           ? Color.orange.opacity(0.5) : .clear,
+                                           lineWidth: 1))
                 .padding(.top, 6)
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .task {
-                    try? await Task.sleep(for: .seconds(2))
-                    withAnimation { model.notice = nil }
+                    // Long enough to read a sentence. Two seconds is ample for
+                    // "Copied." and not for an instruction — the scroll hint is
+                    // two clauses long, shown at the top while the reader is
+                    // looking at the ribbon at the bottom, and it was going
+                    // before it had been noticed.
+                    try? await Task.sleep(for: .seconds(4))
+                    withAnimation {
+                        model.notice = nil
+                        model.noticeIsWarning = false
+                    }
                 }
         }
     }
@@ -1108,9 +1294,16 @@ struct PageView: View {
     let onEditText: (Int32) -> Void
     let segments: [TextSegment]
     let onHighlightMissed: () -> Void
+    var onScrollBlocked: () -> Void = {}
     let onRequestNote: (CGPoint) -> Void
     let onOpenNote: (Int) -> Void
     let onAppearPage: () -> Void
+    /// The text selected anywhere in the reader; the canvas draws it only if it
+    /// belongs to this page.
+    var selection: PageTextSelection?
+    var onSelectWord: (CGPoint) -> Void = { _ in }
+    var onMoveSelectionHandle: (Bool, CGPoint) -> Void = { _, _ in }
+    var onClearSelection: () -> Void = {}
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: CGImage?
@@ -1172,7 +1365,12 @@ struct PageView: View {
                              onMoveText: onMoveText,
                              onEditText: onEditText,
                              segments: segments,
+                             selection: selection,
+                             onSelectWord: onSelectWord,
+                             onMoveSelectionHandle: onMoveSelectionHandle,
+                             onClearSelection: onClearSelection,
                              onHighlightMissed: onHighlightMissed,
+                             onScrollBlocked: onScrollBlocked,
                              annotationRevision: annotationRevision,
                              onRequestNote: onRequestNote,
                              onOpenNote: onOpenNote)

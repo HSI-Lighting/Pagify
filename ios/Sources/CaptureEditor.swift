@@ -211,7 +211,11 @@ struct CaptureEditor: View {
                 size: settings.textSize,
                 color: settings.color,
                 initial: editingIndex.flatMap { caption(at: $0)?.text } ?? "",
-                onCommit: commitText)
+                // The capture editor's captions are laid out on a picture, not a
+                // page, and it offers no line control of its own — so the count
+                // is taken and ignored here rather than threaded through a second
+                // layout path that nothing asks for.
+                onCommit: { words, _ in commitText(words) })
         }
     }
 

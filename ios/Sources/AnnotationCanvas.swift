@@ -1,3 +1,4 @@
+import CoreText
 import SwiftUI
 
 /// The layer that turns a drag into a mark.
@@ -36,7 +37,18 @@ struct AnnotationCanvas: View {
     /// The runs of text on this page. The highlighter snaps to these; without
     /// them a sweep across two lines paints one rectangle the height of the drag.
     var segments: [TextSegment] = []
+    /// The text selected on this page, if the selection is on this page at all.
+    var selection: PageTextSelection?
+    var onSelectWord: (CGPoint) -> Void = { _ in }
+    var onMoveSelectionHandle: (Bool, CGPoint) -> Void = { _, _ in }
+    var onClearSelection: () -> Void = {}
     var onHighlightMissed: () -> Void = {}
+    /// A drag that reads as a swipe at the document, made with a tool armed.
+    ///
+    /// Raised from here because here is the only thing that sees it: with a tool
+    /// held the list's own scrolling is off, so the gesture never reaches the
+    /// scroll view and nothing else can tell the reader why the page stayed put.
+    var onScrollBlocked: () -> Void = {}
     /// A redraw token. Referenced inside the `Canvas` closure on purpose: a
     /// closure whose captures have not changed is reused, and an undo left the
     /// removed mark on screen until a zoom forced a repaint.
@@ -62,6 +74,35 @@ struct AnnotationCanvas: View {
 
     /// Did the finger stay put? Measured as the furthest the trace ever wandered
     /// from where it went down, in page points, against a fixed screen reach.
+    /// Was that a swipe at the document rather than a mark?
+    ///
+    /// Measured on the **net** travel, start to finish, not on the length of the
+    /// path: a scribble wanders a long way and ends where it began, and it is the
+    /// finger that went somewhere, quickly, that was asking the page to move.
+    ///
+    /// Three tests, each keeping out a different honest stroke. The reach keeps
+    /// out the short deliberate one, which is nearly every stroke. The vertical
+    /// dominance keeps out the long one this reader makes most — a highlighter
+    /// sweep runs along the words and is almost all sideways, while the pages
+    /// only ever go up and down. The lift speed keeps out the case the reach
+    /// alone gets wrong: a line or a bracket drawn down a margin is long,
+    /// vertical, and finished with the finger at rest.
+    private func isSwipeAtDocument(_ value: DragGesture.Value) -> Bool {
+        guard settings.tool != .none else { return false }
+        // The note tool answers any drag by putting its sheet up, and the sheet
+        // would cover the answer.
+        if settings.tool == .note { return false }
+        // A drag that began on a caption belongs to the layer above, which is
+        // carrying the words under the finger — not a scroll that failed.
+        if settings.tool.writesText, let down = trace.first,
+           captionId(atPagePoint: down) != nil { return false }
+
+        let travel = value.translation
+        return abs(travel.height) >= AnnotationMetrics.swipeReach
+            && abs(travel.height) >= abs(travel.width) * 2
+            && abs(value.velocity.height) >= AnnotationMetrics.swipeLift
+    }
+
     private func isTap(from down: CGPoint) -> Bool {
         let travel = trace.dropFirst().map { hypot($0.x - down.x, $0.y - down.y) }.max() ?? 0
         return travel <= AnnotationMetrics.tapSlop / max(scale, 0.0001)
@@ -70,6 +111,9 @@ struct AnnotationCanvas: View {
     var body: some View {
         Canvas { context, _ in
             _ = annotationRevision
+            // Under the marks: a highlight made from a selection should read as
+            // having been laid over the words, not under the band that chose them.
+            drawTextSelection(&context)
             for mark in committed {
                 // The one being dragged is drawn where the finger has taken it,
                 // not where it still officially sits.
@@ -148,6 +192,35 @@ struct AnnotationCanvas: View {
         // beginning **on** a caption moves it instead of scrolling the document.
         // Everywhere else still scrolls: this layer is hit-testable only where a
         // caption actually is.
+        // Selecting text needs no tool, the way it needs none on Android: a long
+        // press anywhere on the words does it. Below the caption layer, so a
+        // press that lands on a caption still belongs to the caption.
+        .overlay {
+            if settings.tool == .none {
+                TextSelectLayer(
+                    onLongPress: { onSelectWord(toPage($0)) },
+                    // Only the page the selection is actually on.
+                    //
+                    // `selection` is the reader's one selection, handed to every
+                    // page in the list. Without this check each of them armed its
+                    // handle drag and its tap-to-clear against handle positions
+                    // belonging to a different page — so a drag on any page took
+                    // hold of a phantom handle, and with the drag now claiming any
+                    // touch (below) that would have stopped the list scrolling
+                    // everywhere at once.
+                    handles: selection.flatMap { found in
+                        found.pageIndex == pageIndex
+                            ? (start: mapping.toScreen(found.startHandle),
+                               end: mapping.toScreen(found.endHandle))
+                            : nil
+                    },
+                    onMoveHandle: { isStart, at in
+                        onMoveSelectionHandle(isStart, toPage(at))
+                    },
+                    onTapAway: onClearSelection,
+                    selectionActive: selection != nil)
+            }
+        }
         .overlay {
             if settings.tool == .none || settings.tool.writesText {
             CaptionMoveLayer(
@@ -211,7 +284,12 @@ struct AnnotationCanvas: View {
                     trace.append(point)
                 }
             }
-            .onEnded { _ in
+            .onEnded { value in
+                // Asked before every tool's own ending — before the eraser's,
+                // which returns immediately below, and before the signature's,
+                // which ends in no branch at all. The mark is still made; this
+                // only says why the document did not move under it.
+                if isSwipeAtDocument(value) { onScrollBlocked() }
                 defer { trace = []; eraserAt = nil }
                 if settings.tool == .eraser {
                     onEraseEnd()
@@ -266,6 +344,36 @@ struct AnnotationCanvas: View {
                 guard settings.tool.marks, let annotation = build() else { return }
                 onCommit(annotation)
             }
+    }
+
+    /// The bands over the selected words, and a handle at each end.
+    ///
+    /// One band per line rather than one per character — `PageCharacters` merges
+    /// them — which is what makes a selection read as a stripe over the text
+    /// instead of a row of little boxes, and is far less to draw on a page where
+    /// a selection can run to thousands of characters.
+    private func drawTextSelection(_ context: inout GraphicsContext) {
+        guard let selection, selection.pageIndex == pageIndex else { return }
+
+        // The system's own selection blue: selecting text is a system idiom, and
+        // a reader inventing its own colour for it makes the gesture look like
+        // something else.
+        let tint = Color(uiColor: .tintColor)
+        for rect in selection.rects {
+            let corner = mapping.toScreen(CGPoint(x: rect.minX, y: rect.minY))
+            let far = mapping.toScreen(CGPoint(x: rect.maxX, y: rect.maxY))
+            let band = CGRect(x: corner.x, y: corner.y,
+                              width: far.x - corner.x, height: far.y - corner.y)
+            context.fill(Path(roundedRect: band, cornerRadius: 2), with: .color(tint.opacity(0.28)))
+        }
+
+        // Below the baseline, the way a text cursor's grip sits: a handle drawn
+        // over the words hides the very letters being aimed at.
+        for point in [selection.startHandle, selection.endHandle] {
+            let at = mapping.toScreen(point)
+            let dot = CGRect(x: at.x - 6, y: at.y - 1, width: 12, height: 12)
+            context.fill(Path(ellipseIn: dot), with: .color(tint))
+        }
     }
 
     private func toPage(_ location: CGPoint) -> CGPoint {
@@ -476,15 +584,47 @@ struct AnnotationCanvas: View {
             // mark's **own** face, because a caption previewed in the system font
             // and written in Naskh is two different captions.
             let face = mark.font.uiFont(size: mark.size * scale)
+            let fill = UIColor(colour).cgColor
             for glyph in mark.layOutBlock() {
+                let origin = mapping.toScreen(glyph.origin)
+
+                // By glyph **id**, not by the characters it came from.
+                //
+                // The shaper has already decided which form each letter takes:
+                // Arabic letters join, and the joined shape is a glyph with no
+                // character of its own. Handing the cluster's characters back to
+                // `Text` throws that away and asks CoreText to shape one letter
+                // with no neighbours, which can only produce the isolated form —
+                // so a caption that read correctly while being typed came out on
+                // the page as a row of disconnected letters. The id is the form
+                // that was chosen, and the file gets that same id.
+                if glyph.id != 0, mark.font.asset != nil {
+                    context.drawLayer { layer in
+                        layer.translateBy(x: origin.x, y: origin.y)
+                        // Curved captions lean with the baseline.
+                        if glyph.radians != 0 { layer.rotate(by: .radians(glyph.radians)) }
+                        layer.withCGContext { cg in
+                            // CoreText lays glyphs out with y running up; this
+                            // context has it running down. The flip is about the
+                            // origin, which *is* the baseline — so no ascent
+                            // fudge is needed, unlike the `Text` path below.
+                            cg.scaleBy(x: 1, y: -1)
+                            cg.setFillColor(fill)
+                            var id = CGGlyph(truncatingIfNeeded: glyph.id)
+                            var at = CGPoint.zero
+                            CTFontDrawGlyphs(face as CTFont, &id, &at, 1, cg)
+                        }
+                    }
+                    continue
+                }
+
+                // A standard-14 face has no embedded file and no glyph ids; its
+                // scripts are the ones where a character is its own glyph anyway.
                 var resolved = context.resolve(
                     Text(glyph.text).font(Font(face)).foregroundColor(colour))
                 resolved.shading = .color(colour)
-
-                let origin = mapping.toScreen(glyph.origin)
                 context.drawLayer { layer in
                     layer.translateBy(x: origin.x, y: origin.y)
-                    // Curved captions lean with the baseline.
                     if glyph.radians != 0 { layer.rotate(by: .radians(glyph.radians)) }
                     // The origin is the *baseline*, so the run is lifted by the
                     // face's own ascent rather than by a guessed fraction of the

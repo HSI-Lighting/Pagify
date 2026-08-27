@@ -41,9 +41,6 @@ struct PageOrganiser: View {
     var message: String?
     var onMessageShown: (() -> Void)?
 
-    /// What to do with the paper chosen in the blank-page sheet.
-    var onAddBlank: ((BlankSheet) -> Void)?
-
     @Environment(\.dismiss) private var dismiss
     @Environment(\.colorScheme) private var scheme
     @StateObject private var reorder = GridReorderState()
@@ -312,20 +309,17 @@ struct PageOrganiser: View {
         }
     }
 
-    /// Insert the paper the reader chose.
+    /// Insert the paper the reader chose, after the page in hand.
     ///
-    /// The fallback puts blank pages after the page in hand and drops the chosen
-    /// size, colour and ruling, because the only insert the model offers takes a
-    /// position and nothing else. Pass `onAddBlank` to route the whole payload to
-    /// a model that can carry it.
+    /// Straight to the insert that carries the whole payload, with no hook to
+    /// pass in and no option-less fallback behind it. That fallback was the only
+    /// path anything ever took — the one place this sheet is built never passed
+    /// the closure — so the size, colour and ruling just chosen were thrown away
+    /// and every page added here came out plain white in its neighbour's shape. A
+    /// default that quietly drops what it was handed is a bug waiting for the next
+    /// caller, so there is now only the one path.
     private func addBlank(_ sheet: BlankSheet) {
-        if let onAddBlank {
-            onAddBlank(sheet)
-            return
-        }
-        for offset in 0..<max(1, sheet.count) {
-            model.insertBlankPage(after: model.currentPage + offset)
-        }
+        model.insertBlankPage(after: model.currentPage, sheet: sheet)
     }
 
     // ------------------------------------------------------ pages out and in --

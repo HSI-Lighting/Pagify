@@ -309,9 +309,16 @@ struct MarkupTextShape: Equatable {
     var frame: TextFrame = .none
     /// How far the baseline turns from end to end, in degrees.
     var curveDegrees: CGFloat = 0
+    /// How many lines the words are broken into.
+    ///
+    /// One means "however many newlines were typed", which is what a caption has
+    /// always been. Anything more wraps the words to fill that many lines — a
+    /// paragraph pasted in from a page has no newlines at all, and without this
+    /// it became a single line of type running clean off the sheet.
+    var lines: Int = 1
 
     var isCurved: Bool { path.count > 2 }
-    var isMultiLine: Bool { text.contains("\n") }
+    var isMultiLine: Bool { text.contains("\n") || lines > 1 }
 }
 
 /// Marks drawn on a capture.
@@ -424,7 +431,7 @@ extension MarkupTextShape {
     /// caption is usually inside a cloud or a box, and a frame drawn round
     /// ragged-left lines reads as a mistake.
     func layOutBlock() -> [GlyphPlacement] {
-        let lines = captionLines(text)
+        let lines = captionLines(text, into: self.lines)
         if lines.count <= 1 {
             return layOutText(text, font: font, size: sizePoints, path: path)
         }
@@ -446,7 +453,7 @@ extension MarkupTextShape {
     /// The box the words occupy, before any margin.
     func blockBounds() -> PageRect {
         let anchor = path.first ?? .zero
-        let lines = captionLines(text)
+        let lines = captionLines(text, into: self.lines)
         let widest = lines.map { font.width(of: $0, size: sizePoints) }.max() ?? 0
         let leading = sizePoints * markupLineHeight
         return PageRect(
@@ -972,7 +979,7 @@ extension MarkupTextShape {
         let letters = CGMutablePath()
 
         for placement in layOutBlock() {
-            guard let glyph = outline(of: placement.text, in: uiFont) else { continue }
+            guard let glyph = outline(of: placement, in: uiFont) else { continue }
             // Rotated about its own origin and then carried to it, which is the
             // order that puts a letter on a curve. The other way round rotates
             // the whole line about the picture's corner and scatters the word
@@ -992,7 +999,19 @@ extension MarkupTextShape {
     /// Core Text hands back glyph paths with y increasing **upwards**, which is
     /// the one convention nothing else here uses; left unflipped every caption
     /// comes out mirrored about its own baseline.
-    private func outline(of character: String, in uiFont: UIFont) -> CGPath? {
+    private func outline(of placement: GlyphPlacement, in uiFont: UIFont) -> CGPath? {
+        // By glyph id where the shaper gave one. Re-shaping the cluster's
+        // characters here would ask Core Text to lay out one Arabic letter with
+        // no neighbours, and it can only answer with the isolated form — the
+        // outline would then disagree with both the drawn caption and the file.
+        if placement.id != 0, font.asset != nil {
+            var flip = CGAffineTransform(scaleX: 1, y: -1)
+            return CTFontCreatePathForGlyph(uiFont as CTFont,
+                                            CGGlyph(truncatingIfNeeded: placement.id),
+                                            &flip)
+        }
+
+        let character = placement.text
         guard !character.isEmpty else { return nil }
         let attributed = NSAttributedString(string: character, attributes: [.font: uiFont])
         let line = CTLineCreateWithAttributedString(attributed)

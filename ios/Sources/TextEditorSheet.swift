@@ -11,7 +11,7 @@ struct TextEditorSheet: View {
     let color: MarkColor
     /// The words already there, when this is an edit rather than a new caption.
     var initial: String = ""
-    let onCommit: (String) -> Void
+    let onCommit: (String, Int) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
@@ -39,6 +39,7 @@ struct TextEditorSheet: View {
                         .foregroundStyle(.orange)
                 }
 
+
                 Text("\(font.label) · \(font.script) · \(String(format: "%.0f", size))pt")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -54,7 +55,7 @@ struct TextEditorSheet: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button(initial.isEmpty ? "Add" : "Save") {
-                        onCommit(text)
+                        onCommit(text, captionLines(text).count)
                         dismiss()
                     }
                     .fontWeight(.semibold)
