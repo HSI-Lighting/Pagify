@@ -17,7 +17,8 @@
 //!     render     pixel buffers, format conversion, the LRU page cache
 //! ```
 //!
-//! Only `jni_bridge` is Android-specific; everything below it compiles and tests
+//! Only `jni_bridge` (Android) and `ffi` (iOS) are platform-specific; everything
+//! below them compiles and tests
 //! on the host, which is where the majority of the test suite runs.
 
 pub mod command;
@@ -31,6 +32,12 @@ pub mod text;
 
 #[cfg(target_os = "android")]
 pub mod jni_bridge;
+
+// The C ABI iOS calls. Also built on macOS so the host suite can exercise the
+// exact bytes the device will call — a bridge only compiled on the device is a
+// bridge whose ownership contracts are only tested on the device.
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+pub mod ffi;
 
 pub use document::{Document, DocumentMetadata, Page, PageSize, RenderRequest, Rotation};
 pub use error::{PdfError, Result};

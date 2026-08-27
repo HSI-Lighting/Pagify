@@ -70,7 +70,9 @@ fn main() {
             let ok = bindings.FPDF_SaveWithVersion(
                 doc,
                 &mut sink as *mut Sink as *mut FPDF_FILEWRITE,
-                flags,
+                // `FPDF_SaveWithVersion` takes an `FPDF_DWORD`, which the
+                // bindings widen to u64 — the literals above are u32.
+                flags.into(),
                 17,
             );
 

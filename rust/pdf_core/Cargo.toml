@@ -9,7 +9,10 @@ description = "Pagify PDF engine: parsing, rendering and caching behind a stable
 [lib]
 # `cdylib` is what the JVM dlopen()s; `rlib` keeps `cargo test` able to build the
 # crate as a normal library so the pure-logic modules can be unit-tested on the host.
-crate-type = ["cdylib", "rlib"]
+# `staticlib` is what the Xcode target links: one archive, no second binary to
+# sign and no dlopen path to get wrong. `cdylib` stays for the JVM, `rlib` for
+# `cargo test`.
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [patch.crates-io]
 # One line changed: PdfDocument::handle() made public, which is what makes
@@ -65,6 +68,11 @@ subsetter = "0.2.2"
 jni = "0.21"
 android_logger = "0.15"
 
+# Logging on iOS goes to the unified log, where Console.app and Xcode already
+# look, rather than to a stderr nothing reads on a device.
+[target.'cfg(target_os = "ios")'.dependencies]
+oslog = "0.2"
+
 # No `editing` feature. Editing is the product, not an option, and a flag around it
 # means the default build never type-checks the editing path — which is how the
 # previous one came to gate a module that had never been written.
@@ -78,3 +86,26 @@ strip = "symbols"
 # `catch_unwind` and converts a panic into a Java exception; aborting instead would
 # turn any malformed-PDF edge case into a process kill with no diagnostics.
 panic = "unwind"
+
+# iOS links the `staticlib`, and `strip = "symbols"` above erases the very
+# `#[no_mangle]` exports the Xcode target has to resolve — a stripped archive
+# links with "undefined symbol _pagify_open_document" and nothing else to go on.
+# Stripping is right for the Android `.so`, so it stays; this profile is the same
+# release build with the symbol table kept.
+[profile.release-ios]
+inherits = "release"
+strip = "none"
+# LTO must be off, and this is the trap that costs the afternoon.
+#
+# `lto = true` above is right for the Android `.so`, which is *linked*. iOS links
+# the `staticlib`, and when the output is an archive rather than a linked binary,
+# LTO drops the `#[no_mangle]` exports on the way through — nothing references
+# them from inside the crate, and there is no link step yet to tell it something
+# outside will. Measured on this crate: `lto = true` and `lto = "thin"` each
+# produce an archive defining **0** `_pagify_*` symbols; `lto = false` defines all
+# **37**. It is not a link error you can read, either — the archive builds
+# happily and Xcode fails later with "undefined symbol _pagify_open_document".
+#
+# Check with `nm -g --defined-only libpdf_core.a | grep pagify` after any change
+# to this profile, rather than trusting that it still works.
+lto = false

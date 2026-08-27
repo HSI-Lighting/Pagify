@@ -1,0 +1,107 @@
+# Generated into Pagify.xcodeproj by `xcodegen generate` (run from ios/).
+#
+# The project file is generated rather than checked in so that the two things
+# most likely to drift — where the Rust archive is and which PDFium slice goes in
+# the bundle — stay described in one readable place.
+
+name: Pagify
+
+options:
+  bundleIdPrefix: com.hsilighting
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+targets:
+  Pagify:
+    type: application
+    platform: iOS
+
+    sources:
+      - path: Sources
+      - path: Resources
+      - path: Assets.xcassets
+      - path: Support/Info.plist
+        buildPhase: none
+      - path: Support/Pagify-Bridging-Header.h
+        buildPhase: none
+      - path: CPagifyCore/include/pagify_core.h
+        buildPhase: none
+      - path: Scripts
+        buildPhase: none
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.hsilighting.pagify
+        # Generated from the Android artwork by Scripts/make-appicon.swift, so
+        # there is one piece of art and no hand-exported copy to drift.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        PRODUCT_NAME: Pagify
+        MARKETING_VERSION: "0.1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        INFOPLIST_FILE: Support/Info.plist
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+        # The C ABI reaches Swift through a bridging header rather than a module
+        # map: one header, no module to keep in step with the search paths.
+        SWIFT_OBJC_BRIDGING_HEADER: $(SRCROOT)/Support/Pagify-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/CPagifyCore/include
+        SWIFT_VERSION: "5.0"
+
+        # The engine archive, named by full path rather than found with
+        # `-lpdf_core` on a search path.
+        #
+        # This is not a style preference. The crate's `crate-type` includes both
+        # `cdylib` (for the JVM) and `staticlib`, so Cargo emits *both*
+        # libpdf_core.a and libpdf_core.dylib into the same directory — and given
+        # the choice, the linker takes the dylib. The resulting app records the
+        # dylib's absolute build path on this Mac as a load command.
+        #
+        # It then runs perfectly in the simulator, because the simulator shares
+        # the host filesystem and that path resolves. On a device it does not
+        # exist, and dyld kills the app at launch before a line of Swift runs:
+        #
+        #   dyld: Library not loaded: /Users/.../release-ios/deps/libpdf_core.dylib
+        #
+        # Naming the archive leaves the linker no choice to get wrong.
+        "OTHER_LDFLAGS[sdk=iphonesimulator*]": $(SRCROOT)/../rust/pdf_core/target/aarch64-apple-ios-sim/release-ios/libpdf_core.a
+        "OTHER_LDFLAGS[sdk=iphoneos*]": $(SRCROOT)/../rust/pdf_core/target/aarch64-apple-ios/release-ios/libpdf_core.a
+
+        # PDFium is dlopen'd from Frameworks/, so the loader needs the rpath even
+        # though nothing links against it.
+        LD_RUNPATH_SEARCH_PATHS: $(inherited) @executable_path/Frameworks
+
+        # Only arm64 is built for the simulator; an x86_64 slice would need a
+        # third PDFium download and a Rust target nothing here runs on.
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
+
+        # The build scripts shell out to cargo and write into the app bundle,
+        # neither of which the script sandbox permits.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+
+        # A local simulator build has no team to sign with; this override does
+        # not apply to device builds, which sign with the team below.
+        "CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]": "NO"
+
+        # AL MUTLAQ MARBLES & LIGHTING. Held here rather than set in Xcode's
+        # Signing editor, because that writes into the generated project and
+        # the next XcodeGen run throws it away — which is how a device build
+        # came to fail with "Signing for Pagify requires a development team"
+        # while a perfectly good certificate and wildcard profile sat on disk.
+        #
+        # The matching certificate is the team's own; note that the
+        # `dev@hsilighting.com` certificate on this machine belongs to a
+        # *different* team (22U25TK78X) and cannot sign for this one.
+        DEVELOPMENT_TEAM: 8PPAA8SK8P
+        CODE_SIGN_STYLE: Automatic
+
+    preBuildScripts:
+      - name: Build the Rust engine
+        script: '"$SRCROOT/Scripts/build-rust.sh"'
+        basedOnDependencyAnalysis: false
+
+    postCompileScripts:
+      - name: Embed PDFium
+        script: '"$SRCROOT/Scripts/embed-pdfium.sh"'
+        basedOnDependencyAnalysis: false

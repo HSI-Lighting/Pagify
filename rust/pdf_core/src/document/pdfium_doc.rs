@@ -33,6 +33,21 @@ use crate::render::{RegionPixels, RenderTarget};
 /// struct. The leak is one allocation for the lifetime of the process.
 static PDFIUM: OnceLock<std::result::Result<&'static Pdfium, String>> = OnceLock::new();
 
+/// An explicit PDFium location, set before the first open.
+///
+/// iOS has no system PDFium to find by soname and, at the pinned chromium/7881
+/// tag, no static archive published either — so the app embeds
+/// `libpdfium.dylib` and passes the bundle path, which it only learns at
+/// runtime. A `OnceLock` rather than an env var because the value is read from
+/// several threads and `set_var` is not sound alongside them.
+static LIBRARY_PATH: OnceLock<String> = OnceLock::new();
+
+/// Point the engine at a PDFium build. Returns `false` if a path was already set
+/// or PDFium is already bound, in which case this call changed nothing.
+pub fn set_library_path(path: String) -> bool {
+    LIBRARY_PATH.set(path).is_ok() && PDFIUM.get().is_none()
+}
+
 pub fn pdfium() -> Result<&'static Pdfium> {
     PDFIUM
         .get_or_init(|| {
@@ -44,9 +59,13 @@ pub fn pdfium() -> Result<&'static Pdfium> {
             // tests — every acceptance criterion in phases A and B — run
             // off-device at all. Unset in the app, so the Android path is
             // untouched.
-            let bindings = match std::env::var("PAGIFY_PDFIUM_LIB") {
-                Ok(path) => Pdfium::bind_to_library(&path).map_err(|e| e.to_string())?,
-                Err(_) => Pdfium::bind_to_system_library().map_err(|e| e.to_string())?,
+            let bindings = match (LIBRARY_PATH.get(), std::env::var("PAGIFY_PDFIUM_LIB")) {
+                // Set by the app (iOS), and first because it is the deliberate
+                // one: an env var left over in a test runner must not win over a
+                // path the running app chose.
+                (Some(path), _) => Pdfium::bind_to_library(path).map_err(|e| e.to_string())?,
+                (None, Ok(path)) => Pdfium::bind_to_library(&path).map_err(|e| e.to_string())?,
+                (None, Err(_)) => Pdfium::bind_to_system_library().map_err(|e| e.to_string())?,
             };
             Ok(&*Box::leak(Box::new(Pdfium::new(bindings))))
         })
