@@ -12,6 +12,64 @@ import Foundation
 // screen, because the app would flip it back on the way in.
 
 /// A rectangle in page points, top-left origin.
+extension WireAnnotation {
+    /// The same mark, shifted by `delta` page points.
+    ///
+    /// Android's `Annotation.movedBy`, and its reasoning holds here: **every**
+    /// kind moves. Dragging is a property of a mark rather than of the one tool
+    /// that happens to offer it today, so a case added later cannot quietly
+    /// become the one that does not follow a finger. What is narrowed is what the
+    /// reader is *offered* — see `markId(atPagePoint:)` — not what a mark can do.
+    func movedBy(_ delta: CGSize) -> WireAnnotation {
+        func shift(_ point: CGPoint) -> CGPoint {
+            CGPoint(x: point.x + delta.width, y: point.y + delta.height)
+        }
+        func shift(_ rect: PageRect) -> PageRect {
+            PageRect(left: rect.left + delta.width, top: rect.top + delta.height,
+                     right: rect.right + delta.width, bottom: rect.bottom + delta.height)
+        }
+        switch self {
+        case .highlight(let rects, let color):
+            return .highlight(rects: rects.map(shift), color: color)
+        case .ink(let strokes, let color, let width):
+            return .ink(strokes: strokes.map { $0.map(shift) }, color: color, width: width)
+        case .note(let rect, let contents, let color):
+            return .note(rect: shift(rect), contents: contents, color: color)
+        case .text(var mark):
+            // The baseline, and only the baseline. The glyphs are laid out from it
+            // on demand — shifting them as well would move the words twice. The id
+            // is kept: this is the same caption in a new place.
+            mark.path = mark.path.map(shift)
+            return .text(mark)
+        }
+    }
+
+    /// The box the mark occupies, in page points.
+    var bounds: CGRect? {
+        func box(_ points: [CGPoint]) -> CGRect? {
+            guard let first = points.first else { return nil }
+            var out = CGRect(origin: first, size: .zero)
+            for point in points.dropFirst() {
+                out = out.union(CGRect(origin: point, size: .zero))
+            }
+            return out
+        }
+        switch self {
+        case .highlight(let rects, _):
+            return rects.map(\.cgRect).reduce(nil) { $0?.union($1) ?? $1 }
+        case .ink(let strokes, _, let width):
+            // Inflated by the nib: what is on the page is the stroke plus half a
+            // width either side, and a box drawn tight to the centre line reads as
+            // too small to be the thing that was tapped.
+            return box(strokes.flatMap { $0 })?.insetBy(dx: -width / 2, dy: -width / 2)
+        case .note(let rect, _, _):
+            return rect.cgRect
+        case .text(let mark):
+            return mark.textFrameBounds().cgRect
+        }
+    }
+}
+
 struct PageRect: Equatable {
     var left: CGFloat
     var top: CGFloat
@@ -290,7 +348,10 @@ struct EditState: Equatable {
 /// has no annotation index — so it is addressed by the app's own id through
 /// `removeText`. Everything else is addressed by PDFium's index.
 struct MarkRecord: Identifiable {
-    let annotation: WireAnnotation
+    /// `var`, so a move can replace the geometry **in place**. Building a fresh
+    /// record would hand it a new `id`, and the drag holding that id would lose
+    /// its grip on the mark halfway through.
+    var annotation: WireAnnotation
     /// PDFium's index for it, or nil for a caption.
     var engineIndex: Int?
     let id = UUID()

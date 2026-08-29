@@ -154,6 +154,16 @@ enum AnnotationTool: String, CaseIterable, Identifiable {
 
 /// Everything the reader's pen is currently set to. Android's annotation half of
 /// `PdfReaderState`.
+/// A drawn mark in hand: which page, and where in that page's list.
+///
+/// A position rather than an id, because ink has none of its own. It is cleared
+/// whenever the list it indexes into could have changed underneath — a commit, an
+/// erase, or arming a tool.
+struct MarkPick: Equatable {
+    var page: Int
+    var index: Int
+}
+
 struct AnnotationSettings: Equatable {
     var tool: AnnotationTool = .none
 
@@ -194,6 +204,16 @@ struct AnnotationSettings: Equatable {
     /// The caption currently in hand, addressed **by id** — not by position in any
     /// list, which changes under it the moment anything else is added or erased.
     var selectedTextId: Int64?
+    /// The drawn mark in hand, by its position in the page's committed list.
+    ///
+    /// Beside `selectedTextId` because this is the one place a tool change
+    /// already clears this kind of state, and because the canvas already receives
+    /// `settings` — so nothing new has to be threaded through the page views.
+    ///
+    /// A position rather than an id: ink has none of its own. It is re-read on
+    /// every commit and erase through `select(mark:on:)`, which clears it
+    /// whenever the list it indexes into changes underneath.
+    var selectedMark: MarkPick?
 
     /// Whether the snapshot tool draws around a region rather than boxing it.
     var captureLasso: Bool = false
@@ -227,6 +247,9 @@ struct AnnotationSettings: Equatable {
 
         let wasHighlight = tool == .highlight
         tool = next
+        // A drawn mark is only ever in hand with no tool armed — arming one means
+        // the next drag is about making a mark, not moving one.
+        if next != .none { selectedMark = nil }
 
         // Putting a tool **down** switches to no family at all, so there is
         // nothing to conform to and nothing to repaint.

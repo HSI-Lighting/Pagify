@@ -42,6 +42,12 @@ struct AnnotationCanvas: View {
     var onSelectWord: (CGPoint) -> Void = { _ in }
     var onMoveSelectionHandle: (Bool, CGPoint) -> Void = { _, _ in }
     var onClearSelection: () -> Void = {}
+    /// The drawn mark in hand on this page, by its position in `committed`.
+    var selectedMark: Int?
+    var onSelectMark: (Int?) -> Void = { _ in }
+    /// The mark was dragged: by how much, in page points, and whether the finger
+    /// has lifted. Only the last one is committed.
+    var onMoveMark: (Int, CGSize, Bool) -> Void = { _, _, _ in }
     var onHighlightMissed: () -> Void = {}
     /// A drag that reads as a swipe at the document, made with a tool armed.
     ///
@@ -68,6 +74,9 @@ struct AnnotationCanvas: View {
     @State private var trace: [CGPoint] = []
     /// The caption being dragged, and how far it has come.
     @State private var movingId: Int32?
+    /// How far the drawn mark in hand has been carried, in page points. Overlay
+    /// only until the finger lifts — see `onMoveMark`.
+    @State private var markShift: CGSize = .zero
     @State private var moveShift: CGSize = .zero
 
     private var scale: CGFloat { mapping.scale }
@@ -114,7 +123,15 @@ struct AnnotationCanvas: View {
             // Under the marks: a highlight made from a selection should read as
             // having been laid over the words, not under the band that chose them.
             drawTextSelection(&context)
-            for mark in committed {
+            for (index, mark) in committed.enumerated() {
+                // The one in hand is drawn where the finger has taken it, not
+                // where it still officially sits — the same trick captions use.
+                if index == selectedMark, markShift != .zero {
+                    draw(mark.movedBy(markShift), in: &context)
+                    outline(mark.movedBy(markShift), in: &context)
+                    continue
+                }
+                if index == selectedMark { outline(mark, in: &context) }
                 // The one being dragged is drawn where the finger has taken it,
                 // not where it still officially sits.
                 if case .text(let caption) = mark, caption.id == movingId {
@@ -199,6 +216,30 @@ struct AnnotationCanvas: View {
             if settings.tool == .none {
                 TextSelectLayer(
                     onLongPress: { onSelectWord(toPage($0)) },
+                    onTap: { at in
+                        // A drawn mark under the finger goes in hand; bare page
+                        // puts down whatever was. The caption layer above this one
+                        // is hit-testable only where a caption is, so a tap on
+                        // words never reaches here.
+                        onSelectMark(markIndex(atPagePoint: toPage(at)))
+                    },
+                    heldMark: selectedMark.flatMap { index in
+                        committed.indices.contains(index)
+                            ? committed[index].bounds.map { box in
+                                let corner = mapping.toScreen(CGPoint(x: box.minX, y: box.minY))
+                                let far = mapping.toScreen(CGPoint(x: box.maxX, y: box.maxY))
+                                return CGRect(x: corner.x, y: corner.y,
+                                              width: far.x - corner.x,
+                                              height: far.y - corner.y)
+                              }
+                            : nil
+                    },
+                    onMoveMark: { offset, done in
+                        let delta = CGSize(width: offset.width / scale,
+                                           height: offset.height / scale)
+                        markShift = done ? .zero : delta
+                        if let index = selectedMark { onMoveMark(index, delta, done) }
+                    },
                     // Only the page the selection is actually on.
                     //
                     // `selection` is the reader's one selection, handed to every
@@ -346,6 +387,22 @@ struct AnnotationCanvas: View {
             }
     }
 
+    /// The dashed box around a drawn mark in hand.
+    ///
+    /// The same notation a caption gets, so "this one is chosen" looks the same
+    /// whatever kind of mark it is.
+    private func outline(_ mark: WireAnnotation, in context: inout GraphicsContext) {
+        guard let box = mark.bounds else { return }
+        let margin: CGFloat = 6 / max(scale, 0.0001)
+        let corner = mapping.toScreen(CGPoint(x: box.minX - margin, y: box.minY - margin))
+        let far = mapping.toScreen(CGPoint(x: box.maxX + margin, y: box.maxY + margin))
+        let rect = CGRect(x: corner.x, y: corner.y,
+                          width: far.x - corner.x, height: far.y - corner.y)
+        context.stroke(Path(roundedRect: rect, cornerRadius: 4),
+                       with: .color(Color(hex: 0xF2A93B)),
+                       style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+    }
+
     /// The bands over the selected words, and a handle at each end.
     ///
     /// One band per line rather than one per character — `PageCharacters` merges
@@ -391,6 +448,22 @@ struct AnnotationCanvas: View {
 
     /// The topmost caption at this point — last drawn is the one on top, and the
     /// one the finger is pointing at.
+    /// The topmost drawn mark at this point, by its position in the committed
+    /// list, or nil if the tap landed on bare page.
+    ///
+    /// Ink only. `movedBy` moves every kind — see `PagifyEdit` — but a highlight
+    /// belongs to the words it covers, and one dragged off them is wrong in the
+    /// file as well as on screen. A note has its own tap, which opens it. Offering
+    /// a case later is one line here.
+    private func markIndex(atPagePoint point: CGPoint) -> Int? {
+        for index in committed.indices.reversed() {
+            if case .ink = committed[index], committed[index].isHitBy(point, tolerance: tolerance) {
+                return index
+            }
+        }
+        return nil
+    }
+
     private func captionId(atPagePoint point: CGPoint) -> Int32? {
         for mark in committed.reversed() {
             if case .text(let caption) = mark,

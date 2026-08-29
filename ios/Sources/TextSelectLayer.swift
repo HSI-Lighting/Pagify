@@ -24,6 +24,16 @@ import UIKit
 struct TextSelectLayer: UIViewRepresentable {
     /// A long press landed, in view coordinates.
     let onLongPress: (CGPoint) -> Void
+    /// A plain tap landed on the page, whether or not words are selected.
+    ///
+    /// Separate from `onTapAway`, which only fires while a selection stands: a
+    /// tap has to be able to *take* a drawn mark in hand as well as put one down.
+    var onTap: (CGPoint) -> Void = { _ in }
+    /// Where the drawn mark in hand is on screen, if one is. A drag that starts
+    /// inside it carries it; anywhere else the finger belongs to the scroller.
+    var heldMark: CGRect?
+    /// The mark was carried this far, and whether the finger has lifted.
+    var onMoveMark: (CGSize, Bool) -> Void = { _, _ in }
     /// Where the two handles are, in view coordinates. Nil when there is no
     /// selection, which is what turns handle dragging and tap-to-clear off.
     var handles: (start: CGPoint, end: CGPoint)?
@@ -50,7 +60,7 @@ struct TextSelectLayer: UIViewRepresentable {
         press.allowableMovement = 12
 
         let drag = UIPanGestureRecognizer(target: view, action: #selector(SelectTouchView.drag(_:)))
-        let tap = UITapGestureRecognizer(target: view, action: #selector(SelectTouchView.tapped))
+        let tap = UITapGestureRecognizer(target: view, action: #selector(SelectTouchView.tapped(_:)))
 
         for recogniser in [press, drag, tap] as [UIGestureRecognizer] {
             recogniser.cancelsTouchesInView = false
@@ -58,9 +68,16 @@ struct TextSelectLayer: UIViewRepresentable {
             recogniser.delaysTouchesEnded = false
             recogniser.delegate = view
         }
+        let markDrag = UIPanGestureRecognizer(target: view,
+                                              action: #selector(SelectTouchView.carry(_:)))
+        markDrag.cancelsTouchesInView = false
+        markDrag.delaysTouchesBegan = false
+        markDrag.delegate = view
+        view.markDrag = markDrag
+
         view.handleDrag = drag
         view.tapAway = tap
-        view.recognisers = [press, drag, tap]
+        view.recognisers = [press, drag, tap, markDrag]
         view.apply(self)
         return view
     }
@@ -80,6 +97,10 @@ private final class SelectTouchView: UIView, UIGestureRecognizerDelegate {
     private var onTapAway: () -> Void = {}
     private var handles: (start: CGPoint, end: CGPoint)?
     private var selectionActive = false
+    private var onTap: (CGPoint) -> Void = { _ in }
+    private var heldMark: CGRect?
+    private var onMoveMark: (CGSize, Bool) -> Void = { _, _ in }
+    weak var markDrag: UIPanGestureRecognizer?
     /// Which handle the drag took hold of, decided when it began.
     private var dragging: Bool?
 
@@ -93,11 +114,20 @@ private final class SelectTouchView: UIView, UIGestureRecognizerDelegate {
         onTapAway = layer.onTapAway
         handles = layer.handles
         selectionActive = layer.selectionActive
+        onTap = layer.onTap
+        heldMark = layer.heldMark
+        onMoveMark = layer.onMoveMark
+        // Armed only while a mark is in hand, and even then it begins only inside
+        // that mark — see `gestureRecognizerShouldBegin`. A pan armed over the
+        // whole page would take the scroller's finger everywhere a mark exists.
+        markDrag?.isEnabled = layer.heldMark != nil
         // The drag only where the handles are; the tap wherever a selection
         // stands. Recognisers armed with nothing to do only give the scroll view
         // something to argue with.
         handleDrag?.isEnabled = layer.handles != nil
-        tapAway?.isEnabled = layer.selectionActive
+        // Always armed now: the tap both takes a drawn mark in hand and puts a
+        // selection down, and only the second of those needs one to exist.
+        tapAway?.isEnabled = true
     }
 
     // ------------------------------------------------------------- the host --
@@ -140,7 +170,23 @@ private final class SelectTouchView: UIView, UIGestureRecognizerDelegate {
 
     // -------------------------------------------------------------- touches --
 
-    @objc func tapped() { onTapAway() }
+    @objc func tapped(_ recogniser: UITapGestureRecognizer) {
+        // Both, in this order: a tap that lands on a drawn mark takes it in hand,
+        // and one that lands on bare page puts down whatever was — words or mark.
+        onTap(recogniser.location(in: self))
+        if selectionActive { onTapAway() }
+    }
+
+    @objc func carry(_ recogniser: UIPanGestureRecognizer) {
+        let offset = recogniser.translation(in: self)
+        let travelled = CGSize(width: offset.x, height: offset.y)
+        switch recogniser.state {
+        case .changed: onMoveMark(travelled, false)
+        case .ended:   onMoveMark(travelled, true)
+        case .cancelled, .failed: onMoveMark(.zero, true)
+        default: break
+        }
+    }
 
     @objc func press(_ recogniser: UILongPressGestureRecognizer) {
         guard recogniser.state == .began else { return }
@@ -206,6 +252,11 @@ private final class SelectTouchView: UIView, UIGestureRecognizerDelegate {
     /// still puts the selection down, because the tap recogniser runs alongside
     /// everything and a tap never satisfies a pan.
     override func gestureRecognizerShouldBegin(_ recogniser: UIGestureRecognizer) -> Bool {
+        if recogniser === markDrag {
+            guard let held = heldMark else { return false }
+            return held.insetBy(dx: -22, dy: -22)
+                .contains(recogniser.location(in: self))
+        }
         guard recogniser === handleDrag else { return true }
         return handles != nil
     }
@@ -213,9 +264,9 @@ private final class SelectTouchView: UIView, UIGestureRecognizerDelegate {
     func gestureRecognizer(_ recogniser: UIGestureRecognizer,
                            shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         // The press and the tap run alongside anything — a scroll that outruns the
-        // press's slop fails it on its own, which is the arbitration wanted. The
-        // handle drag does not: once a handle is in hand the page holds still
-        // under it.
-        recogniser !== handleDrag
+        // press's slop fails it on its own, which is the arbitration wanted.
+        // Neither drag does: once a handle or a mark is in hand the page holds
+        // still under it.
+        recogniser !== handleDrag && recogniser !== markDrag
     }
 }

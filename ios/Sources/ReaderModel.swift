@@ -1020,6 +1020,49 @@ final class ReaderModel: ObservableObject {
 
     /// Snapshot before a change, so undo has something to go back to. A new edit
     /// discards the redo branch, as every history does.
+    /// Take a drawn mark in hand, or put down whatever was.
+    func selectMark(_ index: Int?, page: Int) {
+        settings.selectedMark = index.map { MarkPick(page: page, index: $0) }
+    }
+
+    /// Move the drawn mark in hand, and write it into the document.
+    ///
+    /// Erase and re-add, because the engine has no "move this annotation": the id
+    /// is PDFium's index, and there is no command that edits geometry in place.
+    /// Two history steps rather than one, deliberately — a single snapshot around
+    /// both would leave the app's list and the document disagreeing after one
+    /// undo, with every `engineIndex` above the moved mark off by one, and the
+    /// eraser would then take a neighbour. Undo needs two presses; every state in
+    /// between is one the document is actually in.
+    func moveMark(_ index: Int, on page: Int, by delta: CGSize) {
+        guard delta != .zero,
+              let list = marks[page], list.indices.contains(index) else { return }
+        let record = list[index]
+        guard case .ink = record.annotation,
+              let removal = record.removal(page: page) else { return }
+
+        let moved = record.annotation.movedBy(delta)
+
+        rememberMarks()
+        marks[page]?.remove(at: index)
+        if let engineIndex = record.engineIndex {
+            for position in marks[page]!.indices {
+                if let other = marks[page]![position].engineIndex, other > engineIndex {
+                    marks[page]![position].engineIndex = other - 1
+                }
+            }
+        }
+        run(removal)
+
+        commit(moved, page: page)
+        // The list it indexed into has changed underneath, and the moved mark is
+        // now last. Kept in hand so a second drag carries on from where the first
+        // one stopped.
+        settings.selectedMark = marks[page].map { MarkPick(page: page, index: $0.count - 1) }
+        SessionRecorder.shared.record("TOOL_GESTURE",
+            String(format: "mark moved page=%d by=%.0f,%.0f", page, delta.width, delta.height))
+    }
+
     private func rememberMarks() {
         markUndo.append(marks)
         if markUndo.count > Self.historyLimit { markUndo.removeFirst() }
@@ -1214,6 +1257,12 @@ final class ReaderModel: ObservableObject {
     }
 
     func rotatePage(_ index: Int) {
+        // The sheet is about to change shape, and the cached answer is the whole
+        // reason the list can lay itself out before a page is rasterised. A stale
+        // one is a page drawn at the wrong height in a slot reserved at the old
+        // one — which moves every page below it, which is exactly what the board
+        // exists to make impossible.
+        pageSizeCache[index] = nil
         guard let document else { return }
         let current = max(0, pagify_get_page_rotation(document.handle, Int32(index)))
         let quarter = Int((current + 1) % 4)

@@ -91,6 +91,27 @@ final class PageFrameBox {
     var frames: [Int: CGRect] = [:]
 }
 
+/// Every page's top, summed once.
+///
+/// The board asks where a page begins once per built row per body pass, and once
+/// more for the height of the whole document. Walking the page list from zero for
+/// each of those is thousands of size lookups a frame for an answer that cannot
+/// change between edits. Held in a reference so filling it invalidates nothing.
+final class PageTopsCache {
+    var width: CGFloat = 0
+    var count: Int = -1
+    /// `count + 1` entries: the last is the height of the whole document.
+    var tops: [CGFloat] = []
+}
+
+/// The build window the last scroll asked for, before it reaches view state.
+///
+/// Latest-wins on purpose — see `readerScrolled`, which cannot write view state
+/// on the turn of the run loop it is called on.
+final class WindowBox {
+    var range: ClosedRange<Int>?
+}
+
 
 /// Holds the reader's scroll view so a jump can be exact.
 ///

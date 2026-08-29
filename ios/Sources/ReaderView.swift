@@ -82,6 +82,13 @@ struct ReaderView: View {
                             model.moveSelectionHandle(isStart: isStart, to: at)
                         },
                         onClearSelection: { model.clearSelection() },
+                        selectedMark: model.settings.selectedMark
+                            .flatMap { $0.page == page ? $0.index : nil },
+                        onSelectMark: { model.selectMark($0, page: page) },
+                        onMoveMark: { at, delta, done in
+                            guard done else { return }
+                            model.moveMark(at, on: page, by: delta)
+                        },
                         onPageFrame: { zoomedPageFrame.frames = [page: $0] },
                         // The magnified page's pinch, told to the model, so a
                         // caption resize is held in the overlay and written to the
@@ -285,13 +292,6 @@ struct ReaderViewportKey: PreferenceKey {
         }
     }
 
-    private struct PageMidYKey: PreferenceKey {
-        static var defaultValue: [Int: CGRect] { [:] }
-        static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
-            value.merge(nextValue()) { _, new in new }
-        }
-    }
-
     /// The gap around and between pages.
     private let pageGap: CGFloat = 12
 
@@ -340,14 +340,19 @@ struct ReaderViewportKey: PreferenceKey {
                                              model.moveSelectionHandle(isStart: isStart, to: at)
                                          },
                                          onClearSelection: { model.clearSelection() },
+                                         selectedMark: model.settings.selectedMark
+                                             .flatMap { $0.page == index ? $0.index : nil },
+                                         onSelectMark: { model.selectMark($0, page: index) },
+                                         onMoveMark: { at, delta, done in
+                                             // Written only when the finger lifts.
+                                             // Every frame of a drag would be an
+                                             // undo step, and a re-render of the
+                                             // page under the finger.
+                                             guard done else { return }
+                                             model.moveMark(at, on: index, by: delta)
+                                         },
                                          pageSize: model.pageSize(index))
                                     .id(index)
-                                    .background(
-                                        GeometryReader { page in
-                                            Color.clear.preference(
-                                                key: PageMidYKey.self,
-                                                value: [index: page.frame(in: .named("reader"))])
-                                        })
     }
 
     /// Work out where every page now sits, and which one is being read.
@@ -364,15 +369,23 @@ struct ReaderViewportKey: PreferenceKey {
 
         let extent = readerHeight > 0 ? readerHeight : viewportHeight
         var frames: [Int: CGRect] = [:]
-        var top = pageGap
         var chosen: Int?
         var nearest: (page: Int, distance: CGFloat)?
+        var firstBuilt: Int?
+        var lastBuilt = 0
         let middle = extent / 2
+        let tops = tops(width: width, count: document.pageCount)
 
         for page in 0..<document.pageCount {
-            let size = model.pageSize(page)
-            let height = size.width > 0 ? width * size.height / size.width : width
-            let y = top - offset
+            let height = rowHeight(page, width: width)
+            let y = tops[page] - offset
+
+            // A screenful of margin either side, so a flick arrives at pages that
+            // are already drawn instead of at grey rectangles.
+            if y < extent * 2 && y + height > -extent {
+                if firstBuilt == nil { firstBuilt = page }
+                lastBuilt = page
+            }
             // Only what is on screen, or near enough to be scrolled onto it. The
             // zoom needs the frames of pages a finger could actually land on.
             if y < extent && y + height > 0 {
@@ -382,30 +395,37 @@ struct ReaderViewportKey: PreferenceKey {
                     nearest = (page, distance)
                 }
             }
-            top += height + pageGap
         }
 
-        // The pages themselves know better than the arithmetic does.
+        // Nothing overrides this any more.
         //
-        // Every built row lands exactly where `contentTop` predicts *relative to
-        // its neighbours*, but a `LazyVStack` holds estimated space for the rows
-        // it has not built, and those estimates run about a third large. So the
-        // absolute sum above is right near the front of a document and wrong by
-        // dozens of pages near the back — which is how the reader came to show
-        // one page while naming another. Where a page has reported its own frame,
-        // that is used instead, and the sum is left to cover the rest.
-        if !realFrames.frames.isEmpty {
-            for (page, frame) in realFrames.frames where frame.height > 0 {
-                frames[page] = CGRect(x: pageGap, y: frame.minY,
-                                      width: frame.width, height: frame.height)
+        // The pages used to be asked where they were, because the sum above was
+        // right near the front of a document and wrong by dozens of pages near
+        // the back — a lazy stack holding estimated space for rows it had not
+        // built. The board holds no estimates: every page is drawn at exactly
+        // `tops[page]`, so the sum *is* the position, and asking the rows cost a
+        // `GeometryReader` and a preference in every one of them, on every scroll
+        // frame, to be told what was already known.
+        pageFramesBox.frames = frames
+
+        if let firstBuilt {
+            let wanted = firstBuilt...max(firstBuilt, lastBuilt)
+            if wantedWindow.range != wanted {
+                wantedWindow.range = wanted
+                // Off this turn of the run loop on purpose. The observer's first
+                // report comes from `didMoveToWindow`, which UIKit runs inside
+                // SwiftUI's own layout pass — writing view state there is a write
+                // during an update, and this write changes the row count, which
+                // changes the content size, which reports another offset. The hop
+                // breaks that re-entrancy, and the box carries the *latest* want,
+                // so a hop that lands late cannot install a stale window.
+                DispatchQueue.main.async {
+                    guard let want = wantedWindow.range, want != buildWindow else { return }
+                    buildWindow = want
+                }
             }
-            nearest = realFrames.frames
-                .filter { $0.value.height > 0 }
-                .map { (page: $0.key, distance: abs($0.value.midY - middle)) }
-                .min { $0.distance < $1.distance }
         }
 
-        pageFramesBox.frames = frames
         guard let nearest else { return }
 
         // Both ends get an explicit case, the same way they always did: at the top
@@ -543,149 +563,6 @@ struct ReaderViewportKey: PreferenceKey {
     }
 
     /// Where a page begins, in content coordinates.
-    /// Bring the jumped-to page to the middle, using where it says it is.
-    ///
-    /// A jump cannot be computed once and trusted. `contentTop` is right — the
-    /// pages report exactly the positions it predicts — but a `LazyVStack` only
-    /// *estimates* the rows it has not built, and one recording had it guessing
-    /// 40,549 points of content where the built rows add up to 31,024. Landing
-    /// on a correct absolute offset therefore lands in an approximate document:
-    /// as the rows above finish building, their estimates collapse to real
-    /// heights, everything below slides up, and the page under the middle of the
-    /// screen is no longer the one that was asked for. The further into the
-    /// document, the more rows are wrong and the further it slides — which is
-    /// why choosing a page near the front looks fine and one near the back does
-    /// not.
-    ///
-    /// So the offset is corrected against the thing that cannot be estimated:
-    /// the page's own frame, which it publishes. Each pass closes the gap, more
-    /// rows build, and the next pass closes what that shifted, until it stops
-    /// moving.
-    private func settleJump() {
-        guard let page = settlingPage, let scroll = commander.scrollView else { return }
-
-        // A hand that has carried the list somewhere **ends** the settle rather
-        // than pausing it.
-        //
-        // `isDragging` and `isTracking` are both false through a flick's
-        // deceleration — `isDecelerating` is the flag that is true then, and it
-        // was not being asked. That cost little while `again()`'s 0.08s chain was
-        // the only thing driving this, because a pass that returned early never
-        // scheduled the next one and the settle died where it stood. The page
-        // frames now re-enter here on every scroll frame, so it no longer dies:
-        // it waits out the whole drag, and the moment the finger lifts it writes
-        // an unanimated offset, which kills the momentum and hauls the list back
-        // towards wherever the jump was still aiming. That is the page moving out
-        // from under the reader.
-        //
-        // Wherever the reader has carried the list is where they meant to be, and
-        // the jump has nothing further to say about it.
-        if scroll.isDragging || scroll.isDecelerating {
-            settlingPage = nil
-            settleArmed = false
-            return
-        }
-
-        // A finger that is down but has carried the list nowhere is not the
-        // reader taking hold — it is a tap, or the second finger of a pinch on
-        // its way. Waited out rather than abandoned: throwing away a correction
-        // for a touch that never scrolled is how a thumbnail chosen deep in a
-        // document comes to land on the wrong page again. Nothing is spent
-        // waiting, and the wait cannot outlive the touch.
-        guard !scroll.isTracking else { return }
-
-        // A spent budget disarms too. This used to share the early return above,
-        // which left `settleArmed` true with nothing left that could act on it —
-        // so every page frame, one per scroll frame, came back here for the rest
-        // of the session only to be turned away.
-        guard settlePasses < 24 else {
-            settlingPage = nil
-            settleArmed = false
-            return
-        }
-
-        let frames = realFrames.frames
-        let middle = usableExtent(fallback: 0) / 2
-        let width = lastListPageWidth > 0 ? lastListPageWidth : 1
-
-        // There, or near enough: close the last of it against the page itself.
-        if let frame = frames[page], frame.height > 0 {
-            let gap = frame.midY - middle
-            guard abs(gap) > 1 else {
-                SessionRecorder.shared.record("NAVIGATION",
-                    String(format: "settle done page=%d gap=%.1f passes=%d", page, gap, settlePasses))
-                settlingPage = nil
-                settleArmed = false
-                return
-            }
-            settlePasses += 1
-            let before = scroll.contentOffset.y
-            commander.scroll(toContentY: before + gap, animated: false)
-
-            // The clamp had the last word, so this gap can never be closed.
-            //
-            // The last pages of a document have nothing beneath them to scroll
-            // into: the page cannot reach the middle, the gap stays above a point
-            // for ever, and the whole budget drains rewriting an offset the
-            // scroll view already has. Each of those writes cancels whatever the
-            // scroll view was doing, which is the same yank by another route. The
-            // ends of a document belong to the scroll view; there is nothing here
-            // to correct.
-            guard abs(scroll.contentOffset.y - before) > 0.5 else {
-                SessionRecorder.shared.record("NAVIGATION",
-                    String(format: "settle clamped page=%d gap=%.1f passes=%d",
-                           page, gap, settlePasses))
-                settlingPage = nil
-                settleArmed = false
-                return
-            }
-            again()
-            return
-        }
-
-        // Not built yet, so its position is not knowable — step towards it.
-        //
-        // `contentTop` is right about the pages it can see: every built row lands
-        // exactly where it predicts. What it cannot know is the space a
-        // `LazyVStack` is holding for the rows it has *not* built, and that guess
-        // runs about a third large. So an absolute offset computed for page 107
-        // arrives at page 80, and no amount of recomputing it helps.
-        //
-        // The scale between the two is measurable, though: take two rows that are
-        // on screen, compare the distance between them with the distance the
-        // arithmetic predicts, and the ratio converts predicted distance into real
-        // distance. Step by that, and whatever the step gets wrong the next pass
-        // measures again from wherever it actually landed.
-        let known = frames.keys.sorted()
-        guard let first = known.first, let last = known.last, last > first,
-              let near = known.min(by: { abs($0 - page) < abs($1 - page) }),
-              let anchor = frames[near],
-              let topFirst = contentTop(of: first, width: width),
-              let topLast = contentTop(of: last, width: width),
-              let topNear = contentTop(of: near, width: width),
-              let topWanted = contentTop(of: page, width: width),
-              topLast > topFirst,
-              let firstFrame = frames[first], let lastFrame = frames[last] else { return }
-        let scale = (lastFrame.minY - firstFrame.minY) / (topLast - topFirst)
-        guard scale > 0.1, scale < 10 else { return }
-        let step = (topWanted - topNear) * scale + (anchor.midY - middle)
-        settlePasses += 1
-        SessionRecorder.shared.record("NAVIGATION",
-            String(format: "settle step page=%d from=%d scale=%.3f step=%.0f pass=%d",
-                   page, near, scale, step, settlePasses))
-        commander.scroll(toContentY: scroll.contentOffset.y + step, animated: false)
-        again()
-    }
-
-    /// Look again once the rows that step uncovered have had a moment to build.
-    private func again() {
-        let page = settlingPage
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
-            guard settlingPage == page else { return }
-            settleJump()
-        }
-    }
-
     /// The part of the reader a page can actually be centred in.
     ///
     /// The scroll view runs to the bottom of the screen; the tool ribbon floats
@@ -697,23 +574,38 @@ struct ReaderViewportKey: PreferenceKey {
         return max(1, full - ribbonHeight)
     }
 
+    /// Where a page begins, in content coordinates. `page == pageCount` answers
+    /// the height of the whole document — the top gap, every page, and the gap
+    /// under each.
     private func contentTop(of page: Int, width: CGFloat) -> CGFloat? {
-        guard let document = model.document, page <= document.pageCount, width > 0 else { return nil }
-        var top = pageGap
-        for index in 0..<page {
-            let size = model.pageSize(index)
-            top += (size.width > 0 ? width * size.height / size.width : width) + pageGap
-        }
-        return top
+        guard let document = model.document, page >= 0, page <= document.pageCount,
+              width > 0 else { return nil }
+        return tops(width: width, count: document.pageCount)[page]
     }
 
-    private func contentHeight(atWidth width: CGFloat) -> CGFloat {
-        guard let document = model.document, document.pageCount > 0 else { return 0 }
-        let pages = (0..<document.pageCount).reduce(CGFloat(0)) { total, index in
-            total + width / max(model.aspect(page: index), 0.01)
+    /// The sum, cached.
+    ///
+    /// Two answers to one question is how a reserved height and a set of page
+    /// positions come to disagree — which is what the old `contentHeight` would
+    /// have done to whoever wired it up, summing `model.aspect(page:)` against a
+    /// `contentTop` summing `model.pageSize`. There is one answer now, and it is
+    /// this array.
+    private func tops(width: CGFloat, count: Int) -> [CGFloat] {
+        if pageTops.width == width, pageTops.count == count { return pageTops.tops }
+        var out: [CGFloat] = []
+        out.reserveCapacity(count + 1)
+        var top = pageGap
+        for index in 0..<count {
+            out.append(top)
+            top += rowHeight(index, width: width) + pageGap
         }
-        return pages + pageGap * CGFloat(document.pageCount - 1) + pageGap * 2
+        out.append(top)
+        pageTops.width = width
+        pageTops.count = count
+        pageTops.tops = out
+        return out
     }
+
 
     /// Hand the reader over to the pinned page view.
     ///
@@ -749,27 +641,6 @@ struct ReaderViewportKey: PreferenceKey {
         SessionRecorder.shared.record("ZOOM_ENTER",
            String(format: "page=%d target=%.2f at=%.0f,%.0f base=%.0f",
                   page, target, position.x, position.y, lastListPageWidth))
-        // A jump still correcting itself is abandoned here, where the list it was
-        // correcting is known to be going away.
-        //
-        // The correction is a loop, not a scroll: armed a beat after the jump and
-        // re-entered until the page's own frame reaches the middle. The fingers
-        // that arrive for the pinch stop it dead — it waits out a touch without
-        // rescheduling — and handing over then takes the scroll view out from
-        // under it, so it can neither finish nor clear itself. This view's state
-        // outlives the list, and the rebuilt list's first frame report re-enters
-        // the loop against the page a jump from *before* the zoom was chasing,
-        // walking the reader off the page that was actually asked for. Past the
-        // mute those intermediate positions publish as page changes, so the rail
-        // follows the drift too — which is what "choosing a page from the rail
-        // moves me to the next one" is.
-        //
-        // On the way in, not on the way out: `.onAppear` on the rebuilt list is
-        // not ordered against that list's first frame report, so clearing there
-        // can arrive a frame too late.
-        settlingPage = nil
-        settleArmed = false
-        settlePasses = 0
         model.enterZoom(page: page, focus: fraction, target: target)
     }
 
@@ -821,16 +692,14 @@ struct ReaderViewportKey: PreferenceKey {
     /// A reference, like the list's own frames: written on every frame of a pinch
     /// and read only when a drag ends.
     @State private var zoomedPageFrame = PageFrameBox()
-    /// Where the pages actually are, as they themselves report it. Held in a
-    /// reference so that reading it costs no invalidation.
-    @State private var realFrames = PageFrameBox()
-    /// The page a jump is still trying to bring to the middle.
-    @State private var settlingPage: Int?
-    /// Corrections spent on it, so a document that will not settle cannot spin.
-    @State private var settlePasses = 0
-    /// Set once the jump's own animation is over; corrections before that would
-    /// cancel it and turn the move into a snap.
-    @State private var settleArmed = false
+    /// Which pages exist in the board, in page indices. Written from the scroll
+    /// observer, and only when it actually changes — a window recomputed per
+    /// frame would rebuild the list sixty times a second.
+    @State private var buildWindow: ClosedRange<Int> = 0...0
+    /// The window the latest scroll wants, before it reaches `buildWindow`.
+    @State private var wantedWindow = WindowBox()
+    /// Every page's top, summed once per width and page count.
+    @State private var pageTops = PageTopsCache()
 
     /// Two fingers dragging the list.
     ///
@@ -859,6 +728,103 @@ struct ReaderViewportKey: PreferenceKey {
                                 animated: false)
     }
 
+    /// The pages, placed where the arithmetic says they are rather than where a
+    /// lazy stack has got round to putting them.
+    ///
+    /// **This is what was moving.** A `LazyVStack` reserves *estimated* space for
+    /// the rows it has not built — one recording had it guessing 40,549 points of
+    /// content where the built rows add up to 31,024 — and it revises those
+    /// estimates continuously as rows build and fall away. A SwiftUI `ScrollView`
+    /// is anchored to its content *offset*, not to an item, so every revision
+    /// above the viewport slides everything below it while `contentOffset` holds
+    /// perfectly still. Nothing commands a scroll, so nothing appears in a
+    /// recording: the page simply is not where it was a frame ago. That is why
+    /// fixing the jump-settle loop and the reorder hold changed nothing — neither
+    /// was ever involved.
+    ///
+    /// Compose's `LazyColumn` anchors on `firstVisibleItemIndex`, which is why the
+    /// same list holds still on Android and why this needed no answer there.
+    ///
+    /// So the stack goes. Every page's height is known from the engine before a
+    /// single row is built, so the content is given its true height once and each
+    /// page is drawn at its own `contentTop` — absolute, the way the organiser
+    /// draws a page under a finger. Neither number can change afterwards, so a row
+    /// building or leaving moves nothing at all.
+    @ViewBuilder
+    private func pageBoard(width: CGFloat, viewportWidth: CGFloat) -> some View {
+        if let document = model.document, document.pageCount > 0 {
+            ZStack(alignment: .topLeading) {
+                // The whole document's height, reserved up front. The top of the
+                // page *after* the last one is exactly that: the top gap, every
+                // page, and the gap under each. It also gives the content its
+                // width, which the rows, inset by `pageGap`, do not supply.
+                Color.clear
+                    .frame(width: viewportWidth,
+                           height: contentTop(of: document.pageCount, width: width) ?? 0)
+
+                // Only the rows near the viewport are built, which is all the
+                // stack was ever wanted for. `.offset` rather than layout, so a
+                // row's position is a constant and not a running sum.
+                ForEach(builtPages(pageCount: document.pageCount), id: \.self) { index in
+                    pageRow(index, document: document, width: width)
+                        .frame(width: width, height: rowHeight(index, width: width),
+                               alignment: .top)
+                        .offset(x: pageGap, y: contentTop(of: index, width: width) ?? 0)
+                }
+            }
+        }
+    }
+
+    /// How tall page `index` is drawn at this width. The engine answers this
+    /// before the page is rasterised, and `PageView.displayedSize` computes the
+    /// identical number — so a row exactly fills the space reserved for it
+    /// whether or not its raster has arrived.
+    private func rowHeight(_ index: Int, width: CGFloat) -> CGFloat {
+        let size = model.pageSize(index)
+        return size.width > 0 ? width * size.height / size.width : width
+    }
+
+    /// Clamped rather than trusted: a delete or an import can shorten the
+    /// document between the scroll that chose this window and the body that
+    /// reads it.
+    private func builtPages(pageCount: Int) -> [Int] {
+        guard pageCount > 0 else { return [] }
+        let last = pageCount - 1
+        let low = min(max(buildWindow.lowerBound, 0), last)
+        let high = min(max(buildWindow.upperBound, low), last)
+        return Array(low...high)
+    }
+
+    /// Put the list back on the page the magnified view was showing.
+    ///
+    /// Retried because `commander.scrollView` is found by the observer's
+    /// `didMoveToWindow`, which is not ordered against `onAppear`. A restore that
+    /// never lands drops the reader at the top of the document, which is exactly
+    /// what this exists to prevent — so it is worth waiting for, and a wait that
+    /// never ends is worse, so it is bounded and says so.
+    private func restore(to page: Int, viewportWidth: CGFloat, viewportHeight: CGFloat,
+                         attempt: Int = 0) {
+        let width = viewportWidth - pageGap * 2
+        guard let top = contentTop(of: page, width: width) else { return }
+        guard commander.scrollView != nil else {
+            guard attempt < 12 else {
+                SessionRecorder.shared.record("NAVIGATION",
+                    String(format: "restore lost page=%d reason=no-scroll-view", page))
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                restore(to: page, viewportWidth: viewportWidth,
+                        viewportHeight: viewportHeight, attempt: attempt + 1)
+            }
+            return
+        }
+        let extent = usableExtent(fallback: viewportHeight)
+        let target = top - max(0, (extent - rowHeight(page, width: width)) / 2)
+        SessionRecorder.shared.record("NAVIGATION",
+            String(format: "restore page=%d target=%.0f attempt=%d", page, target, attempt))
+        commander.scroll(toContentY: target, animated: false)
+    }
+
     private func pages(width viewportWidth: CGFloat, viewportHeight: CGFloat) -> some View {
         // The list is never scaled. A pinch here accumulates until it is
         // unambiguous and then hands the reader over to the pinned page view —
@@ -868,15 +834,7 @@ struct ReaderViewportKey: PreferenceKey {
 
         return ScrollViewReader { proxy in
             ScrollView([.vertical, .horizontal]) {
-                LazyVStack(spacing: 12) {
-                    if let document = model.document {
-                        ForEach(0..<document.pageCount, id: \.self) { index in
-                            pageRow(index, document: document, width: pageWidth - pageGap * 2)
-                        }
-                    }
-                }
-                .padding(.horizontal, pageGap)
-                .padding(.vertical, pageGap)
+                pageBoard(width: pageWidth - pageGap * 2, viewportWidth: viewportWidth)
                 .onAppear { lastListPageWidth = pageWidth - pageGap * 2 }
                 .onChange(of: pageWidth) { _, width in
                     lastListPageWidth = width - pageGap * 2
@@ -1000,6 +958,16 @@ struct ReaderViewportKey: PreferenceKey {
             .scrollDisabled(model.settings.tool != .none || model.selection != nil)
             // Picking a tool up arms the scroll hint again — see `toolChanged`.
             .onChange(of: model.settings.tool) { _, _ in model.toolChanged() }
+            // An import or a delete changes where every page after it sits
+            // without moving `contentOffset` by a point — so no scroll is
+            // reported, and the window would be left pointing at pages that have
+            // moved out from under it. Asked again from wherever the list is.
+            .onChange(of: model.document?.pageCount ?? 0) { _, _ in
+                guard let scroll = commander.scrollView else { return }
+                readerScrolled(toContentY: scroll.contentOffset.y,
+                               viewportWidth: viewportWidth,
+                               viewportHeight: viewportHeight)
+            }
             // Fitted whether or not a tool is live. With one armed the list's own
             // scrolling is off, because a one-finger drag has to mean "draw"; and
             // with none armed the pinch claims every two-finger event, so the
@@ -1029,10 +997,6 @@ struct ReaderViewportKey: PreferenceKey {
             // Heard by every caption layer below, however deep.
             .environment(\.isPinching, model.isPinching)
             .coordinateSpace(name: "reader")
-            .onPreferenceChange(PageMidYKey.self) { frames in
-                realFrames.frames = frames
-                if settleArmed { settleJump() }
-            }
             // The reader's own height, measured in its own coordinate space.
             // The height handed down by the enclosing geometry is not the same
             // number, and testing "the last page's bottom is at or above the
@@ -1077,29 +1041,22 @@ struct ReaderViewportKey: PreferenceKey {
                 // itself — there is nothing past them to centre against.
                 let width = viewportWidth - pageGap * 2
                 if let top = contentTop(of: page, width: width) {
-                    let size = model.pageSize(page)
-                    let height = size.width > 0 ? width * size.height / size.width : width
+                    let height = rowHeight(page, width: width)
                     let extent = usableExtent(fallback: viewportHeight)
+                    let target = top - max(0, (extent - height) / 2)
                     SessionRecorder.shared.record("TOOL_GESTURE",
                         String(format: "jump page=%d top=%.0f h=%.0f extent=%.0f ribbon=%.0f target=%.0f",
-                               page, top, height, extent, ribbonHeight,
-                               top - max(0, (extent - height) / 2)))
-                    // Animated only for a page already on screen. Animating a
-                    // twenty-thousand-point move shows nothing but a blur, and
-                    // the correction below cannot start until it has finished.
-                    let near = realFrames.frames[page] != nil
-                    settlingPage = page
-                    settlePasses = 0
-                    settleArmed = false
-                    commander.scroll(toContentY: top - max(0, (extent - height) / 2),
-                                     animated: near)
-                    DispatchQueue.main.asyncAfter(deadline: .now() + (near ? 0.45 : 0.08)) {
-                        guard settlingPage == page else { return }
-                        settleArmed = true
-                        settleJump()
-                    }
-                } else {
-                    withAnimation(.easeInOut(duration: 0.25)) { proxy.scrollTo(page, anchor: .center) }
+                               page, top, height, extent, ribbonHeight, target))
+                    // One write, and it lands. There is no settle behind this any
+                    // more: `contentTop` is now where the page *is* rather than
+                    // where a lazy stack was predicted to have put it, and the
+                    // content had its true height before the first row was built,
+                    // so the scroll view's clamp has nothing left to cut down.
+                    //
+                    // Animated only for a page already on screen; animating a
+                    // twenty-thousand-point move shows nothing but a blur.
+                    commander.scroll(toContentY: target,
+                                     animated: pageFramesBox.frames[page] != nil)
                 }
             }
             // Leaving the magnified page builds this list again from nothing, and
@@ -1116,7 +1073,14 @@ struct ReaderViewportKey: PreferenceKey {
             // Unanimated: the list has only just appeared, and sweeping it from
             // page 1 shows a journey nobody took.
             .onAppear {
-                if let page = model.takeRestore() { proxy.scrollTo(page, anchor: .center) }
+                // Not through the proxy any more: only the pages near the
+                // viewport exist in the board, so there is no row carrying page
+                // 40's `.id` to ask for — and `contentTop` is the truth now, so
+                // the offset is simply set.
+                if let page = model.takeRestore() {
+                    restore(to: page, viewportWidth: viewportWidth,
+                            viewportHeight: viewportHeight)
+                }
             }
         }
 
@@ -1304,6 +1268,9 @@ struct PageView: View {
     var onSelectWord: (CGPoint) -> Void = { _ in }
     var onMoveSelectionHandle: (Bool, CGPoint) -> Void = { _, _ in }
     var onClearSelection: () -> Void = {}
+    var selectedMark: Int?
+    var onSelectMark: (Int?) -> Void = { _ in }
+    var onMoveMark: (Int, CGSize, Bool) -> Void = { _, _, _ in }
 
     @Environment(\.displayScale) private var displayScale
     @State private var image: CGImage?
@@ -1369,6 +1336,9 @@ struct PageView: View {
                              onSelectWord: onSelectWord,
                              onMoveSelectionHandle: onMoveSelectionHandle,
                              onClearSelection: onClearSelection,
+                             selectedMark: selectedMark,
+                             onSelectMark: onSelectMark,
+                             onMoveMark: onMoveMark,
                              onHighlightMissed: onHighlightMissed,
                              onScrollBlocked: onScrollBlocked,
                              annotationRevision: annotationRevision,

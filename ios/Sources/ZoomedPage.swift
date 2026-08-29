@@ -93,6 +93,9 @@ struct ZoomedPageView: View {
     var onSelectWord: (CGPoint) -> Void = { _ in }
     var onMoveSelectionHandle: (Bool, CGPoint) -> Void = { _, _ in }
     var onClearSelection: () -> Void = {}
+    var selectedMark: Int?
+    var onSelectMark: (Int?) -> Void = { _ in }
+    var onMoveMark: (Int, CGSize, Bool) -> Void = { _, _, _ in }
     /// Where the page is drawn on screen right now, in this view's coordinates.
     ///
     /// The snapshot tool needs it. In the list the reader already knows every
@@ -310,6 +313,9 @@ struct ZoomedPageView: View {
                         onSelectWord: onSelectWord,
                         onMoveSelectionHandle: onMoveSelectionHandle,
                         onClearSelection: onClearSelection,
+                        selectedMark: selectedMark,
+                        onSelectMark: onSelectMark,
+                        onMoveMark: onMoveMark,
                         onHighlightMissed: onHighlightMissed,
                         onScrollBlocked: onScrollBlocked,
                         annotationRevision: annotationRevision,
