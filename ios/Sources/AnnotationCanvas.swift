@@ -55,6 +55,9 @@ struct AnnotationCanvas: View {
     /// held the list's own scrolling is off, so the gesture never reaches the
     /// scroll view and nothing else can tell the reader why the page stayed put.
     var onScrollBlocked: () -> Void = {}
+    /// Two fingers are on the page: this is a scroll, and whatever the first
+    /// finger began is not a mark.
+    var twoFingersDown: Bool = false
     /// A redraw token. Referenced inside the `Canvas` closure on purpose: a
     /// closure whose captures have not changed is reused, and an undo left the
     /// removed mark on screen until a zoom forced a repaint.
@@ -305,6 +308,17 @@ struct AnnotationCanvas: View {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
                 guard settings.tool != .none else { return }
+                // A second finger turns this into a scroll. The stroke is thrown
+                // away rather than merely stopped: by the time the second finger
+                // lands the first has already drawn a line, and leaving it would
+                // put a mark down the page every time the reader scrolled with a
+                // tool held — which is the very gesture the scroll hint sends
+                // people to.
+                if twoFingersDown {
+                    if !trace.isEmpty { trace = [] }
+                    eraserAt = nil
+                    return
+                }
                 let point = toPage(value.location)
 
                 if settings.tool == .eraser {
@@ -326,6 +340,13 @@ struct AnnotationCanvas: View {
                 }
             }
             .onEnded { value in
+                // Nothing was drawn, so there is nothing to commit and nothing to
+                // say about scrolling either.
+                guard !twoFingersDown else {
+                    trace = []
+                    eraserAt = nil
+                    return
+                }
                 // Asked before every tool's own ending — before the eraser's,
                 // which returns immediately below, and before the signature's,
                 // which ends in no branch at all. The mark is still made; this

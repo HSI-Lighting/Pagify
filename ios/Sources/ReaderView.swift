@@ -73,6 +73,7 @@ struct ReaderView: View {
                         onEditText: { model.editText(id: $0) },
                         onHighlightMissed: { model.highlightMissed(page: page) },
                         onScrollBlocked: { model.scrollBlocked() },
+                        twoFingersDown: model.twoFingersDown,
                         onRequestNote: { model.requestNote(page: page, at: $0) },
                         onOpenNote: { model.openNote(page: page, index: $0) },
                         onScaleText: { model.scaleSelectedText($0) },
@@ -333,6 +334,7 @@ struct ReaderViewportKey: PreferenceKey {
                                          segments: model.segments[index] ?? [],
                                          onHighlightMissed: { model.highlightMissed(page: index) },
                                          onScrollBlocked: { model.scrollBlocked() },
+                                         twoFingersDown: model.twoFingersDown,
                                          onRequestNote: { model.requestNote(page: index, at: $0) },
                                          onOpenNote: { model.openNote(page: index, index: $0) },
                                          onAppearPage: {
@@ -993,7 +995,7 @@ struct ReaderViewportKey: PreferenceKey {
             // why Android fits it unconditionally — fitting it only when a tool
             // was active left two fingers doing nothing the rest of the time.
             .overlay {
-                TwoFingerPanLayer { delta in
+                TwoFingerPanLayer(onPan: { delta in
                     // Nothing while a caption is in hand: the two fingers
                     // resizing it must not also scroll the document out from
                     // under it. And nothing while a pinch is running: this layer
@@ -1003,7 +1005,11 @@ struct ReaderViewportKey: PreferenceKey {
                     guard model.settings.selectedTextId == nil,
                           !model.isPinching else { return }
                     twoFingerScroll(by: delta.height, viewportHeight: viewportHeight)
-                }
+                }, onTwoFingers: { down in
+                    // Told to the model so the drawing layer inside each page can
+                    // abandon the stroke the first finger began.
+                    if model.twoFingersDown != down { model.twoFingersDown = down }
+                })
             }
             // Above the whole list, not inside a page: a capture routinely spans
             // the bottom of one page, the gap between them, and the top of the
@@ -1277,6 +1283,7 @@ struct PageView: View {
     let segments: [TextSegment]
     let onHighlightMissed: () -> Void
     var onScrollBlocked: () -> Void = {}
+    var twoFingersDown: Bool = false
     let onRequestNote: (CGPoint) -> Void
     let onOpenNote: (Int) -> Void
     let onAppearPage: () -> Void
@@ -1359,6 +1366,7 @@ struct PageView: View {
                              onMoveMark: onMoveMark,
                              onHighlightMissed: onHighlightMissed,
                              onScrollBlocked: onScrollBlocked,
+                             twoFingersDown: twoFingersDown,
                              annotationRevision: annotationRevision,
                              onRequestNote: onRequestNote,
                              onOpenNote: onOpenNote)

@@ -67,6 +67,7 @@ struct ZoomedPageView: View {
     let onEditText: (Int32) -> Void
     let onHighlightMissed: () -> Void
     var onScrollBlocked: () -> Void = {}
+    var twoFingersDown: Bool = false
     let onRequestNote: (CGPoint) -> Void
     let onOpenNote: (Int) -> Void
     /// Two fingers with a caption in hand: that big.
@@ -318,6 +319,7 @@ struct ZoomedPageView: View {
                         onMoveMark: onMoveMark,
                         onHighlightMissed: onHighlightMissed,
                         onScrollBlocked: onScrollBlocked,
+                        twoFingersDown: twoFingersDown,
                         annotationRevision: annotationRevision,
                         onRequestNote: onRequestNote,
                         onOpenNote: onOpenNote)

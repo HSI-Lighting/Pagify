@@ -15,6 +15,13 @@ final class TwoFingerPanRecogniser: UIGestureRecognizer {
     /// Centroid movement since the last event, sign matching the gesture:
     /// dragging down and to the right gives positive components.
     var onPan: ((CGSize) -> Void)?
+    /// Two fingers went down, or came back up.
+    ///
+    /// The drawing layer needs this. Its `DragGesture` is handed the *first*
+    /// finger and starts a stroke before the second one lands, and this
+    /// recogniser runs alongside rather than instead of it — so a two-finger
+    /// scroll with a pen armed left a line down the page it scrolled past.
+    var onTwoFingers: ((Bool) -> Void)?
 
     private var lastCentroid: CGPoint?
 
@@ -36,7 +43,10 @@ final class TwoFingerPanRecogniser: UIGestureRecognizer {
             // Dropping back to one finger restarts the reference point, so
             // lifting one of two fingers does not register as a huge jump.
             lastCentroid = nil
-            if state == .began || state == .changed { state = .ended }
+            if state == .began || state == .changed {
+                state = .ended
+                onTwoFingers?(false)
+            }
             return
         }
 
@@ -48,6 +58,10 @@ final class TwoFingerPanRecogniser: UIGestureRecognizer {
             }
         } else {
             state = .began
+            // Said the moment the second finger lands, before any movement: the
+            // stroke the first finger started has to be abandoned, not merely
+            // stopped, and by the time there is a delta it is already a line.
+            onTwoFingers?(true)
         }
         lastCentroid = centre
     }
@@ -81,6 +95,7 @@ final class TwoFingerPanRecogniser: UIGestureRecognizer {
     }
 
     override func reset() {
+        onTwoFingers?(false)
         super.reset()
         lastCentroid = nil
     }
@@ -89,6 +104,8 @@ final class TwoFingerPanRecogniser: UIGestureRecognizer {
 /// Fits the two-finger pan over a view.
 struct TwoFingerPanLayer: UIViewRepresentable {
     let onPan: (CGSize) -> Void
+    /// Two fingers went down, or came back up.
+    var onTwoFingers: (Bool) -> Void = { _ in }
 
     func makeUIView(context: Context) -> UIView {
         let view = GestureHostView()
@@ -98,6 +115,9 @@ struct TwoFingerPanLayer: UIViewRepresentable {
         // captures the first render's state and goes stale.
         recogniser.onPan = { [weak coordinator = context.coordinator] delta in
             coordinator?.onPan(delta)
+        }
+        recogniser.onTwoFingers = { [weak coordinator = context.coordinator] down in
+            coordinator?.onTwoFingers(down)
         }
         recogniser.delegate = context.coordinator
         recogniser.marker = view
@@ -113,14 +133,22 @@ struct TwoFingerPanLayer: UIViewRepresentable {
 
     func updateUIView(_ view: UIView, context: Context) {
         context.coordinator.handler = onPan
+        context.coordinator.fingers = onTwoFingers
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(handler: onPan) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(handler: onPan, fingers: onTwoFingers)
+    }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var handler: (CGSize) -> Void
-        init(handler: @escaping (CGSize) -> Void) { self.handler = handler }
+        var fingers: (Bool) -> Void
+        init(handler: @escaping (CGSize) -> Void, fingers: @escaping (Bool) -> Void) {
+            self.handler = handler
+            self.fingers = fingers
+        }
         func onPan(_ delta: CGSize) { handler(delta) }
+        func onTwoFingers(_ down: Bool) { fingers(down) }
         @objc func noop() {}
 
         /// Runs alongside whatever else is fitted — the pinch in particular,

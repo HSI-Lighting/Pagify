@@ -263,6 +263,12 @@ final class ReaderModel: ObservableObject {
     @Published var isPinching = false
     /// A slider is being dragged — see `beginRestyle`.
     @Published private(set) var isRestyling = false
+    /// Two fingers are on the page — a scroll, not a mark.
+    ///
+    /// The drawing layer is handed the *first* finger and has already begun a
+    /// stroke by the time the second lands, so it needs telling to throw that
+    /// stroke away rather than merely to stop extending it.
+    @Published var twoFingersDown = false
 
     @Published var zoomedPage: Int?
     /// Where the entering gesture was aimed, as a 0…1 fraction of that page.
