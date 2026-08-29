@@ -387,9 +387,17 @@ struct ReaderViewportKey: PreferenceKey {
             let height = rowHeight(page, width: width)
             let y = tops[page] - offset
 
-            // A screenful of margin either side, so a flick arrives at pages that
-            // are already drawn instead of at grey rectangles.
-            if y < extent * 2 && y + height > -extent {
+            // Half a screenful of margin either side.
+            //
+            // It was a whole one below and a whole one above — three screenfuls
+            // of pages built at once, where the lazy stack this replaced kept
+            // roughly one. Every one of those rows asks the engine for a raster,
+            // and a recording of a scroll had renders starting inside 73% of its
+            // stalls with the median render up from 52ms to 81. The margin is
+            // there so a flick arrives at drawn pages rather than grey
+            // rectangles; half a screen buys that and a whole one buys three
+            // times the rasterising.
+            if y < extent * 1.5 && y + height > -extent * 0.5 {
                 if firstBuilt == nil { firstBuilt = page }
                 lastBuilt = page
             }

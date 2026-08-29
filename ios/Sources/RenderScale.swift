@@ -20,6 +20,14 @@ enum RenderScale {
     /// two ever disagree the cache silently stops hitting.
     static let quantum: CGFloat = 0.25
 
+    /// How far above a quantum step the ideal may sit and still take that step
+    /// rather than the one above it.
+    ///
+    /// Five per cent of scale is at most a 5% shortfall in linear resolution, and
+    /// in the case it exists for it is under one. What it saves is the difference
+    /// between rasterising a page once and rasterising nearly two of them.
+    static let closeEnough: CGFloat = 0.05
+
     /// The most pixels worth rasterising for one page.
     static let maxPixels: CGFloat = 16_000_000
 
@@ -41,9 +49,26 @@ enum RenderScale {
         // The area ceiling, expressed as the largest scale that still fits.
         let maxScale = sqrt(maxPixels / (pageSize.width * pageSize.height))
 
-        // Rounded *up*, so the raster is never lower-resolution than asked for —
-        // scaling a bitmap down is free and sharp, scaling up is neither.
-        var stepped = (min(ideal, maxScale) / quantum).rounded(.up) * quantum
+        // Rounded *up*, so the raster is never meaningfully lower-resolution than
+        // asked for — scaling a bitmap down is free and sharp, scaling up is
+        // neither.
+        //
+        // Except by a hair, and that exception earns its keep. The quantum is a
+        // quarter, which is a fine step at 4x and a coarse one below 1: a
+        // landscape spread 1191 points wide, shown 300 points wide on a 3x
+        // screen, wants 0.756 — and rounding that to 1.0 renders 75% more pixels
+        // by area than the screen can show. A recording had the median page
+        // render at 81ms with those spare pixels in it. Coming down to 0.75
+        // instead is a 0.8% shortfall, which is an eighth of one screen pixel
+        // across a whole page.
+        //
+        // Still a multiple of the quantum either way, so the engine's cache keys
+        // are unchanged and it goes on hitting.
+        let wanted = min(ideal, maxScale)
+        let below = (wanted / quantum).rounded(.down) * quantum
+        var stepped = below > 0 && wanted <= below * (1 + closeEnough)
+            ? below
+            : (wanted / quantum).rounded(.up) * quantum
 
         // Rounding up can push it back over the ceiling; step down once if so.
         if stepped > maxScale { stepped -= quantum }
