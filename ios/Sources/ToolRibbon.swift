@@ -50,6 +50,8 @@ struct ToolRibbon: View {
     /// settings only does the first, which is why a caption could be taken in
     /// hand and then not actually be changed by the ribbon showing its style.
     var onRestyle: (String) -> Void = { _ in }
+    /// A style slider is being dragged, or has been let go.
+    var onEditing: (Bool) -> Void = { _ in }
     /// Marks on the page being read, and in the document as a whole. Only the
     /// clear menu reads them, and it says the number out loud before it wipes
     /// anything.
@@ -80,6 +82,7 @@ struct ToolRibbon: View {
                               // the settings and stops there: the caption in hand
                               // keeps the font and size it was made with.
                               onRestyle: onRestyle,
+                              onEditing: onEditing,
                               onPickCustomColour: { pickingColour = true },
                               onDismiss: { showDrawPalette = false })
             }
@@ -251,6 +254,8 @@ struct DrawingRibbon: View {
     /// settings only does the first, which is why a caption could be taken in
     /// hand and then not actually be changed by the ribbon showing its style.
     var onRestyle: (String) -> Void = { _ in }
+    /// A style slider is being dragged, or has been let go.
+    var onEditing: (Bool) -> Void = { _ in }
     let onPickCustomColour: () -> Void
     var onDismiss: (() -> Void)?
 
@@ -294,6 +299,7 @@ struct DrawingRibbon: View {
             // were written, not to the ones that will be.
             turn: settings.selectedTextId != nil ? settings.textTurnDegrees : nil,
             onTurn: { settings.textTurnDegrees = $0; onRestyle("turn") },
+            onEditing: onEditing,
             onTool: { if let tool = $0 as? AnnotationTool { settings.select(tool) } },
             onColour: { settings.penColor = $0; onRestyle("colour") },
             onWidth: { value in
@@ -355,6 +361,8 @@ struct MarkRibbon: View {
     /// one, which is why this is not on the ribbon unless one is selected.
     var turn: CGFloat?
     var onTurn: (CGFloat) -> Void = { _ in }
+    /// A slider is being dragged, or has been let go.
+    var onEditing: (Bool) -> Void = { _ in }
     let onTool: (AnyHashable) -> Void
     let onColour: (MarkColor) -> Void
     let onWidth: (CGFloat) -> Void
@@ -574,7 +582,7 @@ struct MarkRibbon: View {
         case .thickness:
             ThicknessChoices(width: width, colour: colour, presets: widthPresets,
                              range: widthRange, isIntensity: widthIsIntensity,
-                             onWidth: onWidth)
+                             onWidth: onWidth, onEditing: onEditing)
 
         case .lineType:
             LineTypeChoices(style: lineStyle ?? .solid, onStyle: {
@@ -589,10 +597,10 @@ struct MarkRibbon: View {
             })
 
         case .curve:
-            CurveChoices(degrees: curve ?? 0, onDegrees: onCurve)
+            CurveChoices(degrees: curve ?? 0, onDegrees: onCurve, onEditing: onEditing)
 
         case .turn:
-            TurnChoices(degrees: turn ?? 0, onDegrees: onTurn)
+            TurnChoices(degrees: turn ?? 0, onDegrees: onTurn, onEditing: onEditing)
 
         case .tools(let tools):
             ToolChoices(tools: tools, armed: armed,
@@ -730,6 +738,7 @@ private struct ThicknessChoices: View {
     let range: ClosedRange<CGFloat>
     let isIntensity: Bool
     let onWidth: (CGFloat) -> Void
+    var onEditing: (Bool) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var scheme
 
@@ -756,7 +765,8 @@ private struct ThicknessChoices: View {
             Slider(value: Binding(get: { min(max(width, safeRange.lowerBound),
                                              safeRange.upperBound) },
                                   set: onWidth),
-                   in: safeRange)
+                   in: safeRange,
+                   onEditingChanged: onEditing)
                 .frame(width: 220)
         }
     }
@@ -857,6 +867,9 @@ private struct FontChoices: View {
 private struct CurveChoices: View {
     let degrees: CGFloat
     let onDegrees: (CGFloat) -> Void
+    /// Whether the slider is being dragged, so the write can be held back until
+    /// it is let go. See `ReaderModel.beginRestyle`.
+    var onEditing: (Bool) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var scheme
 
@@ -876,7 +889,8 @@ private struct CurveChoices: View {
                     .foregroundStyle(PagifyColor.onSurfaceVariant(scheme))
             }
             Slider(value: Binding(get: { degrees }, set: onDegrees),
-                   in: -AnnotationMetrics.curveLimit...AnnotationMetrics.curveLimit)
+                   in: -AnnotationMetrics.curveLimit...AnnotationMetrics.curveLimit,
+                   onEditingChanged: onEditing)
                 .frame(width: 220)
         }
     }
@@ -891,6 +905,7 @@ private struct CurveChoices: View {
 private struct TurnChoices: View {
     let degrees: CGFloat
     let onDegrees: (CGFloat) -> Void
+    var onEditing: (Bool) -> Void = { _ in }
 
     @Environment(\.colorScheme) private var scheme
 
@@ -914,7 +929,8 @@ private struct TurnChoices: View {
                     .font(.system(size: 14, weight: .medium).monospacedDigit())
                     .foregroundStyle(PagifyColor.onSurfaceVariant(scheme))
             }
-            Slider(value: Binding(get: { degrees }, set: onDegrees), in: 0...359)
+            Slider(value: Binding(get: { degrees }, set: onDegrees), in: 0...359,
+                   onEditingChanged: onEditing)
                 .frame(width: 220)
         }
     }

@@ -202,7 +202,12 @@ struct ReaderView: View {
         .overlay(alignment: .bottom) {
             if model.isEditable {
                 ToolRibbon(settings: $model.settings,
-                               onRestyle: { model.restyleSelected($0) })
+                               onRestyle: { model.restyleSelected($0) },
+                               // One undo step and one write for a whole slider
+                               // drag, rather than one of each per frame.
+                               onEditing: { down in
+                                   if down { model.beginRestyle() } else { model.endRestyle() }
+                               })
                     // How much of the reader it stands in front of.
                     //
                     // Floating over the pages is deliberate — see above — but it
@@ -881,28 +886,31 @@ struct ReaderViewportKey: PreferenceKey {
                         let factor = value.magnification / max(lastPinch, 0.0001)
                         lastPinch = value.magnification
                         pinchProgress = pinchProgressAfter(pinchProgress, factor)
-                        // Raised only once the fingers have actually changed the
-                        // distance between them by enough to mean it.
-                        //
-                        // `MagnifyGesture` reports a change the moment two fingers
-                        // move at all, and this used to call `beginPinch()` on the
-                        // first of them — so every two-finger *scroll* was a pinch
-                        // within a frame, and the pan stands down while one runs.
-                        //
-                        // Three per cent was still too little: a long two-finger
-                        // drag drifts further than that without anyone meaning to
-                        // spread, so the scroll kept stalling and the page kept
-                        // trying to zoom. Measured against the hand-over itself —
-                        // below halfway to it, the fingers are travelling, not
-                        // spreading, and the gesture belongs to the scroll.
-                        let spread = abs(pinchProgress - 1)
-                        if spread > (Zoom.pinchHandover - 1) / 2 { model.beginPinch() }
                         SessionRecorder.shared.record("ZOOM_TOUCH",
                             String(format: "list factor=%.3f progress=%.3f at=%.0f,%.0f",
                                    factor, pinchProgress,
                                    value.startLocation.x, value.startLocation.y))
 
+                        // Not raised on the way here at all — only at the
+                        // hand-over, below.
+                        //
+                        // `isPinching` does two jobs: it defers caption writes
+                        // during a resize, which is the branch above and is
+                        // untouched, and it stands the two-finger pan down. For a
+                        // page pinch only the second applies, and standing the pan
+                        // down before a zoom is going to happen buys nothing and
+                        // costs the scroll.
+                        //
+                        // Two thresholds were tried and both were wrong, because
+                        // the premise was: a recording of an ordinary two-finger
+                        // scroll has `progress` wandering to 0.836 and back, a
+                        // quarter of its samples past six per cent. Fingers
+                        // dragging together really do change their separation that
+                        // much. There is no spread small enough to mean "not a
+                        // pinch" and large enough to catch one — but there is a
+                        // moment that is unambiguous, and it is this one.
                         guard pinchProgress >= Zoom.pinchHandover else { return }
+                        model.beginPinch()
                         // The gesture ends here, not at `.onEnded`: handing over
                         // replaces this whole view, so the end callback never
                         // arrives and `isPinching` stayed true for the rest of the

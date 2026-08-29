@@ -195,6 +195,31 @@ final class ReaderModel: ObservableObject {
         run(.addAnnotation(pageIndex: page, annotation: .text(mark)))
     }
 
+    /// A slider is being dragged.
+    ///
+    /// One undo step and one write for the whole gesture, not one per tick. A
+    /// slider reports a change on every frame of the drag, and each of those was
+    /// a full copy of the page's marks onto the undo stack plus two engine
+    /// commands and a re-raster of the page. That is the lag — and an undo stack
+    /// that needs two hundred presses to get back past one slider.
+    ///
+    /// The caption is lifted for the duration, which is the same trick the pinch
+    /// uses: out of the page, the overlay alone draws it, so `restyleSelected`
+    /// has nothing to write until it goes back.
+    func beginRestyle() {
+        guard !isRestyling, let id = settings.selectedTextId.map(Int32.init) else { return }
+        isRestyling = true
+        rememberMarks()
+        liftText(id: id)
+    }
+
+    /// The slider was let go: the caption goes back into the page, once.
+    func endRestyle() {
+        guard isRestyling else { return }
+        isRestyling = false
+        settleLiftedText()
+    }
+
     /// Two fingers are down. Idempotent: the pinch reports this on every frame,
     /// and re-publishing an unchanged value re-renders the whole reader each time.
     func beginPinch() {
@@ -236,6 +261,8 @@ final class ReaderModel: ObservableObject {
     /// a pinch almost always lands on bare page. So the drag would go on carrying
     /// the words around while the other hand was trying to resize them.
     @Published var isPinching = false
+    /// A slider is being dragged — see `beginRestyle`.
+    @Published private(set) var isRestyling = false
 
     @Published var zoomedPage: Int?
     /// Where the entering gesture was aimed, as a 0…1 fraction of that page.
@@ -683,7 +710,8 @@ final class ReaderModel: ObservableObject {
         // undoes nothing.
         guard mark != before else { return }
 
-        rememberMarks()
+        // Once for the whole gesture while a slider is down; see `beginRestyle`.
+        if !isRestyling { rememberMarks() }
         marks[page]![index] = MarkRecord(annotation: .text(mark), engineIndex: nil)
         if liftedText[mark.id] != nil {
             // Already out of the page: the overlay is the only thing drawing it,
