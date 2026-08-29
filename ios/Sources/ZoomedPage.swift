@@ -262,7 +262,7 @@ struct ZoomedPageView: View {
             // the wrong place.
             .gesture(pan(viewport: viewport, baseW: baseW, baseH: baseH),
                      including: settings.tool == .none && selection == nil
-                        ? .all : .subviews)
+                        && selectedMark == nil ? .all : .subviews)
             .environment(\.isPinching, pinching)
             .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { tap in
                 // Stands down while a caption is in hand, alongside the pinch and

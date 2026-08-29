@@ -882,20 +882,21 @@ struct ReaderViewportKey: PreferenceKey {
                         lastPinch = value.magnification
                         pinchProgress = pinchProgressAfter(pinchProgress, factor)
                         // Raised only once the fingers have actually changed the
-                        // distance between them.
+                        // distance between them by enough to mean it.
                         //
                         // `MagnifyGesture` reports a change the moment two fingers
                         // move at all, and this used to call `beginPinch()` on the
-                        // first of them. Real fingers dragging together always
-                        // drift a little, so every two-finger *scroll* on a device
-                        // was a pinch within a frame — and the two-finger pan
-                        // stands down while one is running, so it never scrolled
-                        // anything. The simulator kept its two points exactly
-                        // parallel, which is why it worked there and nowhere else.
+                        // first of them — so every two-finger *scroll* was a pinch
+                        // within a frame, and the pan stands down while one runs.
                         //
-                        // Three per cent: below that the fingers are travelling,
-                        // not spreading, and the gesture belongs to the scroll.
-                        if abs(pinchProgress - 1) > 0.03 { model.beginPinch() }
+                        // Three per cent was still too little: a long two-finger
+                        // drag drifts further than that without anyone meaning to
+                        // spread, so the scroll kept stalling and the page kept
+                        // trying to zoom. Measured against the hand-over itself —
+                        // below halfway to it, the fingers are travelling, not
+                        // spreading, and the gesture belongs to the scroll.
+                        let spread = abs(pinchProgress - 1)
+                        if spread > (Zoom.pinchHandover - 1) / 2 { model.beginPinch() }
                         SessionRecorder.shared.record("ZOOM_TOUCH",
                             String(format: "list factor=%.3f progress=%.3f at=%.0f,%.0f",
                                    factor, pinchProgress,
@@ -944,7 +945,14 @@ struct ReaderViewportKey: PreferenceKey {
                                  viewport: CGSize(width: viewportWidth, height: viewportHeight))
                     }
             )
-            // Words selected take the scroller too.
+            // Words selected, or a mark in hand, take the scroller too.
+            //
+            // Refusing to run *alongside* the scroll view is not the same as
+            // stopping it: our own recogniser stands down, and the scroller
+            // carries on with the finger. So a mark being dragged moved the page
+            // instead of the mark. Compose can consume the event inside the page
+            // before the list sees it; SwiftUI has no such interception point, so
+            // the scroller is switched off for as long as something is in hand.
             //
             // Compose can consume a drag inside the page before the enclosing
             // list sees it, which is how Android stops the pages moving while a
@@ -955,7 +963,9 @@ struct ReaderViewportKey: PreferenceKey {
             //
             // The way out is a tap, armed on every page for exactly this reason,
             // and Copy and Highlight both put the selection down themselves.
-            .scrollDisabled(model.settings.tool != .none || model.selection != nil)
+            .scrollDisabled(model.settings.tool != .none
+                            || model.selection != nil
+                            || model.settings.selectedMark != nil)
             // Picking a tool up arms the scroll hint again — see `toolChanged`.
             .onChange(of: model.settings.tool) { _, _ in model.toolChanged() }
             // An import or a delete changes where every page after it sits
