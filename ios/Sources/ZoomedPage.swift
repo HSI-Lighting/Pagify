@@ -58,7 +58,7 @@ struct ZoomedPageView: View {
     let segments: [TextSegment]
     let selectedText: Int32?
     let onCommit: (WireAnnotation) -> Void
-    let onErase: (CGPoint) -> Void
+    let onErase: (CGPoint, CGFloat) -> Void
     let onEraseStart: () -> Void
     let onEraseEnd: () -> Void
     let onPlaceText: (CGPoint, CGPoint?) -> Void

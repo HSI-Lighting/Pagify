@@ -64,7 +64,7 @@ struct ReaderView: View {
                         segments: model.segments[page] ?? [],
                         selectedText: model.settings.selectedTextId.map(Int32.init),
                         onCommit: { model.commit($0, page: page) },
-                        onErase: { model.erase(at: $0, page: page) },
+                        onErase: { model.erase(at: $0, page: page, tolerance: $1) },
                         onEraseStart: { model.beginErase() },
                         onEraseEnd: { model.endErase() },
                         onPlaceText: { model.beginText(page: page, from: $0, to: $1) },
@@ -323,7 +323,7 @@ struct ReaderViewportKey: PreferenceKey {
                                          settings: model.settings,
                                          committed: (model.marks[index] ?? []).map(\.annotation),
                                          onCommit: { model.commit($0, page: index) },
-                                         onErase: { model.erase(at: $0, page: index) },
+                                         onErase: { model.erase(at: $0, page: index, tolerance: $1) },
                                          onEraseStart: { model.beginErase() },
                                          onEraseEnd: { model.endErase() },
                                          onPlaceText: { model.beginText(page: index, from: $0, to: $1) },
@@ -335,6 +335,7 @@ struct ReaderViewportKey: PreferenceKey {
                                          onHighlightMissed: { model.highlightMissed(page: index) },
                                          onScrollBlocked: { model.scrollBlocked() },
                                          twoFingersDown: model.twoFingersDown,
+                                         documentToken: model.documentToken,
                                          onRequestNote: { model.requestNote(page: index, at: $0) },
                                          onOpenNote: { model.openNote(page: index, index: $0) },
                                          onAppearPage: {
@@ -707,6 +708,8 @@ struct ReaderViewportKey: PreferenceKey {
     /// A reference, like the list's own frames: written on every frame of a pinch
     /// and read only when a drag ends.
     @State private var zoomedPageFrame = PageFrameBox()
+    /// Takes `twoFingersDown` back down if the gesture goes quiet.
+    @State private var twoFingerWatchdog: Timer?
     /// Which pages exist in the board, in page indices. Written from the scroll
     /// observer, and only when it actually changes — a window recomputed per
     /// frame would rebuild the list sixty times a second.
@@ -1017,6 +1020,20 @@ struct ReaderViewportKey: PreferenceKey {
                     // Told to the model so the drawing layer inside each page can
                     // abandon the stroke the first finger began.
                     if model.twoFingersDown != down { model.twoFingersDown = down }
+                    guard down else { return }
+                    // And taken back down if nothing more is heard.
+                    //
+                    // Left raised, this flag makes every tool answer every touch
+                    // by throwing the stroke away — no marks, no erasing, in
+                    // silence — so it must not depend on a recogniser callback
+                    // arriving. A gesture that is still running says so by
+                    // panning; one that has gone quiet for a third of a second
+                    // has ended, whatever UIKit did or did not report.
+                    twoFingerWatchdog?.invalidate()
+                    twoFingerWatchdog = Timer.scheduledTimer(withTimeInterval: 0.34,
+                                                             repeats: false) { _ in
+                        model.twoFingersDown = false
+                    }
                 })
             }
             // Above the whole list, not inside a page: a capture routinely spans
@@ -1280,7 +1297,7 @@ struct PageView: View {
     let settings: AnnotationSettings
     let committed: [WireAnnotation]
     let onCommit: (WireAnnotation) -> Void
-    let onErase: (CGPoint) -> Void
+    let onErase: (CGPoint, CGFloat) -> Void
     let onEraseStart: () -> Void
     let onEraseEnd: () -> Void
     let onPlaceText: (CGPoint, CGPoint?) -> Void
@@ -1292,6 +1309,8 @@ struct PageView: View {
     let onHighlightMissed: () -> Void
     var onScrollBlocked: () -> Void = {}
     var twoFingersDown: Bool = false
+    /// Changes when a document is opened, so a row re-reads its marks.
+    var documentToken: Int = 0
     let onRequestNote: (CGPoint) -> Void
     let onOpenNote: (Int) -> Void
     let onAppearPage: () -> Void
@@ -1390,7 +1409,11 @@ struct PageView: View {
         // page flash on every gesture; crossing a quantum is the only change that
         // actually produces different pixels.
         .task(id: "\(width)-\(revision)-\(renderScale)") { await render() }
-        .onAppear { onAppearPage() }
+        // Keyed on the document, not merely on appearing. A reopened file — which
+        // is what a save does — leaves these rows exactly where they were, so
+        // `onAppear` never fires again and the page's marks are never read back
+        // in. See `ReaderModel.documentToken`.
+        .task(id: "\(documentToken)-\(index)") { onAppearPage() }
     }
 
     private func render() async {

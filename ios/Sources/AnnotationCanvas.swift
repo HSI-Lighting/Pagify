@@ -18,7 +18,9 @@ struct AnnotationCanvas: View {
     let mapping: PageMapping
     let settings: AnnotationSettings
     let onCommit: (WireAnnotation) -> Void
-    let onErase: (CGPoint) -> Void
+    /// Where to rub out, and how near counts — the second in page points, since
+    /// only this view knows the scale the page is drawn at.
+    let onErase: (CGPoint, CGFloat) -> Void
     var onEraseStart: () -> Void = {}
     var onEraseEnd: () -> Void = {}
     /// Where a caption was put down. The words are not known yet — a text tool
@@ -326,7 +328,7 @@ struct AnnotationCanvas: View {
                     // the only place that knows where the sweep began.
                     if eraserAt == nil { onEraseStart() }
                     eraserAt = value.location
-                    onErase(point)
+                    onErase(point, tolerance)
                     return
                 }
                 if settings.tool == .note {

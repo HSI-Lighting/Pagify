@@ -85,13 +85,24 @@ final class TwoFingerPanRecogniser: UIGestureRecognizer {
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesEnded(touches, with: event)
         lastCentroid = nil
-        if numberOfTouches <= 1 { state = .ended }
+        if numberOfTouches <= 1 {
+            state = .ended
+            // Said here as well as in `reset`, and that is not belt and braces.
+            // `reset` runs only when UIKit takes the recogniser back through
+            // `.possible`, and a recogniser removed mid-gesture — which is every
+            // time SwiftUI rebuilds this layer — is never taken anywhere. The
+            // flag then stays raised for the rest of the session, and the drawing
+            // layer answers every touch by throwing the stroke away: no marks, no
+            // erasing, nothing, in silence.
+            onTwoFingers?(false)
+        }
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent) {
         super.touchesCancelled(touches, with: event)
         lastCentroid = nil
         state = .cancelled
+        onTwoFingers?(false)
     }
 
     override func reset() {
@@ -128,6 +139,8 @@ struct TwoFingerPanLayer: UIViewRepresentable {
     }
 
     static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
+        // Whatever this layer had raised goes down with it.
+        coordinator.fingers(false)
         (view as? GestureHostView)?.detach()
     }
 

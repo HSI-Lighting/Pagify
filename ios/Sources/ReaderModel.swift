@@ -101,6 +101,15 @@ final class ReaderModel: ObservableObject {
     /// How many of the marks on screen came out of the file rather than out of
     /// this session.
     private var savedMarkCount = 0
+    /// Bumped every time a document is opened, including the reopen a save does.
+    ///
+    /// The page rows load their marks when they appear, and a reopened document
+    /// does not make them appear again — the same rows are still on screen, so
+    /// `onAppear` has already fired and will not fire twice. Their marks were
+    /// cleared with the old document and nothing brought the new ones in, so
+    /// every mark in a saved file was unerasable: the eraser hit-tests this
+    /// list, and the list was empty.
+    @Published private(set) var documentToken = 0
 
     /// Whether the page rail is showing. Reader state, not a persisted setting:
     /// it is switched off automatically on a narrow screen, and a preference that
@@ -480,6 +489,7 @@ final class ReaderModel: ObservableObject {
         document = opened
         source = url
         marks = [:]
+        documentToken += 1
         markUndo = []
         markRedo = []
         savedMarkCount = 0
@@ -999,15 +1009,27 @@ final class ReaderModel: ObservableObject {
         markRedo.removeAll()
     }
 
-    func erase(at point: CGPoint, page: Int) {
+    func erase(at point: CGPoint, page: Int, tolerance: CGFloat = eraserTouchRadius) {
         // Hit-tested against the app's own list, not the engine's read-back.
         // The engine cannot report an ink nib (`/BS` does not round-trip) and
         // does not report captions at all, so its list is both thinner and
         // differently shaped — reconciling the two by comparing bounds was how
         // erasing a highlight removed it from the page but left it on screen.
-        guard let hit = marks[page]?.lastIndex(where: {
-            $0.annotation.isHitBy(point, tolerance: eraserTouchRadius)
-        }) else { return }
+        // Told the tolerance in **page** points, because only the canvas knows how
+        // small the page is drawn.
+        //
+        // `eraserTouchRadius` is 14 *screen* points — a finger. Used raw here it
+        // became 14 page points, and in the list a page is drawn at about a
+        // quarter size, so the finger covering 61 points of paper was allowed to
+        // miss by 14. A highlight read back from a saved file is the tight quad
+        // PDFium stores, ten points tall — barely two points on screen — so it
+        // could not be hit at all. Before a save the same mark is the app's own
+        // full text-run box and is tall enough to catch, which is exactly why
+        // erasing worked until the file was written and never after.
+        let hit = marks[page]?.lastIndex(where: {
+            $0.annotation.isHitBy(point, tolerance: tolerance)
+        })
+        guard let hit else { return }
 
         guard let record = marks[page]?[hit],
               let removal = record.removal(page: page) else { return }
