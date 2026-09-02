@@ -9,6 +9,8 @@
 //! is not — that is ML Kit on Android and Vision on iOS — but what the words mean
 //! and how they are written down is the same everywhere.
 
+pub mod parse;
+
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
