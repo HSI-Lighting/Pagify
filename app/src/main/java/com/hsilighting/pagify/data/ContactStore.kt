@@ -15,6 +15,7 @@ import com.hsilighting.pagify.data.db.toGroup
 import com.hsilighting.pagify.data.db.toRow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -45,16 +46,45 @@ class ContactStore internal constructor(database: ContactsDatabase) {
 
     private val dao = database.contacts()
 
-    val contacts: Flow<List<Contact>> = dao.contacts().map { rows -> rows.map { it.toContact() } }
+    /**
+     * The contacts, as the screen reads them.
+     *
+     * **One unreadable row must not kill the flow.** A `Flow` that throws is
+     * finished — it emits nothing ever again, and the screen sits on its last
+     * value until the process restarts. That is indistinguishable from the app
+     * ignoring every edit, and `toContact` parses stored JSON, so one malformed
+     * column would do it. A row that cannot be read is dropped and logged; the
+     * rest still arrive, and the next write still updates the screen.
+     */
+    val contacts: Flow<List<Contact>> = dao.contacts()
+        .map { rows -> rows.mapNotNull { row -> row.readable { it.toContact() } } }
+        .catch { failure ->
+            Log.e(TAG, "the contacts could not be read", failure)
+            emit(emptyList())
+        }
 
-    val groups: Flow<List<ContactGroup>> = dao.groups().map { rows -> rows.map { it.toGroup() } }
+    val groups: Flow<List<ContactGroup>> = dao.groups()
+        .map { rows -> rows.mapNotNull { row -> row.readable { it.toGroup() } } }
+        .catch { failure ->
+            Log.e(TAG, "the groups could not be read", failure)
+            emit(emptyList())
+        }
 
     /** Which contacts are in which groups, as contact id to group ids. */
-    val memberships: Flow<Map<Long, List<Long>>> = dao.memberships().map { rows ->
-        rows.groupBy({ it.contactId }, { it.groupId })
-    }
+    val memberships: Flow<Map<Long, List<Long>>> = dao.memberships()
+        .map { rows -> rows.groupBy({ it.contactId }, { it.groupId }) }
+        .catch { failure ->
+            Log.e(TAG, "the group memberships could not be read", failure)
+            emit(emptyMap())
+        }
 
     // ------------------------------------------------------------ contacts --
+
+    /** One row, or null if it cannot be read. See the note on [contacts]. */
+    private fun <T, R> T.readable(read: (T) -> R): R? =
+        runCatching { read(this) }
+            .onFailure { Log.e(TAG, "a stored row could not be read", it) }
+            .getOrNull()
 
     suspend fun save(contact: Contact) {
         withContext(Dispatchers.IO) { dao.save(contact.toRow()) }

@@ -6,6 +6,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
 import com.hsilighting.pagify.data.ContactStore
+import com.hsilighting.pagify.data.db.ContactRow
 import com.hsilighting.pagify.data.db.ContactsDatabase
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -210,6 +211,47 @@ class ContactStoreTest {
 
         val contacts = awaiting(store.contacts) { it.isNotEmpty() }
         assertEquals(listOf("Jane Okafor"), contacts.map { it.name })
+    }
+
+    /**
+     * **A corrupt column costs a field, never the list.**
+     *
+     * This is the shape of "everything is stale until I close the app": a `Flow`
+     * that throws is finished — it emits nothing more, and the screen holds its
+     * last value until the process restarts, with no crash and nothing in the
+     * log to connect it to. Reading a row parses stored JSON, so a damaged
+     * column is the likeliest way to get there.
+     *
+     * The columns turn out to be parsed defensively already, so the contact
+     * survives with its phones missing rather than being dropped — which is the
+     * better outcome and worth pinning down, because the obvious "tidying" here
+     * is to let the parse throw and handle it further out.
+     */
+    @Test
+    fun aCorruptColumnCostsAFieldRatherThanTheList() = runBlocking {
+        val dao = database.contacts()
+        dao.save(
+            ContactRow(
+                id = 1, name = "Jane Okafor", title = "", company = "", address = "",
+                notes = "", rawText = "",
+                // Not JSON. A column damaged by anything at all looks like this.
+                phonesJson = "{{{ not json",
+                emailsJson = "[]", urlsJson = "[]", cardImagePath = null,
+                capturedAt = 1, exportedAt = null, exportCount = 0,
+            ),
+        )
+        store.save(contact(2, "Sam Reyes"), intoGroup = null)
+
+        val read = awaiting(store.contacts) { it.any { c -> c.name == "Sam Reyes" } }
+        val jane = read.single { it.name == "Jane Okafor" }
+        assertTrue("a damaged column should cost the phones, not the row", jane.phones.isEmpty())
+        assertEquals(2, read.size)
+
+        // And the flow is still alive afterwards, which is the part that matters:
+        // a dead flow looks exactly like an app that ignores every edit.
+        store.save(contact(3, "Priya Raman"), intoGroup = null)
+        val later = awaiting(store.contacts) { it.any { c -> c.name == "Priya Raman" } }
+        assertEquals(3, later.size)
     }
 
     /** Several cards from one photograph, filed together. */
