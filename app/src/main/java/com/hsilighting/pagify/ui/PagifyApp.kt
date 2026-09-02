@@ -3,6 +3,7 @@ package com.hsilighting.pagify.ui
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarHost
+import com.hsilighting.pagify.ui.contacts.CardReviewState
 import com.hsilighting.pagify.ui.contacts.ContactsScreen
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
@@ -69,6 +70,10 @@ fun PagifyApp(
     /** The group last filed into — a suggestion for the filing question. */
     suggestedGroup: Long?,
     onCreateGroup: (String) -> Unit,
+    /** A card read but not yet checked against its photograph. */
+    review: CardReviewState?,
+    onKeepReviewed: () -> Unit,
+    onSkipReviewed: () -> Unit,
     /** What was just scanned and is waiting to be filed, if anything. */
     pendingFilingLabel: String?,
     onFileScanned: (Long) -> Unit,
@@ -153,6 +158,9 @@ fun PagifyApp(
                     memberships = groupMemberships,
                     suggestedGroup = suggestedGroup,
                     onCreateGroup = onCreateGroup,
+                    review = review,
+                    onKeepReviewed = onKeepReviewed,
+                    onSkipReviewed = onSkipReviewed,
                     pendingFilingLabel = pendingFilingLabel,
                     onFileScanned = onFileScanned,
                     onCreateGroupForScan = onCreateGroupForScan,

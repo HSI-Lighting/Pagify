@@ -23,7 +23,7 @@
 //! Whatever no rule claims goes to `notes`, and the whole recognised text is
 //! always kept in `raw_text`.
 
-use crate::contacts::{BusinessCard, Field, PhoneField, PhoneKind};
+use crate::contacts::{BusinessCard, Field, PhoneField, PhoneKind, Region};
 use serde::{Deserialize, Serialize};
 
 /// One recognised box of text, in the card's own pixel space.
@@ -63,6 +63,11 @@ pub struct RecognisedCard {
     pub width: f32,
     pub height: f32,
     pub segments: Vec<TextSegment>,
+    /// What [`RecognisedCard::around_text`] subtracted to bring the card to the
+    /// origin, so a field's region can be reported where it actually is on the
+    /// photograph. `(0, 0)` for a card already given in its own space.
+    #[serde(default)]
+    pub origin: (f32, f32),
 }
 
 impl RecognisedCard {
@@ -83,7 +88,7 @@ impl RecognisedCard {
     /// it.
     pub fn around_text(segments: Vec<TextSegment>) -> Self {
         let Some(first) = segments.first() else {
-            return RecognisedCard { width: 0.0, height: 0.0, segments };
+            return RecognisedCard { width: 0.0, height: 0.0, segments, origin: (0.0, 0.0) };
         };
 
         let (mut left, mut top) = (first.left, first.top);
@@ -106,7 +111,12 @@ impl RecognisedCard {
             })
             .collect();
 
-        RecognisedCard { width: right - left, height: bottom - top, segments }
+        RecognisedCard {
+            width: right - left,
+            height: bottom - top,
+            segments,
+            origin: (left, top),
+        }
     }
 }
 
@@ -361,8 +371,8 @@ pub fn parse_card(card: &RecognisedCard) -> BusinessCard {
     let mut pool: Vec<Line> = lines;
     let mut result = BusinessCard { raw_text, ..Default::default() };
 
-    take_patterns(&mut pool, &mut result);
-    take_structure(&mut pool, &mut result, card.height);
+    take_patterns(&mut pool, &mut result, card.origin);
+    take_structure(&mut pool, &mut result, card.height, card.origin);
 
     // Whatever nothing claimed. Kept rather than dropped: this is where a second
     // phone number the pattern missed, or a tagline, or a second language ends
@@ -381,6 +391,8 @@ pub fn parse_card(card: &RecognisedCard) -> BusinessCard {
 #[derive(Debug, Clone)]
 struct Line {
     text: String,
+    left: f32,
+    right: f32,
     top: f32,
     bottom: f32,
     /// The median height of this line's boxes — the proxy for font size, and
@@ -391,6 +403,17 @@ struct Line {
 impl Line {
     fn centre_y(&self) -> f32 {
         (self.top + self.bottom) / 2.0
+    }
+
+    /// Where this line sits on the photograph, undoing the shift `around_text`
+    /// applied so the rules could work in the card's own space.
+    fn region(&self, origin: (f32, f32)) -> Region {
+        Region {
+            left: self.left + origin.0,
+            top: self.top + origin.1,
+            right: self.right + origin.0,
+            bottom: self.bottom + origin.1,
+        }
     }
 }
 
@@ -439,6 +462,8 @@ fn into_lines(segments: &[TextSegment]) -> Vec<Line> {
                     .map(|p| p.text.trim())
                     .collect::<Vec<_>>()
                     .join(" "),
+                left: parts.iter().map(|p| p.left).fold(f32::MAX, f32::min),
+                right: parts.iter().map(|p| p.right).fold(f32::MIN, f32::max),
                 top: parts.iter().map(|p| p.top).fold(f32::MAX, f32::min),
                 bottom: parts.iter().map(|p| p.bottom).fold(f32::MIN, f32::max),
                 glyph_height: heights[heights.len() / 2],
@@ -456,19 +481,19 @@ fn shares_a_line(a: &TextSegment, b: &TextSegment) -> bool {
 // ----------------------------------------------------------------- patterns --
 
 /// Take everything a pattern can claim: emails, URLs, phone numbers.
-fn take_patterns(pool: &mut Vec<Line>, card: &mut BusinessCard) {
+fn take_patterns(pool: &mut Vec<Line>, card: &mut BusinessCard, origin: (f32, f32)) {
     let mut claimed = Vec::new();
 
     for (index, line) in pool.iter().enumerate() {
         let lower = line.text.to_lowercase();
 
         if let Some(email) = find_email(&line.text) {
-            card.emails.push(Field::new(email, MATCHED));
+            card.emails.push(Field::new(email, MATCHED).at(Some(line.region(origin))));
             claimed.push(index);
             continue;
         }
         if let Some(url) = find_url(&line.text) {
-            card.urls.push(Field::new(url, MATCHED));
+            card.urls.push(Field::new(url, MATCHED).at(Some(line.region(origin))));
             claimed.push(index);
             continue;
         }
@@ -484,6 +509,7 @@ fn take_patterns(pool: &mut Vec<Line>, card: &mut BusinessCard) {
                     // "(mobile)" form.
                     kind: number.kind.unwrap_or_else(|| phone_kind(&lower)),
                     confidence: MATCHED,
+                    region: Some(line.region(origin)),
                 });
             }
             claimed.push(index);
@@ -722,7 +748,12 @@ fn phone_kind(lower: &str) -> PhoneKind {
 // ---------------------------------------------------------------- structure --
 
 /// Name, title, company and address, from typography and position.
-fn take_structure(pool: &mut Vec<Line>, card: &mut BusinessCard, card_height: f32) {
+fn take_structure(
+    pool: &mut Vec<Line>,
+    card: &mut BusinessCard,
+    card_height: f32,
+    origin: (f32, f32),
+) {
     let mut claimed = Vec::new();
 
     // The name: the biggest text in the upper part of the card. Biggest because
@@ -752,7 +783,7 @@ fn take_structure(pool: &mut Vec<Line>, card: &mut BusinessCard, card_height: f3
         .map(|(index, line)| (index, line.clone()));
 
     if let Some((index, line)) = &name {
-        card.name = Some(Field::new(line.text.clone(), INFERRED));
+        card.name = Some(Field::new(line.text.clone(), INFERRED).at(Some(line.region(origin))));
         claimed.push(*index);
 
         // No positional guess for the title.
@@ -774,7 +805,7 @@ fn take_structure(pool: &mut Vec<Line>, card: &mut BusinessCard, card_height: f3
         .enumerate()
         .find(|(index, line)| !claimed.contains(index) && has_a_role_word(&line.text))
     {
-        card.title = Some(Field::new(line.text.clone(), INFERRED));
+        card.title = Some(Field::new(line.text.clone(), INFERRED).at(Some(line.region(origin))));
         claimed.push(index);
     }
 
@@ -801,7 +832,8 @@ fn take_structure(pool: &mut Vec<Line>, card: &mut BusinessCard, card_height: f3
         });
 
     if let Some((index, line, confidence)) = company {
-        card.company = Some(Field::new(line.text, confidence));
+        let region = line.region(origin);
+        card.company = Some(Field::new(line.text, confidence).at(Some(region)));
         claimed.push(index);
     }
 
@@ -819,7 +851,18 @@ fn take_structure(pool: &mut Vec<Line>, card: &mut BusinessCard, card_height: f3
             .map(|index| pool[*index].text.as_str())
             .collect::<Vec<_>>()
             .join(", ");
-        card.address = Some(Field::new(text, INFERRED));
+        // The union of the lines it was built from, so a multi-line address
+        // highlights as one block rather than only its first line.
+        let region = address
+            .iter()
+            .map(|index| pool[*index].region(origin))
+            .reduce(|a, b| Region {
+                left: a.left.min(b.left),
+                top: a.top.min(b.top),
+                right: a.right.max(b.right),
+                bottom: a.bottom.max(b.bottom),
+            });
+        card.address = Some(Field::new(text, INFERRED).at(region));
         claimed.extend(address);
     }
 
@@ -909,7 +952,7 @@ mod tests {
     }
 
     fn card(segments: Vec<TextSegment>) -> RecognisedCard {
-        RecognisedCard { width: WIDE, height: TALL, segments }
+        RecognisedCard { width: WIDE, height: TALL, segments, origin: (0.0, 0.0) }
     }
 
     /// An ordinary card, laid out the way most are.
@@ -936,6 +979,49 @@ mod tests {
         assert_eq!(parsed.urls[0].value, "www.hsilighting.com");
         assert_eq!(parsed.phones[0].kind, PhoneKind::Cell);
         assert!(parsed.address.as_ref().unwrap().value.contains("PO Box 1234"));
+    }
+
+    /// **Each field says where on the photograph it was read.**
+    ///
+    /// What lets the review screen dim the picture and light up the name where it
+    /// actually sits. A region that is merely plausible is worse than none: it
+    /// would point confidently at the wrong line, and the whole purpose is to let
+    /// somebody check the reading against the card in front of them.
+    #[test]
+    fn every_read_field_says_where_it_came_from() {
+        let parsed = parse_card(&ordinary());
+
+        // The fixture puts each line at a known place, so the regions can be
+        // checked against the line they claim rather than merely existing.
+        let name = parsed.name.unwrap().region.expect("the name has no region");
+        assert_eq!((name.left, name.top, name.bottom), (60.0, 70.0, 104.0));
+
+        let title = parsed.title.unwrap().region.expect("the title has no region");
+        assert_eq!((title.top, title.bottom), (118.0, 138.0));
+
+        let company = parsed.company.unwrap().region.expect("the company has no region");
+        assert_eq!((company.top, company.bottom), (165.0, 189.0));
+
+        let phone = parsed.phones[0].region.expect("the phone has no region");
+        assert_eq!((phone.top, phone.bottom), (400.0, 416.0));
+
+        assert!(parsed.emails[0].region.is_some());
+        assert!(parsed.address.unwrap().region.is_some());
+    }
+
+    /// A card read from a QR has nowhere on the picture to point at.
+    ///
+    /// Pointing somewhere arbitrary would be worse than not pointing: the whole
+    /// value of a highlight is that it is where the words are.
+    #[test]
+    fn a_qr_card_claims_no_region() {
+        let card = crate::contacts::from_vcard(
+            "BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Jane Okafor\r\nTEL:+441234567890\r\nEND:VCARD\r\n",
+        )
+        .expect("that is a vCard");
+
+        assert!(card.name.unwrap().region.is_none());
+        assert!(card.phones[0].region.is_none());
     }
 
     /// The whole recognised text is kept whatever the rules did with it.
@@ -1244,6 +1330,7 @@ mod tests {
             width: 0.0,
             height: 0.0,
             segments: vec![line("Sam Reyes", 60.0, 30.0), line("Meridian Ltd", 120.0, 18.0)],
+            origin: (0.0, 0.0),
         });
         assert_eq!(parsed.name.unwrap().value, "Sam Reyes");
     }
@@ -1278,6 +1365,7 @@ mod tests {
             width: 3000.0,
             height: 4000.0,
             segments: photographed(800.0, 2600.0),
+            origin: (0.0, 0.0),
         });
         assert_ne!(
             parsed.name.map(|n| n.value).unwrap_or_default(),
@@ -1297,9 +1385,23 @@ mod tests {
         assert_eq!(shot.name.as_ref().unwrap().value, "Yaseen Anwar");
         assert_eq!(shot.company.as_ref().unwrap().value, "HSI Lighting LLC");
         assert_eq!(shot.title.as_ref().unwrap().value, "Design Engineer");
+
+        // Everything *read* is identical; only where it was read differs, and
+        // that is the point. Regions are in the photograph's own space, so a card
+        // further down the picture must report itself further down.
+        assert_eq!(shot.raw_text, framed.raw_text);
         assert_eq!(
-            shot, framed,
+            shot.phones.iter().map(|p| p.raw.clone()).collect::<Vec<_>>(),
+            framed.phones.iter().map(|p| p.raw.clone()).collect::<Vec<_>>(),
             "where the card sat in the frame changed what was read off it",
+        );
+
+        let here = shot.name.unwrap().region.expect("the name has no region");
+        let there = framed.name.unwrap().region.expect("the name has no region");
+        assert_eq!(
+            (here.left - there.left, here.top - there.top),
+            (800.0, 2600.0),
+            "the region was not reported where the card actually is",
         );
     }
 

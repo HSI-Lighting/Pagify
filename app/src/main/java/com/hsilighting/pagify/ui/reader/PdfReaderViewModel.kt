@@ -6,6 +6,8 @@ import com.hsilighting.pagify.data.ContactStore
 import com.hsilighting.pagify.core.contactFromCardJson
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
+import com.hsilighting.pagify.core.CardReading
+import com.hsilighting.pagify.core.cardReadingFrom
 import com.hsilighting.pagify.core.CardScanner
 import android.app.Application
 import android.content.ClipData
@@ -192,6 +194,98 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     private val _pendingFiling = MutableStateFlow<PendingFiling?>(null)
     val pendingFiling: StateFlow<PendingFiling?> = _pendingFiling
+
+    /**
+     * Cards read off a photograph, waiting to be checked against it.
+     *
+     * **Nothing here is saved yet**, which is the one place this feature departs
+     * from "save first, ask afterwards". Filing is an aid and must never gate a
+     * card; checking what was *read* is not an aid, it is the reading itself, and
+     * saving before it would fill the list with contacts nobody has looked at.
+     *
+     * The cost is that a card is lost if the app dies mid-review. That is the
+     * right trade only because the card is still in the room — the photograph was
+     * taken seconds ago.
+     */
+    data class PendingReview(
+        val imageUri: String,
+        val readings: List<CardReading>,
+        val at: Int = 0,
+        val kept: List<Contact> = emptyList(),
+        val intoGroup: Long?,
+    )
+
+    private val _pendingReview = MutableStateFlow<PendingReview?>(null)
+    val pendingReview: StateFlow<PendingReview?> = _pendingReview
+
+    /** Keep the card being shown, then move to the next or finish. */
+    fun keepReviewedCard() = advanceReview(keep = true)
+
+    /** Pass over the card being shown. */
+    fun skipReviewedCard() = advanceReview(keep = false)
+
+    private fun advanceReview(keep: Boolean) {
+        val review = _pendingReview.value ?: return
+        val reading = review.readings.getOrNull(review.at) ?: return
+
+        val kept = if (keep) review.kept + reading.contact else review.kept
+        val next = review.at + 1
+
+        if (next < review.readings.size) {
+            _pendingReview.value = review.copy(at = next, kept = kept)
+            return
+        }
+
+        _pendingReview.value = null
+        if (kept.isEmpty()) {
+            _state.update { it.copy(message = "Nothing kept from that photograph.") }
+            return
+        }
+        viewModelScope.launch { storeScanned(kept, review.intoGroup, CardScanner.Source.PRINT) }
+    }
+
+    /**
+     * Save what a scan produced, and ask where it goes if that is still open.
+     *
+     * Shared by both routes into the list — a QR, which arrives here directly,
+     * and printed text, which arrives after somebody has looked at it. They
+     * differ in whether the cards were checked, not in what saving one means.
+     */
+    private suspend fun storeScanned(
+        cards: List<Contact>,
+        intoGroup: Long?,
+        source: CardScanner.Source,
+    ) {
+        if (cards.isEmpty()) return
+
+        cards.forEach { contactStore.save(it, intoGroup = intoGroup) }
+        SessionRecorder.record("CARD_SCAN", "source=$source n=${cards.size} group=$intoGroup")
+
+        // Scanning from inside a group has already said which group, so asking
+        // would be putting a question the screen answered.
+        if (intoGroup == null) {
+            _pendingFiling.value = PendingFiling(
+                contactIds = cards.map { it.id },
+                label = if (cards.size == 1) {
+                    cards.first().displayName
+                } else {
+                    "${cards.size} contacts"
+                },
+            )
+        } else {
+            _lastFiled.value = intoGroup
+        }
+
+        _state.update {
+            it.copy(
+                message = if (cards.size == 1) {
+                    "Saved ${cards.first().displayName}."
+                } else {
+                    "Saved ${cards.size} contacts."
+                },
+            )
+        }
+    }
 
     /** File everything from the last scan, or nothing when [groupId] is null. */
     fun fileScanned(groupId: Long?) {
@@ -1809,12 +1903,12 @@ frame = pending.frame,
             runCatching {
             when (val outcome = CardScanner.read(getApplication(), image)) {
                 is CardScanner.Outcome.Contacts -> {
-                    val saved = outcome.cards.mapIndexed { position, json ->
+                    val readings = outcome.cards.mapIndexed { position, json ->
                         // The id is the clock, and several cards are saved within
                         // the same millisecond — so each one is nudged past the
                         // last. Two contacts sharing an id would upsert onto each
                         // other and the second would silently replace the first.
-                        val read = contactFromCardJson(
+                        val read = cardReadingFrom(
                             json,
                             System.currentTimeMillis() + position,
                         )
@@ -1822,55 +1916,24 @@ frame = pending.frame,
                         // reading: it cannot have been misread, which is more than
                         // the printed copy can claim.
                         val contact = outcome.qrPayload
-                            ?.takeIf { it.isNotBlank() && it !in read.urls }
-                            ?.let { read.copy(urls = read.urls + it) }
-                            ?: read
-
-                        // Filed as it is saved when the scan came from inside a
-                        // group; saved unfiled otherwise and asked about below.
-                        // Either way it is on disk before any question is put.
-                        contactStore.save(contact, intoGroup = target)
-                        contact
+                            ?.takeIf { it.isNotBlank() && it !in read.contact.urls }
+                            ?.let { read.contact.copy(urls = read.contact.urls + it) }
+                            ?: read.contact
+                        read.copy(contact = contact)
                     }
 
-                    SessionRecorder.record(
-                        "CARD_SCAN",
-                        "source=${outcome.source} n=${saved.size} group=$target",
-                    )
-
-                    // Scanning from inside a group has already said which group,
-                    // so asking would be putting a question the screen answered.
-                    // Only an unfiled scan is asked about.
-                    if (target == null) {
-                        _pendingFiling.value = PendingFiling(
-                            contactIds = saved.map { it.id },
-                            label = if (saved.size == 1) {
-                                saved.first().displayName
-                            } else {
-                                "${saved.size} contacts"
-                            },
+                    // A QR is exact, so there is nothing to check and nowhere on
+                    // the picture to point at — it is saved outright. Printed text
+                    // is a reading, and gets looked at against the card first.
+                    if (readings.any { it.worthReviewing }) {
+                        SessionRecorder.record("CARD_REVIEW", "n=${readings.size}")
+                        _pendingReview.value = PendingReview(
+                            imageUri = image.toString(),
+                            readings = readings,
+                            intoGroup = target,
                         )
                     } else {
-                        _lastFiled.value = target
-                    }
-
-                    _state.update {
-                        it.copy(
-                            message = when {
-                                saved.size > 1 -> when (outcome.source) {
-                                    CardScanner.Source.QR ->
-                                        "Saved ${saved.size} contacts."
-                                    CardScanner.Source.PRINT ->
-                                        "Read ${saved.size} cards — check them."
-                                }
-
-                                outcome.source == CardScanner.Source.QR ->
-                                    "Saved ${saved.first().displayName}."
-
-                                else ->
-                                    "Read ${saved.first().displayName} — check it."
-                            },
-                        )
+                        storeScanned(readings.map { it.contact }, target, outcome.source)
                     }
                 }
 

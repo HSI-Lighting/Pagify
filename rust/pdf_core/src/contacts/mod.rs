@@ -26,11 +26,39 @@ pub struct Field {
     pub value: String,
     /// 0.0 to 1.0.
     pub confidence: f32,
+    /// Where on the photograph this was read, when it was read from one.
+    ///
+    /// **In the photograph's own pixel space**, not the card's. The card is
+    /// measured and moved to the origin before the rules run, and a rectangle in
+    /// those coordinates would be drawn in the wrong place on the picture the
+    /// user is looking at — so the offset is added back on the way out.
+    ///
+    /// `None` for anything from a QR code or typed by hand: there is nowhere on
+    /// the card to point at, and pointing somewhere arbitrary is worse than not
+    /// pointing at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<Region>,
+}
+
+/// A rectangle on the photograph, in its own pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Region {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
 }
 
 impl Field {
     pub fn new(value: impl Into<String>, confidence: f32) -> Self {
-        Field { value: value.into(), confidence: confidence.clamp(0.0, 1.0) }
+        Field { value: value.into(), confidence: confidence.clamp(0.0, 1.0), region: None }
+    }
+
+    /// The same field, plus the part of the photograph it was read from.
+    pub fn at(mut self, region: Option<Region>) -> Self {
+        self.region = region;
+        self
     }
 }
 
@@ -68,6 +96,9 @@ pub struct PhoneField {
     pub normalised: String,
     pub kind: PhoneKind,
     pub confidence: f32,
+    /// Where on the photograph it was read. See [`Field::region`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<Region>,
 }
 
 /// Everything read off one card.
@@ -341,6 +372,8 @@ pub fn from_vcard(text: &str) -> Option<BusinessCard> {
                 normalised: unescape(value),
                 kind: phone_kind(&params),
                 confidence: 1.0,
+                // A QR code has no place on the card to point at.
+                region: None,
             }),
             "EMAIL" => card.emails.push(Field::new(unescape(value), 1.0)),
             "URL" => card.urls.push(Field::new(unescape(value), 1.0)),
@@ -489,6 +522,7 @@ mod tests {
                 normalised: "+971501234567".into(),
                 kind: PhoneKind::Cell,
                 confidence: 0.9,
+                region: None,
             }],
             emails: vec![Field::new("dev@hsilighting.com", 0.95)],
             urls: vec![Field::new("https://www.hsilighting.com", 0.9)],

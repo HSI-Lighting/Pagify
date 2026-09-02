@@ -83,6 +83,10 @@ fun ContactsScreen(
     /** The group last filed into — a suggestion for the filing question only. */
     suggestedGroup: Long?,
     onCreateGroup: (String) -> Unit,
+    /** A card read but not yet checked against its photograph. */
+    review: CardReviewState?,
+    onKeepReviewed: () -> Unit,
+    onSkipReviewed: () -> Unit,
     /** What was just scanned and is waiting to be filed, if anything. */
     pendingFilingLabel: String?,
     onFileScanned: (Long) -> Unit,
@@ -323,6 +327,17 @@ fun ContactsScreen(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(20.dp),
+        )
+    }
+
+    review?.let { pending ->
+        CardReviewSheet(
+            imageUri = pending.imageUri,
+            reading = pending.reading,
+            position = pending.position,
+            total = pending.total,
+            onSave = onKeepReviewed,
+            onSkip = onSkipReviewed,
         )
     }
 

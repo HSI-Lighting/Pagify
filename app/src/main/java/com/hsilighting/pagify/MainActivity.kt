@@ -29,6 +29,7 @@ import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.isDark
 import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.PagifyApp
+import com.hsilighting.pagify.ui.contacts.CardReviewState
 import com.hsilighting.pagify.ui.components.BlankPageSheet
 import com.hsilighting.pagify.ui.components.NewDocumentChooser
 import com.hsilighting.pagify.ui.components.LeavePrompt
@@ -74,6 +75,7 @@ class MainActivity : ComponentActivity() {
                 val groupMemberships by viewModel.groupMemberships.collectAsStateWithLifecycle()
                 val suggestedGroup by viewModel.lastFiled.collectAsStateWithLifecycle()
                 val pendingFiling by viewModel.pendingFiling.collectAsStateWithLifecycle()
+                val pendingReview by viewModel.pendingReview.collectAsStateWithLifecycle()
 
                 LaunchedEffect(incoming) {
                     incoming?.let { uri ->
@@ -313,6 +315,16 @@ class MainActivity : ComponentActivity() {
                     groupMemberships = groupMemberships,
                     suggestedGroup = suggestedGroup,
                     onCreateGroup = { viewModel.createGroup(it, eventDate = null) },
+                    review = pendingReview?.let { pending ->
+                        CardReviewState(
+                            imageUri = pending.imageUri,
+                            reading = pending.readings[pending.at],
+                            position = pending.at,
+                            total = pending.readings.size,
+                        )
+                    },
+                    onKeepReviewed = viewModel::keepReviewedCard,
+                    onSkipReviewed = viewModel::skipReviewedCard,
                     pendingFilingLabel = pendingFiling?.label,
                     onFileScanned = { viewModel.fileScanned(it) },
                     onCreateGroupForScan = viewModel::createGroupForScan,
