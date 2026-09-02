@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PersonAdd
@@ -77,8 +78,8 @@ fun ContactsScreen(
     groups: List<ContactGroup>,
     /** Contact id to the groups it is in. */
     memberships: Map<Long, List<Long>>,
-    importTarget: Long?,
-    onSetImportTarget: (Long?) -> Unit,
+    /** The group last filed into — a suggestion for the filing question only. */
+    suggestedGroup: Long?,
     onCreateGroup: (String) -> Unit,
     /** What was just scanned and is waiting to be filed, if anything. */
     pendingFilingLabel: String?,
@@ -91,8 +92,9 @@ fun ContactsScreen(
     onRemoveFromGroup: (Contact, Long) -> Unit,
     onAddToGroupPicked: (Contact, Long) -> Unit,
     onCreateGroupWith: (Contact, String) -> Unit,
-    onScanFromGallery: () -> Unit,
-    onScanFromCamera: () -> Unit,
+    /** Given the group being viewed, so a scan from inside one files there. */
+    onScanFromGallery: (Long?) -> Unit,
+    onScanFromCamera: (Long?) -> Unit,
     onExport: (Contact) -> Unit,
     onDelete: (Contact) -> Unit,
     onSaveEdit: (Contact) -> Unit,
@@ -103,7 +105,6 @@ fun ContactsScreen(
     var editing by remember { mutableStateOf<Contact?>(null) }
     var openGroup by remember { mutableStateOf<ContactGroup?>(null) }
     var choosingSource by remember { mutableStateOf(false) }
-    var pickingTarget by remember { mutableStateOf(false) }
     var creatingGroup by remember { mutableStateOf(false) }
     var namingForScan by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<ContactGroup?>(null) }
@@ -161,21 +162,22 @@ fun ContactsScreen(
                 }
             }
 
-            // The sticky import target. Set once before a batch, so forty cards
-            // after an event do not mean answering the same question forty times.
-            if (contacts.isNotEmpty() || groups.isNotEmpty()) {
+            // Makes a group. That is all it does.
+            //
+            // It used to be a picker for a target that new cards would be filed
+            // into, chosen in advance — which asked the same question as the
+            // prompt after a scan, in a place nobody looked. Two ways to answer
+            // one question, so the one that had to be answered early is gone.
+            //
+            // **Always drawn**, because it is now the only way to make a group,
+            // and it used to be hidden until a contact or a group already
+            // existed: the control that creates the first group was unreachable
+            // until there was one.
+            if (openGroup == null) {
                 AssistChip(
-                    onClick = { pickingTarget = true },
-                    label = {
-                        Text(
-                            text = importTarget
-                                ?.let { id -> groups.firstOrNull { it.id == id }?.name }
-                                ?.let { "Scanning into $it" }
-                                ?: "Scanning into no group",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                    },
+                    onClick = { creatingGroup = true },
+                    leadingIcon = { Icon(Icons.Filled.Add, contentDescription = null) },
+                    label = { Text("Group") },
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
                 )
             }
@@ -258,19 +260,11 @@ fun ContactsScreen(
 
     if (choosingSource) {
         SourceChooser(
-            onCamera = { choosingSource = false; onScanFromCamera() },
-            onGallery = { choosingSource = false; onScanFromGallery() },
+            // The group being viewed goes with the scan, so a card taken from
+            // inside a group lands there and is not asked about.
+            onCamera = { choosingSource = false; onScanFromCamera(openGroup?.id) },
+            onGallery = { choosingSource = false; onScanFromGallery(openGroup?.id) },
             onDismiss = { choosingSource = false },
-        )
-    }
-
-    if (pickingTarget) {
-        GroupPicker(
-            groups = groups,
-            selected = importTarget,
-            onPick = { onSetImportTarget(it); pickingTarget = false },
-            onCreate = { pickingTarget = false; creatingGroup = true },
-            onDismiss = { pickingTarget = false },
         )
     }
 
@@ -288,7 +282,7 @@ fun ContactsScreen(
         FilingPrompt(
             label = pendingFilingLabel,
             groups = groups,
-            suggested = importTarget,
+            suggested = suggestedGroup,
             onFile = onFileScanned,
             onCreate = { namingForScan = true },
             onSkip = onSkipFiling,
@@ -356,7 +350,7 @@ fun ContactsScreen(
         FilingPrompt(
             label = contact.displayName,
             groups = available,
-            suggested = importTarget?.takeIf { target -> available.any { it.id == target } },
+            suggested = suggestedGroup?.takeIf { last -> available.any { it.id == last } },
             onFile = { groupId ->
                 onAddToGroupPicked(contact, groupId)
                 addingToGroup = null

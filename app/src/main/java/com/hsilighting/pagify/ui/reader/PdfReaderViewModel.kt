@@ -170,12 +170,33 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * noticing for weeks; forgetting it when the app closes bounds how long that
      * can go on.
      */
-    private val _importTarget = MutableStateFlow<Long?>(null)
-    val importTarget: StateFlow<Long?> = _importTarget
+    /**
+     * The group the next scan belongs to, or null to ask afterwards.
+     *
+     * Set from where the user is standing rather than from a setting: scanning
+     * while inside a group means the card goes in *that* group, and asking would
+     * be asking a question the screen already answered.
+     *
+     * Deliberately not a preference. It used to be a sticky target the user set
+     * in advance, which was redundant once the card is asked about after the scan
+     * — two ways to say the same thing, and the one that had to be set in advance
+     * was the one nobody found.
+     */
+    private var scanTarget: Long? = null
 
-    fun setImportTarget(groupId: Long?) {
-        _importTarget.value = groupId
+    fun setScanTarget(groupId: Long?) {
+        scanTarget = groupId
     }
+
+    /**
+     * The last group anything was filed into.
+     *
+     * Only a suggestion: it puts that group at the top of the filing question and
+     * pre-selects it, so a batch after an event costs one tap per card. It never
+     * files anything by itself.
+     */
+    private val _lastFiled = MutableStateFlow<Long?>(null)
+    val lastFiled: StateFlow<Long?> = _lastFiled
 
     /**
      * Cards just read, waiting to be filed.
@@ -200,7 +221,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
             pending.contactIds.forEach { contactStore.addToGroup(it, groupId) }
             // Remembered so the next card opens on the same group already chosen:
             // at an event the answer is the same forty times running.
-            _importTarget.value = groupId
+            _lastFiled.value = groupId
             val name = contactGroups.value.firstOrNull { it.id == groupId }?.name
             _state.update {
                 it.copy(message = name?.let { group -> "Filed in $group." })
@@ -1781,6 +1802,7 @@ frame = pending.frame,
      */
     fun scanCard(image: Uri) {
         viewModelScope.launch {
+            val target = scanTarget
             when (val outcome = CardScanner.read(getApplication(), image)) {
                 is CardScanner.Outcome.Contacts -> {
                     val saved = outcome.cards.mapIndexed { position, json ->
@@ -1800,26 +1822,33 @@ frame = pending.frame,
                             ?.let { read.copy(urls = read.urls + it) }
                             ?: read
 
-                        // Saved unfiled. Which group it belongs in is asked
-                        // immediately afterwards, so the card is safe on disk
-                        // before anybody is asked anything about it.
-                        contactStore.save(contact, intoGroup = null)
+                        // Filed as it is saved when the scan came from inside a
+                        // group; saved unfiled otherwise and asked about below.
+                        // Either way it is on disk before any question is put.
+                        contactStore.save(contact, intoGroup = target)
                         contact
                     }
 
                     SessionRecorder.record(
                         "CARD_SCAN",
-                        "source=${outcome.source} n=${saved.size}",
+                        "source=${outcome.source} n=${saved.size} group=$target",
                     )
 
-                    _pendingFiling.value = PendingFiling(
-                        contactIds = saved.map { it.id },
-                        label = if (saved.size == 1) {
-                            saved.first().displayName
-                        } else {
-                            "${saved.size} contacts"
-                        },
-                    )
+                    // Scanning from inside a group has already said which group,
+                    // so asking would be putting a question the screen answered.
+                    // Only an unfiled scan is asked about.
+                    if (target == null) {
+                        _pendingFiling.value = PendingFiling(
+                            contactIds = saved.map { it.id },
+                            label = if (saved.size == 1) {
+                                saved.first().displayName
+                            } else {
+                                "${saved.size} contacts"
+                            },
+                        )
+                    } else {
+                        _lastFiled.value = target
+                    }
 
                     _state.update {
                         it.copy(
@@ -1922,7 +1951,7 @@ frame = pending.frame,
             contactStore.saveGroup(group)
             // Creating a group is nearly always the first move of a batch, so it
             // becomes the target without a second tap.
-            _importTarget.value = group.id
+            _lastFiled.value = group.id
             _state.update { it.copy(message = "Scanning into ${group.name}.") }
         }
     }
@@ -1943,7 +1972,8 @@ frame = pending.frame,
     fun deleteGroup(group: ContactGroup) {
         viewModelScope.launch {
             contactStore.deleteGroup(group.id)
-            if (_importTarget.value == group.id) _importTarget.value = null
+            if (_lastFiled.value == group.id) _lastFiled.value = null
+            if (scanTarget == group.id) scanTarget = null
             _state.update {
                 it.copy(message = "Deleted ${group.name}. Its contacts are still here.")
             }

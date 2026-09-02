@@ -71,7 +71,7 @@ class MainActivity : ComponentActivity() {
                 val contacts by viewModel.contacts.collectAsStateWithLifecycle()
                 val contactGroups by viewModel.contactGroups.collectAsStateWithLifecycle()
                 val groupMemberships by viewModel.groupMemberships.collectAsStateWithLifecycle()
-                val importTarget by viewModel.importTarget.collectAsStateWithLifecycle()
+                val suggestedGroup by viewModel.lastFiled.collectAsStateWithLifecycle()
                 val pendingFiling by viewModel.pendingFiling.collectAsStateWithLifecycle()
 
                 LaunchedEffect(incoming) {
@@ -299,8 +299,7 @@ class MainActivity : ComponentActivity() {
                     contacts = contacts,
                     contactGroups = contactGroups,
                     groupMemberships = groupMemberships,
-                    importTarget = importTarget,
-                    onSetImportTarget = viewModel::setImportTarget,
+                    suggestedGroup = suggestedGroup,
                     onCreateGroup = { viewModel.createGroup(it, eventDate = null) },
                     pendingFilingLabel = pendingFiling?.label,
                     onFileScanned = { viewModel.fileScanned(it) },
@@ -316,8 +315,12 @@ class MainActivity : ComponentActivity() {
                     onRemoveFromGroup = viewModel::removeFromGroup,
                     onAddToGroupPicked = viewModel::addToGroupPicked,
                     onCreateGroupWith = viewModel::createGroupWith,
-                    onScanCard = { cardPicker.launch(arrayOf("image/*")) },
-                    onPhotographCard = {
+                    onScanCard = { group ->
+                        viewModel.setScanTarget(group)
+                        cardPicker.launch(arrayOf("image/*"))
+                    },
+                    onPhotographCard = { group ->
+                        viewModel.setScanTarget(group)
                         val destination = runCatching { newCardPhoto() }.getOrNull()
                         if (destination == null) {
                             viewModel.report("There was nowhere to save the photo.")

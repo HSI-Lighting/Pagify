@@ -66,9 +66,8 @@ fun PagifyApp(
     contactGroups: List<ContactGroup>,
     /** Contact id to the groups it is in. */
     groupMemberships: Map<Long, List<Long>>,
-    /** The group newly scanned cards are filed into, or null for none. */
-    importTarget: Long?,
-    onSetImportTarget: (Long?) -> Unit,
+    /** The group last filed into — a suggestion for the filing question. */
+    suggestedGroup: Long?,
     onCreateGroup: (String) -> Unit,
     /** What was just scanned and is waiting to be filed, if anything. */
     pendingFilingLabel: String?,
@@ -82,8 +81,8 @@ fun PagifyApp(
     onAddToGroupPicked: (Contact, Long) -> Unit,
     onCreateGroupWith: (Contact, String) -> Unit,
     /** From the gallery, and from the camera. */
-    onScanCard: () -> Unit,
-    onPhotographCard: () -> Unit,
+    onScanCard: (Long?) -> Unit,
+    onPhotographCard: (Long?) -> Unit,
     onExportContact: (Contact) -> Unit,
     onDeleteContact: (Contact) -> Unit,
     onSaveContact: (Contact) -> Unit,
@@ -148,8 +147,7 @@ fun PagifyApp(
                     contacts = contacts,
                     groups = contactGroups,
                     memberships = groupMemberships,
-                    importTarget = importTarget,
-                    onSetImportTarget = onSetImportTarget,
+                    suggestedGroup = suggestedGroup,
                     onCreateGroup = onCreateGroup,
                     pendingFilingLabel = pendingFilingLabel,
                     onFileScanned = onFileScanned,

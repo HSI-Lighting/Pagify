@@ -27,6 +27,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.ContactGroup
@@ -223,36 +224,6 @@ fun FilingPrompt(
     )
 }
 
-/**
- * Choosing which group cards are filed into, or none.
- *
- * "None" is a first-class option rather than a way of cancelling: filing is an
- * aid, and a contact in no group is an ordinary state, not an unfinished one.
- */
-@Composable
-fun GroupPicker(
-    groups: List<ContactGroup>,
-    selected: Long?,
-    onPick: (Long?) -> Unit,
-    onCreate: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Scan into") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                PickerRow("None", selected == null) { onPick(null) }
-                groups.forEach { group ->
-                    PickerRow(group.name, selected == group.id) { onPick(group.id) }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onCreate) { Text("New group") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
-    )
-}
-
 @Composable
 private fun PickerRow(label: String, chosen: Boolean, onClick: () -> Unit) {
     Surface(
@@ -264,6 +235,10 @@ private fun PickerRow(label: String, chosen: Boolean, onClick: () -> Unit) {
         shape = MaterialTheme.shapes.small,
         modifier = Modifier
             .fillMaxWidth()
+            // Tagged because the same group name is on screen twice while this is
+            // open — once in the list behind it, once here — and a test that
+            // cannot tell them apart cannot test this at all.
+            .testTag("pick:$label")
             .clickable(onClick = onClick),
     ) {
         Box(Modifier.padding(horizontal = 12.dp, vertical = 12.dp)) {
