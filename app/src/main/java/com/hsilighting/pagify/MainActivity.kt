@@ -18,6 +18,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.core.net.toUri
@@ -119,6 +120,17 @@ class MainActivity : ComponentActivity() {
                 val openPicker = remember { { picker.launch(arrayOf(PDF_MIME_TYPE)) } }
 
                 /**
+                 * The group a scan in flight belongs to.
+                 *
+                 * `rememberSaveable`, because the camera is another activity and
+                 * this process can be killed while it is in front. Held in a
+                 * plain field it came back null, the card was saved unfiled, and
+                 * the user was asked a question they had already answered by
+                 * standing inside the group — "sometimes it does not add it".
+                 */
+                var pendingScanGroup by rememberSaveable { mutableStateOf<Long?>(null) }
+
+                /**
                  * A business card already on the device.
                  *
                  * For one photographed earlier, or sent by somebody else. Needs no
@@ -126,7 +138,7 @@ class MainActivity : ComponentActivity() {
                  */
                 val cardPicker = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument(),
-                ) { uri -> uri?.let(viewModel::scanCard) }
+                ) { uri -> uri?.let { viewModel.scanCard(it, pendingScanGroup) } }
 
                 /**
                  * A card photographed here and now.
@@ -150,7 +162,7 @@ class MainActivity : ComponentActivity() {
                 ) { taken ->
                     // False means cancelled or failed. The empty file it leaves
                     // behind is not worth recognising, and the cache clears itself.
-                    if (taken) cardPhoto?.let(viewModel::scanCard)
+                    if (taken) cardPhoto?.let { viewModel.scanCard(it, pendingScanGroup) }
                     cardPhoto = null
                 }
 
@@ -316,11 +328,11 @@ class MainActivity : ComponentActivity() {
                     onAddToGroupPicked = viewModel::addToGroupPicked,
                     onCreateGroupWith = viewModel::createGroupWith,
                     onScanCard = { group ->
-                        viewModel.setScanTarget(group)
+                        pendingScanGroup = group
                         cardPicker.launch(arrayOf("image/*"))
                     },
                     onPhotographCard = { group ->
-                        viewModel.setScanTarget(group)
+                        pendingScanGroup = group
                         val destination = runCatching { newCardPhoto() }.getOrNull()
                         if (destination == null) {
                             viewModel.report("There was nowhere to save the photo.")

@@ -171,24 +171,6 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * can go on.
      */
     /**
-     * The group the next scan belongs to, or null to ask afterwards.
-     *
-     * Set from where the user is standing rather than from a setting: scanning
-     * while inside a group means the card goes in *that* group, and asking would
-     * be asking a question the screen already answered.
-     *
-     * Deliberately not a preference. It used to be a sticky target the user set
-     * in advance, which was redundant once the card is asked about after the scan
-     * — two ways to say the same thing, and the one that had to be set in advance
-     * was the one nobody found.
-     */
-    private var scanTarget: Long? = null
-
-    fun setScanTarget(groupId: Long?) {
-        scanTarget = groupId
-    }
-
-    /**
      * The last group anything was filed into.
      *
      * Only a suggestion: it puts that group at the top of the filing question and
@@ -218,13 +200,30 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         if (pending == null || groupId == null) return
 
         viewModelScope.launch {
-            pending.contactIds.forEach { contactStore.addToGroup(it, groupId) }
-            // Remembered so the next card opens on the same group already chosen:
-            // at an event the answer is the same forty times running.
-            _lastFiled.value = groupId
+            // Every contact is tried whatever happened to the one before. A card
+            // that cannot be filed must not take the rest of the photograph's
+            // cards down with it — which is what an exception here used to do,
+            // along with the whole app.
+            val filed = pending.contactIds.count { id ->
+                runCatching { contactStore.addToGroup(id, groupId) }
+                    .onFailure { Log.e(TAG, "a contact could not be filed", it) }
+                    .getOrDefault(false)
+            }
+
             val name = contactGroups.value.firstOrNull { it.id == groupId }?.name
+            if (filed > 0) {
+                // Remembered so the next card opens on the same group already
+                // chosen: at an event the answer is the same forty times over.
+                _lastFiled.value = groupId
+            }
             _state.update {
-                it.copy(message = name?.let { group -> "Filed in $group." })
+                it.copy(
+                    message = when {
+                        filed == pending.contactIds.size && name != null -> "Filed in $name."
+                        filed > 0 -> "Filed $filed of ${pending.contactIds.size}."
+                        else -> "That group is no longer there — the cards are saved."
+                    },
+                )
             }
         }
     }
@@ -1800,9 +1799,14 @@ frame = pending.frame,
      * the message says where it came from, because the two want different things
      * from the person holding the phone.
      */
-    fun scanCard(image: Uri) {
+    fun scanCard(image: Uri, intoGroup: Long?) {
         viewModelScope.launch {
-            val target = scanTarget
+            val target = intoGroup
+            // Nothing below may kill the app. A photograph is read on a device
+            // with an unknown amount of memory free, into a database that may
+            // have changed underneath — and a card that fails to save is a
+            // message, never the app disappearing while somebody holds it.
+            runCatching {
             when (val outcome = CardScanner.read(getApplication(), image)) {
                 is CardScanner.Outcome.Contacts -> {
                     val saved = outcome.cards.mapIndexed { position, json ->
@@ -1883,6 +1887,12 @@ frame = pending.frame,
 
                 is CardScanner.Outcome.Failed -> _state.update {
                     it.copy(message = outcome.reason)
+                }
+            }
+            }.onFailure { failure ->
+                Log.e(TAG, "the card could not be read", failure)
+                _state.update {
+                    it.copy(message = failure.message ?: "That card could not be read.")
                 }
             }
         }
@@ -1973,7 +1983,6 @@ frame = pending.frame,
         viewModelScope.launch {
             contactStore.deleteGroup(group.id)
             if (_lastFiled.value == group.id) _lastFiled.value = null
-            if (scanTarget == group.id) scanTarget = null
             _state.update {
                 it.copy(message = "Deleted ${group.name}. Its contacts are still here.")
             }
@@ -1991,10 +2000,18 @@ frame = pending.frame,
     /** File a contact that already exists — one scanned before any group did. */
     fun addToGroupPicked(contact: Contact, groupId: Long) {
         viewModelScope.launch {
-            contactStore.addToGroup(contact.id, groupId)
+            val filed = runCatching { contactStore.addToGroup(contact.id, groupId) }
+                .onFailure { Log.e(TAG, "the contact could not be filed", it) }
+                .getOrDefault(false)
             val name = contactGroups.value.firstOrNull { it.id == groupId }?.name
             _state.update {
-                it.copy(message = name?.let { group -> "${contact.displayName} → $group" })
+                it.copy(
+                    message = if (filed && name != null) {
+                        "${contact.displayName} → $name"
+                    } else {
+                        "That group is no longer there."
+                    },
+                )
             }
         }
     }
@@ -2006,7 +2023,8 @@ frame = pending.frame,
         viewModelScope.launch {
             val group = ContactGroup(id = System.currentTimeMillis(), name = trimmed)
             contactStore.saveGroup(group)
-            contactStore.addToGroup(contact.id, group.id)
+            runCatching { contactStore.addToGroup(contact.id, group.id) }
+                .onFailure { Log.e(TAG, "the new group could not take the contact", it) }
             _state.update {
                 it.copy(message = "${contact.displayName} → ${group.name}")
             }

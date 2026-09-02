@@ -72,7 +72,12 @@ class ContactStore internal constructor(database: ContactsDatabase) {
         withContext(Dispatchers.IO) {
             dao.save(contact.toRow())
             if (intoGroup != null) {
-                dao.addToGroup(
+                // Filed if the group is still there, and the card kept either
+                // way. The contact is the thing that cannot be lost — the card
+                // may already be back in somebody's pocket — so a group deleted
+                // between choosing it and using it costs the filing, never the
+                // contact.
+                dao.addToGroupIfBothExist(
                     MembershipRow(
                         contactId = contact.id,
                         groupId = intoGroup,
@@ -104,11 +109,13 @@ class ContactStore internal constructor(database: ContactsDatabase) {
         withContext(Dispatchers.IO) { dao.deleteGroup(id) }
     }
 
-    suspend fun addToGroup(contactId: Long, groupId: Long) {
+    /** @return whether it was filed; false when the group or contact has gone. */
+    suspend fun addToGroup(contactId: Long, groupId: Long): Boolean =
         withContext(Dispatchers.IO) {
-            dao.addToGroup(MembershipRow(contactId, groupId, System.currentTimeMillis()))
+            dao.addToGroupIfBothExist(
+                MembershipRow(contactId, groupId, System.currentTimeMillis()),
+            )
         }
-    }
 
     suspend fun removeFromGroup(contactId: Long, groupId: Long) {
         withContext(Dispatchers.IO) { dao.removeFromGroup(contactId, groupId) }

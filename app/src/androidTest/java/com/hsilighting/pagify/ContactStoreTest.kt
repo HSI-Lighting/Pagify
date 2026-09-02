@@ -153,6 +153,65 @@ class ContactStoreTest {
         )
     }
 
+    /**
+     * **Filing into a group that is gone must not crash.**
+     *
+     * A membership row points at both a contact and a group, and the database
+     * enforces that with foreign keys — so filing into something deleted since
+     * throws `SQLiteConstraintException`. Thrown from a coroutine with nothing
+     * catching it, that is not an error message: it is the app disappearing.
+     *
+     * It happened on the device twice. The window is real — the filing question
+     * names groups from a list that a delete elsewhere has already emptied, and
+     * a scan carries the group it was started from across a trip to the camera
+     * app that may outlive the group.
+     */
+    @Test
+    fun filingIntoAGroupThatIsGoneDoesNotCrash() = runBlocking {
+        store.save(contact(1, "Jane Okafor"), intoGroup = null)
+
+        val filed = store.addToGroup(contactId = 1, groupId = 999)
+
+        assertEquals("a group that does not exist reported success", false, filed)
+        val memberships = awaiting(store.memberships) { it[1L].isNullOrEmpty() }
+        assertTrue(memberships[1L].isNullOrEmpty())
+    }
+
+    /** The same the other way round: the contact is the one that has gone. */
+    @Test
+    fun filingAContactThatIsGoneDoesNotCrash() = runBlocking {
+        store.saveGroup(group(10, "Suppliers"))
+        awaiting(store.groups) { it.isNotEmpty() }
+
+        val filed = store.addToGroup(contactId = 999, groupId = 10)
+
+        assertEquals("a contact that does not exist reported success", false, filed)
+    }
+
+    /** And a real one still reports that it worked. */
+    @Test
+    fun filingSomethingRealReportsSuccess() = runBlocking {
+        store.saveGroup(group(10, "Suppliers"))
+        store.save(contact(1, "Jane Okafor"), intoGroup = null)
+
+        assertEquals(true, store.addToGroup(contactId = 1, groupId = 10))
+    }
+
+    /**
+     * Saving a card into a group that has gone keeps the card.
+     *
+     * The contact is the thing that cannot be lost — the card may be back in
+     * somebody's pocket. Failing to file it is a disappointment; failing to save
+     * it is the feature not working.
+     */
+    @Test
+    fun aCardIsKeptEvenWhenItsGroupHasGone() = runBlocking {
+        store.save(contact(1, "Jane Okafor"), intoGroup = 999)
+
+        val contacts = awaiting(store.contacts) { it.isNotEmpty() }
+        assertEquals(listOf("Jane Okafor"), contacts.map { it.name })
+    }
+
     /** Several cards from one photograph, filed together. */
     @Test
     fun everyCardFromOnePhotographIsFiled() = runBlocking {

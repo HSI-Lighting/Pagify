@@ -79,6 +79,37 @@ interface ContactsDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun addToGroup(membership: MembershipRow)
 
+    /**
+     * File a contact, unless one end of it has gone.
+     *
+     * A membership names a contact and a group, and both foreign keys are
+     * enforced — so filing into a group deleted a moment ago throws
+     * `SQLiteConstraintException`. Thrown inside a coroutine with nothing to
+     * catch it, that is not an error: it is the app vanishing. It did, twice.
+     *
+     * **`OR IGNORE` does not help here**, which is worth writing down because it
+     * is the obvious fix and it is wrong: SQLite's conflict clauses apply to
+     * UNIQUE, NOT NULL, CHECK and PRIMARY KEY, and explicitly not to FOREIGN
+     * KEY. The check has to be made, and made inside the transaction, or it
+     * races the delete it is guarding against.
+     *
+     * Returns whether the contact was filed, so the caller can say so rather
+     * than reporting success and showing nothing.
+     */
+    @Transaction
+    suspend fun addToGroupIfBothExist(membership: MembershipRow): Boolean {
+        if (countGroup(membership.groupId) == 0) return false
+        if (countContact(membership.contactId) == 0) return false
+        addToGroup(membership)
+        return true
+    }
+
+    @Query("SELECT COUNT(*) FROM contact_groups WHERE id = :id")
+    suspend fun countGroup(id: Long): Int
+
+    @Query("SELECT COUNT(*) FROM contacts WHERE id = :id")
+    suspend fun countContact(id: Long): Int
+
     @Query("DELETE FROM group_membership WHERE contactId = :contactId AND groupId = :groupId")
     suspend fun removeFromGroup(contactId: Long, groupId: Long)
 
