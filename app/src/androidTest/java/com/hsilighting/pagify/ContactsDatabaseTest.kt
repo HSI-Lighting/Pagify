@@ -103,6 +103,60 @@ class ContactsDatabaseTest {
         )
     }
 
+    /**
+     * **Editing a contact must not unfile it.**
+     *
+     * The natural way to write this DAO method is `@Insert(REPLACE)`, and it is a
+     * data-loss bug: SQLite implements REPLACE as a delete followed by an insert,
+     * the database runs with `PRAGMA foreign_keys = ON`, and the membership rows
+     * cascade on `contactId`. Correcting a misread phone number would quietly
+     * remove that person from every group they were in — after an event, from the
+     * only thing that made forty cards navigable.
+     *
+     * It stayed invisible while saving only ever meant a newly scanned card. The
+     * first edit would have found it.
+     */
+    @Test
+    fun editingAContactKeepsItsGroups() = runBlocking {
+        val dao = database.contacts()
+        dao.save(contact(1, "Jane Okafor"))
+        dao.saveGroup(group(10, "Light + Building 2026"))
+        dao.saveGroup(group(11, "Suppliers"))
+        dao.addToGroup(MembershipRow(1, 10, 0))
+        dao.addToGroup(MembershipRow(1, 11, 0))
+
+        // The correction somebody makes after reading a card badly.
+        dao.save(contact(1, "Jane Okafor").copy(company = "Meridian Systems Ltd"))
+
+        assertEquals(
+            "the edit changed nothing",
+            "Meridian Systems Ltd",
+            dao.contactsById(listOf(1)).single().company,
+        )
+        assertEquals("the edit emptied a group", 1, dao.contactsInGroup(10).size)
+        assertEquals("the edit emptied the other group", 1, dao.contactsInGroup(11).size)
+        assertTrue(
+            "editing a contact unfiled it",
+            dao.ungrouped().isEmpty(),
+        )
+    }
+
+    /** Editing must also not quietly reset what the contact has been through. */
+    @Test
+    fun editingAContactKeepsItsExportHistory() = runBlocking {
+        val dao = database.contacts()
+        dao.save(contact(1, "Jane Okafor"))
+        dao.markExported(listOf(1), 1_772_000_000_000L)
+
+        val edited = dao.contactsById(listOf(1)).single().copy(name = "Jane Okafor-Smith")
+        dao.save(edited)
+
+        val row = dao.contactsById(listOf(1)).single()
+        assertEquals("Jane Okafor-Smith", row.name)
+        assertEquals("the export date was lost", 1_772_000_000_000L, row.exportedAt)
+        assertEquals("the export count was reset", 1, row.exportCount)
+    }
+
     /** And when it *was* the last group, the contact becomes ungrouped. */
     @Test
     fun aContactWithNoGroupsLeftIsUngrouped() = runBlocking {

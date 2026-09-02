@@ -110,6 +110,230 @@ impl RecognisedCard {
     }
 }
 
+/// How many times one photograph may be divided.
+///
+/// Eight is 256 cards, far past anyone's desk, and it exists only so that a
+/// split which somehow fails to shrink its input cannot recurse forever.
+const MAX_SPLITS: u32 = 8;
+
+/// Separate the cards in one photograph.
+///
+/// Somebody empties their pocket after an event and photographs six cards at
+/// once. Recognition sees one picture and returns one pile of text; this decides
+/// where one card ends and the next begins, so six contacts come out instead of
+/// one contact made of six people.
+///
+/// ## Why not geometry alone
+///
+/// The obvious approach — cluster the text by how close it sits — does not work,
+/// and the reason is worth stating because it looks like it should. On an
+/// ordinary card the name sits at the top and the contact details at the bottom,
+/// with a gap between them as wide as the gap between two cards on a desk. Any
+/// threshold that separates two cards also cuts one card in half, and the halves
+/// are the worst possible ones: a name with no way to contact them, and contact
+/// details belonging to nobody.
+///
+/// ## What actually distinguishes two cards
+///
+/// **Each card is complete on its own.** A real card carries somebody's name
+/// *and* a way of reaching them. One card cut in two does not: the name is on one
+/// side and the phone number on the other. So a gap is only cut when both sides
+/// independently look like a card — each has a contact method, and each has a
+/// line that is not one.
+///
+/// That is what makes this fail safe. Where the evidence is not there, nothing is
+/// split, and the result is the single contact this would have produced anyway.
+/// Merging two people into one contact is the worse error — it is silent, and it
+/// leaves somebody's phone number filed under somebody else's name — so the
+/// doubtful case is resolved by not splitting.
+///
+/// The gaps are searched largest first, so the divide between two cards is tried
+/// before any smaller gap inside one.
+pub fn split_cards(segments: Vec<TextSegment>) -> Vec<RecognisedCard> {
+    let mut groups = Vec::new();
+    divide(segments, 0, &mut groups);
+    in_reading_order(&mut groups);
+    groups.into_iter().map(RecognisedCard::around_text).collect()
+}
+
+fn divide(segments: Vec<TextSegment>, depth: u32, out: &mut Vec<Vec<TextSegment>>) {
+    if depth >= MAX_SPLITS || segments.len() < 4 {
+        if !segments.is_empty() {
+            out.push(segments);
+        }
+        return;
+    }
+
+    match best_split(&segments) {
+        Some((first, second)) => {
+            divide(first, depth + 1, out);
+            divide(second, depth + 1, out);
+        }
+        None => out.push(segments),
+    }
+}
+
+/// The widest gap that leaves a whole card on either side of it.
+fn best_split(segments: &[TextSegment]) -> Option<(Vec<TextSegment>, Vec<TextSegment>)> {
+    let mut candidates: Vec<(f32, Axis, f32)> = Vec::new();
+    for (size, at) in gaps(segments, Axis::X) {
+        candidates.push((size, Axis::X, at));
+    }
+    for (size, at) in gaps(segments, Axis::Y) {
+        candidates.push((size, Axis::Y, at));
+    }
+    // Widest first: the space between two cards is bigger than any space inside
+    // one, even when it is not bigger by much.
+    candidates.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+    for (_, axis, at) in candidates {
+        let (first, second): (Vec<TextSegment>, Vec<TextSegment>) = segments
+            .iter()
+            .cloned()
+            .partition(|segment| axis.centre(segment) < at);
+
+        if looks_like_a_card(&first) && looks_like_a_card(&second) {
+            return Some((first, second));
+        }
+    }
+
+    None
+}
+
+#[derive(Clone, Copy)]
+enum Axis {
+    X,
+    Y,
+}
+
+impl Axis {
+    fn centre(self, segment: &TextSegment) -> f32 {
+        match self {
+            Axis::X => (segment.left + segment.right) / 2.0,
+            Axis::Y => segment.centre_y(),
+        }
+    }
+
+    fn near(self, segment: &TextSegment) -> f32 {
+        match self {
+            Axis::X => segment.left,
+            Axis::Y => segment.top,
+        }
+    }
+
+    fn far(self, segment: &TextSegment) -> f32 {
+        match self {
+            Axis::X => segment.right,
+            Axis::Y => segment.bottom,
+        }
+    }
+}
+
+/// Every empty corridor running clean across the text, as (width, where).
+///
+/// A corridor only counts when nothing at all crosses it — a single word
+/// straddling the divide means these are not two separate cards but one piece of
+/// text with a hole in it.
+fn gaps(segments: &[TextSegment], axis: Axis) -> Vec<(f32, f32)> {
+    let mut ordered: Vec<&TextSegment> = segments.iter().collect();
+    ordered.sort_by(|a, b| axis.near(a).total_cmp(&axis.near(b)));
+
+    let Some(first) = ordered.first() else {
+        return Vec::new();
+    };
+
+    let mut found = Vec::new();
+    let mut reach = axis.far(first);
+    for segment in ordered.iter().skip(1) {
+        let near = axis.near(segment);
+        if near > reach {
+            found.push((near - reach, (near + reach) / 2.0));
+        }
+        reach = reach.max(axis.far(segment));
+    }
+    found
+}
+
+/// Whether this much text could stand on its own as somebody's card.
+///
+/// Somebody's **name** and a way of reaching them. This is the whole guard
+/// against cutting one card in half: the top of a card carries the name with no
+/// contact details and the bottom carries contact details with no name, so
+/// neither half passes and the cut is refused.
+///
+/// "A line that is not a contact detail" is not enough to count as the name, and
+/// the difference is the difference between this working and not. An address is
+/// not a contact pattern, so a fragment holding an email and a postal address
+/// passes that weaker test — and an ordinary card is duly cut just above its own
+/// address, giving one contact with the name and one without. The line has to
+/// look like something a person or a company is called.
+fn looks_like_a_card(segments: &[TextSegment]) -> bool {
+    if segments.len() < 2 {
+        return false;
+    }
+
+    let mut reachable = false;
+    let mut named = false;
+    for line in into_lines(segments) {
+        if find_email(&line.text).is_some()
+            || find_url(&line.text).is_some()
+            || !find_phones(&line.text).is_empty()
+        {
+            reachable = true;
+        } else if could_be_a_name(&line.text) || is_a_company(&line.text) {
+            named = true;
+        }
+    }
+
+    reachable && named
+}
+
+/// Cards in the order somebody laid them out: across, then down.
+fn in_reading_order(groups: &mut [Vec<TextSegment>]) {
+    let top_of = |group: &Vec<TextSegment>| {
+        group.iter().map(|s| s.top).fold(f32::MAX, f32::min)
+    };
+    let left_of = |group: &Vec<TextSegment>| {
+        group.iter().map(|s| s.left).fold(f32::MAX, f32::min)
+    };
+    let height_of = |group: &Vec<TextSegment>| {
+        group.iter().map(|s| s.bottom).fold(f32::MIN, f32::max) - top_of(group)
+    };
+
+    // Rows are worked out first and sorted on as an integer, because a
+    // comparator that calls two tops equal when they are merely close is not a
+    // total order — and `sort_by` is entitled to panic when handed one.
+    let mut order: Vec<usize> = (0..groups.len()).collect();
+    order.sort_by(|&a, &b| top_of(&groups[a]).total_cmp(&top_of(&groups[b])));
+
+    let mut row_of = vec![0usize; groups.len()];
+    let mut row = 0usize;
+    for (position, &index) in order.iter().enumerate() {
+        if position > 0 {
+            let previous = order[position - 1];
+            let tolerance = height_of(&groups[index])
+                .min(height_of(&groups[previous]))
+                .max(1.0)
+                * 0.5;
+            if top_of(&groups[index]) - top_of(&groups[previous]) > tolerance {
+                row += 1;
+            }
+        }
+        row_of[index] = row;
+    }
+
+    let mut keyed: Vec<(usize, f32, Vec<TextSegment>)> = groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| (row_of[index], left_of(group), group.clone()))
+        .collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
+
+    for (slot, (_, _, group)) in keyed.into_iter().enumerate() {
+        groups[slot] = group;
+    }
+}
+
 /// Confidence for something a pattern matched. Not 1.0: the recogniser may
 /// still have misread a character inside a perfectly well-shaped address.
 const MATCHED: f32 = 0.9;
@@ -248,15 +472,20 @@ fn take_patterns(pool: &mut Vec<Line>, card: &mut BusinessCard) {
             claimed.push(index);
             continue;
         }
-        if let Some(number) = find_phone(&line.text) {
-            card.phones.push(PhoneField {
-                normalised: normalise(&number),
-                raw: number,
-                // From the words beside it: "M:" and "mobile" mean a mobile, and
-                // getting this wrong sends somebody to a fax machine.
-                kind: phone_kind(&lower),
-                confidence: MATCHED,
-            });
+        let numbers = find_phones(&line.text);
+        if !numbers.is_empty() {
+            for number in numbers {
+                card.phones.push(PhoneField {
+                    normalised: normalise(&number.raw),
+                    raw: number.raw,
+                    // The label beside the number when there was one — getting
+                    // this wrong sends somebody to a fax machine. Failing that,
+                    // a word anywhere on the line, which catches the trailing
+                    // "(mobile)" form.
+                    kind: number.kind.unwrap_or_else(|| phone_kind(&lower)),
+                    confidence: MATCHED,
+                });
+            }
             claimed.push(index);
         }
     }
@@ -310,29 +539,153 @@ const KNOWN_SUFFIXES: &[&str] = &[
 /// Counted in digits rather than matched as a shape, because a printed number is
 /// spaced, bracketed and dashed differently in every country and a pattern that
 /// insists on one of them misses the rest.
-fn find_phone(text: &str) -> Option<String> {
-    let digits = text.chars().filter(char::is_ascii_digit).count();
-    if !(7..=15).contains(&digits) {
-        return None;
+/// A number found on a line, with the kind the label beside it implied.
+pub(crate) struct FoundPhone {
+    pub raw: String,
+    /// `None` when nothing labelled it, so the caller falls back to the line.
+    pub kind: Option<PhoneKind>,
+}
+
+/// Every number on a line.
+///
+/// **A label is evidence, not noise.** "Tel", "Mob", "Fax", "Direct" and the rest
+/// are printed next to a number precisely to say it is one, so once a label has
+/// been recognised the digits after it are a phone number whatever shape they are
+/// in — spaced, dotted, bracketed, hyphenated, or with the country code split off.
+/// Working the other way round, and hoping a number matches one of the formats a
+/// pattern knows, fails on the first card from a country whose convention was not
+/// on the list.
+///
+/// Reading the label first is also what fixes the reverse mistake: the guard that
+/// stops a street address being read as a phone number counts the letters on the
+/// line, and the label's own letters used to count towards it. `Mobile 050 123
+/// 4567` and `Phone 020 7946 0000` were rejected outright — the two most ordinary
+/// ways a card writes a number, thrown out by the rule meant to protect addresses
+/// from being misread. Stripping the label before counting keeps the guard and
+/// removes the false positive.
+///
+/// A line can hold more than one number — `T: 020 7946 0000 / F: 020 7946 0001` is
+/// an ordinary way to print a landline and a fax — so this returns all of them,
+/// each with its own kind.
+fn find_phones(text: &str) -> Vec<FoundPhone> {
+    let mut found = Vec::new();
+
+    for chunk in phone_chunks(text) {
+        let (kind, rest) = strip_phone_label(&chunk);
+
+        let digits = rest.chars().filter(char::is_ascii_digit).count();
+        // Below seven is a door number or a suite; above fifteen is longer than
+        // E.164 allows and is usually two numbers run together.
+        if !(7..=15).contains(&digits) {
+            continue;
+        }
+
+        // Letters *after* the label mean a sentence that happens to contain
+        // numbers — a street address, most often — rather than a number. This
+        // runs whether or not a label was found, so "M Anderson +44 7700 900123"
+        // is not read as a mobile just because it opens with an M.
+        if rest.chars().filter(|c| c.is_alphabetic()).count() > 4 {
+            continue;
+        }
+
+        let number: String = rest
+            .chars()
+            .filter(|c| c.is_ascii_digit() || "+()- .".contains(*c))
+            .collect();
+        let number = number.trim().trim_matches(['.', '-']).trim().to_string();
+        if !number.is_empty() {
+            found.push(FoundPhone { raw: number, kind });
+        }
     }
-    // Letters mean it is a sentence that happens to contain numbers — a street
-    // address, most often — rather than a phone number.
-    let letters = text.chars().filter(|c| c.is_alphabetic()).count();
-    let label = text
-        .split(|c: char| c == ':' || c == '|')
-        .next_back()
-        .unwrap_or(text);
-    if letters > 4 && label.chars().filter(|c| c.is_alphabetic()).count() > 4 {
+
+    found
+}
+
+/// Split a line into the parts that might each be a number.
+///
+/// Two things divide numbers on a card: punctuation between them, and a second
+/// label starting a new one. Both are handled, because `T 020 7946 0000 F 020
+/// 7946 0001` is printed without any punctuation at all as often as with it.
+fn phone_chunks(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+
+    for segment in text.split(['|', '/', ',', ';']) {
+        let mut current = String::new();
+        for token in segment.split_whitespace() {
+            // A label opens a new number, so whatever came before it is finished.
+            if label_kind(token).is_some() && !current.trim().is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            current.push_str(token);
+            current.push(' ');
+        }
+        if !current.trim().is_empty() {
+            chunks.push(current);
+        }
+    }
+
+    chunks
+}
+
+/// Take a leading label off a chunk, and say what it meant.
+fn strip_phone_label(chunk: &str) -> (Option<PhoneKind>, &str) {
+    let trimmed = chunk.trim_start();
+    let letters_end = trimmed
+        .char_indices()
+        .find(|(_, c)| !c.is_alphabetic())
+        .map(|(index, _)| index)
+        .unwrap_or(trimmed.len());
+
+    match label_kind(&trimmed[..letters_end]) {
+        Some(kind) => (Some(kind), &trimmed[letters_end..]),
+        None => (None, trimmed),
+    }
+}
+
+/// What a single word means beside a number, if anything.
+///
+/// Matched whole rather than by substring: a single letter has to *be* the token
+/// to count, or the "f" in a company name would label a fax number.
+fn label_kind(token: &str) -> Option<PhoneKind> {
+    let word = token
+        .trim_matches(|c: char| !c.is_alphanumeric())
+        .to_lowercase();
+    if word.is_empty() {
         return None;
     }
 
-    let number: String = label
-        .chars()
-        .filter(|c| c.is_ascii_digit() || "+()- .".contains(*c))
-        .collect();
-    let number = number.trim().to_string();
-    (!number.is_empty()).then_some(number)
+    PHONE_LABELS
+        .iter()
+        .find(|(label, _)| *label == word)
+        .map(|(_, kind)| *kind)
 }
+
+/// What cards print beside a number, in the forms they print it.
+///
+/// Single letters are here because they are extremely common on cards and
+/// nowhere else on one: `T`, `M`, `F`, `D` beside a run of digits.
+const PHONE_LABELS: &[(&str, PhoneKind)] = &[
+    ("mobile", PhoneKind::Cell),
+    ("mob", PhoneKind::Cell),
+    ("cell", PhoneKind::Cell),
+    ("cellular", PhoneKind::Cell),
+    ("whatsapp", PhoneKind::Cell),
+    ("wa", PhoneKind::Cell),
+    ("m", PhoneKind::Cell),
+    ("fax", PhoneKind::Fax),
+    ("f", PhoneKind::Fax),
+    ("home", PhoneKind::Home),
+    ("res", PhoneKind::Home),
+    ("telephone", PhoneKind::Work),
+    ("tel", PhoneKind::Work),
+    ("phone", PhoneKind::Work),
+    ("ph", PhoneKind::Work),
+    ("office", PhoneKind::Work),
+    ("direct", PhoneKind::Work),
+    ("dd", PhoneKind::Work),
+    ("t", PhoneKind::Work),
+    ("o", PhoneKind::Work),
+];
 
 /// Strip a printed number to something dialable.
 ///
@@ -677,6 +1030,104 @@ mod tests {
         assert_eq!(kinds, vec![PhoneKind::Cell, PhoneKind::Work, PhoneKind::Fax]);
     }
 
+    /// A label means the digits after it are a number, whatever shape they are in.
+    ///
+    /// Cards space, dot, bracket and hyphen numbers differently in every country,
+    /// and split the country code off as often as not. The label is the reliable
+    /// signal; the formatting is not.
+    #[test]
+    fn a_labelled_number_is_read_however_it_is_printed() {
+        for line_text in [
+            "Mobile 050 123 4567",
+            "Phone 020 7946 0000",
+            "Tel. +971 4 123 4567",
+            "Tel: +971.4.123.4567",
+            "M +44 (0) 7700 900123",
+            "Ph - 020-7946-0000",
+            "Direct line: 020 7946 0000",
+            "WhatsApp +971 50 123 4567",
+            "T +9714 1234567",
+        ] {
+            let parsed = parse_card(&card(vec![
+                line("Sam Reyes", 60.0, 30.0),
+                line(line_text, 300.0, 16.0),
+            ]));
+            assert_eq!(
+                parsed.phones.len(),
+                1,
+                "{line_text:?} was not read as a phone number",
+            );
+        }
+    }
+
+    /// The two most ordinary ways a card prints a number, both of which the
+    /// address guard used to reject because it counted the label's own letters.
+    #[test]
+    fn a_spelled_out_label_does_not_hide_its_number() {
+        let parsed = parse_card(&card(vec![
+            line("Sam Reyes", 60.0, 30.0),
+            line("Mobile 050 123 4567", 300.0, 16.0),
+            line("Phone 020 7946 0000", 340.0, 16.0),
+        ]));
+        assert_eq!(parsed.phones.len(), 2, "a labelled number was thrown away");
+        assert_eq!(parsed.phones[0].kind, PhoneKind::Cell);
+        assert_eq!(parsed.phones[1].kind, PhoneKind::Work);
+    }
+
+    /// A landline and a fax share one line on a great many cards.
+    #[test]
+    fn two_numbers_on_one_line_are_both_read() {
+        let parsed = parse_card(&card(vec![
+            line("Sam Reyes", 60.0, 30.0),
+            line("T: 020 7946 0000 / F: 020 7946 0001", 300.0, 16.0),
+        ]));
+        assert_eq!(parsed.phones.len(), 2, "only one of the two numbers was read");
+        assert_eq!(parsed.phones[0].kind, PhoneKind::Work);
+        assert_eq!(parsed.phones[1].kind, PhoneKind::Fax);
+        assert_eq!(parsed.phones[1].normalised, "02079460001");
+    }
+
+    /// Without punctuation between them, which is just as common.
+    #[test]
+    fn a_second_label_starts_a_second_number() {
+        let parsed = parse_card(&card(vec![
+            line("Sam Reyes", 60.0, 30.0),
+            line("T 020 7946 0000 F 020 7946 0001", 300.0, 16.0),
+        ]));
+        assert_eq!(parsed.phones.len(), 2);
+        assert_eq!(parsed.phones[1].kind, PhoneKind::Fax);
+    }
+
+    /// A single letter has to *be* the label, not appear in a word — otherwise
+    /// the f in a company name labels a fax number.
+    #[test]
+    fn a_letter_inside_a_word_is_not_a_label() {
+        let parsed = parse_card(&card(vec![
+            line("Sam Reyes", 60.0, 30.0),
+            line("Fabrication Unit 12345678", 300.0, 16.0),
+        ]));
+        assert!(
+            parsed.phones.is_empty(),
+            "a word beginning with a label letter was read as a number: {:?}",
+            parsed.phones,
+        );
+    }
+
+    /// And a label must not drag a name in with it. The guard that rejects a
+    /// sentence has to run on what follows the label, not only on what precedes.
+    #[test]
+    fn an_initial_before_a_name_is_not_a_phone_label() {
+        let parsed = parse_card(&card(vec![
+            line("Sam Reyes", 60.0, 30.0),
+            line("M Anderson +44 7700 900123", 300.0, 16.0),
+        ]));
+        assert!(
+            parsed.phones.is_empty(),
+            "a name was read as a labelled phone number: {:?}",
+            parsed.phones,
+        );
+    }
+
     /// A street address holds numbers and must not be read as a phone number.
     #[test]
     fn an_address_with_numbers_is_not_a_phone_number() {
@@ -863,6 +1314,145 @@ mod tests {
         let parsed = parse_card(&RecognisedCard::around_text(segments));
         assert_eq!(parsed.name.unwrap().value, "Yaseen Anwar");
         assert_eq!(parsed.company.unwrap().value, "HSI Lighting LLC");
+    }
+
+    // ------------------------------------------ several cards in one picture --
+
+    /// A second card, with nothing in common with [`ordinary`].
+    fn second_card(offset_x: f32, offset_y: f32) -> Vec<TextSegment> {
+        vec![
+            line("Priya Raman", 70.0, 34.0),
+            line("Head of Purchasing", 118.0, 20.0),
+            line("Northwind Traders Ltd", 165.0, 24.0),
+            line("T: +44 20 7946 0100", 400.0, 16.0),
+            line("priya@northwind.example", 440.0, 16.0),
+        ]
+        .into_iter()
+        .map(|s| TextSegment {
+            left: s.left + offset_x,
+            top: s.top + offset_y,
+            right: s.right + offset_x,
+            bottom: s.bottom + offset_y,
+            text: s.text,
+        })
+        .collect()
+    }
+
+    /// **The case that makes a naive splitter useless.**
+    ///
+    /// One card has a gap between its name and its contact details as wide as the
+    /// gap between two cards on a desk. Cutting there produces a name nobody can
+    /// contact and a phone number belonging to nobody — worse than not splitting
+    /// at all.
+    #[test]
+    fn one_card_is_never_cut_in_half() {
+        let cards = split_cards(ordinary().segments);
+        assert_eq!(cards.len(), 1, "a single card was split into pieces");
+
+        let parsed = parse_card(&cards[0]);
+        assert_eq!(parsed.name.unwrap().value, "Yaseen Anwar");
+        assert_eq!(parsed.emails[0].value, "dev@hsilighting.com");
+    }
+
+    #[test]
+    fn two_cards_side_by_side_are_read_separately() {
+        let mut segments = ordinary().segments;
+        segments.extend(second_card(1400.0, 0.0));
+
+        let cards = split_cards(segments);
+        assert_eq!(cards.len(), 2, "two cards did not come out as two");
+
+        let read: Vec<BusinessCard> = cards.iter().map(parse_card).collect();
+        assert_eq!(read[0].name.as_ref().unwrap().value, "Yaseen Anwar");
+        assert_eq!(read[1].name.as_ref().unwrap().value, "Priya Raman");
+        // And nothing crossed between them, which is the failure that matters:
+        // one person's number filed under another person's name.
+        assert_eq!(read[0].emails[0].value, "dev@hsilighting.com");
+        assert_eq!(read[1].emails[0].value, "priya@northwind.example");
+        assert_eq!(read[1].company.as_ref().unwrap().value, "Northwind Traders Ltd");
+    }
+
+    #[test]
+    fn two_cards_one_above_the_other_are_read_separately() {
+        let mut segments = ordinary().segments;
+        segments.extend(second_card(0.0, 900.0));
+
+        let cards = split_cards(segments);
+        assert_eq!(cards.len(), 2);
+
+        let read: Vec<BusinessCard> = cards.iter().map(parse_card).collect();
+        assert_eq!(read[0].name.as_ref().unwrap().value, "Yaseen Anwar");
+        assert_eq!(read[1].name.as_ref().unwrap().value, "Priya Raman");
+    }
+
+    /// Four on a desk, and they come back in the order they were laid out.
+    #[test]
+    fn a_grid_of_cards_comes_back_in_reading_order() {
+        let mut segments = Vec::new();
+        segments.extend(ordinary().segments); // top left
+        segments.extend(second_card(1400.0, 0.0)); // top right
+        segments.extend(second_card(0.0, 900.0)); // bottom left
+        segments.extend(ordinary().segments.into_iter().map(|s| TextSegment {
+            left: s.left + 1400.0,
+            top: s.top + 900.0,
+            right: s.right + 1400.0,
+            bottom: s.bottom + 900.0,
+            text: s.text,
+        }));
+
+        let cards = split_cards(segments);
+        assert_eq!(cards.len(), 4, "four cards did not come out as four");
+
+        let names: Vec<String> = cards
+            .iter()
+            .map(|card| parse_card(card).name.map(|n| n.value).unwrap_or_default())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["Yaseen Anwar", "Priya Raman", "Priya Raman", "Yaseen Anwar"],
+            "the cards came back in the wrong order",
+        );
+    }
+
+    /// Half a card is not a card: a name with no way to reach them, or contact
+    /// details belonging to nobody. This is the rule the guard rests on.
+    #[test]
+    fn half_a_card_is_not_mistaken_for_one() {
+        let top_half = vec![
+            line("Yaseen Anwar", 70.0, 34.0),
+            line("Design Engineer", 118.0, 20.0),
+            line("HSI Lighting LLC", 165.0, 24.0),
+        ];
+        let bottom_half = vec![
+            line("M: +971 50 123 4567", 400.0, 16.0),
+            line("dev@hsilighting.com", 440.0, 16.0),
+        ];
+
+        assert!(
+            !looks_like_a_card(&top_half),
+            "a name with no way of reaching them was taken for a whole card",
+        );
+        assert!(
+            !looks_like_a_card(&bottom_half),
+            "contact details belonging to nobody were taken for a whole card",
+        );
+    }
+
+    /// Text that no rule can divide stays whole rather than being scattered.
+    #[test]
+    fn a_photograph_of_nothing_in_particular_stays_in_one_piece() {
+        let cards = split_cards(vec![
+            line("Est. 1974", 60.0, 14.0),
+            line("Lighting for people", 100.0, 14.0),
+            line("Open Monday to Friday", 140.0, 14.0),
+            line("Closed on public holidays", 180.0, 14.0),
+        ]);
+        assert_eq!(cards.len(), 1);
+    }
+
+    #[test]
+    fn splitting_nothing_is_survivable() {
+        assert!(split_cards(vec![]).is_empty());
     }
 
     /// A photograph of a blank wall recognises nothing. That is an empty card,

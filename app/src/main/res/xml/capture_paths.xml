@@ -14,4 +14,11 @@
         reasons, and one grant should never reach the other kind of file.
     -->
     <cache-path name="contacts" path="contacts/" />
+    <!--
+        And card photographs their own again. A photo taken to be read is
+        handed to nobody; it is here only because the camera app needs
+        somewhere to write, and it should not be reachable through a grant
+        given out for a vCard or a page.
+    -->
+    <cache-path name="cards" path="cards/" />
 </paths>

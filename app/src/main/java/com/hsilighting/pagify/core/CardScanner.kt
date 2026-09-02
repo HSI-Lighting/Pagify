@@ -58,13 +58,20 @@ object CardScanner {
      */
     sealed interface Outcome {
         /**
-         * @param qrPayload a QR that was not a vCard, when the card was read from
-         *   its printed text instead. The website is usually printed on the card
+         * One or more cards read from a single photograph.
+         *
+         * A list rather than one card, because a photograph of a desk after an
+         * event holds as many cards as somebody laid out on it, and making the
+         * common case go through the flow six times is what stops it being used.
+         *
+         * @param qrPayload a QR that was not a vCard, when the cards were read
+         *   from printed text instead. The website is usually printed on the card
          *   as well, but not always — and this is the copy that cannot have been
-         *   misread.
+         *   misread. Only carried when exactly one card was found: with several
+         *   on the table there is no telling whose code it was.
          */
-        data class Contact(
-            val card: String,
+        data class Contacts(
+            val cards: List<String>,
             val source: Source,
             val qrPayload: String? = null,
         ) : Outcome
@@ -74,7 +81,7 @@ object CardScanner {
         data class Failed(val reason: String) : Outcome
     }
 
-    /** Read a card: its QR if it has one, its printed text if it does not. */
+    /** Read a photograph: the QR codes on it if any, the printed text if not. */
     suspend fun read(context: Context, image: Uri): Outcome {
         val input = try {
             InputImage.fromFilePath(context, image)
@@ -92,15 +99,16 @@ object CardScanner {
             emptyList()
         }
 
-        // Every payload is offered to the engine, not just the first: a card can
-        // carry two codes — one for the vCard and one for a website — and which
-        // is which is not knowable from the barcode alone.
-        for (payload in barcodes) {
-            val card = runCatching { NativeBridge.contactFromVCard(payload) }
+        // Every payload is read, not just the first. A card can carry two codes —
+        // one for the vCard and one for a website — and six cards on a table can
+        // carry six vCards, which is six contacts from one photograph and the
+        // best possible version of this feature: exact data, no recognition.
+        val fromQr = barcodes.mapNotNull { payload ->
+            runCatching { NativeBridge.contactFromVCard(payload) }
                 .onFailure { Log.w(TAG, "could not read a payload as a contact", it) }
                 .getOrNull()
-            if (card != null) return Outcome.Contact(card, Source.QR)
         }
+        if (fromQr.isNotEmpty()) return Outcome.Contacts(fromQr, Source.QR)
 
         val printed = try {
             readPrintedText(input)
@@ -109,12 +117,17 @@ object CardScanner {
             return Outcome.Failed(t.message ?: "The card could not be read.")
         }
 
-        // The engine returns a card either way; an empty one is not worth saving.
-        // Judged on the fields rather than on whether any text was recognised at
-        // all, because a photograph of a page of notes recognises plenty and
-        // yields no contact.
-        if (printed != null && worthKeeping(printed)) {
-            return Outcome.Contact(printed, Source.PRINT, barcodes.firstOrNull())
+        // An empty card is not worth saving. Judged on the fields rather than on
+        // whether any text was recognised at all, because a photograph of a page
+        // of notes recognises plenty and yields no contact.
+        val worth = printed.filter(::worthKeeping)
+        if (worth.isNotEmpty()) {
+            return Outcome.Contacts(
+                cards = worth,
+                source = Source.PRINT,
+                // Only when there is one card to attach it to.
+                qrPayload = barcodes.firstOrNull()?.takeIf { worth.size == 1 },
+            )
         }
 
         barcodes.firstOrNull()?.let { return Outcome.NotAContact(it) }
@@ -128,15 +141,24 @@ object CardScanner {
      * engine's rules are about relative position and relative text size, so the
      * units cancel and there is nothing to convert into.
      */
-    private suspend fun readPrintedText(image: InputImage): String? {
+    private suspend fun readPrintedText(image: InputImage): List<String> {
         val segments = recogniseLines(image)
-        if (segments.isEmpty()) return null
+        if (segments.isEmpty()) return emptyList()
 
         val json = JSONArray().apply { segments.forEach { put(it) } }.toString()
 
-        return runCatching { NativeBridge.parsePhotographedCard(json) }
-            .onFailure { Log.e(TAG, "the engine could not read the card", it) }
+        val cards = runCatching { NativeBridge.parsePhotographedCard(json) }
+            .onFailure { Log.e(TAG, "the engine could not read the cards", it) }
             .getOrNull()
+            ?: return emptyList()
+
+        return runCatching {
+            val array = JSONArray(cards)
+            (0 until array.length()).map { array.getJSONObject(it).toString() }
+        }.getOrElse {
+            Log.e(TAG, "the engine returned cards that could not be read back", it)
+            emptyList()
+        }
     }
 
     /**

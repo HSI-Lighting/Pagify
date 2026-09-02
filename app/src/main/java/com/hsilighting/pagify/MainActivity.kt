@@ -16,7 +16,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -67,6 +69,9 @@ class MainActivity : ComponentActivity() {
                 val incoming by incomingDocument.collectAsStateWithLifecycle()
                 val recents by viewModel.recents.collectAsStateWithLifecycle()
                 val contacts by viewModel.contacts.collectAsStateWithLifecycle()
+                val contactGroups by viewModel.contactGroups.collectAsStateWithLifecycle()
+                val groupMemberships by viewModel.groupMemberships.collectAsStateWithLifecycle()
+                val importTarget by viewModel.importTarget.collectAsStateWithLifecycle()
 
                 LaunchedEffect(incoming) {
                     incoming?.let { uri ->
@@ -113,17 +118,40 @@ class MainActivity : ComponentActivity() {
                 val openPicker = remember { { picker.launch(arrayOf(PDF_MIME_TYPE)) } }
 
                 /**
-                 * A photograph of a business card.
+                 * A business card already on the device.
                  *
-                 * The gallery rather than the camera, for now. There is no camera
-                 * anywhere in this app — no CameraX, no permission, no preview —
-                 * and adding one is a week of work that this slice does not need
-                 * to prove itself. The system camera can put a photo in the
-                 * gallery, and this reads it from there.
+                 * For one photographed earlier, or sent by somebody else. Needs no
+                 * permission of any kind.
                  */
                 val cardPicker = rememberLauncherForActivityResult(
                     ActivityResultContracts.OpenDocument(),
                 ) { uri -> uri?.let(viewModel::scanCard) }
+
+                /**
+                 * A card photographed here and now.
+                 *
+                 * The system camera app rather than CameraX: no dependency, no
+                 * preview to build, and — because this app does not declare
+                 * `CAMERA` in its manifest — **no permission prompt**.
+                 * `TakePicture` requires the permission only from an app that has
+                 * declared it, so declaring it in order to be thorough would
+                 * introduce the very prompt that not declaring it avoids.
+                 *
+                 * The destination is held here across the trip to the camera,
+                 * which is another activity and can take this process down with it
+                 * on a low-memory device. On that path the photo is lost and the
+                 * user takes it again — the alternative, restoring a `Uri` whose
+                 * file may no longer exist, fails less honestly.
+                 */
+                var cardPhoto by remember { mutableStateOf<Uri?>(null) }
+                val cardCamera = rememberLauncherForActivityResult(
+                    ActivityResultContracts.TakePicture(),
+                ) { taken ->
+                    // False means cancelled or failed. The empty file it leaves
+                    // behind is not worth recognising, and the cache clears itself.
+                    if (taken) cardPhoto?.let(viewModel::scanCard)
+                    cardPhoto = null
+                }
 
                 /**
                  * Where chosen pages are written out.
@@ -268,13 +296,41 @@ class MainActivity : ComponentActivity() {
                     onToggleRecording = recordingToast,
                     onReturnToLibrary = { viewModel.askBeforeLeaving(LeaveIntent.Library) },
                     contacts = contacts,
+                    contactGroups = contactGroups,
+                    groupMemberships = groupMemberships,
+                    importTarget = importTarget,
+                    onSetImportTarget = viewModel::setImportTarget,
+                    onCreateGroup = { viewModel.createGroup(it, eventDate = null) },
+                    onRenameGroup = viewModel::renameGroup,
+                    onDeleteGroup = viewModel::deleteGroup,
+                    onExportGroup = { group ->
+                        viewModel.exportGroup(group) { name, vcard ->
+                            shareContact(name, vcard)
+                        }
+                    },
+                    onRemoveFromGroup = viewModel::removeFromGroup,
                     onScanCard = { cardPicker.launch(arrayOf("image/*")) },
+                    onPhotographCard = {
+                        val destination = runCatching { newCardPhoto() }.getOrNull()
+                        if (destination == null) {
+                            viewModel.report("There was nowhere to save the photo.")
+                        } else {
+                            cardPhoto = destination
+                            // No camera app at all is rare but real, and a crash
+                            // is a poor way to say so.
+                            runCatching { cardCamera.launch(destination) }.onFailure {
+                                cardPhoto = null
+                                viewModel.report("This device has no camera app.")
+                            }
+                        }
+                    },
                     onExportContact = { contact ->
                         viewModel.exportContact(contact) { vcard ->
                             shareContact(contact.displayName, vcard)
                         }
                     },
                     onDeleteContact = viewModel::deleteContact,
+                    onSaveContact = viewModel::updateContact,
                     onMessageShown = viewModel::messageShown,
                 ) {
                     PdfReaderScreen(
@@ -438,6 +494,25 @@ class MainActivity : ComponentActivity() {
             val base = documentName.ifBlank { "Document" }.removeSuffix(".pdf")
             return "$base (edited).pdf"
         }
+    }
+
+    /**
+     * Somewhere for the camera app to write a card photograph.
+     *
+     * Its own cache directory, not the one page captures use: a grant handed to
+     * the camera should not reach a document the user never meant to share. The
+     * FileProvider authority is declared in the manifest and the path in
+     * `capture_paths.xml`; both have to agree with this or the camera is handed a
+     * URI it cannot write to.
+     *
+     * The cache is chosen deliberately. The photograph is a means to a contact,
+     * not a thing the user asked to keep, and the system reclaiming it later is
+     * the right outcome rather than a loss.
+     */
+    private fun newCardPhoto(): Uri {
+        val directory = File(cacheDir, "cards").apply { mkdirs() }
+        val file = File(directory, "card-${System.currentTimeMillis()}.jpg")
+        return FileProvider.getUriForFile(this, "$packageName.captures", file)
     }
 
     /**

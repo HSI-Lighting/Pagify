@@ -2,6 +2,7 @@ package com.hsilighting.pagify.data.db
 
 import androidx.room.Dao
 import androidx.room.Insert
+import androidx.room.Upsert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Transaction
@@ -15,7 +16,21 @@ interface ContactsDao {
     @Query("SELECT * FROM contacts ORDER BY capturedAt DESC")
     fun contacts(): Flow<List<ContactRow>>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    /**
+     * Save a contact, new or edited.
+     *
+     * **`@Upsert`, and it must not go back to `@Insert(REPLACE)`.** REPLACE is
+     * the obvious choice and it is a data-loss bug here: SQLite implements it as
+     * a delete followed by an insert, the database runs with
+     * `PRAGMA foreign_keys = ON`, and [MembershipRow] cascades on `contactId` —
+     * so re-saving a contact silently removes it from every group it was filed
+     * in. It never showed while this only ever saved freshly scanned cards; the
+     * first edit of a filed contact would have unfiled it.
+     *
+     * `@Upsert` issues an UPDATE when the row exists. Nothing is deleted, so
+     * nothing cascades. There is a test.
+     */
+    @Upsert
     suspend fun save(contact: ContactRow)
 
     @Query("DELETE FROM contacts WHERE id = :id")

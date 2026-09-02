@@ -213,17 +213,18 @@ internal object NativeBridge {
     external fun contactFromVCard(text: String): String?
 
     /**
-     * Reads the fields off a photographed card, from the text recognised on it.
+     * Reads the cards in a photograph, from the text recognised on it.
      *
      * The printed path — what happens when there is no QR to read. ML Kit does
      * the recognising; deciding which line is the name and which is the company
      * is the engine's, so that a card reads the same here as it does on iOS.
      *
      * [segmentsJson] is a `TextSegment` array in the photograph's pixel space.
-     * No detection has run, so the engine measures the card from its own text.
+     * No detection has run, so the engine measures each card from its own text.
      *
-     * Never null: a photograph that recognised nothing gives back an empty card,
-     * and whether that is worth saving is the caller's decision.
+     * Returns a JSON **array** of cards: one photograph can hold several, and the
+     * engine decides where one ends and the next begins. Never null, and possibly
+     * empty — whether that is worth reporting is the caller's decision.
      */
     @Throws(PdfException::class)
     external fun parsePhotographedCard(segmentsJson: String): String

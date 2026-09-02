@@ -5,6 +5,7 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarHost
 import com.hsilighting.pagify.ui.contacts.ContactsScreen
 import com.hsilighting.pagify.core.Contact
+import com.hsilighting.pagify.core.ContactGroup
 import androidx.compose.material.icons.filled.ContactPage
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
@@ -62,9 +63,23 @@ fun PagifyApp(
     onReturnToLibrary: () -> Unit,
     /** Contacts read off business cards. */
     contacts: List<Contact>,
+    contactGroups: List<ContactGroup>,
+    /** Contact id to the groups it is in. */
+    groupMemberships: Map<Long, List<Long>>,
+    /** The group newly scanned cards are filed into, or null for none. */
+    importTarget: Long?,
+    onSetImportTarget: (Long?) -> Unit,
+    onCreateGroup: (String) -> Unit,
+    onRenameGroup: (ContactGroup, String) -> Unit,
+    onDeleteGroup: (ContactGroup) -> Unit,
+    onExportGroup: (ContactGroup) -> Unit,
+    onRemoveFromGroup: (Contact, Long) -> Unit,
+    /** From the gallery, and from the camera. */
     onScanCard: () -> Unit,
+    onPhotographCard: () -> Unit,
     onExportContact: (Contact) -> Unit,
     onDeleteContact: (Contact) -> Unit,
+    onSaveContact: (Contact) -> Unit,
     /** Cleared once shown, so the same message can be sent twice. */
     onMessageShown: () -> Unit,
     reader: @Composable () -> Unit,
@@ -124,9 +139,20 @@ fun PagifyApp(
 
                 HomeTab.Contacts -> ContactsScreen(
                     contacts = contacts,
-                    onScan = onScanCard,
+                    groups = contactGroups,
+                    memberships = groupMemberships,
+                    importTarget = importTarget,
+                    onSetImportTarget = onSetImportTarget,
+                    onCreateGroup = onCreateGroup,
+                    onRenameGroup = onRenameGroup,
+                    onDeleteGroup = onDeleteGroup,
+                    onExportGroup = onExportGroup,
+                    onRemoveFromGroup = onRemoveFromGroup,
+                    onScanFromGallery = onScanCard,
+                    onScanFromCamera = onPhotographCard,
                     onExport = onExportContact,
                     onDelete = onDeleteContact,
+                    onSaveEdit = onSaveContact,
                 )
 
                 HomeTab.Settings -> SettingsScreen(

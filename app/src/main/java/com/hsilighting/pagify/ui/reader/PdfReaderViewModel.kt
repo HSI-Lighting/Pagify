@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.stateIn
 import com.hsilighting.pagify.data.ContactStore
 import com.hsilighting.pagify.core.contactFromCardJson
 import com.hsilighting.pagify.core.Contact
+import com.hsilighting.pagify.core.ContactGroup
 import com.hsilighting.pagify.core.CardScanner
 import android.app.Application
 import android.content.ClipData
@@ -149,6 +150,32 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     val contacts: StateFlow<List<Contact>> = contactStore.contacts
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val contactGroups: StateFlow<List<ContactGroup>> = contactStore.groups
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Contact id to the groups it is in. */
+    val groupMemberships: StateFlow<Map<Long, List<Long>>> = contactStore.memberships
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    /**
+     * The group newly scanned cards are filed into.
+     *
+     * Set once before a batch rather than asked per card: after an event somebody
+     * imports forty of these, and answering the same question forty times is what
+     * makes a feature go unused. Null is ordinary and means ungrouped.
+     *
+     * Deliberately **not** persisted across launches. The failure mode of a
+     * sticky default is filing next month's cards into last month's event and not
+     * noticing for weeks; forgetting it when the app closes bounds how long that
+     * can go on.
+     */
+    private val _importTarget = MutableStateFlow<Long?>(null)
+    val importTarget: StateFlow<Long?> = _importTarget
+
+    fun setImportTarget(groupId: Long?) {
+        _importTarget.value = groupId
+    }
     val recents: StateFlow<List<RecentDocument>> = recentDocuments.documents
 
     /** Theme, viewfinder, and anything else that outlives a document. */
@@ -1645,6 +1672,16 @@ frame = pending.frame,
 
     fun messageShown() = _state.update { it.copy(message = null) }
 
+    /**
+     * Say something to the user from outside the view model.
+     *
+     * For the few failures only the activity can see — no camera app on the
+     * device, nowhere to write a photograph — which would otherwise have to be
+     * reported with a Toast and so would look nothing like every other message
+     * the app gives.
+     */
+    fun report(message: String) = _state.update { it.copy(message = message) }
+
     fun deletePage(pageIndex: Int) {
         val doc = document ?: return
         if (_state.value.pageCount <= 1) {
@@ -1699,27 +1736,53 @@ frame = pending.frame,
     fun scanCard(image: Uri) {
         viewModelScope.launch {
             when (val outcome = CardScanner.read(getApplication(), image)) {
-                is CardScanner.Outcome.Contact -> {
-                    val read = contactFromCardJson(outcome.card, System.currentTimeMillis())
-                    // The QR held a web address and the card was read in print.
-                    // Keeping it costs nothing and it cannot have been misread,
-                    // which is more than the printed copy can claim.
-                    val contact = outcome.qrPayload
-                        ?.takeIf { it.isNotBlank() && it !in read.urls }
-                        ?.let { read.copy(urls = read.urls + it) }
-                        ?: read
+                is CardScanner.Outcome.Contacts -> {
+                    val target = _importTarget.value
+                    val filed = target
+                        ?.let { id -> contactGroups.value.firstOrNull { it.id == id } }
+                        ?.let { " into ${it.name}" }
+                        .orEmpty()
 
-                    contactStore.save(contact)
+                    val saved = outcome.cards.mapIndexed { position, json ->
+                        // The id is the clock, and several cards are saved within
+                        // the same millisecond — so each one is nudged past the
+                        // last. Two contacts sharing an id would upsert onto each
+                        // other and the second would silently replace the first.
+                        val read = contactFromCardJson(
+                            json,
+                            System.currentTimeMillis() + position,
+                        )
+                        // A QR that held a web address, kept alongside the printed
+                        // reading: it cannot have been misread, which is more than
+                        // the printed copy can claim.
+                        val contact = outcome.qrPayload
+                            ?.takeIf { it.isNotBlank() && it !in read.urls }
+                            ?.let { read.copy(urls = read.urls + it) }
+                            ?: read
+
+                        contactStore.save(contact, target)
+                        contact
+                    }
+
                     SessionRecorder.record(
                         "CARD_SCAN",
-                        "source=${outcome.source} name=${contact.displayName}",
+                        "source=${outcome.source} n=${saved.size} group=$target",
                     )
                     _state.update {
                         it.copy(
-                            message = when (outcome.source) {
-                                CardScanner.Source.QR -> "Saved ${contact.displayName}."
-                                CardScanner.Source.PRINT ->
-                                    "Read ${contact.displayName} off the card — check it."
+                            message = when {
+                                saved.size > 1 -> when (outcome.source) {
+                                    CardScanner.Source.QR ->
+                                        "Saved ${saved.size} contacts$filed."
+                                    CardScanner.Source.PRINT ->
+                                        "Read ${saved.size} cards$filed — check them."
+                                }
+
+                                outcome.source == CardScanner.Source.QR ->
+                                    "Saved ${saved.first().displayName}$filed."
+
+                                else ->
+                                    "Read ${saved.first().displayName}$filed — check it."
                             },
                         )
                     }
@@ -1773,6 +1836,103 @@ frame = pending.frame,
     fun deleteContact(contact: Contact) {
         viewModelScope.launch { contactStore.delete(contact.id) }
     }
+
+    /**
+     * Save a corrected contact.
+     *
+     * The printed path produces guesses — which line was the name, which the
+     * company — so this is how a wrong one stops being wrong. It saves through
+     * the same `save` as a new card, which is safe only because that method
+     * upserts: an `@Insert(REPLACE)` would delete the row first, cascade to the
+     * membership table, and quietly unfile the contact from every group. There
+     * is a test.
+     */
+    fun updateContact(contact: Contact) {
+        viewModelScope.launch {
+            contactStore.save(contact)
+            SessionRecorder.record("CONTACT_EDIT", "name=${contact.displayName}")
+            _state.update { it.copy(message = "Saved ${contact.displayName}.") }
+        }
+    }
+
+    // ------------------------------------------------------------ organising --
+
+    fun createGroup(name: String, eventDate: Long?) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            val group = ContactGroup(
+                id = System.currentTimeMillis(),
+                name = trimmed,
+                eventDate = eventDate,
+            )
+            contactStore.saveGroup(group)
+            // Creating a group is nearly always the first move of a batch, so it
+            // becomes the target without a second tap.
+            _importTarget.value = group.id
+            _state.update { it.copy(message = "Scanning into ${group.name}.") }
+        }
+    }
+
+    fun renameGroup(group: ContactGroup, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch { contactStore.saveGroup(group.copy(name = trimmed)) }
+    }
+
+    /**
+     * Delete a group and **not** its contacts.
+     *
+     * They lose this membership, keep every other, and become ungrouped if it was
+     * their last. The cascade that would take the contacts with it is the natural
+     * thing to write and a data-loss bug; there is a test on the schema.
+     */
+    fun deleteGroup(group: ContactGroup) {
+        viewModelScope.launch {
+            contactStore.deleteGroup(group.id)
+            if (_importTarget.value == group.id) _importTarget.value = null
+            _state.update {
+                it.copy(message = "Deleted ${group.name}. Its contacts are still here.")
+            }
+        }
+    }
+
+    fun addToGroup(contact: Contact, groupId: Long) {
+        viewModelScope.launch { contactStore.addToGroup(contact.id, groupId) }
+    }
+
+    fun removeFromGroup(contact: Contact, groupId: Long) {
+        viewModelScope.launch { contactStore.removeFromGroup(contact.id, groupId) }
+    }
+
+    /**
+     * Export a whole group as one file.
+     *
+     * Everybody in it gets the same `exportedAt`, the same value goes into each
+     * vCard's `REV`, and the group's own `lastExportedAt` agrees with theirs —
+     * they were sent together, so nothing may disagree about when.
+     */
+    fun exportGroup(group: ContactGroup, share: (String, String) -> Unit) {
+        viewModelScope.launch {
+            runCatching { contactStore.exportGroup(group) }
+                .onSuccess { vcard ->
+                    if (vcard.isBlank()) {
+                        _state.update { it.copy(message = "${group.name} is empty.") }
+                        return@onSuccess
+                    }
+                    val count = contactStore.contactsIn(group.id).size
+                    SessionRecorder.record("GROUP_EXPORT", "group=${group.name} n=$count")
+                    share("${group.name} ($count contacts)", vcard)
+                }
+                .onFailure { failure ->
+                    Log.e(TAG, "the group could not be exported", failure)
+                    _state.update {
+                        it.copy(message = failure.message ?: "That group could not be exported.")
+                    }
+                }
+        }
+    }
+
     // ------------------------------------------------------- pages in and out --
 
     fun choosePagesToExport(show: Boolean) =
