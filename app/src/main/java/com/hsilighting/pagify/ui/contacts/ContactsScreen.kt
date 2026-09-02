@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PersonAdd
@@ -98,6 +100,10 @@ fun ContactsScreen(
     onExport: (Contact) -> Unit,
     onDelete: (Contact) -> Unit,
     onSaveEdit: (Contact) -> Unit,
+    /** Several at once, picked by long press. */
+    onDeleteContacts: (List<Contact>) -> Unit,
+    onDeleteGroups: (List<ContactGroup>) -> Unit,
+    onExportSelected: (List<Contact>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
@@ -112,11 +118,23 @@ fun ContactsScreen(
     var namingForContact by remember { mutableStateOf<Contact?>(null) }
     var confirmingDelete by remember { mutableStateOf<ContactGroup?>(null) }
 
+    // Picked by long press, for deleting or exporting several at once. Contacts
+    // and groups never mix: the two lists are separate views, and a delete that
+    // meant different things to different rows in one selection would be a
+    // confirmation nobody could read.
+    var pickedContacts by remember { mutableStateOf(emptySet<Long>()) }
+    var pickedGroups by remember { mutableStateOf(emptySet<Long>()) }
+    var confirmingBulk by remember { mutableStateOf(false) }
+    val picking = pickedContacts.isNotEmpty() || pickedGroups.isNotEmpty()
+    val clearPicked = { pickedContacts = emptySet(); pickedGroups = emptySet() }
+
     // Groups only once one exists — see the note on this function.
     var byGroup by remember(groups.isEmpty()) { mutableStateOf(groups.isNotEmpty()) }
 
-    // Drilling into a group is a place the back gesture should leave, not the tab.
-    BackHandler(enabled = openGroup != null) { openGroup = null }
+    // Back gets out of a selection first, then out of a group. Both before it
+    // reaches the tab, and in that order — the innermost thing the user is in.
+    BackHandler(enabled = picking) { clearPicked() }
+    BackHandler(enabled = !picking && openGroup != null) { openGroup = null }
 
     val inGroup = { group: ContactGroup ->
         contacts.filter { memberships[it.id].orEmpty().contains(group.id) }
@@ -136,13 +154,29 @@ fun ContactsScreen(
 
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
-            Header(
-                group = openGroup,
-                onBack = { openGroup = null },
-                onExportGroup = { openGroup?.let(onExportGroup) },
-                onRenameGroup = { renaming = openGroup },
-                onDeleteGroup = { confirmingDelete = openGroup },
-            )
+            if (picking) {
+                SelectionHeader(
+                    count = pickedContacts.size + pickedGroups.size,
+                    onClear = clearPicked,
+                    onExport = if (pickedContacts.isNotEmpty()) {
+                        {
+                            onExportSelected(contacts.filter { it.id in pickedContacts })
+                            clearPicked()
+                        }
+                    } else {
+                        null
+                    },
+                    onDelete = { confirmingBulk = true },
+                )
+            } else {
+                Header(
+                    group = openGroup,
+                    onBack = { openGroup = null },
+                    onExportGroup = { openGroup?.let(onExportGroup) },
+                    onRenameGroup = { renaming = openGroup },
+                    onDeleteGroup = { confirmingDelete = openGroup },
+                )
+            }
 
             if (openGroup == null && groups.isNotEmpty()) {
                 Row(
@@ -216,6 +250,16 @@ fun ContactsScreen(
                             onRename = { renaming = group },
                             onExport = { onExportGroup(group) },
                             onDelete = { confirmingDelete = group },
+                            selected = group.id in pickedGroups,
+                            selecting = picking,
+                            onLongPress = {
+                                pickedContacts = emptySet()
+                                pickedGroups = if (group.id in pickedGroups) {
+                                    pickedGroups - group.id
+                                } else {
+                                    pickedGroups + group.id
+                                }
+                            },
                         )
                     }
                     if (ungrouped.isNotEmpty()) {
@@ -242,7 +286,20 @@ fun ContactsScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(shown, key = { it.id }) { contact ->
-                        ContactRow(contact) { open = contact }
+                        ContactRow(
+                            contact = contact,
+                            selected = contact.id in pickedContacts,
+                            selecting = picking,
+                            onLongPress = {
+                                pickedGroups = emptySet()
+                                pickedContacts = if (contact.id in pickedContacts) {
+                                    pickedContacts - contact.id
+                                } else {
+                                    pickedContacts + contact.id
+                                }
+                            },
+                            onClick = { open = contact },
+                        )
                     }
                 }
             }
@@ -296,6 +353,50 @@ fun ContactsScreen(
             // Backing out returns to the filing question rather than dropping it,
             // so a mistaken tap on "New group" does not leave the card unfiled.
             onDismiss = { namingForScan = false },
+        )
+    }
+
+    if (confirmingBulk) {
+        val groupsPicked = pickedGroups.size
+        val contactsPicked = pickedContacts.size
+        AlertDialog(
+            onDismissRequest = { confirmingBulk = false },
+            title = {
+                Text(
+                    if (groupsPicked > 0) {
+                        "Delete $groupsPicked ${if (groupsPicked == 1) "group" else "groups"}?"
+                    } else {
+                        "Delete $contactsPicked ${if (contactsPicked == 1) "contact" else "contacts"}?"
+                    },
+                )
+            },
+            text = {
+                Text(
+                    if (groupsPicked > 0) {
+                        "The groups are removed. Their contacts stay in Pagify and " +
+                            "move to Ungrouped if they were in no other group."
+                    } else {
+                        "They will be removed from Pagify. If the cards are not " +
+                            "still in your pocket, this cannot be undone."
+                    },
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmingBulk = false
+                        if (pickedGroups.isNotEmpty()) {
+                            onDeleteGroups(groups.filter { it.id in pickedGroups })
+                        } else {
+                            onDeleteContacts(contacts.filter { it.id in pickedContacts })
+                        }
+                        clearPicked()
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmingBulk = false }) { Text("Keep") }
+            },
         )
     }
 
@@ -429,6 +530,52 @@ private fun Header(
 }
 
 /**
+ * What replaces the title while several things are picked.
+ *
+ * A count rather than a list, and a close that clears rather than a back arrow
+ * that navigates: the selection is a mode, and the way out of a mode should undo
+ * it rather than move somewhere else.
+ */
+@Composable
+private fun SelectionHeader(
+    count: Int,
+    onClear: () -> Unit,
+    onExport: (() -> Unit)?,
+    onDelete: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(start = 8.dp, end = 8.dp, top = 12.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        IconButton(onClick = onClear) {
+            Icon(Icons.Filled.Close, contentDescription = "Stop selecting")
+        }
+        Text(
+            text = "$count selected",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.weight(1f),
+        )
+        // Only for contacts: a group export is a different thing, done from the
+        // group itself, and offering it here would mean two exports with the
+        // same icon doing different things.
+        onExport?.let { export ->
+            IconButton(onClick = export) {
+                Icon(Icons.Filled.Share, contentDescription = "Export the selected contacts")
+            }
+        }
+        IconButton(onClick = onDelete) {
+            Icon(
+                Icons.Filled.Delete,
+                contentDescription = "Delete what is selected",
+                tint = MaterialTheme.colorScheme.error,
+            )
+        }
+    }
+}
+
+/**
  * Confirming a group deletion, wherever it was asked for.
  *
  * One dialog for both routes — the open group's header and the list row's menu —
@@ -507,13 +654,26 @@ private fun SourceRow(icon: ImageVector, label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ContactRow(contact: Contact, onClick: () -> Unit) {
+private fun ContactRow(
+    contact: Contact,
+    selected: Boolean,
+    selecting: Boolean,
+    onLongPress: () -> Unit,
+    onClick: () -> Unit,
+) {
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
         shape = MaterialTheme.shapes.medium,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                onClick = { if (selecting) onLongPress() else onClick() },
+                onLongClick = onLongPress,
+            ),
     ) {
         Row(
             Modifier.padding(14.dp),

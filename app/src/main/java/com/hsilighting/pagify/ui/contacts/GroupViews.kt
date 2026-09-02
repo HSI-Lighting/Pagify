@@ -1,6 +1,7 @@
 package com.hsilighting.pagify.ui.contacts
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -58,15 +59,30 @@ fun GroupRow(
     onRename: (() -> Unit)? = null,
     onExport: (() -> Unit)? = null,
     onDelete: (() -> Unit)? = null,
+    /** Picking several at once. Null when this row cannot be picked. */
+    onLongPress: (() -> Unit)? = null,
+    selected: Boolean = false,
+    /** True once anything is selected: a tap then picks rather than opens. */
+    selecting: Boolean = false,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = if (selected) {
+            MaterialTheme.colorScheme.primaryContainer
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant
+        },
         shape = MaterialTheme.shapes.medium,
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .combinedClickable(
+                // While picking, a tap adds to the selection rather than opening.
+                // A list that opens something mid-selection throws the selection
+                // away, which is the most irritating way for this to be wrong.
+                onClick = { if (selecting && onLongPress != null) onLongPress() else onClick() },
+                onLongClick = onLongPress,
+            ),
     ) {
         Row(
             Modifier.padding(16.dp),
@@ -89,7 +105,7 @@ fun GroupRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (onDelete != null || onRename != null || onExport != null) {
+            if (!selecting && (onDelete != null || onRename != null || onExport != null)) {
                 Box {
                     IconButton(onClick = { menuOpen = true }) {
                         Icon(

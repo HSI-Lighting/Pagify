@@ -86,6 +86,10 @@ fun PagifyApp(
     onExportContact: (Contact) -> Unit,
     onDeleteContact: (Contact) -> Unit,
     onSaveContact: (Contact) -> Unit,
+    /** Several at once, picked by long press. */
+    onDeleteContacts: (List<Contact>) -> Unit,
+    onDeleteGroups: (List<ContactGroup>) -> Unit,
+    onExportSelected: (List<Contact>) -> Unit,
     /** Cleared once shown, so the same message can be sent twice. */
     onMessageShown: () -> Unit,
     reader: @Composable () -> Unit,
@@ -164,6 +168,9 @@ fun PagifyApp(
                     onExport = onExportContact,
                     onDelete = onDeleteContact,
                     onSaveEdit = onSaveContact,
+                    onDeleteContacts = onDeleteContacts,
+                    onDeleteGroups = onDeleteGroups,
+                    onExportSelected = onExportSelected,
                 )
 
                 HomeTab.Settings -> SettingsScreen(

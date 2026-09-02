@@ -122,26 +122,37 @@ private fun field(value: String) = JSONObject().apply {
     put("confidence", 1.0)
 }
 
+/**
+ * A string, treating JSON null as absent.
+ *
+ * `optString` returns the **four characters "null"** for a JSON null rather than
+ * an empty string, and the engine writes `"notes": null` for a card with no
+ * leftover text — every card without notes showed a Notes field reading "null".
+ * It reached a real screen.
+ */
+private fun JSONObject.stringOrEmpty(key: String): String =
+    if (isNull(key)) "" else optString(key)
+
 /** Read a card the engine produced — from a QR, or later from OCR. */
 fun contactFromCardJson(json: String, id: Long): Contact {
     val card = JSONObject(json)
     return Contact(
         id = id,
-        name = card.optJSONObject("name")?.optString("value").orEmpty(),
-        title = card.optJSONObject("title")?.optString("value").orEmpty(),
-        company = card.optJSONObject("company")?.optString("value").orEmpty(),
-        address = card.optJSONObject("address")?.optString("value").orEmpty(),
-        notes = card.optString("notes"),
+        name = card.optJSONObject("name")?.stringOrEmpty("value").orEmpty(),
+        title = card.optJSONObject("title")?.stringOrEmpty("value").orEmpty(),
+        company = card.optJSONObject("company")?.stringOrEmpty("value").orEmpty(),
+        address = card.optJSONObject("address")?.stringOrEmpty("value").orEmpty(),
+        notes = card.stringOrEmpty("notes"),
         phones = card.optJSONArray("phones").objects().map {
             Phone(
-                raw = it.optString("raw"),
-                normalised = it.optString("normalised"),
-                kind = it.optString("kind", "work"),
+                raw = it.stringOrEmpty("raw"),
+                normalised = it.stringOrEmpty("normalised"),
+                kind = it.stringOrEmpty("kind").ifBlank { "work" },
             )
         },
-        emails = card.optJSONArray("emails").objects().map { it.optString("value") },
-        urls = card.optJSONArray("urls").objects().map { it.optString("value") },
-        rawText = card.optString("rawText"),
+        emails = card.optJSONArray("emails").objects().map { it.stringOrEmpty("value") },
+        urls = card.optJSONArray("urls").objects().map { it.stringOrEmpty("value") },
+        rawText = card.stringOrEmpty("rawText"),
     )
 }
 

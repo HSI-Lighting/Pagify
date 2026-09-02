@@ -1930,6 +1930,86 @@ frame = pending.frame,
     }
 
     /**
+     * Delete several contacts picked by long press.
+     *
+     * Each is tried whatever happened to the one before, so one failure costs one
+     * contact rather than abandoning the rest halfway through a list somebody
+     * deliberately chose.
+     */
+    fun deleteContacts(chosen: List<Contact>) {
+        if (chosen.isEmpty()) return
+        viewModelScope.launch {
+            val gone = chosen.count { contact ->
+                runCatching { contactStore.delete(contact.id) }
+                    .onFailure { Log.e(TAG, "a contact could not be deleted", it) }
+                    .isSuccess
+            }
+            SessionRecorder.record("CONTACTS_DELETE", "n=$gone")
+            _state.update {
+                it.copy(
+                    message = if (gone == 1) {
+                        "Deleted ${chosen.first().displayName}."
+                    } else {
+                        "Deleted $gone contacts."
+                    },
+                )
+            }
+        }
+    }
+
+    /** Delete several groups. Their contacts stay, as always. */
+    fun deleteGroups(chosen: List<ContactGroup>) {
+        if (chosen.isEmpty()) return
+        viewModelScope.launch {
+            val gone = chosen.count { group ->
+                runCatching { contactStore.deleteGroup(group.id) }
+                    .onFailure { Log.e(TAG, "a group could not be deleted", it) }
+                    .isSuccess
+            }
+            if (_lastFiled.value in chosen.map { it.id }) _lastFiled.value = null
+            SessionRecorder.record("GROUPS_DELETE", "n=$gone")
+            _state.update {
+                it.copy(
+                    message = if (gone == 1) {
+                        "Deleted ${chosen.first().name}. Its contacts are still here."
+                    } else {
+                        "Deleted $gone groups. Their contacts are still here."
+                    },
+                )
+            }
+        }
+    }
+
+    /**
+     * Export several picked contacts as one file.
+     *
+     * One shared timestamp, the same as a group export uses: they left together,
+     * so nothing may disagree about when.
+     */
+    fun exportSelected(chosen: List<Contact>, share: (String, String) -> Unit) {
+        if (chosen.isEmpty()) return
+        viewModelScope.launch {
+            runCatching { contactStore.exportToVCard(chosen) }
+                .onSuccess { vcard ->
+                    if (vcard.isBlank()) return@onSuccess
+                    SessionRecorder.record("CONTACTS_EXPORT", "n=${chosen.size}")
+                    val name = if (chosen.size == 1) {
+                        chosen.first().displayName
+                    } else {
+                        "${chosen.size} contacts"
+                    }
+                    share(name, vcard)
+                }
+                .onFailure { failure ->
+                    Log.e(TAG, "the contacts could not be exported", failure)
+                    _state.update {
+                        it.copy(message = failure.message ?: "They could not be exported.")
+                    }
+                }
+        }
+    }
+
+    /**
      * Save a corrected contact.
      *
      * The printed path produces guesses — which line was the name, which the

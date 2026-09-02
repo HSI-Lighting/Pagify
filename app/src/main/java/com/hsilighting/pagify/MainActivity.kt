@@ -353,6 +353,13 @@ class MainActivity : ComponentActivity() {
                     },
                     onDeleteContact = viewModel::deleteContact,
                     onSaveContact = viewModel::updateContact,
+                    onDeleteContacts = viewModel::deleteContacts,
+                    onDeleteGroups = viewModel::deleteGroups,
+                    onExportSelected = { chosen ->
+                        viewModel.exportSelected(chosen) { name, vcard ->
+                            shareContact(name, vcard)
+                        }
+                    },
                     onMessageShown = viewModel::messageShown,
                 ) {
                     PdfReaderScreen(

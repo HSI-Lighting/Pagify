@@ -7,6 +7,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.longClick
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
 import com.hsilighting.pagify.ui.contacts.ContactsScreen
@@ -42,6 +44,8 @@ class ContactsScreenTest {
         var createdForScan: String? = null
         var deleted: ContactGroup? = null
         var scanTarget: Long? = null
+        var deletedContacts: List<Contact>? = null
+        var deletedGroups: List<ContactGroup>? = null
     }
 
     private fun show(
@@ -73,6 +77,9 @@ class ContactsScreenTest {
                 onExport = {},
                 onDelete = {},
                 onSaveEdit = {},
+                onDeleteContacts = { calls.deletedContacts = it },
+                onDeleteGroups = { calls.deletedGroups = it },
+                onExportSelected = {},
             )
         }
         return calls
@@ -165,5 +172,51 @@ class ContactsScreenTest {
         compose.onNodeWithText("Delete the group").performClick()
 
         assertEquals(expo, calls.deleted)
+    }
+
+    /**
+     * Long press picks; a tap then picks another rather than opening one.
+     *
+     * A list that opens something mid-selection throws the selection away, which
+     * is the most irritating way for this to be wrong.
+     */
+    @Test
+    fun longPressPicksSeveralContactsAndDeletesThem() {
+        val sam = Contact(id = 2, name = "Sam Reyes")
+        val calls = show(contacts = listOf(jane, sam), groups = emptyList())
+
+        compose.onNodeWithText("Jane Okafor").performTouchInput { longClick() }
+        compose.onNodeWithText("Sam Reyes").performClick()
+        compose.onNodeWithText("2 selected").assertIsDisplayed()
+
+        compose.onNodeWithContentDescription("Delete what is selected").performClick()
+        compose.onNodeWithText("Delete").performClick()
+
+        assertEquals(listOf(1L, 2L), calls.deletedContacts?.map { it.id })
+    }
+
+    /** Groups are picked the same way, and say plainly what survives. */
+    @Test
+    fun longPressPicksGroupsAndDeletesThem() {
+        val calls = show()
+
+        compose.onNodeWithText("Light + Building").performTouchInput { longClick() }
+        compose.onNodeWithText("1 selected").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Delete what is selected").performClick()
+        compose.onNodeWithText("Delete").performClick()
+
+        assertEquals(listOf(10L), calls.deletedGroups?.map { it.id })
+    }
+
+    /** And backing out of a selection clears it rather than leaving the screen. */
+    @Test
+    fun stoppingSelectionLeavesEverythingAlone() {
+        val calls = show()
+
+        compose.onNodeWithText("Light + Building").performTouchInput { longClick() }
+        compose.onNodeWithContentDescription("Stop selecting").performClick()
+
+        compose.onNodeWithText("Contacts").assertIsDisplayed()
+        assertEquals(null, calls.deletedGroups)
     }
 }

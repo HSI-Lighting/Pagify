@@ -729,10 +729,21 @@ fn take_structure(pool: &mut Vec<Line>, card: &mut BusinessCard, card_height: f3
     // that is the one convention cards mostly keep; upper because the bottom is
     // where contact details live, and a large address line would otherwise win.
     let zone = if card_height > 0.0 { card_height * NAME_ZONE } else { f32::MAX };
+    // A line carrying a legal suffix is not a person, whatever size it is set
+    // in. Without this the rule is decided by box height alone, and box height
+    // is a poor proxy for font size: a recogniser measures ink, so a smaller
+    // line with descenders ("HSI Lighting LLC") measures nearly as tall as a
+    // much larger line without any ("Yaseen Anwar"). On a real card, rendered
+    // and read through ML Kit, the company won — the contact was filed under the
+    // firm's name with the person's name in the company field.
     let name = pool
         .iter()
         .enumerate()
-        .filter(|(_, line)| line.centre_y() <= zone && could_be_a_name(&line.text))
+        .filter(|(_, line)| {
+            line.centre_y() <= zone
+                && could_be_a_name(&line.text)
+                && !is_a_company(&line.text)
+        })
         .max_by(|(_, a), (_, b)| {
             a.glyph_height
                 .partial_cmp(&b.glyph_height)
@@ -982,6 +993,28 @@ mod tests {
             line("Bright Ideas", 560.0, 44.0),
         ]));
         assert_eq!(parsed.name.unwrap().value, "Sam Reyes");
+    }
+
+    /// **A company is never the person, whatever size it is set in.**
+    ///
+    /// Found on a real card rather than imagined: a rendered card read through
+    /// ML Kit came back with the name "HSI Lighting LLC" and the company "Yaseen
+    /// Anwar", exactly swapped. The name rule takes the largest text near the
+    /// top, and a recogniser measures ink rather than font size — so "HSI
+    /// Lighting LLC" at 32pt, which has descenders, measured as tall as "Yaseen
+    /// Anwar" at 44pt, which has none. The legal suffix settles it and the box
+    /// heights need not be trusted.
+    #[test]
+    fn a_company_is_not_taken_for_the_person() {
+        let parsed = parse_card(&card(vec![
+            // Deliberately the taller box, as the recogniser reported it.
+            line("HSI Lighting LLC", 130.0, 34.0),
+            line("Yaseen Anwar", 60.0, 33.0),
+            line("dev@hsilighting.com", 400.0, 16.0),
+        ]));
+
+        assert_eq!(parsed.name.unwrap().value, "Yaseen Anwar");
+        assert_eq!(parsed.company.unwrap().value, "HSI Lighting LLC");
     }
 
     /// A legal suffix is evidence; the largest-remaining rule is a guess. The
