@@ -1,5 +1,7 @@
 package com.hsilighting.pagify.ui.contacts
 
+import android.content.Intent
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -45,8 +47,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.net.toUri
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
 import java.text.SimpleDateFormat
@@ -84,6 +89,8 @@ fun ContactsScreen(
     onDeleteGroup: (ContactGroup) -> Unit,
     onExportGroup: (ContactGroup) -> Unit,
     onRemoveFromGroup: (Contact, Long) -> Unit,
+    onAddToGroupPicked: (Contact, Long) -> Unit,
+    onCreateGroupWith: (Contact, String) -> Unit,
     onScanFromGallery: () -> Unit,
     onScanFromCamera: () -> Unit,
     onExport: (Contact) -> Unit,
@@ -100,6 +107,9 @@ fun ContactsScreen(
     var creatingGroup by remember { mutableStateOf(false) }
     var namingForScan by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<ContactGroup?>(null) }
+    var addingToGroup by remember { mutableStateOf<Contact?>(null) }
+    var namingForContact by remember { mutableStateOf<Contact?>(null) }
+    var confirmingDelete by remember { mutableStateOf<ContactGroup?>(null) }
 
     // Groups only once one exists — see the note on this function.
     var byGroup by remember(groups.isEmpty()) { mutableStateOf(groups.isNotEmpty()) }
@@ -130,9 +140,7 @@ fun ContactsScreen(
                 onBack = { openGroup = null },
                 onExportGroup = { openGroup?.let(onExportGroup) },
                 onRenameGroup = { renaming = openGroup },
-                onDeleteGroup = {
-                    openGroup?.let { group -> openGroup = null; onDeleteGroup(group) }
-                },
+                onDeleteGroup = { confirmingDelete = openGroup },
             )
 
             if (openGroup == null && groups.isNotEmpty()) {
@@ -203,6 +211,9 @@ fun ContactsScreen(
                             count = inGroup(group).size,
                             subtitle = group.lastExportedAt?.let { "sent ${onDay(it)}" },
                             onClick = { openGroup = group },
+                            onRename = { renaming = group },
+                            onExport = { onExportGroup(group) },
+                            onDelete = { confirmingDelete = group },
                         )
                     }
                     if (ungrouped.isNotEmpty()) {
@@ -294,6 +305,20 @@ fun ContactsScreen(
         )
     }
 
+    confirmingDelete?.let { group ->
+        ConfirmGroupDelete(
+            group = group,
+            onConfirm = {
+                confirmingDelete = null
+                // Leave the group before deleting it, or the header spends a
+                // frame naming something that is gone.
+                if (openGroup?.id == group.id) openGroup = null
+                onDeleteGroup(group)
+            },
+            onDismiss = { confirmingDelete = null },
+        )
+    }
+
     renaming?.let { group ->
         GroupNameDialog(
             title = "Rename group",
@@ -317,7 +342,38 @@ fun ContactsScreen(
             onExport = { open = null; onExport(contact) },
             onDelete = { open = null; onDelete(contact) },
             onRemoveFromGroup = { onRemoveFromGroup(contact, it) },
+            onAddToGroup = { addingToGroup = contact },
             onDismiss = { open = null },
+        )
+    }
+
+    // Filing a contact that already exists — the direction that was missing, so a
+    // contact scanned before any group existed could never be put in one.
+    addingToGroup?.let { contact ->
+        val alreadyIn = memberships[contact.id].orEmpty()
+        val available = groups.filterNot { it.id in alreadyIn }
+
+        FilingPrompt(
+            label = contact.displayName,
+            groups = available,
+            suggested = importTarget?.takeIf { target -> available.any { it.id == target } },
+            onFile = { groupId ->
+                onAddToGroupPicked(contact, groupId)
+                addingToGroup = null
+            },
+            onCreate = { namingForContact = contact; addingToGroup = null },
+            onSkip = { addingToGroup = null },
+        )
+    }
+
+    namingForContact?.let { contact ->
+        GroupNameDialog(
+            title = "New group",
+            onConfirm = { name ->
+                onCreateGroupWith(contact, name)
+                namingForContact = null
+            },
+            onDismiss = { namingForContact = null },
         )
     }
 
@@ -367,7 +423,7 @@ private fun Header(
             IconButton(onClick = onExportGroup) {
                 Icon(Icons.Filled.Share, contentDescription = "Export this group")
             }
-            IconButton(onClick = { confirmingDelete = true }) {
+            IconButton(onClick = onDeleteGroup) {
                 Icon(
                     Icons.Filled.Delete,
                     contentDescription = "Delete this group",
@@ -376,30 +432,36 @@ private fun Header(
             }
         }
     }
+}
 
-    if (confirmingDelete && group != null) {
-        AlertDialog(
-            onDismissRequest = { confirmingDelete = false },
-            title = { Text("Delete ${group.name}?") },
-            // Said plainly, because "delete the folder" reads like "delete what is
-            // in it", and this is the moment somebody decides.
-            text = {
-                Text(
-                    "The group is removed. Its contacts stay in Pagify — they keep " +
-                        "any other groups they are in, and move to Ungrouped if " +
-                        "this was their only one.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { confirmingDelete = false; onDeleteGroup() }) {
-                    Text("Delete the group")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingDelete = false }) { Text("Keep") }
-            },
-        )
-    }
+/**
+ * Confirming a group deletion, wherever it was asked for.
+ *
+ * One dialog for both routes — the open group's header and the list row's menu —
+ * rather than a copy in each. Two confirmations for the same act drift apart,
+ * and the wording here is the part that matters most.
+ */
+@Composable
+private fun ConfirmGroupDelete(
+    group: ContactGroup,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Delete ${group.name}?") },
+        // Said plainly, because "delete the folder" reads like "delete what is in
+        // it", and this is the moment somebody decides.
+        text = {
+            Text(
+                "The group is removed. Its contacts stay in Pagify — they keep any " +
+                    "other groups they are in, and move to Ungrouped if this was " +
+                    "their only one.",
+            )
+        },
+        confirmButton = { TextButton(onClick = onConfirm) { Text("Delete the group") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Keep") } },
+    )
 }
 
 /**
@@ -520,9 +582,19 @@ private fun ContactSheet(
     onExport: () -> Unit,
     onDelete: () -> Unit,
     onRemoveFromGroup: (Long) -> Unit,
+    onAddToGroup: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     var confirmingDelete by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Nothing here is worth crashing over: a device with no dialer, no mail app
+    // or no browser is unusual but not broken, and the contact is still on screen
+    // to be read or copied.
+    val launch: (Intent) -> Unit = { intent ->
+        runCatching { context.startActivity(intent) }
+            .onFailure { Log.w("ContactsScreen", "nothing could open that", it) }
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -557,28 +629,64 @@ private fun ContactSheet(
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Detail("Title", contact.title)
                     Detail("Company", contact.company)
-                    contact.phones.forEach {
-                        Detail(it.kind.replaceFirstChar(Char::uppercase), it.raw)
-                    }
-                    contact.emails.forEach { Detail("Email", it) }
-                    contact.urls.forEach { Detail("Web", it) }
-                    Detail("Address", contact.address)
-                    Detail("Notes", contact.notes)
 
-                    if (groups.isNotEmpty()) {
-                        HorizontalDivider(Modifier.padding(vertical = 4.dp))
-                        Text(
-                            text = "Groups",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        groups.forEach { group ->
-                            AssistChip(
-                                onClick = { onRemoveFromGroup(group.id) },
-                                label = { Text("${group.name}  ✕") },
+                    contact.phones.forEach { phone ->
+                        Detail(phone.kind.replaceFirstChar(Char::uppercase), phone.raw) {
+                            // ACTION_DIAL, not ACTION_CALL. Dial opens the keypad
+                            // with the number in it and needs no permission;
+                            // CALL_PHONE would place the call outright, which is
+                            // both a prompt to ask for and a worse answer to a tap.
+                            // The dialled form is `normalised` where the engine
+                            // could produce one — that is the version with the
+                            // spaces and brackets taken out.
+                            launch(
+                                Intent(
+                                    Intent.ACTION_DIAL,
+                                    "tel:${phone.normalised.ifBlank { phone.raw }}".toUri(),
+                                ),
                             )
                         }
                     }
+
+                    contact.emails.forEach { email ->
+                        Detail("Email", email) {
+                            launch(Intent(Intent.ACTION_SENDTO, "mailto:$email".toUri()))
+                        }
+                    }
+
+                    contact.urls.forEach { url ->
+                        Detail("Web", url) {
+                            // Cards print "www.example.com" far more often than
+                            // they print a scheme, and a URL without one opens
+                            // nothing at all.
+                            val address = if ("://" in url) url else "https://$url"
+                            launch(Intent(Intent.ACTION_VIEW, address.toUri()))
+                        }
+                    }
+
+                    Detail("Address", contact.address)
+                    Detail("Notes", contact.notes)
+
+                    HorizontalDivider(Modifier.padding(vertical = 4.dp))
+                    Text(
+                        text = "Groups",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    // Both directions. Showing only the groups a contact is
+                    // already in — with a tap that removes — gave no way to add
+                    // one at all, so a contact filed nowhere could never be
+                    // filed.
+                    groups.forEach { group ->
+                        AssistChip(
+                            onClick = { onRemoveFromGroup(group.id) },
+                            label = { Text("${group.name}  ✕") },
+                        )
+                    }
+                    AssistChip(
+                        onClick = onAddToGroup,
+                        label = { Text("+ Add to a group") },
+                    )
 
                     HorizontalDivider(Modifier.padding(vertical = 4.dp))
                     Detail("Added", onDay(contact.capturedAt))
@@ -627,9 +735,19 @@ private fun ContactSheet(
     }
 }
 
-/** One labelled value. Absent fields draw nothing rather than an empty row. */
+/**
+ * One labelled value. Absent fields draw nothing rather than an empty row.
+ *
+ * A value with somewhere to go — a number, an email, a website — is tappable and
+ * drawn as a link. The point of having somebody's number in your pocket is
+ * ringing them, and making that a copy-and-paste into another app is the kind of
+ * small friction that decides whether a feature gets used.
+ *
+ * Selection still works: the text sits in a `SelectionContainer`, and a long
+ * press selects while a tap opens.
+ */
 @Composable
-private fun Detail(label: String, value: String) {
+private fun Detail(label: String, value: String, onOpen: (() -> Unit)? = null) {
     if (value.isBlank()) return
     Column {
         Text(
@@ -637,7 +755,17 @@ private fun Detail(label: String, value: String) {
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(text = value, style = MaterialTheme.typography.bodyMedium)
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (onOpen != null) {
+                MaterialTheme.colorScheme.primary
+            } else {
+                MaterialTheme.colorScheme.onSurface
+            },
+            textDecoration = if (onOpen != null) TextDecoration.Underline else null,
+            modifier = if (onOpen != null) Modifier.clickable(onClick = onOpen) else Modifier,
+        )
     }
 }
 

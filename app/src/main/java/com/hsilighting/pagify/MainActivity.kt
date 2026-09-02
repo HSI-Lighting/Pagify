@@ -314,6 +314,8 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     onRemoveFromGroup = viewModel::removeFromGroup,
+                    onAddToGroupPicked = viewModel::addToGroupPicked,
+                    onCreateGroupWith = viewModel::createGroupWith,
                     onScanCard = { cardPicker.launch(arrayOf("image/*")) },
                     onPhotographCard = {
                         val destination = runCatching { newCardPhoto() }.getOrNull()

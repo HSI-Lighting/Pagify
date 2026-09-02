@@ -179,6 +179,23 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+
+            // Its own package, so a debug build installs *alongside* the release
+            // one rather than colliding with it.
+            //
+            // This is not tidiness. The release build is signed with the release
+            // key, so installing a debug build over it is refused, and the only
+            // way through is to uninstall — which deletes the document library
+            // and every scanned contact. That has happened once. It also left
+            // `connectedAndroidTest` unrunnable, because it installs a debug APK
+            // over whatever is there: the tests covering the data it would
+            // destroy were the tests that could never be run.
+            //
+            // The FileProvider authority is derived from `${applicationId}`, so
+            // it follows this by itself and the two builds cannot reach each
+            // other's files.
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
         }
         release {
             signingConfig = signingConfigs.findByName("release")

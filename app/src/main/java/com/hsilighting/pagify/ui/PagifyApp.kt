@@ -79,6 +79,8 @@ fun PagifyApp(
     onDeleteGroup: (ContactGroup) -> Unit,
     onExportGroup: (ContactGroup) -> Unit,
     onRemoveFromGroup: (Contact, Long) -> Unit,
+    onAddToGroupPicked: (Contact, Long) -> Unit,
+    onCreateGroupWith: (Contact, String) -> Unit,
     /** From the gallery, and from the camera. */
     onScanCard: () -> Unit,
     onPhotographCard: () -> Unit,
@@ -157,6 +159,8 @@ fun PagifyApp(
                     onDeleteGroup = onDeleteGroup,
                     onExportGroup = onExportGroup,
                     onRemoveFromGroup = onRemoveFromGroup,
+                    onAddToGroupPicked = onAddToGroupPicked,
+                    onCreateGroupWith = onCreateGroupWith,
                     onScanFromGallery = onScanCard,
                     onScanFromCamera = onPhotographCard,
                     onExport = onExportContact,

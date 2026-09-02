@@ -9,8 +9,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
@@ -41,7 +45,21 @@ fun GroupRow(
     count: Int,
     subtitle: String?,
     onClick: () -> Unit,
+    /**
+     * Rename, export and delete, if this row is a real group.
+     *
+     * Here **as well as** inside the group. They were only in the open group's
+     * header, which meant the answer to "how do I delete this group" was to open
+     * it first and look at the top — reasonable once you know, and indis-
+     * tinguishable from the feature being broken until you do. Ungrouped is not
+     * a group and passes none of these, so it shows no menu.
+     */
+    onRename: (() -> Unit)? = null,
+    onExport: (() -> Unit)? = null,
+    onDelete: (() -> Unit)? = null,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
+
     Surface(
         color = MaterialTheme.colorScheme.surfaceVariant,
         shape = MaterialTheme.shapes.medium,
@@ -70,6 +88,40 @@ fun GroupRow(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            if (onDelete != null || onRename != null || onExport != null) {
+                Box {
+                    IconButton(onClick = { menuOpen = true }) {
+                        Icon(
+                            Icons.Filled.MoreVert,
+                            contentDescription = "What to do with $name",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        onRename?.let { rename ->
+                            DropdownMenuItem(
+                                text = { Text("Rename") },
+                                onClick = { menuOpen = false; rename() },
+                            )
+                        }
+                        onExport?.let { export ->
+                            DropdownMenuItem(
+                                text = { Text("Export") },
+                                onClick = { menuOpen = false; export() },
+                            )
+                        }
+                        onDelete?.let { delete ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                                },
+                                onClick = { menuOpen = false; delete() },
+                            )
+                        }
+                    }
+                }
+            }
+
             Icon(
                 Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = null,

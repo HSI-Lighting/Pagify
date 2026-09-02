@@ -1958,6 +1958,31 @@ frame = pending.frame,
         viewModelScope.launch { contactStore.removeFromGroup(contact.id, groupId) }
     }
 
+    /** File a contact that already exists — one scanned before any group did. */
+    fun addToGroupPicked(contact: Contact, groupId: Long) {
+        viewModelScope.launch {
+            contactStore.addToGroup(contact.id, groupId)
+            val name = contactGroups.value.firstOrNull { it.id == groupId }?.name
+            _state.update {
+                it.copy(message = name?.let { group -> "${contact.displayName} → $group" })
+            }
+        }
+    }
+
+    /** Make a group and put an existing contact straight into it. */
+    fun createGroupWith(contact: Contact, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            val group = ContactGroup(id = System.currentTimeMillis(), name = trimmed)
+            contactStore.saveGroup(group)
+            contactStore.addToGroup(contact.id, group.id)
+            _state.update {
+                it.copy(message = "${contact.displayName} → ${group.name}")
+            }
+        }
+    }
+
     /**
      * Export a whole group as one file.
      *

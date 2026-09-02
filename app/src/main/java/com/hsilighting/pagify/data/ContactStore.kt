@@ -33,9 +33,17 @@ import java.util.TimeZone
  * else once the card is in a drawer, so failures are logged loudly rather than
  * swallowed.
  */
-class ContactStore(context: Context) {
+class ContactStore internal constructor(database: ContactsDatabase) {
 
-    private val dao = ContactsDatabase.get(context).contacts()
+    /**
+     * The ordinary way in. The other constructor takes a database directly so a
+     * test can hand it an in-memory one — filing and grouping are the part of
+     * this app with no other way to be checked, and they went wrong unnoticed
+     * once because nothing above the DAO was tested at all.
+     */
+    constructor(context: Context) : this(ContactsDatabase.get(context))
+
+    private val dao = database.contacts()
 
     val contacts: Flow<List<Contact>> = dao.contacts().map { rows -> rows.map { it.toContact() } }
 
