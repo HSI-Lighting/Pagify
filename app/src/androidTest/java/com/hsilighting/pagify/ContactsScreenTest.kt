@@ -107,6 +107,34 @@ class ContactsScreenTest {
         assertEquals("Expo 2026", calls.created)
     }
 
+    /**
+     * **Making a group shows the groups.**
+     *
+     * Reported as "adding the group is stale — I have to close the app and open
+     * it again". It was never stale: the view stays on All, where a group cannot
+     * be seen, so a new one appeared to do nothing. Restarting re-runs the
+     * default and lands on Groups, where it had been all along.
+     *
+     * It survived every attempt to reproduce because the *first* group flips the
+     * default by itself. Only the second onwards, made while on All, vanishes —
+     * and tapping Ungrouped is an easy way to end up on All without meaning to.
+     */
+    @Test
+    fun makingAGroupFromTheAllListShowsTheGroups() {
+        show()
+
+        compose.onNodeWithText("All").performClick()
+        // On All, so the existing group is not on screen at all.
+        compose.onNodeWithText("Light + Building").assertDoesNotExist()
+
+        compose.onNodeWithText("Group").performClick()
+        compose.onNodeWithText("Name").performTextInput("Expo 2026")
+        compose.onNodeWithText("Create").performClick()
+
+        // Back on the list where a group can actually be seen.
+        compose.onNodeWithText("Light + Building").assertIsDisplayed()
+    }
+
     /** And it is there with nothing in the app at all. */
     @Test
     fun theGroupChipIsThereBeforeAnythingElseIs() {

@@ -129,7 +129,18 @@ fun ContactsScreen(
     val clearPicked = { pickedContacts = emptySet(); pickedGroups = emptySet() }
 
     // Groups only once one exists — see the note on this function.
+    //
+    // **Keyed on whether there are any groups at all, not on how many.** Making a
+    // group while looking at All left the view on All, where a group cannot be
+    // seen — so a new group appeared to do nothing, and only reappeared after a
+    // restart, which re-runs this and lands on Groups. It read exactly like the
+    // app ignoring the change until it was closed and opened again. Whatever
+    // creates a group now also shows the list it went into; see [showGroups].
     var byGroup by remember(groups.isEmpty()) { mutableStateOf(groups.isNotEmpty()) }
+
+    // Making a group is a request to see groups. Every route that creates one
+    // goes through here, so none of them can forget.
+    val showGroups = { byGroup = true }
 
     // Back gets out of a selection first, then out of a group. Both before it
     // reaches the tab, and in that order — the innermost thing the user is in.
@@ -328,7 +339,7 @@ fun ContactsScreen(
     if (creatingGroup) {
         GroupNameDialog(
             title = "New group",
-            onConfirm = { onCreateGroup(it); creatingGroup = false },
+            onConfirm = { onCreateGroup(it); showGroups(); creatingGroup = false },
             onDismiss = { creatingGroup = false },
         )
     }
@@ -349,7 +360,7 @@ fun ContactsScreen(
     if (namingForScan) {
         GroupNameDialog(
             title = "New group",
-            onConfirm = { onCreateGroupForScan(it); namingForScan = false },
+            onConfirm = { onCreateGroupForScan(it); showGroups(); namingForScan = false },
             // Backing out returns to the filing question rather than dropping it,
             // so a mistaken tap on "New group" does not leave the card unfiled.
             onDismiss = { namingForScan = false },
@@ -466,6 +477,7 @@ fun ContactsScreen(
             title = "New group",
             onConfirm = { name ->
                 onCreateGroupWith(contact, name)
+                showGroups()
                 namingForContact = null
             },
             onDismiss = { namingForContact = null },
