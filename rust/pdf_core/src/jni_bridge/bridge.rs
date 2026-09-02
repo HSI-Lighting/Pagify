@@ -880,6 +880,45 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_contactFrom
     })
 }
 
+/// Read the fields off a photographed card, given the text recognised on it.
+///
+/// The printed path, and the reason the QR path returning null is survivable.
+/// Recognition itself belongs to the platform — ML Kit here, Vision on iOS —
+/// but deciding which line is the name and which is the company does not, so
+/// only the recognised boxes cross this boundary.
+///
+/// The segments arrive in the photograph's pixel space and no detection has run
+/// yet, so the card is measured from its own text: see
+/// [`RecognisedCard::around_text`], which is also what a caller that *has* found
+/// the card's rectangle should stop using.
+///
+/// Never null. A photograph that recognised nothing yields an empty card rather
+/// than an error, and whether an empty card is worth saving is the caller's
+/// question — it is the one that knows whether a QR already answered it.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_parsePhotographedCard<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    segments_json: JString<'local>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let json = required_string(env, &segments_json, "segments")?;
+        let segments: Vec<crate::contacts::parse::TextSegment> = serde_json::from_str(&json)
+            .map_err(|e| {
+                PdfError::InvalidArgument(format!("could not decode the recognised text: {e}"))
+            })?;
+
+        let card = crate::contacts::parse::parse_card(
+            &crate::contacts::parse::RecognisedCard::around_text(segments),
+        );
+        let json = serde_json::to_string(&card)
+            .map_err(|e| PdfError::InvalidArgument(format!("could not encode the card: {e}")))?;
+        env.new_string(json)
+            .map(|s| s.into_raw())
+            .map_err(|e| PdfError::InvalidArgument(format!("could not return the card: {e}")))
+    })
+}
+
 /// The rotation a page currently carries, in quarter turns.
 ///
 /// Needed because `Command::SetPageRotation` is absolute rather than relative: an

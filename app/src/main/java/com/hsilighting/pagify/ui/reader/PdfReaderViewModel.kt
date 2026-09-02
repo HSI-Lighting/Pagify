@@ -1690,36 +1690,50 @@ frame = pending.frame,
     /**
      * Read a photograph of a business card.
      *
-     * Only the QR path exists so far. When a card carries a QR encoding a
-     * vCard, the data is exact and the contact is saved outright; when it does
-     * not, this says so plainly rather than saving a blank contact and letting
-     * somebody discover it was empty later.
+     * A QR holding a vCard is exact, so it is saved outright. Printed text is
+     * recognised and then interpreted, so it is a guess: it is saved too — a card
+     * that was read but not kept is worse than one that needs correcting — but
+     * the message says where it came from, because the two want different things
+     * from the person holding the phone.
      */
     fun scanCard(image: Uri) {
         viewModelScope.launch {
             when (val outcome = CardScanner.read(getApplication(), image)) {
                 is CardScanner.Outcome.Contact -> {
-                    val contact = contactFromCardJson(
-                        outcome.card,
-                        System.currentTimeMillis(),
-                    )
+                    val read = contactFromCardJson(outcome.card, System.currentTimeMillis())
+                    // The QR held a web address and the card was read in print.
+                    // Keeping it costs nothing and it cannot have been misread,
+                    // which is more than the printed copy can claim.
+                    val contact = outcome.qrPayload
+                        ?.takeIf { it.isNotBlank() && it !in read.urls }
+                        ?.let { read.copy(urls = read.urls + it) }
+                        ?: read
+
                     contactStore.save(contact)
-                    SessionRecorder.record("CARD_QR", "name=${contact.displayName}")
-                    _state.update { it.copy(message = "Saved ${contact.displayName}.") }
+                    SessionRecorder.record(
+                        "CARD_SCAN",
+                        "source=${outcome.source} name=${contact.displayName}",
+                    )
+                    _state.update {
+                        it.copy(
+                            message = when (outcome.source) {
+                                CardScanner.Source.QR -> "Saved ${contact.displayName}."
+                                CardScanner.Source.PRINT ->
+                                    "Read ${contact.displayName} off the card — check it."
+                            },
+                        )
+                    }
                 }
 
                 is CardScanner.Outcome.NotAContact -> _state.update {
                     it.copy(
-                        message = "That code holds a link, not a contact. " +
-                            "Reading the card itself is not built yet.",
+                        message = "That code holds a link, not a contact, " +
+                            "and the printed text could not be read.",
                     )
                 }
 
                 CardScanner.Outcome.NothingFound -> _state.update {
-                    it.copy(
-                        message = "No QR code on that card. " +
-                            "Reading the printed text is not built yet.",
-                    )
+                    it.copy(message = "No contact details could be read off that image.")
                 }
 
                 is CardScanner.Outcome.Failed -> _state.update {

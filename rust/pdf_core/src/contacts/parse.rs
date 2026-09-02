@@ -65,6 +65,51 @@ pub struct RecognisedCard {
     pub segments: Vec<TextSegment>,
 }
 
+impl RecognisedCard {
+    /// A card whose edges were never found, sized to the text sitting on it.
+    ///
+    /// This is the whole-photograph path: no detection has run, so what arrives
+    /// is a picture of a desk with a card somewhere on it, and the photograph's
+    /// own dimensions describe the desk. Handing those to [`parse_card`] puts the
+    /// name zone across the top of the *desk*, and on any photo where the card
+    /// does not already fill the frame the name is not inside it at all.
+    ///
+    /// The text's own bounding box is a much better guess at the card than the
+    /// frame is, so the segments are measured and moved to sit at the origin. It
+    /// is still a guess — a card photographed next to a printed receipt would
+    /// measure as one wide card spanning both — which is why this is a separate,
+    /// named constructor rather than something [`parse_card`] does quietly. A
+    /// caller that has actually found the card's rectangle should keep passing
+    /// it.
+    pub fn around_text(segments: Vec<TextSegment>) -> Self {
+        let Some(first) = segments.first() else {
+            return RecognisedCard { width: 0.0, height: 0.0, segments };
+        };
+
+        let (mut left, mut top) = (first.left, first.top);
+        let (mut right, mut bottom) = (first.right, first.bottom);
+        for segment in &segments {
+            left = left.min(segment.left);
+            top = top.min(segment.top);
+            right = right.max(segment.right);
+            bottom = bottom.max(segment.bottom);
+        }
+
+        let segments = segments
+            .into_iter()
+            .map(|segment| TextSegment {
+                left: segment.left - left,
+                top: segment.top - top,
+                right: segment.right - left,
+                bottom: segment.bottom - top,
+                text: segment.text,
+            })
+            .collect();
+
+        RecognisedCard { width: right - left, height: bottom - top, segments }
+    }
+}
+
 /// Confidence for something a pattern matched. Not 1.0: the recogniser may
 /// still have misread a character inside a perfectly well-shaped address.
 const MATCHED: f32 = 0.9;
@@ -717,5 +762,116 @@ mod tests {
             segments: vec![line("Sam Reyes", 60.0, 30.0), line("Meridian Ltd", 120.0, 18.0)],
         });
         assert_eq!(parsed.name.unwrap().value, "Sam Reyes");
+    }
+
+    // ------------------------------------------- a card inside a photograph --
+
+    /// The card from [`ordinary`], sitting somewhere in the middle of a photo of
+    /// a desk — which is what arrives before any detection exists.
+    fn photographed(offset_x: f32, offset_y: f32) -> Vec<TextSegment> {
+        ordinary()
+            .segments
+            .into_iter()
+            .map(|s| TextSegment {
+                left: s.left + offset_x,
+                top: s.top + offset_y,
+                right: s.right + offset_x,
+                bottom: s.bottom + offset_y,
+                text: s.text,
+            })
+            .collect()
+    }
+
+    /// Why [`RecognisedCard::around_text`] exists.
+    ///
+    /// Passing the photograph's own dimensions puts the name zone across the top
+    /// 60% of the *desk*. The card is lower than that, so the name is not in the
+    /// zone and the rule cannot find it. If this ever starts passing, the
+    /// constructor below has stopped earning its place.
+    #[test]
+    fn the_photographs_own_dimensions_lose_the_name() {
+        let parsed = parse_card(&RecognisedCard {
+            width: 3000.0,
+            height: 4000.0,
+            segments: photographed(800.0, 2600.0),
+        });
+        assert_ne!(
+            parsed.name.map(|n| n.value).unwrap_or_default(),
+            "Yaseen Anwar",
+            "the name was found without the card being measured, so nothing \
+             below is being tested",
+        );
+    }
+
+    /// And with the constructor, the same card reads the same wherever in the
+    /// frame it was photographed.
+    #[test]
+    fn a_card_lost_in_a_photograph_reads_the_same() {
+        let framed = parse_card(&ordinary());
+        let shot = parse_card(&RecognisedCard::around_text(photographed(800.0, 2600.0)));
+
+        assert_eq!(shot.name.as_ref().unwrap().value, "Yaseen Anwar");
+        assert_eq!(shot.company.as_ref().unwrap().value, "HSI Lighting LLC");
+        assert_eq!(shot.title.as_ref().unwrap().value, "Design Engineer");
+        assert_eq!(
+            shot, framed,
+            "where the card sat in the frame changed what was read off it",
+        );
+    }
+
+    /// Position within the frame must not survive into the card's own space —
+    /// a card measured but not moved keeps the desk's origin, and every position
+    /// rule stays as wrong as it was.
+    #[test]
+    fn measuring_the_text_also_moves_it_to_the_origin() {
+        let measured = RecognisedCard::around_text(photographed(800.0, 2600.0));
+        let topmost = measured
+            .segments
+            .iter()
+            .fold(f32::MAX, |lowest, s| lowest.min(s.top));
+        assert!(
+            topmost.abs() < 0.001,
+            "the topmost line sits at {topmost}, not at the top of the card",
+        );
+        assert!(measured.height < 600.0, "the card measured as {} tall", measured.height);
+    }
+
+    /// The JSON the platforms actually send.
+    ///
+    /// [`TextSegment`] is decoded by serde, which rejects the whole array over
+    /// one wrong key — so a misspelled name makes *every* scan fail in the same
+    /// way, looking like recognition not working rather than a typo. Nothing
+    /// else covers this: the parser's own tests build segments in Rust and never
+    /// go near the wire format.
+    ///
+    /// The literal below is what Android's `CardScanner.segmentJson` writes, and
+    /// its `CardScannerTest` asserts it still writes exactly this. Either side
+    /// changing alone breaks the other's test.
+    #[test]
+    fn the_json_android_sends_decodes() {
+        let sent = r#"[
+            {"left":60,"top":70,"right":300,"bottom":104,"text":"Yaseen Anwar"},
+            {"left":60,"top":118,"right":280,"bottom":138,"text":"HSI Lighting LLC"}
+        ]"#;
+
+        let segments: Vec<TextSegment> =
+            serde_json::from_str(sent).expect("the recognised text could not be decoded");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].text, "Yaseen Anwar");
+        assert_eq!(segments[0].bottom, 104.0);
+
+        let parsed = parse_card(&RecognisedCard::around_text(segments));
+        assert_eq!(parsed.name.unwrap().value, "Yaseen Anwar");
+        assert_eq!(parsed.company.unwrap().value, "HSI Lighting LLC");
+    }
+
+    /// A photograph of a blank wall recognises nothing. That is an empty card,
+    /// not a division by zero.
+    #[test]
+    fn measuring_nothing_is_survivable() {
+        let measured = RecognisedCard::around_text(vec![]);
+        assert_eq!(measured.width, 0.0);
+        assert_eq!(measured.height, 0.0);
+        assert!(parse_card(&measured).name.is_none());
     }
 }
