@@ -176,6 +176,52 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     fun setImportTarget(groupId: Long?) {
         _importTarget.value = groupId
     }
+
+    /**
+     * Cards just read, waiting to be filed.
+     *
+     * **They are already saved.** Filing is asked about afterwards, never before,
+     * so dismissing the question — or the app dying while it is on screen — loses
+     * nothing. A card that has been photographed and read is not going to be
+     * thrown away because nobody answered a question about folders.
+     */
+    data class PendingFiling(val contactIds: List<Long>, val label: String)
+
+    private val _pendingFiling = MutableStateFlow<PendingFiling?>(null)
+    val pendingFiling: StateFlow<PendingFiling?> = _pendingFiling
+
+    /** File everything from the last scan, or nothing when [groupId] is null. */
+    fun fileScanned(groupId: Long?) {
+        val pending = _pendingFiling.value
+        _pendingFiling.value = null
+        if (pending == null || groupId == null) return
+
+        viewModelScope.launch {
+            pending.contactIds.forEach { contactStore.addToGroup(it, groupId) }
+            // Remembered so the next card opens on the same group already chosen:
+            // at an event the answer is the same forty times running.
+            _importTarget.value = groupId
+            val name = contactGroups.value.firstOrNull { it.id == groupId }?.name
+            _state.update {
+                it.copy(message = name?.let { group -> "Filed in $group." })
+            }
+        }
+    }
+
+    /** Make a group from the filing question, and put this scan straight in it. */
+    fun createGroupForScan(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            val group = ContactGroup(id = System.currentTimeMillis(), name = trimmed)
+            contactStore.saveGroup(group)
+            fileScanned(group.id)
+        }
+    }
+
+    fun dismissFiling() {
+        _pendingFiling.value = null
+    }
     val recents: StateFlow<List<RecentDocument>> = recentDocuments.documents
 
     /** Theme, viewfinder, and anything else that outlives a document. */
@@ -1737,12 +1783,6 @@ frame = pending.frame,
         viewModelScope.launch {
             when (val outcome = CardScanner.read(getApplication(), image)) {
                 is CardScanner.Outcome.Contacts -> {
-                    val target = _importTarget.value
-                    val filed = target
-                        ?.let { id -> contactGroups.value.firstOrNull { it.id == id } }
-                        ?.let { " into ${it.name}" }
-                        .orEmpty()
-
                     val saved = outcome.cards.mapIndexed { position, json ->
                         // The id is the clock, and several cards are saved within
                         // the same millisecond — so each one is nudged past the
@@ -1760,29 +1800,42 @@ frame = pending.frame,
                             ?.let { read.copy(urls = read.urls + it) }
                             ?: read
 
-                        contactStore.save(contact, target)
+                        // Saved unfiled. Which group it belongs in is asked
+                        // immediately afterwards, so the card is safe on disk
+                        // before anybody is asked anything about it.
+                        contactStore.save(contact, intoGroup = null)
                         contact
                     }
 
                     SessionRecorder.record(
                         "CARD_SCAN",
-                        "source=${outcome.source} n=${saved.size} group=$target",
+                        "source=${outcome.source} n=${saved.size}",
                     )
+
+                    _pendingFiling.value = PendingFiling(
+                        contactIds = saved.map { it.id },
+                        label = if (saved.size == 1) {
+                            saved.first().displayName
+                        } else {
+                            "${saved.size} contacts"
+                        },
+                    )
+
                     _state.update {
                         it.copy(
                             message = when {
                                 saved.size > 1 -> when (outcome.source) {
                                     CardScanner.Source.QR ->
-                                        "Saved ${saved.size} contacts$filed."
+                                        "Saved ${saved.size} contacts."
                                     CardScanner.Source.PRINT ->
-                                        "Read ${saved.size} cards$filed — check them."
+                                        "Read ${saved.size} cards — check them."
                                 }
 
                                 outcome.source == CardScanner.Source.QR ->
-                                    "Saved ${saved.first().displayName}$filed."
+                                    "Saved ${saved.first().displayName}."
 
                                 else ->
-                                    "Read ${saved.first().displayName}$filed — check it."
+                                    "Read ${saved.first().displayName} — check it."
                             },
                         )
                     }

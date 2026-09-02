@@ -122,6 +122,56 @@ fun GroupNameDialog(
 }
 
 /**
+ * Where the card that was just read should be filed.
+ *
+ * Asked **after** the contact is saved, never before. Filing is an aid, so it can
+ * never be the thing standing between somebody and a card they photographed —
+ * dismissing this, or the app dying while it is on screen, loses nothing.
+ *
+ * The group used last is offered first and already selected, because at an event
+ * the answer is the same forty times running and the second card onwards should
+ * cost one tap.
+ */
+@Composable
+fun FilingPrompt(
+    label: String,
+    groups: List<ContactGroup>,
+    suggested: Long?,
+    onFile: (Long) -> Unit,
+    onCreate: () -> Unit,
+    onSkip: () -> Unit,
+) {
+    // The suggested group first, then the rest in their usual order.
+    val ordered = remember(groups, suggested) {
+        groups.sortedByDescending { it.id == suggested }
+    }
+
+    AlertDialog(
+        onDismissRequest = onSkip,
+        title = { Text("Add $label to a group?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (groups.isEmpty()) {
+                    Text(
+                        "You have no groups yet. One is worth making for an event " +
+                            "or a client — it is what makes forty cards findable " +
+                            "afterwards.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    ordered.forEach { group ->
+                        PickerRow(group.name, group.id == suggested) { onFile(group.id) }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onCreate) { Text("New group") } },
+        dismissButton = { TextButton(onClick = onSkip) { Text("Not now") } },
+    )
+}
+
+/**
  * Choosing which group cards are filed into, or none.
  *
  * "None" is a first-class option rather than a way of cancelling: filing is an

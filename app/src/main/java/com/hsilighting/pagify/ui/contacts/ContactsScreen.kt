@@ -75,6 +75,11 @@ fun ContactsScreen(
     importTarget: Long?,
     onSetImportTarget: (Long?) -> Unit,
     onCreateGroup: (String) -> Unit,
+    /** What was just scanned and is waiting to be filed, if anything. */
+    pendingFilingLabel: String?,
+    onFileScanned: (Long) -> Unit,
+    onCreateGroupForScan: (String) -> Unit,
+    onSkipFiling: () -> Unit,
     onRenameGroup: (ContactGroup, String) -> Unit,
     onDeleteGroup: (ContactGroup) -> Unit,
     onExportGroup: (ContactGroup) -> Unit,
@@ -93,6 +98,7 @@ fun ContactsScreen(
     var choosingSource by remember { mutableStateOf(false) }
     var pickingTarget by remember { mutableStateOf(false) }
     var creatingGroup by remember { mutableStateOf(false) }
+    var namingForScan by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<ContactGroup?>(null) }
 
     // Groups only once one exists — see the note on this function.
@@ -262,6 +268,29 @@ fun ContactsScreen(
             title = "New group",
             onConfirm = { onCreateGroup(it); creatingGroup = false },
             onDismiss = { creatingGroup = false },
+        )
+    }
+
+    // Asked after a scan, and only while nothing else is on top of it — naming a
+    // new group replaces this rather than stacking a dialog on a dialog.
+    if (pendingFilingLabel != null && !namingForScan) {
+        FilingPrompt(
+            label = pendingFilingLabel,
+            groups = groups,
+            suggested = importTarget,
+            onFile = onFileScanned,
+            onCreate = { namingForScan = true },
+            onSkip = onSkipFiling,
+        )
+    }
+
+    if (namingForScan) {
+        GroupNameDialog(
+            title = "New group",
+            onConfirm = { onCreateGroupForScan(it); namingForScan = false },
+            // Backing out returns to the filing question rather than dropping it,
+            // so a mistaken tap on "New group" does not leave the card unfiled.
+            onDismiss = { namingForScan = false },
         )
     }
 

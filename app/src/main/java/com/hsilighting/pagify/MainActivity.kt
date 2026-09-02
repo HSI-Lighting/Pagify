@@ -72,6 +72,7 @@ class MainActivity : ComponentActivity() {
                 val contactGroups by viewModel.contactGroups.collectAsStateWithLifecycle()
                 val groupMemberships by viewModel.groupMemberships.collectAsStateWithLifecycle()
                 val importTarget by viewModel.importTarget.collectAsStateWithLifecycle()
+                val pendingFiling by viewModel.pendingFiling.collectAsStateWithLifecycle()
 
                 LaunchedEffect(incoming) {
                     incoming?.let { uri ->
@@ -301,6 +302,10 @@ class MainActivity : ComponentActivity() {
                     importTarget = importTarget,
                     onSetImportTarget = viewModel::setImportTarget,
                     onCreateGroup = { viewModel.createGroup(it, eventDate = null) },
+                    pendingFilingLabel = pendingFiling?.label,
+                    onFileScanned = { viewModel.fileScanned(it) },
+                    onCreateGroupForScan = viewModel::createGroupForScan,
+                    onSkipFiling = viewModel::dismissFiling,
                     onRenameGroup = viewModel::renameGroup,
                     onDeleteGroup = viewModel::deleteGroup,
                     onExportGroup = { group ->
