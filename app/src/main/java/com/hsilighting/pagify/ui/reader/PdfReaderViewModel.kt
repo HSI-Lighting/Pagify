@@ -1,5 +1,7 @@
 package com.hsilighting.pagify.ui.reader
 
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import com.hsilighting.pagify.data.ContactStore
 import com.hsilighting.pagify.core.contactFromCardJson
 import com.hsilighting.pagify.core.Contact
@@ -146,6 +148,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     private val contactStore = ContactStore(application)
 
     val contacts: StateFlow<List<Contact>> = contactStore.contacts
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val recents: StateFlow<List<RecentDocument>> = recentDocuments.documents
 
     /** Theme, viewfinder, and anything else that outlives a document. */
@@ -180,7 +183,6 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     init {
         viewModelScope.launch { recentDocuments.load() }
-        viewModelScope.launch { contactStore.load() }
         viewModelScope.launch {
             settingsStore.load()
             // The fill lives in two places — here, for the chips to read, and in

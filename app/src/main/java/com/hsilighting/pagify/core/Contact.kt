@@ -55,6 +55,28 @@ data class Contact(
         ).joinToString(" ").lowercase()
 }
 
+
+/**
+ * A container the user named: an event, a client, a category.
+ *
+ * One entity with an optional date, rather than separate group, event and date
+ * types. A group called "Light + Building 2026" with an event date *is* an
+ * event; one called "Hot leads" without one is a category. The user names the
+ * thing and the app imposes no taxonomy on it.
+ */
+data class ContactGroup(
+    val id: Long,
+    val name: String,
+    /** What lets a group be an event. Null for a plain category. */
+    val eventDate: Long? = null,
+    val notes: String = "",
+    /** ARGB, or null. For picking a group out of a list at a glance. */
+    val colour: Long? = null,
+    val createdAt: Long = System.currentTimeMillis(),
+    /** Set when the whole group is exported together. */
+    val lastExportedAt: Long? = null,
+)
+
 data class Phone(
     val raw: String,
     val normalised: String = raw,

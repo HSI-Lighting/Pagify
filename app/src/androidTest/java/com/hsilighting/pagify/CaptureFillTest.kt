@@ -1,5 +1,6 @@
 package com.hsilighting.pagify
 
+import com.hsilighting.pagify.core.PdfFont
 import android.graphics.Bitmap
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -72,6 +73,23 @@ class CaptureFillTest {
                 onMarkupColor = {},
                 onMarkupSize = { _, _ -> },
                 onCommitMarkup = {},
+                // Added when text markup landed and never wired here, which is
+                // what had the whole instrumented suite failing to compile. The
+                // values are inert on purpose: this test is about the fills.
+                markupArmed = false,
+                selectedMarkup = null,
+                onDisarmMarkup = {},
+                textFont = PdfFont.HELVETICA,
+                textSizePoints = 12f,
+                textCurveDegrees = 0f,
+                onTextFont = {},
+                onTextSize = {},
+                onTextCurve = {},
+                onMoveMarkup = { _, _ -> },
+                onSelectMarkup = {},
+                onScaleMarkup = {},
+                onRewriteMarkup = { _, _ -> },
+                onEraseMarkup = {},
                 onRecogniseMarkup = {},
                 onUndoMarkup = {},
                 onSaveToGallery = {},
