@@ -187,6 +187,31 @@ internal object NativeBridge {
     @Throws(PdfException::class)
     external fun saveToFd(handle: Long, fd: Int, incremental: Boolean)
 
+    // ------------------------------------------------------------- contacts --
+
+    /**
+     * Writes a contact as a vCard 3.0, stamped [exportedAt] as its `REV`.
+     *
+     * The clock belongs here rather than in the engine: the platform knows the
+     * time and the engine does not.
+     */
+    @Throws(PdfException::class)
+    external fun contactToVCard(cardJson: String, exportedAt: String): String
+
+    /** The same, for several contacts in one file. */
+    @Throws(PdfException::class)
+    external fun contactsToVCard(cardsJson: String, exportedAt: String): String
+
+    /**
+     * Reads a vCard into a contact, or returns null when the text is not one.
+     *
+     * Null is an ordinary answer. Most QR codes on business cards hold a web
+     * address rather than a vCard, and the caller needs to tell the two apart so
+     * it can fall through to reading the card by eye.
+     */
+    @Throws(PdfException::class)
+    external fun contactFromVCard(text: String): String?
+
     // ---------------------------------------------------------------- pages --
 
     /**

@@ -1,5 +1,7 @@
 package com.hsilighting.pagify
 
+import java.io.File
+import androidx.core.content.FileProvider
 import android.Manifest.permission.WRITE_EXTERNAL_STORAGE
 import android.content.Context
 import android.content.Intent
@@ -64,6 +66,7 @@ class MainActivity : ComponentActivity() {
                 val state by viewModel.state.collectAsStateWithLifecycle()
                 val incoming by incomingDocument.collectAsStateWithLifecycle()
                 val recents by viewModel.recents.collectAsStateWithLifecycle()
+                val contacts by viewModel.contacts.collectAsStateWithLifecycle()
 
                 LaunchedEffect(incoming) {
                     incoming?.let { uri ->
@@ -108,6 +111,19 @@ class MainActivity : ComponentActivity() {
                 }
 
                 val openPicker = remember { { picker.launch(arrayOf(PDF_MIME_TYPE)) } }
+
+                /**
+                 * A photograph of a business card.
+                 *
+                 * The gallery rather than the camera, for now. There is no camera
+                 * anywhere in this app — no CameraX, no permission, no preview —
+                 * and adding one is a week of work that this slice does not need
+                 * to prove itself. The system camera can put a photo in the
+                 * gallery, and this reads it from there.
+                 */
+                val cardPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument(),
+                ) { uri -> uri?.let(viewModel::scanCard) }
 
                 /**
                  * Where chosen pages are written out.
@@ -225,6 +241,19 @@ class MainActivity : ComponentActivity() {
                     )
                 }
 
+                // Sharing an exported contact. Written to the cache and handed
+                // over as a content:// URI with a grant, never a file path.
+                val shareContact: (String, String) -> Unit = { name, vcard ->
+                    runCatching { shareVCard(name, vcard) }
+                        .onFailure {
+                            Toast.makeText(
+                                this,
+                                it.message ?: "The contact could not be shared.",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                }
+
                 PagifyApp(
                     state = state,
                     recents = recents,
@@ -238,6 +267,15 @@ class MainActivity : ComponentActivity() {
                     onShowViewfinder = viewModel::setShowViewfinder,
                     onToggleRecording = recordingToast,
                     onReturnToLibrary = { viewModel.askBeforeLeaving(LeaveIntent.Library) },
+                    contacts = contacts,
+                    onScanCard = { cardPicker.launch(arrayOf("image/*")) },
+                    onExportContact = { contact ->
+                        viewModel.exportContact(contact) { vcard ->
+                            shareContact(contact.displayName, vcard)
+                        }
+                    },
+                    onDeleteContact = viewModel::deleteContact,
+                    onMessageShown = viewModel::messageShown,
                 ) {
                     PdfReaderScreen(
                         state = state,
@@ -387,6 +425,9 @@ class MainActivity : ComponentActivity() {
     companion object {
         const val PDF_MIME_TYPE = "application/pdf"
 
+        /** What a vCard is, so a share sheet offers contact apps first. */
+        const val VCARD_MIME_TYPE = "text/x-vcard"
+
         /**
          * A name for "Save a copy" that will not collide with the original.
          *
@@ -427,6 +468,32 @@ class MainActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    /**
+     * Hand an exported contact to whatever the reader wants to send it with.
+     *
+     * Written into the cache and shared as a `content://` URI with a grant,
+     * never a `file://` path — the latter throws on anything modern and would
+     * hand out a path into our own storage besides.
+     *
+     * The file is named after the contact so it arrives somewhere recognisable
+     * rather than as `contact.vcf` among a dozen others.
+     */
+    private fun shareVCard(name: String, vcard: String) {
+        val directory = File(cacheDir, "contacts").apply { mkdirs() }
+        // Anything a file name cannot hold becomes an underscore. A company
+        // with a slash in it would otherwise write outside the directory.
+        val safe = name.replace(Regex("[^A-Za-z0-9 _-]"), "_").trim().ifBlank { "Contact" }
+        val file = File(directory, "$safe.vcf").apply { writeText(vcard) }
+
+        val uri = FileProvider.getUriForFile(this, "$packageName.captures", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = VCARD_MIME_TYPE
+            putExtra(Intent.EXTRA_STREAM, uri)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        startActivity(Intent.createChooser(intent, "Send $safe"))
     }
 }
 

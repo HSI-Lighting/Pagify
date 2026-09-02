@@ -1,5 +1,9 @@
 package com.hsilighting.pagify.ui.reader
 
+import com.hsilighting.pagify.data.ContactStore
+import com.hsilighting.pagify.core.contactFromCardJson
+import com.hsilighting.pagify.core.Contact
+import com.hsilighting.pagify.core.CardScanner
 import android.app.Application
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -129,6 +133,19 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * one list everything is drawn from.
      */
     private val recentDocuments = RecentDocumentsStore(application)
+
+    /**
+     * Contacts read off business cards.
+     *
+     * Declared here rather than beside the rest of the contacts code below,
+     * because the `init` block loads it. Kotlin runs property initialisers and
+     * init blocks in declaration order, so a store declared after its own loader
+     * is still null when the loader runs — a null-pointer crash inside the view
+     * model constructor, before the app draws anything at all.
+     */
+    private val contactStore = ContactStore(application)
+
+    val contacts: StateFlow<List<Contact>> = contactStore.contacts
     val recents: StateFlow<List<RecentDocument>> = recentDocuments.documents
 
     /** Theme, viewfinder, and anything else that outlives a document. */
@@ -163,6 +180,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     init {
         viewModelScope.launch { recentDocuments.load() }
+        viewModelScope.launch { contactStore.load() }
         viewModelScope.launch {
             settingsStore.load()
             // The fill lives in two places — here, for the chips to read, and in
@@ -1665,6 +1683,80 @@ frame = pending.frame,
         it.copy(currentPage = page, jumpToPage = page)
     }
 
+    // ------------------------------------------------------------- contacts --
+
+    /**
+     * Read a photograph of a business card.
+     *
+     * Only the QR path exists so far. When a card carries a QR encoding a
+     * vCard, the data is exact and the contact is saved outright; when it does
+     * not, this says so plainly rather than saving a blank contact and letting
+     * somebody discover it was empty later.
+     */
+    fun scanCard(image: Uri) {
+        viewModelScope.launch {
+            when (val outcome = CardScanner.read(getApplication(), image)) {
+                is CardScanner.Outcome.Contact -> {
+                    val contact = contactFromCardJson(
+                        outcome.card,
+                        System.currentTimeMillis(),
+                    )
+                    contactStore.save(contact)
+                    SessionRecorder.record("CARD_QR", "name=${contact.displayName}")
+                    _state.update { it.copy(message = "Saved ${contact.displayName}.") }
+                }
+
+                is CardScanner.Outcome.NotAContact -> _state.update {
+                    it.copy(
+                        message = "That code holds a link, not a contact. " +
+                            "Reading the card itself is not built yet.",
+                    )
+                }
+
+                CardScanner.Outcome.NothingFound -> _state.update {
+                    it.copy(
+                        message = "No QR code on that card. " +
+                            "Reading the printed text is not built yet.",
+                    )
+                }
+
+                is CardScanner.Outcome.Failed -> _state.update {
+                    it.copy(message = outcome.reason)
+                }
+            }
+        }
+    }
+
+    /**
+     * Export a contact, and record that it happened.
+     *
+     * The stamping is the export, as far as this feature is concerned — so the
+     * date is written into the stored contact and into the file as `REV` from
+     * the same instant, and the two cannot disagree.
+     */
+    fun exportContact(contact: Contact, share: (String) -> Unit) {
+        viewModelScope.launch {
+            runCatching { contactStore.exportToVCard(listOf(contact)) }
+                .onSuccess { vcard ->
+                    if (vcard.isBlank()) return@onSuccess
+                    SessionRecorder.record("CONTACT_EXPORT", "name=${contact.displayName}")
+                    share(vcard)
+                }
+                .onFailure { failure ->
+                    Log.e(TAG, "the contact could not be exported", failure)
+                    _state.update {
+                        it.copy(
+                            message = failure.message
+                                ?: "The contact could not be exported.",
+                        )
+                    }
+                }
+        }
+    }
+
+    fun deleteContact(contact: Contact) {
+        viewModelScope.launch { contactStore.delete(contact.id) }
+    }
     // ------------------------------------------------------- pages in and out --
 
     fun choosePagesToExport(show: Boolean) =

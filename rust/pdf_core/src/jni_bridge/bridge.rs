@@ -802,6 +802,84 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_importPages
     })
 }
 
+/// Write a contact as a vCard.
+///
+/// The card arrives as JSON and the timestamp as an RFC 3339 string, because the
+/// clock belongs to the platform: Android has the user's locale and time zone
+/// and the engine does not. The date given here is written into the file as
+/// `REV`, which is the whole point of the feature — an exported contact that
+/// still says when it was exported.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_contactToVCard<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    card_json: JString<'local>,
+    exported_at: JString<'local>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let json = required_string(env, &card_json, "card")?;
+        let exported_at = required_string(env, &exported_at, "exportedAt")?;
+        let card: crate::contacts::BusinessCard = serde_json::from_str(&json)
+            .map_err(|e| PdfError::InvalidArgument(format!("could not decode the card: {e}")))?;
+
+        let vcard = crate::contacts::to_vcard(&card, &exported_at);
+        env.new_string(vcard)
+            .map(|s| s.into_raw())
+            .map_err(|e| PdfError::InvalidArgument(format!("could not return the vCard: {e}")))
+    })
+}
+
+/// Several contacts in one file.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_contactsToVCard<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    cards_json: JString<'local>,
+    exported_at: JString<'local>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let json = required_string(env, &cards_json, "cards")?;
+        let exported_at = required_string(env, &exported_at, "exportedAt")?;
+        let cards: Vec<crate::contacts::BusinessCard> = serde_json::from_str(&json)
+            .map_err(|e| PdfError::InvalidArgument(format!("could not decode the cards: {e}")))?;
+
+        let vcard = crate::contacts::to_vcards(&cards, &exported_at);
+        env.new_string(vcard)
+            .map(|s| s.into_raw())
+            .map_err(|e| PdfError::InvalidArgument(format!("could not return the vCard: {e}")))
+    })
+}
+
+/// Read a vCard into a contact, or return null when the text is not one.
+///
+/// This is the QR path. A business card carrying a QR that encodes a vCard needs
+/// no detection, no rectification and no OCR — the data is exact rather than
+/// recognised.
+///
+/// **Null is a real answer, not a failure.** Most QR codes on business cards hold
+/// a URL rather than a vCard, and the caller has to be able to tell the two
+/// apart so it can fall through to reading the card by eye instead of showing a
+/// blank contact.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_contactFromVCard<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    text: JString<'local>,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let text = required_string(env, &text, "text")?;
+        let Some(card) = crate::contacts::from_vcard(&text) else {
+            return Ok(std::ptr::null_mut());
+        };
+
+        let json = serde_json::to_string(&card)
+            .map_err(|e| PdfError::InvalidArgument(format!("could not encode the card: {e}")))?;
+        env.new_string(json)
+            .map(|s| s.into_raw())
+            .map_err(|e| PdfError::InvalidArgument(format!("could not return the card: {e}")))
+    })
+}
+
 /// The rotation a page currently carries, in quarter turns.
 ///
 /// Needed because `Command::SetPageRotation` is absolute rather than relative: an

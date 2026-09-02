@@ -1,5 +1,11 @@
 package com.hsilighting.pagify.ui
 
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarHost
+import com.hsilighting.pagify.ui.contacts.ContactsScreen
+import com.hsilighting.pagify.core.Contact
+import androidx.compose.material.icons.filled.ContactPage
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -54,6 +60,13 @@ fun PagifyApp(
     onShowViewfinder: (Boolean) -> Unit,
     onToggleRecording: () -> Unit,
     onReturnToLibrary: () -> Unit,
+    /** Contacts read off business cards. */
+    contacts: List<Contact>,
+    onScanCard: () -> Unit,
+    onExportContact: (Contact) -> Unit,
+    onDeleteContact: (Contact) -> Unit,
+    /** Cleared once shown, so the same message can be sent twice. */
+    onMessageShown: () -> Unit,
     reader: @Composable () -> Unit,
 ) {
     // A document is open — or opening, or asking for a password, or has failed to
@@ -73,7 +86,20 @@ fun PagifyApp(
     // quietly put you back in the library.
     var tab by rememberSaveable { mutableStateOf(HomeTab.Library) }
 
+    // The home screens had no way to say anything at all. Everything that
+    // reports an outcome — scanning a card, exporting a contact — put its
+    // message into the reader's snackbar, which does not exist outside a
+    // document. So a scan that found no QR code was indistinguishable from a
+    // scan that never ran: the app simply did nothing, twice over.
+    val snackbar = remember { SnackbarHostState() }
+    LaunchedEffect(state.message) {
+        val message = state.message ?: return@LaunchedEffect
+        snackbar.showSnackbar(message)
+        onMessageShown()
+    }
+
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             NavigationBar {
                 HomeTab.entries.forEach { entry ->
@@ -96,6 +122,13 @@ fun PagifyApp(
                     onPickDocument = onPickDocument,
                 )
 
+                HomeTab.Contacts -> ContactsScreen(
+                    contacts = contacts,
+                    onScan = onScanCard,
+                    onExport = onExportContact,
+                    onDelete = onDeleteContact,
+                )
+
                 HomeTab.Settings -> SettingsScreen(
                     showThumbnails = state.showThumbnails,
                     settings = settings,
@@ -115,11 +148,14 @@ fun PagifyApp(
 /**
  * Where the tab bar can take you.
  *
- * Two, and both of them earn their slot: the library is the app's front door and
- * settings is the only other thing that outlives a document. A bar padded out with
- * places that are really one screen is a bar that teaches people to ignore it.
+ * Three, and each earns its slot: the library is the app's front door,
+ * contacts is a separate body of the user's own data rather than a view of a
+ * document, and settings is the only other thing that outlives a document. A
+ * bar padded out with places that are really one screen is a bar that teaches
+ * people to ignore it.
  */
 enum class HomeTab(val label: String, val icon: ImageVector) {
     Library("Library", Icons.AutoMirrored.Filled.LibraryBooks),
+    Contacts("Contacts", Icons.Filled.ContactPage),
     Settings("Settings", Icons.Filled.Settings),
 }

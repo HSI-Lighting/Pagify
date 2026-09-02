@@ -8,4 +8,10 @@
 -->
 <paths>
     <cache-path name="captures" path="captures/" />
+    <!--
+        Contacts get their own directory rather than sharing the captures one.
+        A vCard and a page image are shared with different apps for different
+        reasons, and one grant should never reach the other kind of file.
+    -->
+    <cache-path name="contacts" path="contacts/" />
 </paths>

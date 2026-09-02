@@ -21,6 +21,7 @@
 //! on the host, which is where the majority of the test suite runs.
 
 pub mod command;
+pub mod contacts;
 pub mod document;
 pub mod engine;
 pub mod error;

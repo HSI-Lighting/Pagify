@@ -217,6 +217,7 @@ dependencies {
     // one: this is an offline reader, and a text layer that only appears once the
     // device has fetched a model is worse than none at all.
     implementation(libs.mlkit.text.recognition)
+    implementation(libs.mlkit.barcode)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
