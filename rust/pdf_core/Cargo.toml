@@ -9,7 +9,7 @@ description = "Pagify PDF engine: parsing, rendering and caching behind a stable
 [lib]
 # `cdylib` is what the JVM dlopen()s; `rlib` keeps `cargo test` able to build the
 # crate as a normal library so the pure-logic modules can be unit-tested on the host.
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [patch.crates-io]
 # One line changed: PdfDocument::handle() made public, which is what makes

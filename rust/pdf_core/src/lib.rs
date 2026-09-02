@@ -23,6 +23,7 @@
 pub mod command;
 pub mod contacts;
 pub mod document;
+pub mod ffi;
 pub mod engine;
 pub mod error;
 pub mod plugins;

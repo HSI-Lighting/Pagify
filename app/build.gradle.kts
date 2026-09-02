@@ -8,6 +8,7 @@ plugins {
     alias(libs.plugins.android.application)
     // No `kotlin.android` here: AGP 9 provides Kotlin compilation itself.
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.ksp)
 }
 
 // --------------------------------------------------------------------------
@@ -218,6 +219,9 @@ dependencies {
     // device has fetched a model is worse than none at all.
     implementation(libs.mlkit.text.recognition)
     implementation(libs.mlkit.barcode)
+    implementation(libs.room.runtime)
+    implementation(libs.room.ktx)
+    ksp(libs.room.compiler)
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.compose.ui)
