@@ -196,7 +196,15 @@ android {
             // other's files.
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+
+            // Named apart on the home screen too. Two identical icons is a way to
+            // open the wrong app and think your contacts have vanished — and the
+            // one holding the real contacts is the one that must never be in
+            // doubt. Uninstall this build when it is not being used for testing.
+            resValue("string", "app_name", "Pagify (test)")
         }
+        // The release build keeps the name from `strings.xml`, so the two cannot
+        // both be "Pagify".
         release {
             signingConfig = signingConfigs.findByName("release")
             isMinifyEnabled = true
@@ -221,6 +229,8 @@ android {
 
     buildFeatures {
         compose = true
+        // For the debug build's own app name. AGP 9 turns this off by default.
+        resValues = true
     }
 }
 

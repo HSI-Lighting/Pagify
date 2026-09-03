@@ -1,0 +1,17 @@
+{
+  "_note": "Real ML Kit line output from a photographed business card, 2026-09-03.",
+  "_anonymised": "Boxes are exactly as ML Kit reported them. The text has been replaced where it named a person or a real contact route; the character classes, word counts and lengths are preserved so every rule sees what it saw.",
+  "_source": "Samsung SM-G736B, ML Kit text-recognition 16.0.1, Latin, 4000x3000 photograph",
+  "segments": [
+    {"left":1387,"top":1326,"right":2274,"bottom":1502,"text":"Firstname Lastname"},
+    {"left":1510,"top":1518,"right":2260,"bottom":1597,"text":"Marketing Manager"},
+    {"left":984,"top":1817,"right":2111,"bottom":1906,"text":"PO Box 231038 Dubai, U.A.E"},
+    {"left":1379,"top":1926,"right":2116,"bottom":2011,"text":"7CRR+PW Sharjah"},
+    {"left":1382,"top":2115,"right":2122,"bottom":2199,"text":"T: +971 6 527 44 93"},
+    {"left":1313,"top":2215,"right":2123,"bottom":2306,"text":"M: +971 52 561 28 14"},
+    {"left":1068,"top":2429,"right":2126,"bottom":2514,"text":"sales @examplefuture.de"},
+    {"left":1102,"top":2530,"right":2130,"bottom":2615,"text":"www.exampefuture.de"},
+    {"left":1909,"top":2926,"right":2323,"bottom":3058,"text":"amplefu"},
+    {"left":2134,"top":3044,"right":2320,"bottom":3097,"text":"Future"}
+  ]
+}

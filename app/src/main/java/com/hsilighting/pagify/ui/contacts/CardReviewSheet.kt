@@ -50,6 +50,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -238,42 +239,65 @@ private fun CardAndPanel(
         val boxHeight = constraints.maxHeight.toFloat()
         val bitmap = photo.bitmap
 
-        // The photograph gets the space the panel does not. Fitting it to the
-        // whole box and laying the panel over it put the panel across the card,
-        // which is the one thing this screen must not do: the values are there to
-        // be compared against the card, and a card nobody can see is a list.
         val density = LocalDensity.current
-        val panelMax = boxHeight * PANEL_SHARE
-        val forPhoto = boxHeight - panelMax - with(density) { BOTTOM_BAR.toPx() }
+        val barPx = with(density) { BOTTOM_BAR.toPx() }
 
-        val fit = min(boxWidth / bitmap.width, forPhoto / bitmap.height)
-        val shownWidth = bitmap.width * fit
-        val shownHeight = bitmap.height * fit
-        // Regions are in the full photograph and the bitmap is a smaller copy of
-        // it: this is the factor between them, and it is not `shown`. Deriving it
-        // from the decoded bitmap would move every marker by the sampling factor.
-        val scale = if (photo.sourceWidth > 0) shownWidth / photo.sourceWidth else fit
-        val offsetX = (boxWidth - shownWidth) / 2f
-        val offsetY = (forPhoto - shownHeight) / 2f
+        // **Show the card, not the desk it was lying on.** A photograph is framed
+        // for a camera, so the card is often a small rectangle surrounded by
+        // floor. Fitting the whole frame made the one thing being checked the
+        // smallest thing on the screen.
+        //
+        // The crop is the extent of the read text plus a margin — the same
+        // measurement `around_text` already uses to size the card, so it needs
+        // nothing new and fails the same way. With no regions at all it falls back
+        // to the whole frame, which is then the only honest thing to show.
+        val crop = cropAround(shown, photo)
+
+        // A landscape card needs little height once cropped, and what it does not
+        // need goes to the panel rather than to empty margin.
+        val widthLimited = crop.height * (boxWidth / crop.width)
+        val forPhoto = min(widthLimited, boxHeight - barPx - with(density) { PANEL_MIN.toPx() })
+        val panelMax = boxHeight - forPhoto - barPx
+
+        // Scale is set by the crop now, not by the whole photograph.
+        val scale = min(boxWidth / crop.width, forPhoto / crop.height)
+        val offsetX = (boxWidth - crop.width * scale) / 2f - crop.left * scale
+        val offsetY = (forPhoto - crop.height * scale) / 2f - crop.top * scale
+        // The whole bitmap is still drawn and simply shifted under a clip, rather
+        // than a cropped copy being made — this is already the largest allocation
+        // on the screen and a second one buys nothing.
+        val shownWidth = photo.sourceWidth * scale
+        val shownHeight = photo.sourceHeight * scale
 
         val accent = MaterialTheme.colorScheme.primary
         val badge = BADGE * textScale
 
-        Image(
-            bitmap = bitmap.asImageBitmap(),
-            contentDescription = "The card that was photographed",
-            contentScale = ContentScale.Fit,
-            modifier = Modifier
+        // Clipped to the area the card gets; the image inside is larger than it
+        // and offset, which is what performs the crop.
+        Box(
+            Modifier
                 .fillMaxWidth()
-                .height(with(density) { forPhoto.toDp() }),
-        )
+                .height(with(density) { forPhoto.toDp() })
+                .clipToBounds(),
+        ) {
+            with(density) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "The card that was photographed",
+                    contentScale = ContentScale.FillBounds,
+                    modifier = Modifier
+                        .offset(x = offsetX.toDp(), y = offsetY.toDp())
+                        .size(shownWidth.toDp(), shownHeight.toDp()),
+                )
+            }
+        }
 
         // Dim everything, so the markers and the panel read as foreground. A
         // light scrim leaves the picture and the values competing.
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.62f)),
+                .background(Color.Black.copy(alpha = 0.45f)),
         )
 
         shown.forEachIndexed { position, entry ->
@@ -323,18 +347,10 @@ private fun CardAndPanel(
             }
         }
 
-        // Where the read text actually sits, so the panel can go beside it rather
-        // than at some fixed place on the screen.
-        val cardBottom = shown.mapNotNull { it.value.region }
-            .maxOfOrNull { offsetY + it.bottom * scale }
-            ?: (offsetY + shownHeight)
-
         with(density) {
-            // Sized to the share reserved for it above, so it sits directly
-            // under the photograph rather than over it. Hanging it in the gap
-            // below the card was the first attempt and showed two fields out of
-            // six — on an ordinary card the text runs most of the way down, so
-            // that gap is small.
+            // Sized to whatever the cropped card did not need. A landscape card
+            // cropped to its own edges leaves most of the screen, and that goes
+            // to the values rather than to margin.
             Surface(
                 color = Color.Black.copy(alpha = 0.72f),
                 shape = RoundedCornerShape(16.dp),
@@ -736,3 +752,48 @@ private fun Removed(
         }
     }
 }
+
+/**
+ * The part of the photograph worth showing: the card, not the room.
+ *
+ * The extent of everything that was read, plus a margin — printed cards carry a
+ * border of blank stock that the text never reaches, so a crop tight to the words
+ * looks like a mistake even when it is right.
+ *
+ * Falls back to the whole frame when nothing carries a region. That is the honest
+ * answer rather than a guess: with no idea where the card is, showing all of the
+ * picture at least contains it.
+ */
+private fun cropAround(fields: List<IndexedValue<ReadField>>, photo: Photo): Crop {
+    val regions = fields.mapNotNull { it.value.region }
+    val whole = Crop(0f, 0f, photo.sourceWidth.toFloat(), photo.sourceHeight.toFloat())
+    if (regions.isEmpty()) return whole
+
+    val left = regions.minOf { it.left }
+    val top = regions.minOf { it.top }
+    val right = regions.maxOf { it.right }
+    val bottom = regions.maxOf { it.bottom }
+
+    // Proportional to the text's own size, so it holds at any resolution and on a
+    // card that fills the frame as well as one lost in it.
+    val padX = (right - left) * CROP_MARGIN
+    val padY = (bottom - top) * CROP_MARGIN
+
+    return Crop(
+        left = (left - padX).coerceAtLeast(0f),
+        top = (top - padY).coerceAtLeast(0f),
+        right = (right + padX).coerceAtMost(photo.sourceWidth.toFloat()),
+        bottom = (bottom + padY).coerceAtMost(photo.sourceHeight.toFloat()),
+    ).takeIf { it.width > 1f && it.height > 1f } ?: whole
+}
+
+private class Crop(val left: Float, val top: Float, val right: Float, val bottom: Float) {
+    val width: Float get() = right - left
+    val height: Float get() = bottom - top
+}
+
+/** Blank card stock the words never reach, as a fraction of the text's extent. */
+private const val CROP_MARGIN = 0.12f
+
+/** The panel never shrinks below this, however tall the cropped card is. */
+private val PANEL_MIN = 200.dp

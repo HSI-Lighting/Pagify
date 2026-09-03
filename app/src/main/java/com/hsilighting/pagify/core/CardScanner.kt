@@ -111,7 +111,7 @@ object CardScanner {
         if (fromQr.isNotEmpty()) return Outcome.Contacts(fromQr, Source.QR)
 
         val printed = try {
-            readPrintedText(input)
+            readPrintedText(context, input)
         } catch (t: Throwable) {
             Log.e(TAG, "the text recognition failed", t)
             return Outcome.Failed(t.message ?: "The card could not be read.")
@@ -141,8 +141,8 @@ object CardScanner {
      * engine's rules are about relative position and relative text size, so the
      * units cancel and there is nothing to convert into.
      */
-    private suspend fun readPrintedText(image: InputImage): List<String> {
-        val segments = recogniseLines(image)
+    private suspend fun readPrintedText(context: Context, image: InputImage): List<String> {
+        val segments = recogniseLines(context, image)
         if (segments.isEmpty()) return emptyList()
 
         val json = JSONArray().apply { segments.forEach { put(it) } }.toString()
@@ -173,11 +173,14 @@ object CardScanner {
      * Latin half and loses the other, which is worth fixing but is a second model
      * to download rather than a change here.
      */
-    private suspend fun recogniseLines(image: InputImage): List<JSONObject> =
+    private suspend fun recogniseLines(context: Context, image: InputImage): List<JSONObject> =
         suspendCancellableCoroutine { continuation ->
             val recogniser = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
             recogniser.process(image)
                 .addOnSuccessListener { recognised ->
+                    // Before anything of ours touches it. See [RecogniserDump],
+                    // which does nothing outside a debuggable build.
+                    RecogniserDump.write(context, recognised, "card-${System.currentTimeMillis()}")
                     val lines = buildList {
                         for (block in recognised.textBlocks) {
                             for (line in block.lines) {
