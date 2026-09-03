@@ -532,10 +532,18 @@ fn horizontal_gap(a: &TextSegment, b: &TextSegment) -> f32 {
 /// In line heights rather than pixels, so it holds at any resolution and for any
 /// size of card in the frame.
 ///
-/// Two is deliberately generous. The gap it must not allow was **eighteen** line
-/// heights, and the gaps it must allow are the spaces between words — well under
-/// one. Nothing in the evidence argues for a tighter number, and a tight one
-/// would start splitting real lines apart.
+/// **The margin is narrower than it first looked.** Two was justified against the
+/// widest column gap on the card — eighteen heights — which made it sound
+/// generous. Measured properly, the same card's *tightest* column gap is 5.3
+/// heights, between the email on the left and the website on the right. That is
+/// the number this has to stay under, not eighteen.
+///
+/// On the other side there is no measurement at all. The case that would argue
+/// for a larger value is a genuine single line broken by a wide tab —
+/// `Tel: … <tab> Fax: …` — which ML Kit returned as one line on every card
+/// captured so far, so the question never arose. Two is therefore set by the only
+/// evidence there is, and `a_tab_wide_gap_on_one_line_stays_one_line` records the
+/// open question rather than a tuned answer.
 const MAX_GAP: f32 = 2.0;
 
 // ----------------------------------------------------------------- patterns --
@@ -1377,6 +1385,81 @@ mod tests {
             lines.contains(&"Sam Reyes"),
             "the left column was disturbed; lines were {lines:?}",
         );
+    }
+
+    // ------------------------------------------- the contested gap, 3 to 5 --
+    //
+    // `MAX_GAP` was justified as separating word spacing from an eighteen-height
+    // column gap, which made it sound like a wide safe margin. Measured against
+    // the real card that is wrong: the nearest gap that must *not* merge is 5.3
+    // heights — the email and the website — and a genuine single line broken by
+    // a tab sits around 3 to 4. The band the rule has to divide is narrow, and
+    // these two probes sit either side of it.
+
+    /// A tab-aligned line is one line, however wide the tab.
+    ///
+    /// Cards print `Tel: … <tab> Fax: …` constantly. Split here and the fax
+    /// number becomes a second telephone number belonging to nothing.
+    ///
+    /// **Ignored because the number in it is invented.** On every card captured
+    /// so far ML Kit returned tab-separated content as a *single* line, so the
+    /// gap was never measured — the 3.5 heights below is my guess at what a
+    /// printed tab looks like, and raising `MAX_GAP` to accommodate it would be
+    /// tuning a real threshold to a made-up number. Doing that would move the
+    /// rule to within 1.3 heights of the tightest column gap that must still
+    /// separate, on no evidence at all.
+    ///
+    /// **What would settle it:** a captured card where the recogniser returns a
+    /// tab-separated line as two boxes, and the gap measured from it. That is a
+    /// question for the harness, and it is the band this rule is least
+    /// characterised in — nothing between 2 and 5.3 has been tested.
+    ///
+    /// A threshold may not be the right answer either. A tab is a one-off; a
+    /// column gutter repeats down the card, and that difference is structural
+    /// rather than dimensional.
+    #[test]
+    #[ignore = "open: no measured tab gap exists yet — see the note; do not tune MAX_GAP to this"]
+    fn a_tab_wide_gap_on_one_line_stays_one_line() {
+        // 3.5 line heights of gap: an ordinary tab on a printed card.
+        let parsed = parse_card(&card(vec![
+            TextSegment {
+                left: 60.0, top: 400.0, right: 260.0, bottom: 420.0,
+                text: "T: 020 7946 0000".into(),
+            },
+            TextSegment {
+                left: 330.0, top: 400.0, right: 530.0, bottom: 420.0,
+                text: "F: 020 7946 0001".into(),
+            },
+        ]));
+
+        let lines: Vec<&str> = parsed.raw_text.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["T: 020 7946 0000 F: 020 7946 0001"],
+            "a tab split one line in two",
+        );
+    }
+
+    /// And the tightest real column gap still separates.
+    ///
+    /// 5.3 heights, taken from the card where the email sits in the left column
+    /// and the website in the right. It is the closest those columns come on any
+    /// row, so it is the case the rule has least margin on.
+    #[test]
+    fn the_tightest_real_column_gap_still_separates() {
+        let parsed = parse_card(&card(vec![
+            TextSegment {
+                left: 621.0, top: 3396.0, right: 1933.0, bottom: 3439.0,
+                text: "sam@example.co.uk".into(),
+            },
+            TextSegment {
+                left: 2162.0, top: 3396.0, right: 2586.0, bottom: 3439.0,
+                text: "www.example.com".into(),
+            },
+        ]));
+
+        let lines: Vec<&str> = parsed.raw_text.lines().collect();
+        assert_eq!(lines.len(), 2, "two columns merged; lines were {lines:?}");
     }
 
     /// Recognisers return a card as scattered boxes, often one per word.
