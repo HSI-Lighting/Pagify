@@ -1,0 +1,22 @@
+{
+  "_note": "Real ML Kit line output for a TWO-COLUMN business card, captured 2026-09-03. This is the card that produced 'Marketing Manager Abdul Ajees HSI LIGHTING' as one field.",
+  "_anonymised": "Boxes are exactly as ML Kit reported them, converted from the captured centre-y and height. The person's name, telephone numbers and email addresses are replaced by strings of the same shape — same word counts, character classes, lengths and OCR damage. The company address is left as printed: it is a published business address, not a person's.",
+  "_source": "Samsung SM-G736B, ML Kit text-recognition 16.0.1, Latin. Line angles 1.0, -2.8, -0.9, 0.8 degrees — a squarely framed card, so the column overlap is layout and not skew.",
+  "_layout": "Left column: name, title, then the address block. Right column: the HSI logo lockup, a colour-picker graphic reading Hue/Saturation/Intensity, and the website.",
+  "segments": [
+    {"left":648,"top":2382,"right":1107,"bottom":2462,"text":"Firstname Lastname"},
+    {"left":2339,"top":2394,"right":2597,"bottom":2462,"text":"LIGHTING"},
+    {"left":2090,"top":2394,"right":2326,"bottom":2510,"text":"HSI"},
+    {"left":645,"top":2474,"right":1202,"bottom":2537,"text":"Marketing Manager"},
+    {"left":2096,"top":2531,"right":2181,"bottom":2562,"text":"Hue"},
+    {"left":2094,"top":2578,"right":2334,"bottom":2617,"text":"Saturation"},
+    {"left":2096,"top":2629,"right":2286,"bottom":2672,"text":"Intensity"},
+    {"left":888,"top":2988,"right":2344,"bottom":3059,"text":"deve op i ng n no vati ve ideas"},
+    {"left":626,"top":3211,"right":1695,"bottom":3286,"text":"PO Box 231038 Dubai, United Arab Emirates,"},
+    {"left":2030,"top":3236,"right":2604,"bottom":3296,"text":"GPS: 7CRR+PW Sharjah"},
+    {"left":640,"top":3275,"right":1698,"bottom":3346,"text":"Tel: +97 l 6 544 36 36 | Fax: +971 6544 33 32"},
+    {"left":622,"top":3335,"right":1772,"bottom":3409,"text":"Mob: M +971 52 561 28 14 | P +97I 55 378 34 22"},
+    {"left":621,"top":3396,"right":1933,"bottom":3479,"text":"Email: Lights@example.co.uk. | Lm@example.co.uk"},
+    {"left":2162,"top":3437,"right":2586,"bottom":3480,"text":"www.example.com"}
+  ]
+}

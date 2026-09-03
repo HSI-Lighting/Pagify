@@ -429,19 +429,46 @@ fn into_lines(segments: &[TextSegment]) -> Vec<Line> {
         .iter()
         .filter(|segment| !segment.text.trim().is_empty())
         .collect();
+    // Left to right within a row, so two boxes at the same height are always
+    // considered in the same order. A greedy pass over an unstable sort gives a
+    // different answer for the same card depending on which box the recogniser
+    // happened to list first, and that turns a layout bug into an intermittent
+    // one.
     sorted.sort_by(|a, b| {
         a.centre_y()
-            .partial_cmp(&b.centre_y())
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&b.centre_y())
+            .then_with(|| a.left.total_cmp(&b.left))
     });
 
     let mut lines: Vec<Vec<&TextSegment>> = Vec::new();
     for segment in sorted {
-        let joined = lines.last_mut().filter(|line| {
-            line.iter().any(|other: &&TextSegment| shares_a_line(other, segment))
-        });
-        match joined {
-            Some(line) => line.push(segment),
+        // **Every open line, not just the last.** Two columns interleave once
+        // they are no longer welded together: sorted by centre, a card gives
+        // right, left, right, left — so the second box of the right column meets
+        // a *left*-column line as the most recent one, fails against it, and
+        // opens a line of its own. The right column would fragment into one line
+        // per box, which is the bug the horizontal test uncovers rather than
+        // causes.
+        //
+        // The best match rather than the first, so the result does not depend on
+        // the order lines happen to have been opened in.
+        let best = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| {
+                line.iter()
+                    .filter(|other| shares_a_line(other, segment))
+                    .filter_map(|other| vertical_overlap(other, segment))
+                    .fold(None, |most: Option<f32>, overlap| {
+                        Some(most.map_or(overlap, |m| m.max(overlap)))
+                    })
+                    .map(|overlap| (index, overlap))
+            })
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
+            .map(|(index, _)| index);
+
+        match best {
+            Some(index) => lines[index].push(segment),
             None => lines.push(vec![segment]),
         }
     }
@@ -473,10 +500,43 @@ fn into_lines(segments: &[TextSegment]) -> Vec<Line> {
 }
 
 fn shares_a_line(a: &TextSegment, b: &TextSegment) -> bool {
+    vertical_overlap(a, b).is_some() && horizontal_gap(a, b) < a.height().min(b.height()) * MAX_GAP
+}
+
+/// How much two boxes share vertically, or `None` if not enough to be one line.
+///
+/// Proportional to the shorter box rather than a fixed tolerance, because a card
+/// mixes 8pt and 20pt text and one number cannot serve both.
+fn vertical_overlap(a: &TextSegment, b: &TextSegment) -> Option<f32> {
     let overlap = a.bottom.min(b.bottom) - a.top.max(b.top);
     let shorter = a.height().min(b.height());
-    shorter > 0.0 && overlap > shorter * 0.5
+    (shorter > 0.0 && overlap > shorter * 0.5).then_some(overlap)
 }
+
+/// The empty space between two boxes horizontally, or zero if they overlap.
+fn horizontal_gap(a: &TextSegment, b: &TextSegment) -> f32 {
+    (b.left - a.right).max(a.left - b.right).max(0.0)
+}
+
+/// How far apart two boxes may sit and still be one line, in line heights.
+///
+/// **Without this, two columns weld together.** Sharing a row was the whole test,
+/// and on a card with the name at the left and the logo at the right the two
+/// share a row exactly. Measured on a real card: the name spans y 2382–2462 and
+/// the logo's `LIGHTING` spans 2394–2462 — an overlap of 68 against a shorter
+/// height of 68 — so they merged, the rest of the logo chained in, and the title
+/// chained onto that. One field came back reading
+/// `Marketing Manager Abdul Ajees HSI LIGHTING`. The same card also welded its
+/// address to a GPS line and its email to its website.
+///
+/// In line heights rather than pixels, so it holds at any resolution and for any
+/// size of card in the frame.
+///
+/// Two is deliberately generous. The gap it must not allow was **eighteen** line
+/// heights, and the gaps it must allow are the spaces between words — well under
+/// one. Nothing in the evidence argues for a tighter number, and a tight one
+/// would start splitting real lines apart.
+const MAX_GAP: f32 = 2.0;
 
 // ----------------------------------------------------------------- patterns --
 
@@ -1275,6 +1335,48 @@ mod tests {
         assert_eq!(parsed.phones[1].normalised, "02079460000");
         // And the printed form survives either way.
         assert_eq!(parsed.phones[0].raw.trim(), "+44 7700 900123");
+    }
+
+    /// **A column must not fragment because another column interleaves with it.**
+    ///
+    /// Boxes are considered in centre order, so two columns arrive interleaved:
+    /// right, left, right. Matching only against the most recently opened line —
+    /// which is what this used to do — means the right column's second box meets
+    /// a *left*-column line, fails against it, and opens a line of its own. The
+    /// right column comes apart, one line per box.
+    ///
+    /// This never showed while the columns were welded together, because
+    /// everything landed in one line regardless. Adding the horizontal test
+    /// uncovers it rather than causing it, which is why both halves of the fix
+    /// had to land together.
+    ///
+    /// Synthetic geometry on purpose: this is a property of the grouping rather
+    /// than of any card, and the real-card fixtures do not happen to contain the
+    /// interleaving that triggers it.
+    #[test]
+    fn a_column_is_not_fragmented_by_the_one_beside_it() {
+        let parsed = parse_card(&card(vec![
+            TextSegment {
+                left: 200.0, top: 0.0, right: 300.0, bottom: 20.0, text: "HSI".into(),
+            },
+            // Sorts between the two right-hand boxes, and is far from both.
+            TextSegment {
+                left: 0.0, top: 9.0, right: 100.0, bottom: 19.0, text: "Sam Reyes".into(),
+            },
+            TextSegment {
+                left: 300.0, top: 8.0, right: 420.0, bottom: 28.0, text: "LIGHTING".into(),
+            },
+        ]));
+
+        let lines: Vec<&str> = parsed.raw_text.lines().collect();
+        assert!(
+            lines.contains(&"HSI LIGHTING"),
+            "the right column fragmented; lines were {lines:?}",
+        );
+        assert!(
+            lines.contains(&"Sam Reyes"),
+            "the left column was disturbed; lines were {lines:?}",
+        );
     }
 
     /// Recognisers return a card as scattered boxes, often one per word.

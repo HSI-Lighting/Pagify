@@ -78,6 +78,99 @@ fn a_single_card_is_not_split_in_two() {
     );
 }
 
+fn card_two_column_logo() -> Vec<TextSegment> {
+    let raw = include_str!("fixtures/card_two_column_logo.json");
+    let fixture: Fixture = serde_json::from_str(raw).expect("the fixture could not be read");
+    fixture.segments
+}
+
+/// **Two columns must not weld into one line.**
+///
+/// This is the card that produced `Marketing Manager Abdul Ajees HSI LIGHTING`
+/// as a single field. The name sits in the left column and the logo in the right,
+/// and they share a row — so they overlap vertically, which is the only thing
+/// `shares_a_line` was asking about.
+///
+/// Measured, not supposed: the name spans y 2382–2462 and `LIGHTING` spans
+/// 2394–2462, an overlap of 68 against a shorter height of 68. The logo's `HSI`
+/// then chains in, and the title chains onto that.
+///
+/// Not skew. The lines on this card sit at 1.0, −2.8, −0.9 and 0.8 degrees.
+#[test]
+fn two_columns_are_not_welded_into_one_line() {
+    let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        card_two_column_logo(),
+    ));
+
+    let lines: Vec<&str> = parsed.raw_text.lines().collect();
+    assert!(
+        lines.iter().any(|line| *line == "Firstname Lastname"),
+        "the name was fused with something else. Lines were:\n{}",
+        parsed.raw_text,
+    );
+    assert!(
+        lines.iter().any(|line| *line == "Marketing Manager"),
+        "the title was fused with something else. Lines were:\n{}",
+        parsed.raw_text,
+    );
+}
+
+/// The same card, and what separating the columns recovers.
+#[test]
+fn a_two_column_card_reads_its_own_columns() {
+    let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        card_two_column_logo(),
+    ));
+
+    assert_eq!(
+        parsed.title.as_ref().map(|f| f.value.as_str()),
+        Some("Marketing Manager"),
+        "the title should be its own line now that the columns are apart",
+    );
+    // The address is in the left column and the GPS line in the right; they share
+    // a row too, and welding them buried a Plus Code inside the address.
+    assert!(
+        parsed.address.as_ref().is_none_or(|f| !f.value.contains("GPS")),
+        "the right column's GPS line was welded into the address: {:?}",
+        parsed.address,
+    );
+}
+
+/// **The logo is bigger than the name, and geometry cannot tell.**
+///
+/// Separating the columns does not finish this card — it changes which failure
+/// shows. The lines are now right and the *labelling* is wrong: the name rule
+/// takes the largest text near the top, and the logo lockup measures 117px
+/// against the name's 80px, so `HSI LIGHTING` is read as the person.
+///
+/// This is the canonical case the whole classifier plan is built on, arrived at
+/// from a real card rather than argued: **the largest text on a card is often the
+/// company.** The rule that already exists to prevent it — a line carrying a
+/// legal suffix is not a person — does not fire, because "Lighting" is an
+/// industry word and not a suffix.
+///
+/// **Deliberately not patched.** Adding trade words to `COMPANY_SUFFIXES` is the
+/// brittle keyword list the plan warns against: it would have to know every
+/// industry in every language, and it would still miss a company called after its
+/// founder. Lexical evidence is the axis that separates these, and that is what
+/// the classifier is for.
+///
+/// What matters is that this is now a *labelling* failure. Before the columns
+/// were separated the name, title and company arrived as one string and no
+/// classifier downstream could have recovered them.
+#[test]
+#[ignore = "known: the logo lockup is taller than the name; needs lexical evidence, not geometry"]
+fn the_person_is_read_as_the_person_not_the_logo() {
+    let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        card_two_column_logo(),
+    ));
+
+    assert_eq!(
+        parsed.name.as_ref().map(|f| f.value.as_str()),
+        Some("Firstname Lastname"),
+    );
+}
+
 /// The lines ML Kit separated stay separated.
 ///
 /// `into_lines` re-groups segments by vertical overlap, which is what fuses the
