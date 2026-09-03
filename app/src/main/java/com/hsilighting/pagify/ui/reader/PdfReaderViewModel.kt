@@ -6,8 +6,12 @@ import com.hsilighting.pagify.data.ContactStore
 import com.hsilighting.pagify.core.contactFromCardJson
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
+import com.hsilighting.pagify.core.CARD_TEXT_MAX
+import com.hsilighting.pagify.core.CARD_TEXT_MIN
 import com.hsilighting.pagify.core.CardReading
+import com.hsilighting.pagify.core.ReadField
 import com.hsilighting.pagify.core.cardReadingFrom
+import com.hsilighting.pagify.core.contactFrom
 import com.hsilighting.pagify.core.CardScanner
 import android.app.Application
 import android.content.ClipData
@@ -218,17 +222,24 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     private val _pendingReview = MutableStateFlow<PendingReview?>(null)
     val pendingReview: StateFlow<PendingReview?> = _pendingReview
 
-    /** Keep the card being shown, then move to the next or finish. */
-    fun keepReviewedCard() = advanceReview(keep = true)
+    /** Keep the card as it stands after the review, corrections and all. */
+    fun keepReviewedCard(fields: List<ReadField>) = advanceReview(fields)
 
     /** Pass over the card being shown. */
-    fun skipReviewedCard() = advanceReview(keep = false)
+    fun skipReviewedCard() = advanceReview(null)
 
-    private fun advanceReview(keep: Boolean) {
+    private fun advanceReview(fields: List<ReadField>?) {
         val review = _pendingReview.value ?: return
         val reading = review.readings.getOrNull(review.at) ?: return
 
-        val kept = if (keep) review.kept + reading.contact else review.kept
+        // Built from what survived rather than from the reading, so a field
+        // swiped away is genuinely absent from the contact and a corrected one
+        // is saved as corrected.
+        val kept = if (fields.isNullOrEmpty()) {
+            review.kept
+        } else {
+            review.kept + reading.contactFrom(fields)
+        }
         val next = review.at + 1
 
         if (next < review.readings.size) {
@@ -344,6 +355,14 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun setTheme(choice: ThemeChoice) {
         viewModelScope.launch { settingsStore.update { it.copy(theme = choice) } }
+    }
+
+    fun setCardTextScale(scale: Float) {
+        viewModelScope.launch {
+            settingsStore.update {
+                it.copy(cardTextScale = scale.coerceIn(CARD_TEXT_MIN, CARD_TEXT_MAX))
+            }
+        }
     }
 
     /** The hard off: no viewfinder while zoomed, and no handle to bring one back. */

@@ -78,6 +78,7 @@ class ContactsScreenTest {
                 onDelete = {},
                 onSaveEdit = {},
                 review = null,
+                cardTextScale = 1f,
                 onKeepReviewed = {},
                 onSkipReviewed = {},
                 onDeleteContacts = { calls.deletedContacts = it },

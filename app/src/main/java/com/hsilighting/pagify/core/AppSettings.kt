@@ -49,6 +49,18 @@ data class AppSettings(
     val captureScale: CaptureScale = CaptureScale.HIGH,
     val captureFormat: CaptureFormat = CaptureFormat.PNG,
     val captureFill: CaptureFill = CaptureFill.PAGE,
+    /**
+     * How large the text is on the card-review panel.
+     *
+     * A setting rather than a fixed size because the panel is read at arm's
+     * length, in whatever light the event has, by somebody who may be holding the
+     * card in the other hand — and because the right size for a phone in a
+     * pocket and a tablet on a stand are not the same number.
+     *
+     * A multiplier rather than a point size, so the labels, the values and the
+     * badges keep their proportions to each other at every setting.
+     */
+    val cardTextScale: Float = 1f,
 )
 
 /** The settings as the file holds them. */
@@ -61,6 +73,7 @@ fun AppSettings.toSettingsJson(): String = JSONObject()
     .put(CAPTURE_SCALE_KEY, captureScale.name)
     .put(CAPTURE_FORMAT_KEY, captureFormat.name)
     .put(CAPTURE_FILL_KEY, captureFill.name)
+    .put(CARD_TEXT_SCALE_KEY, cardTextScale.toDouble())
     .toString()
 
 /**
@@ -92,6 +105,13 @@ fun settingsFromJson(json: String): AppSettings {
         captureScale = stored.optString(CAPTURE_SCALE_KEY).toEnum(defaults.captureScale),
         captureFormat = stored.optString(CAPTURE_FORMAT_KEY).toEnum(defaults.captureFormat),
         captureFill = stored.optString(CAPTURE_FILL_KEY).toEnum(defaults.captureFill),
+        cardTextScale = stored
+            .optDouble(CARD_TEXT_SCALE_KEY, defaults.cardTextScale.toDouble())
+            .toFloat()
+            // Clamped on the way in as well as in the UI: a file edited by hand,
+            // or written by a later build with a wider range, must not produce
+            // text too small to read or too large to fit a value on screen.
+            .coerceIn(CARD_TEXT_MIN, CARD_TEXT_MAX),
     )
 }
 
@@ -113,3 +133,22 @@ private const val HANDLE_Y_KEY = "viewfinderHandleY"
 private const val CAPTURE_SCALE_KEY = "captureScale"
 private const val CAPTURE_FORMAT_KEY = "captureFormat"
 private const val CAPTURE_FILL_KEY = "captureFill"
+private const val CARD_TEXT_SCALE_KEY = "cardTextScale"
+
+/** The range the review text may be scaled to. */
+const val CARD_TEXT_MIN = 0.8f
+const val CARD_TEXT_MAX = 1.6f
+
+/**
+ * The sizes the card-review panel offers.
+ *
+ * Named steps rather than a slider: this is chosen once and then lived with, and
+ * a slider invites fiddling with a number nobody can name. The values stay inside
+ * [CARD_TEXT_MIN] and [CARD_TEXT_MAX], which are what a stored file is clamped to.
+ */
+enum class CardTextSize(val label: String, val scale: Float) {
+    SMALL("Small", 0.85f),
+    NORMAL("Normal", 1f),
+    LARGE("Large", 1.25f),
+    LARGEST("Largest", 1.5f),
+}

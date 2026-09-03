@@ -1,6 +1,7 @@
 package com.hsilighting.pagify
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.hsilighting.pagify.core.CardFieldKind
 import com.hsilighting.pagify.core.cardReadingFrom
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -38,17 +39,19 @@ class CardReadingTest {
     """.trimIndent()
 
     @Test
-    fun theFourFieldsComeThroughWithWhereTheyWereRead() {
+    fun everyFieldComesThroughWithWhereItWasRead() {
         val reading = cardReadingFrom(printed, id = 1)
 
         assertEquals(
-            listOf("Name", "Designation", "Phone", "Company"),
-            reading.highlights.map { it.label },
+            // Who, what they do, who for, then how to reach them — the order
+            // somebody checks a card in.
+            listOf("Name", "Designation", "Company", "Phone"),
+            reading.fields.map { it.kind.label },
         )
-        assertEquals("Yaseen Anwar", reading.highlights[0].value)
-        assertEquals("050 123 4567", reading.highlights[2].value)
+        assertEquals("Yaseen Anwar", reading.fields[0].value)
+        assertEquals("050 123 4567", reading.fields[3].value)
 
-        val name = reading.highlights[0].region!!
+        val name = reading.fields[0].region!!
         assertEquals(60f, name.left)
         assertEquals(70f, name.top)
         assertEquals(34f, name.height)
@@ -84,27 +87,27 @@ class CardReadingTest {
 
         val reading = cardReadingFrom(fromQr, id = 1)
         assertFalse("a QR card was sent to be checked", reading.worthReviewing)
-        assertNull(reading.highlights.first().region)
+        assertNull(reading.fields.first().region)
         // The values are still there — it is the pointing that is impossible.
-        assertEquals("Jane Okafor", reading.highlights.first().value)
+        assertEquals("Jane Okafor", reading.fields.first().value)
     }
 
     /** A card the parser could make nothing of does not crash the review. */
     @Test
     fun anEmptyCardHasNothingToShow() {
         val reading = cardReadingFrom("""{"phones":[],"emails":[],"urls":[],"rawText":""}""", 1)
-        assertTrue(reading.highlights.isEmpty())
+        assertTrue(reading.fields.isEmpty())
         assertFalse(reading.worthReviewing)
     }
 
     /**
-     * Only the first number is highlighted.
+     * Every number is shown, each with its own kind.
      *
-     * A card printing a landline, a mobile and a fax would otherwise stack three
-     * highlights in the same corner, on top of each other.
+     * All of them, because the review is where a misreading is caught and a field
+     * that is not shown cannot be corrected — it goes into the contact unseen.
      */
     @Test
-    fun onlyTheFirstNumberIsHighlighted() {
+    fun everyNumberIsShownWithItsKind() {
         val many = """
             {"phones":[
                {"raw":"020 7946 0000","normalised":"","kind":"work","confidence":0.9,
@@ -115,7 +118,10 @@ class CardReadingTest {
         """.trimIndent()
 
         val reading = cardReadingFrom(many, id = 1)
-        assertEquals(1, reading.highlights.count { it.label == "Phone" })
-        assertEquals("020 7946 0000", reading.highlights.single().value)
+        assertEquals(2, reading.fields.count { it.kind == CardFieldKind.PHONE })
+        assertEquals(
+            listOf("work", "fax"),
+            reading.fields.mapNotNull { it.phoneKind },
+        )
     }
 }

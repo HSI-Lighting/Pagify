@@ -6,6 +6,7 @@ import android.net.Uri
 import android.util.Log
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -14,18 +15,35 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.automirrored.filled.Undo
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Surface
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -38,12 +56,15 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.net.toUri
+import com.hsilighting.pagify.core.CardFieldKind
 import com.hsilighting.pagify.core.CardReading
+import com.hsilighting.pagify.core.ReadField
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.min
@@ -66,8 +87,9 @@ data class CardReviewState(
 /**
  * Checking what was read, against the card it was read from.
  *
- * The photograph is dimmed, each thing that was read is ringed on it, and the
- * four values are set out below in type big enough to check at arm's length.
+ * The photograph fills the screen dimmed, each thing that was read is ringed on
+ * it, and the values sit in a translucent panel against the card — close enough
+ * to compare without covering what they describe.
  *
  * The values are numbered to match the rings rather than drawn at them. Drawing
  * them in place was the first attempt and the reason for this one: the lines of a
@@ -86,11 +108,25 @@ fun CardReviewSheet(
     /** Which of how many, when one photograph held several cards. */
     position: Int,
     total: Int,
-    onSave: () -> Unit,
+    /** From settings: this is read at arm's length, in an event's lighting. */
+    textScale: Float,
+    /** What survived the review, in the order it is shown. */
+    onSave: (List<ReadField>) -> Unit,
     onSkip: () -> Unit,
 ) {
     val context = LocalContext.current
     var photo by remember(imageUri) { mutableStateOf<Photo?>(null) }
+
+    // The working copy. Keyed on the reading, so moving to the next card in a
+    // photograph starts from that card's own fields rather than the last one's.
+    // Every field the card produced, and which of them have been swiped away.
+    // Kept as a set of indices rather than two lists so a removal is reversible:
+    // the field is still here, it is simply not being saved.
+    var all by remember(reading) { mutableStateOf(reading.fields) }
+    var removed by remember(reading) { mutableStateOf(emptySet<Int>()) }
+    var correcting by remember(reading) { mutableStateOf<Int?>(null) }
+
+    val shown = all.withIndex().filter { it.index !in removed }
 
     LaunchedEffect(imageUri) {
         photo = withContext(Dispatchers.IO) {
@@ -104,45 +140,40 @@ fun CardReviewSheet(
         onDismissRequest = onSkip,
         properties = DialogProperties(usePlatformDefaultWidth = false),
     ) {
-        Column(
+        Box(
             Modifier
                 .fillMaxSize()
-                .background(Color(0xFF101010)),
+                .background(Color(0xFF0B0B0B)),
         ) {
-            Text(
-                text = if (total > 1) "Card ${position + 1} of $total" else "Check the card",
-                style = MaterialTheme.typography.titleMedium,
-                color = Color.White,
-                modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 4.dp),
-            )
-            Text(
-                text = "Read from the photograph — tap Save to keep it, or edit it after.",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.7f),
-                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 12.dp),
-            )
-
-            Box(
-                Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                val loaded = photo
-                if (loaded == null) {
-                    Text("Opening the photograph…", color = Color.White.copy(alpha = 0.7f))
-                } else {
-                    HighlightedPhoto(loaded, reading)
-                }
+            val loaded = photo
+            if (loaded == null) {
+                Text(
+                    "Opening the photograph…",
+                    color = Color.White.copy(alpha = 0.7f),
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            } else {
+                CardAndPanel(
+                    photo = loaded,
+                    shown = shown,
+                    removed = removed.map { all[it] },
+                    heading = if (total > 1) {
+                        "Card ${position + 1} of $total"
+                    } else {
+                        "Check the card"
+                    },
+                    textScale = textScale,
+                    onEdit = { correcting = it },
+                    onDrop = { at -> removed = removed + at },
+                    onRestore = { field -> removed = removed - all.indexOf(field) },
+                )
             }
-
-
-            ReadFields(reading)
 
             Row(
                 Modifier
+                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+                    .background(Color(0xFF0B0B0B))
                     .padding(20.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -152,65 +183,101 @@ fun CardReviewSheet(
                     // this passes over one and goes on to the next.
                     Text(if (total > 1) "Skip this one" else "Discard")
                 }
-                Button(onClick = onSave, modifier = Modifier.weight(1f)) { Text("Save") }
+                Button(
+                    onClick = { onSave(shown.map { it.value }) },
+                    enabled = shown.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                ) { Text("Save") }
             }
         }
     }
+
+    correcting?.let { at ->
+        all.getOrNull(at)?.let { field ->
+            CorrectField(
+                field = field,
+                onDone = { corrected ->
+                    all = all.toMutableList().also {
+                        // A corrected number is no longer the one the engine
+                        // normalised, so that form goes: exporting a dialable
+                        // number that disagrees with what is on screen is worse
+                        // than exporting none.
+                        it[at] = field.copy(value = corrected, normalised = null)
+                    }
+                    correcting = null
+                },
+                onDismiss = { correcting = null },
+            )
+        }
+    }
 }
+
 /**
- * The photograph, dimmed, with a marker round each thing that was read.
+ * The photograph with its markers, and the panel of values against it.
  *
- * The values themselves are **not** drawn on the picture, and the first version
- * that did was the argument against it: four labelled values placed at their own
- * lines landed on top of each other and on the card's own text, because the lines
- * of a business card are a few millimetres apart and readable type is not. It was
- * less legible than the card.
+ * The panel is placed relative to the card rather than at a fixed height: below
+ * the read text when there is room under it, over the picture otherwise. A panel
+ * pinned to the bottom of the screen is a long way from a card sitting high in
+ * the frame, and comparing the two is the whole point.
  *
- * So the picture carries numbered markers and nothing else, and the numbers are
- * repeated beside the values below. The link is explicit rather than spatial,
- * which is what survives a card whose lines are close together.
- *
- * The markers are placed into the rectangle the image actually occupies, not the
- * container's — `ContentScale.Fit` leaves bars on one axis, and a marker measured
- * against the container drifts further from its words the more the two aspect
- * ratios differ.
+ * Markers and panel share one coordinate system, so both are computed here.
  */
 @Composable
-private fun HighlightedPhoto(photo: Photo, reading: CardReading) {
+private fun CardAndPanel(
+    photo: Photo,
+    shown: List<IndexedValue<ReadField>>,
+    removed: List<ReadField>,
+    heading: String,
+    textScale: Float,
+    onEdit: (Int) -> Unit,
+    onDrop: (Int) -> Unit,
+    onRestore: (ReadField) -> Unit,
+) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val boxWidth = constraints.maxWidth.toFloat()
         val boxHeight = constraints.maxHeight.toFloat()
         val bitmap = photo.bitmap
-        val shown = min(boxWidth / bitmap.width, boxHeight / bitmap.height)
-        val shownWidth = bitmap.width * shown
-        val shownHeight = bitmap.height * shown
-        // Regions are in the full photograph and the bitmap is a smaller copy of
-        // it: this is the factor that takes one to the other, and it is not
-        // `shown`. Deriving it from the decoded bitmap instead would move every
-        // marker by the downsampling factor.
-        val scale = if (photo.sourceWidth > 0) shownWidth / photo.sourceWidth else shown
-        val offsetX = (boxWidth - shownWidth) / 2f
-        val offsetY = (boxHeight - shownHeight) / 2f
 
+        // The photograph gets the space the panel does not. Fitting it to the
+        // whole box and laying the panel over it put the panel across the card,
+        // which is the one thing this screen must not do: the values are there to
+        // be compared against the card, and a card nobody can see is a list.
         val density = LocalDensity.current
+        val panelMax = boxHeight * PANEL_SHARE
+        val forPhoto = boxHeight - panelMax - with(density) { BOTTOM_BAR.toPx() }
+
+        val fit = min(boxWidth / bitmap.width, forPhoto / bitmap.height)
+        val shownWidth = bitmap.width * fit
+        val shownHeight = bitmap.height * fit
+        // Regions are in the full photograph and the bitmap is a smaller copy of
+        // it: this is the factor between them, and it is not `shown`. Deriving it
+        // from the decoded bitmap would move every marker by the sampling factor.
+        val scale = if (photo.sourceWidth > 0) shownWidth / photo.sourceWidth else fit
+        val offsetX = (boxWidth - shownWidth) / 2f
+        val offsetY = (forPhoto - shownHeight) / 2f
+
         val accent = MaterialTheme.colorScheme.primary
+        val badge = BADGE * textScale
 
         Image(
             bitmap = bitmap.asImageBitmap(),
             contentDescription = "The card that was photographed",
             contentScale = ContentScale.Fit,
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(with(density) { forPhoto.toDp() }),
         )
 
-        // Dim everything, then let the markers sit above it. Heavy enough that
-        // the picture reads as background; a light scrim leaves both competing.
+        // Dim everything, so the markers and the panel read as foreground. A
+        // light scrim leaves the picture and the values competing.
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.55f)),
+                .background(Color.Black.copy(alpha = 0.62f)),
         )
 
-        reading.highlights.forEachIndexed { index, field ->
+        shown.forEachIndexed { position, entry ->
+            val field = entry.value
             val region = field.region ?: return@forEachIndexed
 
             with(density) {
@@ -231,30 +298,73 @@ private fun HighlightedPhoto(photo: Photo, reading: CardReading) {
                 // corner it covered the first letter of every value, and a name
                 // reading "aseen Anwar" is exactly what makes somebody distrust
                 // the check they are being asked to make.
-                //
-                // Tucked back inside when the line runs close to the frame edge,
-                // where a badge beyond it would simply be clipped away.
                 val badgeAfter = (offsetX + region.right * scale).toDp() + 4.dp
-                val fits = badgeAfter + BADGE < (offsetX + shownWidth).toDp()
+                val fits = badgeAfter + badge < (offsetX + shownWidth).toDp()
 
                 Box(
                     Modifier
                         .offset(
-                            x = if (fits) badgeAfter else badgeAfter - BADGE - 8.dp,
+                            x = if (fits) badgeAfter else badgeAfter - badge - 8.dp,
                             y = (offsetY + region.top * scale).toDp() +
-                                (((region.height * scale).toDp() - BADGE) / 2f),
+                                (((region.height * scale).toDp() - badge) / 2f),
                         )
-                        .size(BADGE)
+                        .size(badge)
                         .clip(CircleShape)
                         .background(accent),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "${index + 1}",
+                        text = "${position + 1}",
                         color = MaterialTheme.colorScheme.onPrimary,
-                        fontSize = 12.sp,
+                        fontSize = (12 * textScale).sp,
                         fontWeight = FontWeight.Bold,
                     )
+                }
+            }
+        }
+
+        // Where the read text actually sits, so the panel can go beside it rather
+        // than at some fixed place on the screen.
+        val cardBottom = shown.mapNotNull { it.value.region }
+            .maxOfOrNull { offsetY + it.bottom * scale }
+            ?: (offsetY + shownHeight)
+
+        with(density) {
+            // Sized to the share reserved for it above, so it sits directly
+            // under the photograph rather than over it. Hanging it in the gap
+            // below the card was the first attempt and showed two fields out of
+            // six — on an ordinary card the text runs most of the way down, so
+            // that gap is small.
+            Surface(
+                color = Color.Black.copy(alpha = 0.72f),
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(start = 12.dp, end = 12.dp, bottom = BOTTOM_BAR)
+                    .fillMaxWidth()
+                    .heightIn(max = panelMax.toDp()),
+            ) {
+                Column(Modifier.padding(vertical = 12.dp)) {
+                    Text(
+                        text = heading,
+                        color = Color.White,
+                        fontSize = (15 * textScale).sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 2.dp),
+                    )
+                    SwipeInstruction(textScale)
+                    // The list yields space to what follows rather than taking
+                    // all of it: it scrolls, so it would otherwise push the
+                    // removed strip out of the panel and there would be no way
+                    // back from a swipe after all.
+                    ReadFields(
+                        shown = shown,
+                        textScale = textScale,
+                        onEdit = onEdit,
+                        onDrop = onDrop,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (removed.isNotEmpty()) Removed(removed, textScale, onRestore)
                 }
             }
         }
@@ -262,66 +372,228 @@ private fun HighlightedPhoto(photo: Photo, reading: CardReading) {
 }
 
 /**
- * What was read, in type big enough to check at arm's length.
+ * A line saying the rows can be swiped.
  *
- * Numbered to match the markers on the photograph. This is where the values
- * actually get read — the picture above says *where they came from*, which is the
- * question somebody asks only when one of them looks wrong.
+ * Spelled out because a swipe is invisible: nothing about a row suggests it
+ * moves, and a correction somebody does not know they can make is a correction
+ * they do not make. The icons carry the meaning; the words say which way.
  */
 @Composable
-private fun ReadFields(reading: CardReading) {
-    Column(
-        Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+private fun SwipeInstruction(textScale: Float) {
+    Row(
+        Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (reading.highlights.isEmpty()) {
+        Icon(
+            Icons.Filled.Edit,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size((14 * textScale).dp),
+        )
+        Text(
+            text = "Swipe right to correct",
+            color = Color.White.copy(alpha = 0.75f),
+            fontSize = (11 * textScale).sp,
+            modifier = Modifier.padding(start = 4.dp, end = 12.dp),
+        )
+        Icon(
+            Icons.Filled.Delete,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.error,
+            modifier = Modifier.size((14 * textScale).dp),
+        )
+        Text(
+            text = "left to remove",
+            color = Color.White.copy(alpha = 0.75f),
+            fontSize = (11 * textScale).sp,
+            modifier = Modifier.padding(start = 4.dp),
+        )
+    }
+}
+
+/**
+ * What was read, big enough to check at arm's length — and correctable in place.
+ *
+ * **Swipe left to drop a field, right to correct it.** Both directions on the
+ * same row, because both answers to "that is wrong" are common: the recogniser
+ * either read something that is not there, or read something real and got a
+ * character of it wrong. Making one a swipe and the other a menu would say those
+ * are different kinds of act.
+ *
+ * A dropped field is genuinely absent from what is saved rather than hidden — see
+ * `contactFrom`. The raw text is untouched either way, so a value removed here is
+ * still findable by search afterwards.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReadFields(
+    shown: List<IndexedValue<ReadField>>,
+    textScale: Float,
+    onEdit: (Int) -> Unit,
+    onDrop: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier.verticalScroll(rememberScrollState())) {
+        if (shown.isEmpty()) {
             Text(
-                "Nothing could be read off this card.",
+                "Nothing left to save from this card.",
                 color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
             )
             return@Column
         }
 
-        reading.highlights.forEachIndexed { index, field ->
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Box(
-                    Modifier
-                        .size(BADGE)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
-                    contentAlignment = Alignment.Center,
+        shown.forEachIndexed { position, entry ->
+            val field = entry.value
+            // Keyed on the underlying index: without it, dropping a row leaves
+            // the dismiss state attached to the row that slid up into its place,
+            // which then draws itself already swiped away.
+            key(entry.index, field.value) {
+                val dismiss = rememberSwipeToDismissBoxState(
+                    confirmValueChange = { value ->
+                        when (value) {
+                            SwipeToDismissBoxValue.EndToStart -> {
+                                onDrop(entry.index)
+                                true
+                            }
+                            SwipeToDismissBoxValue.StartToEnd -> {
+                                // Editing is not a dismissal — the row stays and
+                                // the dialog opens over it, so `false` puts the
+                                // row back where it was.
+                                onEdit(entry.index)
+                                false
+                            }
+                            else -> false
+                        }
+                    },
+                )
+
+                SwipeToDismissBox(
+                    state = dismiss,
+                    backgroundContent = { SwipeHint(dismiss.dismissDirection, textScale) },
                 ) {
-                    Text(
-                        text = "${index + 1}",
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = field.label.uppercase(),
-                        color = MaterialTheme.colorScheme.primary,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        letterSpacing = 1.sp,
-                    )
-                    Text(
-                        text = field.value,
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
+                    FieldRow(position + 1, field, textScale)
                 }
             }
         }
     }
 }
+
+/** What shows behind a row as it is swiped, so the gesture says what it will do. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun SwipeHint(direction: SwipeToDismissBoxValue, textScale: Float) {
+    val editing = direction == SwipeToDismissBoxValue.StartToEnd
+    val colour = if (editing) {
+        MaterialTheme.colorScheme.primary
+    } else {
+        MaterialTheme.colorScheme.error
+    }
+
+    Row(
+        Modifier
+            .fillMaxSize()
+            .background(colour.copy(alpha = 0.3f))
+            .padding(horizontal = 20.dp),
+        horizontalArrangement = if (editing) Arrangement.Start else Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            imageVector = if (editing) Icons.Filled.Edit else Icons.Filled.Delete,
+            contentDescription = null,
+            tint = colour,
+        )
+        Text(
+            text = if (editing) "Correct" else "Remove",
+            color = colour,
+            fontSize = (13 * textScale).sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.padding(start = 8.dp),
+        )
+    }
+}
+
+@Composable
+private fun FieldRow(number: Int, field: ReadField, textScale: Float) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            // Opaque, so a row sliding across does not show the rows underneath
+            // it through the panel's translucency.
+            .background(Color(0xFF1A1A1A))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier
+                .size(BADGE * textScale)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "$number",
+                color = MaterialTheme.colorScheme.onPrimary,
+                fontSize = (12 * textScale).sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = field.kind.label.uppercase() +
+                    (
+                        field.phoneKind?.takeIf { field.kind == CardFieldKind.PHONE }
+                            ?.let { " · ${it.replaceFirstChar(Char::uppercase)}" } ?: ""
+                        ),
+                color = MaterialTheme.colorScheme.primary,
+                fontSize = (13 * textScale).sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp,
+            )
+            Text(
+                text = field.value,
+                color = Color.White,
+                fontSize = (19 * textScale).sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+/** Correcting one value the recogniser got wrong. */
+@Composable
+private fun CorrectField(
+    field: ReadField,
+    onDone: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var value by remember(field) { mutableStateOf(field.value) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Correct the ${field.kind.label.lowercase()}") },
+        text = {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it },
+                label = { Text(field.kind.label) },
+                singleLine = field.kind != CardFieldKind.NOTES,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onDone(value.trim()) },
+                enabled = value.isNotBlank(),
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/** Room kept clear at the foot of the screen for Skip and Save. */
+private val BOTTOM_BAR = 92.dp
 
 /**
  * The photograph as the screen shows it, and as the recogniser saw it.
@@ -337,8 +609,8 @@ private class Photo(val bitmap: Bitmap, val sourceWidth: Int, val sourceHeight: 
  * Decode the photograph at something a screen can use, turned as the camera held
  * it.
  *
- * Two things have to agree with the recogniser or the highlights land in the
- * wrong place, and both are silent when wrong:
+ * Two things have to agree with the recogniser or the markers land in the wrong
+ * place, and both are silent when wrong:
  *
  * **Size.** A phone camera makes 12 megapixels or more and the review shows it a
  * screen's width wide, so it is decoded small — but the regions are in the full
@@ -348,7 +620,7 @@ private class Photo(val bitmap: Bitmap, val sourceWidth: Int, val sourceHeight: 
  * measured an upright image. `BitmapFactory` ignores EXIF entirely. A portrait
  * photo from the camera app is stored landscape with a "rotate 90" tag, so
  * without this the picture appears sideways and every region is against the wrong
- * axis — a highlight would sit at the far edge of the card from its words.
+ * axis — a marker would sit at the far edge of the card from its words.
  */
 private fun loadPhoto(context: android.content.Context, uri: Uri): Photo? {
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -402,5 +674,65 @@ private fun loadPhoto(context: android.content.Context, uri: Uri): Photo? {
 /** Pixels the long edge is decoded to. See [loadPhoto] on why size is carried. */
 private const val TARGET_LONG_EDGE = 1600
 
-/** The numbered marker, sized once so the photo and the list below agree. */
+/** The numbered marker, sized once so the photo and the panel agree. */
 private val BADGE = 22.dp
+
+/** How much of the screen the panel may take, leaving the rest for the card. */
+private const val PANEL_SHARE = 0.45f
+
+/**
+ * What has been swiped away, and the way back.
+ *
+ * A destructive gesture with no undo is a trap: the swipe is quick, easy to make
+ * by accident on a scrolling list, and there is no second chance before Save.
+ * Rather than a snackbar that times out — and which sits badly inside a dialog —
+ * the removals stay listed until the card is saved. Nothing is lost until the
+ * whole screen is.
+ */
+@Composable
+private fun Removed(
+    removed: List<ReadField>,
+    textScale: Float,
+    onRestore: (ReadField) -> Unit,
+) {
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Text(
+            text = "REMOVED — TAP TO PUT BACK",
+            color = Color.White.copy(alpha = 0.55f),
+            fontSize = (10 * textScale).sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.sp,
+            modifier = Modifier.padding(bottom = 6.dp),
+        )
+        removed.forEach { field ->
+            Surface(
+                color = Color.White.copy(alpha = 0.08f),
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 6.dp)
+                    .clickable { onRestore(field) },
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Undo,
+                        contentDescription = "Put back the ${field.kind.label.lowercase()}",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size((16 * textScale).dp),
+                    )
+                    Text(
+                        text = "${field.kind.label}: ${field.value}",
+                        color = Color.White.copy(alpha = 0.75f),
+                        fontSize = (13 * textScale).sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+            }
+        }
+    }
+}

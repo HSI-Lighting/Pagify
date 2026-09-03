@@ -307,6 +307,7 @@ class MainActivity : ComponentActivity() {
                     onShowThumbnails = viewModel::setThumbnails,
                     settings = settings,
                     onThemeChange = viewModel::setTheme,
+                    onCardTextScale = viewModel::setCardTextScale,
                     onShowViewfinder = viewModel::setShowViewfinder,
                     onToggleRecording = recordingToast,
                     onReturnToLibrary = { viewModel.askBeforeLeaving(LeaveIntent.Library) },
@@ -323,6 +324,7 @@ class MainActivity : ComponentActivity() {
                             total = pending.readings.size,
                         )
                     },
+                    cardTextScale = settings.cardTextScale,
                     onKeepReviewed = viewModel::keepReviewedCard,
                     onSkipReviewed = viewModel::skipReviewedCard,
                     pendingFilingLabel = pendingFiling?.label,

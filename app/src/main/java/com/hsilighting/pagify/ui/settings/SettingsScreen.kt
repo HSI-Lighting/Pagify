@@ -33,6 +33,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.AppSettings
+import com.hsilighting.pagify.core.CardTextSize
 import com.hsilighting.pagify.core.ThemeChoice
 
 /**
@@ -46,6 +47,7 @@ import com.hsilighting.pagify.core.ThemeChoice
 fun SettingsScreen(
     settings: AppSettings,
     onThemeChange: (ThemeChoice) -> Unit,
+    onCardTextScale: (Float) -> Unit,
     onShowViewfinder: (Boolean) -> Unit,
     showThumbnails: Boolean,
     onShowThumbnails: (Boolean) -> Unit,
@@ -102,6 +104,42 @@ fun SettingsScreen(
                                 count = ThemeChoice.entries.size,
                             ),
                             label = { Text(choice.label) },
+                        )
+                    }
+                }
+            }
+        }
+
+        SettingCard {
+            Column(Modifier.padding(16.dp)) {
+                Text(
+                    "Card review text",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "How large the details are on the panel shown after " +
+                        "photographing a card. It is read at arm's length, often " +
+                        "in poor light and while holding the card.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(12.dp))
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    CardTextSize.entries.forEachIndexed { index, size ->
+                        SegmentedButton(
+                            // Compared with a tolerance rather than by equality:
+                            // the value is stored as a float and read back from
+                            // JSON, and a stored 1.0 that returns as 0.99999
+                            // would leave every option looking unselected.
+                            selected = kotlin.math.abs(settings.cardTextScale - size.scale) < 0.01f,
+                            onClick = { onCardTextScale(size.scale) },
+                            shape = SegmentedButtonDefaults.itemShape(
+                                index = index,
+                                count = CardTextSize.entries.size,
+                            ),
+                            label = { Text(size.label) },
                         )
                     }
                 }

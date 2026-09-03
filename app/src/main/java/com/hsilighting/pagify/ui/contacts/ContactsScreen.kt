@@ -57,6 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
+import com.hsilighting.pagify.core.ReadField
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -85,7 +86,9 @@ fun ContactsScreen(
     onCreateGroup: (String) -> Unit,
     /** A card read but not yet checked against its photograph. */
     review: CardReviewState?,
-    onKeepReviewed: () -> Unit,
+    /** From settings — the review is read at arm's length. */
+    cardTextScale: Float,
+    onKeepReviewed: (List<ReadField>) -> Unit,
     onSkipReviewed: () -> Unit,
     /** What was just scanned and is waiting to be filed, if anything. */
     pendingFilingLabel: String?,
@@ -336,6 +339,7 @@ fun ContactsScreen(
             reading = pending.reading,
             position = pending.position,
             total = pending.total,
+            textScale = cardTextScale,
             onSave = onKeepReviewed,
             onSkip = onSkipReviewed,
         )

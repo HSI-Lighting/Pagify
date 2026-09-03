@@ -7,6 +7,7 @@ import com.hsilighting.pagify.ui.contacts.CardReviewState
 import com.hsilighting.pagify.ui.contacts.ContactsScreen
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
+import com.hsilighting.pagify.core.ReadField
 import androidx.compose.material.icons.filled.ContactPage
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
@@ -59,6 +60,7 @@ fun PagifyApp(
     onShowThumbnails: (Boolean) -> Unit,
     settings: AppSettings,
     onThemeChange: (ThemeChoice) -> Unit,
+    onCardTextScale: (Float) -> Unit,
     onShowViewfinder: (Boolean) -> Unit,
     onToggleRecording: () -> Unit,
     onReturnToLibrary: () -> Unit,
@@ -72,7 +74,8 @@ fun PagifyApp(
     onCreateGroup: (String) -> Unit,
     /** A card read but not yet checked against its photograph. */
     review: CardReviewState?,
-    onKeepReviewed: () -> Unit,
+    cardTextScale: Float,
+    onKeepReviewed: (List<ReadField>) -> Unit,
     onSkipReviewed: () -> Unit,
     /** What was just scanned and is waiting to be filed, if anything. */
     pendingFilingLabel: String?,
@@ -159,6 +162,7 @@ fun PagifyApp(
                     suggestedGroup = suggestedGroup,
                     onCreateGroup = onCreateGroup,
                     review = review,
+                    cardTextScale = cardTextScale,
                     onKeepReviewed = onKeepReviewed,
                     onSkipReviewed = onSkipReviewed,
                     pendingFilingLabel = pendingFilingLabel,
@@ -185,6 +189,7 @@ fun PagifyApp(
                     showThumbnails = state.showThumbnails,
                     settings = settings,
                     onThemeChange = onThemeChange,
+                    onCardTextScale = onCardTextScale,
                     onShowViewfinder = onShowViewfinder,
                     onShowThumbnails = onShowThumbnails,
                     isRecording = state.isRecording,
