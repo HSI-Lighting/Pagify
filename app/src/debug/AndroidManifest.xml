@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Extra permissions for the test build only.
+
+    The shipped app asks for no storage permission of any kind — it reaches every
+    file through the system pickers, which is the whole reason it can be installed
+    without a single prompt. That is a property worth keeping, so this manifest
+    exists to hold what only the fixture-capture tool needs.
+
+    Merged into the debug variant alone. The release manifest is untouched.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- RecogniserCaptureTest reads a folder of card photographs. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+</manifest>

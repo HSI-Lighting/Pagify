@@ -50,12 +50,20 @@ fn card_two_column() -> Vec<TextSegment> {
 /// It costs three fields. The company, the email and the website all end up on the
 /// phantom second card, so the contact that is saved has none of them.
 ///
-/// **Ignored rather than deleted or made to pass**, because the fix is a threshold
-/// and one card cannot tune a threshold — tightening it on this evidence alone
-/// would trade this failure for a card that genuinely holds two. That is what the
-/// harness is for; this assertion is what it has to satisfy. Un-ignore at A5.
+/// **The guard's premise is wrong, not its threshold.** `looks_like_a_card` asks
+/// for something reachable and something named, and "named" is
+/// `could_be_a_name || is_a_company` — which a one-word logo fragment satisfies.
+/// No gap threshold repairs that: the test cannot tell a name from a fragment of
+/// a logo, so tuning the gap turns a knob that is not attached to the failure.
+///
+/// **Ignored rather than deleted, forced to pass, or patched.** The label-first
+/// design resolves it structurally — segment on labels, and a card begins where a
+/// second NAME appears — so a classifier that calls those fragments OTHER never
+/// fires this split at all. Patching the geometric guard now would be work thrown
+/// away, and this failure is evidence for that design rather than a separate bug.
+/// Un-ignore when segmentation moves onto labels.
 #[test]
-#[ignore = "known: split_cards cuts this single card in two — needs the harness to tune"]
+#[ignore = "known: the guard cannot tell a logo fragment from a name; label-first segmentation resolves it"]
 fn a_single_card_is_not_split_in_two() {
     let cards = split_cards(card_two_column());
     assert_eq!(
