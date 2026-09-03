@@ -2,12 +2,14 @@ package com.hsilighting.pagify
 
 import com.hsilighting.pagify.core.PdfFont
 import android.graphics.Bitmap
+import androidx.activity.ComponentActivity
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -29,12 +31,21 @@ import org.junit.runner.RunWith
  * the one gesture the shell cannot inject — `input swipe` interpolates a straight
  * line, which the area check correctly refuses. So the editor is composed directly
  * with a capture that already has a ring on it.
+ *
+ * ## The fills are behind Save, not on the editor
+ *
+ * Every test here opens the export sheet first. That is not ceremony: the chips
+ * used to sit on the editor surface and moved into the sheet, and for a while
+ * these tests asserted against a screen that no longer had them. Two failed
+ * honestly. The third — the one asserting the fills are *absent* for a box
+ * capture — passed, because the sheet it was looking in was shut. It was green
+ * for a year and could not have gone red for the reason it was written for.
  */
 @RunWith(AndroidJUnit4::class)
 class CaptureFillTest {
 
     @get:Rule
-    val rule = createComposeRule()
+    val rule = createAndroidComposeRule<ComponentActivity>()
 
     private var chosen: CaptureFill? = null
 
@@ -100,6 +111,17 @@ class CaptureFillTest {
         }
     }
 
+    /**
+     * Open the export sheet, which is where the fills live.
+     *
+     * Matched as a substring because the button carries an icon and reads as
+     * `"  Save"` in the semantics tree.
+     */
+    private fun openExport() {
+        rule.onNode(hasText("Save", substring = true)).performClick()
+        rule.waitForIdle()
+    }
+
     /** A square ring, which is what a lasso capture arrives with. */
     private fun ring() = listOf(
         Offset(10f, 10f),
@@ -111,6 +133,7 @@ class CaptureFillTest {
     @Test
     fun aRingedCaptureOffersTheFills() {
         showEditor(ring())
+        openExport()
 
         rule.onNodeWithText("Around it").assertIsDisplayed()
         CaptureFill.entries.forEach { fill ->
@@ -121,6 +144,7 @@ class CaptureFillTest {
     @Test
     fun choosingAFillReportsIt() {
         showEditor(ring())
+        openExport()
 
         rule.onNodeWithText(CaptureFill.TRANSPARENT.label).performClick()
         rule.waitForIdle()
@@ -132,7 +156,11 @@ class CaptureFillTest {
     fun aBoxCaptureHasNoOutsideAndSoNoFill() {
         // The control would have nothing to act on: a box capture is all page.
         showEditor(emptyList())
+        openExport()
 
+        // Proof the sheet really is open, so the absence below is the fills being
+        // withheld and not the sheet being shut.
+        rule.onNodeWithText("Quality").assertIsDisplayed()
         rule.onAllNodesWithText("Around it").assertCountEquals(0)
     }
 }
