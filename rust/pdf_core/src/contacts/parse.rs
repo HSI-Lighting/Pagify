@@ -584,7 +584,7 @@ fn horizontal_gap(a: &TextSegment, b: &TextSegment) -> f32 {
 /// for a larger value is a genuine single line broken by a wide tab —
 /// `Tel: … <tab> Fax: …` — which ML Kit returned as one line on every card
 /// captured so far, so the question never arose. Two is therefore set by the only
-/// evidence there is, and `a_tab_wide_gap_on_one_line_stays_one_line` records the
+/// evidence there is, and `no_single_gap_threshold_satisfies_both_measured_cards` records the
 /// open question rather than a tuned answer.
 const MAX_GAP: f32 = 2.0;
 
@@ -1598,53 +1598,66 @@ mod tests {
 
     /// A tab-aligned line is one line, however wide the tab.
     ///
-    /// Cards print `Tel: … <tab> Fax: …` constantly. Split here and the fax
-    /// number becomes a second telephone number belonging to nothing.
+    /// **No value of `MAX_GAP` can be right, and here is the arithmetic.**
     ///
-    /// **Ignored because the number in it is invented.** On every card captured
-    /// so far ML Kit returned tab-separated content as a *single* line, so the
-    /// gap was never measured — the 3.5 heights below is my guess at what a
-    /// printed tab looks like, and raising `MAX_GAP` to accommodate it would be
-    /// tuning a real threshold to a made-up number. Doing that would move the
-    /// rule to within 1.3 heights of the tightest column gap that must still
-    /// separate, on no evidence at all.
+    /// This replaces a probe that sat ignored for two revisions asking what a
+    /// printed tab measures, on the theory that the answer would decide whether
+    /// a threshold could survive. It would not have. The question was settled
+    /// from a different direction entirely and the invented 3.5 heights it
+    /// carried decided nothing, so the probe is gone rather than left implying
+    /// an open question.
     ///
-    /// **Partly settled, and overtaken.** The 2026-09-03 batch produced a
-    /// card where the recogniser *did* return same-row content as two boxes: a
-    /// `FAX` caption beside the number it labels, measured at 1.5625 heights and
-    /// recorded in `a_label_beside_its_own_number_still_merges`. That is a real
-    /// must-merge gap where there was none before, and it is nowhere near the
-    /// 3.5 guessed here. A caption beside its number is not the same thing as a
-    /// tab between two whole fields, so the case below is still unmeasured —
-    /// but the number it needs is now bracketed by evidence rather than free.
+    /// What replaces it is the falsification itself, as a live assertion. Two
+    /// gaps measured on two real cards:
     ///
-    /// It no longer decides anything, either. Whatever a printed tab measures,
-    /// the same batch showed a must-split pair at 1.545 heights — tighter than
-    /// the must-merge caption — so `MAX_GAP` has no working value regardless.
-    /// The question this probe was holding open has been answered against the
-    /// instrument rather than in favour of some number: a tab is a one-off, a
-    /// column gutter repeats down the card, and that difference is structural
-    /// rather than dimensional. See the block comment above.
+    /// - a `FAX` caption beside the number it labels, **1.5625** heights, which
+    ///   must **merge** — they are one field
+    /// - a name and a neighbouring column's title, **1.545** heights, which must
+    ///   **split** — they are two
+    ///
+    /// `shares_a_line` merges when the gap is below `MAX_GAP` and splits when it
+    /// is above, so satisfying both needs a value above 1.5625 and at or below
+    /// 1.545. The must-split gap is the *tighter* of the two, and that ordering
+    /// is what makes it a proof rather than a tuning problem: it is not that no
+    /// value has been found, it is that none exists.
+    ///
+    /// Kept as a test because both numbers come from fixture geometry that could
+    /// change. If a fixture is ever re-measured and the ordering reverses, a
+    /// threshold becomes possible again and everything built on this reasoning
+    /// — the whole of §2.1.4 — needs revisiting rather than assuming.
     #[test]
-    #[ignore = "overtaken: MAX_GAP is falsified regardless of what a tab measures — see the block comment"]
-    fn a_tab_wide_gap_on_one_line_stays_one_line() {
-        // 3.5 line heights of gap: an ordinary tab on a printed card.
-        let parsed = parse_card(&card(vec![
-            TextSegment {
-                left: 60.0, top: 400.0, right: 260.0, bottom: 420.0,
-                text: "T: 020 7946 0000".into(),
-            },
-            TextSegment {
-                left: 330.0, top: 400.0, right: 530.0, bottom: 420.0,
-                text: "F: 020 7946 0001".into(),
-            },
-        ]));
+    fn no_single_gap_threshold_satisfies_both_measured_cards() {
+        // The FAX caption and its number, from card_label_beside_number.
+        let must_merge = TextSegment {
+            left: 1265.0, top: 2832.0, right: 1312.0, bottom: 2864.0, text: "FAX".into(),
+        };
+        let its_number = TextSegment {
+            left: 1362.0, top: 2744.0, right: 2392.0, bottom: 2900.0, text: "0".into(),
+        };
 
-        let lines: Vec<&str> = parsed.raw_text.lines().collect();
-        assert_eq!(
-            lines,
-            vec!["T: 020 7946 0000 F: 020 7946 0001"],
-            "a tab split one line in two",
+        // The name and the title beside it, from card_three_column.
+        let a_name = TextSegment {
+            left: 133.0, top: 2313.5, right: 930.0, bottom: 2444.5, text: "N".into(),
+        };
+        let its_neighbour = TextSegment {
+            left: 1015.0, top: 2309.5, right: 1492.0, bottom: 2364.5, text: "T".into(),
+        };
+
+        let ratio = |a: &TextSegment, b: &TextSegment| {
+            horizontal_gap(a, b) / a.height().min(b.height())
+        };
+        let merge_at = ratio(&must_merge, &its_number);
+        let split_at = ratio(&a_name, &its_neighbour);
+
+        // Both pairs genuinely share a row, or neither would reach the gap test.
+        assert!(vertical_overlap(&must_merge, &its_number).is_some());
+        assert!(vertical_overlap(&a_name, &its_neighbour).is_some());
+
+        assert!(
+            split_at < merge_at,
+            "the falsification has reversed: a threshold above {merge_at} and at \
+             or below {split_at} would now satisfy both cards. §2.1.4 rests on \
+             this ordering and needs revisiting.",
         );
     }
 
@@ -1705,12 +1718,33 @@ mod tests {
     ///
     /// **Ignored, not patched — there is no threshold to patch to.** This is
     /// what currently happens on the three-column card it came from: the name
-    /// and the title fuse into one line. See the note above
-    /// `a_tab_wide_gap_on_one_line_stays_one_line` for why a threshold is the
-    /// wrong instrument, and this test for why it is now falsified rather than
-    /// merely unvalidated.
+    /// and the title fuse into one line. See
+    /// `no_single_gap_threshold_satisfies_both_measured_cards` for the
+    /// arithmetic that closes off every value.
+    ///
+    /// # This one is blocked on a design change, and carries a date
+    ///
+    /// The other ignored tests in this crate are not like it and should not be
+    /// reviewed alongside it. One records an accepted cost of a shipped policy
+    /// and is waiting for nothing; the falsification above is now a live
+    /// assertion rather than a probe. **This is the only one still holding a
+    /// question open**, and what it waits on is an instrument to replace
+    /// `MAX_GAP` — not evidence, which is complete.
+    ///
+    /// **Review 2026-10-16.** If nothing has replaced the gap test by then, the
+    /// decision is not to wait longer: either accept that a name beside a title
+    /// in a neighbouring column fuses, and say so where users can see it as the
+    /// Latin-script notice does, or take the narrower fix. Measured, this costs
+    /// one card in eight its name, its title and its company.
+    ///
+    /// Note that the recursive cut of §2.1.4 is *not* that instrument, and
+    /// building it will not close this — see
+    /// `the_name_and_its_title_cannot_be_separated_by_any_projection` in the
+    /// real-card tests. The corridor exists on one row only, and a projection
+    /// cannot find what is not there. What separates these two lines is knowing
+    /// one is a person and the other a role.
     #[test]
-    #[ignore = "known: MAX_GAP cannot satisfy this and a_label_beside_its_own_number_still_merges at once"]
+    #[ignore = "blocked on replacing the instrument, not on evidence — review 2026-10-16, see the note"]
     fn a_name_and_a_neighbouring_columns_title_must_not_merge() {
         let parsed = parse_card(&card(vec![
             TextSegment {
@@ -1984,11 +2018,20 @@ mod tests {
     /// correction path itself stops working; an under-split gives one contact
     /// with too many fields, on a screen built for swiping fields away.
     ///
-    /// Recorded here rather than left to be found later. When Phase B segments
-    /// on labels this stops being a trade at all, and the assertion below
-    /// should simply start passing.
+    /// # Accepted, not pending
+    ///
+    /// This is `#[ignore]`d for a different reason from anything else here, and
+    /// the distinction is worth keeping: it is not waiting on evidence, on a
+    /// design change, or on a date. **The decision has been taken.** The
+    /// assertion describes behaviour we have chosen against, and it exists so
+    /// the choice is visible and reversible rather than folklore.
+    ///
+    /// Nothing should be scheduled against it and no review needs to consider
+    /// it. When Phase B segments on labels the trade disappears, and this will
+    /// simply start passing — at which point delete the `#[ignore]` rather than
+    /// treating it as a discovery.
     #[test]
-    #[ignore = "known cost of the splitting policy: a card with no telephone is not one to cut on"]
+    #[ignore = "ACCEPTED cost of a shipped policy — not pending anything; see the note"]
     fn a_card_with_no_telephone_is_still_its_own_card() {
         let mut segments = ordinary().segments;
         segments.extend([
