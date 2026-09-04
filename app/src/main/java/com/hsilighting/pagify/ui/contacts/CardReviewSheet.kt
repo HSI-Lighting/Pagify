@@ -619,7 +619,9 @@ private val BOTTOM_BAR = 92.dp
  * than that on purpose. Mapping one to the other needs the size of both, and
  * getting it wrong puts every highlight somewhere plausible and false.
  */
-private class Photo(val bitmap: Bitmap, val sourceWidth: Int, val sourceHeight: Int)
+// internal rather than private: CardCropTest exercises cropAround directly, since
+// it is pure geometry with no Compose runtime involved.
+internal class Photo(val bitmap: Bitmap, val sourceWidth: Int, val sourceHeight: Int)
 
 /**
  * Decode the photograph at something a screen can use, turned as the camera held
@@ -763,8 +765,25 @@ private fun Removed(
  * Falls back to the whole frame when nothing carries a region. That is the honest
  * answer rather than a guess: with no idea where the card is, showing all of the
  * picture at least contains it.
+ *
+ * **Same shape as `RecognisedCard::around_text` in the Rust parser, and so the
+ * same known gap.** Both take an unconditional min/max envelope over whatever
+ * regions they are given, with no protection against one of them being wrong.
+ * On the Rust side that is confirmed reachable: `split_cards` has a documented
+ * failure (see `real_cards.rs`, `a_single_card_is_not_split_in_two`) where a
+ * fragment from outside the card is attributed to it. A `Field.region` built
+ * from that fragment would carry through to here and balloon this crop —
+ * shrinking the real card to a sliver of a mostly-blank picture, which is the
+ * opposite of what this function exists to do (see `CardCropTest`).
+ *
+ * Not patched here. No distance threshold can be justified without a captured
+ * card showing what a real stray fragment looks like, and the same discipline
+ * that ruled out guessing the line-assembly threshold applies here. It is also
+ * gated by the same fix: Phase B's label-first segmentation stops a stray
+ * fragment from ever being attributed to a card's fields in the first place,
+ * so a fix in this function would be work Phase B makes unnecessary.
  */
-private fun cropAround(fields: List<IndexedValue<ReadField>>, photo: Photo): Crop {
+internal fun cropAround(fields: List<IndexedValue<ReadField>>, photo: Photo): Crop {
     val regions = fields.mapNotNull { it.value.region }
     val whole = Crop(0f, 0f, photo.sourceWidth.toFloat(), photo.sourceHeight.toFloat())
     if (regions.isEmpty()) return whole
@@ -787,7 +806,7 @@ private fun cropAround(fields: List<IndexedValue<ReadField>>, photo: Photo): Cro
     ).takeIf { it.width > 1f && it.height > 1f } ?: whole
 }
 
-private class Crop(val left: Float, val top: Float, val right: Float, val bottom: Float) {
+internal class Crop(val left: Float, val top: Float, val right: Float, val bottom: Float) {
     val width: Float get() = right - left
     val height: Float get() = bottom - top
 }

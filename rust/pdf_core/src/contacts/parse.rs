@@ -1395,6 +1395,20 @@ mod tests {
     // heights — the email and the website — and a genuine single line broken by
     // a tab sits around 3 to 4. The band the rule has to divide is narrow, and
     // these two probes sit either side of it.
+    //
+    // **Two more cards, captured later, closed that band from the other end —
+    // and it does not close cleanly.** A three-column card (name / title / logo)
+    // has its name and its title sharing a row 1.545 heights apart, and both
+    // must stay separate lines. A different card has a `FAX` caption sitting
+    // 1.5625 heights from its own number, and those two words are the *same*
+    // field — they must merge. **A single `MAX_GAP` cannot satisfy both real
+    // measurements: 1.545 must split, 1.5625 must merge, and 1.545 < 1.5625.**
+    // No value threads that needle, not just none tried yet. This is the
+    // evidence §2.1.4 asked for: a threshold is not an unvalidated instrument
+    // here, it is a falsified one, and `must_not_merge_when_it_is_only_a_label`
+    // below currently welds the name and the title on the real card it came
+    // from. Left as `#[ignore]`d rather than patched, for the same reason the
+    // tab probe was: there is nothing to tune it to.
 
     /// A tab-aligned line is one line, however wide the tab.
     ///
@@ -1460,6 +1474,63 @@ mod tests {
 
         let lines: Vec<&str> = parsed.raw_text.lines().collect();
         assert_eq!(lines.len(), 2, "two columns merged; lines were {lines:?}");
+    }
+
+    /// A caption sitting right beside its own number, still one field.
+    ///
+    /// Measured from a real card: a `FAX` caption 1.5625 heights from the number
+    /// it labels. They are the same field and must read as one line — see the
+    /// next test for why this number matters more than it looks like it should.
+    #[test]
+    fn a_label_beside_its_own_number_still_merges() {
+        let parsed = parse_card(&card(vec![
+            TextSegment {
+                left: 1265.0, top: 2832.0, right: 1312.0, bottom: 2864.0,
+                text: "FAX".into(),
+            },
+            TextSegment {
+                left: 1362.0, top: 2744.0, right: 2392.0, bottom: 2900.0,
+                text: "+00 000 00000000".into(),
+            },
+        ]));
+
+        let lines: Vec<&str> = parsed.raw_text.lines().collect();
+        assert_eq!(
+            lines,
+            vec!["FAX +00 000 00000000"],
+            "a label and its own number came apart; lines were {lines:?}",
+        );
+    }
+
+    /// **A name and a different column's title, 1.545 heights apart — tighter
+    /// than the label above that must merge at 1.5625.**
+    ///
+    /// Both measured from real cards. `MAX_GAP` cannot separate this pair and
+    /// merge that one: any value that keeps the label and its number together
+    /// (> 1.5625) also welds this name to a title it does not belong to.
+    ///
+    /// **Ignored, not patched — there is no threshold to patch to.** This is
+    /// what currently happens on the three-column card it came from: the name
+    /// and the title fuse into one line. See the note above
+    /// `a_tab_wide_gap_on_one_line_stays_one_line` for why a threshold is the
+    /// wrong instrument, and this test for why it is now falsified rather than
+    /// merely unvalidated.
+    #[test]
+    #[ignore = "known: MAX_GAP cannot satisfy this and a_label_beside_its_own_number_still_merges at once"]
+    fn a_name_and_a_neighbouring_columns_title_must_not_merge() {
+        let parsed = parse_card(&card(vec![
+            TextSegment {
+                left: 1015.0, top: 2309.5, right: 1492.0, bottom: 2364.5,
+                text: "Job Title Here".into(),
+            },
+            TextSegment {
+                left: 133.0, top: 2313.5, right: 930.0, bottom: 2444.5,
+                text: "Firstname Lastname".into(),
+            },
+        ]));
+
+        let lines: Vec<&str> = parsed.raw_text.lines().collect();
+        assert_eq!(lines.len(), 2, "the name and the title merged; lines were {lines:?}");
     }
 
     /// Recognisers return a card as scattered boxes, often one per word.
