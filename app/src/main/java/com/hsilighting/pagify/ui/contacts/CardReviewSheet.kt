@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -273,6 +274,30 @@ private fun CardAndPanel(
         val accent = MaterialTheme.colorScheme.primary
         val badge = BADGE * textScale
 
+        // Numbers only, never the card's text — this is the one screen whose
+        // failures are geometric, and a screenshot cannot say whether the crop
+        // was wrong, the scale was wrong or a region was. It can say all three
+        // at once and none of them separately.
+        LaunchedEffect(photo, shown.size, boxWidth, boxHeight) {
+            Log.i(
+                "CardReview",
+                "photo=${photo.sourceWidth}x${photo.sourceHeight} " +
+                    "bitmap=${bitmap.width}x${bitmap.height} " +
+                    "box=${boxWidth.toInt()}x${boxHeight.toInt()} " +
+                    "crop=${crop.width.toInt()}x${crop.height.toInt()}" +
+                    "@${crop.left.toInt()},${crop.top.toInt()} " +
+                    "forPhoto=${forPhoto.toInt()} scale=$scale " +
+                    "offset=${offsetX.toInt()},${offsetY.toInt()} " +
+                    "shown=${shownWidth.toInt()}x${shownHeight.toInt()} " +
+                    "fields=${shown.size} " +
+                    "regions=" + shown.joinToString(";") { entry ->
+                        entry.value.region?.let { r ->
+                            "${r.left.toInt()},${r.top.toInt()},${r.right.toInt()},${r.bottom.toInt()}"
+                        } ?: "none"
+                    },
+            )
+        }
+
         // Clipped to the area the card gets; the image inside is larger than it
         // and offset, which is what performs the crop.
         Box(
@@ -288,7 +313,17 @@ private fun CardAndPanel(
                     contentScale = ContentScale.FillBounds,
                     modifier = Modifier
                         .offset(x = offsetX.toDp(), y = offsetY.toDp())
-                        .size(shownWidth.toDp(), shownHeight.toDp()),
+                        // **`requiredSize`, not `size`.** The whole photograph is
+                        // drawn larger than this box and slid under it — that is
+                        // what performs the crop — so it *must* exceed the box.
+                        // `size` is only a preference and is coerced into the
+                        // parent's constraints, so the picture was silently
+                        // measured at the box's own height instead: squashed to
+                        // fit, then slid up by an offset computed for its real
+                        // height, which left a third of the card in view and a
+                        // black band under it. Measured on a card that showed
+                        // it — a 1080x1440 image clamped to 1080x720.
+                        .requiredSize(shownWidth.toDp(), shownHeight.toDp()),
                 )
             }
         }
