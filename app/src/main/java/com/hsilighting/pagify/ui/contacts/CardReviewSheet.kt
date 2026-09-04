@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
+import androidx.exifinterface.media.ExifInterface
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -300,6 +301,25 @@ private fun CardAndPanel(
                 .background(Color.Black.copy(alpha = 0.45f)),
         )
 
+        // **The markers are clipped to the same box as the photograph.**
+        //
+        // They were siblings of it with no clip of their own, which had two
+        // costs. A marker near the edge of the crop spilled onto the panel
+        // below; and when a region was wrong — a stray attributed by
+        // `split_cards`, which is a known and reachable failure — its marker
+        // was drawn out over the empty background instead of being clipped
+        // away, so the screen looked like the transform had come loose. That
+        // disguised the cause. Containment, not a threshold: a marker outside
+        // the picture is never right, whatever put it there.
+        //
+        // A separate box from the image rather than the same one, so the scrim
+        // above still falls between them and the markers stay foreground.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(with(density) { forPhoto.toDp() })
+                .clipToBounds(),
+        ) {
         shown.forEachIndexed { position, entry ->
             val field = entry.value
             val region = field.region ?: return@forEachIndexed
@@ -345,6 +365,7 @@ private fun CardAndPanel(
                     )
                 }
             }
+        }
         }
 
         with(density) {
@@ -654,21 +675,46 @@ private fun loadPhoto(context: android.content.Context, uri: Uri): Photo? {
         BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
     } ?: return null
 
+    // **This has to agree with ML Kit, which rotates the image itself.**
+    //
+    // Regions come back in upright coordinates because `InputImage.fromFilePath`
+    // applies EXIF before recognising. If the rotation read here differs by a
+    // quarter turn, every marker lands against the wrong axis — and the picture
+    // still looks right, so it reads as a transform bug rather than an EXIF one.
+    //
+    // Three things were wrong with reading it through `android.media`:
+    //
+    //  - the framework class handles fewer container formats than the androidx
+    //    one, HEIC among them, which is what this phone shoots by default
+    //  - `TRANSPOSE` and `TRANSVERSE` fell through to the `else` and became no
+    //    rotation at all; ML Kit honours both
+    //  - the whole read was wrapped in `runCatching { … }.getOrDefault(0f)`, so
+    //    a failure to parse became a confident claim of "not rotated"
+    //
+    // The mirrored orientations are mapped to their rotation. The reflection is
+    // not applied — a mirrored card photograph is not a thing anybody produces,
+    // and guessing at it would be worse than the quarter turn being right.
     val quarterTurns = context.contentResolver.openInputStream(uri)?.use { stream ->
-        runCatching {
+        try {
             when (
-                android.media.ExifInterface(stream)
-                    .getAttributeInt(
-                        android.media.ExifInterface.TAG_ORIENTATION,
-                        android.media.ExifInterface.ORIENTATION_NORMAL,
-                    )
+                ExifInterface(stream).getAttributeInt(
+                    ExifInterface.TAG_ORIENTATION,
+                    ExifInterface.ORIENTATION_NORMAL,
+                )
             ) {
-                android.media.ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-                android.media.ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-                android.media.ExifInterface.ORIENTATION_ROTATE_270 -> 270f
+                ExifInterface.ORIENTATION_ROTATE_90, ExifInterface.ORIENTATION_TRANSPOSE -> 90f
+                ExifInterface.ORIENTATION_ROTATE_180, ExifInterface.ORIENTATION_FLIP_VERTICAL -> 180f
+                ExifInterface.ORIENTATION_ROTATE_270, ExifInterface.ORIENTATION_TRANSVERSE -> 270f
                 else -> 0f
             }
-        }.getOrDefault(0f)
+        } catch (error: Exception) {
+            // Said out loud rather than defaulted. Nothing here can recover a
+            // rotation it could not read, but a silent 0 turns an unreadable
+            // header into markers that are confidently in the wrong place, and
+            // the log is the only thing that would ever explain it.
+            Log.w("CardReview", "EXIF orientation unreadable for $uri; assuming upright", error)
+            0f
+        }
     } ?: 0f
 
     val upright = if (quarterTurns == 0f) {
