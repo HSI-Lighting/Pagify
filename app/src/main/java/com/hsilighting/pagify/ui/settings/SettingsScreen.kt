@@ -146,6 +146,33 @@ fun SettingsScreen(
             }
         }
 
+        // **What the reader cannot do, said plainly.** The recogniser reads
+        // Latin script only, and the tempting way to phrase that — "other
+        // scripts are not read" — is measured to be wrong. On a bilingual card
+        // the other script comes back as Latin-looking nonsense, and because it
+        // is usually the largest text at the top of the card it is taken for
+        // the person's name. The field is not blank, it is confidently wrong,
+        // which is the one outcome somebody skims past. So the notice tells
+        // people what to check rather than what is missing.
+        SettingCard {
+            Column(Modifier.padding(16.dp)) {
+                Text(
+                    "Scanning reads Latin script",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "Phone numbers, emails and websites come through on any " +
+                        "card. On a card printed in Arabic as well as English, " +
+                        "the Arabic is not read and can be mistaken for the " +
+                        "name — so check the name and company before saving.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
         SectionLabel("Reading")
         SettingCard {
             ToggleRow(

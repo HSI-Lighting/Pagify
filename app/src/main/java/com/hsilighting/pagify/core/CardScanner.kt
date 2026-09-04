@@ -169,9 +169,22 @@ object CardScanner {
      * and a block can span a whole column — which would hand the parser one
      * segment holding the name, the title and the company at once.
      *
-     * Latin-only, matching [PageTextRecogniser]. A bilingual card gives up its
-     * Latin half and loses the other, which is worth fixing but is a second model
-     * to download rather than a change here.
+     * Latin-only, matching [PageTextRecogniser].
+     *
+     * **A bilingual card does not simply lose its other half.** That was the
+     * assumption written here, and it is measured to be wrong — see the
+     * `card_mixed_script` fixture in the engine's real-card tests. Arabic comes
+     * back as a run of Latin and extended-Latin characters that mean nothing,
+     * and because it is usually the largest text at the top of the card, the
+     * name rule takes it: the contact is filed under nonsense and the person's
+     * real Latin name is pushed into the notes. The telephone numbers and the
+     * address do still come through.
+     *
+     * A second model is the fix for the *reading*. It is not the fix for the
+     * *mislabelling*, which needs the classifier — nothing about the characters
+     * themselves marks them as unreadable. Until then Settings says what to
+     * check, and says the other script "can be mistaken for the name" rather
+     * than "is not read": the two send somebody to look in different places.
      */
     private suspend fun recogniseLines(context: Context, image: InputImage): List<JSONObject> =
         suspendCancellableCoroutine { continuation ->
