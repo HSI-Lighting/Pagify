@@ -1,0 +1,21 @@
+{
+  "_note": "Real ML Kit line output for a BILINGUAL Arabic and Latin card, captured 2026-09-03. The Latin recogniser is the only one the app ships, so the Arabic came back as strings of Latin and extended-Latin characters that mean nothing.",
+  "_anonymised": "Boxes are exactly as ML Kit reported them, converted from the captured centre-y and height. The person's name, the organisation, the telephone numbers and the email are replaced by strings of the same shape. The mangled Arabic is replaced by different strings of the SAME character classes - the same mix of extended-Latin letters, the same leading lowercase, the same word counts and lengths - because that mix is the whole subject of this fixture. The spaced '@', with a space on BOTH sides, is kept exactly.",
+  "_source": "Samsung SM-G736B, ML Kit text-recognition, Latin only. Line angles between -5.3 and -1.2 degrees.",
+  "_layout": "A right-hand column, read top to bottom: three lines of Arabic across the top, then the name, title, department, telephones, email and PO box. A left-hand line names the free zone, and a full-width footer runs bilingual.",
+  "_why_it_matters": "The plan's Part 4 said Latin-only was acceptable for v1 because 'most UAE trade cards carry the phone, email and company in Latin even when the name is also Arabic - so the fields that matter may already be reachable'. On this card that is false in a way worse than not reading the Arabic at all. The mangled Arabic sits at the top and is large, so the name rule takes it: the person's name reads as Arabic soup and their real name is pushed into notes. The telephone and email survive; the name and company do not.",
+  "segments": [
+    {"left":2208,"top":1677,"right":2749,"bottom":1787,"text":"bqo ufa"},
+    {"left":2472,"top":1777,"right":2768,"bottom":1905,"text":"Kfp dnro"},
+    {"left":1986,"top":1902,"right":2769,"bottom":2040,"text":"älgpqr Kbcud ülömn"},
+    {"left":264,"top":2025,"right":889,"bottom":2099,"text":"Riverton Business Park"},
+    {"left":2096,"top":2122,"right":2780,"bottom":2216,"text":"Rosalyn Vance"},
+    {"left":2374,"top":2244,"right":2778,"bottom":2332,"text":"Sr. Officer"},
+    {"left":1510,"top":2356,"right":2772,"bottom":2476,"text":"Business Account International"},
+    {"left":2145,"top":2504,"right":2800,"bottom":2604,"text":"T. +999 9 999 9999"},
+    {"left":2050,"top":2613,"right":2804,"bottom":2711,"text":"M. +999 99 999 9999"},
+    {"left":2135,"top":2720,"right":2803,"bottom":2814,"text":"E. rvance @ example.ae"},
+    {"left":1818,"top":2819,"right":2813,"bottom":2945,"text":"P.O.BOX:0000, Dubai, UAE"},
+    {"left":222,"top":2968,"right":2579,"bottom":3134,"text":"Menber of Riverton Integrated Economic Zones Authority apqlsuall äyaltuäll gbnual bkw"}
+  ]
+}

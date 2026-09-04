@@ -446,3 +446,61 @@ fn two_addresses_on_one_line_are_both_read() {
         );
     }
 }
+
+/// **On a bilingual card the unreadable script takes the name.**
+///
+/// The app ships the Latin recogniser only, so Arabic comes back as strings of
+/// Latin and extended-Latin characters that mean nothing. The plan accepted
+/// that for v1 on the grounds that "most UAE trade cards carry the phone, email
+/// and company in Latin even when the name is also Arabic — so the fields that
+/// matter may already be reachable".
+///
+/// **This card shows that is worse than not reading the Arabic at all.** The
+/// Arabic sits across the top and is the largest text there, so the name rule
+/// takes it: the name reads as `älgpqr Kbcud ülömn` and the person's real name
+/// is pushed down into `notes`. The company goes the same way. The telephone
+/// and the email do survive, so half the premise holds — but a contact filed
+/// under mangled script is not one anybody finds again.
+///
+/// **Ignored, not patched, and deliberately so.** Every cheap way to spot the
+/// soup is a bad rule: the characters are ordinary Latin ones, so a
+/// character-class test cannot see it, and preferring Title Case would drop
+/// `PRANAV MENON` — a real name in all capitals on another card in this same
+/// corpus. Lexical evidence separates `älgpqr Kbcud ülömn` from `Rosalyn Vance`
+/// immediately, and that is exactly the n-gram feature the classifier is for.
+///
+/// **What this changes:** it is evidence against Part 4's reasoning rather than
+/// against its conclusion. Latin-only may still be right for v1, but the UI
+/// notice cannot just say Arabic will not be read — on a bilingual card the
+/// name comes out wrong rather than missing.
+#[test]
+#[ignore = "known: unreadable script wins the name rule on size; needs lexical evidence"]
+fn the_latin_name_wins_over_unreadable_script() {
+    let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        fixture(include_str!("fixtures/card_mixed_script.json")),
+    ));
+
+    assert_eq!(
+        parsed.name.as_ref().map(|f| f.value.as_str()),
+        Some("Rosalyn Vance"),
+        "the name was taken by unreadable script; notes held: {:?}",
+        parsed.notes,
+    );
+}
+
+/// What does survive a bilingual card, so the loss is bounded rather than
+/// guessed at. Half of Part 4's premise holds: the ways of reaching somebody
+/// are all in Latin and all come through.
+#[test]
+fn a_bilingual_cards_contact_routes_still_come_through() {
+    let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        fixture(include_str!("fixtures/card_mixed_script.json")),
+    ));
+
+    assert_eq!(
+        parsed.emails.iter().map(|f| f.value.as_str()).collect::<Vec<_>>(),
+        vec!["rvance@example.ae"],
+        "the address was lost — note it is printed with a space on both sides of the @",
+    );
+    assert_eq!(parsed.phones.len(), 2, "a telephone number was lost");
+}
