@@ -577,3 +577,56 @@ fn the_name_baseline_across_the_corpus_is_recorded() {
          baseline deliberately and say why",
     );
 }
+
+/// **The simple form of gutter detection would do nothing on these cards.**
+///
+/// §2.1.4 proposes replacing the gap threshold with whitespace analysis: project
+/// the boxes onto the x-axis, find the corridors of emptiness, cut there. The
+/// appeal is that it needs no guessed distance — a column gutter is structural
+/// where a tab is a one-off.
+///
+/// Measured before building it, the plain version does not work. Projecting a
+/// whole card finds **no corridor at all** on four of the five single-card
+/// fixtures, this one included, and none whatsoever between the name and the
+/// title that falsified `MAX_GAP`. The reason is ordinary card design: the
+/// address block underneath runs the full width of the card, so every x is
+/// covered by something and no column of whitespace survives the projection.
+///
+/// This is not an argument against §2.1.4. It is an argument that it has to be
+/// the **recursive** form — cut into horizontal bands first, then look for
+/// corridors inside each band, which is what recursive XY-cut actually is. Cut
+/// that way, the name and the title do separate, and so do the name and the
+/// logo on the two-column card. Whoever builds it should start from that and
+/// not from the projection alone, which looks simpler, needs no bands, and
+/// silently changes nothing.
+///
+/// Kept as a test rather than a note because it is a measurement, and a note
+/// would go stale the first time somebody moved a fixture.
+#[test]
+fn a_whole_card_projection_finds_no_column_corridor() {
+    let segments = card_three_column();
+
+    let left = segments.iter().map(|s| s.left as i32).min().unwrap();
+    let right = segments.iter().map(|s| s.right as i32).max().unwrap();
+    let mut covered = vec![false; (right - left + 1) as usize];
+    for segment in &segments {
+        for x in (segment.left as i32)..=(segment.right as i32) {
+            covered[(x - left) as usize] = true;
+        }
+    }
+
+    // The widest run of x that no box covers, anywhere on the card.
+    let mut widest = 0;
+    let mut run = 0;
+    for is_covered in &covered {
+        run = if *is_covered { 0 } else { run + 1 };
+        widest = widest.max(run);
+    }
+
+    assert!(
+        widest < 10,
+        "a corridor of {widest}px turned up — if this card now has one, the note \
+         on this test is out of date and the simple projection may be worth \
+         revisiting",
+    );
+}
