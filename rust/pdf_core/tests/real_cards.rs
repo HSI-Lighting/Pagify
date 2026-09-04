@@ -682,3 +682,57 @@ fn every_photograph_is_cut_into_the_right_number_of_cards() {
 
     assert!(wrong.is_empty(), "photographs cut into the wrong number of cards: {wrong:?}");
 }
+
+/// **What the three-column card would read as, if the columns were cut apart.**
+///
+/// The same fixture with its middle and right columns pushed far enough away
+/// that nothing can weld across them — which is what correct line assembly
+/// would produce, arrived at by moving the boxes rather than by fixing the
+/// rule. Everything else in the parser runs untouched.
+///
+/// It reads perfectly: the name, the title and the company all correct, where
+/// today the card gives `fO in` for the name and a three-line weld for the
+/// title. **So the weld is the whole of what is wrong with this card**, and no
+/// other rule is waiting behind it.
+///
+/// That is the target for the recursive cut in §2.1.4, and the reason to build
+/// it: this test says what success looks like before the work starts, so a cut
+/// that lands and does *not* turn `a_three_column_cards_columns_do_not_weld`
+/// green has broken something else rather than merely fallen short.
+///
+/// It also bounds the prize honestly. Of the six cards whose name is read
+/// wrongly, this is the only one where line assembly is the cause — the other
+/// five have correct lines and a wrong label, and no cut reaches them.
+#[test]
+fn the_three_column_card_reads_correctly_once_its_columns_are_apart() {
+    let separated: Vec<TextSegment> = card_three_column()
+        .iter()
+        .map(|segment| {
+            // Right column, then middle column; the left stays where it is.
+            let shift = if segment.left >= 1900.0 {
+                6000.0
+            } else if segment.left >= 1000.0 {
+                3000.0
+            } else {
+                0.0
+            };
+            TextSegment {
+                left: segment.left + shift,
+                top: segment.top,
+                right: segment.right + shift,
+                bottom: segment.bottom,
+                text: segment.text.clone(),
+            }
+        })
+        .collect();
+
+    let parsed =
+        parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(separated));
+
+    assert_eq!(parsed.name.as_ref().map(|f| f.value.as_str()), Some("Nicolas Wong"));
+    assert_eq!(parsed.title.as_ref().map(|f| f.value.as_str()), Some("VP and Co-Founder"));
+    assert_eq!(
+        parsed.company.as_ref().map(|f| f.value.as_str()),
+        Some("Riverton VOLTARIS Photoelectric Technology Co, Ltd"),
+    );
+}
