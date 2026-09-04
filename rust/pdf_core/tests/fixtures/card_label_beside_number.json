@@ -1,0 +1,25 @@
+{
+  "_note": "Real ML Kit line output for a two-column card whose telephone block puts a small FAX caption beside the number it labels, captured 2026-09-03. The caption arrived as its own box.",
+  "_anonymised": "Boxes are exactly as ML Kit reported them, converted from the captured centre-y and height. Company names, the person's name, the email and every telephone number are replaced by strings of the same shape - same word counts, character classes, lengths and OCR damage, including the stray space before the '@' and the leading 'O' the recogniser read off a handset glyph. Certification marks are left as printed: they are public standard names and belong to nobody.",
+  "_source": "Samsung SM-G736B, ML Kit text-recognition, Latin. Line angles between -2.8 and +0.9 degrees.",
+  "_layout": "Left column: logo, website, then a stack of certification marks. Right column: two company names, the role and the person, then the telephone block. The FAX caption sits to the LEFT of its own number rather than above it.",
+  "_why_it_matters": "The FAX caption is 1.5625 line heights from its number and the two are one field - they must merge. card_three_column.json has a name and a title 1.545 heights apart that must split. The must-merge gap is the wider of the two, so no single MAX_GAP satisfies both: this pair is what falsifies the threshold rather than merely leaving it untested.",
+  "segments": [
+    {"left":189,"top":1487,"right":681,"bottom":1659,"text":"AURELIA"},
+    {"left":1205,"top":1542,"right":2709,"bottom":1656,"text":"RIVERTON AURELIA CIRCUITS CO., LTD"},
+    {"left":137,"top":1682,"right":956,"bottom":1780,"text":"www.aureliacircuits.com"},
+    {"left":1244,"top":1782,"right":2730,"bottom":1904,"text":"WESTGATE AURELIA ELEC. TECH. CO., LTD"},
+    {"left":1785,"top":1962,"right":2128,"bottom":2118,"text":"U"},
+    {"left":444,"top":2020,"right":875,"bottom":2074,"text":"Associate Members"},
+    {"left":2118,"top":2010,"right":2321,"bottom":2094,"text":"CEO"},
+    {"left":250,"top":2106,"right":849,"bottom":2192,"text":"ISO9001:2015"},
+    {"left":1664,"top":2126,"right":2035,"bottom":2242,"text":"Owen Hart"},
+    {"left":316,"top":2232,"right":783,"bottom":2314,"text":"IATF 16949"},
+    {"left":195,"top":2348,"right":915,"bottom":2448,"text":"UL/CUL E000000"},
+    {"left":1235,"top":2460,"right":2477,"bottom":2600,"text":"O Tel:(0000)0 00 0000 0000"},
+    {"left":1381,"top":2608,"right":2372,"bottom":2752,"text":"(0000) -000-00000000"},
+    {"left":1362,"top":2744,"right":2392,"bottom":2900,"text":"(0000) -000-00000000"},
+    {"left":1265,"top":2832,"right":1312,"bottom":2864,"text":"FAX"},
+    {"left":1381,"top":2886,"right":2657,"bottom":3050,"text":"owen.hart @aureliacircuits.com"}
+  ]
+}

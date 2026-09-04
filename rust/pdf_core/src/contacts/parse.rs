@@ -1423,16 +1423,24 @@ mod tests {
     /// rule to within 1.3 heights of the tightest column gap that must still
     /// separate, on no evidence at all.
     ///
-    /// **What would settle it:** a captured card where the recogniser returns a
-    /// tab-separated line as two boxes, and the gap measured from it. That is a
-    /// question for the harness, and it is the band this rule is least
-    /// characterised in — nothing between 2 and 5.3 has been tested.
+    /// **Partly settled, and overtaken.** The 2026-09-03 batch produced a
+    /// card where the recogniser *did* return same-row content as two boxes: a
+    /// `FAX` caption beside the number it labels, measured at 1.5625 heights and
+    /// recorded in `a_label_beside_its_own_number_still_merges`. That is a real
+    /// must-merge gap where there was none before, and it is nowhere near the
+    /// 3.5 guessed here. A caption beside its number is not the same thing as a
+    /// tab between two whole fields, so the case below is still unmeasured —
+    /// but the number it needs is now bracketed by evidence rather than free.
     ///
-    /// A threshold may not be the right answer either. A tab is a one-off; a
+    /// It no longer decides anything, either. Whatever a printed tab measures,
+    /// the same batch showed a must-split pair at 1.545 heights — tighter than
+    /// the must-merge caption — so `MAX_GAP` has no working value regardless.
+    /// The question this probe was holding open has been answered against the
+    /// instrument rather than in favour of some number: a tab is a one-off, a
     /// column gutter repeats down the card, and that difference is structural
-    /// rather than dimensional.
+    /// rather than dimensional. See the block comment above.
     #[test]
-    #[ignore = "open: no measured tab gap exists yet — see the note; do not tune MAX_GAP to this"]
+    #[ignore = "overtaken: MAX_GAP is falsified regardless of what a tab measures — see the block comment"]
     fn a_tab_wide_gap_on_one_line_stays_one_line() {
         // 3.5 line heights of gap: an ordinary tab on a printed card.
         let parsed = parse_card(&card(vec![

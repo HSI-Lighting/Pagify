@@ -1,0 +1,23 @@
+{
+  "_note": "Real ML Kit line output for a THREE-COLUMN business card, captured 2026-09-03. The name sits in the left column, the title in the middle, the logo lockup on the right, and all three share one row.",
+  "_anonymised": "Boxes are exactly as ML Kit reported them, converted from the captured centre-y and height. The person's name, the company name, the email, the telephone numbers and the street address are replaced by strings of the same shape - same word counts, character classes, lengths and OCR damage, including the accented 'i' the recogniser produced in the road name. Generic job titles and industry words are left as printed: they identify nobody on their own and the classifier rules turn on their real wording.",
+  "_source": "Samsung SM-G736B, ML Kit text-recognition, Latin. Line angles between -2.0 and +0.9 degrees - a squarely framed card, so the row sharing is layout and not skew.",
+  "_layout": "Left column: name, then the email. Middle column: title, then the association role. Right column: the logo lockup and its tagline. Full-width lines beneath: company, address, telephones, website.",
+  "_why_it_matters": "The name and the middle column's title sit 1.545 line heights apart on the same row and must stay two lines. A different card (card_label_beside_number.json) has a caption 1.5625 heights from its own number that must merge. The must-split gap is the tighter of the two, so no single MAX_GAP satisfies both.",
+  "segments": [
+    {"left":87,"top":1798,"right":759,"bottom":1924,"text":"fO in"},
+    {"left":1148,"top":1894,"right":1400,"bottom":1926,"text":"Regular Member"},
+    {"left":1015,"top":2310,"right":1492,"bottom":2364,"text":"VP and Co-Founder"},
+    {"left":1984,"top":2290,"right":2755,"bottom":2410,"text":"VOLTARIS"},
+    {"left":133,"top":2314,"right":930,"bottom":2444,"text":"Nicolas Wong"},
+    {"left":1015,"top":2364,"right":1745,"bottom":2432,"text":"Vice Chairman of Lumen China"},
+    {"left":2156,"top":2444,"right":2601,"bottom":2532,"text":"LED Optics"},
+    {"left":131,"top":2458,"right":1317,"bottom":2556,"text":"E-mail: nicolas@voltaris.com"},
+    {"left":131,"top":2774,"right":2444,"bottom":2922,"text":"Riverton VOLTARIS Photoelectric Technology Co, Ltd"},
+    {"left":131,"top":2938,"right":2603,"bottom":3066,"text":"Add: Room 000-000, Comprehensive Service Building, Innovation Industrial Park, Westgate"},
+    {"left":135,"top":3037,"right":2281,"bottom":3149,"text":"Cloud Valley, 0000 Marchín Road, Westgate District, Riverton City, Eastprov"},
+    {"left":152,"top":3102,"right":2500,"bottom":3234,"text":"PR Country, Zip code: 000000 Tel: +00 000 0000 0000 Fax: +00 000 0000 0000"},
+    {"left":1424,"top":3207,"right":2179,"bottom":3297,"text":"https://www.voltaris.com/en"},
+    {"left":135,"top":3237,"right":1273,"bottom":3331,"text":"Mobile/WhatsApp/WeChat: 00000000000"}
+  ]
+}

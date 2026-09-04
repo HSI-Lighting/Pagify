@@ -217,3 +217,162 @@ fn the_reading_of_a_real_card_is_recorded() {
         "the person's name was not read as the name",
     );
 }
+
+// ---------------------------------------------------------------------------
+// The 2026-09-03 batch: five more cards, chosen for layout rather than variety.
+//
+// Twenty distinct companies were photographed and read. These five carry the
+// §6.4 classes the two fixtures above do not: three columns, a caption beside
+// the number it labels, the name last and alone, an eight-fold spread of line
+// heights on one card, and two whole cards in one photograph.
+// ---------------------------------------------------------------------------
+
+fn fixture(raw: &str) -> Vec<TextSegment> {
+    let fixture: Fixture = serde_json::from_str(raw).expect("the fixture could not be read");
+    fixture.segments
+}
+
+fn card_three_column() -> Vec<TextSegment> {
+    fixture(include_str!("fixtures/card_three_column.json"))
+}
+
+fn card_label_beside_number() -> Vec<TextSegment> {
+    fixture(include_str!("fixtures/card_label_beside_number.json"))
+}
+
+fn card_two_cards_one_photograph() -> Vec<TextSegment> {
+    fixture(include_str!("fixtures/card_two_cards_one_photograph.json"))
+}
+
+/// **A caption merges with the number it labels.** Half of the falsification.
+///
+/// The `FAX` caption sits to the left of its own number, 1.5625 line heights
+/// away, and the two are one field. They merge, which is right.
+///
+/// Read together with `a_three_column_cards_columns_do_not_weld` below, which
+/// must *split* at 1.545 — a tighter gap than this one that must merge. The two
+/// measurements come from different real cards and cannot both be satisfied by
+/// `MAX_GAP`, whatever it is set to.
+#[test]
+fn a_caption_merges_with_the_number_it_labels() {
+    let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        card_label_beside_number(),
+    ));
+
+    assert!(
+        parsed.raw_text.lines().any(|line| line.starts_with("FAX ")),
+        "the caption came away from its own number. Lines were:\n{}",
+        parsed.raw_text,
+    );
+}
+
+/// **Three columns weld into one line, and it costs the name.**
+///
+/// The other half of the falsification, and the worse half. The name sits in
+/// the left column and the title in the middle, 1.545 line heights apart on the
+/// same row — tighter than the caption above that must merge — so `MAX_GAP`
+/// pulls them together. The association role beneath the title then chains on,
+/// and one field comes back reading
+/// `Nicolas Wong VP and Co-Founder Vice Chairman of Lumen China`.
+///
+/// With the name buried inside that string, the name rule falls through to the
+/// largest thing left near the top and returns `fO in` — the recogniser's
+/// reading of two social-media glyphs.
+///
+/// **Ignored, and deliberately not patched.** There is no value to patch to:
+/// any `MAX_GAP` above 1.5625 welds this, and any value at or below 1.545
+/// breaks the caption. That is not a band left untested, it is a rule that has
+/// been falsified, and the answer is the gutter detection in §2.1.4 rather than
+/// a different number. Un-ignore when that lands.
+#[test]
+#[ignore = "known: MAX_GAP is falsified — see a_caption_merges_with_the_number_it_labels"]
+fn a_three_column_cards_columns_do_not_weld() {
+    let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        card_three_column(),
+    ));
+
+    let lines: Vec<&str> = parsed.raw_text.lines().collect();
+    assert!(
+        lines.iter().any(|line| *line == "Nicolas Wong"),
+        "the name welded to the column beside it. Lines were:\n{}",
+        parsed.raw_text,
+    );
+}
+
+/// **Two whole cards in one photograph should be two contacts.** They are three.
+///
+/// The cards are stacked with 176 pixels of clear space between them, against
+/// line heights of 50 to 78 — the widest horizontal corridor in the frame, and
+/// the one a correct split cuts on. `split_cards` finds it and then keeps
+/// going, cutting one of the halves again.
+///
+/// **The same cause as `a_single_card_is_not_split_in_two`**, on a card where
+/// the right answer is not one but two, which is why it is worth having both.
+/// `looks_like_a_card` asks for something reachable and something named, and a
+/// fragment of a logo lockup satisfies `named`. Resolved by Phase B's
+/// label-first segmentation, not by a threshold.
+#[test]
+#[ignore = "known: looks_like_a_card cannot tell a logo fragment from a name; Phase B resolves it"]
+fn two_cards_in_one_photograph_are_two_contacts() {
+    let cards = split_cards(card_two_cards_one_photograph());
+
+    assert_eq!(
+        cards.len(),
+        2,
+        "a photograph of two cards came back as {}: {:?}",
+        cards.len(),
+        cards
+            .iter()
+            .map(|card| card.segments.iter().map(|s| s.text.as_str()).collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+    );
+}
+
+/// **A certification mark is dialled as a telephone number.**
+///
+/// `ISO9001:2015` comes back in `phones` as `90012015`. It is printed on a
+/// great many manufacturers' cards, so this is not a curiosity — it puts a
+/// number that reaches nobody into the contact, and the review screen shows it
+/// as a phone for someone to accept without thinking.
+///
+/// Not a threshold and not a Phase B question: a run of digits broken by a
+/// colon, with no separators and no dialling prefix, is not a telephone number.
+/// Ignored only because fixing it is a change to the phone rules that has not
+/// been made yet, and it should be made deliberately with its own tests.
+#[test]
+#[ignore = "known defect, fixable: ISO9001:2015 is read as a phone number"]
+fn a_certification_mark_is_not_a_telephone_number() {
+    let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        card_label_beside_number(),
+    ));
+
+    let dialled: Vec<&str> = parsed.phones.iter().map(|p| p.raw.as_str()).collect();
+    assert!(
+        !dialled.iter().any(|raw| raw.contains("90012015")),
+        "a certification mark was read as a telephone number: {dialled:?}",
+    );
+}
+
+/// **An email with a space before the `@` is not read as an email at all.**
+///
+/// The recogniser returned `owen.hart @aureliacircuits.com`, and the card comes
+/// back with no email on it. That is the field most likely to be the reason
+/// somebody scanned the card, and losing it silently is worse than reading it
+/// wrongly: there is nothing on the review screen to correct.
+///
+/// A stray space around punctuation is ordinary OCR damage and appears
+/// elsewhere in this corpus. Ignored for the same reason as the mark above —
+/// worth fixing deliberately rather than as a side effect of this batch.
+#[test]
+#[ignore = "known defect, fixable: a space before the @ loses the email entirely"]
+fn a_space_before_the_at_still_reads_as_an_email() {
+    let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        card_label_beside_number(),
+    ));
+
+    assert!(
+        !parsed.emails.is_empty(),
+        "the only email on the card was lost. Lines were:\n{}",
+        parsed.raw_text,
+    );
+}

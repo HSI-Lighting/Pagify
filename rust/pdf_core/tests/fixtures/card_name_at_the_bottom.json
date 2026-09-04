@@ -1,0 +1,20 @@
+{
+  "_note": "Real ML Kit line output for a card that puts the person's name LAST and alone in the left column, captured 2026-09-03. Everything else is a right-hand block.",
+  "_anonymised": "Boxes are exactly as ML Kit reported them, converted from the captured centre-y and height. The person's name, the company name, the email, the website and the telephone numbers are replaced by strings of the same shape - same word counts, character classes, lengths and OCR damage, including the spurious space the recogniser put inside the title's bracket. Generic job titles and the city are left as printed.",
+  "_source": "Samsung SM-G736B, ML Kit text-recognition, Latin. Every line at 0.0 degrees bar one - a squarely framed card.",
+  "_layout": "A full-width company line at the top. A right-hand block holding a two-line title, two telephone numbers each prefixed with the region it reaches, the email, the website and three address lines. The name sits at the very bottom, in the left column, with nothing beside it.",
+  "_why_it_matters": "Two layout classes at once. The name is the LAST line and the lowest on the card, which is the opposite of the 'largest text near the top' the name rule looks for. The title runs over two lines, and the two telephones carry region keywords rather than TEL/MOB labels.",
+  "segments": [
+    {"left":291,"top":1518,"right":2687,"bottom":1606,"text":"RIVERTON QM DISPLAY TECHNOLOGY CO., LTD"},
+    {"left":1470,"top":1804,"right":2294,"bottom":1888,"text":"Sales Director(M EA)"},
+    {"left":1476,"top":1942,"right":2549,"bottom":2042,"text":"International Department"},
+    {"left":1642,"top":2165,"right":2403,"bottom":2229,"text":"(Norda) +00 000 0000 0000"},
+    {"left":1664,"top":2228,"right":2388,"bottom":2288,"text":"(Vela) +000 0 000000000"},
+    {"left":1644,"top":2364,"right":2276,"bottom":2422,"text":"aidan@qmdisplayco.com"},
+    {"left":1645,"top":2526,"right":2131,"bottom":2586,"text":"en.qmdisplayco.com"},
+    {"left":1665,"top":2688,"right":2609,"bottom":2752,"text":"0D-000, Riverton Software Industry"},
+    {"left":1652,"top":2766,"right":2612,"bottom":2832,"text":"Base, Meadowe Second Road, Norgate"},
+    {"left":1651,"top":2851,"right":2266,"bottom":2911,"text":"Riverton, Eastprov"},
+    {"left":286,"top":2864,"right":746,"bottom":2972,"text":"Aidan"}
+  ]
+}

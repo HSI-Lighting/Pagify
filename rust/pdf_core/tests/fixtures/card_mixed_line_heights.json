@@ -1,0 +1,18 @@
+{
+  "_note": "Real ML Kit line output for a single-column card whose text sizes span a factor of eight, captured 2026-09-03. The logo is 448 pixels tall and the strapline beneath it 74.",
+  "_anonymised": "Boxes are exactly as ML Kit reported them, converted from the captured centre-y and height. The person's name, the company name, the email and the telephone numbers are replaced by strings of the same shape - same word counts, character classes, lengths and OCR damage, including the pipe the recogniser read for a '1' in the second number and the single letter it got wrong in the email against the printed name. The city and country are left as printed.",
+  "_source": "Samsung SM-G736B, ML Kit text-recognition, Latin. Line angles between -0.9 and +1.5 degrees.",
+  "_layout": "One column, centred, top to bottom: a very large logo, a small strapline, the name, the title, two telephones, the email, then two address lines.",
+  "_why_it_matters": "Line heights run 52 to 448 on one card. Every rule that measures in line heights - the gap test, the name-is-the-largest-text rule - is being asked to hold across an eight-fold range on a single card, and the logo is by far the largest text on it.",
+  "segments": [
+    {"left":837,"top":1192,"right":1934,"bottom":1640,"text":"qvo"},
+    {"left":1204,"top":1595,"right":1888,"bottom":1669,"text":"a Midvale Group company"},
+    {"left":907,"top":2099,"right":1906,"bottom":2213,"text":"DEVANI MEHTA"},
+    {"left":1007,"top":2243,"right":1770,"bottom":2295,"text":"KEY ACCOUNT MANAGER"},
+    {"left":773,"top":2660,"right":1387,"bottom":2732,"text":"+000 00 0000000"},
+    {"left":791,"top":2877,"right":1713,"bottom":2963,"text":"+00| 0 0000000 | Ext: 000"},
+    {"left":762,"top":3254,"right":2218,"bottom":3350,"text":"devanj.mehta@qvoelectronics.com"},
+    {"left":763,"top":3592,"right":1227,"bottom":3668,"text":"P.O BOX 0000"},
+    {"left":765,"top":3680,"right":1859,"bottom":3764,"text":"Dubai, United Arab Emirates"}
+  ]
+}
