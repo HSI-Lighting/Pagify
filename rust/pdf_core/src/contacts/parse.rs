@@ -277,19 +277,61 @@ fn gaps(segments: &[TextSegment], axis: Axis) -> Vec<(f32, f32)> {
 /// passes that weaker test — and an ordinary card is duly cut just above its own
 /// address, giving one contact with the name and one without. The line has to
 /// look like something a person or a company is called.
+///
+/// # Two policies that bias against cutting
+///
+/// **Measured, across every fixture: every splitting error was an over-split
+/// and not one was an under-split.** Nine photographs, six wrong, all the same
+/// direction. The two failures do not cost the same:
+///
+/// - an **over-split** invents a contact that does not exist *and* wrecks the
+///   review crop of the real one, because `cropAround` takes an envelope over
+///   whatever regions it is handed and one stray stretches it — so the card
+///   renders as a sliver and the correction path itself stops working
+/// - an **under-split** gives one contact holding two cards' fields, on a
+///   screen built for swiping fields away
+///
+/// So the guard is deliberately harder to satisfy in two statable ways. Neither
+/// is a tuned number; both are claims about what a business card is, and both
+/// degrade towards the cheaper failure.
+///
+/// **A card begins with who it is, not how to reach them.** A piece whose first
+/// line is an email, a website or a telephone number is the tail of a card
+/// rather than a card. Without this the splitter cut straight through contact
+/// blocks, leaving `T:` on one card and `M:` on the next.
+///
+/// **A card carries a telephone number.** A logo lockup carries a website —
+/// that is what is printed under a logo — so a website is the very evidence a
+/// logo fragment offers, and accepting it is what let two OCR fragments of a
+/// logo pass as a whole card. A phone is a route to a person.
+///
+/// The cost is real and is recorded in
+/// `a_card_with_no_telephone_is_still_its_own_card`: a card printed with only
+/// an email and a website will not be cut away from its neighbour. Phase B
+/// segments on labels and ends the trade.
 fn looks_like_a_card(segments: &[TextSegment]) -> bool {
     if segments.len() < 2 {
         return false;
     }
 
+    let lines = into_lines(segments.to_vec().as_slice());
+    if let Some(first) = lines.first() {
+        let opens_with_a_contact = !find_emails(&first.text).is_empty()
+            || !find_urls(&first.text).is_empty()
+            || !find_phones(&first.text).is_empty();
+        if opens_with_a_contact {
+            return false;
+        }
+    }
+
     let mut reachable = false;
     let mut named = false;
     for line in into_lines(segments) {
-        if !find_emails(&line.text).is_empty()
-            || !find_urls(&line.text).is_empty()
-            || !find_phones(&line.text).is_empty()
-        {
+        if !find_phones(&line.text).is_empty() {
             reachable = true;
+        } else if !find_emails(&line.text).is_empty() || !find_urls(&line.text).is_empty() {
+            // A way of reaching somebody, but not one that only a whole card
+            // has: the website under a logo is part of the logo lockup.
         } else if could_be_a_name(&line.text) || is_a_company(&line.text) {
             named = true;
         }
@@ -1926,6 +1968,43 @@ mod tests {
         let read: Vec<BusinessCard> = cards.iter().map(parse_card).collect();
         assert_eq!(read[0].name.as_ref().unwrap().value, "Yaseen Anwar");
         assert_eq!(read[1].name.as_ref().unwrap().value, "Priya Raman");
+    }
+
+    /// **What the two splitting policies cost, stated rather than discovered.**
+    ///
+    /// A card carrying no telephone number — email and website only, which is
+    /// uncommon but real — does not count as a whole card for the purpose of
+    /// cutting. Photographed beside another card, the two come back as one
+    /// contact holding both.
+    ///
+    /// That is the chosen direction, not an oversight. Measured across the
+    /// whole corpus every splitting error was an over-split and none was an
+    /// under-split, and the two cost very different amounts: an over-split
+    /// invents a contact *and* wrecks the review crop of the real one, so the
+    /// correction path itself stops working; an under-split gives one contact
+    /// with too many fields, on a screen built for swiping fields away.
+    ///
+    /// Recorded here rather than left to be found later. When Phase B segments
+    /// on labels this stops being a trade at all, and the assertion below
+    /// should simply start passing.
+    #[test]
+    #[ignore = "known cost of the splitting policy: a card with no telephone is not one to cut on"]
+    fn a_card_with_no_telephone_is_still_its_own_card() {
+        let mut segments = ordinary().segments;
+        segments.extend([
+            line("Priya Raman", 970.0, 34.0),
+            line("Head of Purchasing", 1018.0, 20.0),
+            line("Northwind Traders Ltd", 1065.0, 24.0),
+            line("priya@northwind.example", 1340.0, 16.0),
+            line("www.northwind.example", 1380.0, 16.0),
+        ]);
+
+        let cards = split_cards(segments);
+        assert_eq!(
+            cards.len(),
+            2,
+            "a card carrying no telephone number was folded into the one beside it",
+        );
     }
 
     /// Four on a desk, and they come back in the order they were laid out.

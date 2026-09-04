@@ -38,32 +38,32 @@ fn card_two_column() -> Vec<TextSegment> {
     fixture.segments
 }
 
-/// **One card must not come back as two.** Currently it does.
+/// **One card must not come back as two.** It no longer does.
 ///
 /// The photograph holds a single card. Below the contact details is a gap and then
 /// the logo, which is the widest empty corridor on the card — and the splitter
-/// searches widest first. The guard that should refuse the cut asks whether both
-/// sides look like whole cards, and the bottom passes it: the website counts as a
-/// way of reaching somebody, and the logo's two OCR fragments each look like a
-/// name.
+/// searches widest first. The guard that should have refused the cut asked whether
+/// both halves look like whole cards, and the bottom passed: the website counted
+/// as a way of reaching somebody, and the logo's two OCR fragments each looked
+/// like a name.
 ///
-/// It costs three fields. The company, the email and the website all end up on the
-/// phantom second card, so the contact that is saved has none of them.
+/// It cost three fields. The company, the email and the website all ended up on
+/// the phantom second card, so the contact that was saved had none of them.
 ///
-/// **The guard's premise is wrong, not its threshold.** `looks_like_a_card` asks
-/// for something reachable and something named, and "named" is
-/// `could_be_a_name || is_a_company` — which a one-word logo fragment satisfies.
-/// No gap threshold repairs that: the test cannot tell a name from a fragment of
-/// a logo, so tuning the gap turns a knob that is not attached to the failure.
+/// **Fixed — though not by the route this test spent two revisions predicting.**
+/// The prediction was that only label-first segmentation could resolve it, since
+/// no gap threshold tells a name from a logo fragment. The reasoning was right and
+/// the conclusion too narrow: the guard never needed to tell them apart. It needed
+/// to stop accepting the evidence a logo fragment offers.
 ///
-/// **Ignored rather than deleted, forced to pass, or patched.** The label-first
-/// design resolves it structurally — segment on labels, and a card begins where a
-/// second NAME appears — so a classifier that calls those fragments OTHER never
-/// fires this split at all. Patching the geometric guard now would be work thrown
-/// away, and this failure is evidence for that design rather than a separate bug.
-/// Un-ignore when segmentation moves onto labels.
+/// Two policies on `looks_like_a_card` do that — a card begins with who it is
+/// rather than how to reach them, and a card carries a telephone number where a
+/// logo lockup carries only a website. Both are claims about what a card is rather
+/// than tuned numbers, both are argued from a measured asymmetry, and both are the
+/// interim mitigation the plan called for rather than the structural fix. Phase B
+/// still supersedes them, and will retire the cost recorded in
+/// `a_card_with_no_telephone_is_still_its_own_card`.
 #[test]
-#[ignore = "known: the guard cannot tell a logo fragment from a name; label-first segmentation resolves it"]
 fn a_single_card_is_not_split_in_two() {
     let cards = split_cards(card_two_column());
     assert_eq!(
@@ -299,20 +299,20 @@ fn a_three_column_cards_columns_do_not_weld() {
     );
 }
 
-/// **Two whole cards in one photograph should be two contacts.** They are three.
+/// **Two whole cards in one photograph are two contacts.** They were three.
 ///
 /// The cards are stacked with 176 pixels of clear space between them, against
 /// line heights of 50 to 78 — the widest horizontal corridor in the frame, and
-/// the one a correct split cuts on. `split_cards` finds it and then keeps
-/// going, cutting one of the halves again.
+/// the one a correct split cuts on. `split_cards` found it and then kept going,
+/// cutting one of the halves again just below its own telephone line.
 ///
-/// **The same cause as `a_single_card_is_not_split_in_two`**, on a card where
-/// the right answer is not one but two, which is why it is worth having both.
-/// `looks_like_a_card` asks for something reachable and something named, and a
-/// fragment of a logo lockup satisfies `named`. Resolved by Phase B's
-/// label-first segmentation, not by a threshold.
+/// **Worth keeping beside `a_single_card_is_not_split_in_two`** precisely
+/// because the right answer here is two rather than one. A guard made harder to
+/// satisfy will always fix the card that should not be cut; the question is
+/// whether it still cuts the photograph that should be. This is that question,
+/// and it is the fixture that would catch a mitigation which had simply stopped
+/// splitting anything.
 #[test]
-#[ignore = "known: looks_like_a_card cannot tell a logo fragment from a name; Phase B resolves it"]
 fn two_cards_in_one_photograph_are_two_contacts() {
     let cards = split_cards(card_two_cards_one_photograph());
 
@@ -629,4 +629,56 @@ fn a_whole_card_projection_finds_no_column_corridor() {
          on this test is out of date and the simple projection may be worth \
          revisiting",
     );
+}
+
+/// **How many cards each photograph holds, across the whole corpus.**
+///
+/// The companion to `the_name_baseline_across_the_corpus_is_recorded`, and the
+/// test that earns the two splitting policies their place. Both were added
+/// together and only one of them was caught by anything: disabling "a card
+/// carries a telephone number" left every test in the suite passing, which
+/// meant it was an untested change sitting in the middle of the guard. An
+/// untested fix that happens to be right is indistinguishable from one that is
+/// wrong, and this is where the difference would have surfaced — months later,
+/// in a splitter nobody had looked at since.
+///
+/// Nine photographs: eight of one card, one of two. Every one is now cut
+/// correctly, where six of nine were over-split before. Unlike the name
+/// baseline this asserts *correctness* rather than recording a failure, so it
+/// may be tightened but should never be relaxed to fit.
+#[test]
+fn every_photograph_is_cut_into_the_right_number_of_cards() {
+    let corpus: Vec<(&str, Vec<TextSegment>, usize)> = vec![
+        ("two_column", card_two_column(), 1),
+        ("two_column_logo", card_two_column_logo(), 1),
+        (
+            "logo_second_shot",
+            fixture(include_str!("fixtures/card_two_column_logo_second_shot.json")),
+            1,
+        ),
+        ("three_column", card_three_column(), 1),
+        ("label_beside_num", card_label_beside_number(), 1),
+        (
+            "name_at_bottom",
+            fixture(include_str!("fixtures/card_name_at_the_bottom.json")),
+            1,
+        ),
+        (
+            "mixed_heights",
+            fixture(include_str!("fixtures/card_mixed_line_heights.json")),
+            1,
+        ),
+        ("mixed_script", fixture(include_str!("fixtures/card_mixed_script.json")), 1),
+        ("two_cards", card_two_cards_one_photograph(), 2),
+    ];
+
+    let wrong: Vec<String> = corpus
+        .into_iter()
+        .filter_map(|(label, segments, want)| {
+            let got = split_cards(segments).len();
+            (got != want).then(|| format!("{label}: wanted {want}, got {got}"))
+        })
+        .collect();
+
+    assert!(wrong.is_empty(), "photographs cut into the wrong number of cards: {wrong:?}");
 }
