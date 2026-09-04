@@ -1,0 +1,23 @@
+{
+  "_note": "The SAME physical card as card_two_column_logo.json, photographed again on 2026-09-02 from a different distance and angle. Nothing about the card changed; only the photograph did.",
+  "_anonymised": "Boxes are exactly as ML Kit reported them, converted from the captured centre-y and height. The person's name, the telephone numbers and the email addresses are replaced by strings of the same shape, matching the substitutions used in card_two_column_logo.json so the two shots stay comparable. The OCR damage is kept exactly: the fused '54436' in the telephone, the space after the '@', and the logo read as one run rather than two.",
+  "_source": "Samsung SM-G736B, ML Kit text-recognition, Latin. Every line at 0.0 degrees bar two, and framed larger than the first shot.",
+  "_layout": "The two-column layout: name and title left, logo lockup right, then full-width contact lines.",
+  "_why_it_matters": "A pose check, which nothing else in the corpus provides. The recogniser returned this card differently from one photograph to the next - the logo as one box rather than two, the email line as TWO boxes rather than one, and a space inserted after the '@'. A reading that changes with the camera angle is a reading nobody can trust, and no test covered it before this pair.",
+  "segments": [
+    {"left":2052,"top":1924,"right":2696,"bottom":2102,"text":"HSHCHTING"},
+    {"left":191,"top":1972,"right":783,"bottom":2068,"text":"Firstname Lastname"},
+    {"left":190,"top":2090,"right":909,"bottom":2164,"text":"Marketing Manager"},
+    {"left":2052,"top":2132,"right":2160,"bottom":2168,"text":"Hue"},
+    {"left":2050,"top":2190,"right":2357,"bottom":2234,"text":"Saturation"},
+    {"left":2054,"top":2256,"right":2300,"bottom":2306,"text":"Intensity"},
+    {"left":519,"top":2730,"right":2403,"bottom":2806,"text":"deve oping inno vativ e id e as"},
+    {"left":1980,"top":3027,"right":2713,"bottom":3097,"text":"GPS: 7CRR+PW Sharjah"},
+    {"left":186,"top":3036,"right":1548,"bottom":3100,"text":"PO Box 231038 Dubai, United Arab Emirates,"},
+    {"left":187,"top":3113,"right":1555,"bottom":3181,"text":"Tel: +999 9 99999 99 | Fax: +999 9 999 99 99"},
+    {"left":183,"top":3188,"right":1647,"bottom":3260,"text":"Mob: M +999 99 999 99 99 |P +999 99 999 99 99"},
+    {"left":2149,"top":3268,"right":2691,"bottom":3330,"text":"www.example.com"},
+    {"left":183,"top":3266,"right":1105,"bottom":3348,"text":"Email: Lights@ example.co.uk"},
+    {"left":1218,"top":3266,"right":1858,"bottom":3348,"text":"Lm@example.co.uk"}
+  ]
+}

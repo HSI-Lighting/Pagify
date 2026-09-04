@@ -374,3 +374,75 @@ fn a_space_before_the_at_still_reads_as_an_email() {
         parsed.raw_text,
     );
 }
+
+/// **The same card, photographed twice, must read the same.**
+///
+/// Nothing else in the corpus checks this. Every other fixture is one
+/// photograph of one card, so a reading that depends on where the camera was
+/// would pass all of them.
+///
+/// The recogniser genuinely returned this card differently the second time: the
+/// logo as one run rather than two, the email line as *two* boxes rather than
+/// one, and a space inserted after the `@`. All three are the kind of variation
+/// that comes free with a different distance and angle, and none of them should
+/// reach the fields.
+///
+/// The title, both addresses and the website survive it. **The name does not**,
+/// and is deliberately left out of this assertion rather than quietly weakened
+/// to fit: shot one reads `HSI LIGHTING` and shot two `HSHCHTING`. Both are the
+/// logo and both are wrong — that is
+/// `the_person_is_read_as_the_person_not_the_logo` above — but they are wrong
+/// *differently*, so the value on the review screen depends on how the
+/// photograph was taken. Fold this back in when the classifier lands.
+#[test]
+fn the_same_card_photographed_twice_reads_the_same() {
+    let first = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+        card_two_column_logo(),
+    ));
+    let second = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(fixture(
+        include_str!("fixtures/card_two_column_logo_second_shot.json"),
+    )));
+
+    let addresses = |card: &pdf_core::contacts::BusinessCard| {
+        card.emails.iter().map(|f| f.value.clone()).collect::<Vec<_>>()
+    };
+    let sites = |card: &pdf_core::contacts::BusinessCard| {
+        card.urls.iter().map(|f| f.value.clone()).collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        first.title.as_ref().map(|f| &f.value),
+        second.title.as_ref().map(|f| &f.value),
+        "the title changed with the camera angle",
+    );
+    assert_eq!(
+        addresses(&first),
+        addresses(&second),
+        "the addresses changed with the camera angle",
+    );
+    assert_eq!(sites(&first), sites(&second), "the website changed with the camera angle");
+}
+
+/// **Both addresses, from the one line that carries them.**
+///
+/// This card prints its two email addresses side by side on a single line, and
+/// only the first was ever read — the second was dropped in silence, on the
+/// card belonging to the person building this. The second shot splits the same
+/// line into two boxes, so the fix has to hold whichever way it arrives.
+#[test]
+fn two_addresses_on_one_line_are_both_read() {
+    for (shot, raw) in [
+        ("one box", include_str!("fixtures/card_two_column_logo.json")),
+        ("two boxes", include_str!("fixtures/card_two_column_logo_second_shot.json")),
+    ] {
+        let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
+            fixture(raw),
+        ));
+        let addresses: Vec<&str> = parsed.emails.iter().map(|f| f.value.as_str()).collect();
+        assert_eq!(
+            addresses,
+            vec!["Lights@example.co.uk", "Lm@example.co.uk"],
+            "the second address was lost when the line arrived as {shot}",
+        );
+    }
+}

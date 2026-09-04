@@ -285,8 +285,8 @@ fn looks_like_a_card(segments: &[TextSegment]) -> bool {
     let mut reachable = false;
     let mut named = false;
     for line in into_lines(segments) {
-        if find_email(&line.text).is_some()
-            || find_url(&line.text).is_some()
+        if !find_emails(&line.text).is_empty()
+            || !find_urls(&line.text).is_empty()
             || !find_phones(&line.text).is_empty()
         {
             reachable = true;
@@ -555,13 +555,18 @@ fn take_patterns(pool: &mut Vec<Line>, card: &mut BusinessCard, origin: (f32, f3
     for (index, line) in pool.iter().enumerate() {
         let lower = line.text.to_lowercase();
 
-        if let Some(email) = find_email(&line.text) {
-            card.emails.push(Field::new(email, MATCHED).at(Some(line.region(origin))));
-            claimed.push(index);
-            continue;
-        }
-        if let Some(url) = find_url(&line.text) {
-            card.urls.push(Field::new(url, MATCHED).at(Some(line.region(origin))));
+        // Both, and all of each. A card prints two addresses on one line as
+        // readily as one, and prints `E-Mail: … , Web: …` on one line too — so
+        // stopping at the first match silently drops the rest of the line.
+        let emails = find_emails(&line.text);
+        let urls = find_urls(&line.text);
+        if !emails.is_empty() || !urls.is_empty() {
+            for email in emails {
+                card.emails.push(Field::new(email, MATCHED).at(Some(line.region(origin))));
+            }
+            for url in urls {
+                card.urls.push(Field::new(url, MATCHED).at(Some(line.region(origin))));
+            }
             claimed.push(index);
             continue;
         }
@@ -603,18 +608,21 @@ fn take_patterns(pool: &mut Vec<Line>, card: &mut BusinessCard, origin: (f32, f3
 /// The cost is that `Follow us @ example.com` would now yield `us@example.com`.
 /// That is a decoration nobody has yet seen on a card, weighed against a
 /// measured loss on roughly one card in four.
-fn find_email(text: &str) -> Option<String> {
+fn find_emails(text: &str) -> Vec<String> {
     let joined = join_across_the_at(text);
-    joined.split_whitespace().find_map(|word| {
-        let word = word.trim_matches(|c: char| !c.is_alphanumeric());
-        let (local, host) = word.split_once('@')?;
-        // A host with no dot is not a domain, and a local part with none of it
-        // is not an address — both appear on cards as decoration.
-        if local.is_empty() || !host.contains('.') || host.ends_with('.') {
-            return None;
-        }
-        Some(word.to_string())
-    })
+    joined
+        .split_whitespace()
+        .filter_map(|word| {
+            let word = word.trim_matches(|c: char| !c.is_alphanumeric());
+            let (local, host) = word.split_once('@')?;
+            // A host with no dot is not a domain, and a local part with none of
+            // it is not an address — both appear on cards as decoration.
+            if local.is_empty() || !host.contains('.') || host.ends_with('.') {
+                return None;
+            }
+            Some(word.to_string())
+        })
+        .collect()
 }
 
 /// Closes any run of spaces on either side of an `@`, leaving the rest alone.
@@ -637,24 +645,36 @@ fn join_across_the_at(text: &str) -> String {
     joined
 }
 
-fn find_url(text: &str) -> Option<String> {
-    text.split_whitespace().find_map(|word| {
-        let trimmed = word.trim_end_matches(|c: char| ".,;:".contains(c));
-        let lower = trimmed.to_lowercase();
-        // An email contains a dot and a host too, so it must be excluded here or
-        // every address is also claimed as a website.
-        if lower.contains('@') {
-            return None;
-        }
-        if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("www.")
-        {
-            return Some(trimmed.to_string());
-        }
-        // A bare domain, which is how most cards print one.
-        let looks_like_a_domain = lower.matches('.').count() >= 1
-            && KNOWN_SUFFIXES.iter().any(|suffix| lower.ends_with(suffix));
-        looks_like_a_domain.then(|| trimmed.to_string())
-    })
+/// Every website on the line.
+///
+/// Reads the same joined text as `find_emails`, and for the same reason: a
+/// spaced `@` leaves the host standing on its own as `example.co.uk`, which is
+/// a perfectly good bare domain and would be claimed here as the company's
+/// website. Joining first keeps the host attached to the address it belongs to.
+fn find_urls(text: &str) -> Vec<String> {
+    let joined = join_across_the_at(text);
+    joined
+        .split_whitespace()
+        .filter_map(|word| {
+            let trimmed = word.trim_end_matches(|c: char| ".,;:".contains(c));
+            let lower = trimmed.to_lowercase();
+            // An email contains a dot and a host too, so it must be excluded
+            // here or every address is also claimed as a website.
+            if lower.contains('@') {
+                return None;
+            }
+            if lower.starts_with("http://")
+                || lower.starts_with("https://")
+                || lower.starts_with("www.")
+            {
+                return Some(trimmed.to_string());
+            }
+            // A bare domain, which is how most cards print one.
+            let looks_like_a_domain = lower.matches('.').count() >= 1
+                && KNOWN_SUFFIXES.iter().any(|suffix| lower.ends_with(suffix));
+            looks_like_a_domain.then(|| trimmed.to_string())
+        })
+        .collect()
 }
 
 /// Enough of the common ones to catch a bare domain without a scheme.
@@ -1279,6 +1299,30 @@ mod tests {
                 "`{damaged}` was not read as an address",
             );
         }
+    }
+
+    /// A line that carries an address and a website gives up both.
+    ///
+    /// Cards print `E-Mail: … , Web: …` on one line constantly — it is on three
+    /// of the twenty in the corpus. Stopping at the first thing the line
+    /// matched meant the website was dropped without a trace, and the same
+    /// applies to the second of two addresses.
+    #[test]
+    fn one_line_can_hold_an_address_and_a_website() {
+        let parsed = parse_card(&card(vec![
+            line("Sam Reyes", 60.0, 30.0),
+            line("E-Mail: sam@meridian.example, Web: www.meridian.example", 300.0, 16.0),
+        ]));
+
+        assert_eq!(
+            parsed.emails.iter().map(|f| f.value.as_str()).collect::<Vec<_>>(),
+            vec!["sam@meridian.example"],
+        );
+        assert_eq!(
+            parsed.urls.iter().map(|f| f.value.as_str()).collect::<Vec<_>>(),
+            vec!["www.meridian.example"],
+            "the website on the same line as the address was dropped",
+        );
     }
 
     /// A certification mark is not a telephone number.
