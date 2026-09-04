@@ -592,13 +592,18 @@ fn the_name_baseline_across_the_corpus_is_recorded() {
 /// address block underneath runs the full width of the card, so every x is
 /// covered by something and no column of whitespace survives the projection.
 ///
-/// This is not an argument against §2.1.4. It is an argument that it has to be
-/// the **recursive** form — cut into horizontal bands first, then look for
-/// corridors inside each band, which is what recursive XY-cut actually is. Cut
-/// that way, the name and the title do separate, and so do the name and the
-/// logo on the two-column card. Whoever builds it should start from that and
-/// not from the projection alone, which looks simpler, needs no bands, and
-/// silently changes nothing.
+/// The recursive form — horizontal bands first, corridors inside each band —
+/// does better, but **not on the pair that matters**. It separates the name
+/// from the logo on the two-column card, keeps `HSI` with `LIGHTING`, and keeps
+/// the `FAX` caption with its number. It does not separate the name from the
+/// title here, at any of the four band and corridor settings tried.
+///
+/// **An earlier revision of this note claimed it did.** That came from a crude
+/// probe which cut at every four-pixel horizontal gap; the separation was the
+/// over-splitting artefact that same note warned about, not column detection.
+/// The claim was wrong and is withdrawn — see
+/// `the_name_and_its_title_cannot_be_separated_by_any_projection` below for the
+/// structural reason, which no choice of parameters reaches.
 ///
 /// Kept as a test rather than a note because it is a measurement, and a note
 /// would go stale the first time somebody moved a fixture.
@@ -734,5 +739,67 @@ fn the_three_column_card_reads_correctly_once_its_columns_are_apart() {
     assert_eq!(
         parsed.company.as_ref().map(|f| f.value.as_str()),
         Some("Riverton VOLTARIS Photoelectric Technology Co, Ltd"),
+    );
+}
+
+/// **Why no projection separates the name from the title, whatever its
+/// parameters.**
+///
+/// Two facts about this card, asserted here because together they close off a
+/// whole family of solutions:
+///
+/// 1. The name and the title **share a row** — they overlap vertically by more
+///    than half the shorter box, which is what put them in front of
+///    `shares_a_line` in the first place. So no horizontal cut can place them
+///    in different bands: they are the same band by construction.
+/// 2. The corridor between them, x 930 to 1015, is **crossed by other boxes** —
+///    the email line immediately below spans 131 to 1317, and five full-width
+///    lines beneath span most of the card.
+///
+/// A projection finds a corridor only where one persists across the rows it is
+/// projecting. Here it exists on exactly one row, and a single row projected
+/// against itself is just the word-gap question again — the very question that
+/// falsified `MAX_GAP`. Widening the band, narrowing the corridor, cutting
+/// deeper: none of it reaches this, because the corridor is not there to find.
+///
+/// **So §2.1.4 is worth building and will not fix the card that motivated it.**
+/// It repairs the two-column cases and leaves this one. What actually separates
+/// `Nicolas Wong` from `VP and Co-Founder` is knowing that one is a person and
+/// the other a role, which is lexical, which is the classifier.
+///
+/// Column alignment was the other candidate and it fails differently: the
+/// title's left edge matches the line below it exactly, at 1015, so alignment
+/// would separate this pair — but `HSI` aligns with the colour words beneath it
+/// while `LIGHTING` aligns with nothing, so alignment splits the logo lockup
+/// that must stay whole. Recorded so it is not rediscovered.
+#[test]
+fn the_name_and_its_title_cannot_be_separated_by_any_projection() {
+    let segments = card_three_column();
+    let find = |text: &str| segments.iter().find(|s| s.text == text).expect(text).clone();
+
+    let name = find("Nicolas Wong");
+    let title = find("VP and Co-Founder");
+
+    // 1. They share a row.
+    let overlap = name.bottom.min(title.bottom) - name.top.max(title.top);
+    let shorter = (name.bottom - name.top).min(title.bottom - title.top);
+    assert!(
+        overlap > shorter * 0.5,
+        "the name and the title no longer share a row — this card has changed \
+         and the reasoning in this note needs revisiting",
+    );
+
+    // 2. Something else crosses the corridor between them.
+    let (left, right) = (name.right, title.left);
+    let crossing: Vec<&str> = segments
+        .iter()
+        .filter(|s| s.text != name.text && s.text != title.text)
+        .filter(|s| s.left <= right && s.right >= left)
+        .map(|s| s.text.as_str())
+        .collect();
+    assert!(
+        !crossing.is_empty(),
+        "nothing crosses the corridor between the name and the title any more, \
+         so a projection could find it after all — revisit §2.1.4",
     );
 }
