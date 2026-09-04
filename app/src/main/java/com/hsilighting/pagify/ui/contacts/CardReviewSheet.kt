@@ -263,13 +263,38 @@ private fun CardAndPanel(
 
         // Scale is set by the crop now, not by the whole photograph.
         val scale = min(boxWidth / crop.width, forPhoto / crop.height)
-        val offsetX = (boxWidth - crop.width * scale) / 2f - crop.left * scale
-        val offsetY = (forPhoto - crop.height * scale) / 2f - crop.top * scale
-        // The whole bitmap is still drawn and simply shifted under a clip, rather
-        // than a cropped copy being made — this is already the largest allocation
-        // on the screen and a second one buys nothing.
-        val shownWidth = photo.sourceWidth * scale
-        val shownHeight = photo.sourceHeight * scale
+        val offsetX = (boxWidth - crop.width * scale) / 2f
+        val offsetY = (forPhoto - crop.height * scale) / 2f
+
+        // **The bitmap is actually cut, rather than drawn oversized and slid
+        // under a clip.**
+        //
+        // Sliding was the first design and it does not survive contact with
+        // Compose's constraints: the picture has to be *larger* than the box it
+        // sits in for the offset to crop anything, and a child cannot simply
+        // declare itself larger than its parent. It was silently measured at
+        // the box's own size, squashed, and then shifted by an offset computed
+        // for the size it never got — which put a third of the card on screen
+        // with a black band beneath it, while every number in the layout stayed
+        // correct and looked it.
+        //
+        // Cutting the bitmap has no such subtlety. What is drawn is the crop, it
+        // fills its box, and there is no arithmetic between the two to get
+        // wrong. The copy costs one bitmap of at most the decoded size — this
+        // one is 765x1020, not the four-megapixel original, because `loadPhoto`
+        // already downsamples — and it is made once per card rather than per
+        // frame.
+        val cropped = remember(bitmap, crop.left, crop.top, crop.width, crop.height) {
+            val byX = bitmap.width / photo.sourceWidth.toFloat()
+            val byY = bitmap.height / photo.sourceHeight.toFloat()
+            val left = (crop.left * byX).toInt().coerceIn(0, bitmap.width - 1)
+            val top = (crop.top * byY).toInt().coerceIn(0, bitmap.height - 1)
+            val width = (crop.width * byX).toInt().coerceIn(1, bitmap.width - left)
+            val height = (crop.height * byY).toInt().coerceIn(1, bitmap.height - top)
+            runCatching { Bitmap.createBitmap(bitmap, left, top, width, height) }
+                .onFailure { Log.w("CardReview", "the crop could not be cut", it) }
+                .getOrDefault(bitmap)
+        }
 
         val accent = MaterialTheme.colorScheme.primary
         val badge = BADGE * textScale
@@ -288,7 +313,7 @@ private fun CardAndPanel(
                     "@${crop.left.toInt()},${crop.top.toInt()} " +
                     "forPhoto=${forPhoto.toInt()} scale=$scale " +
                     "offset=${offsetX.toInt()},${offsetY.toInt()} " +
-                    "shown=${shownWidth.toInt()}x${shownHeight.toInt()} " +
+                    "cut=${cropped.width}x${cropped.height} " +
                     "fields=${shown.size} " +
                     "regions=" + shown.joinToString(";") { entry ->
                         entry.value.region?.let { r ->
@@ -307,23 +332,15 @@ private fun CardAndPanel(
                 .clipToBounds(),
         ) {
             with(density) {
+                // The cut bitmap, drawn at the size the crop earns. Both are the
+                // crop's own aspect, so `FillBounds` stretches nothing.
                 Image(
-                    bitmap = bitmap.asImageBitmap(),
+                    bitmap = cropped.asImageBitmap(),
                     contentDescription = "The card that was photographed",
                     contentScale = ContentScale.FillBounds,
                     modifier = Modifier
                         .offset(x = offsetX.toDp(), y = offsetY.toDp())
-                        // **`requiredSize`, not `size`.** The whole photograph is
-                        // drawn larger than this box and slid under it — that is
-                        // what performs the crop — so it *must* exceed the box.
-                        // `size` is only a preference and is coerced into the
-                        // parent's constraints, so the picture was silently
-                        // measured at the box's own height instead: squashed to
-                        // fit, then slid up by an offset computed for its real
-                        // height, which left a third of the card in view and a
-                        // black band under it. Measured on a card that showed
-                        // it — a 1080x1440 image clamped to 1080x720.
-                        .requiredSize(shownWidth.toDp(), shownHeight.toDp()),
+                        .size((crop.width * scale).toDp(), (crop.height * scale).toDp()),
                 )
             }
         }
@@ -363,8 +380,10 @@ private fun CardAndPanel(
                 Box(
                     Modifier
                         .offset(
-                            x = (offsetX + region.left * scale).toDp(),
-                            y = (offsetY + region.top * scale).toDp(),
+                            // Relative to the crop, because the crop is what is
+                            // drawn now rather than the whole photograph.
+                            x = (offsetX + (region.left - crop.left) * scale).toDp(),
+                            y = (offsetY + (region.top - crop.top) * scale).toDp(),
                         )
                         .size(
                             width = (region.width * scale).toDp(),
@@ -377,14 +396,14 @@ private fun CardAndPanel(
                 // corner it covered the first letter of every value, and a name
                 // reading "aseen Anwar" is exactly what makes somebody distrust
                 // the check they are being asked to make.
-                val badgeAfter = (offsetX + region.right * scale).toDp() + 4.dp
-                val fits = badgeAfter + badge < (offsetX + shownWidth).toDp()
+                val badgeAfter = (offsetX + (region.right - crop.left) * scale).toDp() + 4.dp
+                val fits = badgeAfter + badge < (offsetX + crop.width * scale).toDp()
 
                 Box(
                     Modifier
                         .offset(
                             x = if (fits) badgeAfter else badgeAfter - badge - 8.dp,
-                            y = (offsetY + region.top * scale).toDp() +
+                            y = (offsetY + (region.top - crop.top) * scale).toDp() +
                                 (((region.height * scale).toDp() - badge) / 2f),
                         )
                         .size(badge)
