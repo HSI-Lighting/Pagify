@@ -34,7 +34,7 @@
 ///
 /// Written beside a trained model. Loading a model whose recorded version
 /// differs from this must fail loudly — see the module note.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// How many buckets the character n-grams are hashed into.
 ///
@@ -176,8 +176,14 @@ pub fn extract_lexical(text: &str) -> Vec<f32> {
     features.push(
         text.chars().filter(|c| c.is_ascii_punctuation()).count() as f32 / chars,
     );
-    features.push(text.split_whitespace().count() as f32);
-    features.push(chars);
+    // Both scaled into 0..1 rather than pushed raw. A word count of 4 and a
+    // character count of 40 sit beside n-gram values around 0.1, and a
+    // multinomial model reads all of them as counts of the same kind — so a raw
+    // length feature silently becomes almost the whole model, and what gets
+    // learned is how long the string is. Found by a test that expected a name
+    // it had been trained on and got the other class.
+    features.push((text.split_whitespace().count() as f32 / 10.0).min(1.0));
+    features.push((chars / 60.0).min(1.0));
     features.push(capitalisation(text));
 
     // ---- lexical --------------------------------------------------------
@@ -376,12 +382,9 @@ mod tests {
         let b = extract(&scaled, big_card);
 
         for (row_a, row_b) in a.iter().zip(b.iter()) {
-            // The character count feature is absolute by design; everything
-            // else in the dense block is a ratio and must agree.
+            // Every dense feature is either a ratio of the geometry or derived
+            // from the text, and the text does not change with the camera.
             for i in 0..DENSE {
-                if i == 16 {
-                    continue;
-                }
                 assert!(
                     (row_a[i] - row_b[i]).abs() < 1e-4,
                     "feature {i} moved when the card was photographed larger: \
