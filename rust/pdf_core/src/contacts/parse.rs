@@ -588,8 +588,24 @@ fn take_patterns(pool: &mut Vec<Line>, card: &mut BusinessCard, origin: (f32, f3
 }
 
 /// The first thing on the line shaped like an address.
+///
+/// **The `@` often has a space beside it, and the address is lost entirely if
+/// that is not closed first.** Splitting on whitespace turns
+/// `owen.hart @example.com` into a word with no host and a word with no local
+/// part, and neither is an address, so the card comes back with no email on it
+/// at all. That is the worst way to get a field wrong: it is simply absent, and
+/// there is nothing on the review screen for anybody to correct.
+///
+/// Not rare. Seven of the thirty-one cards photographed on 2026-09-03 carried a
+/// spaced `@`, in all three arrangements — before, after, and both sides — and
+/// every one of them was a real address.
+///
+/// The cost is that `Follow us @ example.com` would now yield `us@example.com`.
+/// That is a decoration nobody has yet seen on a card, weighed against a
+/// measured loss on roughly one card in four.
 fn find_email(text: &str) -> Option<String> {
-    text.split_whitespace().find_map(|word| {
+    let joined = join_across_the_at(text);
+    joined.split_whitespace().find_map(|word| {
         let word = word.trim_matches(|c: char| !c.is_alphanumeric());
         let (local, host) = word.split_once('@')?;
         // A host with no dot is not a domain, and a local part with none of it
@@ -599,6 +615,26 @@ fn find_email(text: &str) -> Option<String> {
         }
         Some(word.to_string())
     })
+}
+
+/// Closes any run of spaces on either side of an `@`, leaving the rest alone.
+///
+/// Works on the line rather than on words, because the damage is exactly that
+/// the word boundary is in the wrong place.
+fn join_across_the_at(text: &str) -> String {
+    if !text.contains('@') {
+        return text.to_string();
+    }
+
+    let mut joined = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('@') {
+        joined.push_str(rest[..at].trim_end_matches(' '));
+        joined.push('@');
+        rest = rest[at + 1..].trim_start_matches(' ');
+    }
+    joined.push_str(rest);
+    joined
 }
 
 fn find_url(text: &str) -> Option<String> {
@@ -682,6 +718,18 @@ fn find_phones(text: &str) -> Vec<FoundPhone> {
             continue;
         }
 
+        // A letter fused straight onto a digit is a reference, not a number:
+        // `ISO9001:2015`, `E323980`. Whatever labels a telephone number is
+        // always parted from the digits by a space or punctuation — `Tel:`,
+        // `M `, `F -` — so nothing real is lost by refusing the fused form.
+        //
+        // Without this the certification mark printed on a great many
+        // manufacturers' cards is dialled as `90012015`: eight digits, three
+        // letters, and under every other guard here.
+        if fuses_letters_onto_digits(rest) {
+            continue;
+        }
+
         let number: String = rest
             .chars()
             .filter(|c| c.is_ascii_digit() || "+()- .".contains(*c))
@@ -693,6 +741,13 @@ fn find_phones(text: &str) -> Vec<FoundPhone> {
     }
 
     found
+}
+
+/// Whether any letter runs straight into a digit, as a reference does.
+fn fuses_letters_onto_digits(text: &str) -> bool {
+    text.chars()
+        .zip(text.chars().skip(1))
+        .any(|(left, right)| left.is_alphabetic() && right.is_ascii_digit())
 }
 
 /// Split a line into the parts that might each be a number.
@@ -1202,6 +1257,51 @@ mod tests {
         ]));
         assert_eq!(parsed.emails.len(), 1);
         assert!(parsed.urls.is_empty(), "the email was also claimed as a URL");
+    }
+
+    /// A space beside the `@` is ordinary recogniser damage, in all three of
+    /// the arrangements it comes in.
+    ///
+    /// Seven of the thirty-one cards photographed on 2026-09-03 carried one.
+    /// Before this, every one of those cards came back with no email at all —
+    /// not a wrong address but an absent one, which the review screen cannot
+    /// offer anybody the chance to correct.
+    #[test]
+    fn an_at_with_a_space_beside_it_is_still_an_address() {
+        for damaged in ["sam @meridian.example", "sam@ meridian.example", "sam @ meridian.example"] {
+            let parsed = parse_card(&card(vec![
+                line("Sam Reyes", 60.0, 30.0),
+                line(damaged, 300.0, 16.0),
+            ]));
+            assert_eq!(
+                parsed.emails.first().map(|f| f.value.as_str()),
+                Some("sam@meridian.example"),
+                "`{damaged}` was not read as an address",
+            );
+        }
+    }
+
+    /// A certification mark is not a telephone number.
+    ///
+    /// `ISO9001:2015` is eight digits and three letters, which clears the digit
+    /// count and sits under the letter guard, so it was dialled as `90012015`.
+    /// It is printed on a great many manufacturers' cards, and a number that
+    /// reaches nobody is exactly what somebody skimming the review screen
+    /// accepts without thinking.
+    #[test]
+    fn a_certification_mark_is_not_dialled() {
+        let parsed = parse_card(&card(vec![
+            line("Sam Reyes", 60.0, 30.0),
+            line("ISO9001:2015", 300.0, 16.0),
+            line("T: +44 20 7946 0000", 340.0, 16.0),
+        ]));
+
+        let dialled: Vec<&str> = parsed.phones.iter().map(|p| p.raw.as_str()).collect();
+        assert_eq!(
+            dialled,
+            vec!["+44 20 7946 0000"],
+            "a certification mark was read as a number",
+        );
     }
 
     /// Getting this wrong sends somebody to a fax machine.

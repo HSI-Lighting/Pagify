@@ -340,7 +340,6 @@ fn two_cards_in_one_photograph_are_two_contacts() {
 /// Ignored only because fixing it is a change to the phone rules that has not
 /// been made yet, and it should be made deliberately with its own tests.
 #[test]
-#[ignore = "known defect, fixable: ISO9001:2015 is read as a phone number"]
 fn a_certification_mark_is_not_a_telephone_number() {
     let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
         card_label_beside_number(),
@@ -364,7 +363,6 @@ fn a_certification_mark_is_not_a_telephone_number() {
 /// elsewhere in this corpus. Ignored for the same reason as the mark above —
 /// worth fixing deliberately rather than as a side effect of this batch.
 #[test]
-#[ignore = "known defect, fixable: a space before the @ loses the email entirely"]
 fn a_space_before_the_at_still_reads_as_an_email() {
     let parsed = parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(
         card_label_beside_number(),
