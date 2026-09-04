@@ -252,17 +252,52 @@ mod tests {
     /// name from the lines the parser actually assembles, it takes the name
     /// field from 7 of 18 cards to 5 of 18. It makes things worse.
     ///
-    /// The gap is the input. Every training row is a clean string; a third of
-    /// the real lines arrive welded to a neighbour or mangled by the
-    /// recogniser, and on those the model is confidently wrong rather than
-    /// unsure — which is the one failure mode Part 1 says costs more than
-    /// being wrong.
+    /// The gap is the input. Every training row is a clean string, and on the
+    /// noise a real card carries — a logo read as letters, two social glyphs,
+    /// the colour words inside a graphic — the model is confidently wrong
+    /// rather than unsure, which is the one failure mode Part 1 says costs more
+    /// than being wrong.
     ///
-    /// Two things follow, and both change the order of the plan. Line assembly
-    /// is a **prerequisite** for the classifier rather than an alternative to
-    /// it — a fused line cannot be labelled correctly by anything. And the
-    /// training set has to carry the damage, which the corpus can supply
-    /// because thirty-one photographs record exactly what it looks like.
+    /// # It is not line assembly, and an earlier version of this note said it was
+    ///
+    /// That claim came from a corpus whose x coordinates had been silently
+    /// zeroed by the script that built it. With every box at x=0 everything on
+    /// a row merged, so a third of the lines did indeed arrive fused, and the
+    /// conclusion followed. On the real coordinates **the right name is present
+    /// as a clean assembled line on 14 of the 18 cards.** Line assembly is not
+    /// the bottleneck and fixing it would not move this.
+    ///
+    /// # What the ceiling actually is
+    ///
+    /// | approach | name correct |
+    /// |---|---|
+    /// | available as a clean line | 14 / 18 |
+    /// | the rules alone | 7 / 18 |
+    /// | this model alone | 5 / 18 |
+    /// | both, best arbitration found | 8 / 18 |
+    ///
+    /// The 8 is not a result. It moves 7, 7, 8, 7 as the confidence gate slides,
+    /// which on eighteen cards is noise — and it was reached by trying policies
+    /// against the same eighteen cards that measure them. Adding all-capitals
+    /// names to the training set, an obvious repair for two specific failures,
+    /// made the whole thing worse: the vetoes fell from seven to four while the
+    /// losses only fell from two to one.
+    ///
+    /// **So this is parked rather than tuned further.** Every adjustment swings
+    /// the result by three or four cards out of eighteen, using training data
+    /// that was written by hand. That is fitting noise with invented data, and
+    /// no amount of it reaches the six cards between 8 and 14. What would is
+    /// real name and company corpora, which is a sourcing task rather than a
+    /// modelling one.
+    ///
+    /// # The one thing it is good at
+    ///
+    /// Rejecting. Asked only whether the *rules'* answer is a person, it vetoes
+    /// seven wrong names at the cost of two right ones. By Part 1's own value —
+    /// a confidently wrong field is worse than a flagged one, because the wrong
+    /// one gets accepted and the blank one gets filled in — that is a net gain
+    /// of five cards. It is a real trade rather than a free win, and it has not
+    /// been shipped.
     #[test]
     #[ignore = "records a measured negative: clean-text accuracy does not survive real lines"]
     fn the_model_is_not_fooled_by_what_the_recogniser_actually_returns() {
