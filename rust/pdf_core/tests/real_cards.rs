@@ -504,3 +504,76 @@ fn a_bilingual_cards_contact_routes_still_come_through() {
     );
     assert_eq!(parsed.phones.len(), 2, "a telephone number was lost");
 }
+
+/// **The before-number, across every card in the corpus.**
+///
+/// Not a target and not an approval — a baseline that moves loudly. The plan
+/// asks for checkpoint 3 to be measured over thirty to fifty cards; there are
+/// eight, so this is coarse. What it lacks in sample it makes up in the one
+/// thing a bigger sample would not have given for free: the failures have
+/// *different causes*, which is what decides whether a classifier is the answer
+/// or a few more rules would do.
+///
+/// ```text
+///   two_column          OK
+///   two_column_logo     the logo lockup is taller than the name
+///   logo_second_shot    the same, garbled differently by the camera angle
+///   three_column        the name welded into the title, so the rule fell
+///                       through to "fO in" — two social glyphs
+///   label_beside_num    the logo won
+///   name_at_bottom      the name is last and alone, so a heading won
+///   mixed_heights       OK
+///   mixed_script        unreadable Arabic won
+/// ```
+///
+/// **Two of eight, with six distinct causes, and not one of them a threshold.**
+/// Every failure is a question about what a line *means* rather than where it
+/// sits — which is precisely the split the plan draws between the regex fields
+/// and the classified ones. The contact routes bear that out from the other
+/// side: after this week's fixes every card gives up its email and its
+/// telephones, and those are the fields regex owns.
+///
+/// Update this deliberately when it changes. A number that quietly improves is
+/// as much a problem as one that quietly rots — neither gets read.
+#[test]
+fn the_name_baseline_across_the_corpus_is_recorded() {
+    let corpus: Vec<(&str, Vec<TextSegment>, &str)> = vec![
+        ("two_column", card_two_column(), "Firstname Lastname"),
+        ("two_column_logo", card_two_column_logo(), "Firstname Lastname"),
+        (
+            "logo_second_shot",
+            fixture(include_str!("fixtures/card_two_column_logo_second_shot.json")),
+            "Firstname Lastname",
+        ),
+        ("three_column", card_three_column(), "Nicolas Wong"),
+        ("label_beside_num", card_label_beside_number(), "Owen Hart"),
+        (
+            "name_at_bottom",
+            fixture(include_str!("fixtures/card_name_at_the_bottom.json")),
+            "Aidan",
+        ),
+        (
+            "mixed_heights",
+            fixture(include_str!("fixtures/card_mixed_line_heights.json")),
+            "DEVANI MEHTA",
+        ),
+        ("mixed_script", fixture(include_str!("fixtures/card_mixed_script.json")), "Rosalyn Vance"),
+    ];
+
+    let right: Vec<&str> = corpus
+        .into_iter()
+        .filter(|(_, segments, want)| {
+            let parsed =
+                parse_card(&pdf_core::contacts::parse::RecognisedCard::around_text(segments.clone()));
+            parsed.name.as_ref().map(|f| f.value.as_str()) == Some(*want)
+        })
+        .map(|(label, _, _)| label)
+        .collect();
+
+    assert_eq!(
+        right,
+        vec!["two_column", "mixed_heights"],
+        "the set of cards whose name is read correctly has changed — update this \
+         baseline deliberately and say why",
+    );
+}
