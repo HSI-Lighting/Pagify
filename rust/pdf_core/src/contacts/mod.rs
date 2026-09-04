@@ -10,6 +10,7 @@
 //! and how they are written down is the same everywhere.
 
 pub mod features;
+pub mod labels;
 pub mod parse;
 
 use serde::{Deserialize, Serialize};

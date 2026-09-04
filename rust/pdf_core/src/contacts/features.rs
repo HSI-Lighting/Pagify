@@ -48,6 +48,24 @@ pub const DENSE: usize = 18;
 /// The full width of one line's feature vector.
 pub const WIDTH: usize = DENSE + GRAM_BUCKETS;
 
+/// How many geometric features come first, and are absent from a text-only row.
+pub const GEOMETRY: usize = 13;
+
+/// The width of a text-only vector: character class, then the n-grams.
+///
+/// **The training data has no geometry and cannot be given any.** A company
+/// register and a corpus of personal names are lists of strings; they were
+/// never on a card, so they have no box, no neighbours and no position. There
+/// are only two honest responses to that, and inventing plausible geometry for
+/// them is not one of them.
+///
+/// So the lexical model is trained and run on *this* narrower vector, and the
+/// geometry stays where it already works — in the heuristics. That is not a
+/// compromise forced by the data; it is §11.4's requirement arriving as a
+/// structural fact. The two paths are independent precisely because one of them
+/// cannot see position and the other cannot see language.
+pub const LEXICAL_WIDTH: usize = (DENSE - GEOMETRY) + GRAM_BUCKETS;
+
 /// One line, and where it sits among the others on its card.
 ///
 /// Deliberately not `parse::Line` — that type is private to the parser and
@@ -129,8 +147,30 @@ pub fn extract_one(
     features.push(index as f32 / count);
     features.push((count - 1.0 - index as f32) / count);
 
+    debug_assert_eq!(features.len(), GEOMETRY, "GEOMETRY does not match what is pushed");
+
+    // Everything from here down is what a bare string also has, so it comes
+    // from the one function the lexical model is trained on. Calling it rather
+    // than repeating it is the whole anti-drift argument in miniature: there is
+    // no second copy to diverge.
+    features.extend(extract_lexical(line.text));
+
+    debug_assert_eq!(features.len(), WIDTH);
+    features
+}
+
+/// Everything about a line that a bare string also has: character class, then
+/// the hashed n-grams.
+///
+/// **This is what the lexical classifier is trained and run on.** A row of
+/// training data is a name from a register or a person-name corpus — a string
+/// with no card behind it — and this is the most that can honestly be computed
+/// from one. Inference calls the same function, so a model cannot be fed
+/// differently-shaped numbers than it learned from.
+pub fn extract_lexical(text: &str) -> Vec<f32> {
+    let mut features = Vec::with_capacity(LEXICAL_WIDTH);
+
     // ---- character class ------------------------------------------------
-    let text = line.text;
     let chars = text.chars().count().max(1) as f32;
     features.push(text.chars().filter(char::is_ascii_digit).count() as f32 / chars);
     features.push(
@@ -140,12 +180,9 @@ pub fn extract_one(
     features.push(chars);
     features.push(capitalisation(text));
 
-    debug_assert_eq!(features.len(), DENSE, "DENSE does not match what is pushed");
-
     // ---- lexical --------------------------------------------------------
     // The one channel the heuristics cannot see, and so the only axis on which
-    // the two paths are genuinely independent. Weighted deliberately rather
-    // than left to compete with geometry, per §11.4.
+    // the two paths are genuinely independent, per §11.4.
     let mut buckets = vec![0.0f32; GRAM_BUCKETS];
     let grams = character_grams(text);
     let scale = 1.0 / (grams.len().max(1) as f32).sqrt();
@@ -154,7 +191,7 @@ pub fn extract_one(
     }
     features.extend(buckets);
 
-    debug_assert_eq!(features.len(), WIDTH);
+    debug_assert_eq!(features.len(), LEXICAL_WIDTH);
     features
 }
 
@@ -389,5 +426,35 @@ mod tests {
         assert_eq!(capitalisation("HSI LIGHTING"), 1.0);
         assert_eq!(capitalisation("Michael Peng"), 0.5);
         assert_eq!(capitalisation("www.example.com"), 0.0);
+    }
+
+    /// **The full vector ends with exactly the text-only vector.**
+    ///
+    /// The lexical model is trained on strings that were never on a card and
+    /// run on lines that were. If those two paths ever computed the tail
+    /// differently, the model would be fed numbers it had never learned from
+    /// and nothing would report an error — the failure Part 13 names as the
+    /// most likely in the project. One function, asserted.
+    #[test]
+    fn a_lines_vector_ends_with_what_its_text_alone_would_give() {
+        let lines = vec![line("Michael Peng", 60.0, 34.0), line("HSI LIGHTING", 110.0, 48.0)];
+        let full = extract(&lines, card());
+
+        for (row, view) in full.iter().zip(lines.iter()) {
+            assert_eq!(
+                &row[GEOMETRY..],
+                extract_lexical(view.text).as_slice(),
+                "the tail of the full vector is not the text-only vector for {:?}",
+                view.text,
+            );
+        }
+    }
+
+    /// A bare string yields a vector of the promised narrower width.
+    #[test]
+    fn a_string_with_no_card_behind_it_still_yields_features() {
+        assert_eq!(extract_lexical("Northwind Traders Ltd").len(), LEXICAL_WIDTH);
+        assert_eq!(extract_lexical("Priya Raman").len(), LEXICAL_WIDTH);
+        assert_eq!(LEXICAL_WIDTH + GEOMETRY, WIDTH);
     }
 }
