@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 /**
  * Where contacts and their groups live.
@@ -22,7 +24,7 @@ import androidx.room.RoomDatabase
  */
 @Database(
     entities = [ContactRow::class, GroupRow::class, MembershipRow::class],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class ContactsDatabase : RoomDatabase() {
@@ -32,12 +34,36 @@ abstract class ContactsDatabase : RoomDatabase() {
     companion object {
         @Volatile private var instance: ContactsDatabase? = null
 
+        /**
+         * Version 2 adds where a contact has got to, and when to be reminded.
+         *
+         * **Written out rather than left to a destructive fallback.**
+         * `fallbackToDestructiveMigration` would make this unnecessary and
+         * delete every saved contact on the first launch after the update —
+         * which is exactly the data this feature exists to build on. Four
+         * `ALTER TABLE ADD COLUMN` statements are the cheapest migration there
+         * is and they rewrite nothing.
+         *
+         * The defaults are stated in SQL as well as in Kotlin. A Kotlin default
+         * only applies to rows this app constructs; without the SQL one, every
+         * card already saved would have NULL in a column declared non-null.
+         */
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE contacts ADD COLUMN stage TEXT NOT NULL DEFAULT 'new'")
+                db.execSQL("ALTER TABLE contacts ADD COLUMN met INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE contacts ADD COLUMN reminderAt INTEGER")
+                db.execSQL("ALTER TABLE contacts ADD COLUMN reminderDoneAt INTEGER")
+            }
+        }
+
         fun get(context: Context): ContactsDatabase = instance ?: synchronized(this) {
             instance ?: build(context.applicationContext).also { instance = it }
         }
 
         private fun build(context: Context) =
             Room.databaseBuilder(context, ContactsDatabase::class.java, "contacts.db")
+                .addMigrations(MIGRATION_1_2)
                 // Write-ahead logging, for the burst this is built for: forty
                 // cards saved in a row at an event, while the list on screen is
                 // reading the same tables.

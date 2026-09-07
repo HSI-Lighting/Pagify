@@ -36,7 +36,61 @@ data class ContactRow(
     val capturedAt: Long,
     val exportedAt: Long?,
     val exportCount: Int,
+    /**
+     * Where this one has got to, as a stage name rather than a number.
+     *
+     * The name is stored, not its position, because positions are what break
+     * when a stage is inserted in the middle: every row silently means something
+     * else and nothing reports an error. A name that no longer exists reads back
+     * as [DealStage.New] and is visible; a number that no longer means what it
+     * did is not.
+     */
+    val stage: String = DealStage.New.stored,
+    /**
+     * Whether this is somebody met face to face, rather than a card handed on by
+     * a colleague or taken from a stand.
+     *
+     * Its own flag rather than a stage, because it is orthogonal: a contact can
+     * be quoted without ever being met, and met without going anywhere.
+     */
+    val met: Boolean = false,
+    /** When to be reminded about them, if ever. */
+    val reminderAt: Long? = null,
+    /** Set when the reminder has been dealt with, so it stops being due. */
+    val reminderDoneAt: Long? = null,
 )
+
+/**
+ * How far a contact has got, from a card in a pocket to a decision.
+ *
+ * Fixed rather than user-defined. Editable stages need a migration every time
+ * one is renamed, and a rename cannot be told from a delete-plus-add unless
+ * identity is tracked separately — a schema of its own, for a thing nobody has
+ * asked for twice.
+ */
+enum class DealStage(val stored: String, val label: String) {
+    New("new", "New"),
+    Contacted("contacted", "Contacted"),
+    Meeting("meeting", "Meeting"),
+    Quoted("quoted", "Quoted"),
+    Won("won", "Won"),
+    Lost("lost", "Lost"),
+    ;
+
+    /** Finished with, either way. */
+    val isClosed: Boolean get() = this == Won || this == Lost
+
+    companion object {
+        /**
+         * The stage that string names, or [New].
+         *
+         * An unknown value falls back rather than throwing. A database written
+         * by a newer build has to open in an older one, and losing a stage is
+         * recoverable where refusing to open the contact list is not.
+         */
+        fun of(stored: String?): DealStage = entries.firstOrNull { it.stored == stored } ?: New
+    }
+}
 
 /**
  * A container the user named: an event, a client, a category.

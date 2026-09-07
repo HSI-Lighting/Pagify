@@ -40,6 +40,52 @@ interface ContactsDao {
     suspend fun contactsById(ids: List<Long>): List<ContactRow>
 
     /**
+     * Where a contact has got to, and when to be reminded about it.
+     *
+     * A targeted UPDATE rather than reading the row, changing four fields and
+     * upserting it back. The contact list is a burst-write surface -- forty
+     * cards at an event -- and a read-modify-write of a row carrying half a
+     * kilobyte of recogniser text, to change a six-character stage, loses a
+     * concurrent edit to any other column on the same row.
+     */
+    @Query(
+        "UPDATE contacts SET stage = :stage, met = :met, " +
+            "reminderAt = :reminderAt, reminderDoneAt = :reminderDoneAt WHERE id = :id",
+    )
+    suspend fun setProgress(
+        id: Long,
+        stage: String,
+        met: Boolean,
+        reminderAt: Long?,
+        reminderDoneAt: Long?,
+    )
+
+    /**
+     * Every reminder that has come due and not been dealt with.
+     *
+     * Ordered oldest first, so a notification names the one that has waited
+     * longest rather than whichever the database happened to return.
+     */
+    @Query(
+        "SELECT * FROM contacts WHERE reminderAt IS NOT NULL AND reminderAt <= :now " +
+            "AND reminderDoneAt IS NULL ORDER BY reminderAt ASC",
+    )
+    suspend fun dueReminders(now: Long): List<ContactRow>
+
+    /**
+     * The next reminder still ahead, which is the only one worth an alarm.
+     *
+     * One alarm at a time rather than one per contact: Android caps how many a
+     * process may hold, and rescheduling the next one each time a reminder fires
+     * costs a query where a hundred alarms cost a hundred slots.
+     */
+    @Query(
+        "SELECT * FROM contacts WHERE reminderAt IS NOT NULL AND reminderAt > :now " +
+            "AND reminderDoneAt IS NULL ORDER BY reminderAt ASC LIMIT 1",
+    )
+    suspend fun nextReminder(now: Long): ContactRow?
+
+    /**
      * Record that these contacts were exported, all at the same instant.
      *
      * One statement rather than a read-modify-write per contact: a group export

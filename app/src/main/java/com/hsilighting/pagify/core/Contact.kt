@@ -1,6 +1,7 @@
 package com.hsilighting.pagify.core
 
 import org.json.JSONArray
+import com.hsilighting.pagify.data.db.DealStage
 import org.json.JSONObject
 
 /**
@@ -35,7 +36,28 @@ data class Contact(
     /** Null until it has been exported once. */
     val exportedAt: Long? = null,
     val exportCount: Int = 0,
+    /**
+     * Where this one has got to. Defaults to [DealStage.New], which is what a
+     * card just off the camera is.
+     */
+    val stage: DealStage = DealStage.New,
+    /** Met face to face, as opposed to a card handed on or picked up. */
+    val met: Boolean = false,
+    /** When to be reminded about them, if ever. */
+    val reminderAt: Long? = null,
+    /** When that reminder was dealt with, after which it is no longer due. */
+    val reminderDoneAt: Long? = null,
 ) {
+
+    /**
+     * A reminder that is set, in the past, and not yet dealt with.
+     *
+     * The three conditions together rather than a stored flag, because a stored
+     * one has to be recomputed every time the clock passes it and there is no
+     * moment to do that in.
+     */
+    fun reminderIsDue(now: Long = System.currentTimeMillis()): Boolean =
+        reminderAt != null && reminderAt <= now && reminderDoneAt == null
     /** What the list shows when there is no name — a shop or a hotline has none. */
     val displayName: String
         get() = name.ifBlank { company }.ifBlank { "Untitled contact" }
