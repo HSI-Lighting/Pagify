@@ -69,7 +69,11 @@ fun DrawingRibbon(
                 )
             }
         },
-        armed = selectedTool,
+        // **`None` is not "armed", and the ribbon has to be told so.** `armed` is
+        // untyped, so this enum's own word for "nothing" reads as a perfectly
+        // good value — which would leave the styling slots on screen with no tool
+        // to style, exactly what hiding them was meant to fix.
+        armed = selectedTool.takeIf { it != AnnotationTool.None },
         colour = color,
         palette = AnnotationColors.markerPalette,
         // The weight slot is a point size while text is armed, so it has to be

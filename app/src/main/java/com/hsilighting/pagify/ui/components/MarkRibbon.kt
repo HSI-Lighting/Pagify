@@ -8,6 +8,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -84,8 +85,9 @@ data class RibbonTool(
 /**
  * Everything a mark-making tool needs, in one row.
  *
- * Colour, weight, line type, then the marks themselves. Read left to right it is
- * one sentence: *this colour, this weight, this line, drawn as this.*
+ * Tools first, then how they draw — and the second half only once something is
+ * in your hand. Line types and weights sitting beside a row of tools read as more
+ * tools; they are settings for the one tool held, so they wait until there is one.
  *
  * **Every slot opens on a tap.** These were a long press each, which meant six
  * things hidden behind a gesture with nothing to say they were there. A slot whose
@@ -281,26 +283,19 @@ fun MarkRibbon(
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                RibbonSlot("Colour", { toggle(RibbonPanel.Colour, it) }) { ColourGlyph(colour) }
-                // The same two slots ask a different question when what is armed
-                // writes words: how big, and in what face.
-                RibbonSlot(
-                    label = if (font != null) "Size" else "Thickness",
-                    onOpen = { toggle(RibbonPanel.Thickness, it) },
-                ) {
-                    if (font != null) SizeGlyph(width) else ThicknessGlyph(width, widthPresets)
-                }
-                if (curve != null) {
-                    RibbonSlot("Bend", { toggle(RibbonPanel.Curve, it) }) { CurveGlyph(curve) }
-                }
-                if (font != null) {
-                    RibbonSlot("Font", { toggle(RibbonPanel.Font, it) }) { FontGlyph(font) }
-                } else if (lineStyle != null) {
-                    RibbonSlot("Line type", { toggle(RibbonPanel.LineType, it) }) {
-                        LineTypeGlyph(lineStyle)
-                    }
-                }
-
+                // **Tools first, then how they draw — and the second half only
+                // once something is in your hand.**
+                //
+                // Colour, thickness and line type used to sit at the head of this
+                // row, in front of the tools and looking exactly like them: same
+                // slot, same size, same treatment. Two different questions —
+                // *what am I drawing with* and *what should it look like* — asked
+                // in one undifferentiated row, with the answer to the second
+                // offered before the first had been given.
+                //
+                // Now the row reads in the order the decisions are actually made.
+                // Nothing is armed, so there is nothing to style, so the styling
+                // is not there.
                 groups.forEach { group ->
                     if (group.size == 1) {
                         val only = group.single()
@@ -337,6 +332,32 @@ fun MarkRibbon(
                             },
                         ) {
                             GroupGlyph(group, armed)
+                        }
+                    }
+                }
+
+                // How the armed tool draws. Absent until there is one, because
+                // until then these controls describe nothing on screen and every
+                // one of them is a question with no subject.
+                if (armed != null) {
+                    RibbonDivider()
+                    RibbonSlot("Colour", { toggle(RibbonPanel.Colour, it) }) { ColourGlyph(colour) }
+                    // The same two slots ask a different question when what is
+                    // armed writes words: how big, and in what face.
+                    RibbonSlot(
+                        label = if (font != null) "Size" else "Thickness",
+                        onOpen = { toggle(RibbonPanel.Thickness, it) },
+                    ) {
+                        if (font != null) SizeGlyph(width) else ThicknessGlyph(width, widthPresets)
+                    }
+                    if (curve != null) {
+                        RibbonSlot("Bend", { toggle(RibbonPanel.Curve, it) }) { CurveGlyph(curve) }
+                    }
+                    if (font != null) {
+                        RibbonSlot("Font", { toggle(RibbonPanel.Font, it) }) { FontGlyph(font) }
+                    } else if (lineStyle != null) {
+                        RibbonSlot("Line type", { toggle(RibbonPanel.LineType, it) }) {
+                            LineTypeGlyph(lineStyle)
                         }
                     }
                 }
@@ -1021,3 +1042,20 @@ private val CURVE_PRESETS = listOf(-60f, 0f, 60f)
 
 /** Past half a turn the words start meeting themselves. */
 private const val CURVE_LIMIT = 180f
+
+/**
+ * The hairline between what a tool is and how it draws.
+ *
+ * Thin and low-contrast on purpose: it separates two kinds of slot without
+ * becoming a third thing in a row that is already busy.
+ */
+@Composable
+private fun RibbonDivider() {
+    Box(
+        Modifier
+            .padding(horizontal = 4.dp)
+            .width(1.dp)
+            .height(28.dp)
+            .background(MaterialTheme.colorScheme.outlineVariant),
+    )
+}
