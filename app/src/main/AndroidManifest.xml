@@ -31,6 +31,13 @@
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
+    <!-- The ringing runs in a foreground service, because that is the one thing
+         an app handling an alarm broadcast is reliably allowed to start. It is
+         not allowed to start an activity: with the app closed, Android answers
+         a background activity launch with BAL_BLOCK, which is why the alarm
+         screen only ever appeared while the app was already open. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
     <application
         android:name=".PagifyApplication"
         android:allowBackup="true"
@@ -98,6 +105,14 @@
             android:taskAffinity=".alarm"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
             android:theme="@style/Theme.Pagify" />
+
+        <!-- `shortService` because the ring stops itself at two minutes, inside
+             the roughly three this type allows, and because it is the one
+             foreground service type that asks the user for no permission. -->
+        <service
+            android:name=".core.ReminderAlarmService"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
 
         <receiver
             android:name=".core.ReminderReceiver"

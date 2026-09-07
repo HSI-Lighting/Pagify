@@ -6,7 +6,7 @@ import android.media.AudioAttributes
 import android.os.Build
 import androidx.test.platform.app.InstrumentationRegistry
 import com.hsilighting.pagify.core.Contact
-import com.hsilighting.pagify.core.ReminderAlarmActivity
+import com.hsilighting.pagify.core.ReminderAlarmService
 import com.hsilighting.pagify.core.Reminders
 import com.hsilighting.pagify.data.db.ContactsDatabase
 import com.hsilighting.pagify.data.db.toRow
@@ -97,6 +97,11 @@ class ReminderNotificationTest {
      */
     @After
     fun removeTheRows() = runBlocking {
+        // **Stop the ringing first.** These tests set off a real alarm, and a
+        // real alarm rings for two minutes — which would be two minutes of
+        // alarm tone over the rest of the suite, and over whoever is holding
+        // the phone.
+        ReminderAlarmService.stop(context)
         val dao = ContactsDatabase.get(context).contacts()
         dao.deleteContact(meetingId)
         dao.deleteContact(followUpId)
@@ -153,51 +158,58 @@ class ReminderNotificationTest {
     }
 
     @Test
-    fun theAlarmMeetingTakesTheScreenAndWillNotBeSwipedAway() {
+    fun theAlarmNotificationIsBuiltAsAnAlarmAndNotABanner() {
+        // Asked of the builder rather than of the shade, because what the
+        // service posts and what a screen does with it are two questions and
+        // only one of them belongs here.
+        val notification = Reminders.alarmNotification(
+            context = context,
+            contactId = meetingId,
+            who = "Priya Raman",
+            where = "Northwind",
+            at = System.currentTimeMillis(),
+        )
+
+        assertNotNull(
+            "no full-screen intent, so it can never reach a locked phone",
+            notification.fullScreenIntent,
+        )
+        // An alarm that clears with the same flick as an advert is not an alarm.
+        assertTrue(
+            "the alarm can be swiped away without being answered",
+            notification.flags and Notification.FLAG_ONGOING_EVENT != 0,
+        )
+        assertEquals("both ways out must be on it", 2, notification.actions.size)
+        // Silent by channel, because the service is doing the ringing. A tone
+        // here as well plays once underneath a loop, which sounds like a fault.
+        assertNull(
+            "the alarm channel must stay silent or it doubles with the ringing",
+            manager.getNotificationChannel(ALARM).sound,
+        )
+    }
+
+    @Test
+    fun aRingingMeetingIsNeverAnnouncedInSilence() {
         val due = System.currentTimeMillis() - 60_000
         save(Contact(id = meetingId, name = "Priya Raman", company = "Northwind", meetingAt = due))
 
-        // **Watched for, then shut.** The alarm screen is a real activity that
-        // really opens and really starts ringing, and the first version of this
-        // test pressed Back and hoped. It did not always land: the screen stayed
-        // up, every Compose test after it was looking at an alarm face instead
-        // of the screen it expected, and the run died fifty tests later
-        // somewhere that had nothing to do with reminders.
-        //
-        // A monitor is both the fix and the better assertion — waiting for the
-        // activity is how you find out the screen was taken at all, which is the
-        // thing a user would call working.
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val monitor = instrumentation.addMonitor(ReminderAlarmActivity::class.java.name, null, false)
-        var opened: android.app.Activity? = null
-        try {
-            fire(ring = true)
+        fire(ring = true)
 
-            opened = instrumentation.waitForMonitorWithTimeout(monitor, 10_000)
-            assertNotNull("the alarm never took the screen", opened)
+        // **The exact shape of the bug, written down.** The silent channel is
+        // only ever allowed when something else is making the noise, and the
+        // only thing that can is the foreground service — whose notification
+        // carries FLAG_FOREGROUND_SERVICE and so says so about itself. Using
+        // that channel with no service behind it is what left a closed app
+        // announcing a meeting with nothing at all.
+        val onAlarmChannel = postedOn(ALARM)
+        val posted = onAlarmChannel ?: postedOn(LOUD, waitMillis = 2_000)
+        assertNotNull("a meeting alarm went off and posted nothing at all", posted)
 
-            val posted = postedOn(ALARM)
-            assertNotNull("the alarm went off and posted nothing", posted)
-            assertNotNull(
-                "no full-screen intent, so it is a banner and not an alarm",
-                posted!!.notification.fullScreenIntent,
-            )
-            // An alarm that clears with the same flick as an advert is not an
-            // alarm. FLAG_ONGOING_EVENT is what refuses the flick.
+        if (onAlarmChannel != null) {
             assertTrue(
-                "the alarm can be swiped away without being answered",
-                posted.notification.flags and Notification.FLAG_ONGOING_EVENT != 0,
+                "the silent channel was used with no ringing service behind it",
+                onAlarmChannel.notification.flags and Notification.FLAG_FOREGROUND_SERVICE != 0,
             )
-            // Silent on purpose: the alarm screen loops the tone. A sound here
-            // as well would play once underneath it, which sounds like a fault.
-            assertNull(
-                "the alarm channel must stay silent or it doubles with the ringing",
-                manager.getNotificationChannel(ALARM).sound,
-            )
-        } finally {
-            opened?.let { instrumentation.runOnMainSync { it.finish() } }
-            instrumentation.removeMonitor(monitor)
-            instrumentation.waitForIdleSync()
         }
     }
 

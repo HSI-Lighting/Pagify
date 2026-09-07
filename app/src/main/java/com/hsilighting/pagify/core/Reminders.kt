@@ -12,6 +12,7 @@ import android.media.RingtoneManager
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationManagerCompat
 import com.hsilighting.pagify.MainActivity
 import com.hsilighting.pagify.R
@@ -25,13 +26,21 @@ import com.hsilighting.pagify.data.db.ReminderKind
  * # A meeting rings; a follow-up does not
  *
  * A **meeting** is an appointment, and it gets the alarm-clock treatment:
- * [ReminderAlarmActivity] takes the screen, shows over the lock, and rings on
- * the alarm stream until it is answered. It was a heads-up banner with the
- * default notification chime, which is the same treatment a message gets and
- * got swiped away with the same reflex — two seconds of sound that a phone face
- * down, in a bag, or in a loud room does not deliver at all. Being late is the
- * entire failure being guarded against, so being ignorable was the wrong
- * design.
+ * [ReminderAlarmService] rings on the alarm stream until it is answered, and
+ * [ReminderAlarmActivity] shows the face over the lock screen when the system
+ * lets it. It was a heads-up banner with the default notification chime, which
+ * is the same treatment a message gets and got swiped away with the same reflex
+ * — two seconds of sound that a phone face down, in a bag, or in a loud room
+ * does not deliver at all. Being late is the entire failure being guarded
+ * against, so being ignorable was the wrong design.
+ *
+ * **The sound is in the service and not in the screen, and that distinction is
+ * the whole feature.** The first version rang from the activity and launched it
+ * straight from the alarm broadcast; with the app closed Android answered that
+ * launch with `BAL_BLOCK`, and since the notification behind it was deliberately
+ * silent, a closed app got no alert whatsoever. A foreground service can be
+ * started from an alarm broadcast where an activity cannot, so the noise lives
+ * somewhere that does not need permission to appear.
  *
  * A **follow-up** is a nudge and stays exactly as it was: a quiet line in the
  * shade. Being a few hours late to one costs nothing, and an alarm for it would
@@ -78,12 +87,12 @@ object Reminders {
      * old one is deleted rather than left in the phone's settings as a channel
      * nothing posts to.
      *
-     * There are two because which is used depends on whether this app is
-     * allowed to take over the screen. When it is, [ReminderAlarmActivity] does
-     * the ringing and the notification behind it stays silent — otherwise the
-     * phone would play the tone once while the activity looped it. When it is
-     * not, the fallback has to make the noise by itself, so it carries the alarm
-     * tone and the vibration.
+     * There are two because which is used depends on whether the ringing
+     * service came up. When it did, it is doing the noise and the notification
+     * behind it stays silent — a tone here as well would play once underneath a
+     * looping alarm, which sounds like a fault. When it did not, this fallback
+     * is the entire alert, so it carries the alarm tone and the vibration
+     * itself. Neither case leaves a meeting announced in silence.
      */
     private const val MEETING_ALARM_CHANNEL = "contact-meetings-alarm"
     private const val MEETING_LOUD_CHANNEL = "contact-meetings-loud"
@@ -197,6 +206,7 @@ object Reminders {
             )
         }.onFailure { Log.w("Reminders", "could not put the meeting off", it) }
 
+        ReminderAlarmService.stop(application)
         NotificationManagerCompat.from(application)
             .cancel(notificationId(contactId, ReminderKind.Meeting))
         reschedule(application, notify = false)
@@ -222,6 +232,7 @@ object Reminders {
             )
         }.onFailure { Log.w("Reminders", "could not mark the reminder done", it) }
 
+        ReminderAlarmService.stop(application)
         NotificationManagerCompat.from(application).cancel(notificationId(contactId, kind))
         reschedule(application, notify = false)
     }
@@ -258,19 +269,108 @@ object Reminders {
     private fun notificationId(contactId: Long, kind: ReminderKind): Int =
         (contactId.toInt() * 2) + if (kind == ReminderKind.Meeting) 1 else 0
 
+    /** The id a meeting's alarm posts under, for the service that rings it. */
+    internal fun meetingNotificationId(contactId: Long): Int =
+        notificationId(contactId, ReminderKind.Meeting)
+
     /**
-     * Whether a full-screen alarm is allowed here.
+     * Hand the ringing to [ReminderAlarmService].
      *
-     * From Android 14 this is a permission in its own right, held by alarm and
-     * calling apps and revocable in settings, so it has to be asked rather than
-     * assumed — a full-screen intent that is not allowed does not fail, it
-     * quietly demotes itself to an ordinary banner, which is the silence this
-     * whole change exists to fix.
+     * @return whether it was taken. **A foreground service can be started from
+     *   an alarm broadcast where an activity cannot** — that exemption is the
+     *   one piece of this that is real, and everything about the alert now hangs
+     *   off it. If it is refused anyway, the caller falls back to a notification
+     *   that carries the alarm tone itself, so the worst case is a single tone
+     *   rather than none.
      */
-    private fun canUseFullScreenIntent(context: Context): Boolean {
-        if (Build.VERSION.SDK_INT < 34) return true
-        val manager = context.getSystemService(NotificationManager::class.java) ?: return false
-        return runCatching { manager.canUseFullScreenIntent() }.getOrDefault(false)
+    private fun startAlarmService(context: Context, row: ContactRow, who: String): Boolean =
+        runCatching {
+            ContextCompat.startForegroundService(
+                context,
+                ReminderAlarmService.intent(
+                    context = context,
+                    contactId = row.id,
+                    who = who,
+                    where = row.company.takeIf { it != who }.orEmpty(),
+                    at = row.meetingAt ?: System.currentTimeMillis(),
+                ),
+            )
+            true
+        }.getOrElse {
+            Log.w("Reminders", "the alarm service would not start", it)
+            false
+        }
+
+    /**
+     * The notification the ringing service shows while it rings.
+     *
+     * Silent by channel, because the service is already making the noise, and
+     * carrying the full-screen intent, which is what puts the alarm face in
+     * front of a locked phone. Ongoing, because an alarm that clears with the
+     * same flick as an advert is not an alarm.
+     */
+    internal fun alarmNotification(
+        context: Context,
+        contactId: Long,
+        who: String,
+        where: String,
+        at: Long,
+    ): Notification {
+        ensureChannels(context)
+        val id = notificationId(contactId, ReminderKind.Meeting)
+        val alarmFace = ReminderAlarmActivity.intent(context, contactId, who, where, at)
+
+        return NotificationCompat.Builder(context, MEETING_ALARM_CHANNEL)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle("Meeting with ${who.ifBlank { "a contact" }}")
+            .setContentText(where.ifBlank { "Starting now" })
+            .setCategory(Notification.CATEGORY_ALARM)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    context,
+                    id + 200_000,
+                    alarmFace,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+            .setFullScreenIntent(
+                PendingIntent.getActivity(
+                    context,
+                    id + 300_000,
+                    alarmFace,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+                true,
+            )
+            .addAction(
+                0,
+                "Done",
+                PendingIntent.getBroadcast(
+                    context,
+                    id + 100_000,
+                    Intent(context, ReminderReceiver::class.java)
+                        .setAction(ACTION_DONE)
+                        .putExtra(EXTRA_CONTACT, contactId)
+                        .putExtra(EXTRA_KIND, ReminderKind.Meeting.name),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+            .addAction(
+                0,
+                "Ten more minutes",
+                PendingIntent.getBroadcast(
+                    context,
+                    id + 400_000,
+                    Intent(context, ReminderReceiver::class.java)
+                        .setAction(ACTION_SNOOZE)
+                        .putExtra(EXTRA_CONTACT, contactId),
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+                ),
+            )
+            .build()
     }
 
     /**
@@ -304,18 +404,18 @@ object Reminders {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        // Whether this phone will let the app put a screen in front of the user.
-        // From Android 14 that is a permission of its own, revocable in
-        // settings, and asking rather than assuming is what decides which of the
-        // two meeting channels is used — and so whether the notification itself
-        // has to be the thing that makes a noise.
-        val canTakeTheScreen = isMeeting && ring && canUseFullScreenIntent(context)
+        // **The ringing is the service's job, and it either takes it or the
+        // notification has to.** Nothing here assumes a window will be granted:
+        // that assumption is what made a closed app silent. If the service comes
+        // up it posts its own notification on the silent channel and rings; if
+        // it cannot, the noisy channel below is the whole alert.
+        val ringing = isMeeting && ring && startAlarmService(context, row, who)
+        if (ringing) return
 
         val builder = NotificationCompat.Builder(
             context,
             when {
                 !isMeeting -> FOLLOW_UP_CHANNEL
-                canTakeTheScreen -> MEETING_ALARM_CHANNEL
                 else -> MEETING_LOUD_CHANNEL
             },
         )
@@ -336,39 +436,6 @@ object Reminders {
         builder.setPriority(
             if (isMeeting) NotificationCompat.PRIORITY_MAX else NotificationCompat.PRIORITY_DEFAULT,
         )
-
-        if (canTakeTheScreen) {
-            val alarmFace = ReminderAlarmActivity.intent(
-                context = context,
-                contactId = row.id,
-                who = who,
-                where = row.company.takeIf { it != who }.orEmpty(),
-                at = row.meetingAt ?: System.currentTimeMillis(),
-            )
-            val fullScreen = PendingIntent.getActivity(
-                context,
-                notificationId(row.id, kind) + 200_000,
-                alarmFace,
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
-
-            // Ongoing, because an alarm that can be flicked off the shade with
-            // the same reflex as an advert is not an alarm. It goes when it has
-            // been answered.
-            builder.setOngoing(true)
-                .setAutoCancel(false)
-                .setFullScreenIntent(fullScreen, true)
-
-            // **And started directly, as well as through the notification.**
-            // Android turns a full-screen intent into an ordinary heads-up
-            // whenever the phone is unlocked and in use — which is most of the
-            // working day, and exactly when a meeting alert matters. An alarm
-            // broadcast buys the app a few seconds in which it may start an
-            // activity from the background; this spends them. Both routes land
-            // in the same task, so whichever arrives second finds it already up.
-            runCatching { context.startActivity(alarmFace) }
-                .onFailure { Log.w("Reminders", "the alarm screen would not open", it) }
-        }
 
         // **Posting is allowed to fail and must not crash anything.** From
         // Android 13 the permission may simply not have been granted, and a

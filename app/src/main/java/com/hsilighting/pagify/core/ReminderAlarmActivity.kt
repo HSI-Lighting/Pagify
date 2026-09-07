@@ -3,15 +3,8 @@ package com.hsilighting.pagify.core
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
-import android.media.AudioAttributes
-import android.media.MediaPlayer
-import android.media.RingtoneManager
 import android.os.Build
 import android.os.Bundle
-import android.os.VibrationEffect
-import android.os.Vibrator
-import android.os.VibratorManager
-import android.util.Log
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -45,35 +38,22 @@ import java.util.Date
 import java.util.Locale
 
 /**
- * A meeting going off, taking the whole screen.
+ * The face of a meeting alarm: who, when, and the two ways out.
  *
- * A meeting alert used to be a banner with the default notification sound —
- * which is the same treatment a message gets, and gets swiped away with the same
- * reflex. It went out in a two-second chime that a phone face down on a table,
- * or in a bag, or on a desk in a loud room, does not deliver at all. A meeting
- * you are about to be late for is not a message.
+ * **It does not ring.** It used to, and that was the whole bug —
+ * [ReminderAlarmService] holds the sound now. A screen is a window, and a window
+ * is something Android grants or refuses; with the app closed it refuses, and
+ * everything hung off it went quiet with it. What is left here is what a window
+ * is actually good for: showing over the lock, turning the display on, and
+ * putting two large targets under a thumb.
  *
- * So this is the alarm-clock treatment instead: it takes the screen, it shows
- * over the lock without the phone being unlocked, it turns the display on, and
- * it **keeps ringing** on the alarm stream until somebody answers it. Two ways
- * out — dealt with, or ten more minutes — because an alarm you can only silence
- * teaches people to silence it.
+ * Dealt with, or ten more minutes. An alarm you can only silence teaches people
+ * to silence alarms, and the meeting is still in the diary either way.
  *
- * It rings on `USAGE_ALARM` deliberately. That is the stream that stays audible
- * when the ringer is down or silenced, which is the whole reason a phone on
- * silent still wakes you up in the morning; a reminder set for a meeting has the
- * same claim on being heard. Follow-ups do not get any of this — they are still
- * a quiet line in the shade, which is what a nudge deserves.
- *
- * It stops itself after [RING_LIMIT_MILLIS]. An alarm nobody is there to answer
- * should not flatten the battery, and the notification stays behind to say it
- * happened.
+ * Follow-ups never reach here. They stay a quiet line in the shade, which is
+ * what a nudge deserves.
  */
 class ReminderAlarmActivity : ComponentActivity() {
-
-    private var player: MediaPlayer? = null
-    private var vibrator: Vibrator? = null
-    private val stopSoon = Runnable { stopRinging() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,8 +64,6 @@ class ReminderAlarmActivity : ComponentActivity() {
         val where = intent.getStringExtra(EXTRA_WHERE).orEmpty()
         val at = intent.getLongExtra(EXTRA_AT, 0L)
 
-        startRinging()
-
         setContent {
             PagifyTheme {
                 AlarmFace(
@@ -93,7 +71,7 @@ class ReminderAlarmActivity : ComponentActivity() {
                     where = where,
                     at = at,
                     onDone = {
-                        stopRinging()
+
                         sendBroadcast(
                             Intent(this, ReminderReceiver::class.java)
                                 .setAction(Reminders.ACTION_DONE)
@@ -103,7 +81,7 @@ class ReminderAlarmActivity : ComponentActivity() {
                         finish()
                     },
                     onSnooze = {
-                        stopRinging()
+
                         sendBroadcast(
                             Intent(this, ReminderReceiver::class.java)
                                 .setAction(Reminders.ACTION_SNOOZE)
@@ -139,61 +117,15 @@ class ReminderAlarmActivity : ComponentActivity() {
         )
     }
 
-    private fun startRinging() {
-        val tone = RingtoneManager.getActualDefaultRingtoneUri(this, RingtoneManager.TYPE_ALARM)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
-            ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
-
-        // Ringing is the point, but it must never be the reason a reminder
-        // crashes: a missing tone, a device with no vibrator, an audio focus
-        // refusal. Every part of it is allowed to fail on its own.
-        if (tone != null) {
-            runCatching {
-                player = MediaPlayer().apply {
-                    setDataSource(this@ReminderAlarmActivity, tone)
-                    setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_ALARM)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-                            .build(),
-                    )
-                    isLooping = true
-                    prepare()
-                    start()
-                }
-            }.onFailure { Log.w("Reminders", "the alarm tone would not play", it) }
-        }
-
-        runCatching {
-            vibrator = if (Build.VERSION.SDK_INT >= 31) {
-                getSystemService(VibratorManager::class.java)?.defaultVibrator
-            } else {
-                @Suppress("DEPRECATION")
-                getSystemService(Vibrator::class.java)
-            }
-            val pattern = longArrayOf(0, 600, 600)
-            if (Build.VERSION.SDK_INT >= 26) {
-                vibrator?.vibrate(VibrationEffect.createWaveform(pattern, 0))
-            } else {
-                @Suppress("DEPRECATION")
-                vibrator?.vibrate(pattern, 0)
-            }
-        }.onFailure { Log.w("Reminders", "the phone would not buzz", it) }
-
-        window.decorView.postDelayed(stopSoon, RING_LIMIT_MILLIS)
-    }
-
-    private fun stopRinging() {
-        window.decorView.removeCallbacks(stopSoon)
-        runCatching { player?.stop() }
-        runCatching { player?.release() }
-        player = null
-        runCatching { vibrator?.cancel() }
-        vibrator = null
-    }
-
+    /**
+     * Closing the face quiets the alarm — but only when it is really closing.
+     *
+     * `isFinishing` rather than plain `onDestroy`, because a rotation destroys
+     * this activity too, and an alarm that stops when the phone is turned over
+     * is one that can be missed by picking it up.
+     */
     override fun onDestroy() {
-        stopRinging()
+        if (isFinishing) ReminderAlarmService.stop(this)
         super.onDestroy()
     }
 
@@ -201,9 +133,6 @@ class ReminderAlarmActivity : ComponentActivity() {
         const val EXTRA_WHO = "who"
         const val EXTRA_WHERE = "where"
         const val EXTRA_AT = "at"
-
-        /** Two minutes, then it gives up and leaves the notification behind. */
-        const val RING_LIMIT_MILLIS = 120_000L
 
         fun intent(context: Context, contactId: Long, who: String, where: String, at: Long): Intent =
             Intent(context, ReminderAlarmActivity::class.java)
