@@ -15,6 +15,22 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- A meeting reminder rings like an alarm, and these are what let it.
+
+         USE_EXACT_ALARM rather than SCHEDULE_EXACT_ALARM: the latter is granted
+         in a settings screen and can be refused, which would leave an alarm
+         going off whenever the system next felt like waking up. This one is
+         granted at install and cannot be taken away, and it is the permission
+         meant for exactly this — an alert the user set for a stated minute.
+
+         USE_FULL_SCREEN_INTENT is what puts the alarm screen in front of a
+         locked phone. From Android 14 it can be revoked, so the code asks
+         before relying on it rather than assuming, and falls back to a
+         notification that carries the alarm tone itself. -->
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <application
         android:name=".PagifyApplication"
         android:allowBackup="true"
@@ -67,12 +83,29 @@
 
         <!-- The alarm going off, and the phone coming back on. Not exported:
              nothing outside the app has any business firing these. -->
+        <!-- The alarm face. Its own task and out of recents, so answering a
+             meeting alert never leaves a stray screen behind the app; and
+             `showOnLockScreen` so it is visible without the phone being
+             unlocked, which is the entire point of it. -->
+        <activity
+            android:name=".core.ReminderAlarmActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:showOnLockScreen="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:taskAffinity=".alarm"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode"
+            android:theme="@style/Theme.Pagify" />
+
         <receiver
             android:name=".core.ReminderReceiver"
             android:exported="false">
             <intent-filter>
                 <action android:name="com.hsilighting.pagify.REMINDER" />
                 <action android:name="com.hsilighting.pagify.REMINDER_DONE" />
+                <action android:name="com.hsilighting.pagify.REMINDER_SNOOZE" />
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>

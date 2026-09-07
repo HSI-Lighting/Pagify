@@ -9,6 +9,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import com.hsilighting.pagify.core.uses24Hour
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
@@ -355,7 +356,10 @@ private fun DateAndTimePicker(
     val timeState = rememberTimePickerState(
         initialHour = if (initial != null) existing.get(Calendar.HOUR_OF_DAY) else 9,
         initialMinute = if (initial != null) existing.get(Calendar.MINUTE) else 0,
-        is24Hour = android.text.format.DateFormat.is24HourFormat(LocalContext.current),
+        // Only an explicit setting gets a 0–23 dial; see [uses24Hour] for why
+        // the obvious `DateFormat.is24HourFormat` is what left this picker with
+        // no AM and no PM on it.
+        is24Hour = uses24Hour(LocalContext.current),
     )
 
     AlertDialog(

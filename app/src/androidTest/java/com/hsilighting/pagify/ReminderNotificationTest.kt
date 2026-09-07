@@ -1,9 +1,12 @@
 package com.hsilighting.pagify
 
+import android.app.Notification
 import android.app.NotificationManager
+import android.media.AudioAttributes
 import android.os.Build
 import androidx.test.platform.app.InstrumentationRegistry
 import com.hsilighting.pagify.core.Contact
+import com.hsilighting.pagify.core.ReminderAlarmActivity
 import com.hsilighting.pagify.core.Reminders
 import com.hsilighting.pagify.data.db.ContactsDatabase
 import com.hsilighting.pagify.data.db.toRow
@@ -12,6 +15,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -41,6 +45,10 @@ class ReminderNotificationTest {
 
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
     private val manager = context.getSystemService(NotificationManager::class.java)
+
+    /** The alarm channel, and the one used when no screen can be taken. */
+    private val ALARM = "contact-meetings-alarm"
+    private val LOUD = "contact-meetings-loud"
 
     /** Far above anything a real scan will allocate, so nothing collides. */
     private val meetingId = 900_001L
@@ -98,7 +106,8 @@ class ReminderNotificationTest {
         ContactsDatabase.get(context).contacts().save(contact.toRow())
     }
 
-    private fun fire() = runBlocking { Reminders.reschedule(context, notify = true) }
+    private fun fire(ring: Boolean = false) =
+        runBlocking { Reminders.reschedule(context, notify = true, ring = ring) }
 
     /**
      * What is in the shade on that channel, after giving it a moment to arrive.
@@ -118,25 +127,108 @@ class ReminderNotificationTest {
             }
 
     @Test
-    fun aDueMeetingArrivesOnTheMeetingChannel() {
+    fun aCaughtUpMeetingArrivesWithTheAlarmToneOnIt() {
         val due = System.currentTimeMillis() - 60_000
         save(Contact(id = meetingId, name = "Priya Raman", company = "Northwind", meetingAt = due))
 
         fire()
 
-        val posted = postedOn("contact-meetings")
+        val posted = postedOn(LOUD)
         assertNotNull("a meeting due a minute ago posted nothing", posted)
         assertEquals(
             "Meeting with Priya Raman",
             posted!!.notification.extras.getString("android.title"),
         )
-        // The channel is what makes it drop over whatever is on screen. A
-        // meeting posted quietly is a meeting missed, and the two channels exist
-        // so the phone's own settings can silence one without the other.
+        val channel = manager.getNotificationChannel(LOUD)
+        assertEquals(NotificationManager.IMPORTANCE_HIGH, channel.importance)
+        // This is the channel used when no screen can be taken, so it is the one
+        // that has to make the noise by itself. On the alarm stream, or a phone
+        // with the ringer down hears nothing at all.
+        assertNotNull("the fallback channel has no sound of its own", channel.sound)
         assertEquals(
-            NotificationManager.IMPORTANCE_HIGH,
-            manager.getNotificationChannel("contact-meetings").importance,
+            "the fallback must ring on the alarm stream, not the notification one",
+            AudioAttributes.USAGE_ALARM,
+            channel.audioAttributes?.usage,
         )
+    }
+
+    @Test
+    fun theAlarmMeetingTakesTheScreenAndWillNotBeSwipedAway() {
+        val due = System.currentTimeMillis() - 60_000
+        save(Contact(id = meetingId, name = "Priya Raman", company = "Northwind", meetingAt = due))
+
+        // **Watched for, then shut.** The alarm screen is a real activity that
+        // really opens and really starts ringing, and the first version of this
+        // test pressed Back and hoped. It did not always land: the screen stayed
+        // up, every Compose test after it was looking at an alarm face instead
+        // of the screen it expected, and the run died fifty tests later
+        // somewhere that had nothing to do with reminders.
+        //
+        // A monitor is both the fix and the better assertion — waiting for the
+        // activity is how you find out the screen was taken at all, which is the
+        // thing a user would call working.
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val monitor = instrumentation.addMonitor(ReminderAlarmActivity::class.java.name, null, false)
+        var opened: android.app.Activity? = null
+        try {
+            fire(ring = true)
+
+            opened = instrumentation.waitForMonitorWithTimeout(monitor, 10_000)
+            assertNotNull("the alarm never took the screen", opened)
+
+            val posted = postedOn(ALARM)
+            assertNotNull("the alarm went off and posted nothing", posted)
+            assertNotNull(
+                "no full-screen intent, so it is a banner and not an alarm",
+                posted!!.notification.fullScreenIntent,
+            )
+            // An alarm that clears with the same flick as an advert is not an
+            // alarm. FLAG_ONGOING_EVENT is what refuses the flick.
+            assertTrue(
+                "the alarm can be swiped away without being answered",
+                posted.notification.flags and Notification.FLAG_ONGOING_EVENT != 0,
+            )
+            // Silent on purpose: the alarm screen loops the tone. A sound here
+            // as well would play once underneath it, which sounds like a fault.
+            assertNull(
+                "the alarm channel must stay silent or it doubles with the ringing",
+                manager.getNotificationChannel(ALARM).sound,
+            )
+        } finally {
+            opened?.let { instrumentation.runOnMainSync { it.finish() } }
+            instrumentation.removeMonitor(monitor)
+            instrumentation.waitForIdleSync()
+        }
+    }
+
+    @Test
+    fun theChimeChannelIsGone() {
+        fire()
+        // Renamed rather than reconfigured, because a channel's sound is fixed
+        // when it is created and every later change is ignored. Leaving the old
+        // id behind would put a channel in the phone's settings that looks like
+        // it can be turned on and posts nothing.
+        assertNull(
+            "the old meeting channel is still registered",
+            manager.getNotificationChannel("contact-meetings"),
+        )
+    }
+
+    @Test
+    fun snoozingMovesTheMeetingRatherThanKeepingASecondOne() = runBlocking {
+        val due = System.currentTimeMillis() - 60_000
+        save(Contact(id = meetingId, name = "Priya Raman", meetingAt = due))
+
+        Reminders.snooze(context, meetingId)
+
+        val row = ContactsDatabase.get(context).contacts().contactsById(listOf(meetingId)).single()
+        val moved = row.meetingAt ?: 0L
+        // Ten minutes on, give or take the time the call itself took.
+        assertTrue(
+            "the meeting was not moved forward: $moved against $due",
+            moved > System.currentTimeMillis() + Reminders.SNOOZE_MILLIS - 30_000,
+        )
+        assertNull("a snoozed meeting must not read as dealt with", row.meetingDoneAt)
     }
 
     @Test
@@ -171,7 +263,7 @@ class ReminderNotificationTest {
 
         fire()
 
-        assertNull("a reminder already marked done posted anyway", postedOn("contact-meetings", waitMillis = 1_000))
+        assertNull("a reminder already marked done posted anyway", postedOn(LOUD, waitMillis = 1_000))
     }
 
     @Test
@@ -181,6 +273,6 @@ class ReminderNotificationTest {
 
         fire()
 
-        assertNull("a meeting an hour away posted now", postedOn("contact-meetings", waitMillis = 1_000))
+        assertNull("a meeting an hour away posted now", postedOn(LOUD, waitMillis = 1_000))
     }
 }

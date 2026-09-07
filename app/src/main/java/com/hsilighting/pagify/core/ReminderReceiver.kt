@@ -53,6 +53,26 @@ class ReminderReceiver : BroadcastReceiver() {
             return
         }
 
+        // "Ten more minutes", from the alarm screen. Its own branch rather than
+        // a flag on Done, because the two end differently: one closes the
+        // meeting off, the other leaves it open and moves it.
+        if (action == Reminders.ACTION_SNOOZE) {
+            val contactId = intent.getLongExtra(Reminders.EXTRA_CONTACT, -1L)
+            if (contactId <= 0) return
+
+            val finish = goAsync()
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    Reminders.snooze(context, contactId)
+                } catch (error: Throwable) {
+                    Log.w("Reminders", "could not put the meeting off", error)
+                } finally {
+                    finish.finish()
+                }
+            }
+            return
+        }
+
         if (action != Reminders.ACTION_FIRE && !isBoot) return
 
         // The work outlives this call, so the process must be asked to stay
@@ -65,7 +85,11 @@ class ReminderReceiver : BroadcastReceiver() {
                 // A boot notifies too. Anything that came due while the phone
                 // was off is still due, and staying quiet about it would lose
                 // exactly the reminders that waited longest.
-                Reminders.reschedule(context, notify = true)
+                // Only the alarm itself rings and takes the screen. A boot or a
+                // reinstall is a catch-up: it still says what was missed, in the
+                // shade, without throwing an alarm screen at somebody who was
+                // updating the app.
+                Reminders.reschedule(context, notify = true, ring = action == Reminders.ACTION_FIRE)
             } catch (error: Throwable) {
                 Log.w("Reminders", "the reminder pass failed", error)
             } finally {
