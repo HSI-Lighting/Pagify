@@ -503,8 +503,19 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { recentDocuments.forget(uri) }
     }
 
+    /**
+     * The document on screen, so it can be shared.
+     *
+     * Kept apart from `pendingUri`, which is cleared once the open succeeds —
+     * and so is null at exactly the moment somebody wants to send on what they
+     * are reading.
+     */
+    var openDocumentUri: Uri? = null
+        private set
+
     fun open(uri: Uri, password: String? = null) {
         pendingUri = uri
+        openDocumentUri = uri
         closeDocument()
         _state.value = PdfReaderState(
             phase = PdfReaderState.Phase.Loading,

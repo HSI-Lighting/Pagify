@@ -23,7 +23,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -289,23 +288,8 @@ private fun DocumentRow(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            IconButton(onClick = { menuOpen = true }) {
-                Icon(
-                    Icons.Filled.MoreVert,
-                    contentDescription = "More for ${document.name}",
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
 
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text("Share") },
-                    leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
-                    onClick = {
-                        menuOpen = false
-                        onShare()
-                    },
-                )
                 DropdownMenuItem(
                     text = { Text("Remove from library") },
                     onClick = {

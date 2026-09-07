@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.FiberManualRecord
 import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.automirrored.filled.ViewSidebar
@@ -282,6 +283,8 @@ fun PdfReaderScreen(
     onDismissCapture: () -> Unit,
     /** The share sheet has been raised; the capture can be let go of. */
     onCaptureShared: () -> Unit,
+    /** Hand the whole document being read to another app. */
+    onShareDocument: () -> Unit,
     // Markup on the capture. The shapes are Kotlin's until they are committed,
     // and the engine's from then on — see roadmap decision 4.7.
     onMarkupTool: (MarkupTool) -> Unit,
@@ -433,6 +436,15 @@ fun PdfReaderScreen(
                                     icon = Icons.AutoMirrored.Filled.RotateRight,
                                     label = "Rotate",
                                     onClick = onRotate,
+                                ),
+                                // Sharing the document being read, from the
+                                // overflow it already has rather than a button
+                                // of its own — the bar is already competing
+                                // with the title for room.
+                                ReaderAction(
+                                    icon = Icons.Filled.Share,
+                                    label = "Share this document",
+                                    onClick = onShareDocument,
                                 ),
                                 ReaderAction(
                                     icon = Icons.Filled.GridView,

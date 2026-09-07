@@ -475,6 +475,11 @@ class MainActivity : ComponentActivity() {
                         onCopyCapture = viewModel::copyCapture,
                         onDismissCapture = viewModel::dismissCapture,
                         onCaptureShared = viewModel::captureShared,
+                        onShareDocument = {
+                            viewModel.openDocumentUri?.let {
+                                shareDocumentUri(it, state.documentName)
+                            }
+                        },
                         onTextFont = viewModel::setTextFont,
                         onTextSize = viewModel::setTextSize,
                         onTextCurve = viewModel::setTextCurve,
@@ -635,14 +640,19 @@ class MainActivity : ComponentActivity() {
             Log.w("Pagify", "a library row had an unreadable uri")
             return
         }
+        shareDocumentUri(uri, document.name)
+    }
+
+    /** The same, for whatever is open in the reader. */
+    private fun shareDocumentUri(uri: Uri, name: String) {
         val intent = Intent(Intent.ACTION_SEND).apply {
             type = "application/pdf"
             putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_TITLE, document.name)
+            putExtra(Intent.EXTRA_TITLE, name)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         runCatching {
-            startActivity(Intent.createChooser(intent, "Share ${document.name}"))
+            startActivity(Intent.createChooser(intent, "Share $name"))
         }.onFailure { Log.w("Pagify", "nothing could accept the document", it) }
     }
 }

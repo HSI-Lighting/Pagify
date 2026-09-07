@@ -16,6 +16,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowRightAlt
 import androidx.compose.material.icons.filled.Brush
@@ -119,6 +122,7 @@ fun AnnotationToolbar(
 ) {
     var showDrawPalette by remember { mutableStateOf(false) }
     var showClearMenu by remember { mutableStateOf(false) }
+    var showSnapshotMenu by remember { mutableStateOf(false) }
 
 
     /**
@@ -317,40 +321,81 @@ fun AnnotationToolbar(
                         },
                         hasMore = true,
                     )
-                    ToolButton(
-                        icon = Icons.Filled.CropFree,
-                        label = "Snapshot",
-                        selected = selectedTool == AnnotationTool.Snapshot && !captureLasso,
-                        onClick = {
-                            onCaptureLasso(false)
-                            select(
-                                if (selectedTool == AnnotationTool.Snapshot && !captureLasso) {
-                                    AnnotationTool.None
-                                } else {
-                                    AnnotationTool.Snapshot
+                    // **One button, both shapes.** They were two slots side by
+                    // side, which spent a fifth of a crowded toolbar on a choice
+                    // that is only ever made *after* deciding to take a snapshot,
+                    // never before.
+                    //
+                    // So the button means "snapshot" and the menu means "which
+                    // shape". The icon follows whichever shape is armed, so the
+                    // toolbar still says what a drag will do without being
+                    // opened.
+                    Box {
+                        val snapshotting = selectedTool == AnnotationTool.Snapshot
+                        ToolButton(
+                            icon = if (snapshotting && captureLasso) {
+                                Icons.Filled.Gesture
+                            } else {
+                                Icons.Filled.CropFree
+                            },
+                            label = "Snapshot",
+                            selected = snapshotting,
+                            onClick = { showSnapshotMenu = true },
+                            hasMore = true,
+                        )
+                        DropdownMenu(
+                            expanded = showSnapshotMenu,
+                            onDismissRequest = { showSnapshotMenu = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Box") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.CropFree, contentDescription = null)
+                                },
+                                trailingIcon = {
+                                    if (snapshotting && !captureLasso) {
+                                        Icon(Icons.Filled.Check, contentDescription = "Armed")
+                                    }
+                                },
+                                onClick = {
+                                    showSnapshotMenu = false
+                                    onCaptureLasso(false)
+                                    // Picking the shape already armed turns the
+                                    // tool off, so the button stays a toggle
+                                    // rather than becoming a one-way switch.
+                                    select(
+                                        if (snapshotting && !captureLasso) {
+                                            AnnotationTool.None
+                                        } else {
+                                            AnnotationTool.Snapshot
+                                        },
+                                    )
                                 },
                             )
-                        },
-                    )
-                    ToolButton(
-                        // Its own slot rather than a shape hidden behind a long press on
-                        // the one beside it. They are two tools by the time you are
-                        // choosing: a box for most things, a ring for the detail a box
-                        // cannot take without its neighbours.
-                        icon = Icons.Filled.Gesture,
-                        label = "Draw around",
-                        selected = selectedTool == AnnotationTool.Snapshot && captureLasso,
-                        onClick = {
-                            onCaptureLasso(true)
-                            select(
-                                if (selectedTool == AnnotationTool.Snapshot && captureLasso) {
-                                    AnnotationTool.None
-                                } else {
-                                    AnnotationTool.Snapshot
+                            DropdownMenuItem(
+                                text = { Text("Draw around") },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.Gesture, contentDescription = null)
+                                },
+                                trailingIcon = {
+                                    if (snapshotting && captureLasso) {
+                                        Icon(Icons.Filled.Check, contentDescription = "Armed")
+                                    }
+                                },
+                                onClick = {
+                                    showSnapshotMenu = false
+                                    onCaptureLasso(true)
+                                    select(
+                                        if (snapshotting && captureLasso) {
+                                            AnnotationTool.None
+                                        } else {
+                                            AnnotationTool.Snapshot
+                                        },
+                                    )
                                 },
                             )
-                        },
-                    )
+                        }
+                    }
                 }
             }
         }
