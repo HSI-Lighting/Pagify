@@ -21,6 +21,10 @@
 //! any time. It is pinned exactly and confined to the adapter, so a breaking
 //! release costs one file rather than the geometry.
 
+pub mod adapt;
 pub mod audit;
+pub mod curve;
 pub mod model;
 pub mod orient;
+pub mod project;
+pub mod tessellate;

@@ -55,6 +55,14 @@ rustybuzz = "0.20"
 ttf-parser = "0.25"
 unicode-bidi = "0.3"
 subsetter = "0.2.2"
+# Ear-clipping triangulation of a polygon with holes, which is step three of
+# the tessellator. Pure Rust and pinned exactly: no caret, so a release cannot
+# arrive on its own and change how geometry comes out.
+#
+# Its only dependencies are itertools and num-traits, both pure Rust. **No new
+# C++ dependency** enters the build, which was a condition of this work.
+earcutr = "=0.5.0"
+step-io = "=0.2.4"
 
 # No `lopdf`. PDFium is the single writer: two independent object models writing
 # one file is a corruption class that is very hard to diagnose, and PDFium covers
