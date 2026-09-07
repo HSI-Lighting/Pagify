@@ -14,6 +14,15 @@ import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Event
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.TimePicker
+import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -230,7 +239,7 @@ private fun rememberNotificationPermission(): () -> Unit {
  * it, so setting a reminder by mistake costs one tap to undo rather than a
  * hunt for a Clear button.
  */
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
 private fun ReminderRow(
     heading: String,
@@ -246,6 +255,8 @@ private fun ReminderRow(
         color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(bottom = 6.dp),
     )
+    var picking by remember { mutableStateOf(false) }
+
     FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         offsets.forEach { (label, days) ->
             val on = remember(days) { morningIn(days) }
@@ -256,6 +267,26 @@ private fun ReminderRow(
                 label = { Text(label) },
             )
         }
+        // **A way out of the offsets.** They cover the common cases and none of
+        // the real ones — a meeting is at a time somebody else chose, and no
+        // list of "in three days" will ever contain it. Selected when the date
+        // set is not one of the offsets, so a custom date is visibly a state
+        // rather than a button that does nothing the second time.
+        val isCustom = at != null && offsets.none { (_, days) -> sameDay(at, morningIn(days)) }
+        FilterChip(
+            selected = isCustom,
+            onClick = { picking = true },
+            leadingIcon = { Icon(Icons.Filled.Event, contentDescription = null) },
+            label = { Text(if (isCustom) onDate(at) else "Pick a date") },
+        )
+    }
+
+    if (picking) {
+        DateAndTimePicker(
+            initial = at,
+            onPicked = { picking = false; onPick(it) },
+            onDismiss = { picking = false },
+        )
     }
     if (at != null) {
         AssistChip(
@@ -267,4 +298,93 @@ private fun ReminderRow(
             modifier = Modifier.padding(top = 8.dp),
         )
     }
+}
+
+/**
+ * A date and then a time, for a reminder the offsets do not cover.
+ *
+ * **Both, not just the date.** A meeting alert set for nine in the morning when
+ * the meeting is at three is worse than no alert: it arrives, gets dismissed as
+ * noise, and is gone by the time it mattered. The time defaults to nine so the
+ * second step can be accepted without thought when it genuinely does not matter.
+ *
+ * Two dialogs in sequence rather than one combined control, because Material
+ * ships the two separately and a hand-rolled combination of them is a great deal
+ * of surface for a screen somebody sees once a fortnight.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun DateAndTimePicker(
+    initial: Long?,
+    onPicked: (Long) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var chosenDate by remember { mutableStateOf<Long?>(null) }
+
+    val start = initial ?: morningIn(1)
+    val dateState = rememberDatePickerState(initialSelectedDateMillis = start)
+
+    if (chosenDate == null) {
+        DatePickerDialog(
+            onDismissRequest = onDismiss,
+            confirmButton = {
+                TextButton(
+                    onClick = { chosenDate = dateState.selectedDateMillis ?: start },
+                    enabled = dateState.selectedDateMillis != null,
+                ) { Text("Next") }
+            },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        ) {
+            DatePicker(state = dateState)
+        }
+        return
+    }
+
+    val existing = Calendar.getInstance().apply { timeInMillis = start }
+    val timeState = rememberTimePickerState(
+        initialHour = if (initial != null) existing.get(Calendar.HOUR_OF_DAY) else 9,
+        initialMinute = if (initial != null) existing.get(Calendar.MINUTE) else 0,
+        is24Hour = android.text.format.DateFormat.is24HourFormat(LocalContext.current),
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("At what time?") },
+        text = { TimePicker(state = timeState) },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onPicked(atLocalTime(chosenDate!!, timeState.hour, timeState.minute))
+                },
+            ) { Text("Set") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
+}
+
+/**
+ * The day a date picker returned, at a time in the device's own zone.
+ *
+ * **The picker works in UTC and a reminder does not.** `selectedDateMillis` is
+ * midnight *UTC* on the chosen day, so adding a local hour to it directly puts
+ * the reminder on the wrong day for anybody far enough from Greenwich — a day
+ * early to the west, and the mistake is invisible because the date shown back is
+ * computed the same wrong way.
+ *
+ * So the day is read out in UTC, where it is correct, and rebuilt in the local
+ * zone, where it will be read.
+ */
+internal fun atLocalTime(utcDateMillis: Long, hour: Int, minute: Int): Long {
+    val utc = Calendar.getInstance(java.util.TimeZone.getTimeZone("UTC")).apply {
+        timeInMillis = utcDateMillis
+    }
+    return Calendar.getInstance().apply {
+        set(Calendar.YEAR, utc.get(Calendar.YEAR))
+        set(Calendar.MONTH, utc.get(Calendar.MONTH))
+        set(Calendar.DAY_OF_MONTH, utc.get(Calendar.DAY_OF_MONTH))
+        set(Calendar.HOUR_OF_DAY, hour)
+        set(Calendar.MINUTE, minute)
+        set(Calendar.SECOND, 0)
+        set(Calendar.MILLISECOND, 0)
+    }.timeInMillis
 }
