@@ -2113,6 +2113,21 @@ frame = pending.frame,
      * membership table, and quietly unfile the contact from every group. There
      * is a test.
      */
+    /**
+     * Save the progress sheet, meetings and all.
+     *
+     * Separate from [updateContact] because that one deliberately leaves
+     * meetings alone — see `ContactStore.saveProgress`.
+     */
+    fun updateProgress(contact: Contact) {
+        viewModelScope.launch {
+            contactStore.saveProgress(contact)
+            Reminders.reschedule(getApplication(), notify = false)
+            SessionRecorder.record("CONTACT_PROGRESS", "name=${contact.displayName}")
+            _state.update { it.copy(message = "Saved ${contact.displayName}.") }
+        }
+    }
+
     fun updateContact(contact: Contact) {
         viewModelScope.launch {
             contactStore.save(contact)

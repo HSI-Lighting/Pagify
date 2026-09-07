@@ -4,17 +4,21 @@ import android.content.Context
 import android.util.Log
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
+import com.hsilighting.pagify.core.Meeting
 import com.hsilighting.pagify.core.NativeBridge
 import com.hsilighting.pagify.core.contactFromCardJson
 import com.hsilighting.pagify.core.toCardJson
 import com.hsilighting.pagify.data.db.ContactsDatabase
 import com.hsilighting.pagify.data.db.GroupRow
+import com.hsilighting.pagify.data.db.MeetingRow
 import com.hsilighting.pagify.data.db.MembershipRow
 import com.hsilighting.pagify.data.db.toContact
 import com.hsilighting.pagify.data.db.toGroup
+import com.hsilighting.pagify.data.db.toMeeting
 import com.hsilighting.pagify.data.db.toRow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
@@ -37,7 +41,6 @@ import java.util.TimeZone
 class ContactStore internal constructor(database: ContactsDatabase) {
 
     /**
-     * The ordinary way in. The other constructor takes a database directly so a
      * test can hand it an in-memory one — filing and grouping are the part of
      * this app with no other way to be checked, and they went wrong unnoticed
      * once because nothing above the DAO was tested at all.
@@ -47,7 +50,6 @@ class ContactStore internal constructor(database: ContactsDatabase) {
     private val dao = database.contacts()
 
     /**
-     * The contacts, as the screen reads them.
      *
      * **One unreadable row must not kill the flow.** A `Flow` that throws is
      * finished — it emits nothing ever again, and the screen sits on its last
@@ -56,8 +58,12 @@ class ContactStore internal constructor(database: ContactsDatabase) {
      * column would do it. A row that cannot be read is dropped and logged; the
      * rest still arrive, and the next write still updates the screen.
      */
-    val contacts: Flow<List<Contact>> = dao.contacts()
-        .map { rows -> rows.mapNotNull { row -> row.readable { it.toContact() } } }
+    val contacts: Flow<List<Contact>> = combine(dao.contacts(), dao.meetings()) { rows, meetings ->
+        val byContact = meetings.groupBy { it.contactId }
+        rows.mapNotNull { row ->
+            row.readable { it.toContact(byContact[it.id].orEmpty().map(MeetingRow::toMeeting)) }
+        }
+    }
         .catch { failure ->
             Log.e(TAG, "the contacts could not be read", failure)
             emit(emptyList())
@@ -86,8 +92,36 @@ class ContactStore internal constructor(database: ContactsDatabase) {
             .onFailure { Log.e(TAG, "a stored row could not be read", it) }
             .getOrNull()
 
+    /**
+     * Save a contact. **Meetings are not touched.**
+     *
+     * Most callers — a fresh scan, an import, the field editor — build a
+     * `Contact` without ever loading its meetings, so an empty list here
+     * means "not my business", not "cancel everything". [saveProgress] is
+     * the one that means it.
+     */
     suspend fun save(contact: Contact) {
         withContext(Dispatchers.IO) { dao.save(contact.toRow()) }
+    }
+
+    /**
+     * Save a contact whose meetings were loaded, shown and edited.
+     *
+     * The list given is the whole truth: anything stored and missing from it
+     * has been called off, anything new is arranged, and the rest are written
+     * back. Separate from [save] because the difference between "no meetings"
+     * and "meetings not loaded" cannot be read off an empty list, and
+     * guessing it wrong either loses appointments or refuses to cancel the
+     * last one.
+     */
+    suspend fun saveProgress(contact: Contact) {
+        withContext(Dispatchers.IO) {
+            dao.save(contact.toRow())
+            val stored = dao.meetingsOf(contact.id)
+            val wanted = contact.meetings.mapNotNull { it.id.takeIf { id -> id != 0L } }.toSet()
+            stored.filter { it.id !in wanted }.forEach { dao.deleteMeeting(it.id) }
+            contact.meetings.forEach { dao.saveMeeting(it.copy(contactId = contact.id).toRow()) }
+        }
     }
 
     /**
@@ -116,6 +150,32 @@ class ContactStore internal constructor(database: ContactsDatabase) {
                 )
             }
         }
+    }
+
+    // ------------------------------------------------------------ meetings --
+
+    /**
+     * Arrange a meeting. Returns it with the id it was stored under.
+     *
+     * An insert, never an update: arranging a second meeting with somebody
+     * must not disturb the first. That it used to is the bug this table
+     * exists to fix.
+     */
+    suspend fun addMeeting(contactId: Long, at: Long): Meeting =
+        withContext(Dispatchers.IO) {
+            val meeting = Meeting(contactId = contactId, at = at)
+            val id = dao.addMeeting(meeting.toRow())
+            meeting.copy(id = id)
+        }
+
+    /** Call one off. The meeting is gone; the contact is untouched. */
+    suspend fun cancelMeeting(id: Long) {
+        withContext(Dispatchers.IO) { dao.deleteMeeting(id) }
+    }
+
+    /** Mark one dealt with, keeping it as history rather than deleting it. */
+    suspend fun meetingDone(id: Long, at: Long = System.currentTimeMillis()) {
+        withContext(Dispatchers.IO) { dao.markMeetingDone(id, at) }
     }
 
     suspend fun delete(id: Long) {

@@ -48,10 +48,9 @@ interface ContactsDao {
      * kilobyte of recogniser text, to change a six-character stage, loses a
      * concurrent edit to any other column on the same row.
      */
-@Query(
+    @Query(
         "UPDATE contacts SET stage = :stage, met = :met, " +
-            "reminderAt = :followUpAt, reminderDoneAt = :followUpDoneAt, " +
-            "meetingAt = :meetingAt, meetingDoneAt = :meetingDoneAt WHERE id = :id",
+            "reminderAt = :followUpAt, reminderDoneAt = :followUpDoneAt WHERE id = :id",
     )
     suspend fun setProgress(
         id: Long,
@@ -59,8 +58,6 @@ interface ContactsDao {
         met: Boolean,
         followUpAt: Long?,
         followUpDoneAt: Long?,
-        meetingAt: Long?,
-        meetingDoneAt: Long?,
     )
 
     /**
@@ -71,11 +68,10 @@ interface ContactsDao {
      */
     @Query(
         "SELECT * FROM contacts WHERE " +
-            "(reminderAt IS NOT NULL AND reminderAt <= :now AND reminderDoneAt IS NULL) OR " +
-            "(meetingAt IS NOT NULL AND meetingAt <= :now AND meetingDoneAt IS NULL) " +
-            "ORDER BY MIN(COALESCE(reminderAt, meetingAt), COALESCE(meetingAt, reminderAt)) ASC",
+            "reminderAt IS NOT NULL AND reminderAt <= :now AND reminderDoneAt IS NULL " +
+            "ORDER BY reminderAt ASC",
     )
-    suspend fun dueReminders(now: Long): List<ContactRow>
+    suspend fun dueFollowUps(now: Long): List<ContactRow>
 
     /**
      * The next reminder still ahead, which is the only one worth an alarm.
@@ -89,8 +85,7 @@ interface ContactsDao {
             "SELECT reminderAt AS soonest FROM contacts " +
             "WHERE reminderAt IS NOT NULL AND reminderAt > :now AND reminderDoneAt IS NULL " +
             "UNION ALL " +
-            "SELECT meetingAt AS soonest FROM contacts " +
-            "WHERE meetingAt IS NOT NULL AND meetingAt > :now AND meetingDoneAt IS NULL)",
+            "SELECT at AS soonest FROM meetings WHERE at > :now AND doneAt IS NULL)",
     )
     suspend fun nextReminderAt(now: Long): Long?
 
@@ -107,6 +102,57 @@ interface ContactsDao {
             "WHERE id IN (:ids)",
     )
     suspend fun markExported(ids: List<Long>, at: Long)
+
+    // ------------------------------------------------------------ meetings --
+
+    /**
+     * Every meeting, of every contact, soonest first.
+     *
+     * One flow for the lot rather than a query per contact: the calendar and
+     * the meetings list both want all of them, and a hundred contacts would
+     * otherwise be a hundred queries to draw one month.
+     */
+    @Query("SELECT * FROM meetings ORDER BY at ASC")
+    fun meetings(): Flow<List<MeetingRow>>
+
+    @Query("SELECT * FROM meetings WHERE contactId = :contactId ORDER BY at ASC")
+    suspend fun meetingsOf(contactId: Long): List<MeetingRow>
+
+    /** Insert a new one or update an existing one. Room binds a 0 id as null. */
+    @Upsert
+    suspend fun saveMeeting(meeting: MeetingRow)
+
+    /** Returns the id the meeting was stored under, which it needs to be removed by. */
+    @Insert
+    suspend fun addMeeting(meeting: MeetingRow): Long
+
+    @Query("DELETE FROM meetings WHERE id = :id")
+    suspend fun deleteMeeting(id: Long)
+
+    @Query("DELETE FROM meetings WHERE contactId = :contactId")
+    suspend fun deleteMeetingsOf(contactId: Long)
+
+    @Query("SELECT * FROM meetings WHERE id = :id")
+    suspend fun meetingById(id: Long): MeetingRow?
+
+    /** Move one, for the snooze. The time itself moves; no second alarm is kept. */
+    @Query("UPDATE meetings SET at = :at WHERE id = :id")
+    suspend fun moveMeeting(id: Long, at: Long)
+
+    @Query("UPDATE meetings SET doneAt = :at WHERE id = :id")
+    suspend fun markMeetingDone(id: Long, at: Long)
+
+    /**
+     * Meetings that have come round and not been dealt with, oldest first.
+     *
+     * Joined to the contact, because a notification about a meeting with
+     * nobody is not worth posting.
+     */
+    @Query(
+        "SELECT m.* FROM meetings m JOIN contacts c ON c.id = m.contactId " +
+            "WHERE m.at <= :now AND m.doneAt IS NULL ORDER BY m.at ASC",
+    )
+    suspend fun dueMeetings(now: Long): List<MeetingRow>
 
     // -------------------------------------------------------------- groups --
 

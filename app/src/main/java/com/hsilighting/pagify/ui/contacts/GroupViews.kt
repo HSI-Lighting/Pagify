@@ -1,5 +1,7 @@
 package com.hsilighting.pagify.ui.contacts
 
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -219,7 +221,13 @@ fun FilingPrompt(
         onDismissRequest = onSkip,
         title = { Text("Add $label to a group?") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            // Scrollable: somebody with a dozen groups could not reach the ones
+            // past the bottom of the dialog, and a dialog body is cut off rather
+            // than scrolled unless it is told otherwise.
+            Column(
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+            ) {
                 if (groups.isEmpty()) {
                     Text(
                         "You have no groups yet. One is worth making for an event " +

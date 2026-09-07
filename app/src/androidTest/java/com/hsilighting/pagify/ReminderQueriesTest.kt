@@ -3,6 +3,7 @@ package com.hsilighting.pagify
 import androidx.room.Room
 import androidx.test.platform.app.InstrumentationRegistry
 import com.hsilighting.pagify.core.Contact
+import com.hsilighting.pagify.data.db.MeetingRow
 import com.hsilighting.pagify.data.db.ContactsDatabase
 import com.hsilighting.pagify.data.db.DealStage
 import com.hsilighting.pagify.data.db.toRow
@@ -67,7 +68,7 @@ class ReminderQueriesTest {
         save(3, "Already dealt with", reminderAt = now - hour, doneAt = now)
         save(4, "No reminder at all", reminderAt = null)
 
-        val due = database.contacts().dueReminders(now).map { it.name }
+        val due = database.contacts().dueFollowUps(now).map { it.name }
         assertEquals(listOf("Passed"), due)
     }
 
@@ -75,7 +76,7 @@ class ReminderQueriesTest {
     @Test
     fun a_reminder_falling_exactly_now_is_due() = runBlocking {
         save(1, "On the dot", reminderAt = now)
-        assertEquals(1, database.contacts().dueReminders(now).size)
+        assertEquals(1, database.contacts().dueFollowUps(now).size)
     }
 
     /** Oldest first, so a notification names the one that has waited longest. */
@@ -85,7 +86,7 @@ class ReminderQueriesTest {
         save(2, "An hour ago", reminderAt = now - hour)
         save(3, "Last week", reminderAt = now - 168 * hour)
 
-        val due = database.contacts().dueReminders(now).map { it.name }
+        val due = database.contacts().dueFollowUps(now).map { it.name }
         assertEquals(listOf("Last week", "Yesterday", "An hour ago"), due)
     }
 
@@ -138,18 +139,11 @@ class ReminderQueriesTest {
      */
     @Test
     fun a_meeting_and_a_follow_up_live_side_by_side() = runBlocking {
-        database.contacts().save(
-            Contact(
-                id = 5,
-                name = "Both",
-                meetingAt = now + 2 * hour,
-                followUpAt = now + 100 * hour,
-            ).toRow(),
-        )
+        database.contacts().save(Contact(id = 5, name = "Both", followUpAt = now + 100 * hour).toRow())
+        database.contacts().addMeeting(MeetingRow(contactId = 5, at = now + 2 * hour))
 
-        val back = database.contacts().contactsById(listOf(5)).single()
-        assertEquals(now + 2 * hour, back.meetingAt)
-        assertEquals(now + 100 * hour, back.followUpAt)
+        val back = database.contacts().meetingsOf(5).single()
+        assertEquals(now + 2 * hour, back.at)
 
         // The sooner of the two takes the alarm, whichever kind it is.
         assertEquals(now + 2 * hour, database.contacts().nextReminderAt(now))
@@ -158,15 +152,15 @@ class ReminderQueriesTest {
     /** A due meeting shows up in the same sweep as a due follow-up. */
     @Test
     fun a_due_meeting_is_found_too() = runBlocking {
-        database.contacts().save(
-            Contact(id = 6, name = "Meeting only", meetingAt = now - hour).toRow(),
-        )
+        database.contacts().save(Contact(id = 6, name = "Meeting only").toRow())
+        database.contacts().addMeeting(MeetingRow(contactId = 6, at = now - hour))
         save(7, "Follow-up only", reminderAt = now - 2 * hour)
 
-        val due = database.contacts().dueReminders(now).map { it.name }
-        assertEquals(setOf("Meeting only", "Follow-up only"), due.toSet())
+        // Two sweeps now, because they live in two tables — a meeting is no
+        // longer a column on the contact.
+        assertEquals(listOf("Follow-up only"), database.contacts().dueFollowUps(now).map { it.name })
+        assertEquals(listOf(now - hour), database.contacts().dueMeetings(now).map { it.at })
     }
-
     /** Stage and met survive a round trip through the database. */
     @Test
     fun the_stage_and_the_met_flag_are_stored() = runBlocking {

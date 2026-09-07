@@ -3,6 +3,15 @@ package com.hsilighting.pagify.ui.settings
 import android.content.pm.PackageManager
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
+import android.util.Log
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import com.hsilighting.pagify.core.Reminders
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,6 +23,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.SegmentedButton
@@ -220,6 +230,36 @@ fun SettingsScreen(
             )
         }
 
+        SectionLabel("Reminders")
+        SettingCard {
+            Column(Modifier.padding(vertical = 4.dp)) {
+                // **The phone's own controls, not a copy of them here.**
+                //
+                // Sound, vibration and whether an alert may take over the screen
+                // are channel settings, and a channel is fixed at the moment it
+                // is created — every later change from code is ignored. A sound
+                // picker in this app would therefore set a value the phone never
+                // plays, and it would look like it had worked. Opening the
+                // system screen is the only way any of this can actually be
+                // changed, and it is also where somebody would go looking.
+                ChannelRow(
+                    title = "Meeting alerts",
+                    subtitle = "Sound, vibration, and whether a meeting takes the screen.",
+                    channelId = Reminders.MEETING_ALARM_CHANNEL,
+                )
+                ChannelRow(
+                    title = "Meeting alerts when the screen is not taken",
+                    subtitle = "Used where this app may not open over other apps.",
+                    channelId = Reminders.MEETING_LOUD_CHANNEL,
+                )
+                ChannelRow(
+                    title = "Follow-up reminders",
+                    subtitle = "The quieter one, for contacts to chase rather than meet.",
+                    channelId = Reminders.FOLLOW_UP_CHANNEL,
+                )
+            }
+        }
+
         SectionLabel("About")
         SettingCard {
             Column(Modifier.padding(16.dp)) {
@@ -339,4 +379,79 @@ private fun ActionRow(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
+}
+
+/**
+ * One notification channel, opening the phone's own settings for it.
+ *
+ * The channel has to exist before the system will show a screen for it — an
+ * intent naming one that was never created lands on a blank page. [Reminders]
+ * creates all three on every save and every boot, so by the time anybody reaches
+ * Settings they are there; the fallback below covers the one case they are not,
+ * which is a fresh install where nothing has been saved yet.
+ */
+@Composable
+private fun ChannelRow(title: String, subtitle: String, channelId: String) {
+    val context = LocalContext.current
+
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clickable { openChannelSettings(context, channelId) }
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+            Text(
+                subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Icon(
+            Icons.AutoMirrored.Filled.OpenInNew,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(start = 12.dp),
+        )
+    }
+}
+
+/**
+ * Open the system's settings for one channel, falling back as far as needed.
+ *
+ * Three levels, because each can be missing: the channel screen needs API 26 and
+ * a channel that exists; the app screen needs only the package; and a phone with
+ * neither is one where the intent simply fails, which is logged rather than
+ * crashed. A settings row that does nothing is a disappointment; one that takes
+ * the app down is a bug report.
+ */
+private fun openChannelSettings(context: Context, channelId: String) {
+    val attempts = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            add(
+                Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    .putExtra(Settings.EXTRA_CHANNEL_ID, channelId),
+            )
+            add(
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName),
+            )
+        }
+        add(
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.fromParts("package", context.packageName, null)),
+        )
+    }
+
+    for (intent in attempts) {
+        val opened = runCatching {
+            context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+            true
+        }.getOrDefault(false)
+        if (opened) return
+    }
+    Log.w("Settings", "no settings screen would open for $channelId")
 }

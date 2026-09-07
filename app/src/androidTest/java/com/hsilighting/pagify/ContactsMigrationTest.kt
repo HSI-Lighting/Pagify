@@ -150,7 +150,11 @@ class ContactsMigrationTest {
             // place: somebody who added version 3 and forgot the path from 1
             // would have shipped an app that refuses to open for every user
             // who had not updated in between.
-            .addMigrations(ContactsDatabase.MIGRATION_1_2, ContactsDatabase.MIGRATION_2_3)
+            .addMigrations(
+                ContactsDatabase.MIGRATION_1_2,
+                ContactsDatabase.MIGRATION_2_3,
+                ContactsDatabase.MIGRATION_3_4,
+            )
             .build()
 
         try {
@@ -173,8 +177,60 @@ class ContactsMigrationTest {
             assertNull(contact.followUpAt)
             assertNull(contact.followUpDoneAt)
             // Added by version 3, and null for a row that predates it.
-            assertNull(contact.meetingAt)
-            assertNull(contact.meetingDoneAt)
+            assertNull(contact.legacyMeetingAt)
+            assertNull(contact.legacyMeetingDoneAt)
+        } finally {
+            database.close()
+            context.deleteDatabase(name)
+        }
+    }
+    /**
+     * A meeting arranged before version 4 is still arranged after it.
+     *
+     * Version 4 moved meetings out of `contacts.meetingAt` and into their own
+     * table so a contact could hold more than one. The move is the risk: a
+     * migration that creates the table and forgets to carry the rows across
+     * loses every appointment already in the diary, and loses them silently —
+     * the calendar simply comes up empty, which reads as a display bug rather
+     * than as data that is gone.
+     */
+    @Test
+    fun a_meeting_arranged_before_the_update_survives_it() {
+        createVersionOne().use { old ->
+            old.execSQL(
+                """
+                INSERT INTO contacts VALUES (
+                    78, 'Owen Hart', '', 'Ridgeway', '',
+                    '', '', '[]', '[]',
+                    '[]', NULL, 1700000000000, NULL, 0
+                )
+                """.trimIndent(),
+            )
+            // Up to version 3 by the real migrations, so the database this
+            // starts from is the one users actually have — not a hand-written
+            // imitation of it that could drift.
+            ContactsDatabase.MIGRATION_1_2.migrate(old)
+            ContactsDatabase.MIGRATION_2_3.migrate(old)
+            old.execSQL("UPDATE contacts SET meetingAt = 1800000000000 WHERE id = 78")
+            old.version = 3
+        }
+
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+
+        val database = Room.databaseBuilder(context, ContactsDatabase::class.java, name)
+            .addMigrations(
+                ContactsDatabase.MIGRATION_1_2,
+                ContactsDatabase.MIGRATION_2_3,
+                ContactsDatabase.MIGRATION_3_4,
+            )
+            .build()
+
+        try {
+            val meetings = runBlocking { database.contacts().meetingsOf(78) }
+            assertEquals("the meeting did not come across", 1, meetings.size)
+            assertEquals(1800000000000L, meetings.single().at)
+            assertEquals(78L, meetings.single().contactId)
+            assertNull("it was never dealt with", meetings.single().doneAt)
         } finally {
             database.close()
             context.deleteDatabase(name)

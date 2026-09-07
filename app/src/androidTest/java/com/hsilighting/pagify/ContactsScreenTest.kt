@@ -2,6 +2,7 @@ package com.hsilighting.pagify
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -77,6 +78,7 @@ class ContactsScreenTest {
                 onExport = {},
                 onDelete = {},
                 onSaveEdit = {},
+                onSaveProgress = {},
                 review = null,
                 cardTextScale = 1f,
                 onKeepReviewed = {},
@@ -250,5 +252,33 @@ class ContactsScreenTest {
 
         compose.onNodeWithText("Contacts").assertIsDisplayed()
         assertEquals(null, calls.deletedGroups)
+    }
+
+    /**
+     * Typing a contact in, from the button above the scan one.
+     *
+     * The two ways a contact gets in sit together at the bottom of the
+     * screen. This one began life as a chip up in the header, where it
+     * read as a filter rather than an action — so what is pinned here is
+     * that it is a button, that it is next to its neighbour, and that it
+     * opens the editor with an empty contact rather than somebody else's.
+     */
+    @Test
+    fun addingAContactByHandOpensAnEmptyEditor() {
+        show(contacts = listOf(Contact(id = 1, name = "Priya Raman")))
+
+        // `useUnmergedTree`: an extended FAB clears the semantics of its own
+        // contents, so its label exists only in the unmerged tree. Without this
+        // the finder reports the button as missing when it is plainly on screen.
+        compose.onNodeWithText("Add a card", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("Add a contact", useUnmergedTree = true)
+            .assertIsDisplayed()
+            .performClick()
+
+        // The editor, holding nothing — not the contact that was on screen.
+        compose.onNodeWithText("Name").assertIsDisplayed()
+        compose.onAllNodesWithText("Priya Raman").fetchSemanticsNodes().let {
+            assertEquals("the editor opened on an existing contact", 0, it.size)
+        }
     }
 }

@@ -23,8 +23,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * set by default.
  */
 @Database(
-    entities = [ContactRow::class, GroupRow::class, MembershipRow::class],
-    version = 3,
+    entities = [ContactRow::class, GroupRow::class, MembershipRow::class, MeetingRow::class],
+    version = 4,
     exportSchema = false,
 )
 abstract class ContactsDatabase : RoomDatabase() {
@@ -74,13 +74,54 @@ abstract class ContactsDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Version 4 gives meetings their own table, because there can be more
+         * than one.
+         *
+         * `contacts.meetingAt` could hold a single appointment, so arranging a
+         * second with somebody quietly replaced the first. Every meeting already
+         * set is copied across here, keeping the moment it was arranged for and
+         * whether it had been dealt with.
+         *
+         * **The old columns stay behind, empty of meaning.** SQLite could not
+         * drop a column until 3.35 and API 24 ships 3.9, so removing them means
+         * rebuilding the contacts table and copying every row — a real risk to
+         * real data, to tidy two columns nothing reads. They are renamed in
+         * Kotlin instead, to `legacyMeetingAt`, so no query can reach for them
+         * by the obvious name.
+         */
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS meetings (" +
+                        "id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, " +
+                        "contactId INTEGER NOT NULL, " +
+                        "at INTEGER NOT NULL, " +
+                        "doneAt INTEGER, " +
+                        "FOREIGN KEY(contactId) REFERENCES contacts(id) " +
+                        "ON UPDATE NO ACTION ON DELETE CASCADE)",
+                )
+                db.execSQL(
+                    "CREATE INDEX IF NOT EXISTS index_meetings_contactId " +
+                        "ON meetings (contactId)",
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_meetings_at ON meetings (at)")
+                // Everything already arranged, kept.
+                db.execSQL(
+                    "INSERT INTO meetings (contactId, at, doneAt) " +
+                        "SELECT id, meetingAt, meetingDoneAt FROM contacts " +
+                        "WHERE meetingAt IS NOT NULL",
+                )
+            }
+        }
+
         fun get(context: Context): ContactsDatabase = instance ?: synchronized(this) {
             instance ?: build(context.applicationContext).also { instance = it }
         }
 
         private fun build(context: Context) =
             Room.databaseBuilder(context, ContactsDatabase::class.java, "contacts.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 // Write-ahead logging, for the burst this is built for: forty
                 // cards saved in a row at an event, while the list on screen is
                 // reading the same tables.

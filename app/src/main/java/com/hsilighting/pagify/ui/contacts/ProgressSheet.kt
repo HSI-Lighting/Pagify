@@ -7,6 +7,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import com.hsilighting.pagify.core.uses24Hour
@@ -16,14 +18,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Event
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.TimePicker
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.SelectableDates
 import androidx.compose.material3.rememberDatePickerState
-import androidx.compose.material3.rememberTimePickerState
+
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -35,6 +39,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -43,6 +48,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.Contact
+import com.hsilighting.pagify.core.Meeting
 import com.hsilighting.pagify.data.db.DealStage
 import java.util.Calendar
 import java.util.Locale
@@ -67,7 +73,7 @@ fun ProgressSheet(
 ) {
     var stage by remember(contact.id) { mutableStateOf(contact.stage) }
     var met by remember(contact.id) { mutableStateOf(contact.met) }
-    var meetingAt by remember(contact.id) { mutableStateOf(contact.meetingAt) }
+    var meetings by remember(contact.id) { mutableStateOf(contact.meetings) }
     var followUpAt by remember(contact.id) { mutableStateOf(contact.followUpAt) }
 
     // **Asked for at the moment a reminder is first set, not on launch.**
@@ -94,7 +100,11 @@ fun ProgressSheet(
             }
         },
         text = {
-            Column {
+            // Scrollable: the meetings list grows without limit, and a dialog
+            // body that outgrows the screen is simply cut off rather than
+            // scrolled — which put the Save button out of reach for anybody
+            // with a few appointments arranged.
+            Column(Modifier.verticalScroll(rememberScrollState())) {
                 Label("Stage")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     DealStage.entries.forEach { option ->
@@ -131,16 +141,16 @@ fun ProgressSheet(
                     Switch(checked = met, onCheckedChange = { met = it })
                 }
 
-                // **Two reminders, not one with a type.** A contact usually has
-                // both at once — a meeting on Thursday and a chase the week
-                // after if it does not happen — and a single field would make
-                // setting the second one delete the first.
-                ReminderRow(
-                    heading = "Meeting",
-                    caption = "Announces itself when it comes round.",
-                    at = meetingAt,
-                    offsets = listOf("Tomorrow" to 1, "In 2 days" to 2, "Next week" to 7),
-                    onPick = { meetingAt = it; if (it != null) askForNotifications() },
+                // **Meetings are a list; a follow-up is not.** A contact can have
+                // several appointments — a site visit, then the handover — and
+                // this used to hold one, so arranging the second silently erased
+                // the first. A chase is different: setting a new one means the
+                // old one is answered, so one at a time is the truth there.
+                MeetingsRow(
+                    meetings = meetings,
+                    onAdd = { meetings = (meetings + it).sortedBy { m -> m.at }; askForNotifications() },
+                    onCancel = { gone -> meetings = meetings.filterNot { it === gone } },
+                    contactId = contact.id,
                 )
                 ReminderRow(
                     heading = "Follow up",
@@ -158,17 +168,12 @@ fun ProgressSheet(
                         contact.copy(
                             stage = stage,
                             met = met,
-                            meetingAt = meetingAt,
+                            meetings = meetings,
                             followUpAt = followUpAt,
                             // A reminder that is moved or cleared is no longer
                             // one that was dealt with. Leaving the old "done"
                             // stamp would stop the new date ever coming due —
                             // silently, because the date would look right.
-                            meetingDoneAt = if (meetingAt == contact.meetingAt) {
-                                contact.meetingDoneAt
-                            } else {
-                                null
-                            },
                             followUpDoneAt = if (followUpAt == contact.followUpAt) {
                                 contact.followUpDoneAt
                             } else {
@@ -317,8 +322,12 @@ private fun ReminderRow(
  *
  * **Both, not just the date.** A meeting alert set for nine in the morning when
  * the meeting is at three is worse than no alert: it arrives, gets dismissed as
- * noise, and is gone by the time it mattered. The time defaults to nine so the
- * second step can be accepted without thought when it genuinely does not matter.
+ * noise, and is gone by the time it mattered.
+ *
+ * **Neither of them backwards.** A reminder can only point forwards, so days
+ * that have gone are not offered at all, and a time that has gone cannot be
+ * confirmed — with the reason on screen, because a dead button that says nothing
+ * reads as a broken app.
  *
  * Two dialogs in sequence rather than one combined control, because Material
  * ships the two separately and a hand-rolled combination of them is a great deal
@@ -326,22 +335,37 @@ private fun ReminderRow(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun DateAndTimePicker(
+internal fun DateAndTimePicker(
     initial: Long?,
     onPicked: (Long) -> Unit,
     onDismiss: () -> Unit,
+    now: Long = System.currentTimeMillis(),
 ) {
     var chosenDate by remember { mutableStateOf<Long?>(null) }
 
     val start = initial ?: morningIn(1)
-    val dateState = rememberDatePickerState(initialSelectedDateMillis = start)
+    // Passed in rather than read, so the end-of-day refusal below can be
+    // exercised without waiting until midnight for it.
+    val today = remember(now) { pickerDayOf(now) }
+    val dateState = rememberDatePickerState(
+        // The picker speaks midnight UTC; handing it a local millis is right
+        // only by luck, and only east of Greenwich. An existing reminder that
+        // has already gone opens on today rather than on an unselectable day.
+        initialSelectedDateMillis = maxOf(pickerDayOf(start), today),
+        selectableDates = object : SelectableDates {
+            override fun isSelectableDate(utcTimeMillis: Long) =
+                isOfferableDay(utcTimeMillis, now)
+            override fun isSelectableYear(year: Int) =
+                year >= Calendar.getInstance().apply { timeInMillis = now }.get(Calendar.YEAR)
+        },
+    )
 
     if (chosenDate == null) {
         DatePickerDialog(
             onDismissRequest = onDismiss,
             confirmButton = {
                 TextButton(
-                    onClick = { chosenDate = dateState.selectedDateMillis ?: start },
+                    onClick = { chosenDate = dateState.selectedDateMillis ?: today },
                     enabled = dateState.selectedDateMillis != null,
                 ) { Text("Next") }
             },
@@ -352,25 +376,59 @@ private fun DateAndTimePicker(
         return
     }
 
-    val existing = Calendar.getInstance().apply { timeInMillis = start }
-    val timeState = rememberTimePickerState(
-        initialHour = if (initial != null) existing.get(Calendar.HOUR_OF_DAY) else 9,
-        initialMinute = if (initial != null) existing.get(Calendar.MINUTE) else 0,
-        // Only an explicit setting gets a 0–23 dial; see [uses24Hour] for why
-        // the obvious `DateFormat.is24HourFormat` is what left this picker with
-        // no AM and no PM on it.
-        is24Hour = uses24Hour(LocalContext.current),
-    )
+    val day = chosenDate!!
+    // An existing time is kept if it is still ahead; otherwise the wheels open
+    // on the next five-minute mark, which is also what puts them on the right
+    // side of noon without anybody having to notice.
+    val opening = remember(day, initial, now) {
+        val existing = Calendar.getInstance().apply { timeInMillis = start }
+        val keep = initial != null &&
+            !hasPassed(day, existing.get(Calendar.HOUR_OF_DAY), existing.get(Calendar.MINUTE), now)
+        if (keep) {
+            existing.get(Calendar.HOUR_OF_DAY) to existing.get(Calendar.MINUTE)
+        } else {
+            firstOfferableTime(day, now)
+        }
+    }
+
+    var hour by remember(day) { mutableIntStateOf(opening.first) }
+    var minute by remember(day) { mutableIntStateOf(opening.second) }
+    val gone = hasPassed(day, hour, minute, now)
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("At what time?") },
-        text = { TimePicker(state = timeState) },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text(
+                    onDate(atLocalTime(day, 12, 0)),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 10.dp),
+                )
+                TimeWheels(
+                    initialHour = opening.first,
+                    initialMinute = opening.second,
+                    // Only an explicit setting gets 0–23 wheels; see [uses24Hour]
+                    // for why the obvious `DateFormat.is24HourFormat` is what left
+                    // this picker with no AM and no PM on it.
+                    is24Hour = uses24Hour(LocalContext.current),
+                    onChange = { h, m -> hour = h; minute = m },
+                )
+                if (gone) {
+                    Text(
+                        "That time has already gone. Pick a later one.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 10.dp),
+                    )
+                }
+            }
+        },
         confirmButton = {
             TextButton(
-                onClick = {
-                    onPicked(atLocalTime(chosenDate!!, timeState.hour, timeState.minute))
-                },
+                onClick = { onPicked(atLocalTime(day, hour, minute)) },
+                enabled = !gone,
             ) { Text("Set") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
@@ -402,4 +460,99 @@ internal fun atLocalTime(utcDateMillis: Long, hour: Int, minute: Int): Long {
         set(Calendar.SECOND, 0)
         set(Calendar.MILLISECOND, 0)
     }.timeInMillis
+}
+
+/**
+ * Every meeting arranged with this contact, and a way to arrange another.
+ *
+ * **A list, not a field.** Each one is its own line with its own way to call it
+ * off, so arranging a second meeting adds to the first instead of replacing it.
+ * That replacement was invisible — the old date simply stopped existing — and
+ * the only symptom was not turning up.
+ *
+ * The offsets that a follow-up gets are deliberately absent. A meeting happens
+ * at a time somebody else chose, so "in two days" is never the answer; it always
+ * goes through the date and time picker.
+ */
+@Composable
+private fun MeetingsRow(
+    meetings: List<Meeting>,
+    contactId: Long,
+    onAdd: (Meeting) -> Unit,
+    onCancel: (Meeting) -> Unit,
+) {
+    var picking by remember { mutableStateOf(false) }
+
+    Label("Meetings", top = 18.dp)
+    Text(
+        if (meetings.isEmpty()) {
+            "Announces itself when it comes round."
+        } else {
+            "Each one announces itself when it comes round."
+        },
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(bottom = 6.dp),
+    )
+
+    meetings.sortedBy { it.at }.forEach { meeting ->
+        Row(
+            Modifier.fillMaxWidth().padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                whenItIs(meeting.at),
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (meeting.doneAt != null) {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                modifier = Modifier.weight(1f),
+            )
+            if (meeting.doneAt != null) {
+                Text(
+                    "Done",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(end = 4.dp),
+                )
+            }
+            IconButton(onClick = { onCancel(meeting) }) {
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "Cancel the meeting on ${whenItIs(meeting.at)}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+
+    FilterChip(
+        selected = false,
+        onClick = { picking = true },
+        leadingIcon = { Icon(Icons.Filled.Event, contentDescription = null) },
+        label = { Text(if (meetings.isEmpty()) "Arrange a meeting" else "Arrange another") },
+    )
+
+    if (picking) {
+        DateAndTimePicker(
+            initial = null,
+            onPicked = { at ->
+                picking = false
+                onAdd(Meeting(contactId = contactId, at = at))
+            },
+            onDismiss = { picking = false },
+        )
+    }
+}
+
+/** A meeting's moment, written the way somebody would say it. */
+internal fun whenItIs(millis: Long): String {
+    val date = java.text.SimpleDateFormat("EEE d MMM", Locale.getDefault()).format(millis)
+    // The phone's own clock style, not a pattern of ours: a 24-hour phone
+    // showing 2:30 for a half past two meeting is a phone showing the wrong
+    // time to the person who set it.
+    val time = java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(millis)
+    return "$date at $time"
 }

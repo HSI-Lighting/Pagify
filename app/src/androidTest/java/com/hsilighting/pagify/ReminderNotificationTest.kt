@@ -9,6 +9,7 @@ import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ReminderAlarmService
 import com.hsilighting.pagify.core.Reminders
 import com.hsilighting.pagify.data.db.ContactsDatabase
+import com.hsilighting.pagify.data.db.MeetingRow
 import com.hsilighting.pagify.data.db.toRow
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -64,7 +65,12 @@ class ReminderNotificationTest {
      * on the second run, which is a loud enough way to find out.
      */
     private val ownNotificationIds = listOf(meetingId, followUpId)
-        .flatMap { listOf((it * 2).toInt(), (it * 2).toInt() + 1) }
+        .flatMap { listOf((it * 2).toInt(), (it * 2).toInt() + 1) } +
+        // A meeting now posts under its **own** id rather than the contact's,
+        // because a contact can have several. Meeting ids come from an
+        // AUTOINCREMENT and are small, so a generous span covers whatever this
+        // suite creates without touching a real reminder's slot.
+        (1..400).map { it * 2 + 1 }
 
     @Before
     fun clearTheShade() {
@@ -107,6 +113,12 @@ class ReminderNotificationTest {
         dao.deleteContact(followUpId)
     }
 
+    /** Arrange a meeting for one of this test's contacts, and return its id. */
+    private fun meetingFor(contactId: Long, at: Long, doneAt: Long? = null): Long = runBlocking {
+        ContactsDatabase.get(context).contacts()
+            .addMeeting(MeetingRow(contactId = contactId, at = at, doneAt = doneAt))
+    }
+
     private fun save(contact: Contact) = runBlocking {
         ContactsDatabase.get(context).contacts().save(contact.toRow())
     }
@@ -134,7 +146,8 @@ class ReminderNotificationTest {
     @Test
     fun aCaughtUpMeetingArrivesWithTheAlarmToneOnIt() {
         val due = System.currentTimeMillis() - 60_000
-        save(Contact(id = meetingId, name = "Priya Raman", company = "Northwind", meetingAt = due))
+        save(Contact(id = meetingId, name = "Priya Raman", company = "Northwind"))
+        meetingFor(meetingId, due)
 
         fire()
 
@@ -165,6 +178,7 @@ class ReminderNotificationTest {
         val notification = Reminders.alarmNotification(
             context = context,
             contactId = meetingId,
+            meetingId = 7L,
             who = "Priya Raman",
             where = "Northwind",
             at = System.currentTimeMillis(),
@@ -191,7 +205,8 @@ class ReminderNotificationTest {
     @Test
     fun aRingingMeetingIsNeverAnnouncedInSilence() {
         val due = System.currentTimeMillis() - 60_000
-        save(Contact(id = meetingId, name = "Priya Raman", company = "Northwind", meetingAt = due))
+        save(Contact(id = meetingId, name = "Priya Raman", company = "Northwind"))
+        meetingFor(meetingId, due)
 
         fire(ring = true)
 
@@ -229,20 +244,19 @@ class ReminderNotificationTest {
     @Test
     fun snoozingMovesTheMeetingRatherThanKeepingASecondOne() = runBlocking {
         val due = System.currentTimeMillis() - 60_000
-        save(Contact(id = meetingId, name = "Priya Raman", meetingAt = due))
+        save(Contact(id = meetingId, name = "Priya Raman"))
+        val id = meetingFor(meetingId, due)
 
-        Reminders.snooze(context, meetingId)
+        Reminders.snooze(context, id)
 
-        val row = ContactsDatabase.get(context).contacts().contactsById(listOf(meetingId)).single()
-        val moved = row.meetingAt ?: 0L
+        val moved = ContactsDatabase.get(context).contacts().meetingById(id)!!
         // Ten minutes on, give or take the time the call itself took.
         assertTrue(
-            "the meeting was not moved forward: $moved against $due",
-            moved > System.currentTimeMillis() + Reminders.SNOOZE_MILLIS - 30_000,
+            "the meeting was not moved forward: ${moved.at} against $due",
+            moved.at > System.currentTimeMillis() + Reminders.SNOOZE_MILLIS - 30_000,
         )
-        assertNull("a snoozed meeting must not read as dealt with", row.meetingDoneAt)
+        assertNull("a snoozed meeting must not read as dealt with", moved.doneAt)
     }
-
     @Test
     fun aDueFollowUpArrivesOnItsOwnChannel() {
         val due = System.currentTimeMillis() - 60_000
@@ -268,10 +282,9 @@ class ReminderNotificationTest {
             Contact(
                 id = meetingId,
                 name = "Priya Raman",
-                meetingAt = due,
-                meetingDoneAt = due + 1_000,
             ),
         )
+        meetingFor(meetingId, due, doneAt = due + 1_000)
 
         fire()
 
@@ -281,7 +294,8 @@ class ReminderNotificationTest {
     @Test
     fun oneStillAheadWaits() {
         val notYet = System.currentTimeMillis() + 3_600_000
-        save(Contact(id = meetingId, name = "Priya Raman", meetingAt = notYet))
+        save(Contact(id = meetingId, name = "Priya Raman"))
+        meetingFor(meetingId, notYet)
 
         fire()
 

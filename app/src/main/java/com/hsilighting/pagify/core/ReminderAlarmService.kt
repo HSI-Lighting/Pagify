@@ -63,6 +63,7 @@ class ReminderAlarmService : Service() {
         }
 
         val contactId = intent?.getLongExtra(Reminders.EXTRA_CONTACT, -1L) ?: -1L
+        val meetingId = intent?.getLongExtra(Reminders.EXTRA_MEETING, 0L) ?: 0L
         val who = intent?.getStringExtra(ReminderAlarmActivity.EXTRA_WHO).orEmpty()
         val where = intent?.getStringExtra(ReminderAlarmActivity.EXTRA_WHERE).orEmpty()
         val at = intent?.getLongExtra(ReminderAlarmActivity.EXTRA_AT, 0L) ?: 0L
@@ -71,16 +72,16 @@ class ReminderAlarmService : Service() {
         // that does not call this within a few seconds of being started is killed
         // with an exception, and the reminder would be lost to a crash rather
         // than to silence — which is worse, not better.
-        val notification = Reminders.alarmNotification(this, contactId, who, where, at)
+        val notification = Reminders.alarmNotification(this, contactId, meetingId, who, where, at)
         runCatching {
             if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(
-                    Reminders.meetingNotificationId(contactId),
+                    Reminders.meetingNotificationId(meetingId),
                     notification,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE,
                 )
             } else {
-                startForeground(Reminders.meetingNotificationId(contactId), notification)
+                startForeground(Reminders.meetingNotificationId(meetingId), notification)
             }
         }.onFailure {
             Log.w("Reminders", "the alarm service could not come to the foreground", it)
@@ -99,7 +100,7 @@ class ReminderAlarmService : Service() {
         // lost — it is already ringing.
         if (contactId > 0) {
             runCatching {
-                startActivity(ReminderAlarmActivity.intent(this, contactId, who, where, at))
+                startActivity(ReminderAlarmActivity.intent(this, contactId, meetingId, who, where, at))
             }.onFailure { Log.i("Reminders", "the alarm screen stayed in its banner", it) }
         }
 
@@ -172,9 +173,17 @@ class ReminderAlarmService : Service() {
         /** Two minutes, then it gives up and leaves the notification behind. */
         const val RING_LIMIT_MILLIS = 120_000L
 
-        fun intent(context: Context, contactId: Long, who: String, where: String, at: Long): Intent =
+        fun intent(
+            context: Context,
+            contactId: Long,
+            meetingId: Long,
+            who: String,
+            where: String,
+            at: Long,
+        ): Intent =
             Intent(context, ReminderAlarmService::class.java)
                 .putExtra(Reminders.EXTRA_CONTACT, contactId)
+                .putExtra(Reminders.EXTRA_MEETING, meetingId)
                 .putExtra(ReminderAlarmActivity.EXTRA_WHO, who)
                 .putExtra(ReminderAlarmActivity.EXTRA_WHERE, where)
                 .putExtra(ReminderAlarmActivity.EXTRA_AT, at)

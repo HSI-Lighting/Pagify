@@ -2,6 +2,7 @@ package com.hsilighting.pagify.data.db
 
 import com.hsilighting.pagify.core.Contact
 import com.hsilighting.pagify.core.ContactGroup
+import com.hsilighting.pagify.core.Meeting
 import com.hsilighting.pagify.core.Phone
 import org.json.JSONArray
 import org.json.JSONObject
@@ -19,7 +20,14 @@ import org.json.JSONObject
  * card's worth of it at a time.
  */
 
-fun ContactRow.toContact(): Contact = Contact(
+/**
+ * A stored row as the app reads it.
+ *
+ * Meetings are passed in rather than read from the row: they live in their
+ * own table now, and a contact that quietly reported none because nobody
+ * fetched them would look exactly like a contact with none.
+ */
+fun ContactRow.toContact(meetings: List<Meeting> = emptyList()): Contact = Contact(
     id = id,
     name = name,
     title = title,
@@ -38,8 +46,7 @@ fun ContactRow.toContact(): Contact = Contact(
     met = met,
     followUpAt = followUpAt,
     followUpDoneAt = followUpDoneAt,
-    meetingAt = meetingAt,
-    meetingDoneAt = meetingDoneAt,
+    meetings = meetings,
 )
 
 fun Contact.toRow(): ContactRow = ContactRow(
@@ -69,8 +76,6 @@ fun Contact.toRow(): ContactRow = ContactRow(
     met = met,
     followUpAt = followUpAt,
     followUpDoneAt = followUpDoneAt,
-    meetingAt = meetingAt,
-    meetingDoneAt = meetingDoneAt,
 )
 
 fun GroupRow.toGroup(): ContactGroup = ContactGroup(
@@ -115,3 +120,17 @@ private fun String.toStrings(): List<String> = runCatching {
     val array = JSONArray(this)
     (0 until array.length()).map { array.optString(it) }
 }.getOrDefault(emptyList())
+
+fun MeetingRow.toMeeting(): Meeting = Meeting(
+    id = id,
+    contactId = contactId,
+    at = at,
+    doneAt = doneAt,
+)
+
+fun Meeting.toRow(): MeetingRow = MeetingRow(
+    id = id,
+    contactId = contactId,
+    at = at,
+    doneAt = doneAt,
+)

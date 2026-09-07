@@ -370,6 +370,7 @@ class MainActivity : ComponentActivity() {
                     },
                     onDeleteContact = viewModel::deleteContact,
                     onSaveContact = viewModel::updateContact,
+                    onSaveProgress = viewModel::updateProgress,
                     onDeleteContacts = viewModel::deleteContacts,
                     onDeleteGroups = viewModel::deleteGroups,
                     onExportSelected = { chosen ->

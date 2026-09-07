@@ -73,8 +73,13 @@ data class ContactRow(
      * a contact can have both at once and usually does: a meeting on Thursday
      * and a chase the week after if it does not happen.
      */
-    val meetingAt: Long? = null,
-    val meetingDoneAt: Long? = null,
+    // **Version 3 only, and read by nothing.** Meetings moved to their own
+    // table in version 4 — see [MeetingRow] — and these two are what the old
+    // ones were copied out of. SQLite could not drop a column until 3.35 and
+    // API 24 ships 3.9, so they stay, named to say they are not the answer to
+    // "when is the meeting".
+    @ColumnInfo(name = "meetingAt") val legacyMeetingAt: Long? = null,
+    @ColumnInfo(name = "meetingDoneAt") val legacyMeetingDoneAt: Long? = null,
 )
 
 /**
@@ -184,4 +189,37 @@ data class MembershipRow(
     val contactId: Long,
     val groupId: Long,
     val addedAt: Long,
+)
+
+/**
+ * One arranged meeting with one contact.
+ *
+ * **A table rather than a column, because a column can only hold one.** A
+ * meeting used to be `contacts.meetingAt`, and arranging a second with the same
+ * person silently overwrote the first — no warning, no trace, and the loss only
+ * discovered by not turning up. Somebody you meet twice is not an edge case; it
+ * is what a good contact looks like.
+ *
+ * `doneAt` marks the meeting as dealt with rather than deleting it, so a history
+ * survives and a reminder that has already rung does not ring again.
+ *
+ * Cascades on delete: a meeting with a contact who is gone is not a meeting.
+ */
+@Entity(
+    tableName = "meetings",
+    foreignKeys = [
+        ForeignKey(
+            entity = ContactRow::class,
+            parentColumns = ["id"],
+            childColumns = ["contactId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index("contactId"), Index("at")],
+)
+data class MeetingRow(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val contactId: Long,
+    val at: Long,
+    val doneAt: Long? = null,
 )

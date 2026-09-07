@@ -35,6 +35,7 @@ class ReminderReceiver : BroadcastReceiver() {
         // "look at everything again".
         if (action == Reminders.ACTION_DONE) {
             val contactId = intent.getLongExtra(Reminders.EXTRA_CONTACT, -1L)
+            val meetingId = intent.getLongExtra(Reminders.EXTRA_MEETING, 0L)
             val kind = runCatching {
                 ReminderKind.valueOf(intent.getStringExtra(Reminders.EXTRA_KIND).orEmpty())
             }.getOrNull()
@@ -43,7 +44,7 @@ class ReminderReceiver : BroadcastReceiver() {
             val finish = goAsync()
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    Reminders.markDone(context, contactId, kind)
+                    Reminders.markDone(context, contactId, kind, meetingId)
                 } catch (error: Throwable) {
                     Log.w("Reminders", "could not mark it done", error)
                 } finally {
@@ -58,12 +59,13 @@ class ReminderReceiver : BroadcastReceiver() {
         // meeting off, the other leaves it open and moves it.
         if (action == Reminders.ACTION_SNOOZE) {
             val contactId = intent.getLongExtra(Reminders.EXTRA_CONTACT, -1L)
+            val meetingId = intent.getLongExtra(Reminders.EXTRA_MEETING, 0L)
             if (contactId <= 0) return
 
             val finish = goAsync()
             CoroutineScope(Dispatchers.IO).launch {
                 try {
-                    Reminders.snooze(context, contactId)
+                    Reminders.snooze(context, meetingId)
                 } catch (error: Throwable) {
                     Log.w("Reminders", "could not put the meeting off", error)
                 } finally {

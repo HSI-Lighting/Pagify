@@ -60,6 +60,7 @@ class ReminderAlarmActivity : ComponentActivity() {
         showOverLockScreen()
 
         val contactId = intent.getLongExtra(Reminders.EXTRA_CONTACT, -1L)
+        val meetingId = intent.getLongExtra(Reminders.EXTRA_MEETING, 0L)
         val who = intent.getStringExtra(EXTRA_WHO).orEmpty().ifBlank { "a contact" }
         val where = intent.getStringExtra(EXTRA_WHERE).orEmpty()
         val at = intent.getLongExtra(EXTRA_AT, 0L)
@@ -76,6 +77,7 @@ class ReminderAlarmActivity : ComponentActivity() {
                             Intent(this, ReminderReceiver::class.java)
                                 .setAction(Reminders.ACTION_DONE)
                                 .putExtra(Reminders.EXTRA_CONTACT, contactId)
+                                .putExtra(Reminders.EXTRA_MEETING, meetingId)
                                 .putExtra(Reminders.EXTRA_KIND, ReminderKind.Meeting.name),
                         )
                         finish()
@@ -85,7 +87,8 @@ class ReminderAlarmActivity : ComponentActivity() {
                         sendBroadcast(
                             Intent(this, ReminderReceiver::class.java)
                                 .setAction(Reminders.ACTION_SNOOZE)
-                                .putExtra(Reminders.EXTRA_CONTACT, contactId),
+                                .putExtra(Reminders.EXTRA_CONTACT, contactId)
+                                .putExtra(Reminders.EXTRA_MEETING, meetingId),
                         )
                         finish()
                     },
@@ -134,10 +137,18 @@ class ReminderAlarmActivity : ComponentActivity() {
         const val EXTRA_WHERE = "where"
         const val EXTRA_AT = "at"
 
-        fun intent(context: Context, contactId: Long, who: String, where: String, at: Long): Intent =
+        fun intent(
+            context: Context,
+            contactId: Long,
+            meetingId: Long,
+            who: String,
+            where: String,
+            at: Long,
+        ): Intent =
             Intent(context, ReminderAlarmActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                 .putExtra(Reminders.EXTRA_CONTACT, contactId)
+                .putExtra(Reminders.EXTRA_MEETING, meetingId)
                 .putExtra(EXTRA_WHO, who)
                 .putExtra(EXTRA_WHERE, where)
                 .putExtra(EXTRA_AT, at)

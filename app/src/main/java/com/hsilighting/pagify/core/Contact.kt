@@ -46,9 +46,14 @@ data class Contact(
     /** When to chase them, if ever. */
     val followUpAt: Long? = null,
     val followUpDoneAt: Long? = null,
-    /** When you have arranged to see them. */
-    val meetingAt: Long? = null,
-    val meetingDoneAt: Long? = null,
+    /**
+     * Every meeting arranged with them, soonest first.
+     *
+     * A list, because there can be more than one. This was a single
+     * `meetingAt` and arranging a second meeting overwrote the first — see
+     * [Meeting].
+     */
+    val meetings: List<Meeting> = emptyList(),
 ) {
 
     /**
@@ -63,7 +68,11 @@ data class Contact(
 
     /** The same, for a meeting that has come round. */
     fun meetingIsDue(now: Long = System.currentTimeMillis()): Boolean =
-        meetingAt != null && meetingAt <= now && meetingDoneAt == null
+        meetings.any { it.isDue(now) }
+
+    /** The soonest meeting still ahead, which is the one worth naming. */
+    fun nextMeeting(now: Long = System.currentTimeMillis()): Meeting? =
+        meetings.filter { it.at > now && it.doneAt == null }.minByOrNull { it.at }
 
     /** Either kind, for the calendar mark and the list badge. */
     fun anythingIsDue(now: Long = System.currentTimeMillis()): Boolean =
@@ -260,3 +269,22 @@ private fun JSONArray?.objects(): List<JSONObject> =
 
 private fun JSONArray?.strings(): List<String> =
     if (this == null) emptyList() else (0 until length()).map { optString(it) }
+
+/**
+ * One arranged meeting.
+ *
+ * Separate from the contact because a contact can have several, and because a
+ * meeting has its own life: it is arranged, it comes round, it is dealt with or
+ * it is called off. When this was a pair of columns on the contact, arranging a
+ * second meeting overwrote the first.
+ */
+data class Meeting(
+    val id: Long = 0,
+    val contactId: Long,
+    val at: Long,
+    /** When it was dealt with, if it has been. Kept rather than deleted. */
+    val doneAt: Long? = null,
+) {
+    /** Come round, and not yet dealt with. */
+    fun isDue(now: Long = System.currentTimeMillis()): Boolean = at <= now && doneAt == null
+}

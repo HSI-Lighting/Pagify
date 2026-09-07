@@ -39,7 +39,14 @@ class CalendarSwipeTest {
     private fun calendar(gesture: androidx.compose.ui.test.TouchInjectionScope.() -> Unit): Int {
         var backs = 0
         composeTestRule.setContent {
-            CalendarScreen(contacts = contacts, onOpenContact = {}, onBack = { backs++ })
+            CalendarScreen(
+                contacts = contacts,
+                onOpenProgress = {},
+                onOpenDetails = {},
+                onAddMeeting = { _, _ -> },
+                onCancelMeeting = {},
+                onBack = { backs++ },
+            )
         }
         composeTestRule.onRoot().performTouchInput(gesture)
         composeTestRule.waitForIdle()

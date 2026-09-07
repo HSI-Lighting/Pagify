@@ -18,6 +18,7 @@ import com.hsilighting.pagify.MainActivity
 import com.hsilighting.pagify.R
 import com.hsilighting.pagify.data.db.ContactRow
 import com.hsilighting.pagify.data.db.ContactsDatabase
+import com.hsilighting.pagify.data.db.MeetingRow
 import com.hsilighting.pagify.data.db.ReminderKind
 
 /**
@@ -94,16 +95,27 @@ object Reminders {
      * is the entire alert, so it carries the alarm tone and the vibration
      * itself. Neither case leaves a meeting announced in silence.
      */
-    private const val MEETING_ALARM_CHANNEL = "contact-meetings-alarm"
-    private const val MEETING_LOUD_CHANNEL = "contact-meetings-loud"
+    /**
+     * The channels, named here so Settings can open the phone's own controls
+     * for them.
+     *
+     * Public because sound, vibration and importance belong to Android, not to
+     * this app: a channel's settings are fixed at creation and every later
+     * change from code is ignored, so an in-app sound picker would set a value
+     * the phone never plays. Deep-linking to the system screen is not a
+     * shortcut here -- it is the only thing that works.
+     */
+    const val MEETING_ALARM_CHANNEL = "contact-meetings-alarm"
+    const val MEETING_LOUD_CHANNEL = "contact-meetings-loud"
     private const val LEGACY_MEETING_CHANNEL = "contact-meetings"
-    private const val FOLLOW_UP_CHANNEL = "contact-follow-ups"
+    const val FOLLOW_UP_CHANNEL = "contact-follow-ups"
     private const val ALARM_REQUEST = 4711
 
     const val ACTION_FIRE = "com.hsilighting.pagify.REMINDER"
     const val ACTION_DONE = "com.hsilighting.pagify.REMINDER_DONE"
     const val ACTION_SNOOZE = "com.hsilighting.pagify.REMINDER_SNOOZE"
     const val EXTRA_CONTACT = "contactId"
+    const val EXTRA_MEETING = "meetingId"
     const val EXTRA_KIND = "kind"
 
     /** What "ten more minutes" means. */
@@ -130,20 +142,27 @@ object Reminders {
         ensureChannels(application)
 
         if (notify) {
-            val due = runCatching { dao.dueReminders(now) }.getOrElse {
+            val chases = runCatching { dao.dueFollowUps(now) }.getOrElse {
                 Log.w("Reminders", "could not read what is due", it)
                 emptyList()
             }
-            // One notification per contact rather than one summarising all of
-            // them: a meeting and a chase need different urgency, and a single
-            // line reading "3 reminders" says neither which nor how soon.
-            due.forEach { row ->
-                if (row.meetingAt != null && row.meetingDoneAt == null && row.meetingAt <= now) {
-                    post(application, row, ReminderKind.Meeting, ring)
-                }
-                if (row.followUpAt != null && row.followUpDoneAt == null && row.followUpAt <= now) {
-                    post(application, row, ReminderKind.FollowUp, ring = false)
-                }
+            val meetings = runCatching { dao.dueMeetings(now) }.getOrElse {
+                Log.w("Reminders", "could not read the meetings due", it)
+                emptyList()
+            }
+            val people = runCatching { dao.contactsById(meetings.map { it.contactId }.distinct()) }
+                .getOrElse { emptyList() }
+                .associateBy { it.id }
+
+            // One notification per meeting rather than per contact: two
+            // appointments with the same person on the same day are two
+            // things to be at, and collapsing them would silently drop one.
+            meetings.forEach { meeting ->
+                val row = people[meeting.contactId] ?: return@forEach
+                post(application, row, ReminderKind.Meeting, ring, meeting)
+            }
+            chases.forEach { row ->
+                post(application, row, ReminderKind.FollowUp, ring = false)
             }
         }
 
@@ -188,55 +207,61 @@ object Reminders {
      * about: the day cell would still mark the original hour, and the contact
      * would still read as due at a time nothing was going to fire.
      */
-    suspend fun snooze(context: Context, contactId: Long) {
+    suspend fun snooze(context: Context, meetingId: Long) {
         val application = context.applicationContext
         val dao = ContactsDatabase.get(application).contacts()
-        val row = runCatching { dao.contactsById(listOf(contactId)) }.getOrNull()?.firstOrNull()
-            ?: return
+        val meeting = runCatching { dao.meetingById(meetingId) }.getOrNull() ?: return
 
         runCatching {
-            dao.setProgress(
-                id = contactId,
-                stage = row.stage,
-                met = row.met,
-                followUpAt = row.followUpAt,
-                followUpDoneAt = row.followUpDoneAt,
-                meetingAt = System.currentTimeMillis() + SNOOZE_MILLIS,
-                meetingDoneAt = null,
-            )
+            dao.moveMeeting(meetingId, System.currentTimeMillis() + SNOOZE_MILLIS)
         }.onFailure { Log.w("Reminders", "could not put the meeting off", it) }
 
         ReminderAlarmService.stop(application)
         NotificationManagerCompat.from(application)
-            .cancel(notificationId(contactId, ReminderKind.Meeting))
+            .cancel(meetingNotificationId(meetingId))
         reschedule(application, notify = false)
     }
-
-    /** Mark one reminder dealt with, from the notification's own button. */
-    suspend fun markDone(context: Context, contactId: Long, kind: ReminderKind) {
+    /**
+     * Mark one reminder dealt with, from the notification's own button.
+     *
+     * A meeting is named by its own id rather than by whose it is: a contact
+     * can have several, and finishing one must not finish the rest.
+     */
+    suspend fun markDone(
+        context: Context,
+        contactId: Long,
+        kind: ReminderKind,
+        meetingId: Long = 0,
+    ) {
         val application = context.applicationContext
         val dao = ContactsDatabase.get(application).contacts()
-        val row = runCatching { dao.contactsById(listOf(contactId)) }.getOrNull()?.firstOrNull()
-            ?: return
         val now = System.currentTimeMillis()
 
+        if (kind == ReminderKind.Meeting) {
+            if (meetingId <= 0) return
+            runCatching { dao.markMeetingDone(meetingId, now) }
+                .onFailure { Log.w("Reminders", "could not mark the meeting done", it) }
+            ReminderAlarmService.stop(application)
+            NotificationManagerCompat.from(application).cancel(meetingNotificationId(meetingId))
+            reschedule(application, notify = false)
+            return
+        }
+
+        val row = runCatching { dao.contactsById(listOf(contactId)) }.getOrNull()?.firstOrNull()
+            ?: return
         runCatching {
             dao.setProgress(
                 id = contactId,
                 stage = row.stage,
                 met = row.met,
                 followUpAt = row.followUpAt,
-                followUpDoneAt = if (kind == ReminderKind.FollowUp) now else row.followUpDoneAt,
-                meetingAt = row.meetingAt,
-                meetingDoneAt = if (kind == ReminderKind.Meeting) now else row.meetingDoneAt,
+                followUpDoneAt = now,
             )
         }.onFailure { Log.w("Reminders", "could not mark the reminder done", it) }
 
-        ReminderAlarmService.stop(application)
         NotificationManagerCompat.from(application).cancel(notificationId(contactId, kind))
         reschedule(application, notify = false)
     }
-
     /**
      * Where the status bar's alarm icon leads when tapped.
      *
@@ -262,16 +287,24 @@ object Reminders {
     }
 
     /**
-     * Stable per contact and per kind, so a meeting and a chase for the same
-     * person are two notifications and re-posting either replaces itself rather
-     * than stacking up a new one every time an alarm fires.
+     * A follow-up's notification id: stable per contact, and always even.
+     *
+     * Re-posting replaces itself rather than stacking a new one up every time
+     * an alarm fires.
      */
     private fun notificationId(contactId: Long, kind: ReminderKind): Int =
         (contactId.toInt() * 2) + if (kind == ReminderKind.Meeting) 1 else 0
 
-    /** The id a meeting's alarm posts under, for the service that rings it. */
-    internal fun meetingNotificationId(contactId: Long): Int =
-        notificationId(contactId, ReminderKind.Meeting)
+    /**
+     * The id a meeting posts under.
+     *
+     * **Keyed by the meeting, not by whose it is.** Two appointments with the
+     * same person would otherwise share one id, and the second would replace the
+     * first in the shade — the same collapse the single `meetingAt` column used
+     * to do in the database. Odd numbers here, even ones for follow-ups, so the
+     * two spaces cannot meet.
+     */
+    internal fun meetingNotificationId(meetingId: Long): Int = (meetingId.toInt() * 2) + 1
 
     /**
      * Hand the ringing to [ReminderAlarmService].
@@ -283,16 +316,22 @@ object Reminders {
      *   that carries the alarm tone itself, so the worst case is a single tone
      *   rather than none.
      */
-    private fun startAlarmService(context: Context, row: ContactRow, who: String): Boolean =
+    private fun startAlarmService(
+        context: Context,
+        row: ContactRow,
+        meeting: MeetingRow,
+        who: String,
+    ): Boolean =
         runCatching {
             ContextCompat.startForegroundService(
                 context,
                 ReminderAlarmService.intent(
                     context = context,
                     contactId = row.id,
+                    meetingId = meeting.id,
                     who = who,
                     where = row.company.takeIf { it != who }.orEmpty(),
-                    at = row.meetingAt ?: System.currentTimeMillis(),
+                    at = meeting.at,
                 ),
             )
             true
@@ -312,13 +351,14 @@ object Reminders {
     internal fun alarmNotification(
         context: Context,
         contactId: Long,
+        meetingId: Long,
         who: String,
         where: String,
         at: Long,
     ): Notification {
         ensureChannels(context)
-        val id = notificationId(contactId, ReminderKind.Meeting)
-        val alarmFace = ReminderAlarmActivity.intent(context, contactId, who, where, at)
+        val id = meetingNotificationId(meetingId)
+        val alarmFace = ReminderAlarmActivity.intent(context, contactId, meetingId, who, where, at)
 
         return NotificationCompat.Builder(context, MEETING_ALARM_CHANNEL)
             .setSmallIcon(R.mipmap.ic_launcher)
@@ -354,6 +394,7 @@ object Reminders {
                     Intent(context, ReminderReceiver::class.java)
                         .setAction(ACTION_DONE)
                         .putExtra(EXTRA_CONTACT, contactId)
+                        .putExtra(EXTRA_MEETING, meetingId)
                         .putExtra(EXTRA_KIND, ReminderKind.Meeting.name),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 ),
@@ -366,7 +407,8 @@ object Reminders {
                     id + 400_000,
                     Intent(context, ReminderReceiver::class.java)
                         .setAction(ACTION_SNOOZE)
-                        .putExtra(EXTRA_CONTACT, contactId),
+                        .putExtra(EXTRA_CONTACT, contactId)
+                        .putExtra(EXTRA_MEETING, meetingId),
                     PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
                 ),
             )
@@ -383,23 +425,34 @@ object Reminders {
      *   one after a reinstall would arrive every single time. A catch-up still
      *   says the meeting was missed; it just says it in the shade.
      */
-    private fun post(context: Context, row: ContactRow, kind: ReminderKind, ring: Boolean) {
+    private fun post(
+        context: Context,
+        row: ContactRow,
+        kind: ReminderKind,
+        ring: Boolean,
+        meeting: MeetingRow? = null,
+    ) {
         val who = row.name.ifBlank { row.company }.ifBlank { "a contact" }
         val isMeeting = kind == ReminderKind.Meeting
+        // A meeting is identified by itself; a follow-up by whose it is.
+        val postId =
+            if (isMeeting && meeting != null) meetingNotificationId(meeting.id)
+            else notificationId(row.id, kind)
 
         val open = PendingIntent.getActivity(
             context,
-            notificationId(row.id, kind),
+            postId,
             Intent(context, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val done = PendingIntent.getBroadcast(
             context,
-            notificationId(row.id, kind) + 100_000,
+            postId + 100_000,
             Intent(context, ReminderReceiver::class.java)
                 .setAction(ACTION_DONE)
                 .putExtra(EXTRA_CONTACT, row.id)
+                .putExtra(EXTRA_MEETING, meeting?.id ?: 0L)
                 .putExtra(EXTRA_KIND, kind.name),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
@@ -409,7 +462,8 @@ object Reminders {
         // that assumption is what made a closed app silent. If the service comes
         // up it posts its own notification on the silent channel and rings; if
         // it cannot, the noisy channel below is the whole alert.
-        val ringing = isMeeting && ring && startAlarmService(context, row, who)
+        val ringing = isMeeting && ring && meeting != null &&
+            startAlarmService(context, row, meeting, who)
         if (ringing) return
 
         val builder = NotificationCompat.Builder(
@@ -443,7 +497,7 @@ object Reminders {
         // alarm is a bug report nobody can reproduce.
         runCatching {
             NotificationManagerCompat.from(context)
-                .notify(notificationId(row.id, kind), builder.build())
+                .notify(postId, builder.build())
         }.onFailure { Log.w("Reminders", "the notification was refused", it) }
     }
 

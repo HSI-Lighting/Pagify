@@ -22,6 +22,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -29,10 +37,13 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Keyboard
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
@@ -65,6 +76,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.hsilighting.pagify.core.Contact
+import com.hsilighting.pagify.core.Meeting
 import com.hsilighting.pagify.core.ContactGroup
 import com.hsilighting.pagify.core.ReadField
 import java.text.SimpleDateFormat
@@ -116,6 +128,8 @@ fun ContactsScreen(
     onExport: (Contact) -> Unit,
     onDelete: (Contact) -> Unit,
     onSaveEdit: (Contact) -> Unit,
+    /** The progress sheet, which owns the meetings as well as the stage. */
+    onSaveProgress: (Contact) -> Unit,
     /** Several at once, picked by long press. */
     onDeleteContacts: (List<Contact>) -> Unit,
     onDeleteGroups: (List<ContactGroup>) -> Unit,
@@ -129,6 +143,8 @@ fun ContactsScreen(
     var choosingSource by remember { mutableStateOf(false) }
     var creatingGroup by remember { mutableStateOf(false) }
     var namingForScan by remember { mutableStateOf(false) }
+    // A contact typed in rather than photographed.
+    var creatingContact by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf<ContactGroup?>(null) }
     var addingToGroup by remember { mutableStateOf<Contact?>(null) }
     var namingForContact by remember { mutableStateOf<Contact?>(null) }
@@ -190,26 +206,88 @@ fun ContactsScreen(
     // separate contents. It is the same contacts read by date, so it is reached
     // from here and comes back here — and the back button returns rather than
     // leaving the app, which a tab would not.
-    if (showingCalendar) {
+    // Both views are built, so one can leave while the other arrives. Kept as
+    // lambdas rather than lifted into their own composables because they share
+    // this function's state — which sheet is open, what is selected — and
+    // threading twenty parameters through two signatures to gain a slide would
+    // be a poor trade.
+    val calendarView: @Composable () -> Unit = {
         // The system back leaves the calendar rather than the app. A view
         // reached by a gesture still has to be leavable by the button.
-        BackHandler { if (open != null) open = null else showingCalendar = false }
+        // Back closes whichever sheet is up before it leaves the calendar, so a
+        // sheet opened from a day never takes the whole view with it.
+        BackHandler {
+            when {
+                progressing != null -> progressing = null
+                editing != null -> editing = null
+                open != null -> open = null
+                else -> showingCalendar = false
+            }
+        }
         CalendarScreen(
             contacts = contacts,
-            onOpenContact = { open = it },
+            // A card collected that day, or one to chase: both are about where
+            // the relationship has got to.
+            onOpenProgress = { progressing = it },
+            // A meeting: the progress is already decided, and what is wanted
+            // beforehand is the person.
+            onOpenDetails = { open = it },
+            // Arranging and cancelling both go through the progress save, which
+            // is the one that treats the meetings list as the whole truth.
+            onAddMeeting = { contact, at ->
+                onSaveProgress(contact.copy(meetings = contact.meetings + Meeting(contactId = contact.id, at = at)))
+            },
+            onCancelMeeting = { appointment ->
+                onSaveProgress(
+                    appointment.contact.copy(
+                        meetings = appointment.contact.meetings.filterNot { it.id == appointment.meeting.id },
+                    ),
+                )
+            },
             onBack = { showingCalendar = false },
             modifier = modifier,
         )
+        // **The person, not the paperwork.**
+        //
+        // Tapping a meeting used to open the stage-and-reminder editor, which
+        // answers a question nobody has on the day: the reminder is already set,
+        // that is why the row is there. What is wanted at ten to three is the
+        // telephone number. So this is the same detail sheet a tap in the
+        // contact list gives — who they are and how to reach them — with the
+        // progress editor still one tap further in for whoever wants it.
         open?.let { contact ->
-            ProgressSheet(
+            ContactSheet(
                 contact = contact,
-                onSave = { onSaveEdit(it); open = null },
+                groups = groups.filter { memberships[contact.id].orEmpty().contains(it.id) },
+                onEdit = { editing = contact; open = null },
+                onProgress = { progressing = contact; open = null },
+                onExport = { open = null; onExport(contact) },
+                onDelete = { open = null; onDelete(contact) },
+                onRemoveFromGroup = { onRemoveFromGroup(contact, it) },
+                onAddToGroup = { addingToGroup = contact },
                 onDismiss = { open = null },
             )
         }
-        return
+        // Reached from the detail sheet above, so it still opens over the
+        // calendar rather than sending anybody back to the list to find it.
+        progressing?.let { contact ->
+            ProgressSheet(
+                contact = contact,
+                onSave = { onSaveProgress(it); progressing = null },
+                onDismiss = { progressing = null },
+            )
+        }
+        editing?.let { contact ->
+            ContactEditor(
+                contact = contact,
+                onSave = { onSaveEdit(it); editing = null },
+                onDismiss = { editing = null },
+            )
+        }
     }
 
+
+    val listView: @Composable () -> Unit = {
     Box(
         modifier
             .fillMaxSize()
@@ -316,7 +394,6 @@ fun ContactsScreen(
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
                 )
             }
-
             if (pool.isNotEmpty() || query.isNotBlank()) {
                 OutlinedTextField(
                     value = query,
@@ -406,14 +483,36 @@ fun ContactsScreen(
             }
         }
 
-        ExtendedFloatingActionButton(
-            onClick = { choosingSource = true },
-            icon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
-            text = { Text("Add a card") },
+        // The two ways a contact gets in, stacked and in that order: the card is
+        // the usual one and stays nearest the thumb, with typing one in directly
+        // above it. Not every contact arrives on a card — one given over the
+        // phone, or read off an email signature, previously had no way in at all,
+        // and a button that shape is where somebody looks for one.
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
+                // The app draws edge to edge, so without this the lower
+                // button sits partly under the gesture bar — twenty dp from
+                // the bottom of the *display*, not from the bottom of what
+                // can be touched.
+                .navigationBarsPadding()
                 .padding(20.dp),
-        )
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            ExtendedFloatingActionButton(
+                onClick = { creatingContact = true },
+                icon = { Icon(Icons.Filled.Keyboard, contentDescription = null) },
+                text = { Text("Add a contact") },
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            ExtendedFloatingActionButton(
+                onClick = { choosingSource = true },
+                icon = { Icon(Icons.Filled.PersonAdd, contentDescription = null) },
+                text = { Text("Add a card") },
+            )
+        }
     }
 
     review?.let { pending ->
@@ -435,6 +534,18 @@ fun ContactsScreen(
             onCamera = { choosingSource = false; onScanFromCamera(openGroup?.id) },
             onGallery = { choosingSource = false; onScanFromGallery(openGroup?.id) },
             onDismiss = { choosingSource = false },
+        )
+    }
+
+    // **The same editor an existing contact gets**, given a blank one. A second
+    // form for typing in a person would drift from the first the moment either
+    // gained a field, and there is nothing about a new contact that a saved one
+    // does not also need.
+    if (creatingContact) {
+        ContactEditor(
+            contact = remember { Contact(id = System.currentTimeMillis()) },
+            onSave = { onSaveEdit(it); creatingContact = false },
+            onDismiss = { creatingContact = false },
         )
     }
 
@@ -561,7 +672,7 @@ fun ContactsScreen(
     progressing?.let { contact ->
         ProgressSheet(
             contact = contact,
-            onSave = { onSaveEdit(it); progressing = null },
+            onSave = { onSaveProgress(it); progressing = null },
             onDismiss = { progressing = null },
         )
     }
@@ -601,6 +712,28 @@ fun ContactsScreen(
             onSave = { onSaveEdit(it); editing = null },
             onDismiss = { editing = null },
         )
+    }
+    }
+
+    // **The direction carries the meaning.** The calendar is reached by swiping
+    // one way, so it arrives from that side and leaves back towards it; the
+    // contacts come back the other way. A view that simply appeared gave no clue
+    // where it had come from, which is what makes a gesture feel like a glitch
+    // rather than a movement.
+    AnimatedContent(
+        targetState = showingCalendar,
+        transitionSpec = {
+            if (targetState) {
+                slideInHorizontally { width -> width } togetherWith
+                    slideOutHorizontally { width -> -width / 4 } + fadeOut()
+            } else {
+                slideInHorizontally { width -> -width } togetherWith
+                    slideOutHorizontally { width -> width / 4 } + fadeOut()
+            }
+        },
+        label = "contacts and calendar",
+    ) { calendar ->
+        if (calendar) calendarView() else listView()
     }
 }
 
@@ -861,7 +994,7 @@ private fun ContactRow(
 }
 
 @Composable
-private fun ContactSheet(
+internal fun ContactSheet(
     contact: Contact,
     groups: List<ContactGroup>,
     onEdit: () -> Unit,
@@ -913,7 +1046,15 @@ private fun ContactSheet(
             // Selectable, so a number or an address can be copied out without
             // exporting the whole contact.
             SelectionContainer {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                // **Scrollable, because a contact has no fixed size.** A card
+                // with four numbers, two addresses and a paragraph of notes is
+                // taller than the dialog, and an AlertDialog does not scroll its
+                // own body — it simply cuts it off, so the last details were
+                // unreachable and there was nothing on screen to say so.
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                ) {
                     Detail("Title", contact.title)
                     Detail("Company", contact.company)
 
