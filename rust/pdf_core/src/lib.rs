@@ -30,6 +30,7 @@ pub mod plugins;
 pub mod registry;
 pub mod render;
 pub mod text;
+pub mod step;
 
 #[cfg(target_os = "android")]
 pub mod jni_bridge;

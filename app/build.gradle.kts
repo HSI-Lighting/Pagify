@@ -118,7 +118,16 @@ android {
     ndkVersion = ndkVersionForRust
 
     defaultConfig {
-        applicationId = "com.hsilighting.pagify"
+        // **A different application id, so this is a different app.**
+        //
+        // Pagify 3D installs beside Pagify rather than over it: same code base,
+        // separate package, separate sandbox, separate database. Nothing this
+        // branch does can reach the contacts, cards or documents of the app that
+        // is actually in use — which is the whole reason this work is on its own
+        // branch. The namespace above stays `com.hsilighting.pagify` on purpose:
+        // that is the Kotlin package and R class, and changing it would rename
+        // every import for no gain.
+        applicationId = "com.hsilighting.pagify3d"
         minSdk = 24
         targetSdk = 37
         versionCode = 8
