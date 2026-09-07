@@ -56,7 +56,8 @@ fun ProgressSheet(
 ) {
     var stage by remember(contact.id) { mutableStateOf(contact.stage) }
     var met by remember(contact.id) { mutableStateOf(contact.met) }
-    var reminderAt by remember(contact.id) { mutableStateOf(contact.reminderAt) }
+    var meetingAt by remember(contact.id) { mutableStateOf(contact.meetingAt) }
+    var followUpAt by remember(contact.id) { mutableStateOf(contact.followUpAt) }
 
     // **Asked for at the moment a reminder is first set, not on launch.**
     //
@@ -109,40 +110,24 @@ fun ProgressSheet(
                     Switch(checked = met, onCheckedChange = { met = it })
                 }
 
-                Label("Remind me", top = 18.dp)
-                // Offsets rather than a date picker. Standing at a stand, "next
-                // week" is a decision and a calendar is a chore — and the date
-                // is editable afterwards from the calendar itself.
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    listOf(
-                        "Tomorrow" to 1,
-                        "In 3 days" to 3,
-                        "Next week" to 7,
-                        "In a month" to 30,
-                    ).forEach { (label, days) ->
-                        val at = remember(days) { morningIn(days) }
-                        FilterChip(
-                            selected = reminderAt?.let { sameDay(it, at) } == true,
-                            onClick = {
-                                val already = reminderAt?.let { sameDay(it, at) } == true
-                                reminderAt = if (already) null else at
-                                if (!already) askForNotifications()
-                            },
-                            label = { Text(label) },
-                        )
-                    }
-                }
-                val set = reminderAt
-                if (set != null) {
-                    AssistChip(
-                        onClick = { reminderAt = null },
-                        label = { Text("Clear ${onDate(set)}") },
-                        colors = AssistChipDefaults.assistChipColors(
-                            labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                        ),
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
+                // **Two reminders, not one with a type.** A contact usually has
+                // both at once — a meeting on Thursday and a chase the week
+                // after if it does not happen — and a single field would make
+                // setting the second one delete the first.
+                ReminderRow(
+                    heading = "Meeting",
+                    caption = "Announces itself when it comes round.",
+                    at = meetingAt,
+                    offsets = listOf("Tomorrow" to 1, "In 2 days" to 2, "Next week" to 7),
+                    onPick = { meetingAt = it; if (it != null) askForNotifications() },
+                )
+                ReminderRow(
+                    heading = "Follow up",
+                    caption = "Waits quietly in the notification shade.",
+                    at = followUpAt,
+                    offsets = listOf("In 3 days" to 3, "Next week" to 7, "In a month" to 30),
+                    onPick = { followUpAt = it; if (it != null) askForNotifications() },
+                )
             }
         },
         confirmButton = {
@@ -152,13 +137,19 @@ fun ProgressSheet(
                         contact.copy(
                             stage = stage,
                             met = met,
-                            reminderAt = reminderAt,
+                            meetingAt = meetingAt,
+                            followUpAt = followUpAt,
                             // A reminder that is moved or cleared is no longer
-                            // one that was dealt with; leaving the old
-                            // "done" stamp would keep the new date from ever
-                            // coming due.
-                            reminderDoneAt = if (reminderAt == contact.reminderAt) {
-                                contact.reminderDoneAt
+                            // one that was dealt with. Leaving the old "done"
+                            // stamp would stop the new date ever coming due —
+                            // silently, because the date would look right.
+                            meetingDoneAt = if (meetingAt == contact.meetingAt) {
+                                contact.meetingDoneAt
+                            } else {
+                                null
+                            },
+                            followUpDoneAt = if (followUpAt == contact.followUpAt) {
+                                contact.followUpDoneAt
                             } else {
                                 null
                             },
@@ -228,5 +219,52 @@ private fun rememberNotificationPermission(): () -> Unit {
                 if (!granted) launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
+    }
+}
+
+/**
+ * One reminder: a heading, a row of offsets, and a way to clear it.
+ *
+ * Offsets rather than a date picker. Standing at a stand, "next week" is a
+ * decision and a calendar is a chore — and tapping the chosen one again clears
+ * it, so setting a reminder by mistake costs one tap to undo rather than a
+ * hunt for a Clear button.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun ReminderRow(
+    heading: String,
+    caption: String,
+    at: Long?,
+    offsets: List<Pair<String, Int>>,
+    onPick: (Long?) -> Unit,
+) {
+    Label(heading, top = 18.dp)
+    Text(
+        caption,
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(bottom = 6.dp),
+    )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        offsets.forEach { (label, days) ->
+            val on = remember(days) { morningIn(days) }
+            val chosen = at?.let { sameDay(it, on) } == true
+            FilterChip(
+                selected = chosen,
+                onClick = { onPick(if (chosen) null else on) },
+                label = { Text(label) },
+            )
+        }
+    }
+    if (at != null) {
+        AssistChip(
+            onClick = { onPick(null) },
+            label = { Text("Clear ${onDate(at)}") },
+            colors = AssistChipDefaults.assistChipColors(
+                labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
+            ),
+            modifier = Modifier.padding(top = 8.dp),
+        )
     }
 }

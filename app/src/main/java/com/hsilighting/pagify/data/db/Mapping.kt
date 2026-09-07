@@ -36,8 +36,10 @@ fun ContactRow.toContact(): Contact = Contact(
     exportCount = exportCount,
     stage = DealStage.of(stage),
     met = met,
-    reminderAt = reminderAt,
-    reminderDoneAt = reminderDoneAt,
+    followUpAt = followUpAt,
+    followUpDoneAt = followUpDoneAt,
+    meetingAt = meetingAt,
+    meetingDoneAt = meetingDoneAt,
 )
 
 fun Contact.toRow(): ContactRow = ContactRow(
@@ -65,8 +67,10 @@ fun Contact.toRow(): ContactRow = ContactRow(
     exportCount = exportCount,
     stage = stage.stored,
     met = met,
-    reminderAt = reminderAt,
-    reminderDoneAt = reminderDoneAt,
+    followUpAt = followUpAt,
+    followUpDoneAt = followUpDoneAt,
+    meetingAt = meetingAt,
+    meetingDoneAt = meetingDoneAt,
 )
 
 fun GroupRow.toGroup(): ContactGroup = ContactGroup(

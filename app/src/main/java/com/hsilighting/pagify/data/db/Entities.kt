@@ -1,5 +1,6 @@
 package com.hsilighting.pagify.data.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
@@ -54,11 +55,40 @@ data class ContactRow(
      * be quoted without ever being met, and met without going anywhere.
      */
     val met: Boolean = false,
-    /** When to be reminded about them, if ever. */
-    val reminderAt: Long? = null,
-    /** Set when the reminder has been dealt with, so it stops being due. */
-    val reminderDoneAt: Long? = null,
+    /**
+     * When to chase them, if ever.
+     *
+     * **Stored in the column version 2 called `reminderAt`.** SQLite could not
+     * rename a column until 3.25, and API 24 ships 3.9 — so renaming means
+     * rebuilding the table and copying every row, to change a name nobody
+     * outside this file ever sees. `@ColumnInfo` says the same thing for free,
+     * and every follow-up already saved keeps working.
+     */
+    @ColumnInfo(name = "reminderAt") val followUpAt: Long? = null,
+    @ColumnInfo(name = "reminderDoneAt") val followUpDoneAt: Long? = null,
+    /**
+     * When you have arranged to see them.
+     *
+     * Separate from the follow-up rather than one reminder with a type, because
+     * a contact can have both at once and usually does: a meeting on Thursday
+     * and a chase the week after if it does not happen.
+     */
+    val meetingAt: Long? = null,
+    val meetingDoneAt: Long? = null,
 )
+
+/**
+ * The two kinds of reminder a contact can carry.
+ *
+ * They differ in more than wording. A meeting is an appointment — it announces
+ * itself loudly and shortly beforehand, because being late to it is the failure.
+ * A follow-up is a nudge — it can wait for the morning, and being a few hours
+ * late to it costs nothing.
+ */
+enum class ReminderKind(val label: String) {
+    Meeting("Meeting"),
+    FollowUp("Follow up"),
+}
 
 /**
  * How far a contact has got, from a card in a pocket to a decision.

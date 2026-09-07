@@ -6,6 +6,7 @@ import android.Manifest.permission.WRITE_EXTERNAL_STORAGE
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -26,6 +27,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hsilighting.pagify.core.BlankFrameDetector
 import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.core.RecentDocument
 import com.hsilighting.pagify.core.isDark
 import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.PagifyApp
@@ -302,6 +304,7 @@ class MainActivity : ComponentActivity() {
                     recents = recents,
                     onOpenRecent = { viewModel.open(it.uri.toUri()) },
                     onForgetRecent = { viewModel.forgetDocument(it.uri) },
+                    onShareRecent = ::shareDocument,
                     onPickDocument = { viewModel.showNewDocumentChooser(true) },
                     onClearLibrary = viewModel::clearLibrary,
                     onShowThumbnails = viewModel::setThumbnails,
@@ -612,6 +615,35 @@ class MainActivity : ComponentActivity() {
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         startActivity(Intent.createChooser(intent, "Send $safe"))
+    }
+
+    /**
+     * Hand a library document to another app.
+     *
+     * **The URI is forwarded rather than the file copied.** A recent document is
+     * already a content URI this app holds a persistent grant on, so it can be
+     * passed along with a read grant attached — no second copy of a
+     * fifty-megabyte PDF in the cache, and nothing to clean up afterwards.
+     *
+     * The grant is the whole subtlety. Without `FLAG_GRANT_READ_URI_PERMISSION`
+     * the receiving app gets a URI it cannot open, and what the user sees is a
+     * mail draft whose attachment fails at send — long after the moment anybody
+     * would connect it back to this.
+     */
+    private fun shareDocument(document: RecentDocument) {
+        val uri = runCatching { document.uri.toUri() }.getOrNull() ?: run {
+            Log.w("Pagify", "a library row had an unreadable uri")
+            return
+        }
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "application/pdf"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_TITLE, document.name)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        runCatching {
+            startActivity(Intent.createChooser(intent, "Share ${document.name}"))
+        }.onFailure { Log.w("Pagify", "nothing could accept the document", it) }
     }
 }
 

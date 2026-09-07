@@ -55,6 +55,7 @@ fun PagifyApp(
     recents: List<RecentDocument>,
     onOpenRecent: (RecentDocument) -> Unit,
     onForgetRecent: (RecentDocument) -> Unit,
+    onShareRecent: (RecentDocument) -> Unit,
     onPickDocument: () -> Unit,
     onClearLibrary: () -> Unit,
     onShowThumbnails: (Boolean) -> Unit,
@@ -152,6 +153,7 @@ fun PagifyApp(
                     documents = recents,
                     onOpen = onOpenRecent,
                     onForget = onForgetRecent,
+                    onShare = onShareRecent,
                     onPickDocument = onPickDocument,
                 )
 

@@ -24,7 +24,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  */
 @Database(
     entities = [ContactRow::class, GroupRow::class, MembershipRow::class],
-    version = 2,
+    version = 3,
     exportSchema = false,
 )
 abstract class ContactsDatabase : RoomDatabase() {
@@ -57,13 +57,30 @@ abstract class ContactsDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Version 3 splits one reminder into two: a meeting and a follow-up.
+         *
+         * The existing `reminderAt` column is kept and becomes the follow-up,
+         * so every reminder already set survives as the kind it most likely
+         * was. Only the meeting columns are new. SQLite could not rename a
+         * column until 3.25 and API 24 ships 3.9, so the alternative was
+         * rebuilding the table and copying every row to change a name — see
+         * the `@ColumnInfo` on `ContactRow.followUpAt`.
+         */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE contacts ADD COLUMN meetingAt INTEGER")
+                db.execSQL("ALTER TABLE contacts ADD COLUMN meetingDoneAt INTEGER")
+            }
+        }
+
         fun get(context: Context): ContactsDatabase = instance ?: synchronized(this) {
             instance ?: build(context.applicationContext).also { instance = it }
         }
 
         private fun build(context: Context) =
             Room.databaseBuilder(context, ContactsDatabase::class.java, "contacts.db")
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 // Write-ahead logging, for the burst this is built for: forty
                 // cards saved in a row at an event, while the list on screen is
                 // reading the same tables.

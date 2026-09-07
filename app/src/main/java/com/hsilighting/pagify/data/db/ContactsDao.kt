@@ -48,16 +48,19 @@ interface ContactsDao {
      * kilobyte of recogniser text, to change a six-character stage, loses a
      * concurrent edit to any other column on the same row.
      */
-    @Query(
+@Query(
         "UPDATE contacts SET stage = :stage, met = :met, " +
-            "reminderAt = :reminderAt, reminderDoneAt = :reminderDoneAt WHERE id = :id",
+            "reminderAt = :followUpAt, reminderDoneAt = :followUpDoneAt, " +
+            "meetingAt = :meetingAt, meetingDoneAt = :meetingDoneAt WHERE id = :id",
     )
     suspend fun setProgress(
         id: Long,
         stage: String,
         met: Boolean,
-        reminderAt: Long?,
-        reminderDoneAt: Long?,
+        followUpAt: Long?,
+        followUpDoneAt: Long?,
+        meetingAt: Long?,
+        meetingDoneAt: Long?,
     )
 
     /**
@@ -67,8 +70,10 @@ interface ContactsDao {
      * longest rather than whichever the database happened to return.
      */
     @Query(
-        "SELECT * FROM contacts WHERE reminderAt IS NOT NULL AND reminderAt <= :now " +
-            "AND reminderDoneAt IS NULL ORDER BY reminderAt ASC",
+        "SELECT * FROM contacts WHERE " +
+            "(reminderAt IS NOT NULL AND reminderAt <= :now AND reminderDoneAt IS NULL) OR " +
+            "(meetingAt IS NOT NULL AND meetingAt <= :now AND meetingDoneAt IS NULL) " +
+            "ORDER BY MIN(COALESCE(reminderAt, meetingAt), COALESCE(meetingAt, reminderAt)) ASC",
     )
     suspend fun dueReminders(now: Long): List<ContactRow>
 
@@ -80,10 +85,14 @@ interface ContactsDao {
      * costs a query where a hundred alarms cost a hundred slots.
      */
     @Query(
-        "SELECT * FROM contacts WHERE reminderAt IS NOT NULL AND reminderAt > :now " +
-            "AND reminderDoneAt IS NULL ORDER BY reminderAt ASC LIMIT 1",
+        "SELECT MIN(soonest) FROM (" +
+            "SELECT reminderAt AS soonest FROM contacts " +
+            "WHERE reminderAt IS NOT NULL AND reminderAt > :now AND reminderDoneAt IS NULL " +
+            "UNION ALL " +
+            "SELECT meetingAt AS soonest FROM contacts " +
+            "WHERE meetingAt IS NOT NULL AND meetingAt > :now AND meetingDoneAt IS NULL)",
     )
-    suspend fun nextReminder(now: Long): ContactRow?
+    suspend fun nextReminderAt(now: Long): Long?
 
     /**
      * Record that these contacts were exported, all at the same instant.

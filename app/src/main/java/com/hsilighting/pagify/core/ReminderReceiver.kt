@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import com.hsilighting.pagify.data.db.ReminderKind
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -27,6 +28,31 @@ class ReminderReceiver : BroadcastReceiver() {
         val isBoot = action == Intent.ACTION_BOOT_COMPLETED ||
             action == "android.intent.action.QUICKBOOT_POWERON" ||
             action == Intent.ACTION_MY_PACKAGE_REPLACED
+
+        // "Done" from the notification itself, so a reminder can be cleared
+        // without opening the app — which is the point of putting a button on
+        // it. Handled first because it is the only branch that is not simply
+        // "look at everything again".
+        if (action == Reminders.ACTION_DONE) {
+            val contactId = intent.getLongExtra(Reminders.EXTRA_CONTACT, -1L)
+            val kind = runCatching {
+                ReminderKind.valueOf(intent.getStringExtra(Reminders.EXTRA_KIND).orEmpty())
+            }.getOrNull()
+            if (contactId <= 0 || kind == null) return
+
+            val finish = goAsync()
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    Reminders.markDone(context, contactId, kind)
+                } catch (error: Throwable) {
+                    Log.w("Reminders", "could not mark it done", error)
+                } finally {
+                    finish.finish()
+                }
+            }
+            return
+        }
+
         if (action != Reminders.ACTION_FIRE && !isBoot) return
 
         // The work outlives this call, so the process must be asked to stay

@@ -1,5 +1,10 @@
 package com.hsilighting.pagify.ui.contacts
 
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -72,12 +77,52 @@ fun CalendarScreen(
     // Both indexes are built once per change of the contact list rather than per
     // recomposition: a month scroll must not re-bucket every contact.
     val captured = remember(contacts) { contacts.groupBy { startOfDay(it.capturedAt) } }
-    val reminders = remember(contacts) {
-        contacts.filter { it.reminderAt != null && it.reminderDoneAt == null }
-            .groupBy { startOfDay(it.reminderAt!!) }
+    // Meetings and follow-ups indexed apart, because the day cell marks them
+    // differently and the day list puts meetings first.
+    val meetings = remember(contacts) {
+        contacts.filter { it.meetingAt != null && it.meetingDoneAt == null }
+            .groupBy { startOfDay(it.meetingAt!!) }
+    }
+    val followUps = remember(contacts) {
+        contacts.filter { it.followUpAt != null && it.followUpDoneAt == null }
+            .groupBy { startOfDay(it.followUpAt!!) }
     }
 
-    Column(modifier.fillMaxSize()) {
+    // The way in was a swipe, so the way out is one too. Left-to-right, the
+    // mirror of what opened this — a gesture that only works one way teaches
+    // people not to trust it. Same threshold and same rule as the contacts
+    // list: twice as far across as down before it claims the pointer, so the
+    // month grid and the day list still scroll.
+    val swipeBack = with(LocalDensity.current) { 72.dp.toPx() }
+    Column(
+        modifier
+            .fillMaxSize()
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var across = 0f
+                    var downward = 0f
+                    var decided = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (change.changedToUp()) {
+                            if (decided && across > swipeBack) onBack()
+                            break
+                        }
+                        val delta = change.position - change.previousPosition
+                        across += delta.x
+                        downward += delta.y
+                        if (!decided && kotlin.math.abs(across) > 24f &&
+                            kotlin.math.abs(across) > kotlin.math.abs(downward) * 2f
+                        ) {
+                            decided = true
+                        }
+                        if (decided) change.consume()
+                    }
+                }
+            },
+    ) {
         Row(
             Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -104,18 +149,20 @@ fun CalendarScreen(
             today = today,
             selected = selected,
             captured = captured,
-            reminders = reminders,
+            meetings = meetings,
+            followUps = followUps,
             onPick = { day -> selected = if (selected == day) null else day },
         )
 
         val chosen = selected
         if (chosen == null) {
-            Summary(month, captured, reminders)
+            Summary(month, captured, meetings, followUps)
         } else {
             DayEntries(
                 day = chosen,
                 captured = captured[chosen].orEmpty(),
-                due = reminders[chosen].orEmpty(),
+                meetings = meetings[chosen].orEmpty(),
+                followUps = followUps[chosen].orEmpty(),
                 onOpenContact = onOpenContact,
             )
         }
@@ -128,7 +175,8 @@ private fun MonthGrid(
     today: Long,
     selected: Long?,
     captured: Map<Long, List<Contact>>,
-    reminders: Map<Long, List<Contact>>,
+    meetings: Map<Long, List<Contact>>,
+    followUps: Map<Long, List<Contact>>,
     onPick: (Long) -> Unit,
 ) {
     val weekdays = remember { weekdayInitials() }
@@ -162,7 +210,8 @@ private fun MonthGrid(
                             isToday = day == today,
                             isSelected = day == selected,
                             capturedCount = captured[day]?.size ?: 0,
-                            hasReminder = reminders.containsKey(day),
+                            hasMeeting = meetings.containsKey(day),
+                            hasFollowUp = followUps.containsKey(day),
                             onPick = onPick,
                             modifier = Modifier.weight(1f),
                         )
@@ -182,7 +231,8 @@ private fun DayCell(
     isToday: Boolean,
     isSelected: Boolean,
     capturedCount: Int,
-    hasReminder: Boolean,
+    hasMeeting: Boolean,
+    hasFollowUp: Boolean,
     onPick: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -229,17 +279,32 @@ private fun DayCell(
                 )
             }
         }
-        // A ring rather than another fill: a day can be both collected-on and
-        // due, and two fills cannot show that.
-        if (hasReminder) {
-            Box(
-                Modifier
-                    .size(6.dp)
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 0.dp)
-                    .clip(CircleShape)
-                    .background(if (isSelected) scheme.onPrimary else scheme.error),
-            )
+        // Dots rather than another fill: a day can be collected-on, met-on and
+        // due-on all at once, and fills cannot stack. Two dots side by side
+        // rather than one in two colours, so the difference survives being
+        // colour-blind — a meeting is the left dot, a follow-up the right.
+        if (hasMeeting || hasFollowUp) {
+            Row(
+                Modifier.align(Alignment.BottomCenter),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                if (hasMeeting) {
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(if (isSelected) scheme.onPrimary else scheme.error),
+                    )
+                }
+                if (hasFollowUp) {
+                    Box(
+                        Modifier
+                            .size(6.dp)
+                            .clip(CircleShape)
+                            .background(if (isSelected) scheme.onPrimary else scheme.tertiary),
+                    )
+                }
+            }
         }
     }
 }
@@ -249,11 +314,14 @@ private fun DayCell(
 private fun Summary(
     month: Long,
     captured: Map<Long, List<Contact>>,
-    reminders: Map<Long, List<Contact>>,
+    meetings: Map<Long, List<Contact>>,
+    followUps: Map<Long, List<Contact>>,
 ) {
     val cards = captured.filterKeys { inMonth(it, month) }.values.sumOf { it.size }
     val days = captured.keys.count { inMonth(it, month) }
-    val due = reminders.filterKeys { inMonth(it, month) }.values.sumOf { it.size }
+    val meetingCount = meetings.filterKeys { inMonth(it, month) }.values.sumOf { it.size }
+    val followUpCount = followUps.filterKeys { inMonth(it, month) }.values.sumOf { it.size }
+    val due = meetingCount + followUpCount
 
     Column(Modifier.fillMaxWidth().padding(24.dp)) {
         Text(
@@ -267,7 +335,11 @@ private fun Summary(
         )
         if (due > 0) {
             Text(
-                text = "$due ${if (due == 1) "reminder" else "reminders"} due",
+                text = listOfNotNull(
+                    meetingCount.takeIf { it > 0 }
+                        ?.let { "$it ${if (it == 1) "meeting" else "meetings"}" },
+                    followUpCount.takeIf { it > 0 }?.let { "$it to follow up" },
+                ).joinToString(" · "),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.error,
                 modifier = Modifier.padding(top = 6.dp),
@@ -287,7 +359,8 @@ private fun Summary(
 private fun DayEntries(
     day: Long,
     captured: List<Contact>,
-    due: List<Contact>,
+    meetings: List<Contact>,
+    followUps: List<Contact>,
     onOpenContact: (Contact) -> Unit,
 ) {
     Column(Modifier.fillMaxSize()) {
@@ -298,7 +371,7 @@ private fun DayEntries(
             modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 6.dp),
         )
 
-        if (captured.isEmpty() && due.isEmpty()) {
+        if (captured.isEmpty() && meetings.isEmpty() && followUps.isEmpty()) {
             Text(
                 text = "Nothing on this day.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -308,19 +381,25 @@ private fun DayEntries(
             return@Column
         }
 
+        // Meetings first, then chases, then who was met. Appointments are the
+        // only one of the three with a time you can be late for.
         LazyColumn(Modifier.fillMaxSize()) {
-            if (due.isNotEmpty()) {
-                item {
-                    SectionHeading("Reminders due", MaterialTheme.colorScheme.error)
+            if (meetings.isNotEmpty()) {
+                item { SectionHeading("Meetings", MaterialTheme.colorScheme.error) }
+                items(meetings, key = { "meet-${it.id}" }) { contact ->
+                    DayRow(contact, mark = MaterialTheme.colorScheme.error, onOpenContact = onOpenContact)
                 }
-                items(due, key = { "due-${it.id}" }) { contact ->
-                    DayRow(contact, isDue = true, onOpenContact = onOpenContact)
+            }
+            if (followUps.isNotEmpty()) {
+                item { SectionHeading("To follow up", MaterialTheme.colorScheme.tertiary) }
+                items(followUps, key = { "chase-${it.id}" }) { contact ->
+                    DayRow(contact, mark = MaterialTheme.colorScheme.tertiary, onOpenContact = onOpenContact)
                 }
             }
             if (captured.isNotEmpty()) {
                 item { SectionHeading("Met this day", MaterialTheme.colorScheme.onSurfaceVariant) }
                 items(captured, key = { "met-${it.id}" }) { contact ->
-                    DayRow(contact, isDue = false, onOpenContact = onOpenContact)
+                    DayRow(contact, mark = null, onOpenContact = onOpenContact)
                 }
             }
         }
@@ -339,7 +418,7 @@ private fun SectionHeading(text: String, colour: Color) {
 }
 
 @Composable
-private fun DayRow(contact: Contact, isDue: Boolean, onOpenContact: (Contact) -> Unit) {
+private fun DayRow(contact: Contact, mark: Color?, onOpenContact: (Contact) -> Unit) {
     Surface(
         color = MaterialTheme.colorScheme.surface,
         shape = RoundedCornerShape(12.dp),
@@ -383,13 +462,13 @@ private fun DayRow(contact: Contact, isDue: Boolean, onOpenContact: (Contact) ->
                     modifier = Modifier.padding(start = 8.dp),
                 )
             }
-            if (isDue) {
+            if (mark != null) {
                 Box(
                     Modifier
                         .padding(start = 10.dp)
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.error),
+                        .background(mark),
                 )
             }
         }

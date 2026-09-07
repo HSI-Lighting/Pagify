@@ -144,7 +144,13 @@ class ContactsMigrationTest {
 
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val database = Room.databaseBuilder(context, ContactsDatabase::class.java, name)
-            .addMigrations(ContactsDatabase.MIGRATION_1_2)
+            // **Both migrations, because a version 1 database has to reach 3.**
+            // Registering only the first fails with "A migration from 1 to 3
+            // was required but not found" -- which is this test earning its
+            // place: somebody who added version 3 and forgot the path from 1
+            // would have shipped an app that refuses to open for every user
+            // who had not updated in between.
+            .addMigrations(ContactsDatabase.MIGRATION_1_2, ContactsDatabase.MIGRATION_2_3)
             .build()
 
         try {
@@ -164,8 +170,11 @@ class ContactsMigrationTest {
             // would fail to read at all.
             assertEquals(DealStage.New.stored, contact.stage)
             assertFalse(contact.met)
-            assertNull(contact.reminderAt)
-            assertNull(contact.reminderDoneAt)
+            assertNull(contact.followUpAt)
+            assertNull(contact.followUpDoneAt)
+            // Added by version 3, and null for a row that predates it.
+            assertNull(contact.meetingAt)
+            assertNull(contact.meetingDoneAt)
         } finally {
             database.close()
             context.deleteDatabase(name)

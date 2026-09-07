@@ -53,8 +53,8 @@ class ReminderQueriesTest {
                 id = id,
                 name = name,
                 capturedAt = now,
-                reminderAt = reminderAt,
-                reminderDoneAt = doneAt,
+                followUpAt = reminderAt,
+                followUpDoneAt = doneAt,
             ).toRow(),
         )
     }
@@ -102,7 +102,7 @@ class ReminderQueriesTest {
         save(3, "Next week", reminderAt = now + 168 * hour)
         save(4, "Already passed", reminderAt = now - hour)
 
-        assertEquals("Tomorrow", database.contacts().nextReminder(now)?.name)
+        assertEquals(now + 24 * hour, database.contacts().nextReminderAt(now))
     }
 
     /** A finished reminder never takes the alarm, however soon it is. */
@@ -111,23 +111,60 @@ class ReminderQueriesTest {
         save(1, "Soon but finished", reminderAt = now + hour, doneAt = now)
         save(2, "Later and open", reminderAt = now + 48 * hour)
 
-        assertEquals("Later and open", database.contacts().nextReminder(now)?.name)
+        assertEquals(now + 48 * hour, database.contacts().nextReminderAt(now))
     }
 
     /** Nothing ahead means no alarm, so the pending one is cancelled. */
     @Test
     fun nothing_ahead_means_nothing_to_schedule() = runBlocking {
         save(1, "Passed", reminderAt = now - hour)
-        assertNull(database.contacts().nextReminder(now))
+        assertNull(database.contacts().nextReminderAt(now))
     }
 
     /** The model's own test of the same thing, without a database. */
     @Test
     fun the_contact_agrees_about_what_is_due() {
-        assertTrue(Contact(id = 1, reminderAt = now - hour).reminderIsDue(now))
-        assertFalse(Contact(id = 1, reminderAt = now + hour).reminderIsDue(now))
-        assertFalse(Contact(id = 1, reminderAt = now - hour, reminderDoneAt = now).reminderIsDue(now))
-        assertFalse(Contact(id = 1, reminderAt = null).reminderIsDue(now))
+        assertTrue(Contact(id = 1, followUpAt = now - hour).followUpIsDue(now))
+        assertFalse(Contact(id = 1, followUpAt = now + hour).followUpIsDue(now))
+        assertFalse(Contact(id = 1, followUpAt = now - hour, followUpDoneAt = now).followUpIsDue(now))
+        assertFalse(Contact(id = 1, followUpAt = null).followUpIsDue(now))
+    }
+
+    /**
+     * A meeting and a follow-up are separate, and both reach the alarm.
+     *
+     * The whole reason for two columns: setting one must not clear the other,
+     * and whichever is sooner is the one the single alarm goes to.
+     */
+    @Test
+    fun a_meeting_and_a_follow_up_live_side_by_side() = runBlocking {
+        database.contacts().save(
+            Contact(
+                id = 5,
+                name = "Both",
+                meetingAt = now + 2 * hour,
+                followUpAt = now + 100 * hour,
+            ).toRow(),
+        )
+
+        val back = database.contacts().contactsById(listOf(5)).single()
+        assertEquals(now + 2 * hour, back.meetingAt)
+        assertEquals(now + 100 * hour, back.followUpAt)
+
+        // The sooner of the two takes the alarm, whichever kind it is.
+        assertEquals(now + 2 * hour, database.contacts().nextReminderAt(now))
+    }
+
+    /** A due meeting shows up in the same sweep as a due follow-up. */
+    @Test
+    fun a_due_meeting_is_found_too() = runBlocking {
+        database.contacts().save(
+            Contact(id = 6, name = "Meeting only", meetingAt = now - hour).toRow(),
+        )
+        save(7, "Follow-up only", reminderAt = now - 2 * hour)
+
+        val due = database.contacts().dueReminders(now).map { it.name }
+        assertEquals(setOf("Meeting only", "Follow-up only"), due.toSet())
     }
 
     /** Stage and met survive a round trip through the database. */

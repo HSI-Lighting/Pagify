@@ -43,10 +43,12 @@ data class Contact(
     val stage: DealStage = DealStage.New,
     /** Met face to face, as opposed to a card handed on or picked up. */
     val met: Boolean = false,
-    /** When to be reminded about them, if ever. */
-    val reminderAt: Long? = null,
-    /** When that reminder was dealt with, after which it is no longer due. */
-    val reminderDoneAt: Long? = null,
+    /** When to chase them, if ever. */
+    val followUpAt: Long? = null,
+    val followUpDoneAt: Long? = null,
+    /** When you have arranged to see them. */
+    val meetingAt: Long? = null,
+    val meetingDoneAt: Long? = null,
 ) {
 
     /**
@@ -56,8 +58,16 @@ data class Contact(
      * one has to be recomputed every time the clock passes it and there is no
      * moment to do that in.
      */
-    fun reminderIsDue(now: Long = System.currentTimeMillis()): Boolean =
-        reminderAt != null && reminderAt <= now && reminderDoneAt == null
+    fun followUpIsDue(now: Long = System.currentTimeMillis()): Boolean =
+        followUpAt != null && followUpAt <= now && followUpDoneAt == null
+
+    /** The same, for a meeting that has come round. */
+    fun meetingIsDue(now: Long = System.currentTimeMillis()): Boolean =
+        meetingAt != null && meetingAt <= now && meetingDoneAt == null
+
+    /** Either kind, for the calendar mark and the list badge. */
+    fun anythingIsDue(now: Long = System.currentTimeMillis()): Boolean =
+        followUpIsDue(now) || meetingIsDue(now)
     /** What the list shows when there is no name — a shop or a hotline has none. */
     val displayName: String
         get() = name.ifBlank { company }.ifBlank { "Untitled contact" }

@@ -28,6 +28,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -75,6 +76,8 @@ fun LibraryScreen(
     documents: List<RecentDocument>,
     onOpen: (RecentDocument) -> Unit,
     onForget: (RecentDocument) -> Unit,
+    /** Hand the file to another app — mail, chat, a drive. */
+    onShare: (RecentDocument) -> Unit,
     onPickDocument: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -133,6 +136,7 @@ fun LibraryScreen(
                             document = document,
                             onOpen = { onOpen(document) },
                             onForget = { onForget(document) },
+                            onShare = { onShare(document) },
                         )
                     }
                 }
@@ -211,6 +215,7 @@ private fun DocumentRow(
     document: RecentDocument,
     onOpen: () -> Unit,
     onForget: () -> Unit,
+    onShare: () -> Unit,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
 
@@ -272,6 +277,14 @@ private fun DocumentRow(
             }
 
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                DropdownMenuItem(
+                    text = { Text("Share") },
+                    leadingIcon = { Icon(Icons.Filled.Share, contentDescription = null) },
+                    onClick = {
+                        menuOpen = false
+                        onShare()
+                    },
+                )
                 DropdownMenuItem(
                     text = { Text("Remove from library") },
                     onClick = {

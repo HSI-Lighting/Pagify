@@ -29,6 +29,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.CalendarMonth
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -274,6 +275,7 @@ fun ContactsScreen(
                     onExportGroup = { openGroup?.let(onExportGroup) },
                     onRenameGroup = { renaming = openGroup },
                     onDeleteGroup = { confirmingDelete = openGroup },
+                    onCalendar = { showingCalendar = true },
                 )
             }
 
@@ -609,6 +611,7 @@ private fun Header(
     onExportGroup: () -> Unit,
     onRenameGroup: () -> Unit,
     onDeleteGroup: () -> Unit,
+    onCalendar: () -> Unit,
 ) {
     var confirmingDelete by remember { mutableStateOf(false) }
 
@@ -632,6 +635,14 @@ private fun Header(
                 .weight(1f)
                 .padding(start = if (group == null) 12.dp else 0.dp),
         )
+        if (group == null) {
+            // The swipe is quicker once it is known, and invisible until then.
+            // A gesture with no button beside it is a feature only its author
+            // can find.
+            IconButton(onClick = onCalendar) {
+                Icon(Icons.Filled.CalendarMonth, contentDescription = "Calendar")
+            }
+        }
         if (group != null) {
             IconButton(onClick = onRenameGroup) {
                 Icon(Icons.Filled.Edit, contentDescription = "Rename this group")
