@@ -27,6 +27,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -96,10 +97,20 @@ fun ProgressSheet(
                 Label("Stage")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     DealStage.entries.forEach { option ->
+                        // The picked chip wears the colour its badge wears in
+                        // the calendar. This is the only screen where a stage is
+                        // chosen, so it is the only place the scheme can be
+                        // learnt — six colours that appear fully formed in a
+                        // list and nowhere else are just six colours.
+                        val palette = stagePalette(option)
                         FilterChip(
                             selected = stage == option,
                             onClick = { stage = option },
                             label = { Text(option.label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = palette.container,
+                                selectedLabelColor = palette.ink,
+                            ),
                         )
                     }
                 }

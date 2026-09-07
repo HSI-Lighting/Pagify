@@ -88,11 +88,16 @@ fun CalendarScreen(
             .groupBy { startOfDay(it.followUpAt!!) }
     }
 
-    // The way in was a swipe, so the way out is one too. Left-to-right, the
-    // mirror of what opened this — a gesture that only works one way teaches
-    // people not to trust it. Same threshold and same rule as the contacts
-    // list: twice as far across as down before it claims the pointer, so the
-    // month grid and the day list still scroll.
+    // The way in was a swipe, so the way out is one too — either way
+    // across. This only took left-to-right, which is the gesture that
+    // opened the calendar rather than its mirror: dragging back the way
+    // you came, the one people reach for first, did nothing at all. The
+    // months are buttons and the day list scrolls down, so no horizontal
+    // drag here means anything else and neither has to be guessed at.
+    //
+    // Same threshold and same rule as the contacts list: twice as far
+    // across as down before it claims the pointer, so the month grid and
+    // the day list still scroll.
     val swipeBack = with(LocalDensity.current) { 72.dp.toPx() }
     Column(
         modifier
@@ -107,7 +112,7 @@ fun CalendarScreen(
                         val event = awaitPointerEvent()
                         val change = event.changes.firstOrNull { it.id == down.id } ?: break
                         if (change.changedToUp()) {
-                            if (decided && across > swipeBack) onBack()
+                            if (decided && kotlin.math.abs(across) > swipeBack) onBack()
                             break
                         }
                         val delta = change.position - change.previousPosition
@@ -440,13 +445,14 @@ private fun DayRow(contact: Contact, mark: Color?, onOpenContact: (Contact) -> U
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                val beneath = listOfNotNull(
-                    contact.company.takeIf { it.isNotBlank() },
-                    contact.stage.label.takeIf { contact.stage != com.hsilighting.pagify.data.db.DealStage.New },
-                ).joinToString(" · ")
-                if (beneath.isNotBlank()) {
+                // The stage used to be tacked onto the end of this line after a
+                // dot, in the same grey as the company — a word you had to read
+                // to find, on every row, one row at a time. It is a badge now,
+                // and this line is back to being what the line under a name is
+                // for: where they work.
+                if (contact.company.isNotBlank()) {
                     Text(
-                        text = beneath,
+                        text = contact.company,
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
@@ -454,6 +460,7 @@ private fun DayRow(contact: Contact, mark: Color?, onOpenContact: (Contact) -> U
                     )
                 }
             }
+            StageBadge(contact.stage, Modifier.padding(start = 8.dp))
             if (contact.met) {
                 Text(
                     text = "Met",
