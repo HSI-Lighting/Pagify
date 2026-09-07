@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.stateIn
 import com.hsilighting.pagify.data.ContactStore
 import com.hsilighting.pagify.core.contactFromCardJson
 import com.hsilighting.pagify.core.Contact
+import com.hsilighting.pagify.core.Reminders
 import com.hsilighting.pagify.core.ContactGroup
 import com.hsilighting.pagify.core.CARD_TEXT_MAX
 import com.hsilighting.pagify.core.CARD_TEXT_MIN
@@ -2104,6 +2105,14 @@ frame = pending.frame,
     fun updateContact(contact: Contact) {
         viewModelScope.launch {
             contactStore.save(contact)
+            // **After the save, not before.** The alarm is set from what is in
+            // the database, so scheduling first would read the reminder the
+            // user has just replaced.
+            //
+            // `notify = false`: this is a save. A reminder set for this morning
+            // is already due, and posting a notification the instant somebody
+            // sets one is not a reminder, it is an echo.
+            Reminders.reschedule(getApplication(), notify = false)
             SessionRecorder.record("CONTACT_EDIT", "name=${contact.displayName}")
             _state.update { it.copy(message = "Saved ${contact.displayName}.") }
         }

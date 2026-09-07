@@ -8,6 +8,13 @@
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
+    <!-- Reminders. POST_NOTIFICATIONS is requested at the moment a reminder is
+         first set rather than on launch, so it arrives with a reason attached;
+         RECEIVE_BOOT_COMPLETED is what lets a reminder survive a restart, and
+         without it they stop silently at the first reboot. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:name=".PagifyApplication"
         android:allowBackup="true"
@@ -57,6 +64,18 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/capture_paths" />
         </provider>
+
+        <!-- The alarm going off, and the phone coming back on. Not exported:
+             nothing outside the app has any business firing these. -->
+        <receiver
+            android:name=".core.ReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.hsilighting.pagify.REMINDER" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

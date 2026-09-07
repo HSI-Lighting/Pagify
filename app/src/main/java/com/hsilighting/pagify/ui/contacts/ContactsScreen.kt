@@ -6,6 +6,13 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.AwaitPointerEventScope
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -46,6 +53,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -132,6 +140,11 @@ fun ContactsScreen(
     var pickedContacts by remember { mutableStateOf(emptySet<Long>()) }
     var pickedGroups by remember { mutableStateOf(emptySet<Long>()) }
     var confirmingBulk by remember { mutableStateOf(false) }
+    var showingCalendar by rememberSaveable { mutableStateOf(false) }
+    var progressing by remember { mutableStateOf<Contact?>(null) }
+
+    // How far across counts as a swipe rather than a wobble, in pixels.
+    val swipeThreshold = with(LocalDensity.current) { 72.dp.toPx() }
     val picking = pickedContacts.isNotEmpty() || pickedGroups.isNotEmpty()
     val clearPicked = { pickedContacts = emptySet(); pickedGroups = emptySet() }
 
@@ -170,7 +183,75 @@ fun ContactsScreen(
         else pool.filter { it.searchable.contains(query.trim().lowercase()) }
     }
 
-    Box(modifier.fillMaxSize()) {
+    // **The calendar is a view of this screen, not a tab of its own.**
+    //
+    // Adding a fourth tab would say the calendar is a separate place with
+    // separate contents. It is the same contacts read by date, so it is reached
+    // from here and comes back here — and the back button returns rather than
+    // leaving the app, which a tab would not.
+    if (showingCalendar) {
+        // The system back leaves the calendar rather than the app. A view
+        // reached by a gesture still has to be leavable by the button.
+        BackHandler { if (open != null) open = null else showingCalendar = false }
+        CalendarScreen(
+            contacts = contacts,
+            onOpenContact = { open = it },
+            onBack = { showingCalendar = false },
+            modifier = modifier,
+        )
+        open?.let { contact ->
+            ProgressSheet(
+                contact = contact,
+                onSave = { onSaveEdit(it); open = null },
+                onDismiss = { open = null },
+            )
+        }
+        return
+    }
+
+    Box(
+        modifier
+            .fillMaxSize()
+            // **Swipes, and only when there is nothing else they could mean.**
+            //
+            // Disabled while picking, because a long-press selection is already
+            // a modal state and a stray horizontal drag out of it would be a
+            // surprise. `awaitEachGesture` with a drag threshold rather than
+            // `detectHorizontalDragGestures`, so a vertical scroll of the list
+            // is never stolen: the gesture only claims the pointer once it has
+            // moved further across than down.
+            .pointerInput(picking, openGroup?.id) {
+                if (picking) return@pointerInput
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    var travelled = 0f
+                    var vertical = 0f
+                    var decided = false
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                        if (change.changedToUp()) {
+                            if (decided && kotlin.math.abs(travelled) > swipeThreshold) {
+                                if (travelled > 0) showingCalendar = true
+                                else onScanFromCamera(openGroup?.id)
+                            }
+                            break
+                        }
+                        val delta = change.position - change.previousPosition
+                        travelled += delta.x
+                        vertical += delta.y
+                        // Horizontal intent, decided once: twice as far across
+                        // as down, and past the slop the list itself uses.
+                        if (!decided && kotlin.math.abs(travelled) > 24f &&
+                            kotlin.math.abs(travelled) > kotlin.math.abs(vertical) * 2f
+                        ) {
+                            decided = true
+                        }
+                        if (decided) change.consume()
+                    }
+                }
+            },
+    ) {
         Column(Modifier.fillMaxSize()) {
             if (picking) {
                 SelectionHeader(
@@ -464,6 +545,7 @@ fun ContactsScreen(
             contact = contact,
             groups = groups.filter { memberships[contact.id].orEmpty().contains(it.id) },
             onEdit = { editing = contact; open = null },
+            onProgress = { progressing = contact; open = null },
             onExport = { open = null; onExport(contact) },
             onDelete = { open = null; onDelete(contact) },
             onRemoveFromGroup = { onRemoveFromGroup(contact, it) },
@@ -474,6 +556,14 @@ fun ContactsScreen(
 
     // Filing a contact that already exists — the direction that was missing, so a
     // contact scanned before any group existed could never be put in one.
+    progressing?.let { contact ->
+        ProgressSheet(
+            contact = contact,
+            onSave = { onSaveEdit(it); progressing = null },
+            onDismiss = { progressing = null },
+        )
+    }
+
     addingToGroup?.let { contact ->
         val alreadyIn = memberships[contact.id].orEmpty()
         val available = groups.filterNot { it.id in alreadyIn }
@@ -764,6 +854,7 @@ private fun ContactSheet(
     contact: Contact,
     groups: List<ContactGroup>,
     onEdit: () -> Unit,
+    onProgress: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
     onRemoveFromGroup: (Long) -> Unit,
@@ -895,7 +986,12 @@ private fun ContactSheet(
                 Text("Export", Modifier.padding(start = 8.dp))
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onProgress) { Text("Progress") }
+                TextButton(onClick = onDismiss) { Text("Close") }
+            }
+        },
     )
 
     if (confirmingDelete) {
