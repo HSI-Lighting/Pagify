@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -274,6 +275,26 @@ private fun DocumentRow(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+            }
+
+            // **On the row, not behind a long press.** A gesture is the fastest
+            // way to reach something you already know is there and the worst way
+            // to find out it exists at all. Sharing a document is not an expert
+            // action, so it gets an icon; the long press still works for anyone
+            // who learned it.
+            IconButton(onClick = onShare) {
+                Icon(
+                    Icons.Filled.Share,
+                    contentDescription = "Share ${document.name}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            IconButton(onClick = { menuOpen = true }) {
+                Icon(
+                    Icons.Filled.MoreVert,
+                    contentDescription = "More for ${document.name}",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
