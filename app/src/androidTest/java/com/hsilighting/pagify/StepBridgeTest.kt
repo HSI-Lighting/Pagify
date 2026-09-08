@@ -2,6 +2,7 @@ package com.hsilighting.pagify
 
 import android.graphics.Bitmap
 import androidx.test.platform.app.InstrumentationRegistry
+import com.hsilighting.pagify.core.DrawingBridge
 import com.hsilighting.pagify.core.StepBridge
 import com.hsilighting.pagify.ui.model.captureSize
 import java.io.File
@@ -535,5 +536,199 @@ class OrbitAxesTest {
         val vertical = pixels().toList()
 
         assertNotEquals("both axes produced the same view", sideways, vertical)
+    }
+}
+
+/**
+ * The drawing bridge, on the phone, through the real JNI.
+ *
+ * The engine's readers are tested in Rust against real files. What that cannot
+ * reach is this boundary — whether the symbols resolve, whether a bitmap
+ * Android locked comes back filled the way the stroker thinks it did, and
+ * whether a handle is released when the screen closes.
+ *
+ * The drawing is written out here rather than shipped: customer CAD is the
+ * confidential part, and a square and a circle are enough to prove pixels
+ * arrive.
+ */
+class DrawingBridgeTest {
+
+    private var handle = DrawingBridge.NO_DRAWING
+    private lateinit var file: File
+
+    /** The smallest DXF that draws: two entities on one layer. */
+    private val aSquareAndACircle = """
+        0
+        SECTION
+        2
+        HEADER
+        9
+        ${'$'}INSUNITS
+        70
+        4
+        0
+        ENDSEC
+        0
+        SECTION
+        2
+        ENTITIES
+        0
+        LINE
+        8
+        WALLS
+        10
+        0.0
+        20
+        0.0
+        11
+        100.0
+        21
+        0.0
+        0
+        LINE
+        8
+        WALLS
+        10
+        100.0
+        20
+        0.0
+        11
+        100.0
+        21
+        100.0
+        0
+        CIRCLE
+        8
+        WALLS
+        10
+        50.0
+        20
+        50.0
+        40
+        40.0
+        0
+        ENDSEC
+        0
+        EOF
+    """.trimIndent()
+
+    private fun open(): Long {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        file = File(context.cacheDir, "bridge-test.dxf").apply { writeText(aSquareAndACircle) }
+        handle = DrawingBridge.openDrawing(file.absolutePath)
+        return handle
+    }
+
+    private fun drawn(handle: Long, width: Int = 128, height: Int = 96): Bitmap {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        assertTrue("the drawing would not draw", DrawingBridge.renderDrawingInto(handle, bitmap))
+        return bitmap
+    }
+
+    private fun pixelsOf(bitmap: Bitmap): IntArray {
+        val pixels = IntArray(bitmap.width * bitmap.height)
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+        return pixels
+    }
+
+    @After
+    fun release() {
+        if (handle != DrawingBridge.NO_DRAWING) {
+            DrawingBridge.closeDrawing(handle)
+            handle = DrawingBridge.NO_DRAWING
+        }
+        if (::file.isInitialized) file.delete()
+    }
+
+    @Test
+    fun a_drawing_opens_and_gets_a_handle() {
+        assertNotEquals(DrawingBridge.NO_DRAWING, open())
+    }
+
+    /**
+     * Pixels arrive, and reach the last row.
+     *
+     * A bitmap of an odd width is the shape Android actually pads, and a
+     * sheared picture is still full of pixels — so the last row is checked as
+     * well as the first.
+     */
+    @Test
+    fun the_drawing_is_drawn_into_the_bitmap() {
+        val handle = open()
+        DrawingBridge.fitDrawing(handle, 129, 96)
+        val bitmap = drawn(handle, width = 129)
+        val pixels = pixelsOf(bitmap)
+
+        assertTrue("nothing was written at all", pixels.any { it != 0 })
+        assertTrue("one flat colour, so nothing was stroked", pixels.toSet().size > 1)
+    }
+
+    /** The summary crosses the boundary as usable JSON. */
+    @Test
+    fun the_summary_comes_back_as_json() {
+        val handle = open()
+        DrawingBridge.fitDrawing(handle, 128, 96)
+        val summary = org.json.JSONObject(DrawingBridge.drawingSummaryJson(handle))
+
+        assertEquals(3, summary.getInt("shapes"))
+        // Millimetres, declared by the header rather than assumed.
+        assertEquals(0.001, summary.getDouble("metresPerUnit"), 1e-9)
+        assertTrue(summary.getBoolean("unitsDeclared"))
+    }
+
+    /** And the layers do too, with the one the entities named. */
+    @Test
+    fun the_layers_come_back_as_json() {
+        val layers = org.json.JSONArray(DrawingBridge.drawingLayersJson(open()))
+
+        val names = (0 until layers.length()).map { layers.getJSONObject(it).getString("name") }
+        assertTrue(names.toString(), names.contains("WALLS"))
+    }
+
+    /**
+     * Turning a layer off actually stops it being drawn.
+     *
+     * The one thing a layer panel exists to do, and the one that would fail
+     * silently: the checkbox would move and the sheet would not change.
+     */
+    @Test
+    fun a_layer_turned_off_is_not_drawn() {
+        val handle = open()
+        DrawingBridge.fitDrawing(handle, 128, 96)
+        val before = pixelsOf(drawn(handle)).toSet().size
+
+        assertTrue(DrawingBridge.showDrawingLayer(handle, 0, false))
+        val after = pixelsOf(drawn(handle)).toSet().size
+
+        assertTrue("$before colours became $after", after < before)
+    }
+
+    /** Zooming changes the picture. */
+    @Test
+    fun zooming_changes_what_is_drawn() {
+        val handle = open()
+        DrawingBridge.fitDrawing(handle, 128, 96)
+        val before = pixelsOf(drawn(handle))
+
+        assertTrue(DrawingBridge.zoomDrawing(handle, 3f))
+        assertNotEquals(before.toList(), pixelsOf(drawn(handle)).toList())
+    }
+
+    /**
+     * Closing releases it.
+     *
+     * A plan expanded to a few hundred thousand shapes is native memory no
+     * garbage collector will reclaim.
+     */
+    @Test
+    fun closing_a_drawing_releases_it() {
+        val before = DrawingBridge.openDrawingCount()
+        val opened = open()
+        assertEquals(before + 1, DrawingBridge.openDrawingCount())
+
+        assertTrue(DrawingBridge.closeDrawing(opened))
+        handle = DrawingBridge.NO_DRAWING
+
+        assertEquals(before, DrawingBridge.openDrawingCount())
     }
 }

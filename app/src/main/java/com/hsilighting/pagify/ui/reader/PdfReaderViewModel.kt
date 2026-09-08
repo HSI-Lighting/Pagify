@@ -512,7 +512,14 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
      * separate list of models would be one more place to remember to look. The
      * entry carries its kind, so the library knows which screen reopens it.
      */
-    fun rememberModel(uri: String, name: String, sizeBytes: Long) {
+    fun rememberModel(uri: String, name: String, sizeBytes: Long) =
+        rememberOpened(uri, name, sizeBytes, RecentKind.Model)
+
+    /** And a DXF or DWG drawing, in the same list. */
+    fun rememberDrawing(uri: String, name: String, sizeBytes: Long) =
+        rememberOpened(uri, name, sizeBytes, RecentKind.Drawing)
+
+    private fun rememberOpened(uri: String, name: String, sizeBytes: Long, kind: RecentKind) {
         viewModelScope.launch {
             recentDocuments.remember(
                 RecentDocument(
@@ -523,7 +530,7 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
                     // what it is rather than showing a count of nothing.
                     pageCount = 0,
                     openedAtMillis = System.currentTimeMillis(),
-                    kind = RecentKind.Model,
+                    kind = kind,
                 ),
             )
         }

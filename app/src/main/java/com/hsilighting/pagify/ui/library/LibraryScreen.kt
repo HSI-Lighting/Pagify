@@ -22,6 +22,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Architecture
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.ViewInAr
@@ -85,9 +86,12 @@ fun LibraryScreen(
     onPickDocument: () -> Unit,
     /** Open a 3D model. Pagify 3D only. */
     onOpenModel: () -> Unit,
+    /** Open a DXF or DWG drawing. Pagify 3D only. */
+    onOpenDrawing: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
+    var adding by remember { mutableStateOf(false) }
     val search = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val shown = remember(documents, query) { searchRecents(documents, query) }
@@ -157,18 +161,30 @@ fun LibraryScreen(
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // **Pagify 3D only.** On this branch the app is a separate package
-            // with its own name and icon, so a second way in belongs on the
-            // screen rather than behind a setting.
-            ExtendedFloatingActionButton(
-                onClick = onOpenModel,
-                icon = { Icon(Icons.Filled.ViewInAr, contentDescription = null) },
-                text = { Text("Open a 3D model") },
-                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-            )
-            FloatingActionButton(onClick = onPickDocument) {
-                Icon(Icons.Filled.Add, contentDescription = "Add a document")
+            // **One button, three things to open.** There are three kinds of
+            // file now, arriving through three different pickers, and a stack
+            // of buttons down the corner of the library is a menu that takes
+            // up the screen whether or not anybody wants it. The plus stays
+            // exactly where it has always been and asks what kind — which is
+            // the one question it can usefully ask.
+            Box {
+                FloatingActionButton(onClick = { adding = true }) {
+                    Icon(Icons.Filled.Add, contentDescription = "Open a file")
+                }
+                DropdownMenu(expanded = adding, onDismissRequest = { adding = false }) {
+                    OpenChoice("Open a PDF", Icons.Filled.Description) {
+                        adding = false
+                        onPickDocument()
+                    }
+                    OpenChoice("Open a 3D model", Icons.Filled.ViewInAr) {
+                        adding = false
+                        onOpenModel()
+                    }
+                    OpenChoice("Open a DXF or DWG", Icons.Filled.Architecture) {
+                        adding = false
+                        onOpenDrawing()
+                    }
+                }
             }
         }
     }
@@ -267,10 +283,10 @@ private fun DocumentRow(
             ) {
                 Icon(
                     // Told apart at a glance, in a list that holds both.
-                    if (document.kind == RecentKind.Model) {
-                        Icons.Filled.ViewInAr
-                    } else {
-                        Icons.Filled.Description
+                    when (document.kind) {
+                        RecentKind.Model -> Icons.Filled.ViewInAr
+                        RecentKind.Drawing -> Icons.Filled.Architecture
+                        RecentKind.Document -> Icons.Filled.Description
                     },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -378,3 +394,24 @@ private fun NothingMatched(query: String) {
 /** The mark in the header, matching the size of a toolbar icon and its label. */
 private val LOGO_SIZE = 34.dp
 
+
+/**
+ * One line of the plus button's menu.
+ *
+ * Named by what the reader has in their hand — "a PDF", "a 3D model", "a DXF
+ * or DWG" — rather than by what the app calls its screens. Somebody looking
+ * for the drawing their supplier sent is thinking about the file, not about
+ * which viewer will open it.
+ */
+@Composable
+private fun OpenChoice(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    onClick: () -> Unit,
+) {
+    DropdownMenuItem(
+        text = { Text(label) },
+        leadingIcon = { Icon(icon, contentDescription = null) },
+        onClick = onClick,
+    )
+}

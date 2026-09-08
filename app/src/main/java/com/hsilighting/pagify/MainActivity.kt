@@ -17,6 +17,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
+import com.hsilighting.pagify.ui.drawing.DrawingViewer
+import com.hsilighting.pagify.ui.drawing.DrawingViewerState
 import com.hsilighting.pagify.ui.model.ModelViewer
 import com.hsilighting.pagify.ui.model.ModelViewerState
 import androidx.compose.runtime.getValue
@@ -131,6 +133,41 @@ class MainActivity : ComponentActivity() {
                             // the reader follows: a file that failed is not
                             // something to offer again as if it worked.
                             viewModel.rememberModel(
+                                uri = uri.toString(),
+                                name = nameOf(uri),
+                                sizeBytes = sizeOf(uri),
+                            )
+                        }
+                    }
+                }
+
+                var drawingState by remember { mutableStateOf<DrawingViewerState?>(null) }
+
+                /**
+                 * Open a drawing, from the picker or from the library.
+                 *
+                 * **The name has to survive the copy.** The engine chooses its
+                 * reader by extension, and the cache copy keeps the picked
+                 * file's name, so a `.dwg` stays a `.dwg` — a copy written
+                 * under a generic name would arrive as a DXF and fail on the
+                 * first byte.
+                 */
+                val showDrawing: (Uri) -> Boolean = { uri ->
+                    val copied = copyForReading(uri)
+                    if (copied != null) {
+                        drawingState = DrawingViewerState(copied.name, modelScope)
+                            .also { it.open(copied.absolutePath) }
+                    }
+                    copied != null
+                }
+
+                val drawingPicker = rememberLauncherForActivityResult(
+                    OpenReadableDocument(),
+                ) { uri ->
+                    if (uri != null) {
+                        keepReadAccessTo(uri)
+                        if (showDrawing(uri)) {
+                            viewModel.rememberDrawing(
                                 uri = uri.toString(),
                                 name = nameOf(uri),
                                 sizeBytes = sizeOf(uri),
@@ -362,6 +399,18 @@ class MainActivity : ComponentActivity() {
                     return@PagifyTheme
                 }
 
+                // A drawing takes the screen the same way, and back releases it
+                // for the same reason: a plan expanded to a few hundred
+                // thousand shapes is native memory nothing else will reclaim.
+                drawingState?.let { drawing ->
+                    BackHandler { drawing.close(); drawingState = null }
+                    DrawingViewer(
+                        state = drawing,
+                        onBack = { drawing.close(); drawingState = null },
+                    )
+                    return@PagifyTheme
+                }
+
                 PagifyApp(
                     state = state,
                     recents = recents,
@@ -372,6 +421,7 @@ class MainActivity : ComponentActivity() {
                         // part "drawing.stp" should still get the 3D viewer.
                         when (recent.kind) {
                             RecentKind.Model -> showModel(recent.uri.toUri())
+                            RecentKind.Drawing -> showDrawing(recent.uri.toUri())
                             RecentKind.Document -> viewModel.open(recent.uri.toUri())
                         }
                     },
@@ -379,6 +429,7 @@ class MainActivity : ComponentActivity() {
                     onShareRecent = ::shareDocument,
                     onPickDocument = { viewModel.showNewDocumentChooser(true) },
                     onOpenModel = { modelPicker.launch(arrayOf("*/*")) },
+                    onOpenDrawing = { drawingPicker.launch(arrayOf("*/*")) },
                     onClearLibrary = viewModel::clearLibrary,
                     onShowThumbnails = viewModel::setThumbnails,
                     settings = settings,

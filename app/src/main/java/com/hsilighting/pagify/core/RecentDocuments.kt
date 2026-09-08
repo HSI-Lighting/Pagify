@@ -42,6 +42,7 @@ data class RecentDocument(
 enum class RecentKind(val stored: String) {
     Document("document"),
     Model("model"),
+    Drawing("drawing"),
     ;
 
     companion object {
@@ -178,6 +179,7 @@ fun recentSubtitle(document: RecentDocument): String = listOf(
         // library is that one of them shows no count — which reads as a
         // document that failed to open rather than as a 3D model.
         document.kind == RecentKind.Model -> "3D model"
+        document.kind == RecentKind.Drawing -> "Drawing"
         document.pageCount > 0 ->
             "${document.pageCount} page${if (document.pageCount == 1) "" else "s"}"
         else -> ""

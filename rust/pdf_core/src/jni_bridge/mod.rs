@@ -10,6 +10,7 @@
 
 pub mod android_bitmap;
 pub mod bridge;
+pub mod drawing_bridge;
 pub mod step_bridge;
 
 use jni::objects::JString;
