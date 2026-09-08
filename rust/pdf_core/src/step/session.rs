@@ -201,7 +201,17 @@ impl ModelSession {
             .iter()
             .map(|s| format!(r#"{{"what":{:?},"count":{}}}"#, s.what, s.count))
             .collect();
-        let lost: usize = self.mesh.skipped.iter().map(|s| s.count).sum();
+        // Only what cost a *face*. A hole that could not be cut leaves the face
+        // drawn and solid where it should be pierced — worth saying, but
+        // counting it as a missing face overstates the loss, and the line on
+        // screen is about faces.
+        let lost: usize = self
+            .mesh
+            .skipped
+            .iter()
+            .filter(|s| !s.what.starts_with("holes"))
+            .map(|s| s.count)
+            .sum();
         let (low, high) = self.bounds;
         let c = &self.census;
 

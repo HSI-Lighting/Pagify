@@ -91,6 +91,36 @@ pub fn project(surface: &Surface, point: Point3) -> Option<Point2> {
     }
 }
 
+/// The second coordinate alone, at a point where the first does not exist.
+///
+/// **A pole has no angle, but it does have a height.** A cone's apex sits at a
+/// definite place along the axis; a sphere's pole is at a definite latitude.
+/// Losing that — giving the apex whatever height its neighbour happened to have
+/// — drops it onto the base circle, and a boundary that runs out to the apex
+/// and back becomes a line with no area. It triangulates to nothing and takes
+/// the whole face with it. That is not a rare shape: it is every cone that
+/// comes to a point, in every file.
+///
+/// `None` only where the surface has no second coordinate to give either.
+pub fn v_at(surface: &Surface, point: Point3) -> Option<f64> {
+    match surface {
+        Surface::Plane { frame } => Some(point.minus(frame.origin).dot(frame.second())),
+
+        Surface::Cylinder { frame, .. } | Surface::Cone { frame, .. } => {
+            Some(point.minus(frame.origin).dot(frame.axis))
+        }
+
+        Surface::Sphere { frame, radius } => {
+            let z = point.minus(frame.origin).dot(frame.axis);
+            Some((z / radius.max(1e-12)).clamp(-1.0, 1.0).asin())
+        }
+
+        // On the torus axis there is no tube angle either — such a point is not
+        // on the surface at all, so there is nothing honest to return.
+        Surface::Torus { .. } | Surface::Spline(_) | Surface::Unsupported { .. } => None,
+    }
+}
+
 /// A parameter pair turned back into a point in space.
 pub fn evaluate(surface: &Surface, at: Point2) -> Option<Point3> {
     match surface {
@@ -201,22 +231,30 @@ pub fn u_is_periodic(surface: &Surface) -> bool {
 ///
 /// Points with no `u` at all — a cone's apex, a sphere's pole — take their
 /// neighbour's, which is the one value that keeps the polygon closed and the
-/// triangles at the pole thin rather than twisted.
+/// triangles at the pole thin rather than twisted. **They keep their own `v`.**
+/// A point arriving as `u = NaN` is one of these: [`v_at`] knew its height even
+/// though [`project`] could not give it an angle, and borrowing the
+/// neighbour's height as well would collapse the boundary onto a line.
 pub fn unwrap_seam(points: &mut [Option<Point2>], periodic: bool) {
     // Poles first: a missing u cannot be compared against, so filling has to
     // happen before any jump is measured.
-    let known = points.iter().position(|point| point.is_some());
+    let wants_u = |point: &Option<Point2>| point.map_or(true, |at| !at.u.is_finite());
+    let known = points.iter().position(|point| !wants_u(point));
     let Some(known) = known else { return };
 
     for index in (0..known).rev() {
-        points[index] = points[index].or_else(|| {
-            points[index + 1].map(|next| Point2::new(next.u, points[index].map_or(next.v, |p| p.v)))
-        });
+        if wants_u(&points[index]) {
+            let own_v = points[index].map(|at| at.v);
+            if let Some(next) = points[index + 1] {
+                points[index] = Some(Point2::new(next.u, own_v.unwrap_or(next.v)));
+            }
+        }
     }
     for index in (known + 1)..points.len() {
-        if points[index].is_none() {
+        if wants_u(&points[index]) {
+            let own_v = points[index].map(|at| at.v);
             if let Some(previous) = points[index - 1] {
-                points[index] = Some(Point2::new(previous.u, previous.v));
+                points[index] = Some(Point2::new(previous.u, own_v.unwrap_or(previous.v)));
             }
         }
     }

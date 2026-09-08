@@ -697,14 +697,15 @@ fn surface_of(
             .ok_or("a freeform surface that could not be read")
         }
 
-        raw::SurfaceRef::RationalBSplineSurface(id) => {
-            // The rational form carries weights but *not* its own knots:
-            // in a complex instance those live on the WITH_KNOTS half, and
-            // step-io hands the two out separately. Without them there is
-            // nothing to evaluate against, so this is reported rather than
-            // guessed at with a uniform vector that would bend the surface.
-            let _ = model.rational_b_spline_surface_arena.get(id.0);
-            Err("a rational freeform surface")
+        // **A weighted freeform surface, assembled from its parts.**
+        ///
+        // A rational B-spline is one entity written as several at once: the
+        // degrees and control points on one part, the knots on a second, the
+        // weights on a third. Read singly none of them is a surface, which is
+        // why these were refused -- twenty-four faces of a vane pump, and the
+        // only sign was a count of faces "Pagify 3D does not know".
+        raw::SurfaceRef::Complex(id) => {
+            complex_spline(model, id.0, put).ok_or("a freeform surface that could not be read")
         }
 
         raw::SurfaceRef::BSplineSurface(_) | raw::SurfaceRef::BezierSurface(_) => {
@@ -1341,3 +1342,120 @@ mod where_the_triangles_go {
     }
 }
 
+
+/// A freeform surface written as a complex instance.
+///
+/// One entity wearing several names: `B_SPLINE_SURFACE` carries the degrees and
+/// the control net, `B_SPLINE_SURFACE_WITH_KNOTS` the knot vectors, and
+/// `RATIONAL_B_SPLINE_SURFACE` the weights. None of them is a surface on its
+/// own, which is why a parser that files them separately appears to hold no
+/// freeform surface at all.
+fn complex_spline(model: &raw::StepModel, at: usize, put: &Rigid) -> Option<Surface> {
+    let mut degrees = None;
+    let mut control = None;
+    let mut knots = None;
+    let mut weights = None;
+
+    for part in &model.complex_unit_arena.get(at).parts {
+        match part {
+            raw::UnitPart::BSplineSurface {
+                u_degree,
+                v_degree,
+                control_points_list,
+                ..
+            } => {
+                degrees = Some((u_degree.max(&0), v_degree.max(&0)));
+                control = Some(control_net(model, control_points_list, put));
+            }
+            raw::UnitPart::BSplineSurfaceWithKnots {
+                u_multiplicities,
+                v_multiplicities,
+                u_knots,
+                v_knots,
+                ..
+            } => {
+                knots = Some((
+                    expand_knots(u_knots, u_multiplicities),
+                    expand_knots(v_knots, v_multiplicities),
+                ));
+            }
+            raw::UnitPart::RationalBSplineSurface { weights_data } => {
+                weights = Some(weights_data.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let ((u_degree, v_degree), control, (knots_u, knots_v)) = (degrees?, control?, knots?);
+
+    super::spline::Spline::new(
+        *u_degree as usize,
+        *v_degree as usize,
+        control,
+        knots_u,
+        knots_v,
+        weights,
+    )
+    .map(|spline| Surface::Spline(std::sync::Arc::new(spline)))
+}
+
+#[cfg(test)]
+mod why_a_boundary_cuts_into_nothing {
+    use crate::step::{model::Surface, tessellate};
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn dump_failing_boundaries() {
+        let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
+        let bytes = std::fs::read(&path).expect("readable");
+        let solid = super::read(&bytes).expect("parses");
+        let sag = tessellate::recommended_sag(&solid);
+        let cache = crate::step::curve::EdgeCache::build(&solid.edges, sag);
+
+        for (index, face) in solid.faces.iter().enumerate() {
+            let mut lost = 0usize;
+            let failure = match tessellate::face_triangles_counting(face, &cache, sag, 4096, &mut lost) {
+                Ok(_) => continue,
+                Err(reason) => reason,
+            };
+            let kind = match &face.surface {
+                Surface::Plane { .. } => "plane",
+                Surface::Cylinder { .. } => "cylinder",
+                Surface::Cone { .. } => "cone",
+                Surface::Sphere { .. } => "sphere",
+                Surface::Torus { .. } => "torus",
+                Surface::Spline(_) => "spline",
+                Surface::Unsupported { .. } => "unsupported",
+            };
+            let outer = tessellate::boundary(face, &face.outer, &cache);
+            let shape = match &outer {
+                None => "unreadable".to_string(),
+                Some(points) => {
+                    let (mut lo_u, mut hi_u) = (f64::MAX, f64::MIN);
+                    let (mut lo_v, mut hi_v) = (f64::MAX, f64::MIN);
+                    let mut twice_area = 0.0;
+                    for (at, point) in points.iter().enumerate() {
+                        lo_u = lo_u.min(point.u);
+                        hi_u = hi_u.max(point.u);
+                        lo_v = lo_v.min(point.v);
+                        hi_v = hi_v.max(point.v);
+                        let next = points[(at + 1) % points.len()];
+                        twice_area += point.u * next.v - next.u * point.v;
+                    }
+                    format!(
+                        "{} pts, u {:.6}..{:.6} (span {:.2e}), v {:.6}..{:.6} (span {:.2e}), area {:.3e}",
+                        points.len(),
+                        lo_u, hi_u, hi_u - lo_u,
+                        lo_v, hi_v, hi_v - lo_v,
+                        (twice_area / 2.0).abs(),
+                    )
+                }
+            };
+            println!(
+                "face {index:>4} {kind:<10} edges {:>3} holes {:>2} :: {failure} :: {shape}",
+                face.outer.edges.len(),
+                face.inners.len(),
+            );
+        }
+    }
+}
