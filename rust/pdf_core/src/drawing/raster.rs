@@ -512,8 +512,33 @@ mod picture {
 
         let started = std::time::Instant::now();
         draw(&drawing, &view, &style, &mut sheet);
+        if std::env::var("PAGIFY_DXF_DUPES").is_ok() {
+            let mut seen: std::collections::HashSet<(i64, i64, i64, i64)> = Default::default();
+            let mut lines = 0usize;
+            let mut repeats = 0usize;
+            for entity in &drawing.entities {
+                if let crate::drawing::model::Shape::Line { a, b } = entity.shape {
+                    lines += 1;
+                    let key = |p: crate::drawing::model::Point| {
+                        ((p.x * 1000.0) as i64, (p.y * 1000.0) as i64)
+                    };
+                    let (ka, kb) = (key(a), key(b));
+                    let ordered = if ka <= kb { (ka.0, ka.1, kb.0, kb.1) } else { (kb.0, kb.1, ka.0, ka.1) };
+                    if !seen.insert(ordered) {
+                        repeats += 1;
+                    }
+                }
+            }
+            eprintln!("{lines} lines, {repeats} of them drawn somewhere already");
+        }
+
+        let words = drawing
+            .entities
+            .iter()
+            .filter(|e| matches!(e.shape, crate::drawing::model::Shape::Text { .. }))
+            .count();
         println!(
-            "{} shapes drawn in {:?}, {} pixels per unit",
+            "{} shapes drawn in {:?}, {} pixels per unit, {words} of them text",
             drawing.kept(),
             started.elapsed(),
             view.scale,

@@ -84,14 +84,9 @@ fun LibraryScreen(
     /** Hand the file to another app — mail, chat, a drive. */
     onShare: (RecentDocument) -> Unit,
     onPickDocument: () -> Unit,
-    /** Open a 3D model. Pagify 3D only. */
-    onOpenModel: () -> Unit,
-    /** Open a DXF or DWG drawing. Pagify 3D only. */
-    onOpenDrawing: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
-    var adding by remember { mutableStateOf(false) }
     val search = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
     val shown = remember(documents, query) { searchRecents(documents, query) }
@@ -161,30 +156,13 @@ fun LibraryScreen(
             horizontalAlignment = Alignment.End,
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // **One button, three things to open.** There are three kinds of
-            // file now, arriving through three different pickers, and a stack
-            // of buttons down the corner of the library is a menu that takes
-            // up the screen whether or not anybody wants it. The plus stays
-            // exactly where it has always been and asks what kind — which is
-            // the one question it can usefully ask.
-            Box {
-                FloatingActionButton(onClick = { adding = true }) {
-                    Icon(Icons.Filled.Add, contentDescription = "Open a file")
-                }
-                DropdownMenu(expanded = adding, onDismissRequest = { adding = false }) {
-                    OpenChoice("Open a PDF", Icons.Filled.Description) {
-                        adding = false
-                        onPickDocument()
-                    }
-                    OpenChoice("Open a 3D model", Icons.Filled.ViewInAr) {
-                        adding = false
-                        onOpenModel()
-                    }
-                    OpenChoice("Open a DXF or DWG", Icons.Filled.Architecture) {
-                        adding = false
-                        onOpenDrawing()
-                    }
-                }
+            // **One button, and it asks what kind after it is pressed.** The
+            // chooser behind it already offered blank pages or a file; a
+            // second menu in front of it was a menu to reach a menu. Which
+            // viewer opens the file is worked out from its name, so nobody has
+            // to answer in advance a question the file already answers.
+            FloatingActionButton(onClick = onPickDocument) {
+                Icon(Icons.Filled.Add, contentDescription = "Add a document")
             }
         }
     }
@@ -395,23 +373,3 @@ private fun NothingMatched(query: String) {
 private val LOGO_SIZE = 34.dp
 
 
-/**
- * One line of the plus button's menu.
- *
- * Named by what the reader has in their hand — "a PDF", "a 3D model", "a DXF
- * or DWG" — rather than by what the app calls its screens. Somebody looking
- * for the drawing their supplier sent is thinking about the file, not about
- * which viewer will open it.
- */
-@Composable
-private fun OpenChoice(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    onClick: () -> Unit,
-) {
-    DropdownMenuItem(
-        text = { Text(label) },
-        leadingIcon = { Icon(icon, contentDescription = null) },
-        onClick = onClick,
-    )
-}

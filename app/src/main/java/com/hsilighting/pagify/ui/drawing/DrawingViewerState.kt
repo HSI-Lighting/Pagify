@@ -227,7 +227,7 @@ class DrawingViewerState(
         if (!hasFont) useFont()
         drawing = scope.launch {
             val drawn = withContext(Dispatchers.Default) {
-                runCatching { DrawingBridge.renderDrawingInto(handle, target) }.getOrElse {
+                runCatching { DrawingBridge.renderDrawingInto(handle, target, 1f) }.getOrElse {
                     Log.w(TAG, "the drawing could not be drawn", it)
                     false
                 }
@@ -298,8 +298,12 @@ class DrawingViewerState(
             val drawn = withContext(Dispatchers.Default) {
                 runCatching {
                     val target = modelBitmap(whole.width, whole.height)
-                    if (!DrawingBridge.renderDrawingInto(handle, target)) return@runCatching null
-                    cutOut(target, cut, ring, whole.width.toFloat() / width.toFloat())
+                    val by = whole.width.toFloat() / width.toFloat()
+                    // Told how much bigger this bitmap is, or the sheet shows
+                    // more of the drawing instead of more detail and the cut
+                    // lands on the wrong part of it.
+                    if (!DrawingBridge.renderDrawingInto(handle, target, by)) return@runCatching null
+                    cutOut(target, cut, ring, by)
                 }.getOrElse {
                     Log.w(TAG, "the picture could not be drawn", it)
                     null

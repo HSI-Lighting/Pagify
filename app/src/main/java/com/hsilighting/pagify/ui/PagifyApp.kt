@@ -57,8 +57,6 @@ fun PagifyApp(
     onForgetRecent: (RecentDocument) -> Unit,
     onShareRecent: (RecentDocument) -> Unit,
     onPickDocument: () -> Unit,
-    onOpenModel: () -> Unit,
-    onOpenDrawing: () -> Unit,
     onClearLibrary: () -> Unit,
     onShowThumbnails: (Boolean) -> Unit,
     settings: AppSettings,
@@ -158,8 +156,6 @@ fun PagifyApp(
                     onForget = onForgetRecent,
                     onShare = onShareRecent,
                     onPickDocument = onPickDocument,
-                    onOpenModel = onOpenModel,
-                    onOpenDrawing = onOpenDrawing,
                 )
 
                 HomeTab.Contacts -> ContactsScreen(

@@ -36,7 +36,15 @@ internal object DrawingBridge {
     /** Every layer, with its colour and whether it is drawn. */
     external fun drawingLayersJson(handle: Long): String
 
-    external fun renderDrawingInto(handle: Long, bitmap: Bitmap): Boolean
+    /**
+     * Draw the sheet into a bitmap.
+     *
+     * [by] is how much larger this bitmap is than the one on screen — one for
+     * an ordinary frame, two for a capture. A sheet's scale is pixels per
+     * drawing unit, so without it a larger bitmap shows more of the drawing
+     * instead of the same view in more detail.
+     */
+    external fun renderDrawingInto(handle: Long, bitmap: Bitmap, by: Float): Boolean
 
     /** Both distances are fractions of the view, not pixels. */
     external fun panDrawing(handle: Long, across: Float, down: Float, width: Int, height: Int): Boolean

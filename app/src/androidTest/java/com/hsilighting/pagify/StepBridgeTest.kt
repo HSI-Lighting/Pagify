@@ -621,7 +621,10 @@ class DrawingBridgeTest {
 
     private fun drawn(handle: Long, width: Int = 128, height: Int = 96): Bitmap {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        assertTrue("the drawing would not draw", DrawingBridge.renderDrawingInto(handle, bitmap))
+        assertTrue(
+            "the drawing would not draw",
+            DrawingBridge.renderDrawingInto(handle, bitmap, 1f),
+        )
         return bitmap
     }
 
@@ -715,6 +718,40 @@ class DrawingBridgeTest {
 
         assertTrue(DrawingBridge.zoomDrawing(handle, 3f, 64f, 48f, 128, 96))
         assertNotEquals(before.toList(), pixelsOf(drawn(handle)).toList())
+    }
+
+    /**
+     * **A capture is the same view, larger — not more of the drawing.**
+     *
+     * A sheet's scale is pixels per drawing unit, so a bigger bitmap shows more
+     * of the drawing unless it is told how much bigger it is. Without that, the
+     * region cut out of a capture is not the region anybody drew a box around,
+     * and what comes back looks like a screenshot of the whole view.
+     */
+    @Test
+    fun a_capture_frames_the_sheet_the_way_the_view_does() {
+        val handle = open()
+        DrawingBridge.fitDrawing(handle, 128, 96)
+
+        val view = Bitmap.createBitmap(128, 96, Bitmap.Config.ARGB_8888)
+        val large = Bitmap.createBitmap(256, 192, Bitmap.Config.ARGB_8888)
+        assertTrue(DrawingBridge.renderDrawingInto(handle, view, 1f))
+        assertTrue(DrawingBridge.renderDrawingInto(handle, large, 2f))
+
+        val small = covered(view)
+        val big = covered(large)
+        assertTrue("nothing was drawn: $small, $big", small > 0.001 && big > 0.001)
+        assertTrue(
+            "the sheet covers $small of the view but $big of the capture",
+            kotlin.math.abs(small - big) < 0.02,
+        )
+    }
+
+    /** What fraction of a picture is drawing rather than background. */
+    private fun covered(bitmap: Bitmap): Double {
+        val pixels = pixelsOf(bitmap)
+        val background = pixels[0]
+        return pixels.count { it != background }.toDouble() / pixels.size
     }
 
     /**

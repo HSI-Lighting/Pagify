@@ -205,6 +205,52 @@ class RecentDocumentsTest {
         assertFalse(line, line.contains("page"))
     }
 
+    // ---- which viewer opens what -------------------------------------------
+
+    /**
+     * **The file name decides, and the mistakes are silent ones.**
+     *
+     * Opening a DWG in the PDF reader gives an error about a corrupt
+     * document; opening a PDF in the drawing viewer gives an empty sheet.
+     * Neither says "wrong viewer", which is why this is worth pinning rather
+     * than leaving to a `when` somebody edits later.
+     */
+    @Test
+    fun `the extension decides which viewer opens a file`() {
+        assertEquals(RecentKind.Drawing, kindOfFile("PROPOSED LIGHTING LAYOUT.dwg"))
+        assertEquals(RecentKind.Drawing, kindOfFile("plan.dxf"))
+        assertEquals(RecentKind.Model, kindOfFile("IMPELLER.stp"))
+        assertEquals(RecentKind.Model, kindOfFile("Amplifier_ZK1002T.step"))
+        assertEquals(RecentKind.Document, kindOfFile("Invoice 88.pdf"))
+    }
+
+    /** Whatever case it is written in. */
+    @Test
+    fun `the extension is read whichever case it is in`() {
+        assertEquals(RecentKind.Drawing, kindOfFile("3L MASTER BASE V6.DWG"))
+        assertEquals(RecentKind.Model, kindOfFile("BUTTON NEW - V01.STEP"))
+    }
+
+    /**
+     * A name with dots in it is read from the last one.
+     *
+     * "Villa-MI....dwg" is a real file on this machine, and reading from the
+     * first dot makes it a document.
+     */
+    @Test
+    fun `only the last extension counts`() {
+        assertEquals(RecentKind.Drawing, kindOfFile("Villa-MI....dwg"))
+        assertEquals(RecentKind.Document, kindOfFile("report.dwg.pdf"))
+    }
+
+    /** And anything unrecognised goes to the reader, which explains itself. */
+    @Test
+    fun `an unknown file is offered to the reader`() {
+        assertEquals(RecentKind.Document, kindOfFile("notes"))
+        assertEquals(RecentKind.Document, kindOfFile("archive.zip"))
+        assertEquals(RecentKind.Document, kindOfFile(""))
+    }
+
     /** Both kinds live in one list, newest first, with no duplicates. */
     @Test
     fun `a model and a document share the one library`() {

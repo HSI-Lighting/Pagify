@@ -184,6 +184,9 @@ fn block_definitions<'a>(
                 && !space.starts_with("MODEL_SPACE")
                 && !space.starts_with("PAPER_SPACE")
             {
+                if std::env::var("PAGIFY_DXF_TRACE").is_ok() && held.len() > 200 {
+                    eprintln!("block {upper}: {} parts", held.len());
+                }
                 blocks.insert(upper, held);
             }
             continue;
@@ -307,6 +310,24 @@ fn entities(
                 if let Some(name) = field(&fields, 2) {
                     let put = insert_transform(&fields);
                     expand(&name.to_ascii_uppercase(), put, drawing, blocks, 0);
+                }
+            } else if value == "DIMENSION" {
+                // **A dimension keeps its own picture in a block.** AutoCAD
+                // draws the extension lines, the arrows and — the part that
+                // matters most — the measured figure into an anonymous block,
+                // and the DIMENSION entity names it on code 2. Working the
+                // geometry out from the definition points and a dimension
+                // style would be inventing a second answer to a question the
+                // file has already answered, and getting the figure wrong on a
+                // drawing is worse than not drawing it.
+                //
+                // Its contents are already in world coordinates, so it goes in
+                // where it lies.
+                match field(&fields, 2) {
+                    Some(name) => {
+                        expand(&name.to_ascii_uppercase(), Affine::identity(), drawing, blocks, 0)
+                    }
+                    None => drawing.note("dimensions"),
                 }
             } else if value == "POLYLINE" {
                 let (entity, next) = old_polyline(pairs, at, drawing);
@@ -512,8 +533,10 @@ fn build(kind: &str, fields: &[(i32, &str)], drawing: &mut Drawing) -> Option<En
                 content,
             }
         }
-        "DIMENSION" | "LEADER" | "MULTILEADER" => {
-            drawing.note("dimensions");
+        // DIMENSION is handled where blocks can be expanded; a leader that
+        // carries no block of its own is still counted.
+        "LEADER" | "MULTILEADER" => {
+            drawing.note("leaders");
             return None;
         }
         "HATCH" => {
@@ -524,10 +547,47 @@ fn build(kind: &str, fields: &[(i32, &str)], drawing: &mut Drawing) -> Option<En
             drawing.note("curves this cannot draw yet");
             return None;
         }
-        "POINT" | "VIEWPORT" | "SOLID" | "3DFACE" => {
-            drawing.note("shapes this cannot draw yet");
+        // A filled triangle or quadrilateral — arrowheads, and the solid
+        // fills on a section. Drawn as its outline rather than filled, which
+        // at the size these are is a difference nobody can see, and is one
+        // fewer kind of path for the renderer to carry.
+        //
+        // **The corners are stored 1, 2, 4, 3.** Not a quirk this reader can
+        // choose to ignore: taken in the order they are written, every solid
+        // comes out as a bow tie.
+        "SOLID" | "3DFACE" | "TRACE" => {
+            let corner = |a: i32, b: i32| match (number(fields, a), number(fields, b)) {
+                (Some(x), Some(y)) => Some(placed(Point::new(x, y))),
+                _ => None,
+            };
+            let (first, second) = (corner(10, 20)?, corner(11, 21)?);
+            let third = corner(12, 22)?;
+            let fourth = corner(13, 23).unwrap_or(third);
+
+            let mut vertices = vec![first, second, fourth, third];
+            // A triangle is written as a quadrilateral with its last corner
+            // repeated; leaving the repeat in gives a zero-length segment.
+            vertices.dedup_by(|a, b| (a.x - b.x).abs() < 1e-12 && (a.y - b.y).abs() < 1e-12);
+            if vertices.len() < 3 {
+                return None;
+            }
+
+            Shape::Polyline {
+                vertices: vertices.into_iter().map(|at| Vertex { at, bulge: 0.0 }).collect(),
+                closed: true,
+            }
+        }
+
+        // A point is a marker, not geometry: CAD draws it as a dot whose size
+        // is a setting, and a viewer that draws them all covers a plan in
+        // speckles. Counted so it is a decision rather than an omission.
+        "POINT" => {
+            drawing.note("point markers");
             return None;
         }
+        // The window a layout looks at model space through. It has no geometry
+        // of its own, and this shows model space directly.
+        "VIEWPORT" => return None,
         // Bookkeeping, not geometry: a vertex belongs to the polyline that
         // owns it and a SEQEND only says where one ended. Counting them as
         // losses would report a drawing as missing things it is not.

@@ -31,8 +31,6 @@ class LibraryScreenTest {
 
     private var opened: RecentDocument? = null
     private var picked = 0
-    private var models = 0
-    private var drawings = 0
 
     private val documents = listOf(
         RecentDocument("content://x/1", "Site survey.pdf", 2_500_000L, 12, 1_698_140_000_000L),
@@ -42,8 +40,6 @@ class LibraryScreenTest {
     private fun show(documents: List<RecentDocument>) {
         opened = null
         picked = 0
-        models = 0
-        drawings = 0
         rule.setContent {
             LibraryScreen(
                 documents = documents,
@@ -51,8 +47,6 @@ class LibraryScreenTest {
                 onForget = {},
             onShare = {},
                 onPickDocument = { picked++ },
-                onOpenModel = { models++ },
-                onOpenDrawing = { drawings++ },
             )
         }
     }
@@ -90,31 +84,20 @@ class LibraryScreenTest {
     }
 
     /**
-     * **The plus asks what kind, and each answer goes to its own picker.**
+     * The plus opens the chooser, wherever the library is.
      *
-     * Three file types now arrive through three different pickers behind one
-     * button. Wiring two of them to the same callback would not fail: the
-     * menu would open, the right words would be there, and the wrong picker
-     * would appear — which reads as the file chooser being broken rather than
-     * as a crossed wire.
+     * It used to be the only way in and now sits beside a list; a button that
+     * quietly stops working once there is something on the screen is the kind
+     * of thing nobody tries again.
      */
     @Test
-    fun thePlusOffersEachKindOfFileAndOpensTheRightOne() {
+    fun thePlusOpensTheChooser() {
         show(documents)
 
-        rule.onNodeWithContentDescription("Open a file").performClick()
+        rule.onNodeWithContentDescription("Add a document").performClick()
         rule.waitForIdle()
 
-        rule.onNodeWithText("Open a PDF").assertIsDisplayed()
-        rule.onNodeWithText("Open a 3D model").assertIsDisplayed()
-        rule.onNodeWithText("Open a DXF or DWG").assertIsDisplayed()
-
-        rule.onNodeWithText("Open a DXF or DWG").performClick()
-        rule.waitForIdle()
-
-        assertEquals(1, drawings)
-        assertEquals(0, picked)
-        assertEquals(0, models)
+        assertEquals(1, picked)
     }
 
     @Test

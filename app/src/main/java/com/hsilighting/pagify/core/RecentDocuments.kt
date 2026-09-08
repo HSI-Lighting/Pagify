@@ -186,3 +186,28 @@ fun recentSubtitle(document: RecentDocument): String = listOf(
     },
     formatFileSize(document.sizeBytes),
 ).filter { it.isNotEmpty() }.joinToString("  ·  ")
+
+/**
+ * Which screen opens a file, from what it is called.
+ *
+ * **One picker, three viewers.** Asking somebody to say in advance whether they
+ * are opening a PDF, a part or a drawing is asking them to answer a question
+ * the file already answers — and getting it wrong means the picker they wanted
+ * is the one they did not press. So there is one "Open a file" and this decides.
+ *
+ * By name, because that is all there is to go on: a `.dwg` arrives from most
+ * providers as `application/octet-stream`, so filtering the picker by type
+ * would hide the very files this exists to open.
+ *
+ * Anything unrecognised is a document. The PDF reader is the one that reports a
+ * proper error for a file it cannot read, and its refusal is a sentence rather
+ * than a shrug.
+ */
+fun kindOfFile(name: String): RecentKind = when (name.substringAfterLast('.', "").lowercase()) {
+    "step", "stp", "p21" -> RecentKind.Model
+    "dxf", "dwg" -> RecentKind.Drawing
+    else -> RecentKind.Document
+}
+
+/** What "Open a file" will accept, for the line under it. */
+const val SUPPORTED_FORMATS = "PDF, DWG, DXF, STEP"

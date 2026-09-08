@@ -36,6 +36,7 @@ import com.hsilighting.pagify.core.BlankFrameDetector
 import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.RecentDocument
 import com.hsilighting.pagify.core.RecentKind
+import com.hsilighting.pagify.core.kindOfFile
 import com.hsilighting.pagify.core.isDark
 import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.PagifyApp
@@ -187,7 +188,24 @@ class MainActivity : ComponentActivity() {
                         // asked for later — the grant is fixed when the picker
                         // returns.
                         keepAccessTo(uri)
-                        viewModel.open(uri)
+                        // **The file says which viewer it wants.** One "Open a
+                        // file" for four formats, routed by name — asking
+                        // somebody to declare in advance whether they are
+                        // opening a PDF, a part or a drawing is asking them to
+                        // answer a question the file has already answered.
+                        val name = nameOf(uri)
+                        when (kindOfFile(name)) {
+                            RecentKind.Model ->
+                                if (showModel(uri)) {
+                                    viewModel.rememberModel(uri.toString(), name, sizeOf(uri))
+                                }
+                            RecentKind.Drawing ->
+                                if (showDrawing(uri)) {
+                                    viewModel.rememberDrawing(uri.toString(), name, sizeOf(uri))
+                                }
+                            // The reader remembers its own, once it has opened.
+                            RecentKind.Document -> viewModel.open(uri)
+                        }
                     }
                 }
 
@@ -209,7 +227,11 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                val openPicker = remember { { picker.launch(arrayOf(PDF_MIME_TYPE)) } }
+                // **Everything, not just PDFs.** Most providers hand a DWG or a
+                // STEP file over as `application/octet-stream`, so filtering
+                // the picker by type would hide the very files this now opens.
+                // Which viewer gets it is decided from the name afterwards.
+                val openPicker = remember { { picker.launch(arrayOf("*/*")) } }
 
                 /**
                  * The group a scan in flight belongs to.
@@ -428,8 +450,6 @@ class MainActivity : ComponentActivity() {
                     onForgetRecent = { viewModel.forgetDocument(it.uri) },
                     onShareRecent = ::shareDocument,
                     onPickDocument = { viewModel.showNewDocumentChooser(true) },
-                    onOpenModel = { modelPicker.launch(arrayOf("*/*")) },
-                    onOpenDrawing = { drawingPicker.launch(arrayOf("*/*")) },
                     onClearLibrary = viewModel::clearLibrary,
                     onShowThumbnails = viewModel::setThumbnails,
                     settings = settings,

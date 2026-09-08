@@ -121,12 +121,20 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_DrawingBridge_drawingLay
 ///
 /// The same handover `renderPageInto` and `renderModelInto` use, which is what
 /// lets a drawing be an ordinary `Image` on both platforms.
+///
+/// **The multiple is not optional.** A sheet's scale is pixels per drawing
+/// unit, so a larger bitmap shows more of the drawing rather than the same view
+/// in more detail; without being told how much larger it is, a capture cuts the
+/// wrong region out of a wider picture.
 #[no_mangle]
 pub extern "system" fn Java_com_hsilighting_pagify_core_DrawingBridge_renderDrawingInto<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     handle: jlong,
     bitmap: JObject<'local>,
+    // How much larger this bitmap is than the one on screen: one for an
+    // ordinary frame, two for a capture drawn at twice the detail.
+    by: jfloat,
 ) -> jboolean {
     guard(&mut env, JNI_FALSE, |env| {
         // Safety: `bitmap` is a live local reference for this call, and the
@@ -138,7 +146,8 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_DrawingBridge_renderDraw
             locked.info.stride as usize,
         );
 
-        let sheet = with_drawing(handle, |drawing| drawing.draw(width, height))?;
+        let sheet =
+            with_drawing(handle, |drawing| drawing.draw_scaled(width, height, by as f64))?;
 
         // Row by row, because a bitmap may pad its rows and the sheet does not.
         // Copying the whole buffer would shear the picture on any device whose

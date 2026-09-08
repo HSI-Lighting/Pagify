@@ -75,9 +75,23 @@ pub fn convert(source: &acadrust::CadDocument) -> Drawing {
     // Block definitions, so the references in model space have something to
     // point at. Keyed by name because that is what an INSERT names.
     let mut blocks: HashMap<String, Vec<Part>> = HashMap::new();
+    let mut empty_blocks = 0usize;
     for record in source.block_records.iter() {
+        // **Only model and paper space are skipped, not everything starred.**
+        // Anonymous blocks — `*X##` for a dynamic block's own version of
+        // itself, `*D##` for a dimension's drawn picture, `*U##` for a group
+        // — hold real geometry that nested references reach for. Skipping
+        // every name beginning with a star throws all of that away: on a real
+        // architectural plan it left 1,457 shapes of the 27,261 the same
+        // drawing gives as DXF, and reported nothing missing, because from
+        // the outside a drawing missing its symbols is just a simpler drawing.
         let name = record.name.trim();
-        if name.is_empty() || name.starts_with('*') {
+        let space = name.trim_start_matches(['*', '$']);
+        if name.is_empty()
+            || space.eq_ignore_ascii_case("Model_Space")
+            || space.eq_ignore_ascii_case("Paper_Space")
+            || space.to_ascii_uppercase().starts_with("PAPER_SPACE")
+        {
             continue;
         }
         let mut held = Vec::new();
@@ -90,8 +104,25 @@ pub fn convert(source: &acadrust::CadDocument) -> Drawing {
                 None => {}
             }
         }
-        if !held.is_empty() {
-            blocks.insert(name.to_ascii_uppercase(), held);
+        if held.is_empty() {
+            // **A block this reader could name but not read.** The DWG
+            // decoder lists every block record and then yields entities for
+            // only some of them; on a real architectural plan it named 43 and
+            // produced contents for 8, so the drawing arrived with a
+            // twentieth of its geometry and nothing at all was reported. The
+            // same file as DXF read 168 blocks and 27,000 shapes.
+            //
+            // Counted, because a drawing that quietly lost most of itself
+            // still looks like a drawing — which is the exact failure this
+            // whole feature was told to avoid.
+            empty_blocks += 1;
+            continue;
+        }
+        blocks.insert(name.to_ascii_uppercase(), held);
+    }
+    if empty_blocks > 0 {
+        for _ in 0..empty_blocks {
+            drawing.note("symbols this reader could not open");
         }
     }
 
@@ -114,6 +145,7 @@ pub fn convert(source: &acadrust::CadDocument) -> Drawing {
             None => {}
         }
     }
+
 
     drawing
 }

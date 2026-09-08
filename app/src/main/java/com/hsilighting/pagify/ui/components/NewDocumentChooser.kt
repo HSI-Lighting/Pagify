@@ -21,6 +21,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.hsilighting.pagify.core.SUPPORTED_FORMATS
 
 /**
  * The two things + can mean.
@@ -49,7 +50,12 @@ fun NewDocumentChooser(
                 Choice(
                     icon = Icons.Filled.FolderOpen,
                     title = "Open a file",
-                    detail = "A PDF already on this phone or in your storage",
+                    // **The formats, spelled out.** One button opens four kinds
+                    // of file and picks the viewer itself, so the only place
+                    // anybody can learn that a drawing will open at all is
+                    // here. Without it somebody with a DWG has no reason to
+                    // think this app is the one to try.
+                    detail = SUPPORTED_FORMATS,
                     onClick = onOpenFile,
                 )
             }

@@ -155,12 +155,37 @@ impl DrawingSession {
     }
 
     pub fn draw(&self, width: u32, height: u32) -> Pixmap {
+        self.draw_scaled(width, height, 1.0)
+    }
+
+    /// Draw the same view into a bitmap `by` times the size of the screen's.
+    ///
+    /// **A sheet does not reframe itself when the canvas grows.** Its scale is
+    /// pixels per drawing unit, fixed, so drawing into a bitmap twice as wide
+    /// shows twice as much of the drawing rather than the same part of it in
+    /// twice the detail. A camera in space has no such problem — its projection
+    /// comes from the canvas it is given — which is why the model viewer needs
+    /// no equivalent of this, and why sharing its capture code quietly did the
+    /// wrong thing here: the region cut out of the larger picture was not the
+    /// region anybody had drawn a box around.
+    pub fn draw_scaled(&self, width: u32, height: u32, by: f64) -> Pixmap {
         let mut sheet = Pixmap::new(width.max(1), height.max(1)).unwrap_or_else(|| {
             // Only when the size is absurd; a one-pixel sheet is better than a
             // panic crossing the JNI boundary.
             Pixmap::new(1, 1).expect("a single pixel")
         });
-        raster::draw(&self.drawing, &self.view, &self.style, &mut sheet);
+        let mut view = self.view;
+        let mut style = self.style.clone();
+        if by.is_finite() && by > 0.0 {
+            view.scale *= by;
+            // **The strokes grow with it.** Line width is a constant number of
+            // screen pixels, not a property of the drawing, so leaving it
+            // alone makes a capture a picture of thinner lines rather than the
+            // same picture larger — and the text, which does scale, comes out
+            // heavy beside them.
+            style.line_width *= by as f32;
+        }
+        raster::draw(&self.drawing, &view, &style, &mut sheet);
         sheet
     }
 
@@ -389,5 +414,27 @@ mod tests {
         let layers: serde_json::Value = serde_json::from_str(&session.layers_json())
             .expect("the layers are JSON");
         assert!(layers.is_array());
+    }
+}
+
+#[cfg(test)]
+mod real {
+    /// What a real drawing loses, in either format.
+    ///
+    /// ```text
+    /// PAGIFY_DRAWING_FILE="/path/plan.dwg" \
+    ///   cargo test --release --lib drawing::session::real -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a real drawing; set PAGIFY_DRAWING_FILE"]
+    fn what_a_real_drawing_loses() {
+        let path = std::env::var("PAGIFY_DRAWING_FILE").expect("set PAGIFY_DRAWING_FILE");
+        let sheet = super::open(std::path::Path::new(&path)).expect("it opens");
+
+        println!("--- {path}");
+        println!("  {} shapes, {} layers", sheet.drawing.kept(), sheet.drawing.layers.len());
+        for entry in &sheet.drawing.skipped {
+            println!("  {:>6} {}", entry.count, entry.what);
+        }
     }
 }
