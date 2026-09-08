@@ -23,8 +23,10 @@
 
 pub mod adapt;
 pub mod audit;
+pub mod camera;
 pub mod curve;
 pub mod model;
 pub mod orient;
 pub mod project;
+pub mod raster;
 pub mod tessellate;

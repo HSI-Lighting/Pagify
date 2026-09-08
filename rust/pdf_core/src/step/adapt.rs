@@ -730,3 +730,102 @@ mod sweep {
         assert_eq!(accepted, meshed, "an accepted file produced no triangles");
     }
 }
+
+/// Rendering a real part to a picture, to be looked at.
+///
+/// **Because the numbers cannot say whether it looks right.** A mesh can have
+/// the right triangle count, a plausible volume and correct winding and still
+/// be visibly wrong — a face in the wrong place, a hole that did not come out,
+/// a seam. The only test for that is a person looking at it.
+///
+/// ```text
+/// PAGIFY_STEP_FILE="/path/part.STEP" PAGIFY_STEP_PNG="/path/out.png" \
+///   cargo test --lib step::adapt::picture -- --ignored --nocapture
+/// ```
+#[cfg(test)]
+mod picture {
+    use crate::step::{camera::Camera, model::Point3, raster, tessellate};
+
+    #[test]
+    #[ignore = "needs a real CAD file; set PAGIFY_STEP_FILE and PAGIFY_STEP_PNG"]
+    fn a_real_part_can_be_looked_at() {
+        let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
+        let out = std::env::var("PAGIFY_STEP_PNG").expect("set PAGIFY_STEP_PNG");
+        let bytes = std::fs::read(&path).expect("readable");
+
+        let solid = super::read(&bytes).expect("parses");
+        let sag = tessellate::recommended_sag(&solid);
+        let mesh = tessellate::tessellate(&solid, sag);
+        let (low, high) = mesh.bounds().expect("a mesh has bounds");
+
+        // Four views, so a face that only looks right from one angle cannot
+        // pass. Side by side in one picture rather than four files.
+        const SIZE: u32 = 320;
+        let style = raster::Style::default();
+        let mut sheet = raster::Canvas::new(SIZE * 4, SIZE);
+        sheet.fill(style.background);
+
+        for (index, yaw) in [0.6_f64, 2.2, 3.8, 5.4].into_iter().enumerate() {
+            let mut tile = raster::Canvas::new(SIZE, SIZE);
+            let camera = Camera {
+                yaw,
+                ..Camera::fit(low, high, 45.0_f64.to_radians())
+            };
+            let started = std::time::Instant::now();
+            raster::draw(&mesh, &camera, &style, &mut tile);
+            println!(
+                "view {index}: {} pixels covered in {:?}",
+                tile.covered(),
+                started.elapsed(),
+            );
+            assert!(tile.covered() > 500, "view {index} drew almost nothing");
+
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    let from = ((y * SIZE + x) * 4) as usize;
+                    let to = ((y * SIZE * 4 + index as u32 * SIZE + x) * 4) as usize;
+                    sheet.pixels[to..to + 4].copy_from_slice(&tile.pixels[from..from + 4]);
+                }
+            }
+        }
+
+        image::save_buffer(
+            &out,
+            &sheet.pixels,
+            SIZE * 4,
+            SIZE,
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("the picture is written");
+        println!("wrote {out}");
+
+        // **Where the drawn pixels sit, not whether the centre is filled.**
+        // The first version asked for something at the middle of each tile
+        // and failed on a lamp bezel -- a ring, whose middle is a hole and
+        // correctly empty. What is actually being checked is that the part is
+        // in frame rather than off in a corner, and the centre of what was
+        // drawn answers that without assuming the part is solid.
+        for index in 0..4u32 {
+            let (mut sum_x, mut sum_y, mut seen) = (0.0f64, 0.0f64, 0usize);
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    if sheet.colour_at(index * SIZE + x, y) != style.background {
+                        sum_x += x as f64;
+                        sum_y += y as f64;
+                        seen += 1;
+                    }
+                }
+            }
+            assert!(seen > 500, "view {index} drew almost nothing");
+            let middle = SIZE as f64 / 2.0;
+            let off_x = (sum_x / seen as f64 - middle).abs();
+            let off_y = (sum_y / seen as f64 - middle).abs();
+            assert!(
+                off_x < middle * 0.5 && off_y < middle * 0.5,
+                "view {index} is off centre by ({off_x:.0}, {off_y:.0}) pixels",
+            );
+        }
+
+        let _ = Point3::new(0.0, 0.0, 0.0);
+    }
+}
