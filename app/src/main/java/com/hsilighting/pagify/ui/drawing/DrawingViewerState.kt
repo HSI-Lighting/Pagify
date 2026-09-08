@@ -220,14 +220,20 @@ class DrawingViewerState(
         if (handle == DrawingBridge.NO_DRAWING) return
         if (drawing?.isActive == true) return
 
+        // **How much smaller the proxy is has to be said.** A sheet does not
+        // reframe itself for a smaller canvas — it shows less of the drawing —
+        // so a proxy drawn as though it were full size is a crop, stretched
+        // back up by the `Image`. The drawing jumped the moment a finger
+        // touched it and its labels came and went with every gesture.
         val target = (if (gesturing) proxy else full) ?: return
+        val by = if (width > 0) target.width.toFloat() / width.toFloat() else 1f
         // The fonts load on their own thread at app start, so a drawing opened
         // in the first moment can find none. Asked for again rather than left
         // without, which would lose the text for as long as the file is open.
         if (!hasFont) useFont()
         drawing = scope.launch {
             val drawn = withContext(Dispatchers.Default) {
-                runCatching { DrawingBridge.renderDrawingInto(handle, target, 1f) }.getOrElse {
+                runCatching { DrawingBridge.renderDrawingInto(handle, target, by) }.getOrElse {
                     Log.w(TAG, "the drawing could not be drawn", it)
                     false
                 }

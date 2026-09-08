@@ -212,7 +212,12 @@ fn text_path(
 }
 
 /// Draw the whole sheet.
-pub fn draw(drawing: &Drawing, view: &View, style: &Style, into: &mut Pixmap) {
+/// `on_screen` is how many pixels a drawing unit takes on the display, which
+/// is not the same as `view.scale` when the bitmap is not the screen's.
+/// Legibility is judged by it: a label worth drawing at the size somebody is
+/// looking at should be in the half-size preview a gesture draws too, blurry
+/// rather than absent, or the words come and go every time the sheet is moved.
+pub fn draw(drawing: &Drawing, view: &View, style: &Style, on_screen: f64, into: &mut Pixmap) {
     let (width, height) = (into.width(), into.height());
     into.fill(tiny_skia::Color::from_rgba8(
         style.background[0],
@@ -249,7 +254,7 @@ pub fn draw(drawing: &Drawing, view: &View, style: &Style, into: &mut Pixmap) {
                     // holds thousands of them. Left out until it would say
                     // something — which is what every CAD viewer does, and is
                     // why zooming in makes the labels appear.
-                    if size * view.scale < 4.0 {
+                    if size * on_screen < 3.0 {
                         continue;
                     }
                     if text_path(
@@ -511,7 +516,7 @@ mod picture {
         }
 
         let started = std::time::Instant::now();
-        draw(&drawing, &view, &style, &mut sheet);
+        draw(&drawing, &view, &style, view.scale, &mut sheet);
         if std::env::var("PAGIFY_DXF_DUPES").is_ok() {
             let mut seen: std::collections::HashSet<(i64, i64, i64, i64)> = Default::default();
             let mut lines = 0usize;

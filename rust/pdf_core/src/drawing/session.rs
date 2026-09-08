@@ -185,7 +185,9 @@ impl DrawingSession {
             // heavy beside them.
             style.line_width *= by as f32;
         }
-        raster::draw(&self.drawing, &view, &style, &mut sheet);
+        // Judged against the scale on the display, not this bitmap's, so the
+        // same words are in the preview, the frame and the capture.
+        raster::draw(&self.drawing, &view, &style, self.view.scale, &mut sheet);
         sheet
     }
 
@@ -329,6 +331,64 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// **A bitmap of a different size shows the same view, not more of it.**
+    ///
+    /// A sheet's scale is pixels per drawing unit and does not come from the
+    /// canvas, so every place that draws into something other than the screen
+    /// has to say how much larger or smaller it is: the half-size bitmap a
+    /// gesture draws into, and the double-size one a capture cuts from. Get it
+    /// wrong and the picture is a crop rather than a scale — the drawing jumps
+    /// the moment a finger touches it, and a capture holds the wrong region.
+    ///
+    /// Checked by where the ink is, not by how much there is: a crop and a
+    /// magnification cover a similar fraction of the picture, which is how the
+    /// first version of this test passed while the bug was still there.
+    #[test]
+    fn a_bigger_or_smaller_bitmap_is_the_same_view() {
+        let sheet = a_sheet();
+        let (width, height) = (200u32, 160u32);
+
+        let ordinary = ink_box(&sheet.draw_scaled(width, height, 1.0), width);
+        for by in [2.0_f64, 0.4] {
+            let scaled = sheet.draw_scaled(
+                (width as f64 * by) as u32,
+                (height as f64 * by) as u32,
+                by,
+            );
+            let box_of = ink_box(&scaled, (width as f64 * by) as u32);
+
+            let (a, b) = (ordinary.expect("ink at 1x"), box_of.expect("ink when scaled"));
+            // Every edge of the inked area lands at `by` times where it was,
+            // within a pixel or two of stroke width.
+            for (was, now) in [(a.0, b.0), (a.1, b.1), (a.2, b.2), (a.3, b.3)] {
+                let expected = was as f64 * by;
+                assert!(
+                    (now as f64 - expected).abs() <= 3.0,
+                    "at {by}x an edge at {was} became {now}, not {expected:.0}",
+                );
+            }
+        }
+    }
+
+    /// The box of pixels that are not the background: left, top, right, bottom.
+    fn ink_box(sheet: &Pixmap, width: u32) -> Option<(u32, u32, u32, u32)> {
+        let background = sheet.pixels().first().copied()?;
+        let (mut left, mut top, mut right, mut bottom) = (u32::MAX, u32::MAX, 0u32, 0u32);
+        let mut any = false;
+        for (at, pixel) in sheet.pixels().iter().enumerate() {
+            if *pixel == background {
+                continue;
+            }
+            let (x, y) = (at as u32 % width, at as u32 / width);
+            left = left.min(x);
+            top = top.min(y);
+            right = right.max(x);
+            bottom = bottom.max(y);
+            any = true;
+        }
+        any.then_some((left, top, right, bottom))
     }
 
     /// And it does actually zoom.
