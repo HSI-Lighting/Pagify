@@ -413,6 +413,15 @@ fn faces_of(model: &raw::StepModel) -> HashMap<u64, Vec<usize>> {
         }
     };
 
+    // **The tree's own nodes first.** A solid may be an item of both the
+    // SHAPE_REPRESENTATION the assembly places and an
+    // ADVANCED_BREP_SHAPE_REPRESENTATION beside it. Since each solid is claimed
+    // once, whichever is looked at first wins — and the second kind is often
+    // not in the tree at all, so claiming from there leaves the part at the
+    // origin with nothing to say it moved.
+    for (index, node) in model.shape_representation_arena.items.iter().enumerate() {
+        collect(SHAPE_REPRESENTATION_BASE + index as u64, &node.items, &mut faces);
+    }
     for (index, representation) in model
         .advanced_brep_shape_representation_arena
         .items
@@ -420,9 +429,6 @@ fn faces_of(model: &raw::StepModel) -> HashMap<u64, Vec<usize>> {
         .enumerate()
     {
         collect(index as u64, &representation.items, &mut faces);
-    }
-    for (index, node) in model.shape_representation_arena.items.iter().enumerate() {
-        collect(SHAPE_REPRESENTATION_BASE + index as u64, &node.items, &mut faces);
     }
 
     #[cfg(test)]

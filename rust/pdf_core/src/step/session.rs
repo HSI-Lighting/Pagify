@@ -144,7 +144,11 @@ impl ModelSession {
     /// it visibly and never runs out.
     pub fn orbit(&mut self, across: f64, down: f64) {
         use std::f64::consts::FRAC_PI_2;
-        self.camera = self.camera.turned(-across * FRAC_PI_2, down * FRAC_PI_2);
+        // Both negative: turning the camera basis one way moves the part the
+        // other, in each axis. The vertical sign was wrong and nothing caught
+        // it -- the test that would have was deleted along with its neighbour
+        // during an edit, and the suite stayed green with nothing left to ask.
+        self.camera = self.camera.turned(-across * FRAC_PI_2, -down * FRAC_PI_2);
     }
 
     pub fn zoom(&mut self, by: f64) {
@@ -234,7 +238,7 @@ mod tests {
     use super::*;
 
     /// A cube, written out because a real part cannot be committed.
-    fn a_cube() -> String {
+    pub(super) fn a_cube() -> String {
         let mut step = String::from(
             "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'1');\n\
              FILE_NAME('cube','2026-01-01T00:00:00',(''),(''),'','','');\n\
@@ -297,6 +301,30 @@ mod tests {
         let canvas = session.draw(64, 64);
 
         assert!(canvas.covered() > 100, "only {} pixels", canvas.covered());
+    }
+
+    /// **And dragging down sends it down.**
+    ///
+    /// Restored, having been deleted by accident along with a neighbouring
+    /// test — after which the vertical sign was wrong for a release and the
+    /// suite stayed green, because nothing was left to ask the question.
+    /// A test removed while editing is worse than one never written: the
+    /// green tells you the case is covered.
+    #[test]
+    fn dragging_down_sends_the_part_down() {
+        let mut session = open_a_square("drag-y");
+        let corner = Point3::new(10.0, 10.0, 0.0);
+
+        let before = session.camera.to_view(corner);
+        session.orbit(0.0, 0.05);
+        let after = session.camera.to_view(corner);
+
+        assert!(
+            after.y < before.y,
+            "the part went up when the finger went down: {} to {}",
+            before.y,
+            after.y,
+        );
     }
 
     /// **The part follows the finger.**
