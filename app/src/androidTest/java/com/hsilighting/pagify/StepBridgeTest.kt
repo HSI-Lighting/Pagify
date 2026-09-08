@@ -3,6 +3,7 @@ package com.hsilighting.pagify
 import android.graphics.Bitmap
 import androidx.test.platform.app.InstrumentationRegistry
 import com.hsilighting.pagify.core.StepBridge
+import com.hsilighting.pagify.ui.model.captureSize
 import java.io.File
 import org.junit.After
 import org.junit.Before
@@ -165,6 +166,68 @@ class StepBridgeTest {
         StepBridge.fitModel(handle)
 
         assertEquals(original.toList(), pixelsOf(drawn(handle)).toList())
+    }
+
+    // ---- taking a picture ----------------------------------------------------
+
+    /**
+     * A capture is drawn at its own, larger size.
+     *
+     * The picture the camera button takes is not the one on screen: it is a
+     * second rasterisation into a bitmap several times bigger. That is exactly
+     * where a stride mistake shows — a 96 x 96 square has no padding to get
+     * wrong, and a tall bitmap of an odd width is the shape Android actually
+     * pads. A sheared capture would still be full of pixels, so the test looks
+     * at the last row as well as the first.
+     */
+    @Test
+    fun a_capture_is_drawn_at_its_own_larger_size() {
+        val handle = open()
+        val size = captureSize(viewWidth = 361, viewHeight = 640, scale = 3)
+        val picture = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
+
+        assertTrue("the capture would not draw", StepBridge.renderModelInto(handle, picture))
+        assertEquals(1083, picture.width)
+        assertEquals(1920, picture.height)
+
+        val pixels = pixelsOf(picture)
+        assertTrue("the capture is one flat colour", pixels.toSet().size > 1)
+
+        val lastRow = pixels.takeLast(picture.width)
+        assertTrue("nothing reached the last row", lastRow.any { it != 0 })
+    }
+
+    /**
+     * And it is the same view, only bigger.
+     *
+     * A capture that reframed the part would not be a picture of what the
+     * reader was looking at. Both are drawn from the same camera, so the part
+     * covers the same fraction of each.
+     */
+    @Test
+    fun a_capture_frames_the_part_the_way_the_view_does() {
+        val handle = open()
+        val view = Bitmap.createBitmap(240, 320, Bitmap.Config.ARGB_8888)
+        val large = Bitmap.createBitmap(720, 960, Bitmap.Config.ARGB_8888)
+
+        assertTrue(StepBridge.renderModelInto(handle, view))
+        assertTrue(StepBridge.renderModelInto(handle, large))
+
+        val small = covered(view)
+        val big = covered(large)
+
+        assertTrue("nothing was drawn at all: $small, $big", small > 0.01 && big > 0.01)
+        assertTrue(
+            "the part covers $small of the view but $big of the capture",
+            kotlin.math.abs(small - big) < 0.02,
+        )
+    }
+
+    /** What fraction of a picture is the part rather than the background. */
+    private fun covered(bitmap: Bitmap): Double {
+        val pixels = pixelsOf(bitmap)
+        val background = pixels[0]
+        return pixels.count { it != background }.toDouble() / pixels.size
     }
 
     /** The summary crosses the boundary as usable JSON. */

@@ -1,6 +1,10 @@
 package com.hsilighting.pagify.ui.model
 
+import android.Manifest
 import android.graphics.Bitmap
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -18,12 +22,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -36,9 +42,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.hsilighting.pagify.core.CaptureExport
 import kotlin.math.abs
 
 /**
@@ -99,6 +107,16 @@ fun ModelViewer(
                     tint = if (showingDetails) Color(0xFF8AB4F8) else Color.White,
                 )
             }
+            // Beside Fit rather than in a menu: a capture is of a particular
+            // view, so it is wanted at the moment the part is turned the right
+            // way round — not after going looking for it.
+            IconButton(onClick = { state.takePicture() }, enabled = !state.capturing) {
+                Icon(
+                    Icons.Outlined.PhotoCamera,
+                    contentDescription = "Take a picture of the model",
+                    tint = if (state.capturing) Color(0xFF7A828C) else Color.White,
+                )
+            }
             IconButton(onClick = state::fit) {
                 Icon(
                     Icons.Filled.CenterFocusStrong,
@@ -139,6 +157,62 @@ fun ModelViewer(
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
             )
         }
+    }
+
+    Captures(state)
+}
+
+/**
+ * The picture the camera button takes, and getting it out of the app.
+ *
+ * Kept here rather than passed up to the activity: nothing about a capture of
+ * a model concerns the rest of the app, and the permission below is the only
+ * part that needs the system at all.
+ */
+@Composable
+private fun Captures(state: ModelViewerState) {
+    val context = LocalContext.current
+
+    // **Only below API 29.** From Android 10 on, MediaStore's scoped storage
+    // needs no permission, and asking anyway puts a dialog in front of an
+    // action that does not require one.
+    val storage = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) state.savePicture(context)
+        else state.noteStorageRefused()
+    }
+
+    state.taken?.let { picture ->
+        CaptureSheet(
+            picture = picture,
+            format = state.captureFormat,
+            onFormat = state::chooseFormat,
+            onSave = {
+                if (CaptureExport.galleryNeedsPermission()) {
+                    storage.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                } else {
+                    state.savePicture(context)
+                }
+            },
+            onShare = { state.sharePicture(context) },
+            onCopy = { state.copyPicture(context) },
+            onDismiss = state::discardCapture,
+        )
+    }
+
+    // Raised from an effect rather than straight from the button: the file has
+    // to be written first, or the receiving app is handed an empty one.
+    LaunchedEffect(state.shareRequest) {
+        val uri = state.shareRequest ?: return@LaunchedEffect
+        context.startActivity(CaptureExport.shareIntent(uri, state.captureFormat))
+        state.shareRaised()
+    }
+
+    LaunchedEffect(state.message) {
+        val note = state.message ?: return@LaunchedEffect
+        Toast.makeText(context, note, Toast.LENGTH_SHORT).show()
+        state.messageShown()
     }
 }
 

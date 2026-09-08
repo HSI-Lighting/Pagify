@@ -1,10 +1,14 @@
 package com.hsilighting.pagify.ui.model
 
+import android.content.Context
 import android.graphics.Bitmap
+import android.net.Uri
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.StepBridge
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,6 +16,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import kotlin.math.roundToInt
 
 /**
@@ -247,6 +252,151 @@ class ModelViewerState(
                 picture = Frame(target, version)
             }
         }
+    }
+
+    // ---- taking a picture ----------------------------------------------------
+
+    /** The picture just taken, waiting to be saved, shared or copied. */
+    var taken by mutableStateOf<Bitmap?>(null)
+        private set
+
+    /** Chosen on the sheet; PNG suits flat shading on a plain ground. */
+    var captureFormat by mutableStateOf(CaptureFormat.PNG)
+        private set
+
+    var capturing by mutableStateOf(false)
+        private set
+
+    /** Something to tell the reader once, then forget. */
+    var message by mutableStateOf<String?>(null)
+        private set
+
+    /** Set when a share sheet should be raised, once the bytes are on disk. */
+    var shareRequest by mutableStateOf<Uri?>(null)
+        private set
+
+    fun chooseFormat(format: CaptureFormat) {
+        captureFormat = format
+    }
+
+    fun messageShown() {
+        message = null
+    }
+
+    /**
+     * Say why nothing was saved.
+     *
+     * Naming the permission is the difference between somebody granting it and
+     * concluding the feature is broken — the same reason the PDF reader says
+     * it rather than failing quietly.
+     */
+    fun noteStorageRefused() {
+        message = "Pagify needs permission to write to storage to save a picture."
+    }
+
+    fun shareRaised() {
+        shareRequest = null
+        discardCapture()
+    }
+
+    fun discardCapture() {
+        taken = null
+    }
+
+    /**
+     * Draw the model again, larger, and keep the result.
+     *
+     * Its own bitmap, never the one on screen: that one is redrawn by the next
+     * gesture, and a picture that changes after it was taken is not a picture.
+     */
+    fun takePicture(scale: Int = 2) {
+        if (handle == StepBridge.NO_MODEL || capturing) return
+        val size = captureSize(width, height, scale)
+        if (size.width <= 0 || size.height <= 0) return
+
+        capturing = true
+        scope.launch {
+            val drawn = withContext(Dispatchers.Default) {
+                runCatching {
+                    val target = modelBitmap(size.width, size.height)
+                    if (StepBridge.renderModelInto(handle, target)) target else null
+                }.getOrElse {
+                    Log.w(TAG, "the picture could not be drawn", it)
+                    null
+                }
+            }
+            capturing = false
+            if (drawn != null) taken = drawn else message = "The picture could not be taken."
+        }
+    }
+
+    /** Keep it, in Pictures/Pagify, where the gallery will find it. */
+    fun savePicture(context: Context) =
+        exportPicture(context, "Saved to Pictures/Pagify.") { bytes, fileName, format ->
+            CaptureExport.saveToGallery(context, bytes, fileName, format)
+            null
+        }
+
+    fun sharePicture(context: Context) =
+        exportPicture(context, null) { bytes, fileName, _ ->
+            CaptureExport.cache(context, bytes, fileName)
+        }
+
+    fun copyPicture(context: Context) =
+        exportPicture(context, "Picture copied.") { bytes, fileName, _ ->
+            CaptureExport.copyToClipboard(context, CaptureExport.cache(context, bytes, fileName))
+            null
+        }
+
+    /**
+     * Encode the picture and do something with the bytes.
+     *
+     * Both off the main thread. A six-megapixel PNG takes long enough that
+     * encoding it inline stutters the sheet that is still on screen at the
+     * time — and writing a file on the main thread is the other half of it.
+     */
+    private fun exportPicture(
+        context: Context,
+        note: String?,
+        work: (ByteArray, String, CaptureFormat) -> Uri?,
+    ) {
+        val picture = taken ?: return
+        val format = captureFormat
+        val fileName = captureFileName(name, CaptureExport.timestamp(), format)
+
+        scope.launch {
+            val outcome = withContext(Dispatchers.IO) {
+                runCatching { work(encode(picture, format), fileName, format) }
+            }
+            outcome
+                .onSuccess { uri ->
+                    if (uri != null) {
+                        // The picture is kept until the share has actually been
+                        // raised: dismissing first would take it out from under
+                        // a chooser that has not appeared yet.
+                        shareRequest = uri
+                    } else {
+                        message = note
+                        discardCapture()
+                    }
+                }
+                .onFailure { failure ->
+                    Log.e(TAG, "the picture could not be exported", failure)
+                    message = "The picture could not be saved."
+                }
+        }
+    }
+
+    private fun encode(picture: Bitmap, format: CaptureFormat): ByteArray {
+        val out = ByteArrayOutputStream()
+        val kind = when (format) {
+            CaptureFormat.PNG -> Bitmap.CompressFormat.PNG
+            CaptureFormat.JPEG -> Bitmap.CompressFormat.JPEG
+        }
+        // Ignored for PNG, which is lossless; 92 keeps a JPEG of flat shading
+        // free of the ringing that shows up around a part's silhouette.
+        picture.compress(kind, 92, out)
+        return out.toByteArray()
     }
 
     /** Let the model go. The handle is native memory and does not collect itself. */
