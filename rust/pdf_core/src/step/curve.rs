@@ -205,16 +205,49 @@ fn spline(
         return control.to_vec();
     }
 
-    // Sampled against the control polygon's own size rather than a radius:
-    // there is no radius, and the polygon bounds how far the curve can stray.
-    let extent = control
-        .windows(2)
-        .map(|pair| pair[1].minus(pair[0]).length())
-        .sum::<f64>();
-    let steps = segments_for(extent.max(1e-6), 1.0, sag / extent.max(1e-6))
-        .max(control.len() * 2)
-        .min(MAX_SEGMENTS);
+    // **Measured, not estimated.** A B-spline has no radius to put into the
+    // sag formula, and the earlier version fed it the control polygon's
+    // length as a stand-in — which is not a curvature and produced up to
+    // five hundred points on an edge that needed thirty. The cost of that
+    // is not the edge: every one of those points becomes a boundary vertex,
+    // and a face bounded by four of them triangulates into thousands.
+    //
+    // So the deviation is measured. Sample, check how far the true curve
+    // bows away from the chords replacing it, and double until that is
+    // within the sag. Two or three passes settle it, and the answer is the
+    // count the curve actually needs rather than a guess about it.
+    let mut steps = (control.len() * 2).max(MIN_SEGMENTS).min(MAX_SEGMENTS);
+    let mut points = sample(degree, control, knots, weights, first, last, steps);
 
+    while steps < MAX_SEGMENTS {
+        let mut worst = 0.0_f64;
+        for index in 0..steps {
+            let low = first + (last - first) * (index as f64 / steps as f64);
+            let high = first + (last - first) * ((index + 1) as f64 / steps as f64);
+            let middle = de_boor(degree, control, knots, weights, (low + high) / 2.0);
+            let chord = points[index].plus(points[index + 1]).scaled(0.5);
+            worst = worst.max(middle.minus(chord).length());
+        }
+        if worst <= sag {
+            break;
+        }
+        steps = (steps * 2).min(MAX_SEGMENTS);
+        points = sample(degree, control, knots, weights, first, last, steps);
+    }
+
+    points
+}
+
+/// A spline sampled evenly over its usable range.
+fn sample(
+    degree: usize,
+    control: &[Point3],
+    knots: &[f64],
+    weights: Option<&[f64]>,
+    first: f64,
+    last: f64,
+    steps: usize,
+) -> Vec<Point3> {
     (0..=steps)
         .map(|index| {
             let t = first + (last - first) * (index as f64 / steps as f64);

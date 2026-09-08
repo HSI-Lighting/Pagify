@@ -33,6 +33,17 @@ pub const MAX_FACES: usize = 4000;
 /// A third missing is a different matter: at that point the holes stop reading
 /// as fillets and start reading as the shape. A quarter is the most any real
 /// file needed, so a third leaves room without reaching "unrecognisable".
+/// Above this share of freeform faces a part *used* to be refused.
+///
+/// **Kept as a record, no longer a gate.** It was the right call while
+/// freeform surfaces could not be drawn: a part is recognisable missing 25%
+/// of its faces and is not missing 76%, and the two turbine files proved it
+/// — rendered past the gate they came out as a bare hub, because on an
+/// impeller the blades *are* the freeform surfaces.
+///
+/// Now that those surfaces are tessellated, refusing on this would refuse
+/// files that draw perfectly. The number stays because the reasoning behind
+/// it was measured and a later surface type may need it again.
 pub const MAX_FREEFORM_SHARE: f64 = 0.33;
 
 /// What a file contains, counted without parsing it.
@@ -130,9 +141,6 @@ pub fn verdict(census: &Census) -> Result<(), Refusal> {
     }
     if census.faces > MAX_FACES {
         return Err(Refusal::TooManyFaces { faces: census.faces });
-    }
-    if census.freeform_share() > MAX_FREEFORM_SHARE {
-        return Err(Refusal::MostlyFreeform { share: census.freeform_share() });
     }
     Ok(())
 }
@@ -240,12 +248,12 @@ mod tests {
     }
 
     #[test]
-    fn a_mostly_freeform_part_is_refused_for_that_reason_and_says_so() {
-        let census = Census { faces: 100, freeform_surfaces: 60, ..Default::default() };
-        let refusal = verdict(&census).unwrap_err();
-
-        assert!(matches!(refusal, Refusal::MostlyFreeform { .. }));
-        assert!(refusal.message().contains("freeform"), "{}", refusal.message());
+    fn a_mostly_freeform_part_is_no_longer_refused() {
+        // The impeller: 132 of 173 faces freeform. It was refused while those
+        // surfaces could not be drawn, and drawing it past the gate showed
+        // why -- a bare hub. Now that they are tessellated it must open.
+        let census = Census { faces: 173, freeform_surfaces: 132, ..Default::default() };
+        assert_eq!(Ok(()), verdict(&census));
     }
 
     /// The two refusals must not share a sentence.

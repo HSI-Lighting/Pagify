@@ -85,6 +85,8 @@ pub fn project(surface: &Surface, point: Point3) -> Option<Point2> {
             Some(Point2::new(y.atan2(x), z.atan2(from_axis - major)))
         }
 
+        Surface::Spline(spline) => Some(spline.nearest(point)),
+
         Surface::Unsupported { .. } => None,
     }
 }
@@ -115,6 +117,8 @@ pub fn evaluate(surface: &Surface, at: Point2) -> Option<Point3> {
             let ring = major + minor * at.v.cos();
             Some(frame.to_world(ring * at.u.cos(), ring * at.u.sin(), minor * at.v.sin()))
         }
+
+        Surface::Spline(spline) => Some(spline.at(at)),
 
         Surface::Unsupported { .. } => None,
     }
@@ -170,13 +174,21 @@ pub fn normal_at(surface: &Surface, at: Point2) -> Option<Point3> {
                 .normalised()
         }
 
+        Surface::Spline(spline) => spline.normal(at),
+
         Surface::Unsupported { .. } => None,
     }
 }
 
 /// Whether a surface's `u` wraps round.
 pub fn u_is_periodic(surface: &Surface) -> bool {
-    !matches!(surface, Surface::Plane { .. } | Surface::Unsupported { .. })
+    // A freeform patch has an ordinary rectangular domain -- it does not wrap,
+    // and unwrapping one would add whole turns to parameters that never meant
+    // angles, dragging its boundary off across an imaginary seam.
+    !matches!(
+        surface,
+        Surface::Plane { .. } | Surface::Spline(_) | Surface::Unsupported { .. }
+    )
 }
 
 /// Straighten a boundary that crosses the seam, and fill in the poles.

@@ -280,10 +280,38 @@ fn surface_of(model: &raw::StepModel, surface: &raw::SurfaceRef) -> Result<Surfa
                 .ok_or("a surface with no placement")
         }
 
-        raw::SurfaceRef::BSplineSurfaceWithKnots(_)
-        | raw::SurfaceRef::RationalBSplineSurface(_)
-        | raw::SurfaceRef::BSplineSurface(_)
-        | raw::SurfaceRef::BezierSurface(_) => Err("freeform surfaces"),
+        // **Tessellated, not refused.** Freeform faces are a minority on a
+        // machined part and the *whole shape* of a turbine blade; there is no
+        // threshold that makes the second case viewable, so they are
+        // evaluated like any other surface.
+        raw::SurfaceRef::BSplineSurfaceWithKnots(id) => {
+            let surface = model.b_spline_surface_with_knots_arena.get(id.0);
+            let control = control_net(model, &surface.control_points_list);
+            super::spline::Spline::new(
+                surface.u_degree.max(0) as usize,
+                surface.v_degree.max(0) as usize,
+                control,
+                expand_knots(&surface.u_knots, &surface.u_multiplicities),
+                expand_knots(&surface.v_knots, &surface.v_multiplicities),
+                None,
+            )
+            .map(|spline| Surface::Spline(std::sync::Arc::new(spline)))
+            .ok_or("a freeform surface that could not be read")
+        }
+
+        raw::SurfaceRef::RationalBSplineSurface(id) => {
+            // The rational form carries weights but *not* its own knots:
+            // in a complex instance those live on the WITH_KNOTS half, and
+            // step-io hands the two out separately. Without them there is
+            // nothing to evaluate against, so this is reported rather than
+            // guessed at with a uniform vector that would bend the surface.
+            let _ = model.rational_b_spline_surface_arena.get(id.0);
+            Err("a rational freeform surface")
+        }
+
+        raw::SurfaceRef::BSplineSurface(_) | raw::SurfaceRef::BezierSurface(_) => {
+            Err("freeform surfaces")
+        }
 
         _ => Err("a surface Pagify 3D does not know"),
     }
@@ -840,5 +868,62 @@ mod picture {
         }
 
         let _ = Point3::new(0.0, 0.0, 0.0);
+    }
+}
+
+/// A grid of control points, as rows of resolved coordinates.
+fn control_net(
+    model: &raw::StepModel,
+    rows: &[Vec<raw::CartesianPointRef>],
+) -> Vec<Vec<Point3>> {
+    rows.iter()
+        .map(|row| {
+            row.iter()
+                .filter_map(|point| {
+                    point_id(point).map(|at| cartesian(model.cartesian_point_arena.get(at)))
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod where_the_triangles_go {
+    use crate::step::{model::Surface, tessellate};
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn per_face_counts() {
+        let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
+        let bytes = std::fs::read(&path).expect("readable");
+        let solid = super::read(&bytes).expect("parses");
+        let sag = tessellate::recommended_sag(&solid);
+        println!("sag {sag:.4}");
+        let cache = crate::step::curve::EdgeCache::build(&solid.edges, sag);
+
+        let mut counts: Vec<(usize, &'static str, (f64, f64))> = Vec::new();
+        for face in &solid.faces {
+            let kind = match &face.surface {
+                Surface::Plane { .. } => "plane",
+                Surface::Cylinder { .. } => "cylinder",
+                Surface::Cone { .. } => "cone",
+                Surface::Sphere { .. } => "sphere",
+                Surface::Torus { .. } => "torus",
+                Surface::Spline(_) => "spline",
+                Surface::Unsupported { .. } => "unsupported",
+            };
+            let limits = tessellate::parameter_limits(&face.surface, sag);
+            let count = tessellate::face_triangles(face, &cache, sag, 4096)
+                .map(|t| t.len())
+                .unwrap_or(0);
+            counts.push((count, kind, limits));
+        }
+        counts.sort_by(|a, b| b.0.cmp(&a.0));
+
+        let total: usize = counts.iter().map(|c| c.0).sum();
+        println!("total {total}");
+        for (count, kind, limits) in counts.iter().take(6) {
+            println!("  {count:>7} {kind:<10} limits u={:.5} v={:.5}", limits.0, limits.1);
+        }
     }
 }

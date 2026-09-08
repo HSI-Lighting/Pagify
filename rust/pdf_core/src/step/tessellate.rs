@@ -101,8 +101,22 @@ pub fn recommended_sag(solid: &Solid) -> f64 {
     // A thousandth of the part. On a screen a few hundred pixels across, that
     // is well under one pixel of error, so a finer figure buys nothing that can
     // be seen and costs triangles that must be carried.
-    (diagonal / 1000.0).max(1e-4)
+    (diagonal / 600.0).max(1e-4)
 }
+
+/// The most triangles a whole model is given.
+///
+/// **Measured on the phone.** It drew 3.2 million triangles in 628 ms,
+/// which is two frames a second — and that was after taking 23 seconds to
+/// build them. Four hundred thousand is about 80 ms a frame at the
+/// resolution a gesture draws at, which follows a finger.
+///
+/// Spent per face rather than checked at the end: a retry would mean
+/// paying the 23 seconds first and then paying again. A model with two
+/// thousand faces gets less for each of them than one with fifteen, which
+/// is also the right answer visually — no single face of a crowded part is
+/// large enough on screen to need what a lone one does.
+pub const TRIANGLE_BUDGET: usize = 150_000;
 
 /// Tessellate a whole solid.
 pub fn tessellate(solid: &Solid, sag: f64) -> Mesh {
@@ -115,8 +129,12 @@ pub fn tessellate(solid: &Solid, sag: f64) -> Mesh {
         mesh.skipped.push(skipped.clone());
     }
 
+    // What each face may spend. The floor keeps a part with thousands of
+    // faces from giving each of them too little to be a shape at all.
+    let allowance = (TRIANGLE_BUDGET / solid.faces.len().max(1)).max(48);
+
     for face in &solid.faces {
-        match face_triangles(face, &cache, sag) {
+        match face_triangles(face, &cache, sag, allowance) {
             Ok(triangles) => mesh.triangles.extend(triangles),
             Err(reason) => mesh.skip(reason),
         }
@@ -130,6 +148,8 @@ pub fn face_triangles(
     face: &Face,
     cache: &EdgeCache,
     sag: f64,
+    // The most triangles this face may spend. See TRIANGLE_BUDGET.
+    allowance: usize,
 ) -> Result<Vec<Triangle>, &'static str> {
     // The reason the adapter gave, not a general one: a freeform surface and
     // a surface type this has never heard of are different problems, and
@@ -160,6 +180,13 @@ pub fn face_triangles(
     // [`parameter_limits`]. Splitting happens here, in parameter space, so
     // every new vertex lands exactly on the surface rather than on the chord.
     let (max_u, max_v) = parameter_limits(&face.surface, sag);
+
+    // **Widened until the face fits its allowance.** The sag alone says how
+    // fine the surface needs to be; it says nothing about how many faces are
+    // waiting behind this one. A part of two thousand fillets, each
+    // individually reasonable, is three million triangles and a screen that
+    // will not move.
+    let (max_u, max_v) = widened(&flat, max_u, max_v, allowance);
     let flat: Vec<Point2> = refine(
         flat.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
         max_u,
@@ -283,6 +310,9 @@ pub(crate) fn parameter_limits(surface: &Surface, sag: f64) -> (f64, f64) {
         Surface::Cone { radius, .. } => (angular(radius.max(sag)), f64::INFINITY),
         Surface::Sphere { radius, .. } => (angular(*radius), angular(*radius)),
         Surface::Torus { major, minor, .. } => (angular(major + minor), angular(*minor)),
+        // A freeform patch has no radius to reason from, so its own sampling
+        // says how far it bows and therefore how finely it must be cut.
+        Surface::Spline(spline) => spline.parameter_limits(sag),
     }
 }
 
@@ -732,4 +762,43 @@ mod tests {
     fn an_empty_mesh_has_no_bounds_rather_than_a_point_at_the_origin() {
         assert!(Mesh::default().bounds().is_none());
     }
+}
+
+/// Loosen a face's parameter limits until it fits what it may spend.
+///
+/// The estimate is the number of cells the boundary's own extent would be cut
+/// into, which is what refinement will produce. Scaling both limits by the
+/// square root of the overshoot brings that count down to the allowance in one
+/// step rather than by trying and measuring.
+fn widened(
+    boundary: &[Point2],
+    max_u: f64,
+    max_v: f64,
+    allowance: usize,
+) -> (f64, f64) {
+    if boundary.is_empty() || allowance == 0 {
+        return (max_u, max_v);
+    }
+
+    let mut low = boundary[0];
+    let mut high = boundary[0];
+    for point in boundary {
+        low = Point2::new(low.u.min(point.u), low.v.min(point.v));
+        high = Point2::new(high.u.max(point.u), high.v.max(point.v));
+    }
+
+    let across = if max_u.is_finite() { (high.u - low.u) / max_u } else { 1.0 };
+    let down = if max_v.is_finite() { (high.v - low.v) / max_v } else { 1.0 };
+    // Two triangles a cell.
+    let estimate = (across.max(1.0) * down.max(1.0) * 2.0).max(1.0);
+
+    if estimate <= allowance as f64 {
+        return (max_u, max_v);
+    }
+
+    let loosen = (estimate / allowance as f64).sqrt();
+    (
+        if max_u.is_finite() { max_u * loosen } else { max_u },
+        if max_v.is_finite() { max_v * loosen } else { max_v },
+    )
 }

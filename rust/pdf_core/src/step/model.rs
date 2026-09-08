@@ -119,6 +119,9 @@ pub enum Surface {
     Cone { frame: Frame, radius: f64, half_angle: f64 },
     Sphere { frame: Frame, radius: f64 },
     Torus { frame: Frame, major: f64, minor: f64 },
+    /// A freeform patch. Boxed because it carries its control net and a
+    /// sampling of itself, and a `Face` is cloned about freely.
+    Spline(std::sync::Arc<super::spline::Spline>),
     /// Present in the file and not tessellated. Kept rather than dropped so it
     /// can be counted and named; never silently discarded.
     Unsupported { what: &'static str },

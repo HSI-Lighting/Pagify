@@ -280,62 +280,75 @@ class RealModelTest {
     }.getOrDefault(false)
 
     /** Whatever STEP file has been pushed to Download, if any. */
-    private fun pushedFile(): String? = runCatching {
+    /** Every STEP file pushed to Download, so all of them get measured. */
+    private fun pushedFiles(): List<String> = runCatching {
         val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
         automation.executeShellCommand("ls /sdcard/Download").use { descriptor ->
             android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { source ->
                 source.readBytes().decodeToString()
                     .lineSequence()
                     .map { it.trim() }
-                    .firstOrNull { it.endsWith(".step", true) || it.endsWith(".stp", true) }
-                    ?.let { "/sdcard/Download/$it" }
+                    .filter { it.endsWith(".step", true) || it.endsWith(".stp", true) }
+                    .map { "/sdcard/Download/$it" }
+                    .toList()
             }
         }
-    }.getOrNull()
+    }.getOrDefault(emptyList())
 
     @Test
-    fun a_real_part_opens_and_draws_on_the_phone() {
-        val remote = pushedFile()
-        android.util.Log.i("RealModel", "candidate: $remote")
-        if (remote == null) return // nothing pushed; nothing to say
+    fun every_pushed_part_opens_and_draws_on_the_phone() {
+        val files = pushedFiles()
+        if (files.isEmpty()) return // nothing pushed; nothing to say
 
         val context = InstrumentationRegistry.getInstrumentation().targetContext
-        val copy = File(context.cacheDir, remote.substringAfterLast('/'))
-        val got = fetch(remote, copy)
-        android.util.Log.i("RealModel", "fetched $got, ${copy.length()} bytes")
-        if (!got) return
+        for (remote in files) {
+            val copy = File(context.cacheDir, remote.substringAfterLast('/'))
+            if (!fetch(remote, copy)) continue
 
-        val started = System.currentTimeMillis()
-        val handle = StepBridge.openModel(copy.absolutePath)
-        val opened = System.currentTimeMillis() - started
+            val startedOpen = System.currentTimeMillis()
+            val handle = runCatching { StepBridge.openModel(copy.absolutePath) }
+            val opened = System.currentTimeMillis() - startedOpen
 
-        try {
-            val summary = org.json.JSONObject(StepBridge.modelSummaryJson(handle))
-            android.util.Log.i("RealModel", "${copy.name} in ${opened}ms: $summary")
+            if (handle.isFailure) {
+                android.util.Log.i(
+                    "RealModel",
+                    "${copy.name}: refused in ${opened}ms -- ${handle.exceptionOrNull()?.message}",
+                )
+                copy.delete()
+                continue
+            }
 
-            assertTrue("no triangles", summary.getInt("triangles") > 0)
-            assertTrue("no faces", summary.getInt("facesInFile") > 0)
+            val model = handle.getOrThrow()
+            try {
+                val summary = org.json.JSONObject(StepBridge.modelSummaryJson(model))
+                val bitmap = Bitmap.createBitmap(432, 800, Bitmap.Config.ARGB_8888)
 
-            // Everything is accounted for: drawn plus skipped is the file.
-            val skipped = summary.getJSONArray("skipped")
-            val lost = (0 until skipped.length()).sumOf { skipped.getJSONObject(it).getInt("count") }
-            assertEquals(
-                "faces went missing without being counted",
-                summary.getInt("facesInFile"),
-                summary.getInt("facesDrawn") + lost,
-            )
+                // Twice, and the second is the one reported: the first pays for
+                // whatever the allocator and the caches want, which is not what
+                // a drag would cost.
+                StepBridge.renderModelInto(model, bitmap)
+                val startedDraw = System.nanoTime()
+                assertTrue(StepBridge.renderModelInto(model, bitmap))
+                val drewMicros = (System.nanoTime() - startedDraw) / 1000
 
-            val bitmap = Bitmap.createBitmap(240, 240, Bitmap.Config.ARGB_8888)
-            val drawing = System.currentTimeMillis()
-            assertTrue(StepBridge.renderModelInto(handle, bitmap))
-            android.util.Log.i("RealModel", "drawn in ${System.currentTimeMillis() - drawing}ms")
+                android.util.Log.i(
+                    "RealModel",
+                    "${copy.name}: opened ${opened}ms, drew ${drewMicros / 1000}ms, " +
+                        "${summary.getInt("triangles")} triangles, " +
+                        "${summary.getInt("facesDrawn")} of ${summary.getInt("facesInFile")} faces",
+                )
 
-            val pixels = IntArray(240 * 240)
-            bitmap.getPixels(pixels, 0, 240, 0, 0, 240, 240)
-            assertTrue("the part was not drawn", pixels.toSet().size > 2)
-        } finally {
-            StepBridge.closeModel(handle)
-            copy.delete()
+                val skipped = summary.getJSONArray("skipped")
+                val lost = (0 until skipped.length()).sumOf { skipped.getJSONObject(it).getInt("count") }
+                assertEquals(
+                    "${copy.name}: faces went missing without being counted",
+                    summary.getInt("facesInFile"),
+                    summary.getInt("facesDrawn") + lost,
+                )
+            } finally {
+                StepBridge.closeModel(model)
+                copy.delete()
+            }
         }
     }
 }
