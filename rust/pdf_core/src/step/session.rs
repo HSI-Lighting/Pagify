@@ -126,12 +126,19 @@ pub fn open_with(
 impl ModelSession {
     /// Turn the part. Distances are in fractions of the view, not pixels, so a
     /// drag feels the same on any screen.
+    /// Turn the part, as though the finger were on its surface.
+    ///
+    /// **The camera moves the other way to the finger.** Dragging right
+    /// should send the part right, which means the eye goes left — the
+    /// obvious sign moves the camera with the finger instead and the model
+    /// slides the wrong way under it. Distances are fractions of the view
+    /// rather than pixels, so a drag feels the same on any screen.
     pub fn orbit(&mut self, across: f64, down: f64) {
-        // A full turn for a drag across the whole view: enough to get round the
-        // back in one gesture, little enough to aim.
+        // A full turn for a drag across the whole view: enough to get round
+        // the back in one gesture, little enough to aim.
         self.camera = self
             .camera
-            .turned(across * std::f64::consts::TAU, down * std::f64::consts::PI);
+            .turned(-across * std::f64::consts::TAU, down * std::f64::consts::PI);
     }
 
     pub fn zoom(&mut self, by: f64) {
@@ -284,6 +291,51 @@ mod tests {
         let canvas = session.draw(64, 64);
 
         assert!(canvas.covered() > 100, "only {} pixels", canvas.covered());
+    }
+
+    /// **The part follows the finger.**
+    ///
+    /// Dragging right must send the model right. The camera has to go the
+    /// other way for that, and the sign that looks right moves the camera
+    /// with the finger — so the model slides away from it, which feels
+    /// like the controls are backwards because they are.
+    ///
+    /// Checked by where a point on the part lands on screen, which is the
+    /// thing somebody actually sees, rather than by the sign of an angle.
+    #[test]
+    fn dragging_right_sends_the_part_right() {
+        let mut session = open_a_square("drag-x");
+        // A corner, off to one side so its movement is unambiguous.
+        let corner = Point3::new(10.0, 10.0, 0.0);
+
+        let before = session.camera.to_view(corner);
+        session.orbit(0.05, 0.0);
+        let after = session.camera.to_view(corner);
+
+        assert!(
+            after.x > before.x,
+            "the part went left when the finger went right: {} to {}",
+            before.x,
+            after.x,
+        );
+    }
+
+    /// And dragging down sends it down.
+    #[test]
+    fn dragging_down_sends_the_part_down() {
+        let mut session = open_a_square("drag-y");
+        let corner = Point3::new(10.0, 10.0, 0.0);
+
+        let before = session.camera.to_view(corner);
+        session.orbit(0.0, 0.05);
+        let after = session.camera.to_view(corner);
+
+        assert!(
+            after.y < before.y,
+            "the part went up when the finger went down: {} to {}",
+            before.y,
+            after.y,
+        );
     }
 
     /// Turning changes the picture; that is the whole feature.

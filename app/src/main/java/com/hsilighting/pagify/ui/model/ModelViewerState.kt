@@ -79,8 +79,8 @@ class ModelViewerState(
         }
     }
 
-    /** Every number the panel shows, in the order it shows them. */
-    var details by mutableStateOf<List<Pair<String, String>>>(emptyList())
+    /** Every row of the table, in the order it is read. */
+    var details by mutableStateOf<List<DetailRow>>(emptyList())
         private set
 
     private fun describe() {
@@ -105,25 +105,38 @@ class ModelViewerState(
         }
 
         val surfaces = summary.optJSONObject("surfaces")
+        val skipped = summary.optJSONArray("skipped")
+        val lost = (0 until (skipped?.length() ?: 0)).sumOf {
+            skipped?.optJSONObject(it)?.optInt("count") ?: 0
+        }
+
         details = buildList {
-            add("Faces in the file" to "%,d".format(inFile))
-            // Only when they differ. "1,671 of 1,671" is noise; the line
-            // exists to say when something is missing.
-            if (drawn != inFile) add("Faces drawn" to "%,d".format(drawn))
-            add("Triangles" to "%,d".format(summary.optInt("triangles")))
+            add(DetailRow.Heading("Model"))
+            add(DetailRow.Item("Faces", "%,d".format(inFile)))
+            // Only when they differ. "1,671 of 1,671" is a row to read and
+            // discard; this line exists to say when something is missing.
+            if (drawn != inFile) add(DetailRow.Item("Drawn", "%,d".format(drawn)))
+            add(DetailRow.Item("Triangles", "%,d".format(summary.optInt("triangles"))))
             if (size != null) {
                 add(
-                    "Size" to "%.1f × %.1f × %.1f mm".format(
-                        size.optDouble("x"),
-                        size.optDouble("y"),
-                        size.optDouble("z"),
+                    DetailRow.Item(
+                        "Size",
+                        "%.1f × %.1f × %.1f mm".format(
+                            size.optDouble("x"),
+                            size.optDouble("y"),
+                            size.optDouble("z"),
+                        ),
                     ),
                 )
             }
+            val assembly = summary.optInt("assembly")
+            if (assembly > 0) add(DetailRow.Item("Assembly links", "%,d".format(assembly)))
+
             if (surfaces != null) {
-                // Named the way somebody reading a drawing would, not the
-                // way STEP spells them: TOROIDAL_SURFACE means nothing to
-                // anybody who has not read the standard.
+                add(DetailRow.Heading("Surfaces"))
+                // Named as somebody reading a drawing would name them, not as
+                // STEP spells them: TOROIDAL_SURFACE means nothing to anybody
+                // who has not read the standard.
                 listOf(
                     "Flat" to "plane",
                     "Cylindrical" to "cylinder",
@@ -133,26 +146,27 @@ class ModelViewerState(
                     "Freeform" to "freeform",
                 ).forEach { (label, key) ->
                     val count = surfaces.optInt(key)
-                    if (count > 0) add(label to "%,d".format(count))
+                    if (count > 0) add(DetailRow.Item(label, "%,d".format(count)))
                 }
             }
-            val assembly = summary.optInt("assembly")
-            if (assembly > 0) add("Assembly links" to "%,d".format(assembly))
-        }
-        // **Said out loud, not logged.** A part drawn with faces missing looks
-        // like the part; without this line there is nothing at all to tell
-        // somebody that what they are looking at is incomplete.
-        val skipped = summary.optJSONArray("skipped")
-        if (skipped != null && skipped.length() > 0) {
-            val total = (0 until skipped.length()).sumOf {
-                skipped.optJSONObject(it)?.optInt("count") ?: 0
+
+            if (skipped != null && skipped.length() > 0) {
+                add(DetailRow.Heading("Not shown"))
+                for (index in 0 until skipped.length()) {
+                    val entry = skipped.optJSONObject(index) ?: continue
+                    add(
+                        DetailRow.Item(
+                            entry.optString("what").replaceFirstChar(Char::uppercase),
+                            "%,d".format(entry.optInt("count")),
+                        ),
+                    )
+                }
             }
-            val reasons = (0 until skipped.length())
-                .mapNotNull { skipped.optJSONObject(it)?.optString("what") }
-                .distinct()
-                .joinToString(", ")
-            warning = "$total of ${summary.optInt("facesInFile")} faces are not shown ($reasons)."
         }
+
+        // One line, always visible, because the table can be closed and a
+        // part drawn with faces missing looks like the part.
+        if (lost > 0) warning = "%,d of %,d faces are not shown.".format(lost, inFile)
     }
 
     fun resize(newWidth: Int, newHeight: Int) {
@@ -256,3 +270,15 @@ class ModelViewerState(
  * a redrawn model never reaches the screen.
  */
 data class Frame(val bitmap: Bitmap, val version: Int)
+
+/**
+ * One line of the parameters table.
+ *
+ * Headings and values as separate kinds rather than a heading being an entry
+ * with an empty value: a table read at a glance depends on the eye finding the
+ * groups first, and that only works if they are drawn differently.
+ */
+sealed interface DetailRow {
+    data class Heading(val text: String) : DetailRow
+    data class Item(val label: String, val value: String) : DetailRow
+}

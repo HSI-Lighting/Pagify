@@ -37,6 +37,7 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 
@@ -214,39 +215,57 @@ internal fun modelBitmap(width: Int, height: Int): Bitmap =
     Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
 
 /**
- * What the part is, in numbers.
+ * What the part is, as a table.
  *
- * **The parameters, not only the picture.** A supplier's model is a set of
- * facts before it is a shape — how many faces, of what kinds, how large — and
- * somebody opening one usually wants those as much as the view. Reading them
- * beside the model beats reading them instead of it, so this sits over the
- * corner and can be put away.
+ * **A table, not a sentence.** These are figures somebody compares — how many
+ * faces against how many were drawn, how many of each surface kind — and
+ * comparing is what prose is worst at. Two columns with the numbers right
+ * aligned and lined up on their digits can be read down in a second; the same
+ * facts in a paragraph have to be read through.
+ *
+ * Grouped under headings, because the eye finds the group before the row.
  */
 @Composable
-private fun Details(rows: List<Pair<String, String>>, modifier: Modifier = Modifier) {
+private fun Details(rows: List<DetailRow>, modifier: Modifier = Modifier) {
     Column(
         modifier
             .background(Color(0xE6141619), RoundedCornerShape(12.dp))
             .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(3.dp),
     ) {
-        rows.forEach { (label, value) ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    label,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF9AA2AD),
-                    modifier = Modifier.width(118.dp),
+        rows.forEach { row ->
+            when (row) {
+                is DetailRow.Heading -> Text(
+                    row.text.uppercase(),
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color(0xFF7C8592),
+                    modifier = Modifier.padding(top = 8.dp, bottom = 3.dp),
                 )
-                Text(
-                    value,
-                    // Tabular figures live on the style, not on `Text` -- passing
-                    // `fontFeatureSettings` here does not compile, which is the
-                    // second time that has caught me today.
-                    style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
-                    fontWeight = FontWeight.Medium,
-                    color = Color.White,
-                )
+
+                is DetailRow.Item -> Row(
+                    Modifier.padding(vertical = 1.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        row.label,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFB3BAC4),
+                        modifier = Modifier.width(142.dp),
+                    )
+                    Text(
+                        row.value,
+                        // Right aligned on tabular figures, so the digits of one
+                        // row sit above the digits of the next. That alignment
+                        // is most of what makes a column readable at a glance.
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFeatureSettings = "tnum",
+                        ),
+                        fontWeight = FontWeight.Medium,
+                        color = Color.White,
+                        textAlign = TextAlign.End,
+                        modifier = Modifier.width(96.dp),
+                    )
+                }
             }
         }
     }
