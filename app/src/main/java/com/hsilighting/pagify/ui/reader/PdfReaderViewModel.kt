@@ -68,6 +68,7 @@ import com.hsilighting.pagify.core.PdfCommand
 import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
 import com.hsilighting.pagify.core.RecentDocument
+import com.hsilighting.pagify.core.RecentKind
 import com.hsilighting.pagify.core.ThemeChoice
 import com.hsilighting.pagify.data.AppSettingsStore
 import com.hsilighting.pagify.data.RecentDocumentsStore
@@ -501,6 +502,31 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
     /** Drop a document from the library — moved, deleted, or no longer permitted. */
     fun forgetDocument(uri: String) {
         viewModelScope.launch { recentDocuments.forget(uri) }
+    }
+
+    /**
+     * Put a 3D model in the library beside the documents.
+     *
+     * The same list, not a second one. Somebody who opened a part yesterday
+     * looks for it where they look for everything else they have opened, and a
+     * separate list of models would be one more place to remember to look. The
+     * entry carries its kind, so the library knows which screen reopens it.
+     */
+    fun rememberModel(uri: String, name: String, sizeBytes: Long) {
+        viewModelScope.launch {
+            recentDocuments.remember(
+                RecentDocument(
+                    uri = uri,
+                    name = name,
+                    sizeBytes = sizeBytes,
+                    // A model has no pages. The library reads the kind and says
+                    // what it is rather than showing a count of nothing.
+                    pageCount = 0,
+                    openedAtMillis = System.currentTimeMillis(),
+                    kind = RecentKind.Model,
+                ),
+            )
+        }
     }
 
     /**

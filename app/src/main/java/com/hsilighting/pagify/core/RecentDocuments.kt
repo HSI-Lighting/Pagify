@@ -27,7 +27,29 @@ data class RecentDocument(
     /** Pages, or 0 when the document failed before it was counted. */
     val pageCount: Int,
     val openedAtMillis: Long,
+    /**
+     * What kind of thing it is, and so which screen reopens it.
+     *
+     * Defaulted, because every entry written before this field existed is a
+     * document and there is no version number in the file to tell them apart.
+     * A missing kind meaning "document" is what lets an existing library
+     * survive the upgrade instead of trying to open a PDF in the 3D viewer.
+     */
+    val kind: RecentKind = RecentKind.Document,
 )
+
+/** The screens a remembered file can be reopened in. */
+enum class RecentKind(val stored: String) {
+    Document("document"),
+    Model("model"),
+    ;
+
+    companion object {
+        /** Anything unrecognised is a document, including a missing value. */
+        fun of(stored: String): RecentKind =
+            entries.firstOrNull { it.stored == stored } ?: Document
+    }
+}
 
 /**
  * The list after opening [document], newest first.
@@ -89,6 +111,7 @@ fun List<RecentDocument>.toRecentsJson(): String = JSONArray(
             put("sizeBytes", document.sizeBytes)
             put("pageCount", document.pageCount)
             put("openedAtMillis", document.openedAtMillis)
+            put("kind", document.kind.stored)
         }
     },
 ).toString()
@@ -113,6 +136,7 @@ fun recentsFromJson(json: String): List<RecentDocument> {
             sizeBytes = entry.optLong("sizeBytes", 0L),
             pageCount = entry.optInt("pageCount", 0),
             openedAtMillis = entry.optLong("openedAtMillis", 0L),
+            kind = RecentKind.of(entry.optString("kind")),
         )
     }
 
@@ -148,10 +172,15 @@ fun formatOpenedAt(millis: Long, locale: Locale = Locale.getDefault()): String {
 /** "12 pages · 2.4 MB", with either half dropped when it is not known. */
 fun recentSubtitle(document: RecentDocument): String = listOf(
     formatOpenedAt(document.openedAtMillis),
-    if (document.pageCount > 0) {
-        "${document.pageCount} page${if (document.pageCount == 1) "" else "s"}"
-    } else {
-        ""
+    when {
+        // A model has no pages, so the row says what it is instead. Without
+        // this the only difference between a part and a document in the
+        // library is that one of them shows no count — which reads as a
+        // document that failed to open rather than as a 3D model.
+        document.kind == RecentKind.Model -> "3D model"
+        document.pageCount > 0 ->
+            "${document.pageCount} page${if (document.pageCount == 1) "" else "s"}"
+        else -> ""
     },
     formatFileSize(document.sizeBytes),
 ).filter { it.isNotEmpty() }.joinToString("  ·  ")

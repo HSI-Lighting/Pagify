@@ -15,16 +15,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.CenterFocusStrong
-import androidx.compose.material.icons.outlined.Crop
-import androidx.compose.material.icons.outlined.Gesture
+
+
+
 import androidx.compose.material.icons.outlined.Info
-import androidx.compose.material.icons.outlined.PhotoCamera
+
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -49,6 +50,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.ui.components.CaptureHint
 import com.hsilighting.pagify.ui.components.captureOverlay
 import kotlin.math.abs
 
@@ -112,34 +114,6 @@ fun ModelViewer(
                     tint = if (showingDetails) Color(0xFF8AB4F8) else Color.White,
                 )
             }
-            // Beside Fit rather than in a menu: a capture is of a particular
-            // view, so it is wanted at the moment the part is turned the right
-            // way round — not after going looking for it.
-            IconButton(onClick = { framing = !framing }) {
-                Icon(
-                    Icons.Outlined.PhotoCamera,
-                    contentDescription = if (framing) "Stop taking a picture" else "Take a picture",
-                    tint = if (framing) Color(0xFF8AB4F8) else Color.White,
-                )
-            }
-            // Only while the tool is out. A shape chooser sitting in the bar
-            // the rest of the time is a control for something not happening.
-            if (framing) {
-                IconButton(onClick = { lasso = !lasso }) {
-                    Icon(
-                        if (lasso) Icons.Outlined.Gesture else Icons.Outlined.Crop,
-                        contentDescription = if (lasso) "Draw a ring" else "Drag a box",
-                        tint = Color(0xFF8AB4F8),
-                    )
-                }
-            }
-            IconButton(onClick = state::fit) {
-                Icon(
-                    Icons.Filled.CenterFocusStrong,
-                    contentDescription = "Fit the model to the view",
-                    tint = Color.White,
-                )
-            }
         }
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
@@ -177,15 +151,26 @@ fun ModelViewer(
                             framing = false
                         },
                 )
+                // The reader's own words, not a second phrasing of them.
+                CaptureHint(
+                    lasso = lasso,
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 16.dp),
+                )
             }
-        }
 
-        if (framing) {
-            Text(
-                if (lasso) "Trace a ring around what to keep." else "Drag a box around what to keep.",
-                style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF8AB4F8),
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+            // The ribbon floats over the model, along the bottom, where the
+            // reader's is. Nothing is laid out around it, so turning the part
+            // is not interrupted by the tools appearing and disappearing.
+            ModelRibbon(
+                framing = framing,
+                lasso = lasso,
+                onFrame = { framing = it },
+                onLasso = { lasso = it },
+                onFit = state::fit,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 20.dp)
+                    .navigationBarsPadding(),
             )
         }
 

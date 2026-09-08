@@ -22,9 +22,9 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -57,6 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.R
 import com.hsilighting.pagify.core.RecentDocument
+import com.hsilighting.pagify.core.RecentKind
 import com.hsilighting.pagify.core.recentSubtitle
 import com.hsilighting.pagify.core.searchRecents
 import com.hsilighting.pagify.ui.components.combinedClickableCompat
@@ -265,7 +266,12 @@ private fun DocumentRow(
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
-                    Icons.Filled.Description,
+                    // Told apart at a glance, in a list that holds both.
+                    if (document.kind == RecentKind.Model) {
+                        Icons.Filled.ViewInAr
+                    } else {
+                        Icons.Filled.Description
+                    },
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

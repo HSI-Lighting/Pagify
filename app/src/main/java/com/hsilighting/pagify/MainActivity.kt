@@ -33,6 +33,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.hsilighting.pagify.core.BlankFrameDetector
 import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.RecentDocument
+import com.hsilighting.pagify.core.RecentKind
 import com.hsilighting.pagify.core.isDark
 import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.PagifyApp
@@ -102,14 +103,38 @@ class MainActivity : ComponentActivity() {
                 // inside a zip.
                 var modelState by remember { mutableStateOf<ModelViewerState?>(null) }
                 val modelScope = rememberCoroutineScope()
+
+                /**
+                 * Open a model, from the picker or from the library.
+                 *
+                 * The copy is made each time rather than kept: it lives in the
+                 * cache, which the system empties whenever it likes, so a
+                 * remembered model has to be re-copied from its URI. That is
+                 * what the persistable grant taken below is for.
+                 */
+                val showModel: (Uri) -> Boolean = { uri ->
+                    val copied = copyForReading(uri)
+                    if (copied != null) {
+                        modelState = ModelViewerState(copied.name, modelScope)
+                            .also { it.open(copied.absolutePath) }
+                    }
+                    copied != null
+                }
+
                 val modelPicker = rememberLauncherForActivityResult(
-                    ActivityResultContracts.OpenDocument(),
+                    OpenReadableDocument(),
                 ) { uri ->
                     if (uri != null) {
-                        val copied = copyForReading(uri)
-                        if (copied != null) {
-                            modelState = ModelViewerState(copied.name, modelScope)
-                                .also { it.open(copied.absolutePath) }
+                        keepReadAccessTo(uri)
+                        if (showModel(uri)) {
+                            // Remembered only once it has opened, the same rule
+                            // the reader follows: a file that failed is not
+                            // something to offer again as if it worked.
+                            viewModel.rememberModel(
+                                uri = uri.toString(),
+                                name = nameOf(uri),
+                                sizeBytes = sizeOf(uri),
+                            )
                         }
                     }
                 }
@@ -340,7 +365,16 @@ class MainActivity : ComponentActivity() {
                 PagifyApp(
                     state = state,
                     recents = recents,
-                    onOpenRecent = { viewModel.open(it.uri.toUri()) },
+                    onOpenRecent = { recent ->
+                        // The list holds both kinds now, and they reopen in
+                        // different screens. Reading the kind rather than
+                        // guessing from the file name: a supplier who names a
+                        // part "drawing.stp" should still get the 3D viewer.
+                        when (recent.kind) {
+                            RecentKind.Model -> showModel(recent.uri.toUri())
+                            RecentKind.Document -> viewModel.open(recent.uri.toUri())
+                        }
+                    },
                     onForgetRecent = { viewModel.forgetDocument(it.uri) },
                     onShareRecent = ::shareDocument,
                     onPickDocument = { viewModel.showNewDocumentChooser(true) },
@@ -709,6 +743,48 @@ class MainActivity : ComponentActivity() {
  * which is why this is a widening rather than a requirement: it costs nothing when
  * it cannot be honoured, and "Save a copy" covers that case.
  */
+/**
+ * A picker for something only ever read.
+ *
+ * Read and persistable, no write. A model is never edited, and asking for a
+ * write grant a provider may refuse is a way to fail at opening something that
+ * would have opened.
+ */
+/** What a provider calls a file, falling back to something usable. */
+private fun ComponentActivity.nameOf(uri: android.net.Uri): String =
+    runCatching {
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val column = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
+        }
+    }.getOrNull().orEmpty().ifBlank { uri.lastPathSegment ?: "model.stp" }
+
+/** How large a file is, or zero where the provider will not say. */
+private fun ComponentActivity.sizeOf(uri: android.net.Uri): Long =
+    runCatching {
+        contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val column = cursor.getColumnIndex(android.provider.OpenableColumns.SIZE)
+            if (column >= 0 && cursor.moveToFirst()) cursor.getLong(column) else 0L
+        } ?: 0L
+    }.getOrDefault(0L)
+
+/** Keep read access, so a model can be reopened from the library later. */
+private fun ComponentActivity.keepReadAccessTo(uri: android.net.Uri) {
+    runCatching {
+        contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+}
+
+private class OpenReadableDocument : ActivityResultContracts.OpenDocument() {
+    override fun createIntent(context: Context, input: Array<String>): Intent =
+        super.createIntent(context, input).apply {
+            addFlags(
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION,
+            )
+        }
+}
+
 private class OpenWritableDocument : ActivityResultContracts.OpenDocument() {
     override fun createIntent(context: Context, input: Array<String>): Intent =
         super.createIntent(context, input).apply {
@@ -731,10 +807,7 @@ private class OpenWritableDocument : ActivityResultContracts.OpenDocument() {
  * descriptor rather than a name.
  */
 private fun ComponentActivity.copyForReading(uri: android.net.Uri): File? = runCatching {
-    val name = contentResolver.query(uri, null, null, null, null)?.use { cursor ->
-        val column = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
-        if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
-    } ?: uri.lastPathSegment ?: "model.stp"
+    val name = nameOf(uri)
 
     val into = File(cacheDir, "models").apply { mkdirs() }
     val file = File(into, name)

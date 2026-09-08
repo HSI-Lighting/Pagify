@@ -1,6 +1,7 @@
 package com.hsilighting.pagify.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.Locale
@@ -133,5 +134,96 @@ class RecentDocumentsTest {
         // Fixed locale, or this passes in London and fails everywhere else.
         assertEquals("Oct 24, 2023", formatOpenedAt(1_698_140_000_000L, Locale.UK))
         assertEquals("", formatOpenedAt(0L, Locale.UK))
+    }
+
+    // ---- models in the same library -------------------------------------------
+
+    private fun model(uri: String = "content://part") = RecentDocument(
+        uri = uri,
+        name = "IMPELLER.stp",
+        sizeBytes = 2_400_000,
+        pageCount = 0,
+        openedAtMillis = 1_698_140_000_000L,
+        kind = RecentKind.Model,
+    )
+
+    /**
+     * **An existing library survives the upgrade.**
+     *
+     * Entries written before models existed carry no kind, and there is no
+     * version number in the file to tell them apart. If a missing kind did not
+     * mean "document", every PDF anyone has ever opened would try to reopen in
+     * the 3D viewer — and the file is rewritten on the next open, so it would
+     * not even be recoverable by going back to the older build.
+     */
+    @Test
+    fun `an entry saved before models existed is still a document`() {
+        val old = """
+            [{"uri":"content://one","name":"Report.pdf","sizeBytes":1024,
+              "pageCount":12,"openedAtMillis":1698140000000}]
+        """.trimIndent()
+
+        val read = recentsFromJson(old)
+
+        assertEquals(1, read.size)
+        assertEquals(RecentKind.Document, read[0].kind)
+        assertEquals(12, read[0].pageCount)
+    }
+
+    /** And a kind nobody recognises is not a reason to lose the row. */
+    @Test
+    fun `an unknown kind reads as a document rather than vanishing`() {
+        val read = recentsFromJson(
+            """[{"uri":"content://one","name":"Report.pdf","kind":"hologram"}]""",
+        )
+
+        assertEquals(1, read.size)
+        assertEquals(RecentKind.Document, read[0].kind)
+    }
+
+    @Test
+    fun `a model survives being written and read back`() {
+        val read = recentsFromJson(listOf(model()).toRecentsJson())
+
+        assertEquals(1, read.size)
+        assertEquals(RecentKind.Model, read[0].kind)
+        assertEquals("IMPELLER.stp", read[0].name)
+    }
+
+    /**
+     * The row says what it is instead of showing a count of nothing.
+     *
+     * A model has no pages, so without this the only thing separating a part
+     * from a document in the library is a missing figure — which reads as a
+     * document that failed to open.
+     */
+    @Test
+    fun `a model says so rather than showing no pages`() {
+        val line = recentSubtitle(model())
+
+        assertTrue(line, line.contains("3D model"))
+        assertFalse(line, line.contains("page"))
+    }
+
+    /** Both kinds live in one list, newest first, with no duplicates. */
+    @Test
+    fun `a model and a document share the one library`() {
+        val document = RecentDocument(
+            "content://doc",
+            "Report.pdf",
+            sizeBytes = 10,
+            pageCount = 3,
+            openedAtMillis = 1,
+        )
+
+        val library = promoteRecent(promoteRecent(emptyList(), document), model())
+
+        assertEquals(2, library.size)
+        assertEquals(RecentKind.Model, library[0].kind)
+        assertEquals(RecentKind.Document, library[1].kind)
+
+        // Reopening the model promotes it rather than adding a twin.
+        val again = promoteRecent(library, model())
+        assertEquals(2, again.size)
     }
 }

@@ -6,6 +6,7 @@ import android.graphics.Path
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,17 +14,28 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.Gesture
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,6 +49,7 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.CaptureFormat
+import com.hsilighting.pagify.ui.components.ToolButton
 import kotlin.math.max
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
@@ -166,6 +179,98 @@ fun captureFileName(model: String, stamp: String, format: CaptureFormat): String
     // name and "2026-09-08 14-31-02.png" says nothing about which part it is.
     val stem = model.substringBeforeLast('.').ifBlank { "Model" }
     return "$stem $stamp.${format.extension}"
+}
+
+/**
+ * The tool ribbon, along the bottom, as the reader has.
+ *
+ * **The same shape of control in both places.** On a page the snapshot tool is
+ * a slot on a floating ribbon whose icon says which shape a drag will make, and
+ * whose menu offers the other one. Putting the equivalent in the top bar of the
+ * 3D viewer made it a different tool that happened to do the same thing —
+ * somebody who knows one would still have to learn the other.
+ *
+ * Built from the reader's own `ToolButton` rather than from something that
+ * looks like it, so the two cannot drift apart.
+ */
+@Composable
+fun ModelRibbon(
+    framing: Boolean,
+    lasso: Boolean,
+    onFrame: (Boolean) -> Unit,
+    onLasso: (Boolean) -> Unit,
+    onFit: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var showingShapes by remember { mutableStateOf(false) }
+
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(28.dp),
+        color = MaterialTheme.colorScheme.surface,
+        tonalElevation = 3.dp,
+        shadowElevation = 6.dp,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box {
+                // The button means "snapshot" and the menu means "which shape",
+                // exactly as on a page: the shape is only ever chosen after
+                // deciding to take one, never before.
+                ToolButton(
+                    icon = if (framing && lasso) Icons.Filled.Gesture else Icons.Filled.CropFree,
+                    label = "Snapshot",
+                    selected = framing,
+                    onClick = { showingShapes = true },
+                    hasMore = true,
+                )
+                DropdownMenu(
+                    expanded = showingShapes,
+                    onDismissRequest = { showingShapes = false },
+                ) {
+                    ShapeChoice("Box", Icons.Filled.CropFree, framing && !lasso) {
+                        showingShapes = false
+                        onLasso(false)
+                        // Choosing the shape already armed puts the tool away,
+                        // so this stays a toggle rather than a one-way switch.
+                        onFrame(!(framing && !lasso))
+                    }
+                    ShapeChoice("Ring", Icons.Filled.Gesture, framing && lasso) {
+                        showingShapes = false
+                        onLasso(true)
+                        onFrame(!(framing && lasso))
+                    }
+                }
+            }
+
+            ToolButton(
+                icon = Icons.Filled.CenterFocusStrong,
+                label = "Fit",
+                selected = false,
+                onClick = onFit,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ShapeChoice(
+    label: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    armed: Boolean,
+    onClick: () -> Unit,
+) {
+    DropdownMenuItem(
+        text = { Text(label) },
+        leadingIcon = { Icon(icon, contentDescription = null) },
+        trailingIcon = {
+            if (armed) Icon(Icons.Filled.Check, contentDescription = "Armed")
+        },
+        onClick = onClick,
+    )
 }
 
 /**
