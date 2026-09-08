@@ -21,7 +21,8 @@ pub struct ModelSession {
     bounds: (Point3, Point3),
     style: Style,
     /// What the file contained, for the summary the screen shows.
-    pub faces_in_file: usize,
+    /// What the file contained, entity by entity, for the screen to show.
+    pub census: audit::Census,
 }
 
 /// Why a file could not be opened.
@@ -68,14 +69,28 @@ const KEEP: usize = 3;
 /// The gates run first, on the text, before any geometry is built — refusing a
 /// 14 MB assembly should not cost a second of tessellation first.
 pub fn open(name: &str, bytes: &[u8]) -> Result<ModelSession, OpenError> {
+    let mut meshes = cache()
+        .lock()
+        .map_err(|_| OpenError::Unreadable("the mesh cache is poisoned".into()))?;
+    open_with(&mut meshes, name, bytes)
+}
+
+/// [`open`], against a given cache.
+///
+/// Separate because the real cache is global and shared, and a test that
+/// asserts a hit against shared state is a test another test can evict out
+/// from under it — which is exactly what happened, intermittently, and read
+/// as a caching bug rather than as tests running in parallel.
+pub fn open_with(
+    meshes: &mut HashMap<(String, usize), Arc<Mesh>>,
+    name: &str,
+    bytes: &[u8],
+) -> Result<ModelSession, OpenError> {
     let census = audit::census(&String::from_utf8_lossy(bytes));
     audit::verdict(&census).map_err(OpenError::Refused)?;
 
     let key = (name.to_string(), bytes.len());
-    let cached = cache()
-        .lock()
-        .ok()
-        .and_then(|meshes| meshes.get(&key).cloned());
+    let cached = meshes.get(&key).cloned();
 
     let mesh = match cached {
         Some(mesh) => mesh,
@@ -84,17 +99,15 @@ pub fn open(name: &str, bytes: &[u8]) -> Result<ModelSession, OpenError> {
             let sag = tessellate::recommended_sag(&solid);
             let mesh = Arc::new(tessellate::tessellate(&solid, sag));
 
-            if let Ok(mut meshes) = cache().lock() {
-                if meshes.len() >= KEEP {
-                    // Whichever, rather than nothing: an arbitrary eviction is
-                    // a slower reopen, where growing without limit is the app
-                    // being killed for memory while somebody is using it.
-                    if let Some(victim) = meshes.keys().next().cloned() {
-                        meshes.remove(&victim);
-                    }
+            if meshes.len() >= KEEP {
+                // Whichever, rather than nothing: an arbitrary eviction is a
+                // slower reopen, where growing without limit is the app being
+                // killed for memory while somebody is using it.
+                if let Some(victim) = meshes.keys().next().cloned() {
+                    meshes.remove(&victim);
                 }
-                meshes.insert(key, Arc::clone(&mesh));
             }
+            meshes.insert(key, Arc::clone(&mesh));
             mesh
         }
     };
@@ -106,7 +119,7 @@ pub fn open(name: &str, bytes: &[u8]) -> Result<ModelSession, OpenError> {
         bounds,
         mesh,
         style: Style::default(),
-        faces_in_file: census.faces,
+        census,
     })
 }
 
@@ -156,9 +169,14 @@ impl ModelSession {
 
     /// What the screen tells the user about this model.
     ///
-    /// **Including what was left out.** A part shown with faces missing looks
-    /// like the part; the count is the only thing that says otherwise, so it
-    /// travels with the model rather than being logged and forgotten.
+    /// What the screen tells the user about this model.
+    ///
+    /// **The parameters, not only the picture.** A part is a set of numbers
+    /// before it is a shape — how many faces, of what kinds, how large — and
+    /// somebody opening a supplier's file usually wants those as much as the
+    /// view. Including what was left out: a part drawn with faces missing
+    /// looks like the part, so the count is the only thing that says
+    /// otherwise.
     pub fn summary_json(&self) -> String {
         let skipped: Vec<String> = self
             .mesh
@@ -166,13 +184,31 @@ impl ModelSession {
             .iter()
             .map(|s| format!(r#"{{"what":{:?},"count":{}}}"#, s.what, s.count))
             .collect();
+        let lost: usize = self.mesh.skipped.iter().map(|s| s.count).sum();
         let (low, high) = self.bounds;
+        let c = &self.census;
 
         format!(
-            r#"{{"triangles":{},"facesInFile":{},"skipped":[{}],"size":{{"x":{:.3},"y":{:.3},"z":{:.3}}}}}"#,
+            concat!(
+                r#"{{"triangles":{},"facesInFile":{},"facesDrawn":{},"#,
+                r#""skipped":[{}],"#,
+                r#""surfaces":{{"plane":{},"cylinder":{},"cone":{},"#,
+                r#""torus":{},"sphere":{},"freeform":{}}},"#,
+                r#""freeformCurves":{},"assembly":{},"#,
+                r#""size":{{"x":{:.2},"y":{:.2},"z":{:.2}}}}}"#,
+            ),
             self.mesh.triangles.len(),
-            self.faces_in_file,
+            c.faces,
+            c.faces.saturating_sub(lost),
             skipped.join(","),
+            c.planes,
+            c.cylinders,
+            c.cones,
+            c.tori,
+            c.spheres,
+            c.freeform_surfaces,
+            c.freeform_curves,
+            c.assembly_links,
             high.x - low.x,
             high.y - low.y,
             high.z - low.z,
@@ -354,8 +390,11 @@ mod tests {
     /// Reopening the same file reuses the mesh rather than rebuilding it.
     #[test]
     fn the_same_file_opens_from_the_cache() {
-        let first = open("cached", a_cube().as_bytes()).expect("opens");
-        let second = open("cached", a_cube().as_bytes()).expect("opens again");
+        // Its own cache, not the global one: another test running beside
+        // this one can evict the entry between the two opens.
+        let mut meshes = HashMap::new();
+        let first = open_with(&mut meshes, "cached", a_cube().as_bytes()).expect("opens");
+        let second = open_with(&mut meshes, "cached", a_cube().as_bytes()).expect("again");
 
         assert!(
             Arc::ptr_eq(&first.mesh, &second.mesh),
@@ -373,8 +412,9 @@ mod tests {
         let original = a_cube();
         let edited = original.replace("(10.0,0.0,0.0)", "(12.0,0.0,0.0)  ");
 
-        let first = open("same-name", original.as_bytes()).expect("opens");
-        let second = open("same-name", edited.as_bytes()).expect("opens");
+        let mut meshes = HashMap::new();
+        let first = open_with(&mut meshes, "same-name", original.as_bytes()).expect("opens");
+        let second = open_with(&mut meshes, "same-name", edited.as_bytes()).expect("opens");
 
         assert_ne!(
             original.len(),

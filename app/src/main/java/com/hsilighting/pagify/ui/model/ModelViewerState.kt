@@ -79,11 +79,16 @@ class ModelViewerState(
         }
     }
 
+    /** Every number the panel shows, in the order it shows them. */
+    var details by mutableStateOf<List<Pair<String, String>>>(emptyList())
+        private set
+
     private fun describe() {
         val summary = runCatching { JSONObject(StepBridge.modelSummaryJson(handle)) }.getOrNull()
             ?: return
         val size = summary.optJSONObject("size")
-        val triangles = summary.optInt("triangles")
+        val drawn = summary.optInt("facesDrawn")
+        val inFile = summary.optInt("facesInFile")
 
         subtitle = buildString {
             if (size != null) {
@@ -96,9 +101,44 @@ class ModelViewerState(
                 )
                 append(" · ")
             }
-            append("%,d triangles".format(triangles))
+            append("%,d faces".format(inFile))
         }
 
+        val surfaces = summary.optJSONObject("surfaces")
+        details = buildList {
+            add("Faces in the file" to "%,d".format(inFile))
+            // Only when they differ. "1,671 of 1,671" is noise; the line
+            // exists to say when something is missing.
+            if (drawn != inFile) add("Faces drawn" to "%,d".format(drawn))
+            add("Triangles" to "%,d".format(summary.optInt("triangles")))
+            if (size != null) {
+                add(
+                    "Size" to "%.1f × %.1f × %.1f mm".format(
+                        size.optDouble("x"),
+                        size.optDouble("y"),
+                        size.optDouble("z"),
+                    ),
+                )
+            }
+            if (surfaces != null) {
+                // Named the way somebody reading a drawing would, not the
+                // way STEP spells them: TOROIDAL_SURFACE means nothing to
+                // anybody who has not read the standard.
+                listOf(
+                    "Flat" to "plane",
+                    "Cylindrical" to "cylinder",
+                    "Conical" to "cone",
+                    "Toroidal" to "torus",
+                    "Spherical" to "sphere",
+                    "Freeform" to "freeform",
+                ).forEach { (label, key) ->
+                    val count = surfaces.optInt(key)
+                    if (count > 0) add(label to "%,d".format(count))
+                }
+            }
+            val assembly = summary.optInt("assembly")
+            if (assembly > 0) add("Assembly links" to "%,d".format(assembly))
+        }
         // **Said out loud, not logged.** A part drawn with faces missing looks
         // like the part; without this line there is nothing at all to tell
         // somebody that what they are looking at is incomplete.

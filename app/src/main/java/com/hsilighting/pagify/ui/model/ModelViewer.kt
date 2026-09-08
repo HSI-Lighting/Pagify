@@ -5,21 +5,29 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -57,6 +65,8 @@ fun ModelViewer(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var showingDetails by rememberSaveable { mutableStateOf(false) }
+
     Column(modifier.fillMaxSize().background(BACKDROP)) {
         Row(
             Modifier.fillMaxWidth().padding(start = 4.dp, end = 8.dp, top = 8.dp),
@@ -81,6 +91,13 @@ fun ModelViewer(
                     Text(it, style = MaterialTheme.typography.bodySmall, color = Color(0xFFB8BEC6))
                 }
             }
+            IconButton(onClick = { showingDetails = !showingDetails }) {
+                Icon(
+                    Icons.Outlined.Info,
+                    contentDescription = if (showingDetails) "Hide the details" else "Show the details",
+                    tint = if (showingDetails) Color(0xFF8AB4F8) else Color.White,
+                )
+            }
             IconButton(onClick = state::fit) {
                 Icon(
                     Icons.Filled.CenterFocusStrong,
@@ -90,11 +107,23 @@ fun ModelViewer(
             }
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-            when {
-                state.error != null -> Message(state.error!!)
-                state.loading -> CircularProgressIndicator(color = Color.White)
-                else -> Surface(state)
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                when {
+                    state.error != null -> Message(state.error!!)
+                    state.loading -> CircularProgressIndicator(color = Color.White)
+                    else -> Surface(state)
+                }
+            }
+
+            // **Over the model, not instead of it.** The numbers describe what
+            // is on screen, so putting them beside it means reading one while
+            // looking at the other. A panel that can be dismissed keeps both.
+            if (showingDetails && state.details.isNotEmpty()) {
+                Details(
+                    state.details,
+                    Modifier.align(Alignment.TopStart).padding(12.dp),
+                )
             }
         }
 
@@ -183,3 +212,42 @@ internal const val PROXY_FRACTION = 0.4f
 /** Bitmaps are created here so the viewer and its tests agree on the format. */
 internal fun modelBitmap(width: Int, height: Int): Bitmap =
     Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
+
+/**
+ * What the part is, in numbers.
+ *
+ * **The parameters, not only the picture.** A supplier's model is a set of
+ * facts before it is a shape — how many faces, of what kinds, how large — and
+ * somebody opening one usually wants those as much as the view. Reading them
+ * beside the model beats reading them instead of it, so this sits over the
+ * corner and can be put away.
+ */
+@Composable
+private fun Details(rows: List<Pair<String, String>>, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .background(Color(0xE6141619), RoundedCornerShape(12.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        rows.forEach { (label, value) ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    label,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF9AA2AD),
+                    modifier = Modifier.width(118.dp),
+                )
+                Text(
+                    value,
+                    // Tabular figures live on the style, not on `Text` -- passing
+                    // `fontFeatureSettings` here does not compile, which is the
+                    // second time that has caught me today.
+                    style = MaterialTheme.typography.bodySmall.copy(fontFeatureSettings = "tnum"),
+                    fontWeight = FontWeight.Medium,
+                    color = Color.White,
+                )
+            }
+        }
+    }
+}

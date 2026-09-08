@@ -131,8 +131,11 @@ pub fn face_triangles(
     cache: &EdgeCache,
     sag: f64,
 ) -> Result<Vec<Triangle>, &'static str> {
-    if matches!(face.surface, Surface::Unsupported { .. }) {
-        return Err("freeform surfaces");
+    // The reason the adapter gave, not a general one: a freeform surface and
+    // a surface type this has never heard of are different problems, and
+    // collapsing them tells the user the wrong thing about their file.
+    if let Surface::Unsupported { what } = face.surface {
+        return Err(what);
     }
 
     let outer = boundary(face, &face.outer, cache).ok_or("an unreadable outer boundary")?;
@@ -581,7 +584,7 @@ mod tests {
     fn an_unsupported_face_is_counted_and_named() {
         let mut solid = square_solid(true);
         solid.faces.push(Face {
-            surface: Surface::Unsupported { what: "B_SPLINE_SURFACE_WITH_KNOTS" },
+            surface: Surface::Unsupported { what: "freeform surfaces" },
             outer: Loop { edges: vec![(EdgeId(1), true)], bound_forward: true },
             inners: Vec::new(),
             same_sense: true,
@@ -601,7 +604,7 @@ mod tests {
         let mut solid = square_solid(true);
         for _ in 0..3 {
             solid.faces.push(Face {
-                surface: Surface::Unsupported { what: "B_SPLINE_SURFACE_WITH_KNOTS" },
+                surface: Surface::Unsupported { what: "freeform surfaces" },
                 outer: Loop { edges: vec![(EdgeId(1), true)], bound_forward: true },
                 inners: Vec::new(),
                 same_sense: true,

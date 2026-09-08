@@ -239,3 +239,103 @@ class StepBridgeTest {
         assertTrue(outcome.isFailure)
     }
 }
+
+/**
+ * A real supplier file, on the phone.
+ *
+ * Skipped unless one has been pushed to `/sdcard/Download`, because real CAD
+ * cannot be committed — supplier geometry is the confidential part. What this
+ * adds over the synthetic square is scale: a 6.8 MB model with two thousand
+ * faces, parsed and tessellated on a phone's own processor rather than a
+ * desktop's.
+ *
+ * ```text
+ * adb push part.step /sdcard/Download/
+ * adb shell pm grant com.hsilighting.pagify3d.debug android.permission.READ_EXTERNAL_STORAGE
+ * ```
+ */
+class RealModelTest {
+
+    /**
+     * Copy a file out of shared storage, through the shell.
+     *
+     * **Not by reading it directly.** A test app has no access to
+     * `/sdcard/Download` on a modern Android, and the permission that used
+     * to grant it cannot be granted to a package that only exists while the
+     * test run lasts. Instrumentation can run a shell command, and the shell
+     * can read it — so `cat` does the fetching and the bytes arrive on
+     * stdout.
+     */
+    private fun fetch(remote: String, into: File): Boolean = runCatching {
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        // Unquoted: `executeShellCommand` does not run a shell, it execs the
+        // command after splitting on spaces, so quotes arrive as part of the
+        // filename and `cat` returns nothing at all -- silently.
+        automation.executeShellCommand("cat $remote").use { descriptor ->
+            android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { source ->
+                into.outputStream().use { sink -> source.copyTo(sink) }
+            }
+        }
+        into.length() > 0
+    }.getOrDefault(false)
+
+    /** Whatever STEP file has been pushed to Download, if any. */
+    private fun pushedFile(): String? = runCatching {
+        val automation = InstrumentationRegistry.getInstrumentation().uiAutomation
+        automation.executeShellCommand("ls /sdcard/Download").use { descriptor ->
+            android.os.ParcelFileDescriptor.AutoCloseInputStream(descriptor).use { source ->
+                source.readBytes().decodeToString()
+                    .lineSequence()
+                    .map { it.trim() }
+                    .firstOrNull { it.endsWith(".step", true) || it.endsWith(".stp", true) }
+                    ?.let { "/sdcard/Download/$it" }
+            }
+        }
+    }.getOrNull()
+
+    @Test
+    fun a_real_part_opens_and_draws_on_the_phone() {
+        val remote = pushedFile()
+        android.util.Log.i("RealModel", "candidate: $remote")
+        if (remote == null) return // nothing pushed; nothing to say
+
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val copy = File(context.cacheDir, remote.substringAfterLast('/'))
+        val got = fetch(remote, copy)
+        android.util.Log.i("RealModel", "fetched $got, ${copy.length()} bytes")
+        if (!got) return
+
+        val started = System.currentTimeMillis()
+        val handle = StepBridge.openModel(copy.absolutePath)
+        val opened = System.currentTimeMillis() - started
+
+        try {
+            val summary = org.json.JSONObject(StepBridge.modelSummaryJson(handle))
+            android.util.Log.i("RealModel", "${copy.name} in ${opened}ms: $summary")
+
+            assertTrue("no triangles", summary.getInt("triangles") > 0)
+            assertTrue("no faces", summary.getInt("facesInFile") > 0)
+
+            // Everything is accounted for: drawn plus skipped is the file.
+            val skipped = summary.getJSONArray("skipped")
+            val lost = (0 until skipped.length()).sumOf { skipped.getJSONObject(it).getInt("count") }
+            assertEquals(
+                "faces went missing without being counted",
+                summary.getInt("facesInFile"),
+                summary.getInt("facesDrawn") + lost,
+            )
+
+            val bitmap = Bitmap.createBitmap(240, 240, Bitmap.Config.ARGB_8888)
+            val drawing = System.currentTimeMillis()
+            assertTrue(StepBridge.renderModelInto(handle, bitmap))
+            android.util.Log.i("RealModel", "drawn in ${System.currentTimeMillis() - drawing}ms")
+
+            val pixels = IntArray(240 * 240)
+            bitmap.getPixels(pixels, 0, 240, 0, 0, 240, 240)
+            assertTrue("the part was not drawn", pixels.toSet().size > 2)
+        } finally {
+            StepBridge.closeModel(handle)
+            copy.delete()
+        }
+    }
+}

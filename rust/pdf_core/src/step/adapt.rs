@@ -35,15 +35,17 @@ pub fn read(bytes: &[u8]) -> Result<Solid, String> {
 pub fn convert(model: &raw::StepModel) -> Solid {
     let mut solid = Solid::default();
     let mut edges: HashMap<u64, Edge> = HashMap::new();
-    let mut unsupported: HashMap<&'static str, usize> = HashMap::new();
+    let mut unreadable: HashMap<&'static str, usize> = HashMap::new();
 
     for face in &model.advanced_face_arena.items {
+        // **Not counted here.** An unsupported surface still becomes a
+        // face, and the tessellator counts every face it cannot draw. Adding
+        // it to the tally as well reported each of them twice — 916 faces
+        // missing from a part that was only missing 462, which is a lie in
+        // the same direction as hiding them would have been.
         let surface = match surface_of(model, &face.face_geometry) {
             Ok(surface) => surface,
-            Err(what) => {
-                *unsupported.entry(what).or_default() += 1;
-                Surface::Unsupported { what }
-            }
+            Err(what) => Surface::Unsupported { what },
         };
 
         let mut outer = None;
@@ -79,7 +81,12 @@ pub fn convert(model: &raw::StepModel) -> Solid {
             }
         }
 
-        let Some(outer) = outer else { continue };
+        // A face with no boundary this could read is a real loss, and the
+        // only one the tessellator will never see. Counted here or nowhere.
+        let Some(outer) = outer else {
+            *unreadable.entry("a face with no usable boundary").or_default() += 1;
+            continue;
+        };
 
         solid.faces.push(Face {
             surface,
@@ -92,7 +99,7 @@ pub fn convert(model: &raw::StepModel) -> Solid {
     solid.edges = edges.into_values().collect();
     solid.edges.sort_by_key(|edge| edge.id);
 
-    for (what, count) in unsupported {
+    for (what, count) in unreadable {
         solid.skipped.push(Skipped { what: what.to_string(), count });
     }
 
@@ -578,6 +585,12 @@ mod real {
             mesh.skipped,
             tessellated,
         );
+        // The parameters the screen will show, printed here so a real file
+        // proves them rather than a fixture.
+        if let Ok(session) = crate::step::session::open(&path, &bytes) {
+            println!("summary: {}", session.summary_json());
+        }
+
         if let Some((low, high)) = mesh.bounds() {
             println!(
                 "bounds: {:.2} x {:.2} x {:.2}",
