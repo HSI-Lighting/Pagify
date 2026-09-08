@@ -130,6 +130,27 @@ pub fn convert(model: &raw::StepModel) -> Solid {
         solid.skipped.push(Skipped { what: what.to_string(), count });
     }
 
+    // **Anything the file holds and this never reached.**
+    //
+    // Every fault found in this adapter so far has been of one shape: a
+    // container it did not know about -- a solid with voids, geometry filed
+    // under a different node, a component instanced rather than placed -- whose
+    // faces were therefore never looked at. None of them announced itself. The
+    // picture simply came out missing a part, which reads as a rendering fault
+    // or as the model being different from what the user expected.
+    //
+    // Counting what was never reached turns the next one of those into a line
+    // on screen saying so, rather than into a wrong picture and a puzzled user.
+    let reached: std::collections::HashSet<usize> =
+        placed.iter().map(|(face, _, _)| *face).collect();
+    let unreached = model.advanced_face_arena.items.len().saturating_sub(reached.len());
+    if unreached > 0 {
+        solid.skipped.push(Skipped {
+            what: "faces in no solid this understands".to_string(),
+            count: unreached,
+        });
+    }
+
     solid
 }
 
@@ -161,8 +182,15 @@ struct Instance {
 /// half-finished version of this looked correct on some files and left every
 /// part at the origin on this one.
 fn instances(model: &raw::StepModel, faces: &HashMap<u64, Vec<usize>>) -> Vec<Instance> {
-    // How each node sits in its parent.
-    let mut parent_of: HashMap<u64, (u64, Rigid)> = HashMap::new();
+    // **Children, not parents.** A part is *reused*: one bolt drawn once and
+    // placed a hundred times, one bracket at each end. Holding a single parent
+    // for each node can express only the last of those placements, so a
+    // hundred bolts become one and the rest are silently absent. The tree has
+    // to be walked from the top, emitting an instance for every path that
+    // reaches a piece of geometry.
+    let mut children_of: HashMap<u64, Vec<(u64, Rigid)>> = HashMap::new();
+    let mut is_child: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
     for complex in &model.complex_unit_arena.items {
         let mut pair = None;
         let mut operator = None;
@@ -178,12 +206,8 @@ fn instances(model: &raw::StepModel, faces: &HashMap<u64, Vec<usize>>) -> Vec<In
             }
         }
 
-        let (Some((rep_1, rep_2)), Some(operator)) = (pair, operator) else {
-            continue;
-        };
-        // **rep_1 is the component and rep_2 the assembly.** Backwards, every
-        // part is keyed on its parent and they overwrite one another —
-        // fifteen placements collapsing into three.
+        let Some((rep_1, rep_2)) = pair else { continue };
+        // rep_1 is the component, rep_2 the assembly it sits in.
         let (Some(child), Some(parent)) = (rep_key(rep_1), rep_key(rep_2)) else {
             continue;
         };
@@ -191,43 +215,47 @@ fn instances(model: &raw::StepModel, faces: &HashMap<u64, Vec<usize>>) -> Vec<In
             continue;
         }
 
-        let raw::TransformationRef::ItemDefinedTransformation(id) = operator else {
-            continue;
-        };
-        let transform = model.item_defined_transformation_arena.get(id.0);
-        // item_1 is the component's own origin, item_2 where it lands.
-        let (Some(own), Some(into_parent)) = (
-            placement_item(model, &transform.transform_item_1),
-            placement_item(model, &transform.transform_item_2),
-        ) else {
-            continue;
+        // A relationship with no transformation still ties the two together —
+        // it is how a node reaches its own geometry — and carries no movement.
+        let put = match operator {
+            Some(raw::TransformationRef::ItemDefinedTransformation(id)) => {
+                let transform = model.item_defined_transformation_arena.get(id.0);
+                // item_1 is the component's own origin, item_2 where it lands.
+                match (
+                    placement_item(model, &transform.transform_item_1),
+                    placement_item(model, &transform.transform_item_2),
+                ) {
+                    (Some(own), Some(into_parent)) => assembly::between(&into_parent, &own),
+                    _ => Rigid::identity(),
+                }
+            }
+            _ => Rigid::identity(),
         };
 
-        parent_of.insert(child, (parent, assembly::between(&into_parent, &own)));
+        children_of.entry(parent).or_default().push((child, put));
+        is_child.insert(child);
     }
 
-    // Every node that holds geometry, placed where the tree puts it. A node
-    // may also reach its geometry through a mapped item, which carries a
-    // transform of its own on top of the node's.
-    // **A node the tree names, or geometry something maps in -- never both.**
-    // The same solid is often listed under a SHAPE_REPRESENTATION the assembly
-    // places *and* under an ADVANCED_BREP_SHAPE_REPRESENTATION beside it.
-    // Instancing each would draw every face twice, once in the right place and
-    // once at the origin, which reads as a ghost of the part inside itself.
-    let mut instances = Vec::new();
-    for key in faces.keys() {
-        if *key >= SHAPE_REPRESENTATION_BASE {
-            instances.push(Instance {
-                geometry: *key,
-                put: assembly::to_root(*key, &parent_of),
-            });
-        }
-    }
+    // Mapped items are the other way a node reaches geometry, and carry a
+    // transform of their own. A file uses one convention or the other; reading
+    // only one leaves the parts of the other stacked at the origin.
+    let nodes = model
+        .shape_representation_arena
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (SHAPE_REPRESENTATION_BASE + index as u64, &node.items))
+        .chain(
+            model
+                .advanced_brep_shape_representation_arena
+                .items
+                .iter()
+                .enumerate()
+                .map(|(index, node)| (index as u64, &node.items)),
+        );
 
-    for (index, node) in model.shape_representation_arena.items.iter().enumerate() {
-        let here = assembly::to_root(SHAPE_REPRESENTATION_BASE + index as u64, &parent_of);
-
-        for item in &node.items {
+    for (key, items) in nodes {
+        for item in items {
             let raw::RepresentationItemRef::MappedItem(mapped) = item else {
                 continue;
             };
@@ -237,26 +265,89 @@ fn instances(model: &raw::StepModel, faces: &HashMap<u64, Vec<usize>>) -> Vec<In
                 continue;
             };
             let source = model.representation_map_arena.get(source.0);
-            let raw::RepresentationRef::AdvancedBrepShapeRepresentation(geometry) =
-                &source.mapped_representation
-            else {
-                continue;
+            let child = match &source.mapped_representation {
+                raw::RepresentationRef::AdvancedBrepShapeRepresentation(id) => id.0 as u64,
+                raw::RepresentationRef::ShapeRepresentation(id) => {
+                    SHAPE_REPRESENTATION_BASE + id.0 as u64
+                }
+                _ => continue,
             };
-            let (Some(own), Some(into_node)) = (
+            let put = match (
                 placement_item(model, &source.mapping_origin),
                 placement_item(model, &mapped.mapping_target),
-            ) else {
-                continue;
+            ) {
+                (Some(own), Some(into_node)) => assembly::between(&into_node, &own),
+                _ => Rigid::identity(),
             };
 
-            instances.push(Instance {
-                geometry: geometry.0 as u64,
-                put: assembly::between(&into_node, &own).then(&here),
-            });
+            children_of.entry(key).or_default().push((child, put));
+            is_child.insert(child);
         }
     }
 
+    // Whatever is never a child is a top of the tree. There is usually one; a
+    // file with several separate products has several, and a file with none —
+    // because every node is in a cycle — falls back to drawing where it lies.
+    let mut roots: Vec<u64> = children_of
+        .keys()
+        .copied()
+        .filter(|key| !is_child.contains(key))
+        .collect();
+    for key in faces.keys() {
+        if !is_child.contains(key) && !children_of.contains_key(key) {
+            roots.push(*key);
+        }
+    }
+    roots.sort_unstable();
+    roots.dedup();
+
+    let mut instances = Vec::new();
+    for root in roots {
+        walk(root, Rigid::identity(), 0, &children_of, faces, &mut instances);
+    }
+
+    // A file with no assembly structure draws its geometry where it lies,
+    // which is right for a single part and is most files.
+    if instances.is_empty() {
+        instances = faces
+            .keys()
+            .map(|geometry| Instance { geometry: *geometry, put: Rigid::identity() })
+            .collect();
+    }
+
+    #[cfg(test)]
+    eprintln!("instances {}, roots walked", instances.len());
+
     instances
+}
+
+/// Walk one branch of the assembly, placing whatever geometry it reaches.
+///
+/// Depth-first and by path, so a component used in five places is emitted five
+/// times with five transforms. The depth cap is what stops a file whose
+/// relationships form a cycle from running for ever.
+fn walk(
+    node: u64,
+    here: Rigid,
+    depth: usize,
+    children_of: &HashMap<u64, Vec<(u64, Rigid)>>,
+    faces: &HashMap<u64, Vec<usize>>,
+    into: &mut Vec<Instance>,
+) {
+    const DEEPEST: usize = 24;
+    const MOST: usize = 20_000;
+
+    if depth > DEEPEST || into.len() >= MOST {
+        return;
+    }
+
+    if faces.contains_key(&node) {
+        into.push(Instance { geometry: node, put: here });
+    }
+
+    for (child, step) in children_of.get(&node).into_iter().flatten() {
+        walk(*child, step.then(&here), depth + 1, children_of, faces, into);
+    }
 }
 
 /// The faces each node holds, by the path the file links them.
@@ -270,20 +361,54 @@ fn instances(model: &raw::StepModel, faces: &HashMap<u64, Vec<usize>>) -> Vec<In
 fn faces_of(model: &raw::StepModel) -> HashMap<u64, Vec<usize>> {
     let mut faces: HashMap<u64, Vec<usize>> = HashMap::new();
 
-    let mut collect = |key: u64, items: &[raw::RepresentationItemRef]| {
+    // **Each solid claimed once.** The same MANIFOLD_SOLID_BREP is often an
+    // item of both the node the assembly tree names and a representation
+    // beside it. Registering it under both draws every face twice -- once
+    // placed and once wherever the other node sits -- and the only sign is a
+    // face count that has quietly doubled.
+    let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    let mut shell_faces = |key: u64, shell: &raw::ClosedShellRef, faces: &mut HashMap<u64, Vec<usize>>| {
+        let raw::ClosedShellRef::ClosedShell(shell) = shell else { return };
+        for face in &model.closed_shell_arena.get(shell.0).cfs_faces {
+            if let raw::FaceRef::AdvancedFace(id) = face {
+                faces.entry(key).or_default().push(id.0);
+            }
+        }
+    };
+
+    let mut collect = |key: u64, items: &[raw::RepresentationItemRef], faces: &mut HashMap<u64, Vec<usize>>| {
         for item in items {
-            let raw::RepresentationItemRef::ManifoldSolidBrep(solid) = item else {
-                continue;
-            };
-            let raw::ClosedShellRef::ClosedShell(shell) =
-                &model.manifold_solid_brep_arena.get(solid.0).outer
-            else {
-                continue;
-            };
-            for face in &model.closed_shell_arena.get(shell.0).cfs_faces {
-                if let raw::FaceRef::AdvancedFace(id) = face {
-                    faces.entry(key).or_default().push(id.0);
+            match item {
+                raw::RepresentationItemRef::ManifoldSolidBrep(solid) => {
+                    if claimed.insert(solid.0) {
+                        shell_faces(key, &model.manifold_solid_brep_arena.get(solid.0).outer, faces);
+                    }
                 }
+                // **A solid with cavities in it.** Its outer shell is where the
+                // other kind keeps its only one, and skipping this type loses
+                // the whole part -- half the faces of a real valve body were
+                // absent for exactly this reason, with nothing to say so.
+                raw::RepresentationItemRef::BrepWithVoids(solid) => {
+                    if !claimed.insert(usize::MAX - solid.0) {
+                        continue;
+                    }
+                    let solid = model.brep_with_voids_arena.get(solid.0);
+                    shell_faces(key, &solid.outer, faces);
+                    // The cavities too: they are real surfaces, and a casting
+                    // shown without them is solid where it is hollow.
+                    for void in &solid.voids {
+                        let raw::OrientedClosedShellRef::OrientedClosedShell(void) = void else {
+                            continue;
+                        };
+                        shell_faces(
+                            key,
+                            &model.oriented_closed_shell_arena.get(void.0).closed_shell_element,
+                            faces,
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     };
@@ -294,10 +419,16 @@ fn faces_of(model: &raw::StepModel) -> HashMap<u64, Vec<usize>> {
         .iter()
         .enumerate()
     {
-        collect(index as u64, &representation.items);
+        collect(index as u64, &representation.items, &mut faces);
     }
     for (index, node) in model.shape_representation_arena.items.iter().enumerate() {
-        collect(SHAPE_REPRESENTATION_BASE + index as u64, &node.items);
+        collect(SHAPE_REPRESENTATION_BASE + index as u64, &node.items, &mut faces);
+    }
+
+    #[cfg(test)]
+    {
+        let total: usize = faces.values().map(|v| v.len()).sum();
+        eprintln!("faces_of covers {total} faces across {} nodes", faces.len());
     }
 
     faces
@@ -1002,6 +1133,22 @@ mod sweep {
                 .map(|t| t.a.dot(t.b.cross(t.c)) / 6.0)
                 .sum();
 
+            // **Every face in the file is either drawn or named.**
+            //
+            // The invariant that would have caught every adapter fault found
+            // so far, each of which was a container this did not know about
+            // whose faces were quietly never looked at. Across every real file
+            // available, not the one being worked on.
+            let unreached = solid
+                .skipped
+                .iter()
+                .find(|s| s.what.starts_with("faces in no solid"));
+            assert!(
+                unreached.is_none(),
+                "{name}: {:?} -- a container this adapter does not know about",
+                unreached,
+            );
+
             // **Every accepted part encloses a positive volume.**
             //
             // This is the guard for what the sweep found: at a fixed 0.02 mm
@@ -1067,12 +1214,9 @@ mod picture {
         let mut sheet = raster::Canvas::new(SIZE * 4, SIZE);
         sheet.fill(style.background);
 
-        for (index, yaw) in [0.6_f64, 2.2, 3.8, 5.4].into_iter().enumerate() {
+        for (index, turn) in [0.0_f64, 1.6, 3.2, 4.8].into_iter().enumerate() {
             let mut tile = raster::Canvas::new(SIZE, SIZE);
-            let camera = Camera {
-                yaw,
-                ..Camera::fit(low, high, 45.0_f64.to_radians())
-            };
+            let camera = Camera::fit(low, high, 45.0_f64.to_radians()).turned(turn, 0.0);
             let started = std::time::Instant::now();
             raster::draw(&mesh, &camera, &style, &mut tile);
             println!(

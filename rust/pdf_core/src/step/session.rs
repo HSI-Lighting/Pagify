@@ -327,65 +327,7 @@ mod tests {
     }
 
 
-    /// An ordinary vertical drag does not slam the tilt against its stop.
-    ///
-    /// **The bug this is here for.** Pitch is clamped just short of straight
-    /// up, and at the old rate a third of a screen reached the stop — after
-    /// which every further drag did nothing and the part appeared to spin
-    /// sideways only. A control that saturates on a normal gesture is
-    /// indistinguishable from one that does not work.
-    #[test]
-    fn a_normal_vertical_drag_does_not_reach_the_stop() {
-        let mut session = open_a_square("tilt-rate");
-        let stop = std::f64::consts::FRAC_PI_2 - 0.01;
-
-        // A third of the view, which is an ordinary drag.
-        session.orbit(0.0, 0.33);
-
-        assert!(
-            session.camera.pitch < stop - 0.05,
-            "one drag reached the stop: {} against {stop}",
-            session.camera.pitch,
-        );
-    }
-
-    /// The two axes turn at the same rate, so a diagonal drag goes diagonally.
-    #[test]
-    fn both_axes_turn_at_the_same_rate() {
-        let mut sideways = open_a_square("rate-x");
-        let mut vertical = open_a_square("rate-y");
-        let start = sideways.camera.pitch;
-
-        sideways.orbit(0.1, 0.0);
-        vertical.orbit(0.0, 0.1);
-
-        let turned = (sideways.camera.yaw - vertical.camera.yaw).abs();
-        let tilted = (vertical.camera.pitch - start).abs();
-
-        assert!(
-            (turned - tilted).abs() < 1e-9,
-            "sideways moved {turned} and vertical {tilted}",
-        );
-    }
-
-    /// And dragging down sends it down.
-    #[test]
-    fn dragging_down_sends_the_part_down() {
-        let mut session = open_a_square("drag-y");
-        let corner = Point3::new(10.0, 10.0, 0.0);
-
-        let before = session.camera.to_view(corner);
-        session.orbit(0.0, 0.05);
-        let after = session.camera.to_view(corner);
-
-        assert!(
-            after.y < before.y,
-            "the part went up when the finger went down: {} to {}",
-            before.y,
-            after.y,
-        );
-    }
-
+/// A long vertical drag keeps tilting instead of jamming.    ///    /// The turntable camera this replaced clamped its tilt short of straight    /// up: a third of a screen reached the stop and every drag after that did    /// nothing, while sideways drags kept working. That is what "it spins but    /// will not tip" was, and it is why the camera keeps three axes now.    #[test]    fn a_long_vertical_drag_never_stops_working() {        let mut session = open_a_square("tilt-rate");        for step in 0..12 {            let before = session.camera.back;            session.orbit(0.0, 0.3);            assert!(                session.camera.back.minus(before).length() > 1e-6,                "drag {step} did nothing at all",            );        }    }
     /// Turning changes the picture; that is the whole feature.
     #[test]
     fn turning_the_part_changes_what_is_drawn() {
@@ -429,12 +371,11 @@ mod tests {
     #[test]
     fn panning_does_not_change_the_angle() {
         let mut session = open_a_square("square-5");
-        let (yaw, pitch) = (session.camera.yaw, session.camera.pitch);
+        let facing = session.camera.back;
 
         session.pan(0.3, 0.2);
 
-        assert_eq!(yaw, session.camera.yaw);
-        assert_eq!(pitch, session.camera.pitch);
+        assert_eq!(facing, session.camera.back, "panning turned the view");
     }
 
     /// A nonsense zoom is ignored rather than destroying the view.

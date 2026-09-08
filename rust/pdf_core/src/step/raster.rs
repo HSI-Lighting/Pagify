@@ -331,13 +331,14 @@ mod tests {
         }
     }
 
-    /// Straight on from +z, so a square facing +z faces the eye.
     fn head_on(distance: f64) -> Camera {
         Camera {
             target: Point3::new(0.0, 0.0, 0.0),
             distance,
-            yaw: 0.0,
-            pitch: std::f64::consts::FRAC_PI_2 - 1e-9,
+            // Looking down the world -z, so a face pointing at +z faces the eye.
+            right: Point3::new(1.0, 0.0, 0.0),
+            up: Point3::new(0.0, 1.0, 0.0),
+            back: Point3::new(0.0, 0.0, 1.0),
             fov: 45.0_f64.to_radians(),
         }
     }

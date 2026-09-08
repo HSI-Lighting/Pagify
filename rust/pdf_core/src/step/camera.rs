@@ -9,44 +9,68 @@
 use super::model::Point3;
 
 /// A right-handed look at a point from a distance.
+///
+/// **A trackball, not a turntable.** The orientation is kept as three axes
+/// rather than a yaw and a pitch, because a pitch has poles: it must be clamped
+/// short of straight up, and a drag that reaches the clamp stops doing anything
+/// while sideways drags keep working. That feels exactly like a broken control,
+/// and it was one — the part would spin but would not tip past a point.
+///
+/// Three axes have no poles. Any orientation is reachable, dragging always
+/// moves, and there is nothing to clamp.
 #[derive(Debug, Clone, Copy)]
 pub struct Camera {
     /// What is being looked at, which is normally the middle of the part.
     pub target: Point3,
     /// How far the eye is from it.
     pub distance: f64,
-    /// Rotation about the vertical, in radians.
-    pub yaw: f64,
-    /// Rotation above and below the horizon, in radians.
-    pub pitch: f64,
+    /// Screen right, in the world.
+    pub right: Point3,
+    /// Screen up, in the world.
+    pub up: Point3,
+    /// Out of the screen towards the eye.
+    pub back: Point3,
     /// Vertical field of view, in radians.
     pub fov: f64,
 }
 
 impl Default for Camera {
     fn default() -> Self {
+        // Not straight on. A part viewed square to a face shows one rectangle
+        // and reads as flat; the standard three-quarter view shows three faces
+        // and reads as a solid immediately.
+        let back = Point3::new(0.62, 0.47, 0.63)
+            .normalised()
+            .expect("a fixed non-zero direction");
+        let right = Point3::new(0.0, 0.0, 1.0)
+            .cross(back)
+            .normalised()
+            .expect("not parallel to z");
+
         Self {
             target: Point3::new(0.0, 0.0, 0.0),
             distance: 10.0,
-            // Not straight on. A part viewed square to a face shows one
-            // rectangle and reads as flat; the standard three-quarter view
-            // shows three faces and reads as a solid immediately.
-            yaw: 0.6,
-            pitch: 0.5,
+            right,
+            up: back.cross(right),
+            back,
             fov: 45.0_f64.to_radians(),
         }
     }
 }
 
+/// Turn a vector about an axis, by Rodrigues' formula.
+fn rotated(vector: Point3, axis: Point3, angle: f64) -> Point3 {
+    let (sin, cos) = angle.sin_cos();
+    vector
+        .scaled(cos)
+        .plus(axis.cross(vector).scaled(sin))
+        .plus(axis.scaled(axis.dot(vector) * (1.0 - cos)))
+}
+
 impl Camera {
     /// Where the eye is.
     pub fn eye(&self) -> Point3 {
-        let horizontal = self.distance * self.pitch.cos();
-        self.target.plus(Point3::new(
-            horizontal * self.yaw.cos(),
-            horizontal * self.yaw.sin(),
-            self.distance * self.pitch.sin(),
-        ))
+        self.target.plus(self.back.scaled(self.distance))
     }
 
     /// Frame a box so all of it is visible, whatever shape it is.
@@ -75,17 +99,38 @@ impl Camera {
         }
     }
 
-    /// The pitch, kept off the poles.
+    /// Tumble the view: `across` about the screen's vertical, `down` about its
+    /// horizontal.
     ///
-    /// Straight up is where the view's own idea of "up" stops being defined and
-    /// the model spins about the eye instead of turning. Clamping just short of
-    /// it costs nothing anybody wants and removes a way for the view to become
-    /// unusable with no obvious way back.
-    pub fn turned(&self, by_yaw: f64, by_pitch: f64) -> Self {
-        const NEARLY_UP: f64 = std::f64::consts::FRAC_PI_2 - 0.01;
+    /// Both rotations act on the axes themselves, so there is no orientation
+    /// that cannot be reached and no direction in which dragging stops working.
+    pub fn turned(&self, across: f64, down: f64) -> Self {
+        let mut right = self.right;
+        let mut up = self.up;
+        let mut back = self.back;
+
+        // About the current up first.
+        right = rotated(right, up, across);
+        back = rotated(back, up, across);
+
+        // Then about the new right, which is what makes a second drag continue
+        // from where the first left off rather than from the world's idea of up.
+        up = rotated(up, right, down);
+        back = rotated(back, right, down);
+
+        // Re-squared each time. Rotations drift after enough of them, and a
+        // basis that is no longer square stretches the picture in one direction
+        // — which reads as the part being the wrong shape.
+        let back = back.normalised().unwrap_or(self.back);
+        let right = up
+            .cross(back)
+            .normalised()
+            .unwrap_or_else(|| self.right);
+
         Self {
-            yaw: self.yaw + by_yaw,
-            pitch: (self.pitch + by_pitch).clamp(-NEARLY_UP, NEARLY_UP),
+            right,
+            up: back.cross(right),
+            back,
             ..*self
         }
     }
@@ -98,36 +143,20 @@ impl Camera {
         }
     }
 
+    /// A point in the world, as the eye sees it: x right, y up, z towards it.
     /// The three axes of the view: right, up, and back towards the eye.
     pub fn axes(&self) -> (Point3, Point3, Point3) {
-        let back = self
-            .eye()
-            .minus(self.target)
-            .normalised()
-            .unwrap_or(Point3::new(0.0, 0.0, 1.0));
-
-        // World up, unless the eye is nearly over the pole, where it says
-        // nothing about which way round the view should be.
-        let world_up = if back.z.abs() > 0.999 {
-            Point3::new(0.0, 1.0, 0.0)
-        } else {
-            Point3::new(0.0, 0.0, 1.0)
-        };
-
-        let right = world_up
-            .cross(back)
-            .normalised()
-            .unwrap_or(Point3::new(1.0, 0.0, 0.0));
-        let up = back.cross(right);
-
-        (right, up, back)
+        (self.right, self.up, self.back)
     }
 
     /// A point in the world, as the eye sees it: x right, y up, z towards it.
     pub fn to_view(&self, point: Point3) -> Point3 {
-        let (right, up, back) = self.axes();
         let relative = point.minus(self.eye());
-        Point3::new(relative.dot(right), relative.dot(up), relative.dot(back))
+        Point3::new(
+            relative.dot(self.right),
+            relative.dot(self.up),
+            relative.dot(self.back),
+        )
     }
 }
 
@@ -216,19 +245,72 @@ mod tests {
         assert!(camera.distance.is_finite() && camera.distance > 0.0);
     }
 
-    /// Turning past straight up is where a view stops being recoverable.
+    /// **There is no orientation that cannot be reached.**
+    ///
+    /// The turntable this replaced had to clamp its pitch short of straight up,
+    /// and a drag that reached the clamp did nothing at all while sideways
+    /// drags kept working — which is what "it spins but will not tip" was.
     #[test]
-    fn the_pitch_never_reaches_the_pole() {
+    fn tilting_never_runs_out() {
         let mut camera = Camera::default();
-        for _ in 0..50 {
-            camera = camera.turned(0.0, 1.0);
-        }
-        assert!(camera.pitch < std::f64::consts::FRAC_PI_2, "{}", camera.pitch);
+        let mut seen: Vec<Point3> = Vec::new();
 
-        for _ in 0..100 {
-            camera = camera.turned(0.0, -1.0);
+        // Twenty drags in the same direction, each a sixth of a turn.
+        for _ in 0..20 {
+            let before = camera.back;
+            camera = camera.turned(0.0, 1.0);
+            assert!(
+                camera.back.minus(before).length() > 1e-6,
+                "a drag stopped having any effect: {:?}",
+                camera.back,
+            );
+            seen.push(camera.back);
         }
-        assert!(camera.pitch > -std::f64::consts::FRAC_PI_2, "{}", camera.pitch);
+
+        // And it goes right over the top rather than stopping there: some pose
+        // ends up looking from below.
+        assert!(
+            seen.iter().any(|back| back.z < -0.5),
+            "never got past the top",
+        );
+    }
+
+    /// Turning all the way round comes back to where it started.
+    #[test]
+    fn a_full_turn_returns_to_the_start() {
+        let start = Camera::default();
+        let mut camera = start;
+        for _ in 0..8 {
+            camera = camera.turned(std::f64::consts::FRAC_PI_4, 0.0);
+        }
+
+        assert!(
+            camera.back.minus(start.back).length() < 1e-6,
+            "{:?} against {:?}",
+            camera.back,
+            start.back,
+        );
+    }
+
+    /// The axes stay square however long it is turned for.
+    ///
+    /// Rotations accumulate error, and a basis that is no longer square
+    /// stretches the picture in one direction — which reads as the part being
+    /// the wrong shape rather than as the camera drifting.
+    #[test]
+    fn the_axes_stay_square_after_a_long_tumble() {
+        let mut camera = Camera::default();
+        for step in 0..500 {
+            camera = camera.turned(0.31 + step as f64 * 1e-4, -0.17);
+        }
+
+        let (right, up, back) = camera.axes();
+        for axis in [right, up, back] {
+            assert!((axis.length() - 1.0).abs() < 1e-9, "not unit: {axis:?}");
+        }
+        assert!(right.dot(up).abs() < 1e-9, "right and up drifted apart");
+        assert!(right.dot(back).abs() < 1e-9, "right and back drifted apart");
+        assert!(up.dot(back).abs() < 1e-9, "up and back drifted apart");
     }
 
     /// Zooming out and back in returns to where it started.
@@ -268,16 +350,7 @@ mod tests {
         }
     }
 
-    /// Looking from directly above still produces a usable frame.
-    #[test]
-    fn looking_straight_down_does_not_collapse_the_view() {
-        let camera = Camera {
-            pitch: std::f64::consts::FRAC_PI_2 - 1e-6,
-            ..Camera::default()
-        };
-        let (right, up, back) = camera.axes();
-        assert!(right.length() > 0.9 && up.length() > 0.9 && back.length() > 0.9);
-    }
+/// Looking from directly above is an ordinary pose, not a special case.    ///    /// It is the pole a turntable camera has to guard against; a trackball has    /// none.    #[test]    fn looking_straight_down_does_not_collapse_the_view() {        let camera = Camera::default().turned(0.0, std::f64::consts::FRAC_PI_2);        let (right, up, back) = camera.axes();        for axis in [right, up, back] {            assert!((axis.length() - 1.0).abs() < 1e-9, "collapsed: {axis:?}");        }    }
 
     /// The target sits straight ahead: no sideways or vertical offset.
     #[test]
