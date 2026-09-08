@@ -10,16 +10,21 @@ import android.util.Log
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.LaunchedEffect
+import com.hsilighting.pagify.ui.model.ModelViewer
+import com.hsilighting.pagify.ui.model.ModelViewerState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.core.net.toUri
@@ -85,6 +90,27 @@ class MainActivity : ComponentActivity() {
                         // Cleared so a configuration change does not reopen it and
                         // discard the page the user had scrolled to.
                         incomingDocument.value = null
+                    }
+                }
+
+                // **The 3D viewer's way in, on this branch only.**
+                //
+                // A STEP file is copied into the app's own storage before
+                // being opened. The engine reads a path, and a content URI
+                // from the picker is not one -- it is a handle to something
+                // another app is holding, which may be on a network share or
+                // inside a zip.
+                var modelState by remember { mutableStateOf<ModelViewerState?>(null) }
+                val modelScope = rememberCoroutineScope()
+                val modelPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument(),
+                ) { uri ->
+                    if (uri != null) {
+                        val copied = copyForReading(uri)
+                        if (copied != null) {
+                            modelState = ModelViewerState(copied.name, modelScope)
+                                .also { it.open(copied.absolutePath) }
+                        }
                     }
                 }
 
@@ -299,6 +325,18 @@ class MainActivity : ComponentActivity() {
                         }
                 }
 
+                // The viewer takes the whole screen while a model is open,
+                // and back closes it -- releasing the native handle, which is
+                // megabytes of mesh that will not collect itself.
+                modelState?.let { model ->
+                    BackHandler { model.close(); modelState = null }
+                    ModelViewer(
+                        state = model,
+                        onBack = { model.close(); modelState = null },
+                    )
+                    return@PagifyTheme
+                }
+
                 PagifyApp(
                     state = state,
                     recents = recents,
@@ -306,6 +344,7 @@ class MainActivity : ComponentActivity() {
                     onForgetRecent = { viewModel.forgetDocument(it.uri) },
                     onShareRecent = ::shareDocument,
                     onPickDocument = { viewModel.showNewDocumentChooser(true) },
+                    onOpenModel = { modelPicker.launch(arrayOf("*/*")) },
                     onClearLibrary = viewModel::clearLibrary,
                     onShowThumbnails = viewModel::setThumbnails,
                     settings = settings,
@@ -680,3 +719,27 @@ private class OpenWritableDocument : ActivityResultContracts.OpenDocument() {
             )
         }
 }
+
+/**
+ * Copy a picked file into the app's own storage so the engine can open it.
+ *
+ * **The engine takes a path, and a content URI is not one.** What the picker
+ * returns is a handle to something another app is holding — it may be on a
+ * network share, inside an archive, or on a drive that disconnects. Copying
+ * first means the model is read from a real file that exists for as long as it
+ * is being looked at, and it is the same reason the PDF path takes a file
+ * descriptor rather than a name.
+ */
+private fun ComponentActivity.copyForReading(uri: android.net.Uri): File? = runCatching {
+    val name = contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        val column = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+        if (column >= 0 && cursor.moveToFirst()) cursor.getString(column) else null
+    } ?: uri.lastPathSegment ?: "model.stp"
+
+    val into = File(cacheDir, "models").apply { mkdirs() }
+    val file = File(into, name)
+    contentResolver.openInputStream(uri)?.use { source ->
+        file.outputStream().use { sink -> source.copyTo(sink) }
+    } ?: return null
+    file
+}.getOrNull()

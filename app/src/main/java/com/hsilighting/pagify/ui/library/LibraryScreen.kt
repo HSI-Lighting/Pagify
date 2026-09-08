@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,11 +22,13 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ViewInAr
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.filled.Share
@@ -79,6 +82,8 @@ fun LibraryScreen(
     /** Hand the file to another app — mail, chat, a drive. */
     onShare: (RecentDocument) -> Unit,
     onPickDocument: () -> Unit,
+    /** Open a 3D model. Pagify 3D only. */
+    onOpenModel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
@@ -143,13 +148,27 @@ fun LibraryScreen(
             }
         }
 
-        FloatingActionButton(
-            onClick = onPickDocument,
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
+                .navigationBarsPadding()
                 .padding(20.dp),
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Icon(Icons.Filled.Add, contentDescription = "Add a document")
+            // **Pagify 3D only.** On this branch the app is a separate package
+            // with its own name and icon, so a second way in belongs on the
+            // screen rather than behind a setting.
+            ExtendedFloatingActionButton(
+                onClick = onOpenModel,
+                icon = { Icon(Icons.Filled.ViewInAr, contentDescription = null) },
+                text = { Text("Open a 3D model") },
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            )
+            FloatingActionButton(onClick = onPickDocument) {
+                Icon(Icons.Filled.Add, contentDescription = "Add a document")
+            }
         }
     }
 }

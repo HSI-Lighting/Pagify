@@ -46,6 +46,7 @@ class LibraryScreenTest {
                 onForget = {},
             onShare = {},
                 onPickDocument = { picked++ },
+                onOpenModel = {},
             )
         }
     }
