@@ -15,6 +15,7 @@ use std::collections::HashMap;
 
 use step_io::generated::model as raw;
 
+use super::assembly::{self, Rigid};
 use super::model::{Curve, Edge, EdgeId, Face, Frame, Loop, Point3, Skipped, Solid, Surface};
 
 /// Read a STEP file into a solid this crate can tessellate.
@@ -37,13 +38,38 @@ pub fn convert(model: &raw::StepModel) -> Solid {
     let mut edges: HashMap<u64, Edge> = HashMap::new();
     let mut unreadable: HashMap<&'static str, usize> = HashMap::new();
 
-    for face in &model.advanced_face_arena.items {
+    // **Where each part sits, and how many copies of it there are.**
+    // Without this every component is drawn about its own origin, inside every
+    // other one -- which does not read as a fault, it reads as a different
+    // object.
+    // Every face, with where its copy sits and an edge namespace of its own.
+    let mut placed: Vec<(usize, Rigid, u64)> = Vec::new();
+    let faces_of = faces_of(model);
+    for (copy, instance) in instances(model, &faces_of).iter().enumerate() {
+        for face in faces_of.get(&instance.geometry).into_iter().flatten() {
+            placed.push((*face, instance.put, (copy as u64 + 1) << 40));
+        }
+    }
+
+    // **A file that files none of its faces under a solid still draws.** Faces
+    // outside a closed shell are legal, and a part with no assembly structure
+    // at all is the ordinary case; either way there is nothing to place, so
+    // everything is taken as one component where it lies.
+    if placed.is_empty() {
+        placed = (0..model.advanced_face_arena.items.len())
+            .map(|face| (face, Rigid::identity(), 0))
+            .collect();
+    }
+
+    for (face_index, put, edge_base) in &placed {
+        let (put, edge_base) = (*put, *edge_base);
+        let face = &model.advanced_face_arena.items[*face_index];
         // **Not counted here.** An unsupported surface still becomes a
         // face, and the tessellator counts every face it cannot draw. Adding
         // it to the tally as well reported each of them twice — 916 faces
         // missing from a part that was only missing 462, which is a lie in
         // the same direction as hiding them would have been.
-        let surface = match surface_of(model, &face.face_geometry) {
+        let surface = match surface_of(model, &face.face_geometry, &put) {
             Ok(surface) => surface,
             Err(what) => Surface::Unsupported { what },
         };
@@ -64,7 +90,7 @@ pub fn convert(model: &raw::StepModel) -> Solid {
                 _ => continue,
             };
 
-            let Some(walked) = edge_loop(model, loop_ref, orientation, &mut edges) else {
+            let Some(walked) = edge_loop(model, loop_ref, orientation, &put, edge_base, &mut edges) else {
                 continue;
             };
 
@@ -106,10 +132,222 @@ pub fn convert(model: &raw::StepModel) -> Solid {
     solid
 }
 
+
+/// One placement of one component's geometry.
+///
+/// **A list, not a map.** The same geometry is commonly *instanced*: a turbine
+/// with two identical brackets stores the bracket once and places it twice, and
+/// this file does exactly that — five mapped items pointing at one
+/// representation. A map from face to transform can only hold the last of
+/// those, so one bracket appears and the other silently does not.
+struct Instance {
+    /// Which `ADVANCED_BREP_SHAPE_REPRESENTATION` holds the geometry.
+    geometry: u64,
+    /// Where this copy of it sits.
+    put: Rigid,
+}
+
+/// Every placed copy of every component.
+///
+/// The tree is built from two kinds of link, because assemblies use both:
+///
+/// - `REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION` between nodes, written
+///   as a complex instance wearing three names at once.
+/// - `MAPPED_ITEM`, which is how a node points at the geometry it draws, and
+///   carries a transform of its own.
+///
+/// A file using only the first works with only the first read, which is how a
+/// half-finished version of this looked correct on some files and left every
+/// part at the origin on this one.
+fn instances(model: &raw::StepModel, faces: &HashMap<u64, Vec<usize>>) -> Vec<Instance> {
+    // How each node sits in its parent.
+    let mut parent_of: HashMap<u64, (u64, Rigid)> = HashMap::new();
+    for complex in &model.complex_unit_arena.items {
+        let mut pair = None;
+        let mut operator = None;
+        for part in &complex.parts {
+            match part {
+                raw::UnitPart::RepresentationRelationship { rep_1, rep_2, .. } => {
+                    pair = Some((rep_1, rep_2));
+                }
+                raw::UnitPart::RepresentationRelationshipWithTransformation {
+                    transformation_operator,
+                } => operator = Some(transformation_operator),
+                _ => {}
+            }
+        }
+
+        let (Some((rep_1, rep_2)), Some(operator)) = (pair, operator) else {
+            continue;
+        };
+        // **rep_1 is the component and rep_2 the assembly.** Backwards, every
+        // part is keyed on its parent and they overwrite one another —
+        // fifteen placements collapsing into three.
+        let (Some(child), Some(parent)) = (rep_key(rep_1), rep_key(rep_2)) else {
+            continue;
+        };
+        if child == parent {
+            continue;
+        }
+
+        let raw::TransformationRef::ItemDefinedTransformation(id) = operator else {
+            continue;
+        };
+        let transform = model.item_defined_transformation_arena.get(id.0);
+        // item_1 is the component's own origin, item_2 where it lands.
+        let (Some(own), Some(into_parent)) = (
+            placement_item(model, &transform.transform_item_1),
+            placement_item(model, &transform.transform_item_2),
+        ) else {
+            continue;
+        };
+
+        parent_of.insert(child, (parent, assembly::between(&into_parent, &own)));
+    }
+
+    // Every node that holds geometry, placed where the tree puts it. A node
+    // may also reach its geometry through a mapped item, which carries a
+    // transform of its own on top of the node's.
+    // **A node the tree names, or geometry something maps in -- never both.**
+    // The same solid is often listed under a SHAPE_REPRESENTATION the assembly
+    // places *and* under an ADVANCED_BREP_SHAPE_REPRESENTATION beside it.
+    // Instancing each would draw every face twice, once in the right place and
+    // once at the origin, which reads as a ghost of the part inside itself.
+    let mut instances = Vec::new();
+    for key in faces.keys() {
+        if *key >= SHAPE_REPRESENTATION_BASE {
+            instances.push(Instance {
+                geometry: *key,
+                put: assembly::to_root(*key, &parent_of),
+            });
+        }
+    }
+
+    for (index, node) in model.shape_representation_arena.items.iter().enumerate() {
+        let here = assembly::to_root(SHAPE_REPRESENTATION_BASE + index as u64, &parent_of);
+
+        for item in &node.items {
+            let raw::RepresentationItemRef::MappedItem(mapped) = item else {
+                continue;
+            };
+            let mapped = model.mapped_item_arena.get(mapped.0);
+            let raw::RepresentationMapRef::RepresentationMap(source) = &mapped.mapping_source
+            else {
+                continue;
+            };
+            let source = model.representation_map_arena.get(source.0);
+            let raw::RepresentationRef::AdvancedBrepShapeRepresentation(geometry) =
+                &source.mapped_representation
+            else {
+                continue;
+            };
+            let (Some(own), Some(into_node)) = (
+                placement_item(model, &source.mapping_origin),
+                placement_item(model, &mapped.mapping_target),
+            ) else {
+                continue;
+            };
+
+            instances.push(Instance {
+                geometry: geometry.0 as u64,
+                put: assembly::between(&into_node, &own).then(&here),
+            });
+        }
+    }
+
+    instances
+}
+
+/// The faces each node holds, by the path the file links them.
+///
+/// **Both places a solid can live.** It may sit in its own
+/// `ADVANCED_BREP_SHAPE_REPRESENTATION`, reached from the assembly through a
+/// mapped item — or directly among the items of the `SHAPE_REPRESENTATION`
+/// that the assembly tree already names. Reading only the first found nothing
+/// on a real assembly and quietly fell back to drawing everything at the
+/// origin, which is the failure this whole module exists to prevent.
+fn faces_of(model: &raw::StepModel) -> HashMap<u64, Vec<usize>> {
+    let mut faces: HashMap<u64, Vec<usize>> = HashMap::new();
+
+    let mut collect = |key: u64, items: &[raw::RepresentationItemRef]| {
+        for item in items {
+            let raw::RepresentationItemRef::ManifoldSolidBrep(solid) = item else {
+                continue;
+            };
+            let raw::ClosedShellRef::ClosedShell(shell) =
+                &model.manifold_solid_brep_arena.get(solid.0).outer
+            else {
+                continue;
+            };
+            for face in &model.closed_shell_arena.get(shell.0).cfs_faces {
+                if let raw::FaceRef::AdvancedFace(id) = face {
+                    faces.entry(key).or_default().push(id.0);
+                }
+            }
+        }
+    };
+
+    for (index, representation) in model
+        .advanced_brep_shape_representation_arena
+        .items
+        .iter()
+        .enumerate()
+    {
+        collect(index as u64, &representation.items);
+    }
+    for (index, node) in model.shape_representation_arena.items.iter().enumerate() {
+        collect(SHAPE_REPRESENTATION_BASE + index as u64, &node.items);
+    }
+
+    faces
+}
+
+
+
+/// Representations of two different kinds share one numbering.
+///
+/// The assembly tree links `SHAPE_REPRESENTATION` nodes while the geometry sits
+/// in `ADVANCED_BREP_SHAPE_REPRESENTATION`, so a single map has to hold both.
+/// Offsetting one kind keeps their indices apart without a second lookup.
+const SHAPE_REPRESENTATION_BASE: u64 = 1 << 32;
+
+/// A representation of either kind, as one number.
+fn rep_key(reference: &raw::RepresentationOrRepresentationReferenceRef) -> Option<u64> {
+    match reference {
+        raw::RepresentationOrRepresentationReferenceRef::AdvancedBrepShapeRepresentation(id) => {
+            Some(id.0 as u64)
+        }
+        raw::RepresentationOrRepresentationReferenceRef::ShapeRepresentation(id) => {
+            Some(SHAPE_REPRESENTATION_BASE + id.0 as u64)
+        }
+        _ => None,
+    }
+}
+
+/// The index of a shape representation, if the reference names one this reads.
+fn brep_representation(reference: &raw::RepresentationOrRepresentationReferenceRef) -> Option<usize> {
+    match reference {
+        raw::RepresentationOrRepresentationReferenceRef::AdvancedBrepShapeRepresentation(id) => {
+            Some(id.0)
+        }
+        _ => None,
+    }
+}
+
+/// A transformation's placement, as a frame.
+fn placement_item(model: &raw::StepModel, item: &raw::RepresentationItemRef) -> Option<Frame> {
+    match item {
+        raw::RepresentationItemRef::Axis2Placement3d(id) => frame_at(model, id.0),
+        _ => None,
+    }
+}
+
 fn edge_loop(
     model: &raw::StepModel,
     loop_ref: &raw::LoopRef,
     orientation: bool,
+    put: &Rigid,
+    edge_base: u64,
     edges: &mut HashMap<u64, Edge>,
 ) -> Option<Loop> {
     let raw::LoopRef::EdgeLoop(id) = loop_ref else {
@@ -127,9 +365,9 @@ fn edge_loop(
         // The arena index doubles as the shared identity: two faces reaching the
         // same `EDGE_CURVE` reach the same index, which is exactly what the
         // discretisation cache keys on.
-        let id = EdgeId(curve_id.0 as u64);
+        let id = EdgeId(edge_base + curve_id.0 as u64);
         if !edges.contains_key(&id.0) {
-            if let Some(edge) = edge_of(model, curve_id, id) {
+            if let Some(edge) = edge_of(model, curve_id, id, put) {
                 edges.insert(id.0, edge);
             } else {
                 continue;
@@ -145,11 +383,16 @@ fn edge_loop(
     }
 }
 
-fn edge_of(model: &raw::StepModel, curve_id: &raw::EdgeCurveId, id: EdgeId) -> Option<Edge> {
+fn edge_of(
+    model: &raw::StepModel,
+    curve_id: &raw::EdgeCurveId,
+    id: EdgeId,
+    put: &Rigid,
+) -> Option<Edge> {
     let edge = model.edge_curve_arena.get(curve_id.0);
-    let start = vertex(model, &edge.edge_start)?;
-    let end = vertex(model, &edge.edge_end)?;
-    let curve = curve_of(model, &edge.edge_geometry, start, end);
+    let start = put.apply(vertex(model, &edge.edge_start)?);
+    let end = put.apply(vertex(model, &edge.edge_end)?);
+    let curve = curve_of(model, &edge.edge_geometry, start, end, put);
 
     Some(Edge { id, curve, start, end, same_sense: edge.same_sense })
 }
@@ -171,7 +414,13 @@ fn vertex(model: &raw::StepModel, vertex: &raw::VertexRef) -> Option<Point3> {
 /// triangulates to nothing at all — the face vanishes with no error raised.
 /// A chord is the wrong shape but the right topology, and the face survives to
 /// be looked at.
-fn curve_of(model: &raw::StepModel, curve: &raw::CurveRef, start: Point3, end: Point3) -> Curve {
+fn curve_of(
+    model: &raw::StepModel,
+    curve: &raw::CurveRef,
+    start: Point3,
+    end: Point3,
+    put: &Rigid,
+) -> Curve {
     match curve {
         raw::CurveRef::Line(id) => {
             let line = model.line_arena.get(id.0);
@@ -180,17 +429,21 @@ fn curve_of(model: &raw::StepModel, curve: &raw::CurveRef, start: Point3, end: P
             };
             let vector = model.vector_arena.get(vector_at);
             Curve::Line {
-                from: point_id(&line.pnt)
-                    .map(|at| cartesian(model.cartesian_point_arena.get(at)))
-                    .unwrap_or(start),
-                direction: direction(model, &vector.orientation).scaled(vector.magnitude),
+                from: put.apply(
+                    point_id(&line.pnt)
+                        .map(|at| cartesian(model.cartesian_point_arena.get(at)))
+                        .unwrap_or(start),
+                ),
+                direction: put
+                    .direction(direction(model, &vector.orientation))
+                    .scaled(vector.magnitude),
             }
         }
 
         raw::CurveRef::Circle(id) => {
             let circle = model.circle_arena.get(id.0);
             match placement_any(&circle.position).and_then(|at| frame_at(model, at)) {
-                Some(frame) => Curve::Circle { frame, radius: circle.radius },
+                Some(frame) => Curve::Circle { frame: put.moved(&frame), radius: circle.radius },
                 None => Curve::Polyline { points: vec![start, end] },
             }
         }
@@ -199,7 +452,7 @@ fn curve_of(model: &raw::StepModel, curve: &raw::CurveRef, start: Point3, end: P
             let ellipse = model.ellipse_arena.get(id.0);
             match placement_any(&ellipse.position).and_then(|at| frame_at(model, at)) {
                 Some(frame) => Curve::Ellipse {
-                    frame,
+                    frame: put.moved(&frame),
                     major: ellipse.semi_axis_1,
                     minor: ellipse.semi_axis_2,
                 },
@@ -216,7 +469,10 @@ fn curve_of(model: &raw::StepModel, curve: &raw::CurveRef, start: Point3, end: P
                 control: spline
                     .control_points_list
                     .iter()
-                    .filter_map(|point| point_id(point).map(|at| cartesian(model.cartesian_point_arena.get(at))))
+                    .filter_map(|point| {
+                        point_id(point)
+                            .map(|at| put.apply(cartesian(model.cartesian_point_arena.get(at))))
+                    })
                     .collect(),
                 knots: expand_knots(&spline.knots, &spline.knot_multiplicities),
                 weights: None,
@@ -238,16 +494,20 @@ fn expand_knots(distinct: &[f64], multiplicities: &[i64]) -> Vec<f64> {
     knots
 }
 
-fn surface_of(model: &raw::StepModel, surface: &raw::SurfaceRef) -> Result<Surface, &'static str> {
+fn surface_of(
+    model: &raw::StepModel,
+    surface: &raw::SurfaceRef,
+    put: &Rigid,
+) -> Result<Surface, &'static str> {
     match surface {
         raw::SurfaceRef::Plane(id) => frame_at(model, placement3d(&model.plane_arena.get(id.0).position))
-            .map(|frame| Surface::Plane { frame })
+            .map(|frame| Surface::Plane { frame: put.moved(&frame) })
             .ok_or("a surface with no placement"),
 
         raw::SurfaceRef::CylindricalSurface(id) => {
             let cylinder = model.cylindrical_surface_arena.get(id.0);
             frame_at(model, placement3d(&cylinder.position))
-                .map(|frame| Surface::Cylinder { frame, radius: cylinder.radius })
+                .map(|frame| Surface::Cylinder { frame: put.moved(&frame), radius: cylinder.radius })
                 .ok_or("a surface with no placement")
         }
 
@@ -255,7 +515,7 @@ fn surface_of(model: &raw::StepModel, surface: &raw::SurfaceRef) -> Result<Surfa
             let cone = model.conical_surface_arena.get(id.0);
             frame_at(model, placement3d(&cone.position))
                 .map(|frame| Surface::Cone {
-                    frame,
+                    frame: put.moved(&frame),
                     radius: cone.radius,
                     half_angle: cone.semi_angle,
                 })
@@ -265,7 +525,7 @@ fn surface_of(model: &raw::StepModel, surface: &raw::SurfaceRef) -> Result<Surfa
         raw::SurfaceRef::SphericalSurface(id) => {
             let sphere = model.spherical_surface_arena.get(id.0);
             frame_at(model, placement3d(&sphere.position))
-                .map(|frame| Surface::Sphere { frame, radius: sphere.radius })
+                .map(|frame| Surface::Sphere { frame: put.moved(&frame), radius: sphere.radius })
                 .ok_or("a surface with no placement")
         }
 
@@ -273,7 +533,7 @@ fn surface_of(model: &raw::StepModel, surface: &raw::SurfaceRef) -> Result<Surfa
             let torus = model.toroidal_surface_arena.get(id.0);
             frame_at(model, placement3d(&torus.position))
                 .map(|frame| Surface::Torus {
-                    frame,
+                    frame: put.moved(&frame),
                     major: torus.major_radius,
                     minor: torus.minor_radius,
                 })
@@ -286,7 +546,7 @@ fn surface_of(model: &raw::StepModel, surface: &raw::SurfaceRef) -> Result<Surfa
         // evaluated like any other surface.
         raw::SurfaceRef::BSplineSurfaceWithKnots(id) => {
             let surface = model.b_spline_surface_with_knots_arena.get(id.0);
-            let control = control_net(model, &surface.control_points_list);
+            let control = control_net(model, &surface.control_points_list, put);
             super::spline::Spline::new(
                 surface.u_degree.max(0) as usize,
                 surface.v_degree.max(0) as usize,
@@ -875,12 +1135,14 @@ mod picture {
 fn control_net(
     model: &raw::StepModel,
     rows: &[Vec<raw::CartesianPointRef>],
+    put: &Rigid,
 ) -> Vec<Vec<Point3>> {
     rows.iter()
         .map(|row| {
             row.iter()
                 .filter_map(|point| {
-                    point_id(point).map(|at| cartesian(model.cartesian_point_arena.get(at)))
+                    point_id(point)
+                        .map(|at| put.apply(cartesian(model.cartesian_point_arena.get(at))))
                 })
                 .collect()
         })
@@ -927,3 +1189,4 @@ mod where_the_triangles_go {
         }
     }
 }
+

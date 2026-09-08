@@ -22,6 +22,7 @@
 //! release costs one file rather than the geometry.
 
 pub mod adapt;
+pub mod assembly;
 pub mod audit;
 pub mod camera;
 pub mod curve;
