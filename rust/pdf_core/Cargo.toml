@@ -64,6 +64,17 @@ subsetter = "0.2.2"
 earcutr = "=0.5.0"
 step-io = "=0.2.4"
 
+# DWG, read natively. **MPL-2.0 — file-level copyleft**, so it links into a
+# proprietary binary and only its own files carry the obligation. That licence is
+# what makes this possible at all: LibreDWG, the obvious alternative, is GPL-3.0
+# and would take the whole app with it, App Store included.
+#
+# Pure Rust, like everything else here: its graph is 64 crates with no `cc`, no
+# `libz-sys` and no `bindgen`, and `flate2` resolves to `miniz_oxide`. Verified
+# by building it for aarch64-linux-android and running it on a phone against
+# real drawings before it was adopted.
+acadrust = "=0.4.1"
+
 # No `lopdf`. PDFium is the single writer: two independent object models writing
 # one file is a corruption class that is very hard to diagnose, and PDFium covers
 # the page tree, objects, text and save on its own. If lopdf ever comes back it is

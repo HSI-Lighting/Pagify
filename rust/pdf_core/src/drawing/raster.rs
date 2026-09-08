@@ -287,8 +287,14 @@ mod picture {
     fn a_real_drawing_can_be_looked_at() {
         let path = std::env::var("PAGIFY_DXF_FILE").expect("set PAGIFY_DXF_FILE");
         let out = std::env::var("PAGIFY_DXF_PNG").expect("set PAGIFY_DXF_PNG");
-        let bytes = std::fs::read(&path).expect("readable");
-        let drawing = crate::drawing::dxf::read(&String::from_utf8_lossy(&bytes)).expect("parses");
+        // Either format, chosen by the name: the whole point is that what comes
+        // out is the same drawing whichever door it came through.
+        let drawing = if path.to_ascii_lowercase().ends_with(".dwg") {
+            crate::drawing::dwg::read(std::path::Path::new(&path)).expect("parses")
+        } else {
+            let bytes = std::fs::read(&path).expect("readable");
+            crate::drawing::dxf::read(&String::from_utf8_lossy(&bytes)).expect("parses")
+        };
 
         const WIDE: u32 = 1400;
         const HIGH: u32 = 900;

@@ -7,5 +7,6 @@
 //! neither.
 
 pub mod model;
+pub mod dwg;
 pub mod dxf;
 pub mod raster;
