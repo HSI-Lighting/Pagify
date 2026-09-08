@@ -1,7 +1,11 @@
 package com.hsilighting.pagify.ui.model
 
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
 import com.hsilighting.pagify.core.CaptureFormat
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
@@ -100,6 +104,57 @@ class ModelCaptureTest {
     fun nothing_is_drawn_before_the_view_has_a_size() {
         assertEquals(0, captureSize(0, 0, 2).width)
         assertEquals(0, captureSize(1080, 0, 2).height)
+    }
+
+    // ---- the region that was dragged -----------------------------------------
+
+    /**
+     * A region lands in the picture where it was drawn on screen.
+     *
+     * The picture is rendered at a multiple of the view, so the box has to be
+     * scaled by the same factor. Getting this wrong does not fail: it returns
+     * a picture of the wrong part of the model, which looks like the tool
+     * missing rather than like arithmetic.
+     */
+    @Test
+    fun a_dragged_box_scales_into_the_picture() {
+        val whole = IntSize(1600, 2000)
+        val cut = regionInCapture(Rect(100f, 200f, 300f, 400f), 800, 1000, whole)
+
+        assertEquals(IntRect(200, 400, 600, 800), cut)
+    }
+
+    /**
+     * A drag that ran off the edge is clipped, not extrapolated.
+     *
+     * Selecting something against the border means dragging past it, and
+     * asking for pixels outside the picture is a crash rather than a wrong
+     * answer — `Bitmap.createBitmap` throws.
+     */
+    @Test
+    fun a_drag_past_the_edge_is_kept_inside_the_picture() {
+        val whole = IntSize(1600, 2000)
+        val cut = regionInCapture(Rect(-50f, -80f, 900f, 1200f), 800, 1000, whole)!!
+
+        assertTrue(cut.toString(), cut.left >= 0 && cut.top >= 0)
+        assertTrue(cut.toString(), cut.right <= whole.width && cut.bottom <= whole.height)
+        assertEquals(IntRect(0, 0, 1600, 2000), cut)
+    }
+
+    /** A tap that wandered gives nothing rather than an empty picture. */
+    @Test
+    fun a_region_with_no_area_is_refused() {
+        val whole = IntSize(1600, 2000)
+
+        assertNull(regionInCapture(Rect(10f, 10f, 10f, 10f), 800, 1000, whole))
+        assertNull(regionInCapture(Rect(10f, 10f, 200f, 10.2f), 800, 1000, whole))
+    }
+
+    /** Nothing to cut from before the view has a size. */
+    @Test
+    fun no_region_before_the_view_has_a_size() {
+        assertNull(regionInCapture(Rect(0f, 0f, 10f, 10f), 0, 0, IntSize(100, 100)))
+        assertNull(regionInCapture(Rect(0f, 0f, 10f, 10f), 800, 1000, IntSize.Zero))
     }
 
     // ---- what the file is called ---------------------------------------------

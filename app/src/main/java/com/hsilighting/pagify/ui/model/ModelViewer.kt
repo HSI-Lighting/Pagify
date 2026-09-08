@@ -21,6 +21,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.outlined.Crop
+import androidx.compose.material.icons.outlined.Gesture
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.PhotoCamera
 import androidx.compose.material3.CircularProgressIndicator
@@ -47,6 +49,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.ui.components.captureOverlay
 import kotlin.math.abs
 
 /**
@@ -75,6 +78,8 @@ fun ModelViewer(
     modifier: Modifier = Modifier,
 ) {
     var showingDetails by rememberSaveable { mutableStateOf(false) }
+    var framing by rememberSaveable { mutableStateOf(false) }
+    var lasso by rememberSaveable { mutableStateOf(false) }
 
     Column(modifier.fillMaxSize().background(BACKDROP)) {
         Row(
@@ -110,12 +115,23 @@ fun ModelViewer(
             // Beside Fit rather than in a menu: a capture is of a particular
             // view, so it is wanted at the moment the part is turned the right
             // way round — not after going looking for it.
-            IconButton(onClick = { state.takePicture() }, enabled = !state.capturing) {
+            IconButton(onClick = { framing = !framing }) {
                 Icon(
                     Icons.Outlined.PhotoCamera,
-                    contentDescription = "Take a picture of the model",
-                    tint = if (state.capturing) Color(0xFF7A828C) else Color.White,
+                    contentDescription = if (framing) "Stop taking a picture" else "Take a picture",
+                    tint = if (framing) Color(0xFF8AB4F8) else Color.White,
                 )
+            }
+            // Only while the tool is out. A shape chooser sitting in the bar
+            // the rest of the time is a control for something not happening.
+            if (framing) {
+                IconButton(onClick = { lasso = !lasso }) {
+                    Icon(
+                        if (lasso) Icons.Outlined.Gesture else Icons.Outlined.Crop,
+                        contentDescription = if (lasso) "Draw a ring" else "Drag a box",
+                        tint = Color(0xFF8AB4F8),
+                    )
+                }
             }
             IconButton(onClick = state::fit) {
                 Icon(
@@ -144,6 +160,33 @@ fun ModelViewer(
                     Modifier.align(Alignment.TopStart).padding(12.dp),
                 )
             }
+
+            // **A layer of its own, above the model.** The same overlay the
+            // reader uses on a page, so the tool behaves identically in both
+            // places: drag a box or trace a ring, everything outside dims, and
+            // a drag too small to mean anything is ignored. Above rather than
+            // beside, because the gesture underneath turns the part — one
+            // surface cannot both orbit and select, and letting it try is how
+            // a selection ends up spinning the model it was framing.
+            if (framing) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .captureOverlay(lasso = lasso) { box, ring ->
+                            state.takeRegion(box, ring)
+                            framing = false
+                        },
+                )
+            }
+        }
+
+        if (framing) {
+            Text(
+                if (lasso) "Trace a ring around what to keep." else "Drag a box around what to keep.",
+                style = MaterialTheme.typography.bodySmall,
+                color = Color(0xFF8AB4F8),
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
+            )
         }
 
         // **What was left out, on the screen rather than in a log.** A part

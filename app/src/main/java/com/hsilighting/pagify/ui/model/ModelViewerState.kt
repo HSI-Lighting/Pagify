@@ -7,6 +7,8 @@ import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.CaptureFormat
 import com.hsilighting.pagify.core.StepBridge
@@ -304,22 +306,32 @@ class ModelViewerState(
     }
 
     /**
-     * Draw the model again, larger, and keep the result.
+     * Take the region that was dragged, as the PDF reader does.
      *
-     * Its own bitmap, never the one on screen: that one is redrawn by the next
-     * gesture, and a picture that changes after it was taken is not a picture.
+     * **Drawn again, not cropped off the screen.** The whole view is rendered
+     * afresh at [scale] times its size and the region is cut from that, so a
+     * corner of the screen comes back with more detail in it than the screen
+     * ever showed — which is the point, and is why the same tool on a page is
+     * worth using rather than a screenshot. Its own bitmap, never the one being
+     * displayed: that one is redrawn by the next gesture, and a picture that
+     * changes after it is taken is not a picture.
+     *
+     * [ring] is the lasso's outline in view pixels, empty for a plain box.
+     * Everything outside it comes back blank, exactly as on a page.
      */
-    fun takePicture(scale: Int = 2) {
+    fun takeRegion(box: Rect, ring: List<Offset>, scale: Int = 2) {
         if (handle == StepBridge.NO_MODEL || capturing) return
-        val size = captureSize(width, height, scale)
-        if (size.width <= 0 || size.height <= 0) return
+        val whole = captureSize(width, height, scale)
+        val cut = regionInCapture(box, width, height, whole) ?: return
 
         capturing = true
         scope.launch {
             val drawn = withContext(Dispatchers.Default) {
                 runCatching {
-                    val target = modelBitmap(size.width, size.height)
-                    if (StepBridge.renderModelInto(handle, target)) target else null
+                    val target = modelBitmap(whole.width, whole.height)
+                    if (!StepBridge.renderModelInto(handle, target)) return@runCatching null
+                    val factor = whole.width.toFloat() / width.toFloat()
+                    cutOut(target, cut, ring, factor)
                 }.getOrElse {
                     Log.w(TAG, "the picture could not be drawn", it)
                     null

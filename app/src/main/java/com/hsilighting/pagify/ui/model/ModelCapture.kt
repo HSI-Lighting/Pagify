@@ -1,6 +1,8 @@
 package com.hsilighting.pagify.ui.model
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Path
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -25,14 +27,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.CaptureFormat
 import kotlin.math.max
+import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
 /**
@@ -95,6 +101,64 @@ fun captureSize(
  * the tablet at four times size, not for the case this feature exists to serve.
  */
 const val MOST_CAPTURE_PIXELS: Int = 12_000_000
+
+/**
+ * Where a region dragged on screen lands in the re-rendered picture.
+ *
+ * Scaled by the same factor in both directions, and clipped to the picture:
+ * a drag that ran off the edge of the view — which is how anyone selects
+ * something against the border — would otherwise ask for pixels that were
+ * never drawn.
+ *
+ * `null` when nothing usable is left, so a stray tap does not produce an empty
+ * picture and a sheet on top of it.
+ */
+fun regionInCapture(box: Rect, viewWidth: Int, viewHeight: Int, whole: IntSize): IntRect? {
+    if (viewWidth <= 0 || viewHeight <= 0 || whole.width <= 0 || whole.height <= 0) return null
+
+    val across = whole.width.toFloat() / viewWidth.toFloat()
+    val down = whole.height.toFloat() / viewHeight.toFloat()
+
+    val left = (box.left * across).toInt().coerceIn(0, whole.width)
+    val top = (box.top * down).toInt().coerceIn(0, whole.height)
+    val right = (box.right * across).roundToInt().coerceIn(0, whole.width)
+    val bottom = (box.bottom * down).roundToInt().coerceIn(0, whole.height)
+
+    if (right - left < 1 || bottom - top < 1) return null
+    return IntRect(left, top, right, bottom)
+}
+
+/**
+ * Cut the region out, blanking anything the lasso left outside itself.
+ *
+ * The ring arrives in view pixels and is scaled and shifted into the cut
+ * picture's own coordinates here, because that is the only place both are
+ * known — passing it around already converted is how a mask ends up correct
+ * at one zoom and wrong at every other.
+ */
+fun cutOut(whole: Bitmap, cut: IntRect, ring: List<Offset>, factor: Float): Bitmap {
+    val region = Bitmap.createBitmap(whole, cut.left, cut.top, cut.width, cut.height)
+    if (ring.size < 3) return region
+
+    val path = Path()
+    ring.forEachIndexed { at, point ->
+        val x = point.x * factor - cut.left
+        val y = point.y * factor - cut.top
+        if (at == 0) path.moveTo(x, y) else path.lineTo(x, y)
+    }
+    path.close()
+
+    // Drawn into a fresh bitmap through the ring rather than erased out of the
+    // region: clipping away is not something a Bitmap canvas does reliably on
+    // every Android version, and starting from blank cannot leave a fringe.
+    val masked = Bitmap.createBitmap(region.width, region.height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(masked)
+    canvas.save()
+    canvas.clipPath(path)
+    canvas.drawBitmap(region, 0f, 0f, null)
+    canvas.restore()
+    return masked
+}
 
 /** What a capture is called once it is a file. */
 fun captureFileName(model: String, stamp: String, format: CaptureFormat): String {
