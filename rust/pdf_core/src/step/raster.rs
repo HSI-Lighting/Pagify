@@ -112,7 +112,70 @@ impl Default for Style {
     }
 }
 
-/// Draw a mesh.
+/// Everything about the view that does not change from triangle to triangle.
+///
+/// **Hoisted, because it was not.** `Camera::to_view` rebuilds the camera's
+/// basis every time it is called — four trigonometric calls, two cross
+/// products and two normalisations — and it was being called once per
+/// vertex. On a 400,000-triangle part that is 1.2 million rebuilds of a
+/// thing that is the same for the whole frame, and it was most of what
+/// made dragging slow.
+struct View {
+    eye: Point3,
+    right: Point3,
+    up: Point3,
+    back: Point3,
+    /// Half the screen height over the tangent of half the field of view,
+    /// which turns a depth into pixels per unit.
+    scale: f64,
+    middle_x: f64,
+    middle_y: f64,
+    near: f64,
+}
+
+impl View {
+    fn of(camera: &Camera, width: u32, height: u32) -> Self {
+        let (right, up, back) = camera.axes();
+        Self {
+            eye: camera.eye(),
+            right,
+            up,
+            back,
+            scale: (height as f64 / 2.0) / (camera.fov / 2.0).tan(),
+            middle_x: width as f64 / 2.0,
+            middle_y: height as f64 / 2.0,
+            // Nothing nearer than this: a triangle straddling the eye plane
+            // projects to infinity and paints the whole screen.
+            near: (camera.distance * 1e-4).max(1e-6),
+        }
+    }
+
+    /// A world point straight to screen pixels and depth, in one pass.
+    #[inline]
+    fn place(&self, point: Point3) -> Option<(f64, f64, f32)> {
+        let relative = point.minus(self.eye);
+        let depth = -relative.dot(self.back);
+        if depth <= self.near {
+            return None;
+        }
+        let over = self.scale / depth;
+        Some((
+            self.middle_x + relative.dot(self.right) * over,
+            // Screen rows run down, the world's up runs up.
+            self.middle_y - relative.dot(self.up) * over,
+            depth as f32,
+        ))
+    }
+}
+/// How many distinct brightnesses a surface can take.
+///
+/// Shading is quantised into a lookup because a part is thousands of triangles
+/// sharing a few dozen normals, and rounding three floats to bytes for each of
+/// them is work done over and over for the same answer. Sixty-four steps is
+/// finer than the eye separates on a shaded solid.
+const SHADES: usize = 64;
+
+
 pub fn draw(mesh: &Mesh, camera: &Camera, style: &Style, canvas: &mut Canvas) {
     canvas.fill(style.background);
 
@@ -120,19 +183,30 @@ pub fn draw(mesh: &Mesh, camera: &Camera, style: &Style, canvas: &mut Canvas) {
         .light
         .normalised()
         .unwrap_or(Point3::new(0.0, 0.0, 1.0));
-    let (right, up, back) = camera.axes();
+    let view = View::of(camera, canvas.width, canvas.height);
 
-    // Nothing nearer than this is drawn: a triangle straddling the eye plane
-    // projects to infinity and paints the whole screen.
-    let near = (camera.distance * 1e-4).max(1e-6);
+    // Shading is a lookup: a normal only ever gives one of these, and
+    // rounding three floats to bytes for every triangle was work repeated
+    // across the thousands of them that share a face.
+    let shades: Vec<[u8; 4]> = (0..=SHADES)
+        .map(|step| {
+            let lit = step as f64 / SHADES as f64;
+            let shade = lit * (1.0 - style.ambient) + style.ambient;
+            [
+                (style.material[0] as f64 * shade) as u8,
+                (style.material[1] as f64 * shade) as u8,
+                (style.material[2] as f64 * shade) as u8,
+                255,
+            ]
+        })
+        .collect();
 
     for triangle in &mesh.triangles {
         let normal = Point3::new(
-            triangle.normal.dot(right),
-            triangle.normal.dot(up),
-            triangle.normal.dot(back),
+            triangle.normal.dot(view.right),
+            triangle.normal.dot(view.up),
+            triangle.normal.dot(view.back),
         );
-
         // **Facing away, so not drawn.** With a closed solid this halves the
         // work and removes the far wall from behind the near one. A part whose
         // faces are inverted disappears here rather than shading oddly, which
@@ -141,45 +215,27 @@ pub fn draw(mesh: &Mesh, camera: &Camera, style: &Style, canvas: &mut Canvas) {
             continue;
         }
 
-        let corners = [triangle.a, triangle.b, triangle.c].map(|p| camera.to_view(p));
-        if corners.iter().any(|c| -c.z <= near) {
+        // Placed straight to screen coordinates. Any corner behind the eye
+        // drops the triangle rather than smearing it across the canvas.
+        let (Some(a), Some(b), Some(c)) = (
+            view.place(triangle.a),
+            view.place(triangle.b),
+            view.place(triangle.c),
+        ) else {
             continue;
-        }
+        };
 
-        let shade = (normal.dot(light).max(0.0) * (1.0 - style.ambient)) + style.ambient;
-        let colour = [
-            (style.material[0] as f64 * shade).round().clamp(0.0, 255.0) as u8,
-            (style.material[1] as f64 * shade).round().clamp(0.0, 255.0) as u8,
-            (style.material[2] as f64 * shade).round().clamp(0.0, 255.0) as u8,
-            255,
-        ];
+        let step = (normal.dot(light).max(0.0) * SHADES as f64) as usize;
+        let colour = shades[step.min(SHADES)];
 
-        let screen: Vec<(f64, f64, f32)> = corners
-            .iter()
-            .map(|corner| {
-                let (x, y) = project(*corner, camera, canvas.width, canvas.height);
-                (x, y, (-corner.z) as f32)
-            })
-            .collect();
-
-        fill_triangle(canvas, &screen, colour);
+        fill_triangle(canvas, &[a, b, c], colour);
     }
-}
-
-/// A view-space point on the screen, in pixels.
-fn project(view: Point3, camera: &Camera, width: u32, height: u32) -> (f64, f64) {
-    let depth = -view.z;
-    let half_height = (camera.fov / 2.0).tan();
-    let scale = (height as f64 / 2.0) / (half_height * depth);
-
-    (
-        width as f64 / 2.0 + view.x * scale,
-        // Screen rows run down, the world's up runs up.
-        height as f64 / 2.0 - view.y * scale,
-    )
-}
-
 /// One triangle, by scanning the rows it covers.
+///
+/// Edge functions stepped along the row rather than recomputed at each pixel,
+/// and the reciprocal of the area taken once. The straightforward version
+/// divides three times per pixel, and a part covering a third of a phone
+/// screen is a quarter of a million pixels a frame.
 fn fill_triangle(canvas: &mut Canvas, corners: &[(f64, f64, f32)], colour: [u8; 4]) {
     let (ax, ay, az) = corners[0];
     let (bx, by, bz) = corners[1];
@@ -189,32 +245,51 @@ fn fill_triangle(canvas: &mut Canvas, corners: &[(f64, f64, f32)], colour: [u8; 
     if area.abs() < 1e-12 {
         return; // edge-on, so it covers nothing
     }
+    let over_area = 1.0 / area;
 
     let low_x = ax.min(bx).min(cx).floor().max(0.0) as i64;
     let high_x = ax.max(bx).max(cx).ceil().min(canvas.width as f64) as i64;
     let low_y = ay.min(by).min(cy).floor().max(0.0) as i64;
     let high_y = ay.max(by).max(cy).ceil().min(canvas.height as f64) as i64;
+    if high_x <= low_x || high_y <= low_y {
+        return;
+    }
+
+    // How each weight changes for one pixel across and one down. The
+    // barycentric weights are affine in screen position, so they can be
+    // stepped rather than evaluated.
+    let d0_dx = (by - cy) * over_area;
+    let d0_dy = (cx - bx) * over_area;
+    let d1_dx = (cy - ay) * over_area;
+    let d1_dy = (ax - cx) * over_area;
+
+    // Sampled at the middle of the pixel, so a triangle edge falling exactly
+    // on a boundary belongs to one side or the other rather than to both,
+    // which would leave a seam of double-drawn pixels.
+    let first_x = low_x as f64 + 0.5;
+    let first_y = low_y as f64 + 0.5;
+    let mut row0 =
+        ((bx - first_x) * (cy - first_y) - (cx - first_x) * (by - first_y)) * over_area;
+    let mut row1 =
+        ((cx - first_x) * (ay - first_y) - (ax - first_x) * (cy - first_y)) * over_area;
 
     for y in low_y..high_y {
+        let mut w0 = row0;
+        let mut w1 = row1;
         for x in low_x..high_x {
-            // Sampled at the middle of the pixel, so a triangle edge falling
-            // exactly on a boundary belongs to one side or the other rather
-            // than to both, which would leave a seam of double-drawn pixels.
-            let px = x as f64 + 0.5;
-            let py = y as f64 + 0.5;
-
-            let w0 = ((bx - px) * (cy - py) - (cx - px) * (by - py)) / area;
-            let w1 = ((cx - px) * (ay - py) - (ax - px) * (cy - py)) / area;
             let w2 = 1.0 - w0 - w1;
-
-            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                continue;
+            if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                let depth = (w0 as f32) * az + (w1 as f32) * bz + (w2 as f32) * cz;
+                canvas.put(x as u32, y as u32, depth, colour);
             }
-
-            let depth = (w0 as f32) * az + (w1 as f32) * bz + (w2 as f32) * cz;
-            canvas.put(x as u32, y as u32, depth, colour);
+            w0 += d0_dx;
+            w1 += d1_dx;
         }
+        row0 += d0_dy;
+        row1 += d1_dy;
     }
+}
+
 }
 
 /// The whole job: fit a mesh to a canvas and draw it.
