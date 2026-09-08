@@ -133,11 +133,15 @@ pub fn tessellate(solid: &Solid, sag: f64) -> Mesh {
     // faces from giving each of them too little to be a shape at all.
     let allowance = (TRIANGLE_BUDGET / solid.faces.len().max(1)).max(48);
 
-    for face in &solid.faces {
-        match face_triangles(face, &cache, sag, allowance) {
-            Ok(triangles) => mesh.triangles.extend(triangles),
-            Err(reason) => mesh.skip(reason),
+    for group in solid.faces.chunk_by(|a, b| a.component == b.component) {
+        let began = mesh.triangles.len();
+        for face in group {
+            match face_triangles(face, &cache, sag, allowance) {
+                Ok(triangles) => mesh.triangles.extend(triangles),
+                Err(reason) => mesh.skip(reason),
+            }
         }
+        turn_outward(&mut mesh.triangles[began..]);
     }
 
     mesh
@@ -443,6 +447,7 @@ mod tests {
                 },
                 inners: Vec::new(),
                 same_sense,
+                component: 0,
             }],
             edges,
             skipped: Vec::new(),
@@ -571,6 +576,7 @@ mod tests {
                 },
                 inners: Vec::new(),
                 same_sense: true,
+                component: 0,
             }],
             edges: vec![
                 rim(1, 0.0),
@@ -618,6 +624,7 @@ mod tests {
             outer: Loop { edges: vec![(EdgeId(1), true)], bound_forward: true },
             inners: Vec::new(),
             same_sense: true,
+            component: 0,
         });
 
         let mesh = tessellate(&solid, DEFAULT_SAG);
@@ -638,6 +645,7 @@ mod tests {
                 outer: Loop { edges: vec![(EdgeId(1), true)], bound_forward: true },
                 inners: Vec::new(),
                 same_sense: true,
+                component: 0,
             });
         }
 
@@ -671,6 +679,106 @@ mod tests {
 
         let mesh = tessellate(&solid, DEFAULT_SAG);
         assert_eq!(2, mesh.triangles.len(), "the face itself survived");
+    }
+
+
+    // ---- inside out --------------------------------------------------------
+
+    /// A closed tetrahedron, wound so that it encloses a positive volume.
+    fn tetrahedron() -> Vec<Triangle> {
+        let o = Point3::new(0.0, 0.0, 0.0);
+        let x = Point3::new(1.0, 0.0, 0.0);
+        let y = Point3::new(0.0, 1.0, 0.0);
+        let z = Point3::new(0.0, 0.0, 1.0);
+
+        [(o, y, x), (o, x, z), (o, z, y), (x, y, z)]
+            .into_iter()
+            .map(|(a, b, c)| {
+                let normal = b.minus(a).cross(c.minus(a)).normalised().expect("a normal");
+                Triangle { a, b, c, normal }
+            })
+            .collect()
+    }
+
+    fn volume_of(triangles: &[Triangle]) -> f64 {
+        triangles.iter().map(|t| t.a.dot(t.b.cross(t.c)) / 6.0).sum()
+    }
+
+    /// A solid whose faces all point inward is turned the right way out.
+    ///
+    /// **It does not look inverted, it looks hollow.** Backface culling throws
+    /// away the near wall and draws the far one, so the part is solid from one
+    /// direction and open from another — which reads as a hole in the model
+    /// rather than as a sign error, and is what a real assembly showed on some
+    /// of its components and not on others.
+    #[test]
+    fn a_solid_wound_inside_out_is_turned_the_right_way() {
+        let right_way = tetrahedron();
+        assert!(volume_of(&right_way) > 0.0, "the fixture is not a solid");
+
+        // Turned outside in, exactly as a file with the wrong sense flags does.
+        let mut inside_out: Vec<Triangle> = right_way
+            .iter()
+            .map(|t| Triangle {
+                a: t.a,
+                b: t.c,
+                c: t.b,
+                normal: t.normal.scaled(-1.0),
+            })
+            .collect();
+        assert!(volume_of(&inside_out) < 0.0, "the fixture was not inverted");
+
+        turn_outward(&mut inside_out);
+
+        assert!(volume_of(&inside_out) > 0.0, "still inside out");
+        assert!(
+            (volume_of(&inside_out) - volume_of(&right_way)).abs() < 1e-12,
+            "the shape changed, not only its sense",
+        );
+    }
+
+    /// And the normals turn with the winding, or the shading disagrees with it.
+    #[test]
+    fn turning_a_solid_turns_its_normals_too() {
+        let mut inside_out: Vec<Triangle> = tetrahedron()
+            .iter()
+            .map(|t| Triangle { a: t.a, b: t.c, c: t.b, normal: t.normal.scaled(-1.0) })
+            .collect();
+
+        turn_outward(&mut inside_out);
+
+        for triangle in &inside_out {
+            let wound = triangle.b.minus(triangle.a).cross(triangle.c.minus(triangle.a));
+            assert!(
+                wound.dot(triangle.normal) > 0.0,
+                "winding and normal disagree after turning: {triangle:?}",
+            );
+        }
+    }
+
+    /// A solid already the right way out is left exactly as it was.
+    #[test]
+    fn a_correct_solid_is_not_disturbed() {
+        let original = tetrahedron();
+        let mut copy = original.clone();
+        turn_outward(&mut copy);
+        assert_eq!(original, copy, "a correct solid was turned over");
+    }
+
+    /// An open shell encloses nothing and is not "repaired" into nonsense.
+    ///
+    /// A single face is a surface, not a solid. Its signed volume is whatever
+    /// its position relative to the origin makes it, and flipping it on that
+    /// basis would turn correct geometry over depending on where it sits.
+    #[test]
+    fn an_open_shell_is_left_as_it_is() {
+        let mesh = tessellate(&square_solid(true), DEFAULT_SAG);
+        let normals: Vec<Point3> = mesh.triangles.iter().map(|t| t.normal).collect();
+
+        assert!(
+            normals.iter().all(|n| n.z > 0.0),
+            "a flat face was turned over by a volume it does not have",
+        );
     }
 
     // ---- fitting to view -----------------------------------------------------
@@ -801,4 +909,38 @@ fn widened(
         if max_u.is_finite() { max_u * loosen } else { max_u },
         if max_v.is_finite() { max_v * loosen } else { max_v },
     )
+}
+
+/// Turn a solid the right way out, if the file had it inside in.
+///
+/// **A closed solid encloses a positive volume.** Summing `a·(b×c)/6` over its
+/// triangles gives that volume with a sign, and the sign says which way the
+/// faces point — outward for a real solid, inward for one whose `same_sense`
+/// flags or loop windings disagree with the rest of the file.
+///
+/// An inside-out solid does not look inverted. Under backface culling its near
+/// wall is thrown away and its far wall drawn, so you see *into* it: solid from
+/// one direction and hollow from another, which reads as a hole in the model
+/// rather than as a wrong sign. A real assembly showed exactly that, and only
+/// on some of its components.
+///
+/// Repaired per component rather than per file, because a file can be right
+/// about one part and wrong about the next — and per component is the only
+/// scale at which "encloses a volume" means anything.
+fn turn_outward(triangles: &mut [Triangle]) {
+    let volume: f64 = triangles
+        .iter()
+        .map(|t| t.a.dot(t.b.cross(t.c)) / 6.0)
+        .sum();
+
+    // Zero means an open shell — a surface rather than a solid — where there is
+    // no inside to be on the wrong side of, and nothing to repair.
+    if volume >= 0.0 {
+        return;
+    }
+
+    for triangle in triangles.iter_mut() {
+        std::mem::swap(&mut triangle.b, &mut triangle.c);
+        triangle.normal = triangle.normal.scaled(-1.0);
+    }
 }

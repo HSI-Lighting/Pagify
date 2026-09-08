@@ -187,6 +187,12 @@ pub struct Face {
     pub inners: Vec<Loop>,
     /// `ADVANCED_FACE.same_sense`: whether the face agrees with its surface.
     pub same_sense: bool,
+    /// Which placed copy of which component this face belongs to.
+    ///
+    /// Faces are grouped by it so a solid can be checked for being inside out
+    /// on its own: a file can be right about one part and wrong about the next,
+    /// and "encloses a volume" only means something per solid.
+    pub component: u64,
 }
 
 /// One solid, and everything about it that could not be represented.

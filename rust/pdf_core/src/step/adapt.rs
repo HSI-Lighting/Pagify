@@ -119,6 +119,7 @@ pub fn convert(model: &raw::StepModel) -> Solid {
             outer,
             inners,
             same_sense: face.same_sense,
+            component: edge_base,
         });
     }
 

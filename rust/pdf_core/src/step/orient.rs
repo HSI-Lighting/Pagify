@@ -144,6 +144,7 @@ mod tests {
             },
             inners: Vec::new(),
             same_sense,
+            component: 0,
         }
     }
 

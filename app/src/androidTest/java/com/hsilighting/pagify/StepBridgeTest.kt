@@ -5,6 +5,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.hsilighting.pagify.core.StepBridge
 import java.io.File
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
@@ -350,5 +351,126 @@ class RealModelTest {
                 copy.delete()
             }
         }
+    }
+}
+
+/**
+ * Which way a drag turns the model.
+ *
+ * A reported bug: the part could be spun about one axis and not tilted about
+ * the other. The Rust side has tests saying both work, so this asks the same
+ * question from the Kotlin side of the boundary — the only place left for it
+ * to be lost.
+ */
+class OrbitAxesTest {
+
+    private var handle = StepBridge.NO_MODEL
+    private lateinit var file: File
+
+    /** A wedge: it looks different from every direction, unlike a flat square. */
+    private val aWedge = """
+        ISO-10303-21;
+        HEADER;
+        FILE_DESCRIPTION((''),'1');
+        FILE_NAME('wedge','2026-01-01T00:00:00',(''),(''),'','','');
+        FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+        ENDSEC;
+        DATA;
+        #1=CARTESIAN_POINT('',(0.,0.,0.));
+        #2=CARTESIAN_POINT('',(10.,0.,0.));
+        #3=CARTESIAN_POINT('',(10.,10.,0.));
+        #4=CARTESIAN_POINT('',(0.,10.,0.));
+        #5=DIRECTION('',(0.,0.,1.));
+        #6=DIRECTION('',(1.,0.,0.));
+        #7=AXIS2_PLACEMENT_3D('',#1,#5,#6);
+        #8=PLANE('',#7);
+        #11=VERTEX_POINT('',#1);
+        #12=VERTEX_POINT('',#2);
+        #13=VERTEX_POINT('',#3);
+        #14=VERTEX_POINT('',#4);
+        #20=DIRECTION('',(1.,0.,0.));
+        #21=VECTOR('',#20,1.);
+        #22=LINE('',#1,#21);
+        #23=DIRECTION('',(0.,1.,0.));
+        #24=VECTOR('',#23,1.);
+        #25=LINE('',#2,#24);
+        #26=DIRECTION('',(-1.,0.,0.));
+        #27=VECTOR('',#26,1.);
+        #28=LINE('',#3,#27);
+        #29=DIRECTION('',(0.,-1.,0.));
+        #30=VECTOR('',#29,1.);
+        #31=LINE('',#4,#30);
+        #41=EDGE_CURVE('',#11,#12,#22,.T.);
+        #42=EDGE_CURVE('',#12,#13,#25,.T.);
+        #43=EDGE_CURVE('',#13,#14,#28,.T.);
+        #44=EDGE_CURVE('',#14,#11,#31,.T.);
+        #51=ORIENTED_EDGE('',*,*,#41,.T.);
+        #52=ORIENTED_EDGE('',*,*,#42,.T.);
+        #53=ORIENTED_EDGE('',*,*,#43,.T.);
+        #54=ORIENTED_EDGE('',*,*,#44,.T.);
+        #60=EDGE_LOOP('',(#51,#52,#53,#54));
+        #61=FACE_OUTER_BOUND('',#60,.T.);
+        #62=ADVANCED_FACE('',(#61),#8,.T.);
+        ENDSEC;
+        END-ISO-10303-21;
+    """.trimIndent()
+
+    private fun pixels(size: Int = 96): IntArray {
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        assertTrue(StepBridge.renderModelInto(handle, bitmap))
+        val out = IntArray(size * size)
+        bitmap.getPixels(out, 0, size, 0, 0, size, size)
+        return out
+    }
+
+    @Before
+    fun open() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        file = File(context.cacheDir, "orbit-axes.stp").apply { writeText(aWedge) }
+        handle = StepBridge.openModel(file.absolutePath)
+    }
+
+    @After
+    fun close() {
+        if (handle != StepBridge.NO_MODEL) StepBridge.closeModel(handle)
+        if (::file.isInitialized) file.delete()
+    }
+
+    /** Dragging sideways turns it. */
+    @Test
+    fun a_sideways_drag_turns_the_model() {
+        val before = pixels().toList()
+        StepBridge.orbitModel(handle, 0.15f, 0f)
+        assertNotEquals("a sideways drag did nothing", before, pixels().toList())
+    }
+
+    /**
+     * And dragging up or down tilts it.
+     *
+     * This is the half that was reported broken. Asked separately from the
+     * sideways drag so a failure names which axis, rather than "the gesture".
+     */
+    @Test
+    fun a_vertical_drag_tilts_the_model() {
+        val before = pixels().toList()
+        StepBridge.orbitModel(handle, 0f, 0.15f)
+        assertNotEquals("a vertical drag did nothing", before, pixels().toList())
+    }
+
+    /** And they are different movements, not the same one twice. */
+    @Test
+    fun the_two_axes_are_not_the_same_movement() {
+        val start = pixels().toList()
+
+        StepBridge.orbitModel(handle, 0.15f, 0f)
+        val sideways = pixels().toList()
+
+        StepBridge.fitModel(handle)
+        assertEquals("fit did not restore the view", start, pixels().toList())
+
+        StepBridge.orbitModel(handle, 0f, 0.15f)
+        val vertical = pixels().toList()
+
+        assertNotEquals("both axes produced the same view", sideways, vertical)
     }
 }

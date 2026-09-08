@@ -182,9 +182,15 @@ private fun Surface(state: ModelViewerState) {
                             state.pan(slide.x / size.width, slide.y / size.height)
                         } else {
                             lastApart = 0f
+                            // **Both against the same length.** Dividing across by
+                            // the width and down by the height makes the two
+                            // axes turn at different rates per finger-pixel on
+                            // any screen that is not square, so a diagonal drag
+                            // arrives at the engine skewed.
+                            val reach = size.width.coerceAtLeast(1)
                             val moved = touching[0].positionChange()
                             if (abs(moved.x) > 0.01f || abs(moved.y) > 0.01f) {
-                                state.orbit(moved.x / size.width, moved.y / size.height)
+                                state.orbit(moved.x / reach, moved.y / reach)
                             }
                         }
                         touching.forEach { it.consume() }

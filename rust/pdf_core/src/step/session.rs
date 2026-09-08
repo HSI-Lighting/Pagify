@@ -128,17 +128,23 @@ impl ModelSession {
     /// drag feels the same on any screen.
     /// Turn the part, as though the finger were on its surface.
     ///
-    /// **The camera moves the other way to the finger.** Dragging right
-    /// should send the part right, which means the eye goes left — the
-    /// obvious sign moves the camera with the finger instead and the model
-    /// slides the wrong way under it. Distances are fractions of the view
-    /// rather than pixels, so a drag feels the same on any screen.
+    /// **The camera moves the other way to the finger.** Dragging right should
+    /// send the part right, which means the eye goes left — the obvious sign
+    /// moves the camera with the finger and the model slides the wrong way
+    /// under it.
+    ///
+    /// **Both axes at the same rate.** Pitch used to be a whole half-turn for a
+    /// drag down the view, and pitch is clamped just short of straight up: a
+    /// third of a screen put it against the stop, where every further drag did
+    /// nothing at all. That does not feel like a sensitive control, it feels
+    /// like a broken one — the part span freely sideways and would not tip.
+    /// A quarter turn across the view, for both. Ninety degrees is a long
+    /// deliberate drag rather than a flick, and the tilt starts at twenty-eight
+    /// degrees with sixty left before the stop — so an ordinary gesture moves
+    /// it visibly and never runs out.
     pub fn orbit(&mut self, across: f64, down: f64) {
-        // A full turn for a drag across the whole view: enough to get round
-        // the back in one gesture, little enough to aim.
-        self.camera = self
-            .camera
-            .turned(-across * std::f64::consts::TAU, down * std::f64::consts::PI);
+        use std::f64::consts::FRAC_PI_2;
+        self.camera = self.camera.turned(-across * FRAC_PI_2, down * FRAC_PI_2);
     }
 
     pub fn zoom(&mut self, by: f64) {
@@ -317,6 +323,48 @@ mod tests {
             "the part went left when the finger went right: {} to {}",
             before.x,
             after.x,
+        );
+    }
+
+
+    /// An ordinary vertical drag does not slam the tilt against its stop.
+    ///
+    /// **The bug this is here for.** Pitch is clamped just short of straight
+    /// up, and at the old rate a third of a screen reached the stop — after
+    /// which every further drag did nothing and the part appeared to spin
+    /// sideways only. A control that saturates on a normal gesture is
+    /// indistinguishable from one that does not work.
+    #[test]
+    fn a_normal_vertical_drag_does_not_reach_the_stop() {
+        let mut session = open_a_square("tilt-rate");
+        let stop = std::f64::consts::FRAC_PI_2 - 0.01;
+
+        // A third of the view, which is an ordinary drag.
+        session.orbit(0.0, 0.33);
+
+        assert!(
+            session.camera.pitch < stop - 0.05,
+            "one drag reached the stop: {} against {stop}",
+            session.camera.pitch,
+        );
+    }
+
+    /// The two axes turn at the same rate, so a diagonal drag goes diagonally.
+    #[test]
+    fn both_axes_turn_at_the_same_rate() {
+        let mut sideways = open_a_square("rate-x");
+        let mut vertical = open_a_square("rate-y");
+        let start = sideways.camera.pitch;
+
+        sideways.orbit(0.1, 0.0);
+        vertical.orbit(0.0, 0.1);
+
+        let turned = (sideways.camera.yaw - vertical.camera.yaw).abs();
+        let tilted = (vertical.camera.pitch - start).abs();
+
+        assert!(
+            (turned - tilted).abs() < 1e-9,
+            "sideways moved {turned} and vertical {tilted}",
         );
     }
 
