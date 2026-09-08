@@ -207,6 +207,10 @@ pub fn face_triangles_counting(
         }
     }
 
+    // Which loop is the outline is settled here, by the geometry, rather than
+    // upstream by what the file called them. See [`outline_first`].
+    let (outer, inners) = outline_first(outer, inners);
+
     // **If it will not cut with its holes, cut it without them.** A boundary
     // that defeats the triangulator -- a hole touching its outline, a loop that
     // crosses itself where the surface wraps -- costs the whole face, and a
@@ -291,6 +295,62 @@ pub fn face_triangles_counting(
     }
 }
 
+/// The area a loop encloses in parameter space, by the shoelace formula.
+///
+/// Unsigned, because which way a loop was walked says nothing about whether it
+/// is the outline: exporters wind holes both ways, and the triangulator does
+/// not care either.
+pub(crate) fn enclosed(points: &[Point2]) -> f64 {
+    let mut twice = 0.0;
+    for (at, point) in points.iter().enumerate() {
+        let next = points[(at + 1) % points.len()];
+        twice += point.u * next.v - next.u * point.v;
+    }
+    (twice / 2.0).abs()
+}
+
+/// Put the loop that really is the outline first.
+///
+/// **Which bound is the outline is geometry, not a name.** A face lists its
+/// boundaries, and STEP marks the outer one with `FACE_OUTER_BOUND` — except
+/// where an exporter writes every bound as a plain `FACE_BOUND`, which is
+/// common. The adapter then has to guess, and guessing "the first one" is
+/// wrong whenever a hole happens to be listed first.
+///
+/// It fails in the worst possible way: the face is still drawn, at the right
+/// size, with the right holes — only inside out. The hole is filled and the
+/// material around it is cut away, so a spoked wheel comes back with solid
+/// openings and missing spokes. Nothing is missing, so no count reports it and
+/// no warning appears; it simply is not the part.
+///
+/// A hole is inside its outline, so the outline encloses more. Settled by
+/// measurement, which is true whatever the file called them — and equally
+/// true for a file that does say `FACE_OUTER_BOUND` and says it wrongly.
+pub(crate) fn outline_first(outer: Vec<Point2>, inners: Vec<Vec<Point2>>) -> (Vec<Point2>, Vec<Vec<Point2>>) {
+    if inners.is_empty() {
+        return (outer, inners);
+    }
+
+    let mut widest = enclosed(&outer);
+    let mut swap = None;
+    for (at, hole) in inners.iter().enumerate() {
+        let area = enclosed(hole);
+        if area > widest {
+            widest = area;
+            swap = Some(at);
+        }
+    }
+
+    match swap {
+        None => (outer, inners),
+        Some(at) => {
+            let mut inners = inners;
+            let outline = std::mem::replace(&mut inners[at], outer);
+            (outline, inners)
+        }
+    }
+}
+
 /// A face bounded only by the seam is the whole way round the surface.
 ///
 /// **A closed sphere or cylinder needs no boundary at all.** Where a modeller
@@ -303,7 +363,7 @@ pub fn face_triangles_counting(
 ///
 /// Anything with real width in `u` is left exactly as it is — this is only for
 /// the boundary that has collapsed onto the seam.
-fn whole_revolution(surface: &Surface, outer: Vec<Point2>) -> Vec<Point2> {
+pub(crate) fn whole_revolution(surface: &Surface, outer: Vec<Point2>) -> Vec<Point2> {
     use std::f64::consts::TAU;
 
     if !project::u_is_periodic(surface) {

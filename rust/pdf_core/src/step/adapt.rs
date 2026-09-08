@@ -1459,3 +1459,133 @@ mod why_a_boundary_cuts_into_nothing {
         }
     }
 }
+
+#[cfg(test)]
+mod which_bound_is_the_outline {
+    use crate::step::{model::Point2, tessellate};
+
+    fn area(points: &[Point2]) -> f64 {
+        let mut twice = 0.0;
+        for (at, point) in points.iter().enumerate() {
+            let next = points[(at + 1) % points.len()];
+            twice += point.u * next.v - next.u * point.v;
+        }
+        (twice / 2.0).abs()
+    }
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn count_faces_whose_hole_is_bigger_than_their_outline() {
+        let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
+        let bytes = std::fs::read(&path).expect("readable");
+        let solid = super::read(&bytes).expect("parses");
+        let sag = tessellate::recommended_sag(&solid);
+        let cache = crate::step::curve::EdgeCache::build(&solid.edges, sag);
+
+        let mut with_holes = 0usize;
+        let mut wrong = 0usize;
+        let mut by_component: std::collections::BTreeMap<u64, usize> = Default::default();
+        for face in &solid.faces {
+            if face.inners.is_empty() {
+                continue;
+            }
+            with_holes += 1;
+            let Some(outer) = tessellate::boundary(face, &face.outer, &cache) else { continue };
+            // The same order the tessellator uses: a seam-only boundary is
+            // widened to the full turn BEFORE anything is compared, or every
+            // closed face looks like it has a hole bigger than its outline.
+            let outer = tessellate::whole_revolution(&face.surface, outer);
+            let outer_area = area(&outer);
+            let biggest_hole = face
+                .inners
+                .iter()
+                .filter_map(|hole| tessellate::boundary(face, hole, &cache))
+                .map(|hole| area(&hole))
+                .fold(0.0, f64::max);
+            if biggest_hole > outer_area {
+                wrong += 1;
+                *by_component.entry(face.component).or_default() += 1;
+            }
+        }
+        println!(
+            "{}: {} faces with holes, {wrong} where a hole is larger than the outline",
+            path.rsplit('/').next().unwrap_or(&path),
+            with_holes,
+        );
+        let mut all: Vec<u64> = solid.faces.iter().map(|f| f.component).collect();
+        all.sort_unstable();
+        all.dedup();
+        for (component, count) in &by_component {
+            let at = all.iter().position(|c| c == component).unwrap_or(0);
+            println!("  component index {at}: {count} faces inside out");
+        }
+    }
+}
+
+/// Look at one component of an assembly on its own, large.
+///
+/// A part inside an assembly is a few hundred pixels across in a picture of the
+/// whole thing, which is not enough to tell a hole from a shadow.
+#[cfg(test)]
+mod component_picture {
+    use crate::step::{camera::Camera, model::Solid, raster, tessellate};
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn one_component_up_close() {
+        let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
+        let out = std::env::var("PAGIFY_STEP_PNG").expect("set PAGIFY_STEP_PNG");
+        let wanted: u64 = std::env::var("PAGIFY_STEP_COMPONENT")
+            .expect("set PAGIFY_STEP_COMPONENT")
+            .parse()
+            .expect("a number");
+        let bytes = std::fs::read(&path).expect("readable");
+        let whole = super::read(&bytes).expect("parses");
+
+        let mut components: Vec<u64> = whole.faces.iter().map(|f| f.component).collect();
+        components.sort_unstable();
+        components.dedup();
+        println!("components: {components:?}");
+        let pick = components.get(wanted as usize).copied().unwrap_or(0);
+
+        let solid = Solid {
+            faces: whole.faces.iter().filter(|f| f.component == pick).cloned().collect(),
+            edges: whole.edges.clone(),
+            skipped: Vec::new(),
+        };
+        println!("component {pick}: {} faces", solid.faces.len());
+
+        let sag = tessellate::recommended_sag(&solid);
+        let mesh = tessellate::tessellate(&solid, sag);
+        let (low, high) = mesh.bounds().expect("a mesh has bounds");
+
+        const SIZE: u32 = 420;
+        let mut style = raster::Style::default();
+        if std::env::var("PAGIFY_STEP_LOUD").is_ok() {
+            style.background = [220, 20, 140, 255];
+        }
+        let mut sheet = raster::Canvas::new(SIZE * 3, SIZE);
+        sheet.fill(style.background);
+
+        for (index, (across, down)) in [(0.0_f64, 0.0_f64), (0.0, 1.2), (2.1, 0.5)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut tile = raster::Canvas::new(SIZE, SIZE);
+            let camera = Camera::fit(low, high, 45.0_f64.to_radians()).turned(across, down);
+            raster::draw(&mesh, &camera, &style, &mut tile);
+
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    let from = ((y * SIZE + x) * 4) as usize;
+                    let to = ((y * SIZE * 3 + index as u32 * SIZE + x) * 4) as usize;
+                    sheet.pixels[to..to + 4].copy_from_slice(&tile.pixels[from..from + 4]);
+                }
+            }
+        }
+
+        image::save_buffer(&out, &sheet.pixels, SIZE * 3, SIZE, image::ColorType::Rgba8)
+            .expect("the picture is written");
+        println!("wrote {out}");
+    }
+}

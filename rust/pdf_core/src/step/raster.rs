@@ -97,6 +97,23 @@ pub struct Style {
     /// How much light a surface facing away still receives. Without it the far
     /// side of a part is pure black and reads as a hole rather than a shadow.
     pub ambient: f64,
+    /// How much of the light comes from the eye rather than from [`light`].
+    ///
+    /// **What stops solid material reading as empty space.** One light leaves
+    /// every surface turned away from it at the ambient level, and ambient
+    /// alone was landing on almost exactly the background colour: material at
+    /// RGB 49, 51, 53 against a background of 30, 32, 36. On a phone those are
+    /// the same colour, so the recessed web of a gear — solid metal, correctly
+    /// drawn — was indistinguishable from the hole beside it. Not one file's
+    /// problem: any surface at any angle away from the light, in every part.
+    ///
+    /// A light from the eye cannot leave a *visible* surface unlit, because
+    /// back faces are culled and everything drawn therefore faces the viewer.
+    /// It costs nothing: the term is `normal.z`, which the culling test has
+    /// already computed.
+    ///
+    /// [`light`]: Self::light
+    pub fill: f64,
 }
 
 impl Default for Style {
@@ -108,8 +125,34 @@ impl Default for Style {
             // shape read as solid rather than lit from nowhere.
             light: Point3::new(-0.4, 0.6, 1.0),
             ambient: 0.28,
+            // Enough that nothing visible goes near the background, little
+            // enough that the key light still carries the form. A pure
+            // headlight lights every face equally and flattens the part into
+            // a silhouette, which loses the shape as surely as the dark did.
+            fill: 0.45,
         }
     }
+}
+
+/// How lit a surface is, from 0 for unlit to 1 for full on.
+///
+/// `normal` is in view space, so its `z` is how squarely the surface faces the
+/// eye — positive for anything drawn at all.
+pub(crate) fn lit(style: &Style, normal: Point3, light: Point3) -> f64 {
+    let key = normal.dot(light).max(0.0);
+    let toward_eye = normal.z.max(0.0);
+    (key * (1.0 - style.fill) + toward_eye * style.fill).clamp(0.0, 1.0)
+}
+
+/// The colour of a surface at a given light level.
+pub(crate) fn shade(style: &Style, lit: f64) -> [u8; 4] {
+    let shade = lit.clamp(0.0, 1.0) * (1.0 - style.ambient) + style.ambient;
+    [
+        (style.material[0] as f64 * shade) as u8,
+        (style.material[1] as f64 * shade) as u8,
+        (style.material[2] as f64 * shade) as u8,
+        255,
+    ]
 }
 
 /// Everything about the view that does not change from triangle to triangle.
@@ -188,18 +231,8 @@ pub fn draw(mesh: &Mesh, camera: &Camera, style: &Style, canvas: &mut Canvas) {
     // Shading is a lookup: a normal only ever gives one of these, and
     // rounding three floats to bytes for every triangle was work repeated
     // across the thousands of them that share a face.
-    let shades: Vec<[u8; 4]> = (0..=SHADES)
-        .map(|step| {
-            let lit = step as f64 / SHADES as f64;
-            let shade = lit * (1.0 - style.ambient) + style.ambient;
-            [
-                (style.material[0] as f64 * shade) as u8,
-                (style.material[1] as f64 * shade) as u8,
-                (style.material[2] as f64 * shade) as u8,
-                255,
-            ]
-        })
-        .collect();
+    let shades: Vec<[u8; 4]> =
+        (0..=SHADES).map(|step| shade(style, step as f64 / SHADES as f64)).collect();
 
     for triangle in &mesh.triangles {
         let normal = Point3::new(
@@ -225,7 +258,7 @@ pub fn draw(mesh: &Mesh, camera: &Camera, style: &Style, canvas: &mut Canvas) {
             continue;
         };
 
-        let step = (normal.dot(light).max(0.0) * SHADES as f64) as usize;
+        let step = (lit(style, normal, light) * SHADES as f64) as usize;
         let colour = shades[step.min(SHADES)];
 
         fill_triangle(canvas, &[a, b, c], colour);
@@ -307,6 +340,127 @@ mod tests {
 
     fn triangle(a: Point3, b: Point3, c: Point3, normal: Point3) -> Triangle {
         Triangle { a, b, c, normal }
+    }
+
+    // ---- telling material from empty space ------------------------------------
+
+    /// How far apart two colours are, at their furthest channel.
+    fn apart(a: [u8; 4], b: [u8; 4]) -> i32 {
+        (0..3)
+            .map(|c| (a[c] as i32 - b[c] as i32).abs())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// **Solid material never looks like a hole.**
+    ///
+    /// This is the whole reason for the fill light. A surface facing the eye
+    /// but turned away from the key light used to come out at RGB 49, 51, 53
+    /// against a background of 30, 32, 36 — the same colour on a phone. The
+    /// recessed web of a gear, correctly drawn, was indistinguishable from the
+    /// opening next to it, and the part read as full of holes it does not have.
+    ///
+    /// The exact case that was reported: turned right away from the light, and
+    /// still facing the viewer enough to be a surface rather than an edge.
+    #[test]
+    fn a_face_the_light_never_reaches_is_plainly_not_a_hole() {
+        let style = Style::default();
+        let light = style.light.normalised().expect("the light points somewhere");
+        let normal = Point3::new(0.6, -0.65, 0.5).normalised().expect("a direction");
+
+        assert!(
+            normal.dot(light) <= 0.0,
+            "this normal is meant to get nothing from the key light",
+        );
+        assert!(normal.z > 0.4, "and still to be facing the viewer");
+
+        let unlit = shade(&style, lit(&style, normal, light));
+        assert!(
+            apart(unlit, style.background) >= 40,
+            "material the light misses is {unlit:?}, background is {:?}",
+            style.background,
+        );
+    }
+
+    /// And it holds whichever way the part is turned.
+    ///
+    /// The complaint was never about one angle: it was about turning a part
+    /// until something solid stopped looking solid. Every direction that
+    /// presents real area to the viewer is checked. Surfaces nearly edge-on
+    /// are left out on purpose — they are the silhouette, a pixel or two wide,
+    /// and dark there is what makes an outline read as an outline.
+    #[test]
+    fn no_surface_facing_the_viewer_is_the_colour_of_the_background() {
+        let style = Style::default();
+        let light = style.light.normalised().expect("the light points somewhere");
+
+        let mut worst = i32::MAX;
+        let mut worst_at = Point3::new(0.0, 0.0, 1.0);
+        for x in -10..=10 {
+            for y in -10..=10 {
+                for z in 1..=10 {
+                    let Some(normal) =
+                        Point3::new(x as f64 / 10.0, y as f64 / 10.0, z as f64 / 10.0).normalised()
+                    else {
+                        continue;
+                    };
+                    // Presenting area rather than an edge. Back faces are
+                    // culled anyway, so anything below this is a silhouette.
+                    if normal.z < 0.3 {
+                        continue;
+                    }
+                    let colour = shade(&style, lit(&style, normal, light));
+                    let distance = apart(colour, style.background);
+                    if distance < worst {
+                        worst = distance;
+                        worst_at = normal;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            worst >= 30,
+            "a surface facing {worst_at:?} is within {worst} of the background",
+        );
+    }
+
+    /// And the light still says which way a surface faces.
+    ///
+    /// The cheap way to pass the tests above is to flood everything with
+    /// light, which trades holes-that-are-not-there for a flat silhouette with
+    /// no shape in it at all. A part has to keep reading as a solid object, so
+    /// there has to be a real range of brightness across the surfaces that are
+    /// actually visible.
+    #[test]
+    fn the_light_still_shows_the_shape() {
+        let style = Style::default();
+        let light = style.light.normalised().expect("the light points somewhere");
+
+        let mut brightest = 0i32;
+        let mut dimmest = 255i32;
+        for x in -10..=10 {
+            for y in -10..=10 {
+                for z in 3..=10 {
+                    let Some(normal) =
+                        Point3::new(x as f64 / 10.0, y as f64 / 10.0, z as f64 / 10.0).normalised()
+                    else {
+                        continue;
+                    };
+                    if normal.z < 0.3 {
+                        continue;
+                    }
+                    let level = shade(&style, lit(&style, normal, light))[0] as i32;
+                    brightest = brightest.max(level);
+                    dimmest = dimmest.min(level);
+                }
+            }
+        }
+
+        assert!(
+            brightest - dimmest > 40,
+            "everything visible is between {dimmest} and {brightest}, so the part has no form",
+        );
     }
 
     /// A square facing the camera, one unit each way, at a given depth.
