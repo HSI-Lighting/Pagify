@@ -1535,7 +1535,7 @@ mod component_picture {
     fn one_component_up_close() {
         let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
         let out = std::env::var("PAGIFY_STEP_PNG").expect("set PAGIFY_STEP_PNG");
-        let wanted: u64 = std::env::var("PAGIFY_STEP_COMPONENT")
+        let wanted: i64 = std::env::var("PAGIFY_STEP_COMPONENT")
             .expect("set PAGIFY_STEP_COMPONENT")
             .parse()
             .expect("a number");
@@ -1546,10 +1546,18 @@ mod component_picture {
         components.sort_unstable();
         components.dedup();
         println!("components: {components:?}");
-        let pick = components.get(wanted as usize).copied().unwrap_or(0);
+        // A negative index means the whole assembly, so one harness can compare
+        // a part on its own against the same part among the others.
+        let pick = components.get(wanted.max(0) as usize).copied().unwrap_or(0);
+        let everything = wanted < 0;
 
         let solid = Solid {
-            faces: whole.faces.iter().filter(|f| f.component == pick).cloned().collect(),
+            faces: whole
+                .faces
+                .iter()
+                .filter(|f| everything || f.component == pick)
+                .cloned()
+                .collect(),
             edges: whole.edges.clone(),
             skipped: Vec::new(),
         };
@@ -1567,7 +1575,7 @@ mod component_picture {
         let mut sheet = raster::Canvas::new(SIZE * 3, SIZE);
         sheet.fill(style.background);
 
-        for (index, (across, down)) in [(0.0_f64, 0.0_f64), (0.0, 1.2), (2.1, 0.5)]
+        for (index, (across, down)) in [(0.0_f64, 0.0_f64), (0.35, 0.0), (std::f64::consts::PI, 0.0)]
             .into_iter()
             .enumerate()
         {
@@ -1587,5 +1595,318 @@ mod component_picture {
         image::save_buffer(&out, &sheet.pixels, SIZE * 3, SIZE, image::ColorType::Rgba8)
             .expect("the picture is written");
         println!("wrote {out}");
+    }
+}
+
+/// Where each component actually sits, and how large it is.
+///
+/// An assembly drawn wrong usually is not drawn wrong at all: every part is
+/// correct and one of them is in the wrong place. Boxes are how that shows.
+#[cfg(test)]
+mod component_bounds {
+    use crate::step::{model::Solid, tessellate};
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn every_component_and_where_it_is() {
+        let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
+        let bytes = std::fs::read(&path).expect("readable");
+        let whole = super::read(&bytes).expect("parses");
+
+        let mut components: Vec<u64> = whole.faces.iter().map(|f| f.component).collect();
+        components.sort_unstable();
+        components.dedup();
+
+        for (at, component) in components.iter().enumerate() {
+            let solid = Solid {
+                faces: whole.faces.iter().filter(|f| f.component == *component).cloned().collect(),
+                edges: whole.edges.clone(),
+                skipped: Vec::new(),
+            };
+            let faces = solid.faces.len();
+            let sag = tessellate::recommended_sag(&solid);
+            let mesh = tessellate::tessellate(&solid, sag);
+            let Some((low, high)) = mesh.bounds() else {
+                println!("[{at:>2}] {faces:>4} faces  -- nothing drawn");
+                continue;
+            };
+            println!(
+                "[{at:>2}] {faces:>4} faces  x {:>8.1}..{:<8.1} y {:>8.1}..{:<8.1} z {:>8.1}..{:<8.1}  size {:.1} x {:.1} x {:.1}",
+                low.x, high.x, low.y, high.y, low.z, high.z,
+                high.x - low.x, high.y - low.y, high.z - low.z,
+            );
+        }
+    }
+}
+
+/// Is there material at a given place, or is it open?
+///
+/// Looking answers this badly: a surface seen edge-on, a face culled from one
+/// side, and a genuine hole all look similar. Counting how many triangles a
+/// ray crosses does not.
+#[cfg(test)]
+mod is_it_open {
+    use crate::step::{model::Point3, model::Solid, tessellate};
+
+    /// Möller–Trumbore, without the early-out, because a back-facing hit still
+    /// counts as material.
+    fn hits(from: Point3, along: Point3, a: Point3, b: Point3, c: Point3) -> bool {
+        let edge1 = b.minus(a);
+        let edge2 = c.minus(a);
+        let h = along.cross(edge2);
+        let det = edge1.dot(h);
+        if det.abs() < 1e-12 {
+            return false;
+        }
+        let inv = 1.0 / det;
+        let s = from.minus(a);
+        let u = s.dot(h) * inv;
+        if !(0.0..=1.0).contains(&u) {
+            return false;
+        }
+        let q = s.cross(edge1);
+        let v = along.dot(q) * inv;
+        if v < 0.0 || u + v > 1.0 {
+            return false;
+        }
+        edge2.dot(q) * inv > 1e-9
+    }
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn count_material_along_a_ray() {
+        let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
+        let component: usize = std::env::var("PAGIFY_STEP_COMPONENT")
+            .unwrap_or_else(|_| "0".into())
+            .parse()
+            .expect("a number");
+        let bytes = std::fs::read(&path).expect("readable");
+        let whole = super::read(&bytes).expect("parses");
+
+        let mut components: Vec<u64> = whole.faces.iter().map(|f| f.component).collect();
+        components.sort_unstable();
+        components.dedup();
+        let pick = components[component];
+
+        let solid = Solid {
+            faces: whole.faces.iter().filter(|f| f.component == pick).cloned().collect(),
+            edges: whole.edges.clone(),
+            skipped: Vec::new(),
+        };
+        let sag = tessellate::recommended_sag(&solid);
+        let mesh = tessellate::tessellate(&solid, sag);
+        let (low, high) = mesh.bounds().expect("bounds");
+        println!("component {component}: {} triangles", mesh.triangles.len());
+        println!("  x {:.1}..{:.1}  y {:.1}..{:.1}  z {:.1}..{:.1}", low.x, high.x, low.y, high.y, low.z, high.z);
+
+        let middle = Point3::new((low.x + high.x) / 2.0, (low.y + high.y) / 2.0, 0.0);
+        let along = Point3::new(0.0, 0.0, 1.0);
+        let start_z = low.z - 10.0;
+
+        // A ring of samples at several radii: spokes are material, the sectors
+        // between them should be nothing at all.
+        for radius in [10.0, 25.0, 40.0, 52.0] {
+            let mut counts = Vec::new();
+            for step in 0..16 {
+                let angle = std::f64::consts::TAU * step as f64 / 16.0;
+                let from = Point3::new(
+                    middle.x + radius * angle.cos(),
+                    middle.y + radius * angle.sin(),
+                    start_z,
+                );
+                let crossings = mesh
+                    .triangles
+                    .iter()
+                    .filter(|t| hits(from, along, t.a, t.b, t.c))
+                    .count();
+                counts.push(crossings);
+            }
+            println!("  radius {radius:>5.1}: {counts:?}");
+        }
+
+        // How far across the part each triangle reaches. A tooth flank spans a
+        // millimetre or two; anything spanning the whole disc is not a tooth.
+        let mut spans: Vec<(f64, Point3)> = mesh
+            .triangles
+            .iter()
+            .map(|t| {
+                let reach = |p: Point3| (p.x - middle.x).hypot(p.y - middle.y);
+                let (a, b, c) = (reach(t.a), reach(t.b), reach(t.c));
+                (a.max(b).max(c) - a.min(b).min(c), t.a)
+            })
+            .collect();
+        spans.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        println!("  widest triangles, by how far across the disc they reach:");
+        for (span, at) in spans.iter().take(6) {
+            println!("    {span:>7.2} mm  starting at {:.1}, {:.1}, {:.1}", at.x, at.y, at.z);
+        }
+        let huge = spans.iter().filter(|(s, _)| *s > 20.0).count();
+        println!("  {huge} triangles reach more than 20 mm across");
+    }
+}
+
+/// Does each boundary run head to tail, or does it jump?
+///
+/// A loop walked out of order still has all the right points, so nothing is
+/// missing and no count reports it. The polygon simply zig-zags across the
+/// face, and the triangulator quite correctly fills the star it was given.
+#[cfg(test)]
+mod does_the_boundary_join_up {
+    use crate::step::{model::Solid, tessellate};
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn find_boundaries_that_jump() {
+        let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
+        let bytes = std::fs::read(&path).expect("readable");
+        let whole = super::read(&bytes).expect("parses");
+
+        let only: Option<usize> = std::env::var("PAGIFY_STEP_COMPONENT").ok().and_then(|v| v.parse().ok());
+        let mut components: Vec<u64> = whole.faces.iter().map(|f| f.component).collect();
+        components.sort_unstable();
+        components.dedup();
+
+        let solid = match only {
+            Some(at) => Solid {
+                faces: whole
+                    .faces
+                    .iter()
+                    .filter(|f| f.component == components[at])
+                    .cloned()
+                    .collect(),
+                edges: whole.edges.clone(),
+                skipped: Vec::new(),
+            },
+            None => whole,
+        };
+
+        let sag = tessellate::recommended_sag(&solid);
+        let cache = crate::step::curve::EdgeCache::build(&solid.edges, sag);
+
+        let mut worst: Vec<(f64, usize, usize, usize)> = Vec::new();
+        for (at, face) in solid.faces.iter().enumerate() {
+            for (which, the_loop) in
+                std::iter::once(&face.outer).chain(face.inners.iter()).enumerate()
+            {
+                // The gap where one edge is meant to meet the next. Anything
+                // but zero means the loop was walked out of order or an edge
+                // was taken backwards.
+                let mut points = Vec::new();
+                let mut worst_join = 0.0_f64;
+                for (id, forwards) in crate::step::orient::walk(the_loop) {
+                    let Some(chain) = cache.points(id, forwards) else { continue };
+                    if let (Some(last), Some(first)) = (points.last().copied(), chain.first().copied()) {
+                        worst_join = worst_join.max(first.minus(last).length());
+                    }
+                    let start = usize::from(!points.is_empty());
+                    points.extend(chain.into_iter().skip(start));
+                }
+                if points.len() < 3 {
+                    continue;
+                }
+                // The longest step between neighbours, against the loop's own
+                // size, so a big part and a small one are judged the same way.
+                let mut span = 0.0_f64;
+                for point in points.iter() {
+                    for other in &points {
+                        span = span.max(other.minus(*point).length());
+                    }
+                }
+                if span > 1e-9 {
+                    worst.push((worst_join / span, at, which, points.len()));
+                }
+            }
+        }
+
+        worst.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        println!("loops whose worst join is the largest share of their own size:");
+        for (share, face, which, points) in worst.iter().take(8) {
+            let what = if *which == 0 { "outline" } else { "hole" };
+            println!("  face {face:>4} {what:<8} {points:>5} points, gap where two edges meet is {:.1}% of its size", share * 100.0);
+        }
+        let broken = worst.iter().filter(|(share, _, _, _)| *share > 0.01).count();
+        println!("  {broken} loops have a real gap where two edges should meet");
+    }
+}
+
+/// Which face is drawing across the whole part.
+#[cfg(test)]
+mod which_face_is_too_big {
+    use crate::step::{curve::EdgeCache, model::Solid, model::Surface, tessellate};
+
+    #[test]
+    #[ignore = "diagnostic"]
+    fn the_faces_with_the_widest_triangles() {
+        let path = std::env::var("PAGIFY_STEP_FILE").expect("set PAGIFY_STEP_FILE");
+        let at: usize = std::env::var("PAGIFY_STEP_COMPONENT").unwrap_or_else(|_| "0".into()).parse().unwrap();
+        let bytes = std::fs::read(&path).expect("readable");
+        let whole = super::read(&bytes).expect("parses");
+
+        let mut components: Vec<u64> = whole.faces.iter().map(|f| f.component).collect();
+        components.sort_unstable();
+        components.dedup();
+        let solid = Solid {
+            faces: whole.faces.iter().filter(|f| f.component == components[at]).cloned().collect(),
+            edges: whole.edges.clone(),
+            skipped: Vec::new(),
+        };
+
+        let sag = tessellate::recommended_sag(&solid);
+        let cache = EdgeCache::build(&solid.edges, sag);
+
+        let mut report: Vec<(f64, usize, &'static str, usize, usize, usize)> = Vec::new();
+        for (index, face) in solid.faces.iter().enumerate() {
+            let mut lost = 0;
+            let Ok(triangles) = tessellate::face_triangles_counting(face, &cache, sag, 40_000, &mut lost)
+            else {
+                continue;
+            };
+            let widest = triangles
+                .iter()
+                .map(|t| {
+                    let sides = [
+                        t.b.minus(t.a).length(),
+                        t.c.minus(t.b).length(),
+                        t.a.minus(t.c).length(),
+                    ];
+                    sides.iter().cloned().fold(0.0, f64::max)
+                })
+                .fold(0.0, f64::max);
+            let kind = match &face.surface {
+                Surface::Plane { .. } => "plane",
+                Surface::Cylinder { .. } => "cylinder",
+                Surface::Cone { .. } => "cone",
+                Surface::Sphere { .. } => "sphere",
+                Surface::Torus { .. } => "torus",
+                Surface::Spline(_) => "spline",
+                Surface::Unsupported { .. } => "unsupported",
+            };
+            report.push((widest, index, kind, face.outer.edges.len(), face.inners.len(), triangles.len()));
+        }
+
+        report.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        if let Some((_, worst, _, _, _, _)) = report.first() {
+            let face = &solid.faces[*worst];
+            println!("face {worst} in detail:");
+            let outer = tessellate::boundary(face, &face.outer, &cache).expect("an outline");
+            println!("  outline {:>5} points, encloses {:>12.1}", outer.len(), tessellate::enclosed(&outer));
+            let mut holes = Vec::new();
+            for hole in &face.inners {
+                if let Some(points) = tessellate::boundary(face, hole, &cache) {
+                    println!("  hole    {:>5} points, encloses {:>12.1}", points.len(), tessellate::enclosed(&points));
+                    holes.push(points);
+                }
+            }
+            match tessellate::triangulate(&outer, &holes) {
+                Ok(flat) => println!("  cuts into {} corners with its holes", flat.len()),
+                Err(why) => println!("  will not cut with its holes: {why}"),
+            }
+        }
+        println!("faces whose triangles reach furthest:");
+        for (widest, index, kind, edges, holes, count) in report.iter().take(8) {
+            println!(
+                "  face {index:>4} {kind:<10} {edges:>3} edges {holes:>2} holes -> {count:>6} triangles, widest side {widest:.1} mm",
+            );
+        }
     }
 }

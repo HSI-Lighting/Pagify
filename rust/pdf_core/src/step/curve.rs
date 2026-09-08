@@ -92,14 +92,14 @@ pub fn discretise(edge: &Edge, sag: f64) -> Vec<Point3> {
         Curve::Line { .. } => vec![edge.start, edge.end],
 
         Curve::Circle { frame, radius } => {
-            arc(frame, *radius, *radius, edge.start, edge.end, sag)
+            arc(frame, *radius, *radius, edge.start, edge.end, edge.same_sense, sag)
         }
 
         Curve::Ellipse { frame, major, minor } => {
             // Sagitta on an ellipse varies along it; using the larger radius
             // makes the step conservative everywhere rather than correct in one
             // place and coarse at the ends.
-            arc(frame, *major, *minor, edge.start, edge.end, sag)
+            arc(frame, *major, *minor, edge.start, edge.end, edge.same_sense, sag)
         }
 
         Curve::Polyline { points } => points.clone(),
@@ -150,18 +150,36 @@ fn arc(
     minor: f64,
     start: Point3,
     end: Point3,
+    same_sense: bool,
     sag: f64,
 ) -> Vec<Point3> {
     let from = angle_of(frame, start);
     let to = angle_of(frame, end);
 
-    // STEP parameterises a circle anticlockwise about its axis, so the sweep is
-    // taken that way. Coincident ends mean a whole circle rather than nothing:
-    // a cylinder's rim is one edge whose vertices are the same point, and
-    // treating that as a zero sweep loses the entire face.
+    // STEP parameterises a circle anticlockwise about its axis, and
+    // `EDGE_CURVE.same_sense` says whether this edge runs with that or against
+    // it. **Which way round matters far more than it looks.** Taking every arc
+    // anticlockwise turns a small clockwise one — a five hundredth of a turn —
+    // into 6.23 radians, very nearly the whole circle. It does not fail: the
+    // chain still starts and ends on the right vertices, so the loop closes,
+    // nothing is reported missing, and the boundary quietly encircles the part
+    // an extra time. On a gear with ninety-four teeth whose tip arcs run
+    // clockwise, that was ninety-four extra turns around the rim, an outline
+    // enclosing ninety-four times the area it should, and the open sectors
+    // between the spokes filled with metal that is not there.
+    //
+    // Coincident ends still mean a whole circle rather than nothing: a
+    // cylinder's rim is one edge whose two vertices are the same point, and
+    // reading that as a zero sweep loses the entire face.
     let mut sweep = to - from;
-    while sweep <= 1e-9 {
-        sweep += std::f64::consts::TAU;
+    if same_sense {
+        while sweep <= 1e-9 {
+            sweep += std::f64::consts::TAU;
+        }
+    } else {
+        while sweep >= -1e-9 {
+            sweep -= std::f64::consts::TAU;
+        }
     }
 
     let steps = segments_for(major.max(minor), sweep, sag);
@@ -327,6 +345,94 @@ mod tests {
             start: from,
             end: to,
             same_sense: true,
+        }
+    }
+
+    // ---- which way round an arc goes ------------------------------------------
+
+    /// A point on the unit-frame circle at a given angle.
+    fn at(radius: f64, angle: f64) -> Point3 {
+        Point3::new(radius * angle.cos(), radius * angle.sin(), 0.0)
+    }
+
+    /// How far the chain travels, end to end along itself.
+    fn walked(points: &[Point3]) -> f64 {
+        points.windows(2).map(|pair| pair[1].minus(pair[0]).length()).sum()
+    }
+
+    /// **A short arc the other way round stays short.**
+    ///
+    /// `EDGE_CURVE.same_sense` says whether the edge runs with the circle's own
+    /// anticlockwise parameterisation or against it. Taking every arc
+    /// anticlockwise regardless turns a hundredth of a turn into very nearly a
+    /// whole one — and it does not fail anywhere: the chain still begins and
+    /// ends on the right vertices, so the loop closes and nothing is reported.
+    /// The boundary simply encircles the part one more time than it should.
+    #[test]
+    fn a_short_clockwise_arc_does_not_become_a_whole_circle() {
+        let radius = 10.0;
+        let span = 0.2;
+        // Running against the circle's own anticlockwise direction: the angle
+        // decreases from start to end, which is a fifth of a radian of travel.
+        // This is the shape a gear's tooth tips are written in.
+        let mut edge = circle_edge(1, radius, at(radius, span), at(radius, 0.0));
+        edge.same_sense = false;
+
+        let length = walked(&discretise(&edge, DEFAULT_SAG));
+
+        assert!(
+            (length - radius * span).abs() < radius * span * 0.05,
+            "travelled {length:.3} where {:.3} was expected; a whole circle is {:.3}",
+            radius * span,
+            std::f64::consts::TAU * radius,
+        );
+    }
+
+    /// And it goes the other way round from the one that says so.
+    #[test]
+    fn same_sense_decides_the_direction_travelled() {
+        let radius = 10.0;
+        let span = 0.6;
+        let forwards = circle_edge(1, radius, at(radius, 0.0), at(radius, span));
+        let mut backwards = forwards.clone();
+        backwards.same_sense = false;
+
+        let one = discretise(&forwards, DEFAULT_SAG);
+        let other = discretise(&backwards, DEFAULT_SAG);
+
+        // Both start and finish on the same two vertices...
+        assert!(one[0].minus(other[0]).length() < 1e-9);
+        assert!(
+            one[one.len() - 1].minus(other[other.len() - 1]).length() < 1e-9,
+            "the ends moved",
+        );
+        // ...but one goes the short way and the other all the way round.
+        let short = walked(&one);
+        let long = walked(&other);
+        assert!(short < long, "{short:.2} should be shorter than {long:.2}");
+        assert!(
+            (short + long - std::f64::consts::TAU * radius).abs() < radius * 0.05,
+            "the two ways round should add up to a circle: {short:.2} + {long:.2}",
+        );
+    }
+
+    /// A rim is still a whole circle, whichever way it runs.
+    ///
+    /// A cylinder's rim is one edge whose two vertices are the same point.
+    /// Reading that as a zero sweep loses the entire face, so it has to stay a
+    /// full turn for both senses.
+    #[test]
+    fn an_edge_that_begins_where_it_ends_is_a_whole_circle() {
+        let radius = 4.0;
+        for same_sense in [true, false] {
+            let mut edge = circle_edge(1, radius, at(radius, 0.0), at(radius, 0.0));
+            edge.same_sense = same_sense;
+
+            let length = walked(&discretise(&edge, DEFAULT_SAG));
+            assert!(
+                (length - std::f64::consts::TAU * radius).abs() < radius * 0.05,
+                "same_sense={same_sense}: travelled {length:.3}",
+            );
         }
     }
 
