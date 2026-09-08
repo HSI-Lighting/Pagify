@@ -41,8 +41,23 @@ internal object DrawingBridge {
     /** Both distances are fractions of the view, not pixels. */
     external fun panDrawing(handle: Long, across: Float, down: Float, width: Int, height: Int): Boolean
 
-    /** Above one is closer. */
-    external fun zoomDrawing(handle: Long, by: Float): Boolean
+    /**
+     * Zoom about a point on the screen. Above one is closer.
+     *
+     * Takes where the fingers are: a pinch about the middle of the view has to
+     * be dragged back afterwards every time.
+     */
+    external fun zoomDrawing(
+        handle: Long,
+        by: Float,
+        atX: Float,
+        atY: Float,
+        width: Int,
+        height: Int,
+    ): Boolean
+
+    /** Give the sheet a registered font to draw its text with. */
+    external fun useDrawingFont(handle: Long, name: String): Boolean
 
     /**
      * Show the whole sheet.

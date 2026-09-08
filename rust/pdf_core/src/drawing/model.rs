@@ -65,6 +65,22 @@ pub enum Shape {
         vertices: Vec<Vertex>,
         closed: bool,
     },
+    /// A line of text on the sheet.
+    ///
+    /// **A drawing without its text is a picture of a drawing.** Room names,
+    /// fixture labels, every dimension figure and every note live here, and a
+    /// plan that shows the lines and none of the words is not something anybody
+    /// can work from — which is why this is a shape rather than something
+    /// counted as unsupported.
+    Text {
+        /// Where the text sits: the left end of its baseline.
+        at: Point,
+        /// Cap height, in drawing units — what CAD calls the text height.
+        height: f64,
+        /// Anticlockwise from horizontal, in radians.
+        rotation: f64,
+        content: String,
+    },
 }
 
 /// A shape, and which layer it belongs to.
@@ -182,6 +198,13 @@ impl Drawing {
                     for vertex in vertices {
                         widen(vertex.at);
                     }
+                }
+                // Where it starts and a rough box for where it runs to. The
+                // exact width needs a font, which the bounds have no business
+                // asking for; erring wide only loosens the fit slightly.
+                Shape::Text { at, height, content, .. } => {
+                    widen(*at);
+                    widen(Point::new(at.x + height * content.chars().count() as f64, at.y + height));
                 }
             }
         }

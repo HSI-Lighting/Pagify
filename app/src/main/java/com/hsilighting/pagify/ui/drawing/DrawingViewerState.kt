@@ -74,6 +74,11 @@ class DrawingViewerState(
             opened
                 .onSuccess { newHandle ->
                     handle = newHandle
+                    // **Before the first frame, or the text is missing from
+                    // it.** The fonts are registered on a background thread at
+                    // app start, so this can fail on a very fast open; it is
+                    // retried on the next draw rather than left undone.
+                    useFont()
                     describe()
                     loading = false
                     // Fitted before the first frame: a drawing's coordinates can
@@ -89,6 +94,21 @@ class DrawingViewerState(
                 }
         }
     }
+
+    /**
+     * Give the sheet the app's own font.
+     *
+     * A drawing names an SHX stroke font or a Windows typeface, neither of
+     * which travels with the file, so every viewer substitutes. This asks for
+     * the one the PDF side already registered rather than reading six
+     * megabytes of assets a second time.
+     */
+    private fun useFont() {
+        hasFont = runCatching { DrawingBridge.useDrawingFont(handle, TEXT_FONT) }
+            .getOrDefault(false)
+    }
+
+    private var hasFont = false
 
     private fun describe() {
         val summary = runCatching { JSONObject(DrawingBridge.drawingSummaryJson(handle)) }
@@ -182,9 +202,10 @@ class DrawingViewerState(
         redraw()
     }
 
-    fun zoom(by: Float) {
+    /** Zoom about where the fingers are, not the middle of the screen. */
+    fun zoom(by: Float, atX: Float, atY: Float) {
         if (handle == DrawingBridge.NO_DRAWING) return
-        DrawingBridge.zoomDrawing(handle, by)
+        DrawingBridge.zoomDrawing(handle, by, atX, atY, width, height)
         redraw()
     }
 
@@ -200,6 +221,10 @@ class DrawingViewerState(
         if (drawing?.isActive == true) return
 
         val target = (if (gesturing) proxy else full) ?: return
+        // The fonts load on their own thread at app start, so a drawing opened
+        // in the first moment can find none. Asked for again rather than left
+        // without, which would lose the text for as long as the file is open.
+        if (!hasFont) useFont()
         drawing = scope.launch {
             val drawn = withContext(Dispatchers.Default) {
                 runCatching { DrawingBridge.renderDrawingInto(handle, target) }.getOrElse {
@@ -343,6 +368,9 @@ class DrawingViewerState(
 
     private companion object {
         const val TAG = "DrawingViewer"
+
+        /** The asset name the PDF side registers this under. */
+        const val TEXT_FONT = "NotoSans-Regular.ttf"
     }
 }
 

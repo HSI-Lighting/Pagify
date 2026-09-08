@@ -230,9 +230,35 @@ fn part_of(entity: &acadrust::EntityType, drawing: &mut Drawing) -> Option<Part>
 
         // Counted rather than passed over, and named, because "134 not shown"
         // and "134 pieces of text not shown" are different things to be told.
-        E::Text(_) | E::MText(_) => {
-            drawing.note("text");
-            return None;
+        E::Text(t) => {
+            let content = super::dxf::readable(&t.value);
+            if content.is_empty() {
+                return None;
+            }
+            // The second alignment point is where justified text really sits;
+            // the insertion point is left at the origin of its own box.
+            let at = t.alignment_point.filter(|p| p.x != 0.0 || p.y != 0.0).unwrap_or(t.insertion_point);
+            Shape::Text {
+                at: Point::new(at.x, at.y),
+                height: if t.height > 0.0 { t.height } else { 2.5 },
+                // Radians here, where DXF writes degrees — the same trap the
+                // arcs set, in the same file format.
+                rotation: t.rotation,
+                content,
+            }
+        }
+
+        E::MText(t) => {
+            let content = super::dxf::readable(&t.value);
+            if content.is_empty() {
+                return None;
+            }
+            Shape::Text {
+                at: Point::new(t.insertion_point.x, t.insertion_point.y),
+                height: if t.height > 0.0 { t.height } else { 2.5 },
+                rotation: t.rotation,
+                content,
+            }
         }
         E::Hatch(_) => {
             drawing.note("hatching");
@@ -352,6 +378,17 @@ fn moved(shape: &Shape, put: &Affine) -> Shape {
             ratio: *ratio,
             start: *start,
             sweep: *sweep,
+        },
+
+        // Text turns and grows with the block it is in, but is never
+        // mirrored into unreadability: a plan with a block placed the other
+        // way round still has its labels the right way round on paper, which
+        // is what CAD itself does with them.
+        Shape::Text { at, height, rotation, content } => Shape::Text {
+            at: put.point(*at),
+            height: height * put.scale(),
+            rotation: rotation + put.turn(),
+            content: content.clone(),
         },
 
         Shape::Polyline { vertices, closed } => Shape::Polyline {

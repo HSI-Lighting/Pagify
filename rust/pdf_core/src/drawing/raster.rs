@@ -12,7 +12,7 @@ use tiny_skia::{Paint, PathBuilder, Pixmap, Stroke, Transform};
 use super::model::{Drawing, Point, Shape};
 
 /// How the sheet is drawn.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Style {
     pub background: [u8; 4],
     /// How wide a line is on screen, in pixels, whatever the zoom.
@@ -23,11 +23,29 @@ pub struct Style {
     /// screen — which is what every CAD viewer does at low zoom for the same
     /// reason.
     pub line_width: f32,
+    /// The font the sheet's text is drawn with, if one is registered.
+    ///
+    /// **A drawing carries no font of its own that this can use.** CAD text
+    /// names an SHX stroke font or a Windows typeface, neither of which travels
+    /// with the file — so every viewer substitutes, and this substitutes the
+    /// app's own. Held as bytes rather than a parsed face because a parsed one
+    /// borrows them, and this has to be `Clone` and outlive any single frame.
+    pub font: Option<std::sync::Arc<Vec<u8>>>,
+}
+
+impl Style {
+    /// The font, parsed, or `None` when there is none to draw with.
+    ///
+    /// Parsed per frame rather than held: `ttf_parser::Face` borrows its bytes,
+    /// and the parse is a header read rather than anything expensive.
+    pub(crate) fn face(&self) -> Option<ttf_parser::Face<'_>> {
+        ttf_parser::Face::parse(self.font.as_ref()?, 0).ok()
+    }
 }
 
 impl Default for Style {
     fn default() -> Self {
-        Self { background: [24, 26, 30, 255], line_width: 1.2 }
+        Self { background: [24, 26, 30, 255], line_width: 1.2, font: None }
     }
 }
 
@@ -68,6 +86,131 @@ impl View {
     }
 }
 
+/// A font's outlines, turned into a path the stroker can use.
+///
+/// `ttf-parser` hands a glyph over one segment at a time through this, in the
+/// font's own units with y running up. The flip, the turn and the scale happen
+/// here, once per point, rather than being applied to a finished path.
+struct Glyph<'a> {
+    into: &'a mut PathBuilder,
+    /// Font units to drawing units.
+    scale: f64,
+    /// Where the glyph's origin sits on the sheet.
+    at: Point,
+    sin: f64,
+    cos: f64,
+    view: &'a View,
+    width: u32,
+    height: u32,
+}
+
+impl Glyph<'_> {
+    /// A point in font units to a pixel on screen.
+    fn place(&self, x: f32, y: f32) -> (f32, f32) {
+        let (dx, dy) = (x as f64 * self.scale, y as f64 * self.scale);
+        let on_sheet = Point::new(
+            self.at.x + dx * self.cos - dy * self.sin,
+            self.at.y + dx * self.sin + dy * self.cos,
+        );
+        self.view.place(on_sheet, self.width, self.height)
+    }
+}
+
+impl ttf_parser::OutlineBuilder for Glyph<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let (px, py) = self.place(x, y);
+        self.into.move_to(px, py);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let (px, py) = self.place(x, y);
+        self.into.line_to(px, py);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        let (cx, cy) = self.place(x1, y1);
+        let (px, py) = self.place(x, y);
+        self.into.quad_to(cx, cy, px, py);
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        let (c1x, c1y) = self.place(x1, y1);
+        let (c2x, c2y) = self.place(x2, y2);
+        let (px, py) = self.place(x, y);
+        self.into.cubic_to(c1x, c1y, c2x, c2y, px, py);
+    }
+
+    fn close(&mut self) {
+        self.into.close();
+    }
+}
+
+/// Lay one line of text out along the sheet, as outlines.
+///
+/// **Filled, not stroked.** Everything else here is a line with a width; a
+/// letter is a shape with an inside, and stroking its outline at the same
+/// weight as a wall turns small text into an unreadable smudge.
+///
+/// Returns `false` when there is no font to draw with, so the caller can count
+/// the text as not shown rather than leave a gap nobody is told about.
+fn text_path(
+    face: &ttf_parser::Face,
+    content: &str,
+    at: Point,
+    height: f64,
+    rotation: f64,
+    view: &View,
+    width: u32,
+    height_px: u32,
+    into: &mut PathBuilder,
+) -> bool {
+    let per_em = face.units_per_em() as f64;
+    if per_em <= 0.0 {
+        return false;
+    }
+    // **CAD's text height is the height of a capital**, not the em size. Using
+    // the em would draw every label about a third too small, which on a plan
+    // full of 2.5 mm text is the difference between readable and not.
+    let cap = face
+        .capital_height()
+        .filter(|c| *c > 0)
+        .map(|c| c as f64)
+        .unwrap_or(per_em * 0.7);
+    let scale = height / cap;
+    let (sin, cos) = rotation.sin_cos();
+
+    let mut pen = 0.0_f64;
+    for character in content.chars() {
+        let Some(glyph) = face.glyph_index(character) else {
+            // A character this font has no glyph for. Advancing by a space
+            // keeps the rest of the line where it belongs instead of closing
+            // up around the hole.
+            pen += per_em * 0.5;
+            continue;
+        };
+
+        let origin = Point::new(
+            at.x + pen * scale * cos,
+            at.y + pen * scale * sin,
+        );
+        let mut builder = Glyph {
+            into,
+            scale,
+            at: origin,
+            sin,
+            cos,
+            view,
+            width,
+            height: height_px,
+        };
+        face.outline_glyph(glyph, &mut builder);
+
+        pen += face.glyph_hor_advance(glyph).unwrap_or(0) as f64;
+    }
+
+    true
+}
+
 /// Draw the whole sheet.
 pub fn draw(drawing: &Drawing, view: &View, style: &Style, into: &mut Pixmap) {
     let (width, height) = (into.width(), into.height());
@@ -90,18 +233,57 @@ pub fn draw(drawing: &Drawing, view: &View, style: &Style, into: &mut Pixmap) {
         paint.set_color_rgba8(layer.colour[0], layer.colour[1], layer.colour[2], 255);
         paint.anti_alias = true;
 
-        let mut builder = PathBuilder::new();
-        let mut any = false;
+        // Two paths per layer, because letters are filled and lines are
+        // stroked. Kept apart rather than drawn per entity so the whole layer
+        // is still two calls into the rasteriser rather than thousands.
+        let mut lines = PathBuilder::new();
+        let mut letters = PathBuilder::new();
+        let mut any_line = false;
+        let mut any_letter = false;
+
         for entity in drawing.entities.iter().filter(|e| e.layer as usize == id) {
-            if add(&mut builder, &entity.shape, view, width, height) {
-                any = true;
+            match &entity.shape {
+                Shape::Text { at, height: size, rotation, content } => {
+                    let Some(face) = style.face() else { continue };
+                    // Below about four pixels a letter is a smudge, and a plan
+                    // holds thousands of them. Left out until it would say
+                    // something — which is what every CAD viewer does, and is
+                    // why zooming in makes the labels appear.
+                    if size * view.scale < 4.0 {
+                        continue;
+                    }
+                    if text_path(
+                        &face, content, *at, *size, *rotation, view, width, height, &mut letters,
+                    ) {
+                        any_letter = true;
+                    }
+                }
+                other => {
+                    if add(&mut lines, other, view, width, height) {
+                        any_line = true;
+                    }
+                }
             }
         }
-        if !any {
-            continue;
+
+        if any_line {
+            if let Some(path) = lines.finish() {
+                into.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+            }
         }
-        if let Some(path) = builder.finish() {
-            into.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
+        if any_letter {
+            if let Some(path) = letters.finish() {
+                into.fill_path(
+                    &path,
+                    &paint,
+                    // Non-zero, not even-odd: a glyph's counters — the hole in
+                    // an "o" — are wound against its outline, and even-odd
+                    // would fill some letters solid and leave others hollow.
+                    tiny_skia::FillRule::Winding,
+                    Transform::identity(),
+                    None,
+                );
+            }
         }
     }
 }
@@ -117,6 +299,10 @@ fn add(
     let to_screen = |p: Point| view.place(p, width, height);
 
     match shape {
+        // Handled by `draw`, which fills letters rather than stroking them.
+        // Reaching here would draw a label in outline at wall weight.
+        Shape::Text { .. } => false,
+
         Shape::Line { a, b } => {
             let (ax, ay) = to_screen(*a);
             let (bx, by) = to_screen(*b);
@@ -300,7 +486,29 @@ mod picture {
         const HIGH: u32 = 900;
         let mut sheet = Pixmap::new(WIDE, HIGH).expect("a canvas");
         let view = View::fitted(&drawing, WIDE, HIGH);
-        let style = Style::default();
+        let mut style = Style::default();
+        // The app hands over its own font over the bridge; here it is read
+        // straight off disk, so the picture is the one the phone would draw.
+        if let Ok(name) = std::env::var("PAGIFY_DXF_FONT") {
+            if let Ok(bytes) = std::fs::read(&name) {
+                style.font = Some(std::sync::Arc::new(bytes));
+            }
+        }
+
+        // Zoomed, so text large enough to be worth drawing actually is. At a
+        // whole-sheet fit a 2.5 mm label is two pixels tall and is left out on
+        // purpose, which is exactly the behaviour that needs looking past here.
+        let mut view = view;
+        if let Ok(by) = std::env::var("PAGIFY_DXF_ZOOM") {
+            if let Ok(by) = by.parse::<f64>() {
+                view.scale *= by;
+            }
+        }
+        if let (Ok(x), Ok(y)) = (std::env::var("PAGIFY_DXF_AT_X"), std::env::var("PAGIFY_DXF_AT_Y")) {
+            if let (Ok(x), Ok(y)) = (x.parse::<f64>(), y.parse::<f64>()) {
+                view.centre = crate::drawing::model::Point::new(x, y);
+            }
+        }
 
         let started = std::time::Instant::now();
         draw(&drawing, &view, &style, &mut sheet);

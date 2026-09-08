@@ -82,14 +82,59 @@ pub fn open(path: &std::path::Path) -> Result<DrawingSession, OpenError> {
 }
 
 impl DrawingSession {
-    /// Zoom about the middle of the view.
+    /// Zoom about a point on the screen.
     ///
     /// Above one is closer. Multiplied rather than added so a pinch feels the
     /// same however far in it already is.
+    ///
+    /// **The point under the fingers stays under the fingers.** Zooming about
+    /// the middle instead is the difference between a viewer that goes where it
+    /// is pointed and one that has to be dragged back after every pinch:
+    /// somebody spreads two fingers over a stair detail in the corner and the
+    /// middle of the sheet comes up at them instead. Work out which point of
+    /// the drawing is under the touch, scale, then move the centre so that same
+    /// point lands back where it was.
+    pub fn zoom_about(&mut self, by: f64, at_x: f64, at_y: f64, width: u32, height: u32) {
+        if !by.is_finite() || by <= 0.0 || self.view.scale <= 0.0 {
+            return;
+        }
+        let was = self.view.scale;
+        let now = (was * by).clamp(1e-9, 1e12);
+        if now == was {
+            return;
+        }
+        self.view.scale = now;
+
+        // How far the touch is from the middle, in pixels. The sheet's y runs
+        // up and the screen's down, so the second term is negated.
+        let across = at_x - width as f64 / 2.0;
+        let down = at_y - height as f64 / 2.0;
+        self.view.centre.x += across * (1.0 / was - 1.0 / now);
+        self.view.centre.y -= down * (1.0 / was - 1.0 / now);
+    }
+
+    /// Zoom about the middle, for anything with no particular point in mind.
     pub fn zoom(&mut self, by: f64) {
         if by.is_finite() && by > 0.0 {
             self.view.scale = (self.view.scale * by).clamp(1e-9, 1e12);
         }
+    }
+
+    /// The font the sheet's text is drawn with.
+    pub fn use_font(&mut self, bytes: std::sync::Arc<Vec<u8>>) {
+        self.style.font = Some(bytes);
+    }
+
+    /// Which point of the drawing is under a pixel.
+    ///
+    /// Exposed so a test can state the property that matters — that a pinch
+    /// leaves the same place under the fingers — rather than re-deriving the
+    /// arithmetic it is checking.
+    pub fn under(&self, at_x: f64, at_y: f64, width: u32, height: u32) -> super::model::Point {
+        super::model::Point::new(
+            self.view.centre.x + (at_x - width as f64 / 2.0) / self.view.scale,
+            self.view.centre.y - (at_y - height as f64 / 2.0) / self.view.scale,
+        )
     }
 
     /// Slide the sheet. Both distances are fractions of the view, not pixels,
@@ -216,6 +261,73 @@ fn quoted(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn a_sheet() -> DrawingSession {
+        let mut drawing = Drawing::default();
+        drawing.layer_for("0");
+        drawing.entities.push(super::super::model::Entity {
+            layer: 0,
+            shape: super::super::model::Shape::Line {
+                a: super::super::model::Point::new(0.0, 0.0),
+                b: super::super::model::Point::new(100.0, 80.0),
+            },
+        });
+        DrawingSession {
+            drawing,
+            view: View { centre: super::super::model::Point::new(50.0, 40.0), scale: 4.0 },
+            style: Style::default(),
+            name: "plan.dxf".into(),
+        }
+    }
+
+    /// **A pinch leaves the same place under the fingers.**
+    ///
+    /// Zooming about the middle instead is not a failure anybody sees as one:
+    /// the sheet does get bigger. It is just never the part that was being
+    /// pinched, so every zoom has to be followed by a drag to find the detail
+    /// again. Stated as the property rather than as the arithmetic, so the
+    /// test cannot agree with a wrong formula by copying it.
+    #[test]
+    fn zooming_keeps_the_point_under_the_fingers() {
+        let (width, height) = (1000u32, 600u32);
+        for (x, y) in [(120.0, 90.0), (880.0, 510.0), (500.0, 300.0), (0.0, 0.0)] {
+            for by in [1.5, 0.5, 4.0] {
+                let mut sheet = a_sheet();
+                let before = sheet.under(x, y, width, height);
+
+                sheet.zoom_about(by, x, y, width, height);
+                let after = sheet.under(x, y, width, height);
+
+                assert!(
+                    (before.x - after.x).abs() < 1e-9 && (before.y - after.y).abs() < 1e-9,
+                    "pinching {by}x at ({x}, {y}) moved {before:?} to {after:?}",
+                );
+            }
+        }
+    }
+
+    /// And it does actually zoom.
+    #[test]
+    fn zooming_changes_the_scale() {
+        let mut sheet = a_sheet();
+        let was = sheet.view.scale;
+
+        sheet.zoom_about(2.0, 100.0, 100.0, 1000, 600);
+
+        assert!((sheet.view.scale - was * 2.0).abs() < 1e-9);
+    }
+
+    /// Zooming about the middle is the one case where both agree.
+    #[test]
+    fn a_pinch_at_the_middle_does_not_move_the_centre() {
+        let mut sheet = a_sheet();
+        let was = sheet.view.centre;
+
+        sheet.zoom_about(3.0, 500.0, 300.0, 1000, 600);
+
+        assert!((sheet.view.centre.x - was.x).abs() < 1e-9);
+        assert!((sheet.view.centre.y - was.y).abs() < 1e-9);
+    }
 
     /// **Whatever a layer is called, the summary is still JSON.**
     ///

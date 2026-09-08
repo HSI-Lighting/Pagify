@@ -193,7 +193,15 @@ private fun Sheet(state: DrawingViewerState) {
                         if (touching.size >= 2) {
                             val apart =
                                 (touching[0].position - touching[1].position).getDistance()
-                            if (lastApart > 0f && apart > 0f) state.zoom(apart / lastApart)
+                            // **About the middle of the pinch, not the middle
+                            // of the screen.** Somebody spreads two fingers
+                            // over a detail in the corner; without this the
+                            // centre of the sheet comes up at them instead and
+                            // the detail has to be dragged back into view.
+                            val between = (touching[0].position + touching[1].position) / 2f
+                            if (lastApart > 0f && apart > 0f) {
+                                state.zoom(apart / lastApart, between.x, between.y)
+                            }
                             lastApart = apart
                         } else {
                             lastApart = 0f

@@ -487,11 +487,30 @@ fn build(kind: &str, fields: &[(i32, &str)], drawing: &mut Drawing) -> Option<En
             Shape::Polyline { vertices, closed }
         }
 
-        // Named rather than lumped together, because "3 not shown" and "3 bits
-        // of text not shown" are different things to be told.
-        "TEXT" | "MTEXT" | "ATTRIB" | "ATTDEF" => {
-            drawing.note("text");
-            return None;
+        "TEXT" | "MTEXT" | "ATTRIB" => {
+            let content = readable(field(fields, 1).unwrap_or(""));
+            if content.is_empty() {
+                return None;
+            }
+            // **The second point is where aligned text actually sits.** With a
+            // horizontal or vertical justification set, 10/20 is left at the
+            // origin of the text's own box and 11/21 carries the real place.
+            // Taking the first blindly stacks every centred label at the corner
+            // of whatever it labels.
+            let aligned = field(fields, 72).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) != 0
+                || field(fields, 73).and_then(|v| v.parse::<i32>().ok()).unwrap_or(0) != 0;
+            let at = match (aligned, number(fields, 11), number(fields, 21)) {
+                (true, Some(x), Some(y)) => Point::new(x, y),
+                _ => Point::new(number(fields, 10)?, number(fields, 20)?),
+            };
+
+            Shape::Text {
+                at: placed(at),
+                // MTEXT calls its height 40 too, so one path serves both.
+                height: number(fields, 40).filter(|h| *h > 0.0).unwrap_or(2.5),
+                rotation: number(fields, 50).unwrap_or(0.0).to_radians(),
+                content,
+            }
         }
         "DIMENSION" | "LEADER" | "MULTILEADER" => {
             drawing.note("dimensions");
@@ -687,6 +706,17 @@ fn moved(shape: &Shape, put: &Affine) -> Shape {
             sweep: *sweep,
         },
 
+        // Text turns and grows with the block it is in, but is never
+        // mirrored into unreadability: a plan with a block placed the other
+        // way round still has its labels the right way round on paper, which
+        // is what CAD itself does with them.
+        Shape::Text { at, height, rotation, content } => Shape::Text {
+            at: put.point(*at),
+            height: height * put.scale(),
+            rotation: rotation + put.turn(),
+            content: content.clone(),
+        },
+
         Shape::Polyline { vertices, closed } => Shape::Polyline {
             vertices: vertices
                 .iter()
@@ -753,5 +783,111 @@ mod real {
         }
 
         assert!(drawing.kept() > 0, "nothing was read at all");
+    }
+}
+
+/// The words out of a piece of CAD text, without the formatting around them.
+///
+/// **MTEXT is not a string, it is a tiny markup language.** A paragraph arrives
+/// as something like `\pxi-3,l4,t4;{\H0.7x;NOTE}\PSecond line`, and drawing it
+/// verbatim puts backslashes and font codes across the sheet where the note
+/// should be. The escapes that stand for a real character are kept and the ones
+/// that set something are dropped, which is the difference between a label and
+/// a line of noise.
+///
+/// Plain TEXT goes through untouched apart from its `%%` codes, which it does
+/// use: `%%d` is the degree sign in nearly every drawing with an angle on it.
+///
+/// Written without a single backslash literal, deliberately — the character
+/// this is about is exactly the one that is hardest to get through a source
+/// file unaltered.
+pub(crate) fn readable(raw: &str) -> String {
+    const ESCAPE: char = '\u{5c}';
+
+    let mut out = String::with_capacity(raw.len());
+    let mut characters = raw.chars().peekable();
+
+    while let Some(character) = characters.next() {
+        if character == ESCAPE {
+            match characters.next() {
+                // The ones that stand for a character of their own. Case
+                // matters and the two are opposites: capital P is a hard
+                // line break, lowercase p opens a run of paragraph settings
+                // that continues to its semicolon, so treating them alike
+                // writes "xi-3,l4,t4;" across the sheet.
+                Some('P') | Some('~') => out.push(' '),
+                Some(ESCAPE) => out.push(ESCAPE),
+                Some('{') => out.push('{'),
+                Some('}') => out.push('}'),
+                // Everything else sets something — a font, a height, a width,
+                // a stacked fraction — and runs to its semicolon.
+                Some(_) => {
+                    for skipped in characters.by_ref() {
+                        if skipped == ';' {
+                            break;
+                        }
+                    }
+                }
+                None => {}
+            }
+            continue;
+        }
+
+        match character {
+            // Grouping, which carries no text of its own.
+            '{' | '}' => {}
+            '%' if characters.peek() == Some(&'%') => {
+                characters.next();
+                match characters.next() {
+                    Some('d') | Some('D') => out.push('°'),
+                    Some('c') | Some('C') => out.push('Ø'),
+                    Some('p') | Some('P') => out.push('±'),
+                    Some('%') => out.push('%'),
+                    // A code this does not know is dropped rather than shown as
+                    // a stray pair of per-cent signs.
+                    Some(_) | None => {}
+                }
+            }
+            other => out.push(other),
+        }
+    }
+
+    out.trim().to_string()
+}
+
+#[cfg(test)]
+mod text_from_a_drawing {
+    use super::readable;
+
+    const ESCAPE: char = '\u{5c}';
+
+    /// A paragraph's formatting does not end up on the sheet.
+    #[test]
+    fn mtext_markup_is_not_drawn_as_words() {
+        let raw = format!("{ESCAPE}pxi-3,l4,t4;{{{ESCAPE}H0.7x;NOTE}}{ESCAPE}PSecond line");
+        assert_eq!("NOTE Second line", readable(&raw));
+    }
+
+    /// The codes that stand for a character are kept.
+    ///
+    /// `%%d` is the degree sign, and a drawing with angles on it is full of
+    /// them — dropping it quietly turns "45°" into "45".
+    #[test]
+    fn the_codes_that_mean_a_character_survive() {
+        assert_eq!("45°", readable("45%%d"));
+        assert_eq!("Ø20", readable("%%c20"));
+        assert_eq!("±0.5", readable("%%p0.5"));
+    }
+
+    /// An ordinary label is left exactly as it is.
+    #[test]
+    fn plain_text_passes_through() {
+        assert_eq!("GROUND FLOOR", readable("GROUND FLOOR"));
+    }
+
+    /// And an escaped brace is a brace, not a group that never opened.
+    #[test]
+    fn an_escaped_brace_is_a_brace() {
+        assert_eq!("{1}", readable(&format!("{ESCAPE}{{1{ESCAPE}}}")));
     }
 }

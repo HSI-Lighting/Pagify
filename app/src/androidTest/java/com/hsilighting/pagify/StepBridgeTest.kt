@@ -703,14 +703,17 @@ class DrawingBridgeTest {
         assertTrue("$before colours became $after", after < before)
     }
 
-    /** Zooming changes the picture. */
+    /**
+     * Zooming changes the picture, and about the point given rather than the
+     * middle: pinching one corner brings that corner closer, not the centre.
+     */
     @Test
     fun zooming_changes_what_is_drawn() {
         val handle = open()
         DrawingBridge.fitDrawing(handle, 128, 96)
         val before = pixelsOf(drawn(handle))
 
-        assertTrue(DrawingBridge.zoomDrawing(handle, 3f))
+        assertTrue(DrawingBridge.zoomDrawing(handle, 3f, 64f, 48f, 128, 96))
         assertNotEquals(before.toList(), pixelsOf(drawn(handle)).toList())
     }
 

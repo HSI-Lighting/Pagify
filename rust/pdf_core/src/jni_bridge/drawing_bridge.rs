@@ -177,16 +177,53 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_DrawingBridge_panDrawing
     })
 }
 
-/// Above one is closer.
+/// Zoom about a point on the screen. Above one is closer.
+///
+/// Takes where the fingers are, because a pinch that zooms about the middle of
+/// the view has to be dragged back afterwards every single time.
 #[no_mangle]
 pub extern "system" fn Java_com_hsilighting_pagify_core_DrawingBridge_zoomDrawing(
     mut env: JNIEnv,
     _class: JClass,
     handle: jlong,
     by: jfloat,
+    at_x: jfloat,
+    at_y: jfloat,
+    width: jint,
+    height: jint,
 ) -> jboolean {
     guard(&mut env, JNI_FALSE, |_| {
-        with_drawing(handle, |drawing| drawing.zoom(by as f64))?;
+        with_drawing(handle, |drawing| {
+            drawing.zoom_about(
+                by as f64,
+                at_x as f64,
+                at_y as f64,
+                width.max(1) as u32,
+                height.max(1) as u32,
+            )
+        })?;
+        Ok(JNI_TRUE)
+    })
+}
+
+/// Give the sheet a font to draw its text with.
+///
+/// **A drawing brings no usable font of its own.** Its text names an SHX stroke
+/// font or a Windows typeface, neither of which travels with the file, so every
+/// viewer substitutes one. This hands over the app's own — the same bytes the
+/// PDF side already registered, looked up by the name it registered them under,
+/// so nothing is read or parsed twice.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_DrawingBridge_useDrawingFont<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    name: JString<'local>,
+) -> jboolean {
+    guard(&mut env, JNI_FALSE, |env| {
+        let name = required_string(env, &name, "name")?;
+        let bytes = crate::text::font_data(&name)?;
+        with_drawing(handle, |drawing| drawing.use_font(bytes))?;
         Ok(JNI_TRUE)
     })
 }
