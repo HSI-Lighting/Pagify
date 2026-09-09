@@ -13,6 +13,7 @@ import com.hsilighting.pagify.core.movedBy
 import com.hsilighting.pagify.core.MAXIMUM_TEXT_POINTS
 import com.hsilighting.pagify.core.MINIMUM_TEXT_POINTS
 import com.hsilighting.pagify.core.PdfFont
+import com.hsilighting.pagify.core.rebuiltMarkup
 import com.hsilighting.pagify.core.sizeThatFits
 import com.hsilighting.pagify.core.sizeRange
 
@@ -69,7 +70,7 @@ class CaptureMarkup {
     var textFont by mutableStateOf(PdfFont.HELVETICA)
         private set
 
-    var textSizePoints by mutableStateOf(14f)
+    var textSizePoints by mutableStateOf(CAPTION_POINTS)
         private set
 
     var textCurveDegrees by mutableStateOf(0f)
@@ -102,20 +103,35 @@ class CaptureMarkup {
         sizes = sizes + (which to value.coerceIn(which.sizeRange))
     }
 
+    /**
+     * Restyling goes through [rebuiltMarkup], never a plain `copy`.
+     *
+     * **A caption is words *and* the line they are written on.** The layout
+     * walks that line and stops when it runs out, so changing the type without
+     * rebuilding the line leaves the words too long for it and the last few are
+     * simply not drawn. Growing a caption made its end disappear a letter at a
+     * time and shrinking brought it back, which reads as the text being eaten
+     * rather than as a line that never grew with it.
+     *
+     * It is the same for the face and for the bend: a wider face needs more
+     * line, and a bend is the line. Each of these was a `copy` that changed one
+     * of the four things the baseline is built from and left the baseline
+     * alone.
+     */
     fun font(value: PdfFont) {
         textFont = value
-        rewriteSelected { it.copy(font = value) }
+        rewriteSelected { it.rebuiltMarkup(font = value) }
     }
 
     fun textSize(value: Float) {
         val within = value.coerceIn(MINIMUM_TEXT_POINTS, MAXIMUM_TEXT_POINTS)
         textSizePoints = within
-        rewriteSelected { it.copy(sizePoints = within) }
+        rewriteSelected { it.rebuiltMarkup(sizePoints = within) }
     }
 
     fun textCurve(value: Float) {
         textCurveDegrees = value
-        rewriteSelected { it.copy(curveDegrees = value) }
+        rewriteSelected { it.rebuiltMarkup(curveDegrees = value) }
     }
 
     /** Add a mark that needed no recognition — a dragged shape, or a stroke. */
@@ -172,8 +188,17 @@ class CaptureMarkup {
      * points the moment it was pinched, which reads as the gesture not working
      * while the size bar, which uses the right range, plainly does.
      *
+     * **And through [rebuiltMarkup], which takes the baseline with it.** A caption
+     * grown by a plain `copy` keeps the line it was written on at the length it
+     * had at its old size; the layout walks that line and stops where it ends,
+     * so the words past the end are not drawn. Growing a caption made its last
+     * letters vanish one at a time and shrinking brought them back — which
+     * reads as the text being eaten, not as a line that failed to grow.
+     *
      * [across] is how wide the picture is, so a caption cannot be grown past
-     * the edge of the thing it is written on.
+     * the edge of the thing it is written on. Measured from where the caption
+     * starts, since it grows rightwards from the point it was placed: one three
+     * quarters of the way across has a quarter of the picture to grow into.
      */
     fun scaleSelected(factor: Float, across: Float = 0f) {
         if (factor == 1f) return
@@ -181,8 +206,10 @@ class CaptureMarkup {
         val mark = marks.getOrNull(index) ?: return
         val shape = mark.shape as? MarkupShape.Text ?: return
 
-        val ceiling = if (across > 0f) {
-            shape.font.sizeThatFits(shape.text, across * PICTURE_FRACTION)
+        val from = shape.path.firstOrNull()?.x ?: 0f
+        val room = across - from.coerceAtLeast(0f)
+        val ceiling = if (across > 0f && room > 0f) {
+            shape.font.sizeThatFits(shape.text, room * PICTURE_FRACTION)
         } else {
             MAXIMUM_TEXT_POINTS
         }
@@ -193,7 +220,7 @@ class CaptureMarkup {
         // The bar follows the pinch, so the two never disagree.
         textSizePoints = grown
         marks = marks.toMutableList().also {
-            it[index] = mark.copy(shape = shape.copy(sizePoints = grown))
+            it[index] = mark.copy(shape = shape.rebuiltMarkup(sizePoints = grown))
         }
     }
 
@@ -211,7 +238,12 @@ class CaptureMarkup {
             selected = null
             marks.filterIndexed { at, _ -> at != index }
         } else {
-            marks.toMutableList().also { it[index] = mark.copy(shape = shape.copy(text = text)) }
+            // Longer words need a longer line, for the reason spelled out on
+            // `font` above: rewriting one and leaving the baseline alone loses
+            // whatever no longer fits on it.
+            marks.toMutableList().also {
+                it[index] = mark.copy(shape = shape.rebuiltMarkup(text = text))
+            }
         }
     }
 
@@ -242,3 +274,20 @@ class CaptureMarkup {
  * last letter to sit, and one that runs off is worse than one that stopped.
  */
 private const val PICTURE_FRACTION = 0.94f
+
+/**
+ * How big a caption on a picture starts.
+ *
+ * **Not the reader's fourteen.** That number is in page points, on a sheet six
+ * hundred points across, and it is the size of ordinary body text there. A
+ * capture is measured in its own pixels — a phone screenshot is a couple of
+ * thousand across — so the same fourteen came out as a line of type a fiftieth
+ * of the width of the picture: legible only by zooming into a note somebody had
+ * just written by hand. A hundred is a caption you can read on the picture
+ * without doing anything, and there is a size bar for the rest.
+ *
+ * It is a starting point, not a floor: [CaptureEditor] holds it down to what
+ * actually fits across the picture, so a long note starts smaller rather than
+ * running off the edge.
+ */
+const val CAPTION_POINTS = 100f

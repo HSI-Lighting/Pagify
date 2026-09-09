@@ -188,6 +188,15 @@ data class PdfReaderState(
     val textBendApplies: Boolean = true,
     val textSizePoints: Float = 12f,
     /**
+     * The page's own caption size, held while a capture is open.
+     *
+     * The size bar is one control serving two surfaces that want very different
+     * numbers — twelve points on a sheet, a hundred on a screenshot — so the
+     * page's setting is put aside rather than overwritten, and comes back when
+     * the capture closes.
+     */
+    val pageTextSizePoints: Float = 12f,
+    /**
      * Where text is being typed, if it is.
      *
      * Holds the baseline it will sit on — two points for a tap, a traced curve for

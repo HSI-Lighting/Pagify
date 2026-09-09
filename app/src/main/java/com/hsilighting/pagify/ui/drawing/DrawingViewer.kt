@@ -443,7 +443,15 @@ private fun MeasureReadout(taken: Measurement, modifier: Modifier = Modifier) {
         color = Color(0xF2262A31),
         shadowElevation = 6.dp,
     ) {
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+        // **Centred on each other, not left-aligned.** The line underneath says
+        // what the measurement snapped to, and it is nearly always the wider of
+        // the two — so ranging them left hangs the number off one end of a chip
+        // that is itself centred on the screen, which reads as misplaced rather
+        // than as two lines of one thing.
+        Column(
+            Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
             Text(
                 taken.readout(),
                 style = MaterialTheme.typography.titleMedium,

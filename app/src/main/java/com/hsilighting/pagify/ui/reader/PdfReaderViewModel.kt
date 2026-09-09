@@ -60,6 +60,7 @@ import com.hsilighting.pagify.core.sizeRange
 import com.hsilighting.pagify.core.EditState
 import com.hsilighting.pagify.core.PageCharacters
 import com.hsilighting.pagify.core.PageSize
+import com.hsilighting.pagify.ui.components.CAPTION_POINTS
 import com.hsilighting.pagify.ui.components.BlankSheet
 import com.hsilighting.pagify.core.PageTextRecogniser
 import com.hsilighting.pagify.core.NOTE_MARKER_RADIUS_POINTS
@@ -3173,7 +3174,21 @@ frame = pending.frame,
                         "${(request.height * request.scale.factor).toInt()} " +
                         "format=${request.format.wireName} bytes=${taken.bytes.size}",
                 )
-                _state.update { it.copy(isCapturing = false, capture = taken) }
+                // **A caption on a picture starts far bigger than one on a
+                // page**, and the two share this setting. Fourteen points is
+                // body text on a sheet six hundred points across; a capture is
+                // measured in its own pixels, a couple of thousand of them, and
+                // the same number came out as a line a fiftieth of the width.
+                // Set on the way in and put back on the way out, so the page's
+                // own text tool keeps the size somebody chose for it.
+                _state.update {
+                    it.copy(
+                        isCapturing = false,
+                        capture = taken,
+                        pageTextSizePoints = it.textSizePoints,
+                        textSizePoints = CAPTION_POINTS,
+                    )
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "capture failed", t)
                 _state.update {
@@ -3233,7 +3248,9 @@ frame = pending.frame,
      */
     fun setCaptureLasso(lasso: Boolean) = _state.update { it.copy(captureLasso = lasso) }
 
-    fun dismissCapture() = _state.update { it.copy(capture = null, markup = emptyList()) }
+    fun dismissCapture() = _state.update {
+        it.copy(capture = null, markup = emptyList(), textSizePoints = it.pageTextSizePoints)
+    }
 
     // ------------------------------------------------------- markup on a capture --
 
@@ -3402,12 +3419,19 @@ frame = pending.frame,
      *
      * Held to what the picture can carry, the same way a page holds a caption: a
      * run wider than the picture is words nobody can read.
+     *
+     * **From where the caption starts, not from the left edge**, for the reason
+     * spelled out in `CaptureMarkup.scaleSelected`: the room a caption has is
+     * what lies to its right, and measuring the whole picture instead let the
+     * words run off it and be clipped away as they grew.
      */
     fun scaleSelectedMarkup(factor: Float) {
         if (factor == 1f) return
         val across = _state.value.capture?.request?.localBounds?.width ?: return
         restyleSelectedMarkup { caption ->
-            val ceiling = caption.font.sizeThatFits(caption.text, across * TEXT_PAGE_FRACTION)
+            val from = caption.path.firstOrNull()?.x ?: 0f
+            val room = (across - from.coerceAtLeast(0f)).coerceAtLeast(1f)
+            val ceiling = caption.font.sizeThatFits(caption.text, room * TEXT_PAGE_FRACTION)
             caption.rebuiltMarkup(
                 sizePoints = (caption.sizePoints * factor).coerceAtMost(ceiling),
             )
@@ -3509,7 +3533,13 @@ frame = pending.frame,
                         format = capture.request.format,
                     )
                 }
-                _state.update { it.copy(capture = null, message = "Saved to Pictures/Pagify.") }
+                _state.update {
+                    it.copy(
+                        capture = null,
+                        message = "Saved to Pictures/Pagify.",
+                        textSizePoints = it.pageTextSizePoints,
+                    )
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "saving a capture failed", t)
                 _state.update { it.copy(message = captureSaveFailureMessage(t)) }
@@ -3546,7 +3576,9 @@ frame = pending.frame,
         }
     }
 
-    fun captureShared() = _state.update { it.copy(captureToShare = null, capture = null) }
+    fun captureShared() = _state.update {
+        it.copy(captureToShare = null, capture = null, textSizePoints = it.pageTextSizePoints)
+    }
 
     /** Put the capture on the clipboard, for pasting into another app. */
     fun copyCapture() {
@@ -3558,7 +3590,13 @@ frame = pending.frame,
                     CaptureExport.cache(getApplication(), bytes, capture.fileName)
                 }
                 CaptureExport.copyToClipboard(getApplication(), uri)
-                _state.update { it.copy(capture = null, message = "Picture copied.") }
+                _state.update {
+                    it.copy(
+                        capture = null,
+                        message = "Picture copied.",
+                        textSizePoints = it.pageTextSizePoints,
+                    )
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "copying a capture failed", t)
                 _state.update { it.copy(message = "The picture could not be copied.") }

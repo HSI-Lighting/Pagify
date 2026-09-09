@@ -86,6 +86,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import com.hsilighting.pagify.core.PdfFont
 import com.hsilighting.pagify.core.bendsText
+import com.hsilighting.pagify.core.sizeThatFits
 import com.hsilighting.pagify.core.curvedBaseline
 import com.hsilighting.pagify.core.straightBaseline
 import com.hsilighting.pagify.core.textFrame
@@ -298,6 +299,19 @@ fun CaptureEditor(
                                 close()
                                 return@TextButton
                             }
+                            // **The size asked for, or what fits — whichever is
+                            // smaller.** A caption starts large enough to read
+                            // on the picture without zooming, and a long note
+                            // at that size would run off the edge before it was
+                            // finished. Measured from where it was placed,
+                            // since it grows rightwards from there.
+                            val anchor = pendingText?.firstOrNull() ?: Offset.Zero
+                            val room = preview.request.width - anchor.x.coerceAtLeast(0f)
+                            val startAt = if (room > 0f) {
+                                minOf(textSizePoints, textFont.sizeThatFits(typed, room * CAPTION_FRACTION))
+                            } else {
+                                textSizePoints
+                            }
                             onCommitMarkup(
                                 MarkupShape.Text(
                                     text = typed,
@@ -305,10 +319,10 @@ fun CaptureEditor(
                                     // a line; the bend is a setting, so the line
                                     // is built rather than traced.
                                     path = curvedBaseline(
-                                        anchor = pendingText?.firstOrNull() ?: Offset.Zero,
+                                        anchor = anchor,
                                         text = typed,
                                         font = textFont,
-                                        sizePoints = textSizePoints,
+                                        sizePoints = startAt,
                                         degrees = if (markupTool.bendsText) {
                                             textCurveDegrees
                                         } else {
@@ -316,7 +330,7 @@ fun CaptureEditor(
                                         },
                                     ),
                                     font = textFont,
-                                    sizePoints = textSizePoints,
+                                    sizePoints = startAt,
                                     frame = markupTool.textFrame,
                                     curveDegrees = if (markupTool.bendsText) {
                                         textCurveDegrees
@@ -752,3 +766,11 @@ private fun StylePattern(style: MarkupStyle, tint: Color, width: Dp) {
 
 /** How thick the little pattern is drawn, in pixels. */
 private const val STYLE_PATTERN_WIDTH_PX = 4f
+
+/**
+ * How much of the width a caption may span when it is first written.
+ *
+ * A little tighter than the pinch's own limit, so a note that starts at the
+ * edge of what fits still has somewhere to go before it stops growing.
+ */
+private const val CAPTION_FRACTION = 0.9f
