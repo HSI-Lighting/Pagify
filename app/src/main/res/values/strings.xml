@@ -1,4 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Pagify 3D</string>
+    <!--
+        The name on the home screen, and this is the app people already have.
+
+        It was "Pagify 3D" while this work was a separate package sitting beside
+        the real app, where two icons both called Pagify would have been a way
+        to open the wrong one and think your contacts had gone. That reason left
+        with the application id: this *is* `com.hsilighting.pagify` now, so an
+        update that renamed the icon would look like a different app had been
+        installed over the one somebody was using.
+    -->
+    <string name="app_name">Pagify</string>
 </resources>
