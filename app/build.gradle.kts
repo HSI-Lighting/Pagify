@@ -118,20 +118,32 @@ android {
     ndkVersion = ndkVersionForRust
 
     defaultConfig {
-        // **A different application id, so this is a different app.**
+        // **The id people already have installed, so this updates that app.**
         //
-        // Pagify 3D installs beside Pagify rather than over it: same code base,
-        // separate package, separate sandbox, separate database. Nothing this
-        // branch does can reach the contacts, cards or documents of the app that
-        // is actually in use — which is the whole reason this work is on its own
-        // branch. The namespace above stays `com.hsilighting.pagify` on purpose:
-        // that is the Kotlin package and R class, and changing it would rename
-        // every import for no gain.
-        applicationId = "com.hsilighting.pagify3d"
+        // While this work was being built it used `com.hsilighting.pagify3d`, a
+        // separate package with a separate sandbox, precisely so that nothing
+        // here could reach the documents and settings of the app in use. That
+        // was right for developing it and is wrong for shipping it: an id is
+        // what Android matches an update against, so an APK under a different
+        // one is a second app on the phone, not a new version of the first, and
+        // the data somebody entered stays in the old one where they cannot see
+        // it.
+        //
+        // Two things make the in-place update keep that data, and both have
+        // been checked rather than assumed: it is signed with the same key as
+        // the release already out there, and `versionCode` is higher than the
+        // one on the phone. Fail either and the only route left is uninstall,
+        // which deletes the data directory.
+        applicationId = "com.hsilighting.pagify"
         minSdk = 24
         targetSdk = 37
-        versionCode = 8
-        versionName = "0.1.6"
+        // **Never goes backwards.** Android refuses an install whose version
+        // code is lower than the one on the phone, and the only way past that
+        // is to uninstall — which takes the user's data with it. Every APK that
+        // goes to a phone somebody is already using gets a higher number here
+        // than the one before it.
+        versionCode = 9
+        versionName = "0.1.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

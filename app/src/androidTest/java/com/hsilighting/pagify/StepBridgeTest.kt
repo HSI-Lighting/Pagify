@@ -317,7 +317,7 @@ class StepBridgeTest {
  *
  * ```text
  * adb push part.step /sdcard/Download/
- * adb shell pm grant com.hsilighting.pagify3d.debug android.permission.READ_EXTERNAL_STORAGE
+ * adb shell pm grant com.hsilighting.pagify.debug android.permission.READ_EXTERNAL_STORAGE
  * ```
  */
 class RealModelTest {
