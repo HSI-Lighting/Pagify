@@ -709,6 +709,7 @@ fun PdfReaderScreen(
                 onTextCurve = onTextCurve,
                 fill = state.captureFill,
                 onFillChange = onCaptureFill,
+                origin = "Page ${state.capture?.request?.originPage?.plus(1) ?: 1}",
                 onSaveToGallery = onSaveCapture,
                 onShare = onShareCapture,
                 onCopy = onCopyCapture,

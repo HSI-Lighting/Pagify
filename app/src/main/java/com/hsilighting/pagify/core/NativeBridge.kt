@@ -271,6 +271,19 @@ internal object NativeBridge {
     external fun fontCovers(name: String, text: String): Boolean
 
     /**
+     * Draw markup onto a bitmap already in hand.
+     *
+     * The reader's markup is burnt in by re-rendering the page region and
+     * painting over it, which needs a document. A picture of a model or a
+     * drawing has none — it is already a finished bitmap — so this is the same
+     * marks and the same painter by a different way in.
+     *
+     * [scale] is capture units to pixels: the marks were drawn on screen and
+     * the picture is usually larger.
+     */
+    external fun compositeMarkupInto(bitmap: Bitmap, markupJson: String, scale: Float): Boolean
+
+    /**
      * Shapes [text] in a registered font.
      *
      * Returns the glyphs in the order they are drawn, left to right, with

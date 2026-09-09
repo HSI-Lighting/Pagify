@@ -34,6 +34,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -51,10 +52,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.core.CaptureFill
+import com.hsilighting.pagify.core.MarkupShape
+import com.hsilighting.pagify.ui.components.CaptureEditor
+import com.hsilighting.pagify.ui.components.CaptureMarkup
 import com.hsilighting.pagify.ui.components.CaptureHint
 import com.hsilighting.pagify.ui.components.ToolButton
 import com.hsilighting.pagify.ui.components.captureOverlay
-import com.hsilighting.pagify.ui.model.CaptureSheet
 import com.hsilighting.pagify.ui.model.ModelRibbon
 
 /**
@@ -322,27 +326,69 @@ private fun Layers(state: DrawingViewerState, modifier: Modifier = Modifier) {
 private fun Captures(state: DrawingViewerState) {
     val context = LocalContext.current
 
+    // **The reader's own editor, not a second one.** Every tool it offers on a
+    // page — pen, line, arrow, box, circle, cloud, highlighter, eraser, typed
+    // captions with their font, size and bend — works the same way on a picture
+    // of a drawing, because a picture is a picture. What it needed was somewhere
+    // to keep the marks that is not a document, and something to burn them into
+    // that is not a page re-render.
+    val markup = remember(state.taken) { CaptureMarkup() }
+
     val storage = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) state.savePicture(context) else state.noteStorageRefused()
+        if (granted) state.savePicture(context, markup.marks) else state.noteStorageRefused()
     }
 
-    state.taken?.let { picture ->
-        CaptureSheet(
-            picture = picture,
-            format = state.captureFormat,
-            onFormat = state::chooseFormat,
-            onSave = {
+    state.preview?.let { preview ->
+        CaptureEditor(
+            preview = preview,
+            isCapturing = state.capturing,
+            markup = markup.marks,
+            markupTool = markup.tool,
+            markupArmed = markup.armed,
+            onDisarmMarkup = markup::disarm,
+            markupColor = markup.colour,
+            markupSize = markup.size,
+            markupStyle = markup.style,
+            onMarkupStyle = markup::style,
+            onScaleChange = state::chooseScale,
+            onFormatChange = state::chooseFormat,
+            // A picture of a drawing is all drawing: there is no bare area
+            // around a page for a fill to reach, so the control hides itself.
+            fill = CaptureFill.PAGE,
+            onFillChange = {},
+            onMarkupTool = markup::use,
+            onMarkupColor = markup::colour,
+            onMarkupSize = markup::size,
+            textFont = markup.textFont,
+            textSizePoints = markup.textSizePoints,
+            textCurveDegrees = markup.textCurveDegrees,
+            onTextFont = markup::font,
+            onTextSize = markup::textSize,
+            onTextCurve = markup::textCurve,
+            onCommitMarkup = markup::add,
+            onRecogniseMarkup = { markup.add(MarkupShape.Freehand(it)) },
+            onUndoMarkup = markup::undo,
+            onMoveMarkup = markup::move,
+            onSelectMarkup = markup::select,
+            onScaleMarkup = markup::scaleSelected,
+            onRewriteMarkup = markup::rewrite,
+            onEraseMarkup = markup::erase,
+            selectedMarkup = markup.selected,
+            onSaveToGallery = {
                 if (CaptureExport.galleryNeedsPermission()) {
                     storage.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 } else {
-                    state.savePicture(context)
+                    state.savePicture(context, markup.marks)
                 }
             },
-            onShare = { state.sharePicture(context) },
-            onCopy = { state.copyPicture(context) },
+            onShare = { state.sharePicture(context, markup.marks) },
+            onCopy = { state.copyPicture(context, markup.marks) },
             onDismiss = state::discardCapture,
+            // A drawing has no pages, so a page number here would be a fact
+            // this editor invented.
+            origin = state.name,
         )
     }
 

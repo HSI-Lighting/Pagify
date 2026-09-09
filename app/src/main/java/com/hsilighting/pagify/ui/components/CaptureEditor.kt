@@ -168,6 +168,14 @@ fun CaptureEditor(
     onShare: () -> Unit,
     onCopy: () -> Unit,
     onDismiss: () -> Unit,
+    /**
+     * Where the picture came from, for the line under its name.
+     *
+     * "Page 4" for a document, the file's own name for a model or a drawing —
+     * which have no pages, and for which a page number would be a fact this
+     * editor invented.
+     */
+    origin: String,
 ) {
     var zoom by remember { mutableFloatStateOf(1f) }
     var pan by remember { mutableStateOf(Offset.Zero) }
@@ -345,7 +353,7 @@ fun CaptureEditor(
                     Column(Modifier.weight(1f)) {
                         Text("Picture", style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "Page ${preview.request.originPage + 1} · " +
+                            "$origin · " +
                                 "${preview.request.scale.label} · " +
                                 "${preview.request.format.extension.uppercase()} · " +
                                 preview.sizeLabel,

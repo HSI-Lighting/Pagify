@@ -106,6 +106,7 @@ class CaptureFillTest {
                 onSaveToGallery = {},
                 onShare = {},
                 onCopy = {},
+                origin = "Page 1",
                 onDismiss = {},
             )
         }

@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.test.platform.app.InstrumentationRegistry
 import com.hsilighting.pagify.core.DrawingBridge
 import com.hsilighting.pagify.core.StepBridge
+import com.hsilighting.pagify.core.toWireJson
 import com.hsilighting.pagify.ui.model.captureSize
 import java.io.File
 import org.junit.After
@@ -806,6 +807,43 @@ class DrawingBridgeTest {
         val pixels = pixelsOf(bitmap)
         val background = pixels[0]
         return pixels.count { it != background }.toDouble() / pixels.size
+    }
+
+    /**
+     * **Markup is burnt into a picture that has no document behind it.**
+     *
+     * The reader draws its marks by re-rendering the page region and painting
+     * over it, which needs tiles and a document. A picture of a drawing has
+     * neither — it is already a finished bitmap — so this is a different way in
+     * to the same painter, and the thing that could silently do nothing.
+     */
+    @Test
+    fun markup_is_drawn_onto_a_finished_picture() {
+        val picture = Bitmap.createBitmap(200, 150, Bitmap.Config.ARGB_8888)
+        picture.eraseColor(android.graphics.Color.BLACK)
+        val before = pixelsOf(picture).toList()
+
+        // One red line across the middle, in the picture's own pixels — built
+        // with the app's own encoder rather than written out by hand, so this
+        // also proves the two sides still agree on the wire format.
+        val marks = listOf(
+            com.hsilighting.pagify.core.Markup(
+                shape = com.hsilighting.pagify.core.MarkupShape.Line(
+                    from = androidx.compose.ui.geometry.Offset(10f, 75f),
+                    to = androidx.compose.ui.geometry.Offset(190f, 75f),
+                ),
+                color = com.hsilighting.pagify.core.AnnotationColors.RED,
+                widthPoints = 4f,
+            ),
+        ).toWireJson()
+
+        assertTrue(
+            "the painter refused the bitmap",
+            com.hsilighting.pagify.core.NativeBridge.compositeMarkupInto(picture, marks, 1f),
+        )
+
+        val after = pixelsOf(picture).toList()
+        assertNotEquals("nothing was drawn on it", before, after)
     }
 
     /**

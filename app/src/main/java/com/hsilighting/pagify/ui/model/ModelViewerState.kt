@@ -11,7 +11,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.CaptureFormat
+import com.hsilighting.pagify.core.CaptureRequest
+import com.hsilighting.pagify.core.CaptureScale
+import com.hsilighting.pagify.core.Markup
+import com.hsilighting.pagify.core.NativeBridge
 import com.hsilighting.pagify.core.StepBridge
+import com.hsilighting.pagify.core.toWireJson
+import com.hsilighting.pagify.ui.reader.CapturePreview
+import androidx.compose.ui.graphics.asImageBitmap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -262,6 +269,21 @@ class ModelViewerState(
     var taken by mutableStateOf<Bitmap?>(null)
         private set
 
+    /** The capture packaged the way the editor reads it. See the drawing side. */
+    var preview by mutableStateOf<CapturePreview?>(null)
+        private set
+
+    var captureScale by mutableStateOf(CaptureScale.HIGH)
+        private set
+
+    fun chooseScale(scale: CaptureScale) {
+        captureScale = scale
+        val (box, ring) = framed ?: return
+        takeRegion(box, ring, scale.factor.roundToInt().coerceAtLeast(1))
+    }
+
+    private var framed: Pair<Rect, List<Offset>>? = null
+
     /** Chosen on the sheet; PNG suits flat shading on a plain ground. */
     var captureFormat by mutableStateOf(CaptureFormat.PNG)
         private set
@@ -303,6 +325,7 @@ class ModelViewerState(
 
     fun discardCapture() {
         taken = null
+        preview = null
     }
 
     /**
@@ -324,6 +347,7 @@ class ModelViewerState(
         val whole = captureSize(width, height, scale)
         val cut = regionInCapture(box, width, height, whole) ?: return
 
+        framed = box to ring
         capturing = true
         scope.launch {
             val drawn = withContext(Dispatchers.Default) {
@@ -338,24 +362,29 @@ class ModelViewerState(
                 }
             }
             capturing = false
-            if (drawn != null) taken = drawn else message = "The picture could not be taken."
+            if (drawn == null) {
+                message = "The picture could not be taken."
+                return@launch
+            }
+            taken = drawn
+            preview = previewOf(drawn)
         }
     }
 
     /** Keep it, in Pictures/Pagify, where the gallery will find it. */
-    fun savePicture(context: Context) =
+    fun savePicture(context: Context, marks: List<Markup> = emptyList()) =
         exportPicture(context, "Saved to Pictures/Pagify.") { bytes, fileName, format ->
             CaptureExport.saveToGallery(context, bytes, fileName, format)
             null
         }
 
-    fun sharePicture(context: Context) =
-        exportPicture(context, null) { bytes, fileName, _ ->
+    fun sharePicture(context: Context, marks: List<Markup> = emptyList()) =
+        exportPicture(context, null, marks) { bytes, fileName, _ ->
             CaptureExport.cache(context, bytes, fileName)
         }
 
-    fun copyPicture(context: Context) =
-        exportPicture(context, "Picture copied.") { bytes, fileName, _ ->
+    fun copyPicture(context: Context, marks: List<Markup> = emptyList()) =
+        exportPicture(context, "Picture copied.", marks) { bytes, fileName, _ ->
             CaptureExport.copyToClipboard(context, CaptureExport.cache(context, bytes, fileName))
             null
         }
@@ -370,6 +399,7 @@ class ModelViewerState(
     private fun exportPicture(
         context: Context,
         note: String?,
+        marks: List<Markup> = emptyList(),
         work: (ByteArray, String, CaptureFormat) -> Uri?,
     ) {
         val picture = taken ?: return
@@ -378,7 +408,7 @@ class ModelViewerState(
 
         scope.launch {
             val outcome = withContext(Dispatchers.IO) {
-                runCatching { work(encode(picture, format), fileName, format) }
+                runCatching { work(encode(picture, format, marks), fileName, format) }
             }
             outcome
                 .onSuccess { uri ->
@@ -399,7 +429,42 @@ class ModelViewerState(
         }
     }
 
-    private fun encode(picture: Bitmap, format: CaptureFormat): ByteArray {
+    /** The capture, packaged the way the editor reads it. */
+    private fun previewOf(picture: Bitmap): CapturePreview = CapturePreview(
+        request = CaptureRequest(
+            tiles = emptyList(),
+            width = picture.width.toFloat(),
+            height = picture.height.toFloat(),
+            background = 0xFF1E2024L,
+            originPage = 0,
+            scale = captureScale,
+            format = captureFormat,
+        ),
+        bytes = encode(picture, captureFormat),
+        fileName = captureFileName(name, CaptureExport.timestamp(), captureFormat),
+        preview = picture.asImageBitmap(),
+    )
+
+    /**
+     * The picture as bytes, with whatever was drawn on it burnt in.
+     *
+     * Onto a copy, never the one on screen: the editor is still showing it, and
+     * painting the marks in would double them on the next export.
+     */
+    private fun encode(
+        picture: Bitmap,
+        format: CaptureFormat,
+        marks: List<Markup> = emptyList(),
+    ): ByteArray {
+        val flattened = if (marks.isEmpty()) {
+            picture
+        } else {
+            picture.copy(Bitmap.Config.ARGB_8888, true).also {
+                runCatching { NativeBridge.compositeMarkupInto(it, marks.toWireJson(), 1f) }
+                    .onFailure { why -> Log.w(TAG, "the markup could not be drawn on", why) }
+            }
+        }
+
         val out = ByteArrayOutputStream()
         val kind = when (format) {
             CaptureFormat.PNG -> Bitmap.CompressFormat.PNG
@@ -407,7 +472,7 @@ class ModelViewerState(
         }
         // Ignored for PNG, which is lossless; 92 keeps a JPEG of flat shading
         // free of the ringing that shows up around a part's silhouette.
-        picture.compress(kind, 92, out)
+        flattened.compress(kind, 92, out)
         return out.toByteArray()
     }
 

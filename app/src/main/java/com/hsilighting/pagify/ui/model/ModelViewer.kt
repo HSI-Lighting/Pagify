@@ -35,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -50,6 +51,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.CaptureExport
+import com.hsilighting.pagify.core.CaptureFill
+import com.hsilighting.pagify.core.MarkupShape
+import com.hsilighting.pagify.ui.components.CaptureEditor
+import com.hsilighting.pagify.ui.components.CaptureMarkup
 import com.hsilighting.pagify.ui.components.CaptureHint
 import com.hsilighting.pagify.ui.components.captureOverlay
 import kotlin.math.abs
@@ -201,36 +206,67 @@ fun ModelViewer(
 private fun Captures(state: ModelViewerState) {
     val context = LocalContext.current
 
-    // **Only below API 29.** From Android 10 on, MediaStore's scoped storage
-    // needs no permission, and asking anyway puts a dialog in front of an
-    // action that does not require one.
+    // The reader's editor, on a picture of a part. Same tools, same marks; the
+    // only thing a model needed was somewhere to keep them that is not a
+    // document, and a way to burn them in that is not a page re-render.
+    val markup = remember(state.taken) { CaptureMarkup() }
+
     val storage = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) state.savePicture(context)
-        else state.noteStorageRefused()
+        if (granted) state.savePicture(context, markup.marks) else state.noteStorageRefused()
     }
 
-    state.taken?.let { picture ->
-        CaptureSheet(
-            picture = picture,
-            format = state.captureFormat,
-            onFormat = state::chooseFormat,
-            onSave = {
+    state.preview?.let { preview ->
+        CaptureEditor(
+            preview = preview,
+            isCapturing = state.capturing,
+            markup = markup.marks,
+            markupTool = markup.tool,
+            markupArmed = markup.armed,
+            onDisarmMarkup = markup::disarm,
+            markupColor = markup.colour,
+            markupSize = markup.size,
+            markupStyle = markup.style,
+            onMarkupStyle = markup::style,
+            onScaleChange = state::chooseScale,
+            onFormatChange = state::chooseFormat,
+            // A picture of a part is all part: nothing around it for a fill.
+            fill = CaptureFill.PAGE,
+            onFillChange = {},
+            onMarkupTool = markup::use,
+            onMarkupColor = markup::colour,
+            onMarkupSize = markup::size,
+            textFont = markup.textFont,
+            textSizePoints = markup.textSizePoints,
+            textCurveDegrees = markup.textCurveDegrees,
+            onTextFont = markup::font,
+            onTextSize = markup::textSize,
+            onTextCurve = markup::textCurve,
+            onCommitMarkup = markup::add,
+            onRecogniseMarkup = { markup.add(MarkupShape.Freehand(it)) },
+            onUndoMarkup = markup::undo,
+            onMoveMarkup = markup::move,
+            onSelectMarkup = markup::select,
+            onScaleMarkup = markup::scaleSelected,
+            onRewriteMarkup = markup::rewrite,
+            onEraseMarkup = markup::erase,
+            selectedMarkup = markup.selected,
+            onSaveToGallery = {
                 if (CaptureExport.galleryNeedsPermission()) {
                     storage.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
                 } else {
-                    state.savePicture(context)
+                    state.savePicture(context, markup.marks)
                 }
             },
-            onShare = { state.sharePicture(context) },
-            onCopy = { state.copyPicture(context) },
+            onShare = { state.sharePicture(context, markup.marks) },
+            onCopy = { state.copyPicture(context, markup.marks) },
             onDismiss = state::discardCapture,
+            // A model has no pages either.
+            origin = state.name,
         )
     }
 
-    // Raised from an effect rather than straight from the button: the file has
-    // to be written first, or the receiving app is handed an empty one.
     LaunchedEffect(state.shareRequest) {
         val uri = state.shareRequest ?: return@LaunchedEffect
         context.startActivity(CaptureExport.shareIntent(uri, state.captureFormat))

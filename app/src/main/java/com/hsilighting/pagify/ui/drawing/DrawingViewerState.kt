@@ -11,7 +11,14 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.CaptureFormat
+import com.hsilighting.pagify.core.CaptureRequest
+import com.hsilighting.pagify.core.CaptureScale
+import com.hsilighting.pagify.ui.reader.CapturePreview
+import androidx.compose.ui.graphics.asImageBitmap
 import com.hsilighting.pagify.core.DrawingBridge
+import com.hsilighting.pagify.core.Markup
+import com.hsilighting.pagify.core.NativeBridge
+import com.hsilighting.pagify.core.toWireJson
 import com.hsilighting.pagify.ui.model.Frame
 import com.hsilighting.pagify.ui.model.captureFileName
 import com.hsilighting.pagify.ui.model.captureSize
@@ -295,6 +302,30 @@ class DrawingViewerState(
 
     var taken by mutableStateOf<Bitmap?>(null)
         private set
+
+    /**
+     * The capture as the editor wants it: bytes, a preview and a request.
+     *
+     * The request carries no tiles — there is no document to re-render from —
+     * and its width and height are the picture's own pixels, which is the
+     * space marks are drawn in. That is what lets the marks be burnt in at a
+     * scale of one rather than through a page transform that does not exist.
+     */
+    var preview by mutableStateOf<CapturePreview?>(null)
+        private set
+
+    var captureScale by mutableStateOf(CaptureScale.HIGH)
+        private set
+
+    /** Retake at a different sharpness, from the region already framed. */
+    fun chooseScale(scale: CaptureScale) {
+        captureScale = scale
+        val (box, ring) = framed ?: return
+        takeRegion(box, ring, scale.factor.roundToInt().coerceAtLeast(1))
+    }
+
+    /** The region last framed, so a change of scale can cut it again. */
+    private var framed: Pair<Rect, List<Offset>>? = null
     var captureFormat by mutableStateOf(CaptureFormat.PNG)
         private set
     var capturing by mutableStateOf(false)
@@ -319,6 +350,7 @@ class DrawingViewerState(
 
     fun discardCapture() {
         taken = null
+        preview = null
     }
 
     fun noteStorageRefused() {
@@ -338,6 +370,7 @@ class DrawingViewerState(
         val whole = captureSize(width, height, scale)
         val cut = regionInCapture(box, width, height, whole) ?: return
 
+        framed = box to ring
         capturing = true
         scope.launch {
             val drawn = withContext(Dispatchers.Default) {
@@ -355,23 +388,28 @@ class DrawingViewerState(
                 }
             }
             capturing = false
-            if (drawn != null) taken = drawn else message = "The picture could not be taken."
+            if (drawn == null) {
+                message = "The picture could not be taken."
+                return@launch
+            }
+            taken = drawn
+            preview = previewOf(drawn)
         }
     }
 
-    fun savePicture(context: Context) =
-        exportPicture(context, "Saved to Pictures/Pagify.") { bytes, fileName, format ->
+    fun savePicture(context: Context, marks: List<Markup> = emptyList()) =
+        exportPicture(context, "Saved to Pictures/Pagify.", marks) { bytes, fileName, format ->
             CaptureExport.saveToGallery(context, bytes, fileName, format)
             null
         }
 
-    fun sharePicture(context: Context) =
-        exportPicture(context, null) { bytes, fileName, _ ->
+    fun sharePicture(context: Context, marks: List<Markup> = emptyList()) =
+        exportPicture(context, null, marks) { bytes, fileName, _ ->
             CaptureExport.cache(context, bytes, fileName)
         }
 
-    fun copyPicture(context: Context) =
-        exportPicture(context, "Picture copied.") { bytes, fileName, _ ->
+    fun copyPicture(context: Context, marks: List<Markup> = emptyList()) =
+        exportPicture(context, "Picture copied.", marks) { bytes, fileName, _ ->
             CaptureExport.copyToClipboard(context, CaptureExport.cache(context, bytes, fileName))
             null
         }
@@ -379,6 +417,7 @@ class DrawingViewerState(
     private fun exportPicture(
         context: Context,
         note: String?,
+        marks: List<Markup> = emptyList(),
         work: (ByteArray, String, CaptureFormat) -> Uri?,
     ) {
         val picture = taken ?: return
@@ -387,7 +426,7 @@ class DrawingViewerState(
 
         scope.launch {
             val outcome = withContext(Dispatchers.IO) {
-                runCatching { work(encode(picture, format), fileName, format) }
+                runCatching { work(encode(picture, format, marks), fileName, format) }
             }
             outcome
                 .onSuccess { uri ->
@@ -405,13 +444,59 @@ class DrawingViewerState(
         }
     }
 
-    private fun encode(picture: Bitmap, format: CaptureFormat): ByteArray {
+    /**
+     * The capture, packaged the way the editor reads it.
+     *
+     * The encoded bytes are the plain picture: the marks are burnt in only when
+     * something is exported, so drawing on it and changing your mind costs
+     * nothing and the picture never accumulates them.
+     */
+    private fun previewOf(picture: Bitmap): CapturePreview {
+        val bytes = encode(picture, captureFormat, emptyList())
+        return CapturePreview(
+            request = CaptureRequest(
+                // No tiles: there is no document behind this to re-render.
+                tiles = emptyList(),
+                width = picture.width.toFloat(),
+                height = picture.height.toFloat(),
+                background = 0xFF181A1EL,
+                originPage = 0,
+                scale = captureScale,
+                format = captureFormat,
+            ),
+            bytes = bytes,
+            fileName = captureFileName(name, CaptureExport.timestamp(), captureFormat),
+            preview = picture.asImageBitmap(),
+        )
+    }
+
+    /**
+     * The picture as bytes, with whatever was drawn on it burnt in.
+     *
+     * **Onto a copy, never the picture on screen.** The one being displayed is
+     * still on the editor behind the export sheet; painting the marks into it
+     * would double them the next time anything is saved, and the second copy
+     * would be a shade darker where they overlap.
+     *
+     * The marks are in the picture's own pixels, so the painter is told a
+     * scale of one — the region was cut at the size the marks were drawn at.
+     */
+    private fun encode(picture: Bitmap, format: CaptureFormat, marks: List<Markup>): ByteArray {
+        val flattened = if (marks.isEmpty()) {
+            picture
+        } else {
+            picture.copy(Bitmap.Config.ARGB_8888, true).also {
+                runCatching { NativeBridge.compositeMarkupInto(it, marks.toWireJson(), 1f) }
+                    .onFailure { why -> Log.w(TAG, "the markup could not be drawn on", why) }
+            }
+        }
+
         val out = ByteArrayOutputStream()
         val kind = when (format) {
             CaptureFormat.PNG -> Bitmap.CompressFormat.PNG
             CaptureFormat.JPEG -> Bitmap.CompressFormat.JPEG
         }
-        picture.compress(kind, 92, out)
+        flattened.compress(kind, 92, out)
         return out.toByteArray()
     }
 

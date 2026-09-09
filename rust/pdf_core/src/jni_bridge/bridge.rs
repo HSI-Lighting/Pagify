@@ -1215,3 +1215,70 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_getPageChar
             .into_raw())
     })
 }
+
+/// Draw markup onto a bitmap that is already in hand.
+///
+/// **The one path that is not a PDF capture.** The reader's markup is drawn by
+/// re-rendering the page region and painting over it, which needs tiles and a
+/// document; a picture of a model or a drawing has neither — it is already a
+/// finished bitmap. Same marks, same painter, different way in.
+///
+/// `scale` is capture units to pixels: the marks were drawn on screen, and the
+/// picture they are being burnt into is usually larger.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_NativeBridge_compositeMarkupInto<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    bitmap: JObject<'local>,
+    markup_json: JString<'local>,
+    scale: jfloat,
+) -> jboolean {
+    guard(&mut env, JNI_FALSE, |env| {
+        let marks: Vec<crate::render::Markup> = match optional_string(env, &markup_json)? {
+            Some(json) => serde_json::from_str(&json)
+                .map_err(|e| PdfError::InvalidArgument(format!("could not read markup: {e}")))?,
+            None => return Ok(JNI_TRUE),
+        };
+        if marks.is_empty() {
+            return Ok(JNI_TRUE);
+        }
+
+        // Safety: `bitmap` is a live local reference for this call, and the
+        // lock is released before it is dropped.
+        let mut locked = unsafe { crate::jni_bridge::android_bitmap::LockedPixels::lock(env, &bitmap)? };
+        let (width, height, stride) = (
+            locked.info.width,
+            locked.info.height,
+            locked.info.stride as usize,
+        );
+
+        // Copied in and out rather than painted in place: the painter wants a
+        // tightly packed buffer and an Android bitmap may pad its rows. One
+        // copy of a still picture is nothing; doing it per frame would not be.
+        let row_bytes = width as usize * 4;
+        let mut canvas = crate::render::Bitmap::new(width, height, crate::render::PixelOrder::Rgba)?;
+        {
+            let source = locked.as_mut_slice();
+            for row in 0..(height as usize) {
+                let from = row * stride;
+                let to = row * row_bytes;
+                if from + row_bytes <= source.len() && to + row_bytes <= canvas.data.len() {
+                    canvas.data[to..to + row_bytes].copy_from_slice(&source[from..from + row_bytes]);
+                }
+            }
+        }
+
+        crate::render::markup::composite(&mut canvas, &marks, scale as f32)?;
+
+        let target = locked.as_mut_slice();
+        for row in 0..(height as usize) {
+            let from = row * row_bytes;
+            let to = row * stride;
+            if to + row_bytes <= target.len() && from + row_bytes <= canvas.data.len() {
+                target[to..to + row_bytes].copy_from_slice(&canvas.data[from..from + row_bytes]);
+            }
+        }
+
+        Ok(JNI_TRUE)
+    })
+}
