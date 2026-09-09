@@ -60,15 +60,40 @@ enum class RecentKind(val stored: String) {
  * than appear twice, and the list must stop growing at some point. Both are
  * invisible until the list is long, which is exactly when nobody is watching.
  *
- * Matching is by URI, so reopening the same file from a different picker session
- * still promotes the existing entry rather than adding a twin.
+ * **Matching on the URI alone is not enough, because one file has many URIs.**
+ * A document opened from another app and then from this one arrives twice under
+ * two entirely different strings: the app that handed it over grants a URI from
+ * its own provider, and this app's picker returns one from storage. Neither is
+ * wrong and neither can be turned into the other, so the library listed the
+ * same document twice — and a file opened often enough by both routes filled
+ * the list with copies of itself.
+ *
+ * So two entries are also the same document when their name and their size
+ * agree. A size of zero means the provider would not say, which identifies
+ * nothing, so it is never matched on.
+ *
+ * The newest wins, which is the part that keeps the list working: its URI is
+ * the one just proven to open, where the one it replaces may be a grant that
+ * has since expired.
  */
 fun promoteRecent(
     existing: List<RecentDocument>,
     document: RecentDocument,
     limit: Int = RECENT_DOCUMENT_LIMIT,
-): List<RecentDocument> = (listOf(document) + existing.filterNot { it.uri == document.uri })
-    .take(limit)
+): List<RecentDocument> =
+    (listOf(document) + existing.filterNot { it.isTheSameDocumentAs(document) }).take(limit)
+
+/**
+ * Whether two entries stand for one document. See [promoteRecent].
+ */
+private fun RecentDocument.isTheSameDocumentAs(other: RecentDocument): Boolean {
+    if (uri == other.uri) return true
+    // A name on its own is far too weak — "scan.pdf" is every scanner's idea of
+    // a filename — so the size has to agree as well, and has to be known at all.
+    if (sizeBytes <= 0L || sizeBytes != other.sizeBytes) return false
+    if (kind != other.kind) return false
+    return name.isNotBlank() && name.equals(other.name, ignoreCase = true)
+}
 
 /**
  * How many documents the library remembers.
@@ -141,7 +166,17 @@ fun recentsFromJson(json: String): List<RecentDocument> {
         )
     }
 
-    return documents
+    // **Collapse the twins a stricter rule let in.** Matching only on the URI
+    // put the same document in the library once per route it was opened by, and
+    // those rows are already written to the file on the phones this ships to.
+    // Folding on the way in tidies an existing library on first read instead of
+    // waiting for each document to be opened once more, and costs nothing on a
+    // list that has none — the entries are already newest first, so the one
+    // kept is the newest, exactly as when one is opened.
+    return documents.fold(mutableListOf()) { kept, document ->
+        if (kept.none { it.isTheSameDocumentAs(document) }) kept += document
+        kept
+    }
 }
 
 // ------------------------------------------------------------------ labels --

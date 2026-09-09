@@ -16,14 +16,25 @@ import java.util.Locale
  */
 class RecentDocumentsTest {
 
+    /**
+     * A library entry, distinct from every other one by default.
+     *
+     * **The name and the size follow the URI unless a test says otherwise**,
+     * because they are part of what makes two entries the same document — see
+     * `promoteRecent`. Fixing them for every fixture made a list of ten
+     * different documents a list of ten copies of one, so an ordering test
+     * would have been checking the order of something the library correctly
+     * refuses to hold.
+     */
     private fun doc(
         uri: String,
-        name: String = "Report.pdf",
+        name: String = "Report $uri.pdf",
         openedAt: Long = 1_000L,
+        sizeBytes: Long = 2_500_000L + uri.hashCode().toLong(),
     ) = RecentDocument(
         uri = uri,
         name = name,
-        sizeBytes = 2_500_000L,
+        sizeBytes = sizeBytes,
         pageCount = 12,
         openedAtMillis = openedAt,
     )
@@ -40,6 +51,89 @@ class RecentDocumentsTest {
 
         assertEquals(listOf("c", "a", "b"), list.map { it.uri })
         assertEquals(9_000L, list.first().openedAtMillis)
+    }
+
+    /**
+     * **One document opened two ways is one row.**
+     *
+     * The reported bug. A PDF handed over by another app arrives under that
+     * app's own provider; the same file opened from this app's picker arrives
+     * under storage's. The two strings have nothing in common and neither can
+     * be turned into the other, so matching on the URI alone listed the
+     * document once per route it had ever been opened by.
+     */
+    @Test
+    fun `the same file opened from another app is not a second entry`() {
+        val fromAnotherApp = doc(
+            "content://com.google.android.apps.docs.storage/document/acc=1;doc=99",
+            name = "Report.pdf",
+            sizeBytes = 2_500_000L,
+        )
+        val fromThePicker = doc(
+            "content://com.android.externalstorage.documents/document/primary%3ADownload%2FReport.pdf",
+            name = "Report.pdf",
+            openedAt = 9_000L,
+            sizeBytes = 2_500_000L,
+        )
+
+        val list = promoteRecent(listOf(fromAnotherApp), fromThePicker)
+
+        assertEquals(1, list.size)
+        // The newest URI, because it is the one just proven to open.
+        assertEquals(fromThePicker.uri, list.single().uri)
+    }
+
+    /** Two genuinely different files are still two rows. */
+    @Test
+    fun `a different file of the same name is still its own entry`() {
+        val one = doc("content://x/1", name = "Report.pdf", sizeBytes = 2_500_000L)
+        val other = doc("content://x/2", name = "Report.pdf", sizeBytes = 900_000L)
+
+        assertEquals(2, promoteRecent(listOf(one), other).size)
+    }
+
+    /**
+     * A size of zero is the provider declining to say, not a size.
+     *
+     * Two documents it would not measure must not collapse into each other on
+     * the strength of a shared name.
+     */
+    @Test
+    fun `an unknown size matches nothing`() {
+        val one = doc("content://x/1", name = "scan.pdf", sizeBytes = 0L)
+        val other = doc("content://x/2", name = "scan.pdf", sizeBytes = 0L)
+
+        assertEquals(2, promoteRecent(listOf(one), other).size)
+    }
+
+    /** A drawing and a document of the same name are different things. */
+    @Test
+    fun `entries of different kinds do not collapse`() {
+        val document = doc("content://x/1", name = "Plan", sizeBytes = 4_000L)
+        val drawing = document.copy(uri = "content://x/2", kind = RecentKind.Drawing)
+
+        assertEquals(2, promoteRecent(listOf(document), drawing).size)
+    }
+
+    /**
+     * And a library that already has the twins in it loses them on first read.
+     *
+     * The duplicates are written to the file on phones this ships to, so
+     * waiting for each document to be opened once more would leave the list
+     * looking broken until it happened to be.
+     */
+    @Test
+    fun `duplicates already on disk are collapsed when read`() {
+        val documents = listOf(
+            doc("content://picker/Report.pdf", name = "Report.pdf", openedAt = 9_000L, sizeBytes = 2_500_000L),
+            doc("content://other-app/99", name = "Report.pdf", openedAt = 1_000L, sizeBytes = 2_500_000L),
+            doc("content://x/2", name = "Invoice.pdf", sizeBytes = 700_000L),
+        )
+
+        val read = recentsFromJson(documents.toRecentsJson())
+
+        assertEquals(listOf("Report.pdf", "Invoice.pdf"), read.map { it.name })
+        assertEquals("content://picker/Report.pdf", read.first().uri)
     }
 
     @Test
