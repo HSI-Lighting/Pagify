@@ -178,6 +178,10 @@ fn common_of(entity: &acadrust::EntityType) -> Option<&acadrust::entities::Entit
         E::Hatch(x) => &x.common,
         E::Spline(x) => &x.common,
         E::Insert(x) => &x.common,
+        // Dimensions too, and for the same reason: they carry their drawn
+        // picture in a block, and an entity this cannot answer for is treated
+        // as not-model-space and dropped before anything looks at it.
+        E::Dimension(x) => &x.base().common,
         _ => return None,
     })
 }
@@ -243,6 +247,23 @@ fn part_of(entity: &acadrust::EntityType, drawing: &mut Drawing) -> Option<Part>
                 .collect(),
             closed: p.is_closed(),
         },
+
+        // **A dimension keeps its drawn picture in its own block** — the
+        // extension lines, the arrows and, most of all, the measured figure.
+        // The DXF side already expands these; not doing it here is where forty
+        // of this drawing's sixty-seven pieces of text were going. Its
+        // contents are in world coordinates, so it goes in where it lies.
+        E::Dimension(d) => {
+            let name = d.base().block_name.trim();
+            if name.is_empty() {
+                drawing.note("dimensions");
+                return None;
+            }
+            return Some(Part::Inside {
+                name: name.to_ascii_uppercase(),
+                put: Affine::identity(),
+            });
+        }
 
         E::Insert(insert) => {
             let (x_scale, y_scale) = (insert.x_scale(), insert.y_scale());
@@ -326,6 +347,10 @@ struct Affine {
 }
 
 impl Affine {
+    const fn identity() -> Self {
+        Self { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 }
+    }
+
     fn point(&self, p: Point) -> Point {
         Point::new(self.a * p.x + self.c * p.y + self.e, self.b * p.x + self.d * p.y + self.f)
     }

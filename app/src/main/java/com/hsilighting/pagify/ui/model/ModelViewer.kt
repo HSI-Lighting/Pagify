@@ -248,7 +248,7 @@ private fun Captures(state: ModelViewerState) {
             onUndoMarkup = markup::undo,
             onMoveMarkup = markup::move,
             onSelectMarkup = markup::select,
-            onScaleMarkup = markup::scaleSelected,
+            onScaleMarkup = { markup.scaleSelected(it, preview.request.width) },
             onRewriteMarkup = markup::rewrite,
             onEraseMarkup = markup::erase,
             selectedMarkup = markup.selected,

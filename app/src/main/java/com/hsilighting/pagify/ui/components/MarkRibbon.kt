@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -268,7 +269,17 @@ fun MarkRibbon(
             // The cross sits outside the scrolling row, not in it: scrolled along
             // with the slots it spent most of its life off the edge of the screen,
             // which is the one thing a way out cannot be.
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            //
+            // **Centred when the slots fit.** The scrolling row takes only the
+            // width it needs, so a ribbon of four tools sat hard against the
+            // left of the sheet with a third of the bar empty beside it. When
+            // there are more slots than fit, there is no spare width to spread
+            // and it behaves exactly as before.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
             Row(
                 // Scrolled, so the slots keep their own size instead of being
                 // squeezed by whatever width is left. A Row given too little

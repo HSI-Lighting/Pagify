@@ -527,17 +527,18 @@ data class Measurement(
     val metresPerUnit: Double,
     val unitsDeclared: Boolean,
 ) {
-    /** What to put on screen. */
-    fun readout(): String = when {
-        taken == 0 -> "Tap a point"
-        taken == 1 -> "Tap the second point — first is ${snaps.firstOrNull() ?: "a point"}"
-        !unitsDeclared -> "%,.2f units".format(distance)
-        else -> {
-            val metres = distance * metresPerUnit
-            // Millimetres below a metre: an architectural drawing is measured
-            // in them, and "0.08 m" is a number somebody has to convert.
-            if (metres < 1.0) "%,.0f mm".format(metres * 1000.0)
-            else "%,.3f m".format(metres)
-        }
+    /**
+     * What to put on screen.
+     *
+     * **The number the drawing is in, with no unit named.** A plan is drawn in
+     * its own units and the reader knows what they are; converting to metres
+     * meant trusting a declaration that half of these files do not make, and
+     * printing "mm" beside a figure that might be metres is worse than
+     * printing nothing. The figure alone is the thing that was asked for.
+     */
+    fun readout(): String = when (taken) {
+        0 -> "Tap a point"
+        1 -> "Tap the second point — first is ${snaps.firstOrNull() ?: "a point"}"
+        else -> "%,.2f".format(distance)
     }
 }

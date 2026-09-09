@@ -10,7 +10,10 @@ import com.hsilighting.pagify.core.MarkupShape
 import com.hsilighting.pagify.core.MarkupStyle
 import com.hsilighting.pagify.core.MarkupTool
 import com.hsilighting.pagify.core.movedBy
+import com.hsilighting.pagify.core.MAXIMUM_TEXT_POINTS
+import com.hsilighting.pagify.core.MINIMUM_TEXT_POINTS
 import com.hsilighting.pagify.core.PdfFont
+import com.hsilighting.pagify.core.sizeThatFits
 import com.hsilighting.pagify.core.sizeRange
 
 /**
@@ -105,8 +108,9 @@ class CaptureMarkup {
     }
 
     fun textSize(value: Float) {
-        textSizePoints = value
-        rewriteSelected { it.copy(sizePoints = value) }
+        val within = value.coerceIn(MINIMUM_TEXT_POINTS, MAXIMUM_TEXT_POINTS)
+        textSizePoints = within
+        rewriteSelected { it.copy(sizePoints = within) }
     }
 
     fun textCurve(value: Float) {
@@ -159,11 +163,34 @@ class CaptureMarkup {
         }
     }
 
-    fun scaleSelected(factor: Float) {
+    /**
+     * Pinch a caption bigger or smaller.
+     *
+     * **In points, not in nib widths.** `MarkupTool.sizeRange` is how thick a
+     * pen draws — 0.6 to 16 — and a caption is measured in point sizes running
+     * from 6 to 400. Clamping one by the other pinned every caption at sixteen
+     * points the moment it was pinched, which reads as the gesture not working
+     * while the size bar, which uses the right range, plainly does.
+     *
+     * [across] is how wide the picture is, so a caption cannot be grown past
+     * the edge of the thing it is written on.
+     */
+    fun scaleSelected(factor: Float, across: Float = 0f) {
+        if (factor == 1f) return
         val index = selected ?: return
         val mark = marks.getOrNull(index) ?: return
         val shape = mark.shape as? MarkupShape.Text ?: return
-        val grown = (shape.sizePoints * factor).coerceIn(MarkupTool.Text.sizeRange)
+
+        val ceiling = if (across > 0f) {
+            shape.font.sizeThatFits(shape.text, across * PICTURE_FRACTION)
+        } else {
+            MAXIMUM_TEXT_POINTS
+        }
+        val grown = (shape.sizePoints * factor)
+            .coerceIn(MINIMUM_TEXT_POINTS, MAXIMUM_TEXT_POINTS)
+            .coerceAtMost(ceiling)
+
+        // The bar follows the pinch, so the two never disagree.
         textSizePoints = grown
         marks = marks.toMutableList().also {
             it[index] = mark.copy(shape = shape.copy(sizePoints = grown))
@@ -207,3 +234,11 @@ class CaptureMarkup {
         marks = marks.toMutableList().also { it[index] = mark.copy(shape = change(shape)) }
     }
 }
+
+/**
+ * How much of the picture's width a caption may span.
+ *
+ * The reader's own figure. A caption grown to the very edge has nowhere for its
+ * last letter to sit, and one that runs off is worse than one that stopped.
+ */
+private const val PICTURE_FRACTION = 0.94f
