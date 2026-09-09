@@ -65,6 +65,35 @@ pub enum Shape {
         vertices: Vec<Vertex>,
         closed: bool,
     },
+    /// A region painted solid — a solid hatch, or a `SOLID` entity.
+    ///
+    /// **The only filled thing on a drawing sheet**, and the reason it is its
+    /// own variant rather than a closed polyline: everything else here is a
+    /// stroke, and a stroked outline where the file asked for a filled region
+    /// is the difference between a wall shown in section and a wall shown as
+    /// two lines with nothing between them.
+    ///
+    /// Several loops, and holes are the odd ones: a point inside an odd number
+    /// of them is inside the region. Islands in a hatch are stated exactly that
+    /// way, so the drawing's own rule and the rasteriser's agree.
+    Fill { loops: Vec<Vec<Point>> },
+    /// A region filled with a pattern — the recipe, not the strokes.
+    ///
+    /// **Run when it is drawn, not when it is read.** A hatch pattern is stated
+    /// in drawing units and a phone's screen is not: the concrete hatch on one
+    /// real drawing's stair treads is spaced at six hundredths of an inch, and
+    /// at a whole-sheet fit that is a seventeenth of a pixel. Expanding it as
+    /// the file is read turned thirty-three hatches into eighty-eight thousand
+    /// line segments — fifty times the whole rest of the drawing — every one of
+    /// which landed in a pixel some other line had already covered.
+    ///
+    /// Kept as the instruction it is, the same region costs whatever the view
+    /// can actually show: nothing at all when it is finer than the screen, and
+    /// real strokes once somebody has zoomed in far enough to read them.
+    Hatch {
+        loops: Vec<Vec<Point>>,
+        lines: Vec<super::hatch::PatternLine>,
+    },
     /// A point somebody placed: a survey mark, a node, a reference.
     ///
     /// Drawn as a small cross a fixed number of pixels across, because that is
@@ -204,6 +233,13 @@ impl Drawing {
                 Shape::Polyline { vertices, .. } => {
                     for vertex in vertices {
                         widen(vertex.at);
+                    }
+                }
+                Shape::Fill { loops } | Shape::Hatch { loops, .. } => {
+                    for ring in loops {
+                        for at in ring {
+                            widen(*at);
+                        }
                     }
                 }
                 // Where it starts and a rough box for where it runs to. The

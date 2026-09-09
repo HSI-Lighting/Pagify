@@ -211,6 +211,56 @@ fn text_path(
     true
 }
 
+/// How far apart a pattern's lines must be, in pixels, to be worth drawing.
+///
+/// Below about one pixel, a second line lands where the first already is, and
+/// a hundred more do nothing but cost. The tone they make together is drawn
+/// instead — see [`TINT`].
+const RESOLVABLE: f64 = 1.2;
+
+/// How dark a region gets when its pattern is too fine to draw.
+///
+/// A wash rather than a solid: what a dense hatch looks like from far enough
+/// away is a tone, and painting it at full strength would say the region is
+/// solid, which is a different thing for a drawing to claim.
+const TINT: u8 = 90;
+
+/// The most hatching strokes one layer may put in one frame.
+///
+/// The recipe is run per frame, so this is a budget rather than a limit on the
+/// drawing: zoom in and the same region is drawn from far fewer strokes,
+/// because far less of it is on screen.
+const MOST_HATCHING: usize = 40_000;
+
+/// Add closed loops to a path, ready to be filled by the even-odd rule.
+fn add_region(
+    into: &mut PathBuilder,
+    loops: &[Vec<Point>],
+    view: &View,
+    width: u32,
+    height: u32,
+    any: &mut bool,
+) {
+    for ring in loops {
+        if ring.len() < 3 {
+            continue;
+        }
+        let (x, y) = view.place(ring[0], width, height);
+        if !x.is_finite() || !y.is_finite() {
+            continue;
+        }
+        into.move_to(x, y);
+        for at in &ring[1..] {
+            let (x, y) = view.place(*at, width, height);
+            if x.is_finite() && y.is_finite() {
+                into.line_to(x, y);
+            }
+        }
+        into.close();
+        *any = true;
+    }
+}
+
 /// Draw the whole sheet.
 /// `on_screen` is how many pixels a drawing unit takes on the display, which
 /// is not the same as `view.scale` when the bitmap is not the screen's.
@@ -245,16 +295,67 @@ pub fn draw(
         paint.set_color_rgba8(layer.colour[0], layer.colour[1], layer.colour[2], 255);
         paint.anti_alias = true;
 
-        // Two paths per layer, because letters are filled and lines are
+        // Four paths per layer: letters are filled by the winding rule, solid
+        // regions and tints by the odd-even one, and everything else is
         // stroked. Kept apart rather than drawn per entity so the whole layer
-        // is still two calls into the rasteriser rather than thousands.
-        let mut lines = PathBuilder::new();
+        // is still four calls into the rasteriser rather than thousands.
+        let mut lines_path = PathBuilder::new();
         let mut letters = PathBuilder::new();
+        let mut regions = PathBuilder::new();
+        let mut tinted = PathBuilder::new();
         let mut any_line = false;
         let mut any_letter = false;
+        let mut any_region = false;
+        let mut any_tint = false;
+        // How much hatching this layer has already produced, so one absurdly
+        // fine pattern cannot spend the whole frame.
+        let mut hatched = 0usize;
 
         for entity in drawing.entities.iter().filter(|e| e.layer as usize == id) {
             match &entity.shape {
+                Shape::Fill { loops } => {
+                    add_region(&mut regions, loops, view, width, height, &mut any_region);
+                }
+                // **Run here, where there is a scale to judge against.** A
+                // pattern finer than the screen adds nothing but time: every
+                // stroke lands in a pixel an earlier one already covered, and
+                // what comes out is a smear that a single toned fill draws
+                // identically and instantly. So a family too fine to resolve
+                // is not drawn as lines at all — the region is tinted instead,
+                // which is the tone those lines would have made — and the
+                // hatching resolves into real strokes as somebody zooms in.
+                Shape::Hatch { loops, lines } => {
+                    let mut coarse: Vec<crate::drawing::hatch::PatternLine> = Vec::new();
+                    let mut any_fine = false;
+                    for line in lines {
+                        if (line.offset.y * on_screen).abs() < RESOLVABLE {
+                            any_fine = true;
+                        } else {
+                            coarse.push(line.clone());
+                        }
+                    }
+
+                    if any_fine {
+                        add_region(&mut tinted, loops, view, width, height, &mut any_tint);
+                    }
+                    if !coarse.is_empty() && hatched < MOST_HATCHING {
+                        let made = crate::drawing::hatch::strokes(
+                            loops,
+                            &coarse,
+                            MOST_HATCHING - hatched,
+                        );
+                        hatched += made.len();
+                        for (a, b) in made {
+                            let (ax, ay) = view.place(a, width, height);
+                            let (bx, by) = view.place(b, width, height);
+                            if ax.is_finite() && ay.is_finite() && bx.is_finite() && by.is_finite() {
+                                lines_path.move_to(ax, ay);
+                                lines_path.line_to(bx, by);
+                                any_line = true;
+                            }
+                        }
+                    }
+                }
                 Shape::Text { at, height: size, rotation, content } => {
                     let Some(face) = style.face() else { continue };
                     // Below about four pixels a letter is a smudge, and a plan
@@ -271,15 +372,48 @@ pub fn draw(
                     }
                 }
                 other => {
-                    if add(&mut lines, other, view, width, height) {
+                    if add(&mut lines_path, other, view, width, height) {
                         any_line = true;
                     }
                 }
             }
         }
 
+        // The tone a pattern too fine to draw would have made, under
+        // everything else so the lines it belongs behind stay legible.
+        if any_tint {
+            if let Some(path) = tinted.finish() {
+                let mut wash = Paint::default();
+                wash.set_color_rgba8(layer.colour[0], layer.colour[1], layer.colour[2], TINT);
+                wash.anti_alias = true;
+                into.fill_path(
+                    &path,
+                    &wash,
+                    tiny_skia::FillRule::EvenOdd,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
+        // Regions first, so lines and letters sit on top of what they label
+        // rather than under it.
+        if any_region {
+            if let Some(path) = regions.finish() {
+                into.fill_path(
+                    &path,
+                    &paint,
+                    // Even-odd, because that is the rule the drawing states: a
+                    // hatch names its islands as further loops, and whether one
+                    // is a hole depends on how many loops enclose it, not on
+                    // which way round it was drawn.
+                    tiny_skia::FillRule::EvenOdd,
+                    Transform::identity(),
+                    None,
+                );
+            }
+        }
         if any_line {
-            if let Some(path) = lines.finish() {
+            if let Some(path) = lines_path.finish() {
                 into.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
             }
         }
@@ -359,6 +493,12 @@ fn add(
         // Handled by `draw`, which fills letters rather than stroking them.
         // Reaching here would draw a label in outline at wall weight.
         Shape::Text { .. } => false,
+
+        // Likewise: `draw` fills these by the even-odd rule, and runs a hatch's
+        // recipe at the scale it is being drawn at. Stroking one here would
+        // outline a solid region and leave the inside empty, which is the one
+        // thing a fill exists to say is not the case.
+        Shape::Fill { .. } | Shape::Hatch { .. } => false,
 
         // A small cross, sized in pixels rather than in drawing units: a
         // point has no size of its own, so anything drawn in the drawing's

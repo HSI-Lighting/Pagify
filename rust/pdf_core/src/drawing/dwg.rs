@@ -66,11 +66,35 @@ pub fn convert(source: &acadrust::CadDocument) -> Drawing {
     // and every symbol definition drawn at the origin. Each entity carries the
     // handle of the block record that owns it, so the filter is exact rather
     // than a guess at coordinates.
-    let model_space = source
+    //
+    // **Both spaces, not only the model.** A drawing has a model — the
+    // building, at full size — and layouts, the sheets it is printed on, which
+    // carry the title block, the revision table and the view callouts. They
+    // are different coordinate systems: in this reader's test drawing the
+    // model runs 1,440 units wide and the sheet is 34 by 22 inches, thirty
+    // times smaller and somewhere else entirely.
+    //
+    // Reading only the model was losing every word on the sheet — the project
+    // name, the client, the date, the sheet number, thirty-one of them in one
+    // file — and reporting nothing missing, because a drawing without its
+    // title block still looks like a drawing. Both are read, which is what the
+    // DXF side has always done and what AutoCAD's own DXF conversion of this
+    // file produces — the two now agree shape for shape.
+    //
+    // It does mean a sheet drawn beside the model it describes rather than
+    // around it. Showing one space at a time is the honest answer and wants a
+    // way to choose between them, which is a thing to build, not a line to
+    // change here.
+    let is_space = |name: &str| {
+        let bare = name.trim().trim_start_matches(['*', '$']).to_ascii_uppercase();
+        bare == "MODEL_SPACE" || bare.starts_with("PAPER_SPACE")
+    };
+    let spaces: Vec<_> = source
         .block_records
         .iter()
-        .find(|b| b.name.eq_ignore_ascii_case("*Model_Space"))
-        .map(|b| b.handle);
+        .filter(|b| is_space(&b.name))
+        .map(|b| b.handle)
+        .collect();
 
     // Block definitions, so the references in model space have something to
     // point at. Keyed by name because that is what an INSERT names.
@@ -96,13 +120,10 @@ pub fn convert(source: &acadrust::CadDocument) -> Drawing {
         }
         let mut held = Vec::new();
         for entity in source.entities() {
-            if common_of(entity).map(|c| c.owner_handle) != Some(record.handle) {
+            if common_of(entity).owner_handle != record.handle {
                 continue;
             }
-            match part_of(entity, &mut drawing) {
-                Some(part) => held.push(part),
-                None => {}
-            }
+            held.extend(parts_of(entity, &mut drawing));
         }
         if held.is_empty() {
             // **A block this reader could name but not read.** The DWG
@@ -127,22 +148,18 @@ pub fn convert(source: &acadrust::CadDocument) -> Drawing {
     }
 
     for entity in source.entities() {
-        if let Some(owner) = model_space {
-            // A drawing with no model-space record is not one this can filter,
-            // and an empty document reported as a successful open is the worst
-            // outcome available — so the filter only applies where there is
-            // something to filter by.
-            match common_of(entity) {
-                Some(common) if common.owner_handle == owner => {}
-                _ => continue,
-            }
+        // A drawing with no space record at all is not one this can filter,
+        // and an empty document reported as a successful open is the worst
+        // outcome available — so the filter only applies where there is
+        // something to filter by.
+        if !spaces.is_empty() && !spaces.contains(&common_of(entity).owner_handle) {
+            continue;
         }
-        match part_of(entity, &mut drawing) {
-            Some(Part::Shape(shape)) => drawing.entities.push(shape),
-            Some(Part::Inside { name, put }) => {
-                expand(&name, put, &mut drawing, &blocks, 0);
+        for part in parts_of(entity, &mut drawing) {
+            match part {
+                Part::Shape(shape) => drawing.entities.push(shape),
+                Part::Inside { name, put } => expand(&name, put, &mut drawing, &blocks, 0),
             }
-            None => {}
         }
     }
 
@@ -159,30 +176,231 @@ enum Part {
 /// The fields every entity carries: which layer it is on, and which block
 /// record owns it.
 ///
-/// **`Insert` must be in this list.** The model-space filter judges by owner,
-/// and an entity this cannot answer for is treated as not-model-space — so
-/// leaving block references out drops every one of them before anything looks
-/// at it, and the drawing arrives with all its symbols missing.
-fn common_of(entity: &acadrust::EntityType) -> Option<&acadrust::entities::EntityCommon> {
+/// **Every variant, with no catch-all, on purpose.** This used to answer
+/// `None` for anything it had not been taught, and that answer is not "count
+/// it as unsupported" — both filters here judge an entity by its owner, so one
+/// with no owner to give is dropped *before* the code that counts what it
+/// cannot draw ever sees it. The entity then does not appear on the sheet and
+/// does not appear in what the sheet says is missing, which is the one outcome
+/// this whole reader exists to avoid.
+///
+/// It cost the same bug three times — first every block reference, then every
+/// dimension, then fifty pieces of text — because each time the fix was to add
+/// the one variant that had gone missing rather than to close the hole. Being
+/// exhaustive closes it: a variant nobody has thought about is now a compile
+/// error here instead of silence on the drawing, and deciding what to *do*
+/// with an entity stays where it belongs, in `part_of`, which counts.
+fn common_of(entity: &acadrust::EntityType) -> &acadrust::entities::EntityCommon {
     use acadrust::EntityType as E;
-    Some(match entity {
+    match entity {
+        E::Point(x) => &x.common,
         E::Line(x) => &x.common,
         E::Circle(x) => &x.common,
         E::Arc(x) => &x.common,
         E::Ellipse(x) => &x.common,
-        E::LwPolyline(x) => &x.common,
+        E::Polyline(x) => &x.common,
         E::Polyline2D(x) => &x.common,
-        E::Point(x) => &x.common,
+        E::Polyline3D(x) => &x.common,
+        E::LwPolyline(x) => &x.common,
         E::Text(x) => &x.common,
         E::MText(x) => &x.common,
-        E::Hatch(x) => &x.common,
         E::Spline(x) => &x.common,
-        E::Insert(x) => &x.common,
-        // Dimensions too, and for the same reason: they carry their drawn
-        // picture in a block, and an entity this cannot answer for is treated
-        // as not-model-space and dropped before anything looks at it.
+        E::Helix(x) => &x.common,
+        // A dimension keeps its own picture in a block, and reaches its common
+        // fields through the base every dimension kind shares.
         E::Dimension(x) => &x.base().common,
-        _ => return None,
+        E::Hatch(x) => &x.common,
+        E::Solid(x) => &x.common,
+        E::Face3D(x) => &x.common,
+        E::Insert(x) => &x.common,
+        E::Block(x) => &x.common,
+        E::BlockEnd(x) => &x.common,
+        E::Ray(x) => &x.common,
+        E::XLine(x) => &x.common,
+        E::Viewport(x) => &x.common,
+        E::AttributeDefinition(x) => &x.common,
+        E::AttributeEntity(x) => &x.common,
+        E::Leader(x) => &x.common,
+        E::MultiLeader(x) => &x.common,
+        E::MLine(x) => &x.common,
+        E::Mesh(x) => &x.common,
+        E::RasterImage(x) => &x.common,
+        E::Solid3D(x) => &x.common,
+        E::Region(x) => &x.common,
+        E::Body(x) => &x.common,
+        E::Surface(x) => &x.common,
+        E::Table(x) => &x.common,
+        E::Tolerance(x) => &x.common,
+        E::PolyfaceMesh(x) => &x.common,
+        E::Wipeout(x) => &x.common,
+        E::Shape(x) => &x.common,
+        E::Underlay(x) => &x.common,
+        E::Seqend(x) => &x.common,
+        E::Ole2Frame(x) => &x.common,
+        E::PolygonMesh(x) => &x.common,
+        E::Unknown(x) => &x.common,
+    }
+}
+
+/// Everything one entity puts on the sheet.
+///
+/// **A block reference brings its own text with it.** The words filled into a
+/// block — a room number, a door mark, a fixture tag — are `ATTRIB` entities,
+/// and this crate does not hand them over loose: they are held *inside* the
+/// `Insert` that owns them. So no filter over the file's entities could ever
+/// have found them, whatever it filtered by, and every one of them was missing
+/// from the DWG side of this app while the DXF side drew them.
+///
+/// Which is why this returns a list rather than one part. An entity is not
+/// always one thing.
+fn parts_of(entity: &acadrust::EntityType, drawing: &mut Drawing) -> Vec<Part> {
+    let mut out = Vec::new();
+
+    // A hatch is a recipe, and running it gives however many strokes it gives.
+    if let acadrust::EntityType::Hatch(hatch) = entity {
+        let named = hatch.common.layer.trim();
+        let layer = drawing.layer_for(if named.is_empty() { "0" } else { named });
+        return match super::hatch::shape_of(&hatch_of(hatch), layer) {
+            Some(made) => vec![Part::Shape(made)],
+            // A hatch with no boundary this reader could make sense of. Counted
+            // rather than passed over: a section drawing missing its materials
+            // still looks like a section drawing.
+            None => {
+                drawing.note("hatching");
+                Vec::new()
+            }
+        };
+    }
+
+    if let acadrust::EntityType::Insert(insert) = entity {
+        // **Already in world coordinates**, so the insert's own transform must
+        // not be applied to them. An attribute is placed where it was dragged
+        // to, not where the block's definition would put it — applying the
+        // transform a second time is how labels end up somewhere else on the
+        // sheet, at a plausible-looking angle.
+        let fallback = insert.common.layer.trim();
+        for attribute in &insert.attributes {
+            let named = attribute.common.layer.trim();
+            let named = if named.is_empty() { fallback } else { named };
+            let layer = drawing.layer_for(if named.is_empty() { "0" } else { named });
+            if let Some(shape) = attribute_text(attribute) {
+                out.push(Part::Shape(Entity { layer, shape }));
+            }
+        }
+    }
+
+    out.extend(part_of(entity, drawing));
+    out
+}
+
+/// This crate's hatch, as the one [`super::hatch`] knows how to run.
+///
+/// A translation and nothing more: the pattern lines are already in radians
+/// and already at their final scale, and the boundary edges only need opening
+/// out into points. Everything that could be got subtly wrong about a hatch
+/// lives in the module this hands to, where it is tested.
+fn hatch_of(hatch: &acadrust::entities::Hatch) -> super::hatch::Hatch {
+    use acadrust::entities::hatch::BoundaryEdge;
+
+    let mut loops = Vec::new();
+    for path in &hatch.paths {
+        let mut ring: Vec<Point> = Vec::new();
+        let edges = path.edges.len();
+        for (index, edge) in path.edges.iter().enumerate() {
+            match edge {
+                BoundaryEdge::Polyline(p) => {
+                    let vertices: Vec<Vertex> = p
+                        .vertices
+                        .iter()
+                        .map(|v| Vertex { at: Point::new(v.x, v.y), bulge: v.z })
+                        .collect();
+                    ring.extend(super::hatch::flattened(&vertices, true));
+                }
+                // Only the start of each edge: the next one begins where this
+                // ended, and the loop closes. The last edge gives both, or the
+                // ring would stop one corner short of where it began.
+                BoundaryEdge::Line(l) => {
+                    ring.push(Point::new(l.start.x, l.start.y));
+                    if index + 1 == edges {
+                        ring.push(Point::new(l.end.x, l.end.y));
+                    }
+                }
+                BoundaryEdge::CircularArc(a) => super::hatch::arc_points(
+                    &mut ring,
+                    Point::new(a.center.x, a.center.y),
+                    a.radius,
+                    1.0,
+                    0.0,
+                    a.start_angle,
+                    a.end_angle,
+                    a.counter_clockwise,
+                ),
+                BoundaryEdge::EllipticArc(a) => {
+                    let (major_x, major_y) = (a.major_axis_endpoint.x, a.major_axis_endpoint.y);
+                    let radius = major_x.hypot(major_y);
+                    if radius < 1e-12 {
+                        continue;
+                    }
+                    super::hatch::arc_points(
+                        &mut ring,
+                        Point::new(a.center.x, a.center.y),
+                        radius,
+                        a.minor_axis_ratio,
+                        major_y.atan2(major_x),
+                        a.start_angle,
+                        a.end_angle,
+                        a.counter_clockwise,
+                    );
+                }
+                // The fit points are on the curve; the control points are not,
+                // and joining those would pull the boundary inside the region
+                // it is supposed to bound, all the way round.
+                BoundaryEdge::Spline(s) => {
+                    ring.extend(s.fit_points.iter().map(|p| Point::new(p.x, p.y)));
+                }
+            }
+        }
+        if ring.len() >= 3 {
+            loops.push(ring);
+        }
+    }
+
+    super::hatch::Hatch {
+        loops,
+        solid: hatch.is_solid,
+        lines: hatch
+            .pattern
+            .lines
+            .iter()
+            .map(|line| super::hatch::PatternLine {
+                angle: line.angle,
+                base: Point::new(line.base_point.x, line.base_point.y),
+                offset: Point::new(line.offset.x, line.offset.y),
+                dashes: line.dash_lengths.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// The words in a block attribute, where they sit on the sheet.
+///
+/// Shared by the two ways one can arrive: held inside its `Insert`, which is
+/// how this crate normally gives them, and loose in the entity list, which
+/// some files still do.
+fn attribute_text(attribute: &acadrust::entities::AttributeEntity) -> Option<Shape> {
+    let content = super::dxf::readable(&attribute.value);
+    if content.is_empty() {
+        return None;
+    }
+    // The second alignment point is where justified text really sits; the
+    // insertion point is left at the origin of its own box.
+    let point = attribute.alignment_point;
+    let at = if point.x != 0.0 || point.y != 0.0 { point } else { attribute.insertion_point };
+    Some(Shape::Text {
+        at: Point::new(at.x, at.y),
+        height: if attribute.height > 0.0 { attribute.height } else { 2.5 },
+        rotation: attribute.rotation,
+        content,
     })
 }
 
@@ -190,7 +408,9 @@ fn common_of(entity: &acadrust::EntityType) -> Option<&acadrust::entities::Entit
 fn part_of(entity: &acadrust::EntityType, drawing: &mut Drawing) -> Option<Part> {
     use acadrust::EntityType as E;
 
-    let layer = drawing.layer_for(common_of(entity).map(|c| c.layer.trim()).unwrap_or("0"));
+    let named = common_of(entity).layer.trim();
+    // An entity with no layer named belongs to layer 0, which every drawing has.
+    let layer = drawing.layer_for(if named.is_empty() { "0" } else { named });
 
     let shape = match entity {
         E::Line(l) => Shape::Line {
@@ -315,6 +535,29 @@ fn part_of(entity: &acadrust::EntityType, drawing: &mut Drawing) -> Option<Part>
                 content,
             }
         }
+        // **The filled-in value of a block's attribute, and the reason a room
+        // number shows on a plan.** A block defines a slot (`ATTDEF`) and each
+        // placement of that block carries the words somebody typed into it
+        // (`ATTRIB`). The DXF side has always drawn these; the DWG side never
+        // saw one, because `common_of` could not answer for them and the model
+        // -space filter dropped them first. Thirty-one of this drawing's
+        // labels were going that way, unreported.
+        E::AttributeEntity(a) => attribute_text(a)?,
+
+        // **The slot, not the value.** An `ATTDEF` is a block's prompt — "ROOM
+        // NAME" — and AutoCAD draws it only while the block is being defined,
+        // never where the block is placed. Drawing it would write the word
+        // "ROOM NAME" across every room on the plan. The DXF side skips these
+        // for the same reason, so both formats show the same sheet.
+        E::AttributeDefinition(_) => return None,
+
+        // **Punctuation, not content.** A `SEQEND` closes a run of attributes,
+        // `BLOCK`/`ENDBLK` bracket a definition, a `VIEWPORT` is a window on a
+        // layout sheet. None of them is anything to draw, and now that nothing
+        // is dropped before it is looked at, counting them would put a number
+        // in front of somebody that stands for nothing missing at all.
+        E::Seqend(_) | E::Block(_) | E::BlockEnd(_) | E::Viewport(_) => return None,
+
         E::Hatch(_) => {
             drawing.note("hatching");
             return None;
@@ -465,6 +708,16 @@ fn moved(shape: &Shape, put: &Affine) -> Shape {
                 .collect(),
             closed: *closed,
         },
+        // Every loop moves with the block that holds it. A fill has no
+        // bulges to re-sign and no direction of its own: even-odd asks how
+        // many loops enclose a point, which a mirror does not change.
+        Shape::Hatch { loops, lines } => Shape::Hatch {
+            loops: loops.iter().map(|ring| ring.iter().map(|at| put.point(*at)).collect()).collect(),
+            lines: lines.clone(),
+        },
+        Shape::Fill { loops } => Shape::Fill {
+            loops: loops.iter().map(|ring| ring.iter().map(|at| put.point(*at)).collect()).collect(),
+        },
     }
 }
 
@@ -479,7 +732,13 @@ fn kind_of(entity: &acadrust::EntityType) -> &'static str {
         E::Dimension(_) => "dimension",
         E::Solid(_) => "solid fill",
         E::Face3D(_) => "3D face",
-        E::Block(_) | E::BlockEnd(_) => "block marker",
+        // The same words the DXF side uses, so one drawing read both ways
+        // reports the same losses in the same language.
+        E::Leader(_) | E::MultiLeader(_) => "leader",
+        E::Table(_) => "table",
+        E::MLine(_) => "multi-line",
+        E::Wipeout(_) => "wipeout",
+        E::RasterImage(_) => "image",
         _ => "other",
     }
 }

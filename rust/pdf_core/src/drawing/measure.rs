@@ -55,6 +55,15 @@ impl Snap {
     }
 }
 
+/// How close, as a fraction of the reach, two candidates count as arriving
+/// together — and so as a tie for rank to settle rather than distance.
+///
+/// A little over a third of a fingertip. Wide enough that the corner case the
+/// ranking exists for still resolves the same way every time, narrow enough
+/// that something directly under the finger is not passed over for something
+/// on the other side of it.
+const TOGETHER: f64 = 0.4;
+
 /// Where a tap ended up, and why.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Snapped {
@@ -69,6 +78,10 @@ pub struct Snapped {
 /// zooms in — which is what makes it possible to pick one end of a 40 mm
 /// fitting apart from the other.
 pub fn snap(drawing: &Drawing, near: Point, reach: f64) -> Snapped {
+    // How much nearer one candidate must be for its distance to beat another's
+    // rank. See the comparison below for why this band exists at all.
+    let band = reach * TOGETHER;
+
     let mut best: Option<(Snap, f64, Point)> = None;
     let mut consider = |kind: Snap, at: Point| {
         let away = (at.x - near.x).hypot(at.y - near.y);
@@ -77,9 +90,30 @@ pub fn snap(drawing: &Drawing, near: Point, reach: f64) -> Snapped {
         }
         let better = match &best {
             None => true,
-            // A more specific kind wins outright; within one kind, the nearest.
             Some((was, distance, _)) => {
-                kind.rank() < was.rank() || (kind.rank() == was.rank() && away < *distance)
+                // **Rank settles a near-tie; it does not beat a clear win.**
+                //
+                // The order — endpoint, intersection, midpoint, centre — is
+                // there for the case it was written for: two candidates a few
+                // pixels apart near a corner, where picking the nearer gives a
+                // different answer each time a finger lands a pixel to the
+                // left. Applied to every comparison it says something else
+                // entirely — that any endpoint anywhere within a fingertip
+                // beats a centre the finger is sitting exactly on. Tapping the
+                // middle of a circle then measured to a wall corner nearby,
+                // and no amount of tapping more carefully helped, because
+                // aiming better was never what the rule was reading.
+                //
+                // So a candidate clearly nearer than the one in hand wins on
+                // that alone, and rank decides only among those that arrived
+                // together.
+                if away + band < *distance {
+                    true
+                } else if *distance + band < away {
+                    false
+                } else {
+                    kind.rank() < was.rank() || (kind.rank() == was.rank() && away < *distance)
+                }
             }
         };
         if better {
@@ -106,6 +140,21 @@ pub fn snap(drawing: &Drawing, near: Point, reach: f64) -> Snapped {
             }
 
             Shape::Marker { at } => consider(Snap::Endpoint, *at),
+
+            // **The corners of a filled region are as real as any others.**
+            // Somebody measuring across a wall shown in section is measuring
+            // to the edge of the fill, and refusing to snap there would send
+            // them to whatever line happened to be nearby instead.
+            Shape::Fill { loops } | Shape::Hatch { loops, .. } => {
+                for ring in loops {
+                    for (index, at) in ring.iter().enumerate() {
+                        consider(Snap::Endpoint, *at);
+                        let next = ring[(index + 1) % ring.len()];
+                        consider(Snap::Midpoint, middle(*at, next));
+                        keep_near(&mut nearby, *at, next, near, reach);
+                    }
+                }
+            }
 
             Shape::Arc { centre, radius, start, sweep } => {
                 consider(Snap::Centre, *centre);
@@ -314,6 +363,47 @@ mod tests {
 
         assert_eq!(Snap::Centre, found.kind);
         assert_eq!(Point::new(20.0, 20.0), found.at);
+    }
+
+    /// **A tap on a circle's middle takes the middle**, even with a corner in
+    /// reach.
+    ///
+    /// The ranking puts a centre last, which is right for two candidates a few
+    /// pixels apart and wrong for these: the finger is sitting on the centre
+    /// and the endpoint is on the far side of the reach. Read as an absolute
+    /// order it measured to the corner instead, and tapping more carefully
+    /// could not fix it, because precision was never what it was reading.
+    #[test]
+    fn a_tap_on_a_circles_middle_takes_the_middle() {
+        let drawing = drawing_of(vec![
+            Shape::Arc {
+                centre: Point::new(20.0, 20.0),
+                radius: 15.0,
+                start: 0.0,
+                sweep: std::f64::consts::TAU,
+            },
+            // A wall ending well away from the tap, but still within a finger.
+            line(28.0, 26.0, 90.0, 26.0),
+        ]);
+
+        let found = snap(&drawing, Point::new(20.2, 20.1), 10.0);
+
+        assert_eq!(Snap::Centre, found.kind, "{found:?}");
+        assert_eq!(Point::new(20.0, 20.0), found.at);
+    }
+
+    /// And the near-tie the ranking exists for still resolves by rank.
+    ///
+    /// The guard on the change above: an endpoint and a midpoint a couple of
+    /// units apart are the corner case, and there the more specific one has to
+    /// keep winning — otherwise the answer changes with every pixel of aim.
+    #[test]
+    fn a_near_tie_is_still_settled_by_what_it_is() {
+        let drawing = drawing_of(vec![line(0.0, 0.0, 100.0, 0.0), line(90.0, 4.0, 100.0, 4.0)]);
+
+        let found = snap(&drawing, Point::new(96.0, 3.0), 10.0);
+
+        assert_eq!(Snap::Endpoint, found.kind, "{found:?}");
     }
 
     /// Every corner of a polyline is an end to hold on to.

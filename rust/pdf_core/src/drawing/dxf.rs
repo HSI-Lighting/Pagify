@@ -221,6 +221,8 @@ fn one_block(
                         put: insert_transform(&fields),
                     });
                 }
+            } else if value == "HATCH" {
+                into.extend(hatch_shapes(&fields, drawing).into_iter().map(Part::Shape));
             } else if value == "POLYLINE" {
                 let (entity, next) = old_polyline(pairs, at, drawing);
                 if let Some(entity) = entity {
@@ -329,6 +331,9 @@ fn entities(
                     }
                     None => drawing.note("dimensions"),
                 }
+            } else if value == "HATCH" {
+                let filled = hatch_shapes(&fields, drawing);
+                drawing.entities.extend(filled);
             } else if value == "POLYLINE" {
                 let (entity, next) = old_polyline(pairs, at, drawing);
                 if let Some(entity) = entity {
@@ -539,6 +544,9 @@ fn build(kind: &str, fields: &[(i32, &str)], drawing: &mut Drawing) -> Option<En
             drawing.note("leaders");
             return None;
         }
+        // Handled where more than one shape can be returned; see
+        // [`hatch_shapes`]. Reaching here would mean a caller that did not
+        // check, so it is counted rather than passed over in silence.
         "HATCH" => {
             drawing.note("hatching");
             return None;
@@ -603,6 +611,284 @@ fn build(kind: &str, fields: &[(i32, &str)], drawing: &mut Drawing) -> Option<En
     };
 
     Some(Entity { layer, shape })
+}
+
+/// A `HATCH`, as the shapes that fill it.
+///
+/// **Not one entity but many**, which is why it is here rather than in
+/// [`build`]: a patterned hatch is a recipe, and what goes on the sheet is
+/// however many strokes running it produces.
+///
+/// The pattern definition written into the file is already at its final angle
+/// and scale — AutoCAD applies the pattern scale (41) and angle (52) before
+/// writing, and they are left in the file for a program that wants to edit the
+/// hatch rather than draw it. Applying them again here would tilt every hatch
+/// by its own angle twice, which is one of those errors that still looks like
+/// hatching.
+fn hatch_shapes(fields: &[(i32, &str)], drawing: &mut Drawing) -> Vec<Entity> {
+    let layer = drawing.layer_for(field(fields, 8).unwrap_or("0"));
+    let flip = facing_of(fields) == Facing::MirroredX;
+    let placed = |p: Point| if flip { Point::new(-p.x, p.y) } else { p };
+
+    let whole = |code: i32| field(fields, code).and_then(|v| v.parse::<i32>().ok());
+    let mut hatch = super::hatch::Hatch {
+        solid: whole(70) == Some(1),
+        ..Default::default()
+    };
+
+    // The codes come in a defined order, so this walks the list once rather
+    // than searching it: a hatch repeats 10 and 20 for every vertex of every
+    // loop, and `field`, which finds the first, would answer with the first
+    // corner of the first loop to every question asked of it.
+    let mut at = 0usize;
+    let mut next = |at: &mut usize| -> Option<(i32, &str)> {
+        let pair = fields.get(*at).copied();
+        if pair.is_some() {
+            *at += 1;
+        }
+        pair
+    };
+    let value = |text: &str| text.parse::<f64>().unwrap_or(0.0);
+    let count = |text: &str| text.parse::<i64>().unwrap_or(0).clamp(0, 100_000) as usize;
+
+    // Up to the boundary data.
+    while let Some((code, _)) = next(&mut at) {
+        if code == 91 {
+            break;
+        }
+    }
+
+    while at < fields.len() {
+        let Some((code, text)) = next(&mut at) else { break };
+        match code {
+            // A boundary path: a polyline, or a run of edges.
+            92 => {
+                let flags = text.parse::<i32>().unwrap_or(0);
+                let ring = if flags & 2 != 0 {
+                    polyline_boundary(fields, &mut at)
+                } else {
+                    edge_boundary(fields, &mut at)
+                };
+                if ring.len() >= 3 {
+                    hatch.loops.push(ring.into_iter().map(placed).collect());
+                }
+            }
+            // A line of the pattern definition. Its own codes follow in order.
+            53 => {
+                let mut line = super::hatch::PatternLine {
+                    angle: value(text).to_radians(),
+                    base: Point::new(0.0, 0.0),
+                    offset: Point::new(0.0, 0.0),
+                    dashes: Vec::new(),
+                };
+                let mut dashes = 0usize;
+                while let Some(&(code, text)) = fields.get(at) {
+                    match code {
+                        43 => line.base.x = value(text),
+                        44 => line.base.y = value(text),
+                        45 => line.offset.x = value(text),
+                        46 => line.offset.y = value(text),
+                        79 => dashes = count(text),
+                        49 => line.dashes.push(value(text)),
+                        // Anything else begins the next thing along.
+                        _ => break,
+                    }
+                    at += 1;
+                    if code == 49 && line.dashes.len() >= dashes {
+                        break;
+                    }
+                }
+                // **Mirrored patterns run the other way.** The boundary is
+                // mirrored above; leaving the pattern alone would hatch a
+                // mirrored region at the mirror image of its own angle.
+                if flip {
+                    line.angle = std::f64::consts::PI - line.angle;
+                    line.base.x = -line.base.x;
+                    line.offset.x = -line.offset.x;
+                }
+                hatch.lines.push(line);
+            }
+            _ => {}
+        }
+    }
+
+    match super::hatch::shape_of(&hatch, layer) {
+        Some(made) => vec![made],
+        // No boundary this reader could make sense of. Counted rather than
+        // passed over: a section drawing missing its materials still looks
+        // like a section drawing.
+        None => {
+            drawing.note("hatching");
+            Vec::new()
+        }
+    }
+}
+
+/// A boundary written as a polyline: a count, then its vertices.
+fn polyline_boundary(fields: &[(i32, &str)], at: &mut usize) -> Vec<Point> {
+    let mut has_bulge = false;
+    let mut wanted = 0usize;
+    let mut vertices: Vec<Vertex> = Vec::new();
+
+    while let Some(&(code, text)) = fields.get(*at) {
+        match code {
+            72 => has_bulge = text.parse::<i32>().unwrap_or(0) != 0,
+            // 73 is the closed flag. A hatch boundary is a region, so it is
+            // closed whatever the flag says — an open one bounds nothing.
+            73 => {}
+            93 => wanted = text.parse::<i64>().unwrap_or(0).clamp(0, 100_000) as usize,
+            10 => vertices.push(Vertex {
+                at: Point::new(text.parse().unwrap_or(0.0), 0.0),
+                bulge: 0.0,
+            }),
+            20 => {
+                if let Some(last) = vertices.last_mut() {
+                    last.at.y = text.parse().unwrap_or(0.0);
+                }
+            }
+            42 if has_bulge => {
+                if let Some(last) = vertices.last_mut() {
+                    last.bulge = text.parse().unwrap_or(0.0);
+                }
+            }
+            // The count of source objects: the vertices are finished.
+            97 => break,
+            // The next path, or the pattern.
+            92 | 75 | 76 | 78 | 98 | 450 => break,
+            _ => {}
+        }
+        *at += 1;
+        if wanted > 0 && vertices.len() >= wanted && code == 20 {
+            *at += 1;
+            break;
+        }
+    }
+    super::hatch::flattened(&vertices, true)
+}
+
+/// A boundary written as a run of edges: lines, arcs and ellipse arcs.
+///
+/// Each edge names its kind on code 72 and then its own numbers. Splines are
+/// walked past rather than approximated — a boundary that is nearly right
+/// bleeds the hatching out of the region it belongs in.
+fn edge_boundary(fields: &[(i32, &str)], at: &mut usize) -> Vec<Point> {
+    let mut out: Vec<Point> = Vec::new();
+    let mut edges = 0usize;
+    let mut done = 0usize;
+
+    // The edge count comes first.
+    while let Some(&(code, text)) = fields.get(*at) {
+        *at += 1;
+        if code == 93 {
+            edges = text.parse::<i64>().unwrap_or(0).clamp(0, 100_000) as usize;
+            break;
+        }
+        if code == 92 || code == 97 {
+            return out;
+        }
+    }
+
+    while done < edges {
+        // Every edge begins with its kind.
+        let mut kind = 0;
+        let mut found = false;
+        while let Some(&(code, text)) = fields.get(*at) {
+            if code == 72 {
+                kind = text.parse::<i32>().unwrap_or(0);
+                *at += 1;
+                found = true;
+                break;
+            }
+            if code == 97 || code == 92 {
+                return out;
+            }
+            *at += 1;
+        }
+        if !found {
+            return out;
+        }
+        done += 1;
+
+        let mut numbers: Vec<(i32, f64)> = Vec::new();
+        while let Some(&(code, text)) = fields.get(*at) {
+            // 72 begins the next edge; these three begin what follows the path.
+            if code == 72 || code == 97 || code == 92 || code == 93 {
+                break;
+            }
+            numbers.push((code, text.parse().unwrap_or(0.0)));
+            *at += 1;
+        }
+        let of = |want: i32| numbers.iter().find(|(code, _)| *code == want).map(|(_, v)| *v);
+
+        match kind {
+            // A line: from its start to its end. Only the start is kept — the
+            // next edge begins where this one ended, and the loop is closed.
+            1 => {
+                if let (Some(x), Some(y)) = (of(10), of(20)) {
+                    out.push(Point::new(x, y));
+                }
+                if done == edges {
+                    if let (Some(x), Some(y)) = (of(11), of(21)) {
+                        out.push(Point::new(x, y));
+                    }
+                }
+            }
+            // A circular arc, opened out. Degrees here, as everywhere in DXF.
+            2 => {
+                let (Some(cx), Some(cy), Some(radius)) = (of(10), of(20), of(40)) else { continue };
+                let from = of(50).unwrap_or(0.0).to_radians();
+                let to = of(51).unwrap_or(360.0).to_radians();
+                let anticlockwise = of(73).unwrap_or(1.0) != 0.0;
+                super::hatch::arc_points(&mut out, Point::new(cx, cy), radius, 1.0, 0.0, from, to, anticlockwise);
+            }
+            // An elliptical arc. The major axis is a vector from the centre and
+            // the minor is a fraction of it, which is how the whole crate holds
+            // an ellipse — so the only work is the turn.
+            3 => {
+                let (Some(cx), Some(cy)) = (of(10), of(20)) else { continue };
+                let (major_x, major_y) = (of(11).unwrap_or(0.0), of(21).unwrap_or(0.0));
+                let radius = major_x.hypot(major_y);
+                if radius < 1e-12 {
+                    continue;
+                }
+                let from = of(50).unwrap_or(0.0).to_radians();
+                let to = of(51).unwrap_or(360.0).to_radians();
+                let anticlockwise = of(73).unwrap_or(1.0) != 0.0;
+                super::hatch::arc_points(
+                    &mut out,
+                    Point::new(cx, cy),
+                    radius,
+                    of(40).unwrap_or(1.0),
+                    major_y.atan2(major_x),
+                    from,
+                    to,
+                    anticlockwise,
+                );
+            }
+            // A spline boundary. Its control points are not on the curve, so
+            // joining them would give a region a little smaller than the real
+            // one all the way round — near enough to look right and wrong at
+            // every edge. The fit points, where the file gives them, are.
+            4 => {
+                let mut fit: Vec<Point> = Vec::new();
+                let mut pending: Option<f64> = None;
+                for (code, number) in &numbers {
+                    match code {
+                        11 => pending = Some(*number),
+                        21 => {
+                            if let Some(x) = pending.take() {
+                                fit.push(Point::new(x, *number));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                out.extend(fit);
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Where a block's contents land.
@@ -793,6 +1079,16 @@ fn moved(shape: &Shape, put: &Affine) -> Shape {
                 .collect(),
             closed: *closed,
         },
+        // Every loop moves with the block that holds it. A fill has no
+        // bulges to re-sign and no direction of its own: even-odd asks how
+        // many loops enclose a point, which a mirror does not change.
+        Shape::Hatch { loops, lines } => Shape::Hatch {
+            loops: loops.iter().map(|ring| ring.iter().map(|at| put.point(*at)).collect()).collect(),
+            lines: lines.clone(),
+        },
+        Shape::Fill { loops } => Shape::Fill {
+            loops: loops.iter().map(|ring| ring.iter().map(|at| put.point(*at)).collect()).collect(),
+        },
     }
 }
 
@@ -916,6 +1212,86 @@ pub(crate) fn readable(raw: &str) -> String {
     }
 
     out.trim().to_string()
+}
+
+#[cfg(test)]
+mod hatching {
+    use super::super::model::Shape;
+
+    /// A DXF holding one entity, written the way a file writes it.
+    fn one_entity(body: &str) -> String {
+        format!("0\nSECTION\n2\nENTITIES\n{body}0\nENDSEC\n0\nEOF\n")
+    }
+
+    /// A square metre hatched with lines every tenth of a unit.
+    fn a_hatched_square(solid: i32) -> String {
+        one_entity(&format!(
+            "0\nHATCH\n8\nWALLS\n2\nANSI31\n70\n{solid}\n71\n0\n\
+             91\n1\n92\n7\n72\n0\n73\n1\n93\n4\n\
+             10\n0.0\n20\n0.0\n10\n1.0\n20\n0.0\n10\n1.0\n20\n1.0\n10\n0.0\n20\n1.0\n\
+             97\n0\n75\n0\n76\n1\n52\n0.0\n41\n1.0\n77\n0\n78\n1\n\
+             53\n0.0\n43\n0.0\n44\n0.0\n45\n0.0\n46\n0.1\n79\n0\n",
+        ))
+    }
+
+    /// **A hatch is one shape, however dense its pattern.**
+    ///
+    /// The strokes are worked out when the drawing is drawn, at the scale it is
+    /// being drawn at — not here. Running the recipe as the file is read turned
+    /// thirty-three hatches on one real drawing into eighty-eight thousand line
+    /// segments, fifty times the whole rest of the drawing, and at a whole-sheet
+    /// fit every one of them landed in a pixel another had already covered.
+    #[test]
+    fn a_hatch_is_read_as_one_shape_not_as_its_strokes() {
+        let drawing = super::read(&a_hatched_square(0)).expect("it parses");
+
+        assert_eq!(1, drawing.kept(), "{:?}", drawing.entities.len());
+        assert!(
+            matches!(drawing.entities[0].shape, Shape::Hatch { .. }),
+            "not kept as an instruction: {:?}",
+            drawing.entities[0].shape,
+        );
+        assert!(drawing.skipped.is_empty(), "{:?}", drawing.skipped);
+    }
+
+    /// The boundary comes through as the region it bounds.
+    #[test]
+    fn the_boundary_is_the_square_the_file_gave() {
+        let drawing = super::read(&a_hatched_square(0)).expect("it parses");
+
+        let Shape::Hatch { loops, lines } = &drawing.entities[0].shape else {
+            panic!("not a hatch");
+        };
+        assert_eq!(1, loops.len());
+        assert_eq!(4, loops[0].len(), "{:?}", loops[0]);
+        assert_eq!(1, lines.len());
+        // The spacing across the lines, which is what sets the density.
+        assert!((lines[0].offset.y - 0.1).abs() < 1e-9, "{:?}", lines[0]);
+    }
+
+    /// **Solid means filled, not outlined.** A region a drawing says is solid,
+    /// shown as an outline with nothing inside it, is the difference between a
+    /// wall in section and a gap in a wall.
+    #[test]
+    fn a_solid_hatch_is_a_filled_region() {
+        let drawing = super::read(&a_hatched_square(1)).expect("it parses");
+
+        assert!(
+            matches!(drawing.entities[0].shape, Shape::Fill { .. }),
+            "{:?}",
+            drawing.entities[0].shape,
+        );
+    }
+
+    /// A hatch this reader cannot make a region out of is counted, not dropped.
+    #[test]
+    fn a_hatch_with_no_boundary_is_reported() {
+        let drawing = super::read(&one_entity("0\nHATCH\n8\nWALLS\n2\nANSI31\n70\n0\n91\n0\n"))
+            .expect("it parses");
+
+        assert_eq!(0, drawing.kept());
+        assert_eq!(1, drawing.lost(), "{:?}", drawing.skipped);
+    }
 }
 
 #[cfg(test)]

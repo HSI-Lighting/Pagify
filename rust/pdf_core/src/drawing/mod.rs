@@ -8,6 +8,7 @@
 
 pub mod model;
 pub mod dwg;
+pub mod hatch;
 pub mod dxf;
 pub mod measure;
 pub mod raster;

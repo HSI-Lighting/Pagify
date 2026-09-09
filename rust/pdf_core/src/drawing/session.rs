@@ -28,7 +28,15 @@ pub struct DrawingSession {
 }
 
 /// How far from a tap, in screen pixels, the geometry is still worth catching.
-const TAP_PIXELS: f64 = 24.0;
+///
+/// **A fingertip and then some.** Twenty-four pixels is roughly the contact
+/// patch, and matching it exactly means every tap that lands a hair outside
+/// snaps to nothing and measures raw screen position instead — an answer that
+/// looks like a measurement and is not one. Forty is about a quarter of an
+/// inch on a phone: near enough that aiming works, far enough that the wrong
+/// end of a small fitting is still a zoom away rather than a coin toss, since
+/// the reach shrinks with the drawing as somebody zooms in.
+const TAP_PIXELS: f64 = 40.0;
 
 /// Why a file could not be opened.
 #[derive(Debug, Clone, PartialEq)]
@@ -564,8 +572,28 @@ mod real {
         let path = std::env::var("PAGIFY_DRAWING_FILE").expect("set PAGIFY_DRAWING_FILE");
         let sheet = super::open(std::path::Path::new(&path)).expect("it opens");
 
+        use crate::drawing::model::Shape;
+        let counts = |want: fn(&Shape) -> bool| {
+            sheet.drawing.entities.iter().filter(|e| want(&e.shape)).count()
+        };
+
         println!("--- {path}");
         println!("  {} shapes, {} layers", sheet.drawing.kept(), sheet.drawing.layers.len());
+        // **Broken down by kind, because a total hides the interesting loss.**
+        // A drawing that arrives with every line and none of its words has the
+        // same shape count as one missing a wall, and only one of them looks
+        // wrong at a glance.
+        println!(
+            "  lines {}  arcs {}  ellipses {}  polylines {}  markers {}  fills {}  hatches {}  text {}",
+            counts(|s| matches!(s, Shape::Line { .. })),
+            counts(|s| matches!(s, Shape::Arc { .. })),
+            counts(|s| matches!(s, Shape::Ellipse { .. })),
+            counts(|s| matches!(s, Shape::Polyline { .. })),
+            counts(|s| matches!(s, Shape::Marker { .. })),
+            counts(|s| matches!(s, Shape::Fill { .. })),
+            counts(|s| matches!(s, Shape::Hatch { .. })),
+            counts(|s| matches!(s, Shape::Text { .. })),
+        );
         for entry in &sheet.drawing.skipped {
             println!("  {:>6} {}", entry.count, entry.what);
         }
