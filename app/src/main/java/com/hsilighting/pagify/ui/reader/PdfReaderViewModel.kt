@@ -2162,9 +2162,23 @@ frame = pending.frame,
         }
     }
 
-    fun updateContact(contact: Contact) {
+    /**
+     * Save a contact, optionally filing it into a group.
+     *
+     * **[intoGroup] is for a contact being made, never one being edited.** A
+     * card scanned from inside a group lands in it, and typing somebody in from
+     * the same place has always been expected to do the same — it did not, so a
+     * contact added while looking at a group went to Ungrouped and vanished
+     * from the screen that had just been used to add it. That reads as the app
+     * ignoring the entry, which is why it was reported as staleness.
+     *
+     * Editing an existing contact passes nothing here on purpose: re-filing
+     * somebody into whatever group happened to be open, because their phone
+     * number was corrected, would quietly reorganise the address book.
+     */
+    fun updateContact(contact: Contact, intoGroup: Long? = null) {
         viewModelScope.launch {
-            contactStore.save(contact)
+            contactStore.save(contact, intoGroup)
             // **After the save, not before.** The alarm is set from what is in
             // the database, so scheduling first would read the reminder the
             // user has just replaced.

@@ -128,6 +128,14 @@ fun ContactsScreen(
     onExport: (Contact) -> Unit,
     onDelete: (Contact) -> Unit,
     onSaveEdit: (Contact) -> Unit,
+    /**
+     * A contact typed in rather than scanned, and the group to file it into.
+     *
+     * Separate from [onSaveEdit] because only a *new* contact takes the group
+     * being viewed — the same rule [onScanFromCamera] already follows. Editing
+     * somebody must not move them.
+     */
+    onCreateContact: (Contact, Long?) -> Unit,
     /** The progress sheet, which owns the meetings as well as the stage. */
     onSaveProgress: (Contact) -> Unit,
     /** Several at once, picked by long press. */
@@ -178,6 +186,13 @@ fun ContactsScreen(
     // Making a group is a request to see groups. Every route that creates one
     // goes through here, so none of them can forget.
     val showGroups = { byGroup = true }
+
+    // And the other half of the same rule: adding a contact is a request to see
+    // that contact. A new one that belongs to no group is not on the Groups
+    // list at all — it is inside Ungrouped, a tap away — so adding one from
+    // there looked exactly like the group bug did, and for exactly the same
+    // reason. Whatever the view is, it ends up somewhere the new entry is.
+    val showAll = { byGroup = false }
 
     // Back gets out of a selection first, then out of a group. Both before it
     // reaches the tab, and in that order — the innermost thing the user is in.
@@ -544,7 +559,15 @@ fun ContactsScreen(
     if (creatingContact) {
         ContactEditor(
             contact = remember { Contact(id = System.currentTimeMillis()) },
-            onSave = { onSaveEdit(it); creatingContact = false },
+            onSave = {
+                // Into the group being looked at, the way a scan from here
+                // already goes, and then to a list where it can be seen: inside
+                // a group it is already on screen, and from the Groups list it
+                // is not, because an ungrouped contact is not a group.
+                onCreateContact(it, openGroup?.id)
+                if (openGroup == null) showAll()
+                creatingContact = false
+            },
             onDismiss = { creatingContact = false },
         )
     }

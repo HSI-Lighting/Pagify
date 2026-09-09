@@ -95,6 +95,8 @@ fun PagifyApp(
     onExportContact: (Contact) -> Unit,
     onDeleteContact: (Contact) -> Unit,
     onSaveContact: (Contact) -> Unit,
+    /** A contact typed in, and the group being viewed when it was. */
+    onCreateContact: (Contact, Long?) -> Unit,
     onSaveProgress: (Contact) -> Unit,
     /** Several at once, picked by long press. */
     onDeleteContacts: (List<Contact>) -> Unit,
@@ -183,6 +185,7 @@ fun PagifyApp(
                     onExport = onExportContact,
                     onDelete = onDeleteContact,
                     onSaveEdit = onSaveContact,
+                    onCreateContact = onCreateContact,
                     onSaveProgress = onSaveProgress,
                     onDeleteContacts = onDeleteContacts,
                     onDeleteGroups = onDeleteGroups,

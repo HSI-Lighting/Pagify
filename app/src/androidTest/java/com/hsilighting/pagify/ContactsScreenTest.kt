@@ -47,6 +47,8 @@ class ContactsScreenTest {
         var scanTarget: Long? = null
         var deletedContacts: List<Contact>? = null
         var deletedGroups: List<ContactGroup>? = null
+        /** The contact typed in, and the group it was filed into. */
+        var madeContact: Pair<String, Long?>? = null
     }
 
     private fun show(
@@ -78,6 +80,7 @@ class ContactsScreenTest {
                 onExport = {},
                 onDelete = {},
                 onSaveEdit = {},
+                onCreateContact = { contact, group -> calls.madeContact = contact.displayName to group },
                 onSaveProgress = {},
                 review = null,
                 cardTextScale = 1f,
@@ -111,6 +114,51 @@ class ContactsScreenTest {
         compose.onNodeWithText("Create").performClick()
 
         assertEquals("Expo 2026", calls.created)
+    }
+
+    /**
+     * **A contact typed in from inside a group goes into that group.**
+     *
+     * The other half of the staleness above, and reported the same way: a
+     * contact added while looking at a group was saved with no group at all, so
+     * it went to Ungrouped and was not on the screen that had just been used to
+     * add it. Nothing was lost and nothing was late — it was filed somewhere
+     * else — but from the outside that is indistinguishable from the app
+     * ignoring the entry.
+     *
+     * Scanning a card from inside a group had always filed it correctly, which
+     * is what made the manual route look broken rather than unimplemented.
+     */
+    @Test
+    fun aContactTypedInFromInsideAGroupIsFiledThere() {
+        val calls = show(memberships = mapOf(1L to listOf(10L)))
+
+        compose.onNodeWithText("Light + Building").performClick()
+        compose.onNodeWithText("Add a contact").performClick()
+        compose.onNodeWithText("Name").performTextInput("Priya Raman")
+        compose.onNodeWithText("Save").performClick()
+
+        assertEquals("Priya Raman" to 10L, calls.madeContact)
+    }
+
+    /**
+     * And one added from the Groups list lands where it can be seen.
+     *
+     * With no group open there is no group to file it into, so it is ungrouped
+     * — and the Groups list shows groups, not contacts. Staying put would leave
+     * the new contact one tap inside Ungrouped, which is the same disappearance
+     * by a different route.
+     */
+    @Test
+    fun aContactAddedFromTheGroupsListIsShown() {
+        show()
+
+        compose.onNodeWithText("Add a contact").performClick()
+        compose.onNodeWithText("Name").performTextInput("Priya Raman")
+        compose.onNodeWithText("Save").performClick()
+
+        // The All list, where a contact belonging to no group actually appears.
+        compose.onNodeWithText("Jane Okafor").assertIsDisplayed()
     }
 
     /**
