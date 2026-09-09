@@ -65,6 +65,13 @@ pub enum Shape {
         vertices: Vec<Vertex>,
         closed: bool,
     },
+    /// A point somebody placed: a survey mark, a node, a reference.
+    ///
+    /// Drawn as a small cross a fixed number of pixels across, because that is
+    /// what it is — CAD gives a point no size of its own, only a display
+    /// setting, so a point drawn in drawing units would be invisible at one
+    /// zoom and enormous at the next.
+    Marker { at: Point },
     /// A line of text on the sheet.
     ///
     /// **A drawing without its text is a picture of a drawing.** Room names,
@@ -202,6 +209,7 @@ impl Drawing {
                 // Where it starts and a rough box for where it runs to. The
                 // exact width needs a font, which the bounds have no business
                 // asking for; erring wide only loosens the fit slightly.
+                Shape::Marker { at } => widen(*at),
                 Shape::Text { at, height, content, .. } => {
                     widen(*at);
                     widen(Point::new(at.x + height * content.chars().count() as f64, at.y + height));

@@ -262,6 +262,8 @@ fn part_of(entity: &acadrust::EntityType, drawing: &mut Drawing) -> Option<Part>
 
         // Counted rather than passed over, and named, because "134 not shown"
         // and "134 pieces of text not shown" are different things to be told.
+        E::Point(p) => Shape::Marker { at: Point::new(p.location.x, p.location.y) },
+
         E::Text(t) => {
             let content = super::dxf::readable(&t.value);
             if content.is_empty() {
@@ -300,8 +302,11 @@ fn part_of(entity: &acadrust::EntityType, drawing: &mut Drawing) -> Option<Part>
             drawing.note("curves this cannot draw yet");
             return None;
         }
-        _ => {
-            drawing.note("shapes this cannot draw yet");
+        // Named, as the DXF side names them. "84 shapes this cannot draw yet"
+        // says a number and nothing about what to do next; "84 attribute
+        // definitions" says which one thing to write.
+        other => {
+            drawing.note(&format!("{} entities this cannot draw yet", kind_of(other)));
             return None;
         }
     };
@@ -393,6 +398,8 @@ fn moved(shape: &Shape, put: &Affine) -> Shape {
     match shape {
         Shape::Line { a, b } => Shape::Line { a: put.point(*a), b: put.point(*b) },
 
+        Shape::Marker { at } => Shape::Marker { at: put.point(*at) },
+
         Shape::Arc { centre, radius, start, sweep } => {
             let start =
                 if put.reverses() { put.turn() - start - sweep } else { put.turn() + start };
@@ -433,5 +440,21 @@ fn moved(shape: &Shape, put: &Affine) -> Shape {
                 .collect(),
             closed: *closed,
         },
+    }
+}
+
+/// What an entity is called, for the line that says it was not drawn.
+fn kind_of(entity: &acadrust::EntityType) -> &'static str {
+    use acadrust::EntityType as E;
+    match entity {
+        E::Point(_) => "point marker",
+        E::Polyline(_) | E::Polyline3D(_) => "3D polyline",
+        E::Spline(_) => "spline",
+        E::Helix(_) => "helix",
+        E::Dimension(_) => "dimension",
+        E::Solid(_) => "solid fill",
+        E::Face3D(_) => "3D face",
+        E::Block(_) | E::BlockEnd(_) => "block marker",
+        _ => "other",
     }
 }

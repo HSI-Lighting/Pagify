@@ -308,6 +308,22 @@ fn add(
         // Reaching here would draw a label in outline at wall weight.
         Shape::Text { .. } => false,
 
+        // A small cross, sized in pixels rather than in drawing units: a
+        // point has no size of its own, so anything drawn in the drawing's
+        // units would be invisible at one zoom and enormous at the next.
+        Shape::Marker { at } => {
+            let (x, y) = to_screen(*at);
+            if !x.is_finite() || !y.is_finite() {
+                return false;
+            }
+            const ARM: f32 = 3.0;
+            builder.move_to(x - ARM, y);
+            builder.line_to(x + ARM, y);
+            builder.move_to(x, y - ARM);
+            builder.line_to(x, y + ARM);
+            true
+        }
+
         Shape::Line { a, b } => {
             let (ax, ay) = to_screen(*a);
             let (bx, by) = to_screen(*b);

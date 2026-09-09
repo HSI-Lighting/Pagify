@@ -578,13 +578,14 @@ fn build(kind: &str, fields: &[(i32, &str)], drawing: &mut Drawing) -> Option<En
             }
         }
 
-        // A point is a marker, not geometry: CAD draws it as a dot whose size
-        // is a setting, and a viewer that draws them all covers a plan in
-        // speckles. Counted so it is a decision rather than an omission.
-        "POINT" => {
-            drawing.note("point markers");
-            return None;
-        }
+        "POINT" => Shape::Marker { at: placed(Point::new(number(fields, 10)?, number(fields, 20)?)) },
+
+        // **An attribute definition is a blank, not a value.** It lives in a
+        // block definition and says where a value will go and what to call it;
+        // the value itself arrives as an ATTRIB on each block reference, and
+        // those are drawn. Drawing the definition too would print the
+        // placeholder — "ROOM_NAME" — across every room that has a name.
+        "ATTDEF" => return None,
         // The window a layout looks at model space through. It has no geometry
         // of its own, and this shows model space directly.
         "VIEWPORT" => return None,
@@ -737,6 +738,8 @@ fn expand(
 fn moved(shape: &Shape, put: &Affine) -> Shape {
     match shape {
         Shape::Line { a, b } => Shape::Line { a: put.point(*a), b: put.point(*b) },
+
+        Shape::Marker { at } => Shape::Marker { at: put.point(*at) },
 
         Shape::Arc { centre, radius, start, sweep } => {
             // A reversing transform reflects the angles, so the arc runs from
