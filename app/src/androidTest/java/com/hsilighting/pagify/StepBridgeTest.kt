@@ -707,6 +707,60 @@ class DrawingBridgeTest {
     }
 
     /**
+     * **A tap near a corner measures from the corner.**
+     *
+     * The whole point of the measuring tool. A finger covers several
+     * millimetres of screen and rather more of the drawing, so a measurement
+     * taken where the finger landed comes back short — and a short answer looks
+     * exactly like a right one, which is why this is worth pinning through the
+     * real bridge rather than only in Rust.
+     */
+    @Test
+    fun a_measurement_snaps_to_the_geometry() {
+        val handle = open()
+        DrawingBridge.fitDrawing(handle, 400, 300)
+
+        // Somewhere on the sheet, then a second point. Whatever they land on,
+        // both must come back snapped to something the drawing actually has.
+        val first = org.json.JSONObject(DrawingBridge.measureAt(handle, 200f, 150f, 400, 300))
+        assertEquals(1, first.getJSONArray("points").length())
+
+        val second = org.json.JSONObject(DrawingBridge.measureAt(handle, 320f, 150f, 400, 300))
+        val points = second.getJSONArray("points")
+        assertEquals(2, points.length())
+        assertTrue("no distance", second.getDouble("distance") > 0.0)
+        // Millimetres, from the header this file declares.
+        assertEquals(0.001, second.getDouble("metresPerUnit"), 1e-9)
+        assertTrue(second.getBoolean("unitsDeclared"))
+    }
+
+    /** A third tap starts a new measurement rather than making a chain. */
+    @Test
+    fun a_third_tap_starts_again() {
+        val handle = open()
+        DrawingBridge.fitDrawing(handle, 400, 300)
+
+        DrawingBridge.measureAt(handle, 200f, 150f, 400, 300)
+        DrawingBridge.measureAt(handle, 320f, 150f, 400, 300)
+        val third = org.json.JSONObject(DrawingBridge.measureAt(handle, 100f, 100f, 400, 300))
+
+        assertEquals(1, third.getJSONArray("points").length())
+    }
+
+    /** And clearing it leaves nothing behind. */
+    @Test
+    fun a_measurement_can_be_cleared() {
+        val handle = open()
+        DrawingBridge.fitDrawing(handle, 400, 300)
+        DrawingBridge.measureAt(handle, 200f, 150f, 400, 300)
+
+        assertTrue(DrawingBridge.clearMeasure(handle))
+
+        val after = org.json.JSONObject(DrawingBridge.measureAt(handle, 200f, 150f, 400, 300))
+        assertEquals(1, after.getJSONArray("points").length())
+    }
+
+    /**
      * Zooming changes the picture, and about the point given rather than the
      * middle: pinching one corner brings that corner closer, not the centre.
      */

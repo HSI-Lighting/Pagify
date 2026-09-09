@@ -24,11 +24,13 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.outlined.Layers
+import androidx.compose.material.icons.outlined.Straighten
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -50,6 +52,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.ui.components.CaptureHint
+import com.hsilighting.pagify.ui.components.ToolButton
 import com.hsilighting.pagify.ui.components.captureOverlay
 import com.hsilighting.pagify.ui.model.CaptureSheet
 import com.hsilighting.pagify.ui.model.ModelRibbon
@@ -73,6 +76,7 @@ fun DrawingViewer(
     var showingLayers by rememberSaveable { mutableStateOf(false) }
     var framing by rememberSaveable { mutableStateOf(false) }
     var lasso by rememberSaveable { mutableStateOf(false) }
+    var measuring by rememberSaveable { mutableStateOf(false) }
 
     Column(modifier.fillMaxSize().background(BACKDROP)) {
         Row(
@@ -114,7 +118,7 @@ fun DrawingViewer(
                 when {
                     state.error != null -> Message(state.error!!)
                     state.loading -> CircularProgressIndicator(color = Color.White)
-                    else -> Sheet(state)
+                    else -> Sheet(state, onTap = if (measuring) state::measureAt else null)
                 }
             }
 
@@ -143,6 +147,18 @@ fun DrawingViewer(
                 )
             }
 
+            // The measurement, above the ribbon so a finger reaching for the
+            // tools does not cover the number it just took.
+            state.measurement?.let { taken ->
+                MeasureReadout(
+                    taken,
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 92.dp)
+                        .navigationBarsPadding(),
+                )
+            }
+
             ModelRibbon(
                 framing = framing,
                 lasso = lasso,
@@ -153,7 +169,21 @@ fun DrawingViewer(
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 20.dp)
                     .navigationBarsPadding(),
-            )
+            ) {
+                // **Only here.** A solid has no two points to measure between,
+                // so the model viewer never grows this slot.
+                ToolButton(
+                    icon = Icons.Outlined.Straighten,
+                    label = "Measure",
+                    selected = measuring,
+                    onClick = {
+                        measuring = !measuring
+                        if (!measuring) state.clearMeasurement()
+                        // Two tools that both want a tap cannot both be armed.
+                        if (measuring) framing = false
+                    },
+                )
+            }
         }
 
         // **What was left out, on the screen rather than in a log.** A plan
@@ -174,15 +204,24 @@ fun DrawingViewer(
 
 /** The sheet itself, and the gestures that move it. */
 @Composable
-private fun Sheet(state: DrawingViewerState) {
+private fun Sheet(state: DrawingViewerState, onTap: ((Float, Float) -> Unit)? = null) {
     Box(
         Modifier
             .fillMaxSize()
             .onSizeChanged { state.resize(it.width, it.height) }
-            .pointerInput(state) {
+            .pointerInput(state, onTap) {
                 awaitEachGesture {
-                    awaitFirstDown(requireUnconsumed = false)
+                    val first = awaitFirstDown(requireUnconsumed = false)
                     state.beginGesture()
+
+                    // **A tap is a press that did not go anywhere.** Measuring
+                    // has to live alongside panning rather than replacing it —
+                    // a measuring tool that stops somebody moving the sheet
+                    // makes them turn it off to reach the other end of a wall
+                    // and lose the first point. So the gesture is watched, and
+                    // only a press that stayed put counts as a tap.
+                    val began = first.position
+                    var wandered = false
 
                     var lastApart = 0f
                     while (true) {
@@ -209,12 +248,18 @@ private fun Sheet(state: DrawingViewerState) {
                             // A sheet has no other side, so the obvious gesture
                             // is the one that moves it about.
                             val moved = touching[0].positionChange()
+                            if ((touching[0].position - began).getDistance() > STILL) {
+                                wandered = true
+                            }
+                            // While the measuring tool is out, a drag still
+                            // pans; it is only the tap that is spoken for.
                             state.pan(moved.x / size.width, moved.y / size.height)
                         }
                         touching.forEach { it.consume() }
                     }
 
                     state.endGesture()
+                    if (!wandered && onTap != null) onTap(began.x, began.y)
                 }
             },
         contentAlignment = Alignment.Center,
@@ -327,3 +372,45 @@ private fun Message(text: String) {
 
 /** The same ground the model viewer uses, so the two feel like one app. */
 private val BACKDROP = Color(0xFF1E2024)
+
+/**
+ * How far a finger may move and still be a tap, in pixels.
+ *
+ * A press on a phone is never perfectly still. Too small and a measurement can
+ * only be taken by somebody with a steady hand; too large and a short pan
+ * quietly places a point where they were trying to slide from.
+ */
+private const val STILL = 12f
+
+/**
+ * The measurement, as a chip above the ribbon.
+ *
+ * Says what it snapped to as well as how far it is. Somebody measuring a wall
+ * needs to know the number came from its endpoint and not from a spot near it,
+ * and there is no other way to tell once the answer is on screen.
+ */
+@Composable
+private fun MeasureReadout(taken: Measurement, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(20.dp),
+        color = Color(0xF2262A31),
+        shadowElevation = 6.dp,
+    ) {
+        Column(Modifier.padding(horizontal = 16.dp, vertical = 10.dp)) {
+            Text(
+                taken.readout(),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = Color(0xFFFFBE3C),
+            )
+            if (taken.taken == 2) {
+                Text(
+                    taken.snaps.joinToString(" → "),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFFB8BEC6),
+                )
+            }
+        }
+    }
+}

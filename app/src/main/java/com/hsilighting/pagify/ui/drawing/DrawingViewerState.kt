@@ -252,6 +252,45 @@ class DrawingViewerState(
         }
     }
 
+    // ---- measuring ------------------------------------------------------------
+
+    /** The measurement on screen, or null when none is being taken. */
+    var measurement by mutableStateOf<Measurement?>(null)
+        private set
+
+    /**
+     * Measure from where a tap landed.
+     *
+     * The snap is the engine's, so the point is the drawing's rather than the
+     * finger's — a wall measured from *near* its end comes back short, and a
+     * short answer looks exactly like a right one.
+     */
+    fun measureAt(atX: Float, atY: Float) {
+        if (handle == DrawingBridge.NO_DRAWING) return
+        val json = runCatching { JSONObject(DrawingBridge.measureAt(handle, atX, atY, width, height)) }
+            .getOrNull() ?: return
+
+        val points = json.optJSONArray("points")
+        val snaps = (0 until (points?.length() ?: 0)).mapNotNull {
+            points?.optJSONObject(it)?.optString("snap")
+        }
+        measurement = Measurement(
+            taken = snaps.size,
+            snaps = snaps,
+            distance = json.optDouble("distance", 0.0),
+            metresPerUnit = json.optDouble("metresPerUnit", 1.0),
+            unitsDeclared = json.optBoolean("unitsDeclared", false),
+        )
+        redraw()
+    }
+
+    fun clearMeasurement() {
+        if (handle == DrawingBridge.NO_DRAWING) return
+        DrawingBridge.clearMeasure(handle)
+        measurement = null
+        redraw()
+    }
+
     // ---- taking a picture ----------------------------------------------------
 
     var taken by mutableStateOf<Bitmap?>(null)
@@ -386,3 +425,34 @@ class DrawingViewerState(
 
 /** One layer, and whether the sheet is showing it. */
 data class DrawingLayer(val at: Int, val name: String, val visible: Boolean)
+
+/**
+ * A measurement between two points, as the readout shows it.
+ *
+ * The units are carried rather than folded in, because whether the file
+ * *declared* them decides whether metres can be shown at all: a plan that never
+ * said what a unit means could be in millimetres or metres, and a length shown
+ * in metres that is a thousand times out is the exact mistake worth refusing to
+ * make.
+ */
+data class Measurement(
+    val taken: Int,
+    val snaps: List<String>,
+    val distance: Double,
+    val metresPerUnit: Double,
+    val unitsDeclared: Boolean,
+) {
+    /** What to put on screen. */
+    fun readout(): String = when {
+        taken == 0 -> "Tap a point"
+        taken == 1 -> "Tap the second point — first is ${snaps.firstOrNull() ?: "a point"}"
+        !unitsDeclared -> "%,.2f units".format(distance)
+        else -> {
+            val metres = distance * metresPerUnit
+            // Millimetres below a metre: an architectural drawing is measured
+            // in them, and "0.08 m" is a number somebody has to convert.
+            if (metres < 1.0) "%,.0f mm".format(metres * 1000.0)
+            else "%,.3f m".format(metres)
+        }
+    }
+}

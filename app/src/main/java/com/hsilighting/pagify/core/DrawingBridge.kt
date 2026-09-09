@@ -68,6 +68,16 @@ internal object DrawingBridge {
     external fun useDrawingFont(handle: Long, name: String): Boolean
 
     /**
+     * Put a measuring point where a tap landed, snapped to the geometry.
+     *
+     * The snap happens in the engine because it needs the shapes; returns the
+     * measurement so far as JSON.
+     */
+    external fun measureAt(handle: Long, atX: Float, atY: Float, width: Int, height: Int): String
+
+    external fun clearMeasure(handle: Long): Boolean
+
+    /**
      * Show the whole sheet.
      *
      * Needs the view's size, unlike the model viewer's fit: a camera can frame

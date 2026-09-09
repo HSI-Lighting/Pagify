@@ -217,7 +217,14 @@ fn text_path(
 /// Legibility is judged by it: a label worth drawing at the size somebody is
 /// looking at should be in the half-size preview a gesture draws too, blurry
 /// rather than absent, or the words come and go every time the sheet is moved.
-pub fn draw(drawing: &Drawing, view: &View, style: &Style, on_screen: f64, into: &mut Pixmap) {
+pub fn draw(
+    drawing: &Drawing,
+    view: &View,
+    style: &Style,
+    on_screen: f64,
+    marks: &[Point],
+    into: &mut Pixmap,
+) {
     let (width, height) = (into.width(), into.height());
     into.fill(tiny_skia::Color::from_rgba8(
         style.background[0],
@@ -290,6 +297,51 @@ pub fn draw(drawing: &Drawing, view: &View, style: &Style, on_screen: f64, into:
                 );
             }
         }
+    }
+
+    measurement(marks, view, into);
+}
+
+/// The measurement, over everything else.
+///
+/// Drawn by the engine rather than laid over the picture in Compose so that it
+/// moves with the sheet without anything having to keep two coordinate systems
+/// in step — and so a capture holds the measurement that was on screen.
+fn measurement(marks: &[Point], view: &View, into: &mut Pixmap) {
+    if marks.is_empty() {
+        return;
+    }
+    let (width, height) = (into.width(), into.height());
+
+    let mut paint = Paint::default();
+    paint.set_color_rgba8(255, 190, 60, 255);
+    paint.anti_alias = true;
+    let stroke = Stroke { width: 2.0, ..Stroke::default() };
+
+    let mut builder = PathBuilder::new();
+    // A ring at each point rather than a filled dot: the thing being measured
+    // to is usually a corner, and a dot covers the very detail somebody is
+    // checking they caught.
+    for mark in marks {
+        let (x, y) = view.place(*mark, width, height);
+        if !x.is_finite() || !y.is_finite() {
+            continue;
+        }
+        builder.push_circle(x, y, 7.0);
+        builder.move_to(x - 2.0, y);
+        builder.line_to(x + 2.0, y);
+    }
+    if let [first, second] = marks {
+        let (ax, ay) = view.place(*first, width, height);
+        let (bx, by) = view.place(*second, width, height);
+        if ax.is_finite() && ay.is_finite() && bx.is_finite() && by.is_finite() {
+            builder.move_to(ax, ay);
+            builder.line_to(bx, by);
+        }
+    }
+
+    if let Some(path) = builder.finish() {
+        into.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }
 
@@ -532,7 +584,7 @@ mod picture {
         }
 
         let started = std::time::Instant::now();
-        draw(&drawing, &view, &style, view.scale, &mut sheet);
+        draw(&drawing, &view, &style, view.scale, &[], &mut sheet);
         if std::env::var("PAGIFY_DXF_DUPES").is_ok() {
             let mut seen: std::collections::HashSet<(i64, i64, i64, i64)> = Default::default();
             let mut lines = 0usize;

@@ -12,6 +12,7 @@
 
 use tiny_skia::Pixmap;
 
+use super::measure::{self, Snapped};
 use super::model::Drawing;
 use super::raster::{self, Style, View};
 
@@ -22,7 +23,12 @@ pub struct DrawingSession {
     style: Style,
     /// What the file is called, for the screen's title.
     pub name: String,
+    /// The one or two points a measurement is being taken between.
+    measure: Vec<Snapped>,
 }
+
+/// How far from a tap, in screen pixels, the geometry is still worth catching.
+const TAP_PIXELS: f64 = 24.0;
 
 /// Why a file could not be opened.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +84,7 @@ pub fn open(path: &std::path::Path) -> Result<DrawingSession, OpenError> {
         drawing,
         style: Style::default(),
         name,
+        measure: Vec::new(),
     })
 }
 
@@ -123,6 +130,69 @@ impl DrawingSession {
     /// The font the sheet's text is drawn with.
     pub fn use_font(&mut self, bytes: std::sync::Arc<Vec<u8>>) {
         self.style.font = Some(bytes);
+    }
+
+    // ---- measuring ----------------------------------------------------------
+
+    /// Put a measuring point where a tap landed, snapped to the geometry.
+    ///
+    /// A third tap starts again rather than adding to a chain: two points is
+    /// what "how far is that" means, and a growing polyline of measurements
+    /// would need a way to end one, which is a control for a question nobody
+    /// asked.
+    pub fn measure_at(&mut self, at_x: f64, at_y: f64, width: u32, height: u32) -> Snapped {
+        let near = self.under(at_x, at_y, width, height);
+        // **The reach is a finger, not a distance.** Twenty-four pixels is
+        // about what a fingertip covers; converting it through the current
+        // scale is what lets somebody separate the two ends of a small fitting
+        // by zooming in, instead of being told to tap more precisely.
+        let reach = if self.view.scale > 0.0 { TAP_PIXELS / self.view.scale } else { 0.0 };
+        let found = measure::snap(&self.drawing, near, reach);
+
+        if self.measure.len() >= 2 {
+            self.measure.clear();
+        }
+        self.measure.push(found);
+        found
+    }
+
+    pub fn clear_measure(&mut self) {
+        self.measure.clear();
+    }
+
+    /// The measurement so far, for the readout.
+    ///
+    /// Reported in the drawing's own units and, when the file said what those
+    /// are, in metres as well. A plan that never declared its units gets the
+    /// number alone rather than a length in metres that may be a thousand
+    /// times out — which is the one mistake this whole path exists to avoid.
+    pub fn measure_json(&self) -> String {
+        let mut points = String::from("[");
+        for (at, mark) in self.measure.iter().enumerate() {
+            if at > 0 {
+                points.push(',');
+            }
+            points.push_str(&format!(
+                r#"{{"x":{:.4},"y":{:.4},"snap":"{}"}}"#,
+                mark.at.x,
+                mark.at.y,
+                mark.kind.name(),
+            ));
+        }
+        points.push(']');
+
+        let distance = match self.measure.as_slice() {
+            [first, second] => {
+                (second.at.x - first.at.x).hypot(second.at.y - first.at.y)
+            }
+            _ => 0.0,
+        };
+
+        format!(
+            r#"{{"points":{points},"distance":{distance:.6},"metresPerUnit":{},"unitsDeclared":{}}}"#,
+            self.drawing.units.metres_per_unit,
+            self.drawing.units.declared,
+        )
     }
 
     /// Which point of the drawing is under a pixel.
@@ -187,7 +257,8 @@ impl DrawingSession {
         }
         // Judged against the scale on the display, not this bitmap's, so the
         // same words are in the preview, the frame and the capture.
-        raster::draw(&self.drawing, &view, &style, self.view.scale, &mut sheet);
+        let marks: Vec<super::model::Point> = self.measure.iter().map(|m| m.at).collect();
+        raster::draw(&self.drawing, &view, &style, self.view.scale, &marks, &mut sheet);
         sheet
     }
 
@@ -304,6 +375,7 @@ mod tests {
             view: View { centre: super::super::model::Point::new(50.0, 40.0), scale: 4.0 },
             style: Style::default(),
             name: "plan.dxf".into(),
+            measure: Vec::new(),
         }
     }
 
@@ -464,6 +536,7 @@ mod tests {
             view: View { centre: super::super::model::Point::new(0.0, 0.0), scale: 1.0 },
             style: Style::default(),
             name: format!("plan{quote}.dxf"),
+            measure: Vec::new(),
         };
 
         let value: serde_json::Value = serde_json::from_str(&session.summary_json())

@@ -285,3 +285,48 @@ pub extern "system" fn Java_com_hsilighting_pagify_core_DrawingBridge_openDrawin
         Ok(sessions().lock().map(|open| open.len() as i64).unwrap_or(0))
     })
 }
+
+/// Put a measuring point where a tap landed, and give back the measurement.
+///
+/// The snap happens here rather than on the phone because it needs the
+/// geometry, and sending twenty-seven thousand shapes across the boundary so
+/// Kotlin can search them would cost more than the drawing did.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_DrawingBridge_measureAt<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    handle: jlong,
+    at_x: jfloat,
+    at_y: jfloat,
+    width: jint,
+    height: jint,
+) -> jstring {
+    guard(&mut env, std::ptr::null_mut(), |env| {
+        let json = with_drawing(handle, |drawing| {
+            drawing.measure_at(
+                at_x as f64,
+                at_y as f64,
+                width.max(1) as u32,
+                height.max(1) as u32,
+            );
+            drawing.measure_json()
+        })?;
+        Ok(env
+            .new_string(json)
+            .map_err(|e| PdfError::Pdfium(format!("could not allocate Java string: {e}")))?
+            .into_raw())
+    })
+}
+
+/// Forget the measurement.
+#[no_mangle]
+pub extern "system" fn Java_com_hsilighting_pagify_core_DrawingBridge_clearMeasure(
+    mut env: JNIEnv,
+    _class: JClass,
+    handle: jlong,
+) -> jboolean {
+    guard(&mut env, JNI_FALSE, |_| {
+        with_drawing(handle, |drawing| drawing.clear_measure())?;
+        Ok(JNI_TRUE)
+    })
+}

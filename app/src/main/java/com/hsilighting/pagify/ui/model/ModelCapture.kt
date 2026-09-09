@@ -201,6 +201,15 @@ fun ModelRibbon(
     onLasso: (Boolean) -> Unit,
     onFit: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * Slots this ribbon does not know about, added on the end.
+     *
+     * The drawing viewer has a measuring tool and the model viewer has nothing
+     * to measure between, so the difference lives at the call site rather than
+     * as a flag inside — one ribbon, and neither screen carries a control the
+     * other needed.
+     */
+    extra: (@Composable () -> Unit)? = null,
 ) {
     var showingShapes by remember { mutableStateOf(false) }
 
@@ -252,6 +261,8 @@ fun ModelRibbon(
                 selected = false,
                 onClick = onFit,
             )
+
+            extra?.invoke()
         }
     }
 }
