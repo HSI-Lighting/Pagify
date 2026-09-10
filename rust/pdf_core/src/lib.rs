@@ -22,9 +22,13 @@
 //! on the host, which is where the majority of the test suite runs.
 
 pub mod command;
+pub mod contacts;
+pub mod crypto;
 pub mod document;
 pub mod engine;
 pub mod error;
+pub mod ocr;
+pub mod pdf;
 pub mod plugins;
 pub mod registry;
 pub mod render;

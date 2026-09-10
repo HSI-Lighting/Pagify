@@ -109,6 +109,53 @@ pub fn covers(name: &str, text: &str) -> bool {
         .all(|c| face.glyph_index(c).is_some())
 }
 
+/// How far below the baseline a word's own glyphs reach, as a fraction of the
+/// point size.
+///
+/// **For putting words back where they were taken from.** A recognised word is
+/// known by the box its ink occupies, and the bottom of that box is the
+/// baseline only when nothing in it descends — `tested` sits on the line,
+/// `tested again` hangs below it by the tail of the `g`. Subtracting this from
+/// the box's bottom gives the baseline either way.
+///
+/// Zero for a word with no descenders, which is the common case and is exactly
+/// right. `None` when the font cannot be read.
+pub fn ink_depth(name: &str, text: &str) -> Option<f32> {
+    let data = font_data(name).ok()?;
+    let face = Face::from_slice(&data, 0)?;
+    let per_em = (face.units_per_em() as f32).max(1.0);
+
+    let mut lowest = 0.0f32;
+    for character in text.chars() {
+        let Some(glyph) = face.glyph_index(character) else { continue };
+        let Some(bounds) = face.glyph_bounding_box(glyph) else { continue };
+        lowest = lowest.min(bounds.y_min as f32);
+    }
+    // Below the baseline is negative in font units; a depth is positive.
+    Some(-lowest / per_em)
+}
+
+/// How far to the right of the pen a word's first glyph starts drawing, as a
+/// fraction of the point size.
+///
+/// The horizontal twin of [`ink_depth`], and it exists for the same reason. A
+/// recognised word is known by the box its ink occupies, and the left of that
+/// box is where the *drawing* starts — not where the pen was. Every glyph has a
+/// left side bearing, and setting the pen at the box's edge pushes the word
+/// right by it.
+///
+/// Zero for a glyph that touches its own origin. `None` when the font cannot be
+/// read.
+pub fn ink_start(name: &str, text: &str) -> Option<f32> {
+    let data = font_data(name).ok()?;
+    let face = Face::from_slice(&data, 0)?;
+    let per_em = (face.units_per_em() as f32).max(1.0);
+    let first = text.chars().next()?;
+    let glyph = face.glyph_index(first)?;
+    let bounds = face.glyph_bounding_box(glyph)?;
+    Some(bounds.x_min as f32 / per_em)
+}
+
 /// Shape `text` in the named font.
 pub fn shape(name: &str, text: &str) -> Result<ShapedText> {
     let data = font_data(name)?;

@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members  = ["crates/pagify_shell", "crates/pagify_app"]
+
+# ---------------------------------------------------------------------------
+# DO NOT DELETE. This stanza is load-bearing and its absence is silent.
+#
+# `pdf_core` carries this same patch in its own manifest, and Cargo honours
+# `[patch.crates-io]` ONLY in the workspace root. The moment `pdf_core` became a
+# path dependency here instead of a root in its own right, its copy stopped
+# being read — with no warning of any kind.
+#
+# What breaks without it: Cargo resolves stock `pdfium-render` 0.9.3 from
+# crates.io, where `PdfDocument::handle()` is `pub(crate)`, and `pdf_core` fails
+# with 16 instances of `error[E0624]: method 'handle' is private` pointing into
+# a registry source file. Nothing names the patch.
+#
+# What that method buys: incremental save. A signature covers a byte range, and
+# a full rewrite relocates every object in the file — so without this, no
+# signature can survive an edit. See rust/vendor/README.md in the Pagify repo.
+# ---------------------------------------------------------------------------
+[patch.crates-io]
+pdfium-render = { path = "../workspace/Pagify/rust/vendor/pdfium-render" }
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+# Consumed, never forked — see the build plan §5.4. Anything Pagify needs that
+# these do not do belongs in `pagify_shell`, above them.
+[workspace.dependencies]
+pdf_core   = { path = "../workspace/Pagify/rust/pdf_core" }
+cad_kernel = { path = "../Documents/3D-factory/cad_kernel" }
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1

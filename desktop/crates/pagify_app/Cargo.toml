@@ -1,0 +1,36 @@
+[package]
+name    = "pagify_app"
+edition.workspace = true
+version.workspace = true
+description = "Pagify Desktop: the eframe binary."
+
+[dependencies]
+pagify_shell = { path = "../pagify_shell" }
+pdf_core.workspace   = true
+cad_kernel.workspace = true
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow"] }
+egui   = "0.36"
+egui_extras = { version = "0.36", default-features = false }
+# Native file dialogs. Without one there is literally no way to open a document
+# from the interface — which is exactly what happened.
+rfd    = "0.15"
+# Decodes the embedded logo. PNG only — every other decoder is dead weight in
+# the binary and attack surface with nothing asking for it.
+image  = { version = "0.25", default-features = false, features = ["png"] }
+
+# The Linux windowing backends are additive and only meaningful there; on macOS
+# and Windows eframe uses the platform's own and these features do not apply.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+
+[dev-dependencies]
+egui_kittest = "0.36"
+
+# Finder hands a double-clicked document to an application through an Apple
+# Event, never through `argv`. Without a handler for it macOS answers for the
+# app — "Pagify cannot open files in the PDF document format" — which is what a
+# person sees when they double-click a PDF. These are already in the tree via
+# winit; naming them here makes the dependency deliberate.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"

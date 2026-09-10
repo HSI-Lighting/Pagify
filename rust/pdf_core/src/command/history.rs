@@ -212,6 +212,36 @@ mod tests {
             Ok(self.rotations[index])
         }
 
+        fn page_crop(&self, _index: usize) -> Result<crate::document::Rect> {
+            Ok(crate::document::Rect { left: 0.0, top: 0.0, right: 612.0, bottom: 792.0 })
+        }
+
+        fn set_text_run_styled(
+            &mut self,
+            _page: usize,
+            _object: usize,
+            _text: &str,
+            _style: &crate::document::TextStyle,
+        ) -> Result<(String, crate::document::TextStyle)> {
+            Ok((String::new(), crate::document::TextStyle::default()))
+        }
+
+        fn transform_page(&mut self, _index: usize, _matrix: [f32; 6]) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_page_media(&mut self, _index: usize, _w: f32, _h: f32) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_page_crop(
+            &mut self,
+            _index: usize,
+            _crop: crate::document::Rect,
+        ) -> Result<()> {
+            Ok(())
+        }
+
         fn add_annotation(&mut self, _page: usize, _a: &Annotation) -> Result<usize> {
             Ok(0)
         }

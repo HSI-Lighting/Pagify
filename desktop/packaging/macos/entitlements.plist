@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- PDFium is dlopen'd from inside the bundle. Under the hardened runtime
+       that needs no entitlement so long as the library is signed by the same
+       team — which is what bundle.sh does, nested-first. It is listed here as
+       a comment rather than granting disable-library-validation, which would
+       let *any* unsigned library load and is the usual lazy fix. -->
+  <key>com.apple.security.cs.allow-jit</key><false/>
+</dict>
+</plist>

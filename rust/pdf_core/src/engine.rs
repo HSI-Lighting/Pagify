@@ -422,6 +422,25 @@ pub fn save(
         .document
         .as_document_mut()
         .ok_or(PdfError::Unsupported("saving this document"))?;
+    // **Refused rather than quietly upgraded.** An incremental save of a
+    // redacted document writes a file whose earlier revision still holds every
+    // word that was removed — the feature's entire failure mode in one call. It
+    // would be easy to switch silently to a full copy here, and wrong: a caller
+    // asking for an incremental save is asking to preserve a signature, and
+    // giving them a file that destroys every signature while telling them
+    // nothing is its own kind of lie. The error says which save to use.
+    //
+    // Nothing is lost by refusing. Redaction has already rewritten the page's
+    // content stream, so any signature over this document is void whichever way
+    // it is written.
+    if incremental && doc.must_save_full_copy() {
+        return Err(PdfError::IncompleteRedaction(
+            "a redacted document must be saved as a full copy — saving incrementally \
+             leaves the removed content in the file's earlier revision"
+                .into(),
+        ));
+    }
+
     if incremental {
         doc.save_incremental(dest)
     } else {
@@ -705,6 +724,36 @@ mod tests {
     }
 
     impl DocumentMut for EditableDoc {
+        fn page_crop(&self, _index: usize) -> Result<crate::document::Rect> {
+            Ok(crate::document::Rect { left: 0.0, top: 0.0, right: 612.0, bottom: 792.0 })
+        }
+
+        fn set_text_run_styled(
+            &mut self,
+            _page: usize,
+            _object: usize,
+            _text: &str,
+            _style: &crate::document::TextStyle,
+        ) -> Result<(String, crate::document::TextStyle)> {
+            Ok((String::new(), crate::document::TextStyle::default()))
+        }
+
+        fn transform_page(&mut self, _index: usize, _matrix: [f32; 6]) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_page_media(&mut self, _index: usize, _w: f32, _h: f32) -> Result<()> {
+            Ok(())
+        }
+
+        fn set_page_crop(
+            &mut self,
+            _index: usize,
+            _crop: crate::document::Rect,
+        ) -> Result<()> {
+            Ok(())
+        }
+
         fn text_mark_restore(&mut self, _page_index: usize, id: i32) -> Result<String> {
             Err(PdfError::InvalidArgument(format!("no text mark {id}")))
         }

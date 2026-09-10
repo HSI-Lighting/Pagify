@@ -89,6 +89,37 @@ pub enum Command {
         index: usize,
         quarter_turns: u8,
     },
+    /// Trim what a page shows, without discarding what is outside it.
+    ///
+    /// The crop box is a window onto the sheet, not a knife: the content beyond
+    /// it is still in the file and a wider crop brings it back. That is why this
+    /// undoes by restoring the previous rectangle rather than by putting
+    /// anything back.
+    SetPageCrop {
+        index: usize,
+        crop: crate::document::Rect,
+    },
+    /// Change the sheet size, scaling the content to match.
+    ///
+    /// Content **and** sheet. Setting the boundary alone would only reveal or
+    /// hide margin, which is not what anybody means by resizing a page.
+    ///
+    /// The content is scaled to fit — the same factor on both axes — and
+    /// centred. A different factor per axis would fit the sheet exactly and
+    /// distort every letter on it.
+    SetPageSize {
+        index: usize,
+        width_pt: f32,
+        height_pt: f32,
+    },
+    /// Replace the words in one run of text.
+    SetTextRun {
+        page_index: usize,
+        object: usize,
+        text: String,
+        /// What else to change. `Default` means the words only.
+        style: crate::document::TextStyle,
+    },
     /// Put pages from somewhere else into this document at `at`.
     ///
     /// Carries the pages **as their own small PDF** rather than as a reference to
@@ -134,6 +165,109 @@ pub enum Command {
         page_index: usize,
         id: i32,
     },
+    /// Write recognised words onto a page as invisible, selectable text.
+    ///
+    /// Arriving as a command rather than as a special path is the whole reason
+    /// "make searchable" costs so little: undo, redo, cache invalidation and
+    /// both bridges need nothing written for it.
+    AddTextLayer {
+        page_index: usize,
+        words: Vec<crate::document::RecognisedWord>,
+    },
+
+    // --------------------------------------------------------------- redact --
+    /// Destroy everything inside a rectangle.
+    ///
+    /// The one command that removes content rather than describing a change to
+    /// it, which is why it undoes by restoring a copy of the whole page. See
+    /// [`crate::document::DocumentMut::snapshot_page`].
+    ///
+    /// **After this the document can only be saved as a full copy.** An
+    /// incremental save keeps the original bytes and appends a delta, so the
+    /// removed words would still be in the file. The engine refuses it.
+    Redact {
+        page_index: usize,
+        /// Page points, top-left origin.
+        area: crate::document::Rect,
+        /// The mark painted over the cleared area. Absent means a black one —
+        /// what a reader expects a redaction to look like. Explicit `null`
+        /// leaves the space blank.
+        #[serde(default = "black_mark")]
+        fill: Option<Color>,
+        /// Go ahead even where the rectangle cannot be fully cleared.
+        ///
+        /// **Phrased as the permission rather than the requirement, so that the
+        /// default is the safe one.** `#[serde(default)]` on a `require_complete`
+        /// flag would give `false` — and a caller on another platform that had
+        /// simply never heard of the field would silently get incomplete
+        /// redactions. Absent means no.
+        #[serde(default)]
+        allow_incomplete: bool,
+        /// Faces to match type-converted-to-curves against, if the caller has
+        /// any. Every candidate's glyphs are merged into one catalogue before
+        /// matching — a body face and its bold both count, since the shape
+        /// distance decides which candidate a given letter matches, not which
+        /// one the caller happened to try first.
+        ///
+        /// **Empty is not a lesser request — it is the correct one** for the
+        /// overwhelming majority of redactions, which run against ordinary
+        /// text and need no font at all. Carried here, rather than looked up
+        /// again on redo, for the same reason `ImportPages` carries whole PDF
+        /// bytes: redo re-executes this exact command against the document as
+        /// it now stands, and it must match with the *same* faces each time or
+        /// an outlined letter that redacted once could silently stop
+        /// redacting the second time.
+        #[serde(default, with = "font_bytes_list")]
+        outlined_fonts: Vec<Vec<u8>>,
+    },
+
+    /// Put a page back from a copy of it.
+    ///
+    /// **How unlocking reaches the document.** Decryption happens outside the
+    /// command stack, deliberately: a command carrying a passcode would leave it
+    /// sitting in the undo history, and the one thing a passcode must not do is
+    /// outlive the moment it was typed. What lands here is the page itself,
+    /// already verified, so the re-insertion undoes and redoes like every other
+    /// edit.
+    ReplacePage {
+        index: usize,
+        /// The page as a one-page PDF.
+        #[serde(with = "page_bytes")]
+        pdf: Vec<u8>,
+    },
+}
+
+/// An optional font's bytes, the same way [`page_bytes`] carries a page's —
+/// present as an ordinary byte array when given, entirely absent otherwise
+/// rather than `null`, so an old caller's recorded command still decodes.
+mod font_bytes_list {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(fonts: &[Vec<u8>], s: S) -> Result<S::Ok, S::Error> {
+        fonts.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Vec<u8>>, D::Error> {
+        Vec::<Vec<u8>>::deserialize(d)
+    }
+}
+
+/// A page's bytes as base64 in the wire format.
+mod page_bytes {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        bytes.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        Vec::<u8>::deserialize(d)
+    }
+}
+
+/// What a redaction mark is when the caller does not say.
+fn black_mark() -> Option<Color> {
+    Some(Color { r: 0, g: 0, b: 0, a: 255 })
 }
 
 /// What one execution needs in order to be undone.
@@ -147,6 +281,14 @@ pub enum UndoRecord {
     /// be cloned or serialised.
     RestorePage {
         at: usize,
+        page: RemovedPage,
+    },
+    /// Puts back a page a redaction destroyed part of.
+    ///
+    /// Distinct from [`UndoRecord::RestorePage`] because the page was never
+    /// removed: this one replaces, and inserting would leave two.
+    RestoreRedactedPage {
+        index: usize,
         page: RemovedPage,
     },
     /// The permutation that puts the pages back where they were.
@@ -170,6 +312,28 @@ pub enum UndoRecord {
         index: usize,
         quarter_turns: u8,
     },
+    SetPageCrop {
+        index: usize,
+        crop: crate::document::Rect,
+    },
+    SetTextRun {
+        page_index: usize,
+        object: usize,
+        text: String,
+        style: crate::document::TextStyle,
+    },
+    /// Put a resized page back exactly as it was.
+    ///
+    /// The **inverse matrix**, not the previous size. Re-deriving a scale from
+    /// the old dimensions would centre the content on the way back, so a page
+    /// whose content was not centred to begin with would not return to where it
+    /// started. An inverse is exact.
+    RestorePageSize {
+        index: usize,
+        matrix: [f32; 6],
+        width_pt: f32,
+        height_pt: f32,
+    },
 
     /// Removes a mark that an add put there.
     RemoveAnnotation {
@@ -185,6 +349,11 @@ pub enum UndoRecord {
     /// which would destroy any form widget or link this engine cannot model, a
     /// far worse trade than a highlight changing which of two overlapping marks
     /// draws on top.
+    /// Take a text mark, and everything written under its id, back off a page.
+    RemoveText {
+        page_index: usize,
+        id: i32,
+    },
     RestoreAnnotation {
         page_index: usize,
         annotation: Annotation,
@@ -244,10 +413,74 @@ impl Command {
                     quarter_turns: previous,
                 })
             }
+            Command::SetPageCrop { index, crop } => {
+                // Read before the change, or undo restores what the command
+                // just set rather than what was there.
+                let previous = doc.page_crop(*index)?;
+                doc.set_page_crop(*index, *crop)?;
+                Ok(UndoRecord::SetPageCrop { index: *index, crop: previous })
+            }
+            Command::SetPageSize { index, width_pt, height_pt } => {
+                let before = doc.page_crop(*index)?;
+                let (was_w, was_h) = (
+                    (before.right - before.left).abs().max(1.0),
+                    (before.bottom - before.top).abs().max(1.0),
+                );
+
+                // Fit, then centre. `min` of the two ratios rather than each
+                // axis on its own: filling the sheet exactly means stretching
+                // one axis, and a page of stretched type is worse than a page
+                // with a margin.
+                let scale = (*width_pt / was_w).min(*height_pt / was_h);
+                let (tx, ty) = (
+                    (*width_pt - was_w * scale) / 2.0,
+                    (*height_pt - was_h * scale) / 2.0,
+                );
+
+                doc.transform_page(*index, [scale, 0.0, 0.0, scale, tx, ty])?;
+                doc.set_page_media(*index, *width_pt, *height_pt)?;
+
+                // The exact inverse: undo the translate, then the scale.
+                let back = 1.0 / scale;
+                Ok(UndoRecord::RestorePageSize {
+                    index: *index,
+                    matrix: [back, 0.0, 0.0, back, -tx * back, -ty * back],
+                    width_pt: was_w,
+                    height_pt: was_h,
+                })
+            }
+            Command::SetTextRun { page_index, object, text, style } => {
+                // The write reports both the words and the appearance it
+                // replaced, so undo restores the whole thing — and neither can
+                // have come from a different state than the change.
+                let (previous, appearance) =
+                    doc.set_text_run_styled(*page_index, *object, text, style)?;
+                Ok(UndoRecord::SetTextRun {
+                    page_index: *page_index,
+                    object: *object,
+                    text: previous,
+                    style: appearance,
+                })
+            }
             Command::AddAnnotation {
                 page_index,
                 annotation,
             } => {
+                // Text is not an annotation. It is written as page content —
+                // real text objects, which is the whole reason for writing it
+                // rather than drawing it — and it is found again by the id
+                // tagged onto every object, not by a position in the page's
+                // annotation list.
+                //
+                // Recording `RemoveAnnotation` for it removed whatever
+                // annotation happened to sit at that index, or nothing at all,
+                // and left the words on the page. Added text simply did not
+                // undo.
+                if let Annotation::Text { id, .. } = annotation {
+                    doc.add_annotation(*page_index, annotation)?;
+                    return Ok(UndoRecord::RemoveText { page_index: *page_index, id: *id });
+                }
+
                 // The index PDFium actually gave it, so undo removes this mark and
                 // not whichever one happens to be last by then.
                 let index = doc.add_annotation(*page_index, annotation)?;
@@ -262,6 +495,46 @@ impl Command {
                     page_index: *page_index,
                     annotation,
                 })
+            }
+            Command::AddTextLayer { page_index, words } => {
+                doc.add_text_layer(*page_index, words)?;
+                // The whole layer shares one id, so undoing it is one call.
+                Ok(UndoRecord::RemoveText {
+                    page_index: *page_index,
+                    id: crate::document::TEXT_LAYER_ID,
+                })
+            }
+            Command::Redact { page_index, area, fill, allow_incomplete, outlined_fonts } => {
+                // Copied **before** the removal, because afterwards there is
+                // nothing left to copy — the same reason `delete_page` takes its
+                // copy first.
+                let page = doc.snapshot_page(*page_index)?;
+                // Every candidate's glyphs merged into one catalogue: the
+                // shape distance decides which face a given letter matches,
+                // not the order candidates were given in.
+                let catalogue = (!outlined_fonts.is_empty()).then(|| {
+                    let mut catalogue = crate::document::glyphs::Catalogue::default();
+                    for font in outlined_fonts {
+                        catalogue.extend_from_font_common(font);
+                    }
+                    catalogue
+                });
+                doc.redact(
+                    &crate::document::Redaction {
+                        page_index: *page_index,
+                        area: *area,
+                        fill: *fill,
+                        require_complete: !*allow_incomplete,
+                    },
+                    catalogue.as_ref(),
+                )?;
+                Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
+            }
+            Command::ReplacePage { index, pdf } => {
+                // Copied first, so undo has the page this is about to displace.
+                let page = doc.snapshot_page(*index)?;
+                doc.replace_page(*index, pdf)?;
+                Ok(UndoRecord::RestoreRedactedPage { index: *index, page })
             }
             Command::RemoveText { page_index, id } => {
                 // Read what is there before taking it out, so undo can put the
@@ -288,6 +561,11 @@ impl Command {
             Command::InsertBlankPage { at, .. } => format!("Insert page {}", at + 1),
             Command::ImportPages { at, .. } => format!("Import pages at {}", at + 1),
             Command::SetPageRotation { index, .. } => format!("Rotate page {}", index + 1),
+            Command::SetPageCrop { index, .. } => format!("Crop page {}", index + 1),
+            Command::SetTextRun { page_index, .. } => {
+                format!("Edit text on page {}", page_index + 1)
+            }
+            Command::SetPageSize { index, .. } => format!("Resize page {}", index + 1),
             // Named by what the user drew, not by "annotation" — the label goes
             // straight onto an undo button, and "Undo add annotation" tells nobody
             // which of their marks is about to vanish.
@@ -301,6 +579,11 @@ impl Command {
             Command::RemoveText { page_index, .. } => {
                 format!("Erase text on page {}", page_index + 1)
             }
+            Command::AddTextLayer { page_index, words } => {
+                format!("Make page {} searchable ({} words)", page_index + 1, words.len())
+            }
+            Command::Redact { page_index, .. } => format!("Redact on page {}", page_index + 1),
+            Command::ReplacePage { index, .. } => format!("Restore page {}", index + 1),
         }
     }
 
@@ -317,12 +600,23 @@ impl Command {
             // An import renumbers every page after it, exactly as an insert does.
             | Command::ImportPages { .. } => Vec::new(),
             Command::SetPageRotation { index, .. } => vec![*index],
+            Command::SetPageCrop { index, .. } => vec![*index],
+            Command::SetTextRun { page_index, .. } => vec![*page_index],
+            Command::SetPageSize { index, .. } => vec![*index],
             // A mark changes one page and renumbers nothing, so the rest of the
             // cache survives — which matters, because marks are made far more
             // often than pages are moved.
             Command::AddAnnotation { page_index, .. }
             | Command::RemoveAnnotation { page_index, .. }
-            | Command::RemoveText { page_index, .. } => vec![*page_index],
+            | Command::RemoveText { page_index, .. }
+            // Invisible text changes no pixels, but the cache is not only for
+            // pixels: a raster kept from before the layer existed would hand
+            // back a page whose text and image disagree.
+            | Command::AddTextLayer { page_index, .. }
+            // Restoring the page replaces it, so the raster from before is
+            // wrong either way round.
+            | Command::Redact { page_index, .. } => vec![*page_index],
+            Command::ReplacePage { index, .. } => vec![*index],
         }
     }
 }
@@ -332,6 +626,9 @@ impl Annotation {
     pub fn describe(&self) -> &'static str {
         match self {
             Annotation::Highlight { .. } => "Highlight",
+            Annotation::Underline { .. } => "Underline",
+            Annotation::StrikeOut { .. } => "Strikeout",
+            Annotation::Squiggly { .. } => "Squiggly",
             Annotation::Ink { .. } => "Drawing",
             Annotation::Note { .. } => "Note",
             Annotation::Text { .. } => "Text",
@@ -345,6 +642,13 @@ impl UndoRecord {
     pub fn revert(self, doc: &mut dyn DocumentMut) -> Result<()> {
         match self {
             UndoRecord::RestorePage { at, page } => doc.insert_page(at, page),
+            UndoRecord::RestoreRedactedPage { index, page } => {
+                // Replace, not insert: the redacted page is still there. Delete
+                // first and the copy goes back at the same index, so nothing
+                // after it moves.
+                doc.delete_page(index)?;
+                doc.insert_page(index, page)
+            }
             UndoRecord::ReorderPages { order } => doc.reorder_pages(&order),
             UndoRecord::RemovePage { index } => doc.delete_page(index).map(|_| ()),
             // Backwards: removing a page shifts every index after it, so taking
@@ -360,9 +664,21 @@ impl UndoRecord {
                 index,
                 quarter_turns,
             } => doc.set_page_rotation(index, quarter_turns),
+            UndoRecord::SetPageCrop { index, crop } => doc.set_page_crop(index, crop),
+            UndoRecord::SetTextRun { page_index, object, text, style } => {
+                doc.set_text_run_styled(page_index, object, &text, &style).map(|_| ())
+            }
+            UndoRecord::RestorePageSize { index, matrix, width_pt, height_pt } => {
+                // The sheet first, then the content: transforming into a page
+                // that is still the new size would clip against the wrong
+                // boundary on the way back.
+                doc.set_page_media(index, width_pt, height_pt)?;
+                doc.transform_page(index, matrix)
+            }
             UndoRecord::RemoveAnnotation { page_index, index } => {
                 doc.remove_annotation(page_index, index)
             }
+            UndoRecord::RemoveText { page_index, id } => doc.remove_text(page_index, id),
             UndoRecord::RestoreAnnotation {
                 page_index,
                 annotation,
@@ -448,6 +764,83 @@ mod tests {
     }
 
     #[test]
+    /// **The default a caller gets by not knowing about the field.**
+    ///
+    /// This is why the flag is `allowIncomplete` and not `requireComplete`.
+    /// Serde fills an absent field with `Default`, which for a bool is `false` —
+    /// so the safe answer has to be the one `false` means. Named the other way
+    /// round, a platform that had never heard of the field would silently ship
+    /// incomplete redactions, and nothing would say so.
+    #[test]
+    fn a_caller_that_says_nothing_gets_the_strict_redaction() {
+        let decoded: Command = serde_json::from_str(
+            r#"{"op":"redact","pageIndex":0,"area":{"left":0.0,"top":0.0,"right":1.0,"bottom":1.0}}"#,
+        )
+        .expect("decode");
+        let Command::Redact { allow_incomplete, fill, .. } = decoded else {
+            panic!("wrong variant")
+        };
+        assert!(!allow_incomplete, "silence was read as permission");
+        assert_eq!(
+            fill,
+            Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+            "a redaction with no mark asked for should still be marked"
+        );
+    }
+
+    /// And a caller that means it can still say so, both ways.
+    #[test]
+    fn a_caller_can_ask_for_an_unmarked_or_partial_redaction() {
+        let decoded: Command = serde_json::from_str(
+            r#"{"op":"redact","pageIndex":0,"area":{"left":0.0,"top":0.0,"right":1.0,"bottom":1.0},"fill":null,"allowIncomplete":true}"#,
+        )
+        .expect("decode");
+        let Command::Redact { allow_incomplete, fill, .. } = decoded else {
+            panic!("wrong variant")
+        };
+        assert!(allow_incomplete);
+        assert_eq!(fill, None);
+    }
+
+    /// A caller with a candidate face — or several — can send them. Plain
+    /// byte arrays in the wire format, the same as `ReplacePage`'s `pdf`
+    /// field: `#[serde(with = "font_bytes_list")]` passes a `Vec<Vec<u8>>`
+    /// straight through rather than encoding it as text.
+    #[test]
+    fn a_caller_can_send_more_than_one_candidate_face() {
+        let decoded: Command = serde_json::from_str(
+            r#"{"op":"redact","pageIndex":0,"area":{"left":0.0,"top":0.0,"right":1.0,"bottom":1.0},"outlinedFonts":[[1,2,3],[4,5]]}"#,
+        )
+        .expect("decode");
+        let Command::Redact { outlined_fonts, .. } = decoded else { panic!("wrong variant") };
+        assert_eq!(outlined_fonts, vec![vec![1, 2, 3], vec![4, 5]]);
+    }
+
+    /// And the overwhelming common case — no font at all — is what absence
+    /// decodes to, not an error.
+    #[test]
+    fn no_outlined_fonts_field_at_all_decodes_to_an_empty_list() {
+        let decoded: Command = serde_json::from_str(
+            r#"{"op":"redact","pageIndex":0,"area":{"left":0.0,"top":0.0,"right":1.0,"bottom":1.0}}"#,
+        )
+        .expect("decode");
+        let Command::Redact { outlined_fonts, .. } = decoded else { panic!("wrong variant") };
+        assert!(outlined_fonts.is_empty());
+    }
+
+    #[test]
+    fn a_redaction_names_its_page_for_the_undo_button() {
+        let command = Command::Redact {
+            page_index: 4,
+            area: Rect { left: 0.0, top: 0.0, right: 1.0, bottom: 1.0 },
+            fill: None,
+            allow_incomplete: false,
+            outlined_fonts: Vec::new(),
+        };
+        assert_eq!("Redact on page 5", command.description());
+        assert_eq!(vec![4], command.affected_pages());
+    }
+
     fn descriptions_count_pages_from_one_because_readers_do() {
         assert_eq!(
             "Delete page 5",
@@ -545,6 +938,16 @@ mod tests {
                 Command::RemoveAnnotation {
                     page_index: 3,
                     index: 7,
+                },
+            ),
+            (
+                r#"{"op":"redact","pageIndex":2,"area":{"left":10.0,"top":20.0,"right":90.0,"bottom":34.0}}"#,
+                Command::Redact {
+                    page_index: 2,
+                    area: Rect { left: 10.0, top: 20.0, right: 90.0, bottom: 34.0 },
+                    fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
+                    allow_incomplete: false,
+                    outlined_fonts: Vec::new(),
                 },
             ),
         ];

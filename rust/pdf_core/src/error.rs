@@ -45,12 +45,36 @@ pub enum PdfError {
     #[error("{0}")]
     InvalidArgument(String),
 
+    /// A redaction was asked to clear a rectangle it cannot fully clear.
+    ///
+    /// Distinct from [`PdfError::Unsupported`] because the caller's answer is
+    /// different: this one can be overridden by asking for an incomplete
+    /// redaction knowingly, and `Unsupported` — an outlined page, a scan —
+    /// cannot, since forcing it would remove nothing at all while drawing a
+    /// mark that says otherwise.
+    #[error("this area cannot be fully cleared: {0}")]
+    IncompleteRedaction(String),
+
     /// Raised by `catch_unwind` at the JNI boundary.
     #[error("internal error: {0}")]
     Panic(String),
 
     #[error("{0} is not implemented yet")]
     Unsupported(&'static str),
+
+    /// Something inside the engine went wrong in a way the caller did not cause
+    /// and cannot fix — no randomness from the operating system, a key of the
+    /// wrong length reaching a cipher.
+    #[error("{0}")]
+    Internal(String),
+
+    /// The caller asked for the work to stop, and it did.
+    ///
+    /// Its own variant rather than a generic failure because it is not one: no
+    /// one needs to be told that what they cancelled did not finish, and an
+    /// error dialog saying so would be the program arguing with them.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 impl PdfError {

@@ -1096,3 +1096,92 @@ pub extern "C" fn pagify_on_trim_memory(level: i32) {
         registry::trim_caches();
     }
 }
+
+// ---------------------------------------------------------------- contacts --
+//
+// The vCard writer and reader live in `crate::contacts` and were built and
+// tested against the JNI side first. These three are the C ABI over them, so
+// iOS does not write a second serialiser: the rules that decide whether a vCard
+// imports anywhere — comma escaping, folding at 75 octets, CRLF line endings —
+// are exactly the kind that go subtly wrong when written twice.
+//
+// Adapted from the Android branch's originals to this file's conventions rather
+// than transplanted verbatim. The originals wrapped their own `catch_unwind` and
+// returned a bare null on bad input; `guard` does the same panic containment and
+// also records why, which is what this header promises: "NULL means failure; the
+// reason is on pagify_last_error_message()."
+
+/// Write one contact as a vCard 3.0, stamped `exported_at` as its `REV`.
+///
+/// `card_json` is a `BusinessCard` as JSON; `exported_at` is an RFC 3339
+/// timestamp in UTC. The clock belongs to the platform — it knows the time zone
+/// and this crate does not.
+///
+/// # Safety
+/// Both arguments must be null or valid NUL-terminated UTF-8. The result must be
+/// freed with [`pagify_string_free`].
+#[no_mangle]
+pub unsafe extern "C" fn pagify_vcard(
+    card_json: *const c_char,
+    exported_at: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let json = unsafe { required_str(card_json, "card_json") }?;
+        let stamp = unsafe { required_str(exported_at, "exported_at") }?;
+        let card: crate::contacts::BusinessCard = serde_json::from_str(json)
+            .map_err(|e| PdfError::InvalidArgument(format!("card_json is not a card: {e}")))?;
+        owned_string(crate::contacts::to_vcard(&card, stamp))
+    })
+}
+
+/// The same for several contacts, as one file.
+///
+/// `cards_json` is a JSON array of `BusinessCard`. Every card is stamped with the
+/// same `exported_at`, which is what a group export needs: everyone sent together
+/// left together.
+///
+/// # Safety
+/// As [`pagify_vcard`].
+#[no_mangle]
+pub unsafe extern "C" fn pagify_vcards(
+    cards_json: *const c_char,
+    exported_at: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let json = unsafe { required_str(cards_json, "cards_json") }?;
+        let stamp = unsafe { required_str(exported_at, "exported_at") }?;
+        let cards: Vec<crate::contacts::BusinessCard> = serde_json::from_str(json)
+            .map_err(|e| PdfError::InvalidArgument(format!("cards_json is not a list: {e}")))?;
+        owned_string(crate::contacts::to_vcards(&cards, stamp))
+    })
+}
+
+/// Read a vCard into a `BusinessCard`, as JSON.
+///
+/// This is the QR path: a card carrying a vCard QR needs no detection, no
+/// rectification and no recognition, so every field comes back at full
+/// confidence.
+///
+/// **Null is an ordinary answer here, not a failure, and it deliberately leaves
+/// `pagify_last_error_message()` empty.** Most QR codes on business cards hold a
+/// web address rather than a contact, and the caller has to tell "this was not a
+/// contact" from "something went wrong" so it can fall through to reading the
+/// card by eye instead of reporting an error nobody can act on. A null
+/// *argument* is a different thing and does record a reason.
+///
+/// # Safety
+/// `text` must be null or valid NUL-terminated UTF-8. The result must be freed
+/// with [`pagify_string_free`].
+#[no_mangle]
+pub unsafe extern "C" fn pagify_vcard_parse(text: *const c_char) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let text = unsafe { required_str(text, "text") }?;
+        let Some(card) = crate::contacts::from_vcard(text) else {
+            // Not a vCard. An answer, not an error.
+            return Ok(std::ptr::null_mut());
+        };
+        let json = serde_json::to_string(&card)
+            .map_err(|e| PdfError::Pdfium(format!("could not serialise the card: {e}")))?;
+        owned_string(json)
+    })
+}

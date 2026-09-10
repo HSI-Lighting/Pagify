@@ -1120,3 +1120,91 @@ fn pages_import_where_they_were_asked_for_and_undo_takes_them_out() {
         "redo did not put the imported pages back",
     );
 }
+
+/// The other three text-markup subtypes, through a save and back.
+///
+/// They are the same PDF construct as a highlight — quadrilaterals over the
+/// words covered — and differ only in subtype. That makes the interesting
+/// question not "does it round-trip" but **"does it come back as itself"**: a
+/// single wrong constant in the read path turns every underline in a document
+/// into a highlight, silently, and only on reopening.
+#[test]
+fn each_text_markup_subtype_comes_back_as_itself() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let placed = Rect { left: 20.0, top: 30.0, right: 180.0, bottom: 44.0 };
+    let ink = Color { r: 220, g: 40, b: 40, a: 255 };
+
+    let cases: Vec<(&str, Annotation)> = vec![
+        ("underline", Annotation::Underline { rects: vec![placed], color: ink }),
+        ("strikeout", Annotation::StrikeOut { rects: vec![placed], color: ink }),
+        ("squiggly", Annotation::Squiggly { rects: vec![placed], color: ink }),
+    ];
+
+    for (name, annotation) in cases {
+        let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+        doc.as_document_mut().expect("mutable").add_annotation(1, &annotation).expect("add");
+
+        let reopened = save_and_reopen(&pdfium, &mut doc);
+        let marks = reopened.annotations(1).expect("read back");
+        assert_eq!(1, marks.len(), "{name}: exactly the one mark that was written");
+
+        let rects = match (&marks[0].annotation, name) {
+            (Annotation::Underline { rects, .. }, "underline") => rects,
+            (Annotation::StrikeOut { rects, .. }, "strikeout") => rects,
+            (Annotation::Squiggly { rects, .. }, "squiggly") => rects,
+            (other, _) => panic!("{name} came back as {}", other.describe()),
+        };
+
+        assert_eq!(1, rects.len(), "{name}: one rect");
+        let r = rects[0];
+        // Within a point: the round trip goes through f32 PDF coordinates.
+        assert!((r.left - placed.left).abs() < 1.0, "{name}: left was {}", r.left);
+        assert!((r.top - placed.top).abs() < 1.0, "{name}: top was {}", r.top);
+        assert!((r.right - placed.right).abs() < 1.0, "{name}: right was {}", r.right);
+        assert!((r.bottom - placed.bottom).abs() < 1.0, "{name}: bottom was {}", r.bottom);
+    }
+}
+
+/// One selection spanning three lines is **one** mark, so taking it back is one
+/// action rather than three — the same reason `Highlight` holds a list.
+#[test]
+fn a_markup_over_three_lines_is_one_annotation() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let lines: Vec<Rect> = (0..3)
+        .map(|i| Rect {
+            left: 20.0,
+            top: 30.0 + i as f32 * 16.0,
+            right: 180.0,
+            bottom: 44.0 + i as f32 * 16.0,
+        })
+        .collect();
+
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+    doc.as_document_mut()
+        .expect("mutable")
+        .add_annotation(
+            1,
+            &Annotation::StrikeOut {
+                rects: lines.clone(),
+                color: Color { r: 0, g: 0, b: 0, a: 255 },
+            },
+        )
+        .expect("add");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    let marks = reopened.annotations(1).expect("read back");
+    assert_eq!(1, marks.len(), "three lines became {} marks", marks.len());
+
+    match &marks[0].annotation {
+        Annotation::StrikeOut { rects, .. } => assert_eq!(3, rects.len()),
+        other => panic!("came back as {}", other.describe()),
+    }
+}

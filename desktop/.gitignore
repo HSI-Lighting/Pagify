@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+.DS_Store
+
+# Fetched, not vendored: ~30 MB of binaries reproducible with
+# `tools/fetch_pdfium.sh`, pinned to chromium/7881.
+/third_party/pdfium

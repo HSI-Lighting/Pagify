@@ -57,12 +57,73 @@ tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "
 rustybuzz = "0.20"
 ttf-parser = "0.25"
 unicode-bidi = "0.3"
+
+# Recognition. Behind a feature so a phone build can decline it, and **on by
+# default** so the desktop build — the one anybody runs `cargo test` in — always
+# type-checks the engine. A default-off feature around real code is how that
+# code stops compiling without anyone noticing; the crate already refuses to put
+# `editing` behind a flag for the same reason. Mobile turns it off explicitly
+# with `--no-default-features` when it wants the smaller binary.
+#
+# `rten` is pure Rust, which is what makes this defensible at all: no ONNX
+# Runtime, no C++ toolchain, no per-platform prebuilt to ship and sign. The M0
+# spike measured it at ~950 ms and 482 MB peak for a 300 dpi page, which is why
+# `tiling` exists and is not optional on a phone.
+ocrs = { version = "0.10.4", optional = true }
+rten = { version = "0.21", optional = true }
+rten-tensor = { version = "0.21", optional = true }
+rten-imageproc = { version = "0.21", optional = true }
+
+
+
+# NFKC for the *search* index only. Pure Rust and small, which is the same test
+# every other dependency here passed: a C++ graphics or ICU dependency would tie
+# extraction to a platform, and this does not.
+unicode-normalization = "0.1"
 subsetter = "0.2.2"
+# Content streams are FlateDecode'd, and `pdf::content` has to read one to take
+# locked text out of it — see `crate::pdf`. Also how the redaction acceptance
+# test answers "are the words still in the file?" without asking PDFium, which
+# is the library that wrote it. Pure Rust (miniz_oxide), so it adds no C
+# dependency to any build.
+flate2 = "1"
+# Encryption — Protect phase 4. Platform-neutral and host-testable; none of it
+# touches a PDF.
+#
+# `sm4` is the block cipher; GCM is **composed over it** with `aes-gcm`'s generic
+# AEAD machinery rather than hand-written, because a hand-rolled GCM produces
+# ciphertext that looks perfectly convincing and is not secure. `argon2` derives
+# the key-encryption key; `zeroize` wipes it. `rand_core` supplies the salt and
+# the data key.
+sm4 = "0.5"
+aes-gcm = "0.10"
+# PDF's own encryption (ISO 32000-2 §7.6.4.3.4) is AES-256 in CBC with a
+# SHA-2 key derivation — neither the GCM above nor Argon2 below can stand in
+# for it, because the bytes have to be exactly what other readers expect.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+sha2 = "0.10"
+# A PDF signature is a CMS SignedData blob over a byte range of the file
+# itself — see `crate::sign`. None of this is optional: a signature that is
+# not one is worse than none at all.
+rsa = { version = "0.9", features = ["sha2"] }
+cms = { version = "0.2", features = ["builder"] }
+der = { version = "0.7", features = ["oid"] }
+x509-cert = "0.2"
+const-oid = { version = "0.9", features = ["db"] }
+spki = "0.7"
+p12 = "0.6"
+argon2 = "0.5"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 # No `lopdf`. PDFium is the single writer: two independent object models writing
 # one file is a corruption class that is very hard to diagnose, and PDFium covers
 # the page tree, objects, text and save on its own. If lopdf ever comes back it is
 # for read-only structural analysis, and not before it has been fuzzed.
+
+[dev-dependencies]
+# Tests only — never in the shipped library.
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
@@ -109,3 +170,7 @@ strip = "none"
 # Check with `nm -g --defined-only libpdf_core.a | grep pagify` after any change
 # to this profile, rather than trusting that it still works.
 lto = false
+
+[features]
+default = ["ocr-engine"]
+ocr-engine = ["dep:ocrs", "dep:rten", "dep:rten-tensor", "dep:rten-imageproc"]
