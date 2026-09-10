@@ -20,7 +20,7 @@ members  = ["crates/pagify_shell", "crates/pagify_app"]
 # signature can survive an edit. See rust/vendor/README.md in the Pagify repo.
 # ---------------------------------------------------------------------------
 [patch.crates-io]
-pdfium-render = { path = "../workspace/Pagify/rust/vendor/pdfium-render" }
+pdfium-render = { path = "../rust/vendor/pdfium-render" }
 
 [workspace.package]
 edition = "2021"
@@ -29,8 +29,16 @@ version = "0.1.0"
 # Consumed, never forked — see the build plan §5.4. Anything Pagify needs that
 # these do not do belongs in `pagify_shell`, above them.
 [workspace.dependencies]
-pdf_core   = { path = "../workspace/Pagify/rust/pdf_core" }
-cad_kernel = { path = "../Documents/3D-factory/cad_kernel" }
+# Inside this repository, so a clone builds without anything beside it.
+pdf_core   = { path = "../rust/pdf_core" }
+# **Not** in this repository. Consumed, never forked — so it is expected as a
+# sibling checkout of HSI-Lighting/3D-factory:
+#
+#     git clone https://github.com/HSI-Lighting/Pagify.git
+#     git clone https://github.com/HSI-Lighting/3D-factory.git
+#
+# leaving the two side by side, which is what the path below assumes.
+cad_kernel = { path = "../../3D-factory/cad_kernel" }
 
 [profile.release]
 opt-level     = 3
