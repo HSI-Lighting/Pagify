@@ -16033,6 +16033,35 @@ mod lock_wiring_tests {
         );
     }
 
+    /// **`unsecure` then `save` leaves a file with no password on it.** Found
+    /// by audit: the default save appended to the encrypted file, and the
+    /// password the person had been told was off was still on.
+    #[test]
+    fn unsecure_then_save_writes_a_file_anyone_can_open() {
+        let out = std::env::temp_dir().join(format!("pagify-unsecure-{}.pdf", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        std::fs::copy(fixture("encrypted.pdf"), &out).expect("copy the fixture");
+
+        let mut app = PagifyApp::new(Some(out.to_str().expect("path")));
+        let path = app.awaiting_open().expect("it did not ask for a password");
+        app.answer_open_password(&path, "pagify");
+        assert!(app.doc.is_some(), "the fixture did not open");
+
+        app.submit("unsecure");
+        assert!(said(&app).contains("password is off"), "{}", said(&app));
+        app.submit("save");
+        assert!(said(&app).contains("saved"), "{}", said(&app));
+
+        let bytes = std::fs::read(&out).expect("read it back");
+        let _ = std::fs::remove_file(&out);
+        let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+        assert!(file.trailer().get(b"Encrypt").is_none(), "the saved file still carries /Encrypt");
+        pdf_core::registry::exclusive(|| {
+            pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes.clone(), None)
+        })
+        .expect("the saved file still wants a password");
+    }
+
     /// **Changing a password and saving in place really changes it.**
     ///
     /// Reported from use: set a new password, save, close, reopen — and the

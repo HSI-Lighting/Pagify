@@ -3443,8 +3443,10 @@ impl DocumentMut for PdfiumDocument {
     fn must_save_full_copy(&self) -> bool {
         // A password cannot be appended: an incremental save leaves the whole
         // original revision in the file, in plain sight, with the encrypted one
-        // after it.
-        self.redacted || self.security.is_some()
+        // after it. Nor can one be taken off by appending: the revision added
+        // to an encrypted file is encrypted like the rest, so the password a
+        // person was told was off stayed on. Found by audit.
+        self.redacted || self.security.is_some() || self.remove_password
     }
 
     fn transform_page(&mut self, index: usize, matrix: [f32; 6]) -> Result<()> {
@@ -3883,6 +3885,15 @@ impl DocumentMut for PdfiumDocument {
             return Err(PdfError::IncompleteRedaction(
                 "a document with a password must be saved as a full copy — saving \
                  incrementally leaves the whole unsecured original in the file"
+                    .into(),
+            ));
+        }
+        // And the reverse: a revision appended to an encrypted file is
+        // encrypted with it, so the password would still be on.
+        if self.remove_password {
+            return Err(PdfError::IncompleteRedaction(
+                "a document whose password is coming off must be saved as a full copy — \
+                 saving incrementally leaves it on"
                     .into(),
             ));
         }
@@ -6194,7 +6205,11 @@ fn font_to_unicode(
     /// user password and loses that distinction, which is said here rather than
     /// discovered.
     fn rearm_security(&mut self, was_secured: bool, plus: bool, permissions: Option<crate::pdf::encrypt::Permissions>) {
-        if !was_secured {
+        // A password on its way off stays off. Re-arming it here put it back
+        // on any document that was edited after `unsecure` — the edit read
+        // the plaintext, and the read's own bookkeeping restored what the
+        // person had just removed. Found by audit.
+        if !was_secured || self.remove_password {
             return;
         }
         let Some(user) = self.opened_with.clone() else { return };

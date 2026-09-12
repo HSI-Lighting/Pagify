@@ -154,6 +154,69 @@ fn the_password_can_be_taken_back_off() {
     );
 }
 
+/// **The password comes off the file, not only off the document in hand.**
+/// Found by audit: `unsecure` on a document opened with a password marked it
+/// to come off, and the default save — incremental — appended a revision to
+/// the encrypted file, encrypted like the rest. The password stayed on.
+#[test]
+fn unsecure_reaches_the_file_by_the_default_save() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    doc.secure_document(PASSWORD, None, Permissions::all()).expect("secure");
+    let secured = saved(&mut doc);
+    let password = std::str::from_utf8(PASSWORD).expect("utf-8");
+    let mut reopened = PdfiumDocument::open_bytes(secured, Some(password)).expect("reopen");
+
+    reopened.unsecure_document().expect("unsecure");
+    assert!(reopened.must_save_full_copy(), "an incremental save would leave the password on");
+    let mut appended = Vec::new();
+    match reopened.save_incremental(&mut appended) {
+        Err(e) => assert!(e.to_string().contains("password"), "{e}"),
+        Ok(()) => panic!("an incremental save was allowed with the password coming off"),
+    }
+
+    let plain = saved(&mut reopened);
+    assert!(
+        PdfiumDocument::open_bytes(plain.clone(), None).is_ok(),
+        "the saved file still wants the password"
+    );
+    let file = pdf_core::pdf::File::parse(&plain).expect("parse");
+    assert!(file.trailer().get(b"Encrypt").is_none(), "the file still carries /Encrypt");
+}
+
+/// And an edit made after `unsecure` does not bring the password back.
+/// Found by audit: the byte-level edits read the document as plaintext and
+/// then re-armed the password they had read past — including one that had
+/// just been taken off.
+#[test]
+fn an_edit_after_unsecure_does_not_put_the_password_back() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    doc.secure_document(PASSWORD, None, Permissions::all()).expect("secure");
+    let secured = saved(&mut doc);
+    let password = std::str::from_utf8(PASSWORD).expect("utf-8");
+    let mut reopened = PdfiumDocument::open_bytes(secured, Some(password)).expect("reopen");
+    reopened.unsecure_document().expect("unsecure");
+
+    // An edit that rewrites the file's bytes, which is the path that re-armed.
+    let run = reopened
+        .text_runs(0)
+        .expect("runs")
+        .into_iter()
+        .find(|r| r.text.trim().chars().count() > 5)
+        .expect("a run with words in it");
+    reopened.try_set_run_in_stream(0, run.object, "Replaced").expect("edit");
+    assert!(!reopened.is_secured(), "the edit put the password back");
+
+    let plain = saved(&mut reopened);
+    let opened = PdfiumDocument::open_bytes(plain, None).expect("the saved file opens with no password");
+    assert!(text_of(&opened, 0).contains("Replaced"), "the edit did not survive");
+}
+
 /// Saving twice must not produce the same ciphertext — fresh salts and a fresh
 /// file key each time, or two saves of one document leak that they are the
 /// same.
