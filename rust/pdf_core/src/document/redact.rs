@@ -357,15 +357,47 @@ impl RedactionReport {
     /// are untouched. That is a drawing of a redaction.
     ///
     /// Distinct from a rectangle over blank space, which also removes nothing
-    /// and is perfectly honest. What separates them is whether an image is lying
-    /// under the area: if it is, the thing the mark covers is content that
-    /// survived.
+    /// and is perfectly honest. What separates them is whether something that
+    /// can hold words is lying under the area: an image the area is mostly
+    /// made of, **nested content this pass does not descend into, or type
+    /// drawn as curves**. Found by audit: the last two were left out, so a
+    /// card number drawn through a form XObject was "redacted" — a black mark
+    /// painted, the number still extractable from the saved file.
     pub fn would_only_draw_a_mark(&self) -> bool {
         self.characters == 0
             && self.objects == 0
-            && self.uncleared.iter().any(|u| {
-                matches!(u, Uncleared::Image { covers, .. } if *covers >= Self::MOSTLY_IMAGE)
+            && self.uncleared.iter().any(|u| match u {
+                Uncleared::Image { covers, .. } => *covers >= Self::MOSTLY_IMAGE,
+                Uncleared::Form { .. } | Uncleared::OutlinedText { .. } => true,
+                Uncleared::Path { .. } | Uncleared::Annotation { .. } => false,
             })
+    }
+
+    /// Why going ahead would only draw a mark — what is under the area that
+    /// this pass cannot take words out of. Empty when it would not.
+    pub fn what_survives_a_mark(&self) -> Vec<String> {
+        if !self.would_only_draw_a_mark() {
+            return Vec::new();
+        }
+        let mut how: Vec<String> = self
+            .uncleared
+            .iter()
+            .filter_map(|u| match u {
+                Uncleared::Image { covers, .. } if *covers >= Self::MOSTLY_IMAGE => {
+                    Some("the words are part of an image".to_string())
+                }
+                Uncleared::Form { object } => Some(format!(
+                    "the words are inside nested content (object {object}) this pass does not reach"
+                )),
+                Uncleared::OutlinedText { object } => {
+                    Some(format!("the words are drawn as curves (object {object})"))
+                }
+                _ => None,
+            })
+            .collect();
+        how.sort();
+        how.dedup();
+        how
     }
 
     /// Whether the area is actually clear.

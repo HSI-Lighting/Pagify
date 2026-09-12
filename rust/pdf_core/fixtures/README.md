@@ -181,6 +181,20 @@ move it in both places.
 
 Rebuild it with `tools/make_forms_fixture.py fixtures/forms.pdf`.
 
+## secret-in-form.pdf
+
+One 612 × 792 pt page: a heading and a telephone number drawn at page level,
+and **a payment card number drawn through a form XObject**.
+
+It is the security audit's probe. Text extraction finds the card number, so it
+can be searched for and a rectangle drawn over it — and the redaction pass,
+which does not descend into forms, removes nothing there. What the engine and
+the app *say* about that is what the fixture tests: refused by name, never
+"gone for good". The telephone number is the control — page-level, and
+redactable.
+
+Rebuild it with `tools/make_secret_in_form_fixture.py fixtures/secret-in-form.pdf`.
+
 ## covered.pdf
 
 One 612 × 792 pt page: a red picture, then a grey panel painted **over** it, then

@@ -298,6 +298,85 @@ fn a_refused_redaction_changes_nothing() {
     assert_eq!(before, after, "a refused redaction still changed the page");
 }
 
+/// **Words inside a form XObject are not reached, and the refusal says so.**
+///
+/// The audit's probe: a card number drawn through a form. Extraction finds it,
+/// so it can be searched for and a rectangle drawn over it — and the redaction
+/// pass, which does not descend into forms, removes nothing. That used to go
+/// through with `require_complete` off: a black mark painted, the number still
+/// in the saved file, and a report of success. Now the survey sees nested
+/// content under an area it took no characters out of, and refuses by name.
+#[test]
+fn words_inside_a_form_refuse_rather_than_being_painted_over() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-form.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let card = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .find(|f| f.text.contains("4111"))
+        .expect("the card number is found by extraction — that is the point");
+
+    // The survey says what is there.
+    let mut lenient = Redaction::new(0, card.area);
+    lenient.require_complete = false;
+    let report = doc.preview_redaction(&lenient, None).expect("survey");
+    assert_eq!(report.characters, 0, "no page-level characters are under the area");
+    assert!(
+        report.uncleared.iter().any(|u| matches!(u, Uncleared::Form { .. })),
+        "the form was not seen: {report:?}"
+    );
+    assert!(report.would_only_draw_a_mark(), "a mark over nothing removed was allowed");
+
+    // And going ahead — even with completeness not required — is refused.
+    match doc.redact(&lenient, None) {
+        Err(PdfError::IncompleteRedaction(why)) => {
+            assert!(why.contains("nested content"), "the reason is not named: {why}");
+            assert!(why.contains("remove nothing"), "{why}");
+        }
+        Err(other) => panic!("wrong error: {other}"),
+        Ok(report) => panic!("words inside a form reported a redaction: {report:?}"),
+    }
+
+    // The control: the number is still there, which is exactly why refusing
+    // was right.
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes, None).expect("reopen");
+    assert!(text_of(&reopened as &dyn Document, 0).contains("4111 1111 1111 1111"));
+}
+
+/// The page-level words on the same page are still redactable — the form's
+/// presence elsewhere on the page does not refuse them.
+#[test]
+fn page_level_words_beside_a_form_still_come_out() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-form.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let telephone = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .find(|f| f.text.contains("7946"))
+        .expect("the telephone number is found");
+    let report = doc.redact(&Redaction::new(0, telephone.area), None).expect("redact");
+    assert!(report.characters > 0, "{report:?}");
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes, None).expect("reopen");
+    let text = text_of(&reopened as &dyn Document, 0);
+    assert!(!text.contains("7946"), "the telephone number survived: {text}");
+    assert!(text.contains("4111"), "the control went missing: {text}");
+}
+
 // ------------------------------------------------------------- the reporting --
 
 #[test]

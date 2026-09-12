@@ -4162,11 +4162,26 @@ impl PagifyApp {
 
                 // Destroyed, not hidden: this is redaction, and there is no
                 // passcode to bring any of it back.
-                let mut done = 0usize;
-                let mut refused: Vec<String> = Vec::new();
+                //
+                // **"Gone for good" is only said of what is proven gone.** Each
+                // area is surveyed first, and anything the survey says would
+                // survive — nested content, an image, type drawn as curves —
+                // is reported against that item, not folded into a count of
+                // successes. Found by audit: a card number drawn through a
+                // form was reported "redacted — gone for good" while the
+                // number was still extractable from the saved file.
+                let mut gone = 0usize;
+                let mut partly: Vec<String> = Vec::new();
+                let mut left: Vec<String> = Vec::new();
                 let faces = self.outlined_font_bytes();
+                let borrowed: Vec<&[u8]> = faces.iter().map(Vec::as_slice).collect();
                 let Some(doc) = &self.doc else { return };
                 for item in &found {
+                    let survives: Vec<String> = doc
+                        .session
+                        .preview_redaction(item.page_index, item.area, &borrowed)
+                        .map(|report| report.blockers().iter().map(|b| b.describe()).collect())
+                        .unwrap_or_default();
                     // Through the command, so each one lands in the history and
                     // can be undone one at a time — the same as a redaction
                     // somebody drew by hand.
@@ -4176,13 +4191,17 @@ impl PagifyApp {
                         fill: Some(pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 }),
                         // These were found *by* their text, so there is text to
                         // clear; an image crossing the edge must not stop the
-                        // rest of the page being done.
+                        // rest of the page being done — it is reported instead.
+                        // The engine still refuses to paint over words it
+                        // removed none of, whatever this says.
                         allow_incomplete: true,
                         outlined_fonts: faces.clone(),
                     });
+                    let page = item.page_index + 1;
                     match outcome {
-                        Ok(_) => done += 1,
-                        Err(e) => refused.push(format!("p{}: {e}", item.page_index + 1)),
+                        Ok(_) if survives.is_empty() => gone += 1,
+                        Ok(_) => partly.push(format!("p{page} {}: {}", item.text, survives.join("; "))),
+                        Err(e) => left.push(format!("p{page} {}: {e}", item.text)),
                     }
                 }
                 if let Some(doc) = &mut self.doc {
@@ -4191,15 +4210,27 @@ impl PagifyApp {
                 self.text = None;
                 self.text_selection = None;
                 self.find_hits.clear();
-                self.say_info(if refused.is_empty() {
-                    format!("{done} redacted — gone for good. Save to write it out.")
+                if partly.is_empty() && left.is_empty() {
+                    self.say_info(format!("{gone} redacted — gone for good. Save to write it out."));
                 } else {
-                    format!(
-                        "{done} redacted; {} refused ({}). Save to write it out.",
-                        refused.len(),
-                        refused.join(", ")
-                    )
-                });
+                    let mut said = vec![format!("{gone} gone for good")];
+                    if !partly.is_empty() {
+                        said.push(format!(
+                            "{} NOT fully cleared — words removed, but something under the \
+                             area may still hold them ({})",
+                            partly.len(),
+                            partly.join(", ")
+                        ));
+                    }
+                    if !left.is_empty() {
+                        said.push(format!(
+                            "{} left untouched, still in the document ({})",
+                            left.len(),
+                            left.join(", ")
+                        ));
+                    }
+                    self.say_error(format!("{}. Save to write out what was removed.", said.join("; ")));
+                }
             }
             Verb::HiddenData { clean } => {
                 let Some(doc) = &self.doc else {
@@ -15780,6 +15811,42 @@ mod lock_wiring_tests {
             .map(pagify_shell::reader::Characters::text)
             .unwrap_or_default();
         assert_eq!(after, before, "a whiteout removed text it only covered");
+    }
+
+    /// **Automatic redaction never says "gone for good" of words it could not
+    /// reach.** Found by audit: a card number drawn through a form XObject was
+    /// reported redacted — mark painted, number still in the saved file.
+    #[test]
+    fn smartredact_says_what_it_could_not_reach_instead_of_claiming_it_gone() {
+        let mut app = app("secret-in-form.pdf");
+        app.submit("smartredact");
+        assert!(said(&app).contains("4111"), "the card number was not found: {}", said(&app));
+
+        app.submit("smartredact redact");
+        let told = said(&app);
+        assert!(!told.contains("gone for good. Save"), "it claimed everything was gone: {told}");
+        assert!(told.contains("left untouched"), "{told}");
+        assert!(told.contains("4111") && told.contains("nested content"), "{told}");
+        // The telephone number at page level did come out, and is counted.
+        assert!(told.contains("1 gone for good"), "{told}");
+
+        // And the file agrees: saved and reopened, the card number is still
+        // there and the telephone number is not.
+        let out = std::env::temp_dir().join(format!("pagify-smartredact-{}.pdf", std::process::id()));
+        app.submit(&format!("saveas {}", out.display()));
+        let text = pdf_core::registry::exclusive(|| {
+            use pdf_core::document::Document;
+            let doc = pdf_core::document::pdfium_doc::PdfiumDocument::open_path(
+                out.to_str().expect("path"),
+                None,
+            )
+            .expect("reopen");
+            let text = doc.page(0).expect("page").text().expect("text");
+            text
+        });
+        let _ = std::fs::remove_file(&out);
+        assert!(text.contains("4111 1111 1111 1111"), "the control went missing: {text}");
+        assert!(!text.contains("7946"), "the telephone number survived: {text}");
     }
 
     /// **Smart Redact reports before it acts, and says what it found.**

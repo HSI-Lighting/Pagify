@@ -8508,10 +8508,13 @@ impl PdfiumDocument {
         // whole-page equivalent is the `Scanned` refusal above; this is the same
         // situation confined to one region, and it earns the same answer.
         if report.would_only_draw_a_mark() {
-            return Err(PdfError::Unsupported(
-                "nothing in this area is text — the words are part of an image, so a \
-                 redaction here would draw a mark and remove nothing",
-            ));
+            // Named for what is actually there. "Part of an image" was the only
+            // wording, and it was wrong for the form and outlined cases —
+            // which now refuse too. Found by audit.
+            return Err(PdfError::IncompleteRedaction(format!(
+                "a redaction here would draw a mark and remove nothing: {}",
+                report.what_survives_a_mark().join("; ")
+            )));
         }
 
         if request.require_complete {
