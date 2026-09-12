@@ -195,6 +195,19 @@ redactable.
 
 Rebuild it with `tools/make_secret_in_form_fixture.py fixtures/secret-in-form.pdf`.
 
+## hidden-things.pdf
+
+One page carrying one of everything `hiddendata` looks for: an `/Info`
+dictionary, an XMP packet, an attachment whose text is `ATTACHED-PAYLOAD`,
+JavaScript in every place it can hang (the name tree, `/OpenAction`, a page's
+`/AA`, a link's `/A`), an object nothing reaches, and a second revision.
+
+It is the security audit's probe for `hiddendata clean`, which reported the
+attachment and the script removed while both were still in the file. The
+tests clean it, save, and read the bytes back the way anyone else would.
+
+Rebuild it with `tools/make_hidden_things_fixture.py fixtures/hidden-things.pdf`.
+
 ## covered.pdf
 
 One 612 × 792 pt page: a red picture, then a grey panel painted **over** it, then

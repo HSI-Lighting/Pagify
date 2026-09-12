@@ -109,6 +109,68 @@ impl Hidden {
     }
 }
 
+impl Hidden {
+    /// What was here and is not in `remaining`: the part a clean removed.
+    pub fn without(&self, remaining: &Hidden) -> Hidden {
+        Hidden {
+            revisions: (self.revisions + 1).saturating_sub(remaining.revisions).max(1),
+            information: self
+                .information
+                .iter()
+                .filter(|k| !remaining.information.contains(k))
+                .cloned()
+                .collect(),
+            xmp: self.xmp && !remaining.xmp,
+            embedded_files: self.embedded_files.saturating_sub(remaining.embedded_files),
+            javascript: self.javascript && !remaining.javascript,
+            unreachable: self.unreachable.saturating_sub(remaining.unreachable),
+            keeps_lock: self.keeps_lock,
+        }
+    }
+}
+
+/// What a clean did: what the file carried, and what it still carries.
+///
+/// **Reported from a second survey of the cleaned bytes, not from the first
+/// one.** The message used to print what the survey *found* as what the clean
+/// *removed* — and for attachments and JavaScript, which the clean did not
+/// touch, that was a claim with nothing behind it. Found by audit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sanitised {
+    /// What the file carried before.
+    pub before: Hidden,
+    /// What a survey of the cleaned bytes still finds.
+    pub after: Hidden,
+}
+
+impl Sanitised {
+    /// What actually came out.
+    pub fn removed(&self) -> Hidden {
+        self.before.without(&self.after)
+    }
+
+    /// Whether everything that was found came out.
+    pub fn is_clean(&self) -> bool {
+        self.after.is_empty()
+    }
+
+    /// In words: what came out, and — first, because it matters more — what
+    /// did not.
+    pub fn describe(&self) -> String {
+        let removed = self.removed();
+        match (removed.is_empty(), self.after.is_empty()) {
+            (true, true) => "there was nothing hidden to remove".into(),
+            (false, true) => format!("removed: {}", removed.describe()),
+            (true, false) => format!("NOTHING REMOVED — still there: {}", self.after.describe()),
+            (false, false) => format!(
+                "STILL THERE: {}. Removed: {}",
+                self.after.describe(),
+                removed.describe()
+            ),
+        }
+    }
+}
+
 /// Read what a file carries beyond its pages. Changes nothing.
 pub fn survey(file: &File<'_>, bytes: &[u8]) -> Result<Hidden> {
     let mut found = Hidden {
@@ -145,37 +207,251 @@ pub fn survey(file: &File<'_>, bytes: &[u8]) -> Result<Hidden> {
             found.embedded_files = all.saturating_sub(usize::from(lock));
             found.keeps_lock = lock;
         }
-        // An action on opening is JavaScript's other home.
-        if root.get(b"OpenAction").is_some() {
-            found.javascript = found.javascript || open_action_runs_script(file, root);
-        }
     }
 
     let reachable = reachable_from_root(file);
     found.unreachable = file.numbers().filter(|n| !reachable.contains(n)).count();
+
+    // **Script is wherever an action can run it**, not only in the name tree:
+    // on opening, on a page being shown, on a link being followed, on a form
+    // field changing. Every reachable object is searched for an action that
+    // runs script, so what this reports is what `strip` takes out — the two
+    // are the same rule, and a survey that looked in fewer places than the
+    // clean would report a file as clean that was not.
+    found.javascript = found.javascript
+        || reachable
+            .iter()
+            .filter_map(|n| file.object(*n).ok())
+            .any(|object| holds_script(file, &object, 0));
     Ok(found)
+}
+
+/// Whether an action runs script: `/S /JavaScript`, or a `/JS` entry, which
+/// only a JavaScript action carries.
+fn runs_script(file: &File<'_>, action: &Object) -> bool {
+    let Ok(action) = file.resolve(action) else { return false };
+    let Some(dict) = action.as_dict() else { return false };
+    dict.get(b"S").and_then(Object::as_name) == Some(&b"JavaScript"[..]) || dict.get(b"JS").is_some()
+}
+
+/// Whether anything in an object — at any depth, references not followed —
+/// is an action that runs script.
+fn holds_script(file: &File<'_>, object: &Object, depth: usize) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    match object {
+        Object::Dict(dict) | Object::Stream(dict, _) => {
+            runs_script(file, object)
+                || dict.0.iter().any(|(_, value)| holds_script(file, value, depth + 1))
+        }
+        Object::Array(items) => items.iter().any(|item| holds_script(file, item, depth + 1)),
+        _ => false,
+    }
+}
+
+/// The keys an action hangs from. `/AA` is a dictionary of them, one per
+/// trigger; the others hold one action, or an array of them.
+const ACTION_KEYS: [&[u8]; 3] = [b"A", b"OpenAction", b"Next"];
+
+/// The object with every action that runs script taken out of it, and
+/// whether anything was.
+///
+/// References are not followed: an object reached only through a removed
+/// action becomes unreachable, and the clean leaves it out for that reason.
+fn scrubbed(file: &File<'_>, object: &Object, depth: usize) -> (Object, bool) {
+    if depth > 32 {
+        return (object.clone(), false);
+    }
+    match object {
+        Object::Dict(dict) => {
+            let (dict, changed) = scrubbed_dict(file, dict, depth);
+            (Object::Dict(dict), changed)
+        }
+        // A stream's bytes are never touched; its dictionary is a dictionary.
+        Object::Stream(dict, data) => {
+            let (dict, changed) = scrubbed_dict(file, dict, depth);
+            (Object::Stream(dict, data.clone()), changed)
+        }
+        Object::Array(items) => {
+            let mut changed = false;
+            let out = items
+                .iter()
+                .map(|item| {
+                    let (item, c) = scrubbed(file, item, depth + 1);
+                    changed |= c;
+                    item
+                })
+                .collect();
+            (Object::Array(out), changed)
+        }
+        other => (other.clone(), false),
+    }
+}
+
+fn scrubbed_dict(file: &File<'_>, dict: &Dict, depth: usize) -> (Dict, bool) {
+    let mut out = Vec::with_capacity(dict.0.len());
+    let mut changed = false;
+    for (key, value) in &dict.0 {
+        if key == b"AA" {
+            // One action per trigger: keep the triggers whose action is not
+            // script, drop the entry when none are.
+            let Ok(Object::Dict(triggers)) = file.resolve(value) else {
+                out.push((key.clone(), value.clone()));
+                continue;
+            };
+            let kept: Vec<(Vec<u8>, Object)> = triggers
+                .0
+                .iter()
+                .filter(|(_, action)| !runs_script(file, action))
+                .cloned()
+                .collect();
+            if kept.len() != triggers.0.len() {
+                changed = true;
+                if !kept.is_empty() {
+                    out.push((key.clone(), Object::Dict(Dict(kept))));
+                }
+                continue;
+            }
+        } else if ACTION_KEYS.contains(&key.as_slice()) {
+            match file.resolve(value) {
+                Ok(Object::Array(actions)) => {
+                    let kept: Vec<Object> =
+                        actions.iter().filter(|a| !runs_script(file, a)).cloned().collect();
+                    if kept.len() != actions.len() {
+                        changed = true;
+                        if !kept.is_empty() {
+                            out.push((key.clone(), Object::Array(kept)));
+                        }
+                        continue;
+                    }
+                }
+                _ if runs_script(file, value) => {
+                    changed = true;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        let (value, c) = scrubbed(file, value, depth + 1);
+        changed |= c;
+        out.push((key.clone(), value));
+    }
+    (Dict(out), changed)
+}
+
+/// The `/Names` dictionary without its script and without any attachment but
+/// the lock's; `None` when nothing in it is left.
+fn names_kept(file: &File<'_>, names: &Dict) -> Option<Dict> {
+    let mut out = Vec::new();
+    for (key, value) in &names.0 {
+        match key.as_slice() {
+            b"JavaScript" => continue,
+            b"EmbeddedFiles" => {
+                let Ok(tree) = file.resolve(value) else { continue };
+                let mut lock = Vec::new();
+                lock_entries(file, &tree, &mut lock, 0);
+                if lock.is_empty() {
+                    continue;
+                }
+                // A flat tree holding only the lock's entry — the shape every
+                // reader accepts, and the whole of what is kept.
+                let mut leaf = Dict(Vec::new());
+                leaf.set(b"Names", Object::Array(lock));
+                out.push((key.clone(), Object::Dict(leaf)));
+            }
+            _ => out.push((key.clone(), value.clone())),
+        }
+    }
+    (!out.is_empty()).then_some(Dict(out))
+}
+
+/// The `[name value]` pairs in an attachment tree that are the lock's own.
+fn lock_entries(file: &File<'_>, node: &Object, out: &mut Vec<Object>, depth: usize) {
+    if depth > 32 {
+        return;
+    }
+    let Some(dict) = node.as_dict() else { return };
+    if let Some(Object::Array(items)) = dict.get(b"Names").and_then(|n| file.resolve(n).ok()) {
+        for pair in items.chunks(2) {
+            let (Some(name), Some(value)) = (pair.first(), pair.get(1)) else { continue };
+            let spelled = match name {
+                Object::LiteralString(raw) | Object::HexString(raw) => {
+                    String::from_utf8_lossy(raw).into_owned()
+                }
+                _ => String::new(),
+            };
+            if spelled.contains(KEEP) {
+                out.push(name.clone());
+                out.push(value.clone());
+            }
+        }
+    }
+    if let Some(Object::Array(kids)) = dict.get(b"Kids").and_then(|k| file.resolve(k).ok()) {
+        for kid in kids {
+            if let Ok(kid) = file.resolve(&kid) {
+                lock_entries(file, &kid, out, depth + 1);
+            }
+        }
+    }
 }
 
 /// A copy with the hidden data taken out.
 ///
 /// Everything on the pages is untouched — this rewrites the file's *structure*,
-/// never a content stream. Objects nothing reaches are left out, `/Info` and the
-/// XMP packet go, and the result is one revision rather than several, which is
-/// what removes the earlier versions.
-pub fn strip(file: &File<'_>, bytes: &[u8]) -> Result<(Vec<u8>, Hidden)> {
-    let found = survey(file, bytes)?;
+/// never a content stream. Objects nothing reaches are left out; `/Info`, the
+/// XMP packet, the attachments (but the lock's), the script name tree and
+/// every action that runs script go; and the result is one revision rather
+/// than several, which is what removes the earlier versions.
+///
+/// **What it says it removed is measured, not assumed**: the cleaned bytes are
+/// surveyed again, and the second survey is what the caller shows.
+pub fn strip(file: &File<'_>, bytes: &[u8]) -> Result<(Vec<u8>, Sanitised)> {
+    let before = survey(file, bytes)?;
 
-    // The catalogue without its metadata pointer.
     let mut replacements: Vec<(u32, Vec<u8>)> = Vec::new();
-    let mut cleaned_root = None;
-    if let Some(Object::Reference(number, _)) = file.trailer().get(b"Root") {
-        if let Ok(Object::Dict(mut root)) = file.object(*number) {
+    let mut rewritten: std::collections::BTreeMap<u32, Object> = std::collections::BTreeMap::new();
+
+    // The catalogue without its metadata pointer, its script, its attachments
+    // (but the lock's) and its opening action if that runs script.
+    let root_number = match file.trailer().get(b"Root") {
+        Some(Object::Reference(number, _)) => Some(*number),
+        _ => None,
+    };
+    if let Some(number) = root_number {
+        if let Ok(Object::Dict(mut root)) = file.object(number) {
             root.remove(b"Metadata");
-            let mut body = Vec::new();
-            write_object(&mut body, &Object::Dict(root.clone()));
-            replacements.push((*number, body));
-            cleaned_root = Some((*number, root));
+            if let Some(names) = root
+                .get(b"Names")
+                .and_then(|n| file.resolve(n).ok())
+                .and_then(|n| n.as_dict().cloned())
+            {
+                match names_kept(file, &names) {
+                    Some(kept) => root.set(b"Names", Object::Dict(kept)),
+                    None => root.remove(b"Names"),
+                }
+            }
+            let (root, _) = scrubbed(file, &Object::Dict(root), 0);
+            rewritten.insert(number, root);
         }
+    }
+
+    // Every other object with its script actions taken out. Only objects
+    // that change are rewritten; the rest are copied through byte for byte.
+    for number in file.numbers() {
+        if Some(number) == root_number {
+            continue;
+        }
+        let Ok(object) = file.object(number) else { continue };
+        let (object, changed) = scrubbed(file, &object, 0);
+        if changed {
+            rewritten.insert(number, object);
+        }
+    }
+    for (number, object) in &rewritten {
+        let mut body = Vec::new();
+        write_object(&mut body, object);
+        replacements.push((*number, body));
     }
 
     // **Reachability is computed against the file as it will be, not as it
@@ -183,13 +459,12 @@ pub fn strip(file: &File<'_>, bytes: &[u8]) -> Result<(Vec<u8>, Hidden)> {
     // orphans those objects; walking the original would still count them as
     // reached and copy them through, leaving the metadata in the file with
     // nothing pointing at it. Measured on a catalogue: two objects survived a
-    // clean that way.
+    // clean that way. The same goes for the attachments and the script: the
+    // walk reads the rewritten objects, so what they no longer point at is
+    // left out.
     let mut reachable = BTreeSet::new();
-    if let Some((number, root)) = &cleaned_root {
-        reachable.insert(*number);
-        references(&Object::Dict(root.clone()), &mut |n| {
-            walk(file, n, &mut reachable, 0)
-        });
+    if let Some(number) = root_number {
+        walk_through(file, &rewritten, number, &mut reachable, 0);
     }
     let drop: Vec<u32> = file.numbers().filter(|n| !reachable.contains(n)).collect();
 
@@ -199,7 +474,31 @@ pub fn strip(file: &File<'_>, bytes: &[u8]) -> Result<(Vec<u8>, Hidden)> {
     trailer.set(b"Info", Object::Null);
 
     let cleaned = file.rewrite_dropping(&replacements, &[], &trailer, &drop)?;
-    Ok((cleaned, found))
+
+    // Measured on the result, not assumed from the intent.
+    let after = File::parse(&cleaned).and_then(|f| survey(&f, &cleaned))?;
+    Ok((cleaned, Sanitised { before, after }))
+}
+
+/// [`walk`], reading rewritten objects where there are any.
+fn walk_through(
+    file: &File<'_>,
+    rewritten: &std::collections::BTreeMap<u32, Object>,
+    number: u32,
+    seen: &mut BTreeSet<u32>,
+    depth: usize,
+) {
+    if depth > 96 || !seen.insert(number) {
+        return;
+    }
+    let object = match rewritten.get(&number) {
+        Some(object) => object.clone(),
+        None => match file.object(number) {
+            Ok(object) => object,
+            Err(_) => return,
+        },
+    };
+    references(&object, &mut |n| walk_through(file, rewritten, n, seen, depth + 1));
 }
 
 /// Everything reachable from the catalogue as the file stands, following
@@ -281,20 +580,6 @@ fn collect_names(file: &File<'_>, node: &Object, count: &mut usize, lock: &mut b
             }
         }
     }
-}
-
-/// Whether the document runs a script when it opens.
-fn open_action_runs_script(file: &File<'_>, root: &Dict) -> bool {
-    let Some(action) = root.get(b"OpenAction").and_then(|a| file.resolve(a).ok()) else {
-        return false;
-    };
-    // An `/OpenAction` is usually a destination — go to page 3 — which is not
-    // script and not hidden. Only `/S /JavaScript` is.
-    action
-        .as_dict()
-        .and_then(|d| d.get(b"S"))
-        .and_then(Object::as_name)
-        .is_some_and(|s| s == b"JavaScript")
 }
 
 #[cfg(test)]

@@ -4237,31 +4237,42 @@ impl PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 };
-                let outcome = if clean {
-                    doc.session.remove_hidden_data()
-                } else {
-                    doc.session.hidden_data()
-                };
-                match outcome {
-                    Ok(found) if clean => {
-                        if let Some(doc) = &mut self.doc {
-                            doc.rendered_is_stale();
+                if clean {
+                    // **What is printed is what a second survey of the cleaned
+                    // bytes found**, not what the first survey listed. The line
+                    // used to print the findings as removals — and for the
+                    // attachment and the script, which the clean left alone,
+                    // that was a claim with nothing behind it. Found by audit.
+                    match doc.session.remove_hidden_data() {
+                        Ok(done) => {
+                            if let Some(doc) = &mut self.doc {
+                                doc.rendered_is_stale();
+                            }
+                            self.text = None;
+                            self.text_selection = None;
+                            self.find_hits.clear();
+                            let said = done.describe();
+                            if done.is_clean() {
+                                self.say_info(if done.removed().is_empty() {
+                                    format!("{said}.")
+                                } else {
+                                    format!("{said}. Save to write it out.")
+                                });
+                            } else {
+                                self.say_error(format!("{said}. Save to write out what was removed."));
+                            }
                         }
-                        self.text = None;
-                        self.text_selection = None;
-                        self.find_hits.clear();
-                        self.say_info(if found.is_empty() {
-                            "there was nothing hidden to remove.".to_string()
-                        } else {
-                            format!("removed: {}. Save to write it out.", found.describe())
-                        });
+                        Err(e) => self.say_error(e.to_string()),
                     }
-                    Ok(found) => self.say_info(if found.is_empty() {
-                        found.describe()
-                    } else {
-                        format!("{} — `hiddendata clean` takes it out.", found.describe())
-                    }),
-                    Err(e) => self.say_error(e.to_string()),
+                } else {
+                    match doc.session.hidden_data() {
+                        Ok(found) => self.say_info(if found.is_empty() {
+                            found.describe()
+                        } else {
+                            format!("{} — `hiddendata clean` takes it out.", found.describe())
+                        }),
+                        Err(e) => self.say_error(e.to_string()),
+                    }
                 }
             }
             Verb::Unsecure => {
@@ -14197,6 +14208,36 @@ mod lock_wiring_tests {
             "a second survey still found something: {}",
             said(&app)
         );
+    }
+
+    /// **What it says it removed is what the file no longer has.** Found by
+    /// audit: "removed: 1 embedded file(s); JavaScript" while both were still
+    /// in the file. Now the line comes from a survey of the cleaned bytes, and
+    /// the saved file is checked here the way anyone else would read it.
+    #[test]
+    fn hiddendata_clean_reports_from_the_cleaned_file_not_from_the_survey() {
+        let mut app = app("hidden-things.pdf");
+        app.submit("hiddendata");
+        let before = said(&app);
+        assert!(before.contains("embedded file") && before.contains("JavaScript"), "{before}");
+
+        app.submit("hiddendata clean");
+        let told = said(&app);
+        assert!(told.contains("removed:"), "{told}");
+        assert!(!told.contains("STILL THERE"), "{told}");
+        for expected in ["embedded file", "JavaScript", "XMP", "Author"] {
+            assert!(told.contains(expected), "{expected:?} not reported as removed: {told}");
+        }
+
+        let out = std::env::temp_dir().join(format!("pagify-hiddendata-{}.pdf", std::process::id()));
+        app.submit(&format!("saveas {}", out.display()));
+        let bytes = std::fs::read(&out).expect("the file was written");
+        let _ = std::fs::remove_file(&out);
+        let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+        let after = pdf_core::pdf::hidden::survey(&file, &bytes).expect("survey");
+        assert!(after.is_empty(), "the saved file still carries: {}", after.describe());
+        assert!(!bytes.windows(16).any(|w| w == b"ATTACHED-PAYLOAD"), "the attachment survived");
+        assert!(!bytes.windows(9).any(|w| w == b"app.alert"), "the script survived");
     }
 
     /// **The window offers the choice, and warns about the one that shuts

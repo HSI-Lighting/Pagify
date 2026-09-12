@@ -1382,7 +1382,7 @@ pub trait DocumentMut {
     /// Applied at once rather than at save time, so the document in front of
     /// the person is the sanitised one — a survey that still reported the old
     /// findings afterwards would be worse than not offering this at all.
-    fn remove_hidden_data(&mut self) -> Result<crate::pdf::hidden::Hidden> {
+    fn remove_hidden_data(&mut self) -> Result<crate::pdf::hidden::Sanitised> {
         Err(PdfError::Unsupported("this document cannot be sanitised"))
     }
 

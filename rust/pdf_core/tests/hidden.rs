@@ -75,6 +75,93 @@ fn cleaning_twice_finds_nothing_the_second_time() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// What the clean says it removed has to be what came out of the file. Found by
+// audit: it printed the survey's findings as its own doing, and for the
+// attachment and the script it had done nothing.
+// ---------------------------------------------------------------------------
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The fixture carries one of everything, and the survey sees all of it.
+#[test]
+fn a_survey_finds_every_kind_of_hidden_thing() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("hidden-things.pdf");
+    let found = doc.hidden_data().expect("survey");
+    assert!(found.information.iter().any(|k| k == "Author"), "{found:?}");
+    assert!(found.xmp, "{found:?}");
+    assert_eq!(found.embedded_files, 1, "{found:?}");
+    assert!(found.javascript, "{found:?}");
+    assert!(found.unreachable >= 1, "{found:?}");
+    assert_eq!(found.revisions, 2, "{found:?}");
+}
+
+/// **The acceptance test.** Cleaned, saved, reopened from the bytes: a
+/// second survey finds nothing, and the bytes hold neither the attachment's
+/// text, nor any script, nor the author's name.
+#[test]
+fn cleaning_removes_everything_it_reports_removed() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("hidden-things.pdf");
+    let done = doc.remove_hidden_data().expect("sanitise");
+    assert!(done.is_clean(), "the clean left something behind: {}", done.describe());
+    let said = done.describe();
+    assert!(said.starts_with("removed:"), "{said}");
+    for expected in ["embedded file", "JavaScript", "Author", "XMP"] {
+        assert!(said.contains(expected), "{expected:?} was not reported: {said}");
+    }
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+
+    // The file, read the way anyone else would read it.
+    let reopened = PdfiumDocument::open_bytes(bytes.clone(), None).expect("reopen");
+    assert_eq!(text_of(&reopened, 0), "A page with things behind it");
+    let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+    let after = pdf_core::pdf::hidden::survey(&file, &bytes).expect("survey");
+    assert!(after.is_empty(), "a reader still finds: {}", after.describe());
+
+    for gone in [
+        &b"ATTACHED-PAYLOAD"[..],
+        b"app.alert",
+        b"JavaScript",
+        b"EmbeddedFile",
+        b"Hidden Author",
+        b"/OpenAction",
+        b"/AA",
+    ] {
+        assert!(
+            !contains(&bytes, gone),
+            "{} is still in the file",
+            String::from_utf8_lossy(gone)
+        );
+    }
+}
+
+/// A clean that could not take everything out says so, first — never
+/// "removed" alone. Built by hand: the outcome type is what the app prints,
+/// so its wording is checked here rather than in the app.
+#[test]
+fn what_is_still_there_is_said_before_what_was_removed() {
+    use pdf_core::pdf::hidden::{Hidden, Sanitised};
+    let before = Hidden { revisions: 1, xmp: true, javascript: true, ..Hidden::default() };
+    let after = Hidden { revisions: 1, javascript: true, ..Hidden::default() };
+    let done = Sanitised { before, after };
+    assert!(!done.is_clean());
+    let said = done.describe();
+    assert!(said.starts_with("STILL THERE: JavaScript"), "{said}");
+    assert!(said.contains("Removed: an XMP metadata packet"), "{said}");
+    assert!(!done.removed().javascript, "it counted the script as removed");
+}
+
 /// **A sanitised document must be saved whole.**
 ///
 /// Appending to it would start the problem over: the cleaned revision, with an

@@ -203,6 +203,24 @@ unsafe impl Send for PdfiumDocument {}
 unsafe impl Sync for PdfiumDocument {}
 
 impl PdfiumDocument {
+    /// Earlier revisions and orphaned objects exist only in the file as
+    /// written; the bytes PDFium re-emits have neither, so a survey of those
+    /// alone always reported one revision and nothing unreachable — for a
+    /// catalogue with two saves and eight orphans in it. Counted from the
+    /// file itself, where there is one.
+    fn count_what_only_the_file_shows(&self, found: &mut crate::pdf::hidden::Hidden) {
+        let on_disk = match (&self.written, &self.source) {
+            (Some(exact), _) => Some(exact.clone()),
+            (None, DocumentSource::Path(path)) => std::fs::read(path).ok(),
+            (None, _) => None,
+        };
+        let Some(on_disk) = on_disk else { return };
+        let Ok(file) = crate::pdf::File::parse(&on_disk) else { return };
+        let Ok(as_written) = crate::pdf::hidden::survey(&file, &on_disk) else { return };
+        found.revisions = found.revisions.max(as_written.revisions);
+        found.unreachable = found.unreachable.max(as_written.unreachable);
+    }
+
     /// How many signatures a reader finds in this document.
     ///
     /// PDFium's own count, asked so a test can check that what was written is
@@ -3333,16 +3351,22 @@ impl DocumentMut for PdfiumDocument {
             .save_to_bytes()
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
         let file = crate::pdf::File::parse(&bytes)?;
-        crate::pdf::hidden::survey(&file, &bytes)
+        let mut found = crate::pdf::hidden::survey(&file, &bytes)?;
+        self.count_what_only_the_file_shows(&mut found);
+        Ok(found)
     }
 
-    fn remove_hidden_data(&mut self) -> Result<crate::pdf::hidden::Hidden> {
+    fn remove_hidden_data(&mut self) -> Result<crate::pdf::hidden::Sanitised> {
         let bytes = self
             .document
             .save_to_bytes()
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
         let file = crate::pdf::File::parse(&bytes)?;
-        let (cleaned, found) = crate::pdf::hidden::strip(&file, &bytes)?;
+        let (cleaned, mut found) = crate::pdf::hidden::strip(&file, &bytes)?;
+        // The full-copy save this forces is what takes the earlier revisions
+        // and the orphaned objects out of the file — so they are counted as
+        // removed, from the file they are in.
+        self.count_what_only_the_file_shows(&mut found.before);
 
         // Reopened from the sanitised bytes, so what the person is looking at
         // is the document they just cleaned.

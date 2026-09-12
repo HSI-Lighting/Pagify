@@ -847,8 +847,8 @@ impl Session {
         })
     }
 
-    /// Take that data out, and say what went.
-    pub fn remove_hidden_data(&self) -> Result<pdf_core::pdf::hidden::Hidden> {
+    /// Take that data out, and say what went — and what did not.
+    pub fn remove_hidden_data(&self) -> Result<pdf_core::pdf::hidden::Sanitised> {
         registry::with_session(self.handle, |s| {
             s.document
                 .as_document_mut()
