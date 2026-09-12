@@ -701,6 +701,20 @@ struct PagifyApp {
     last_snap: Option<tools::Snapped>,
 }
 
+/// Who a signature is by, for a readout.
+///
+/// **The certificate's subject when the signature verified; otherwise the
+/// file's own label, marked as such.** The `/Name` in a signature dictionary
+/// is plain text written by whoever wrote the file, and printing it bare
+/// beside "unchanged" let it read as a finding. Found by audit.
+fn signer_label(signature: &pdf_core::pdf::validate::Signature) -> String {
+    match (&signature.signer, signature.name.trim()) {
+        (Some(subject), _) => format!(" by {subject}"),
+        (None, "") => String::new(),
+        (None, label) => format!(" by {label} (as the file labels it — not verified)"),
+    }
+}
+
 /// The rectangle two dragged corners describe, or `None` if it has no area.
 ///
 /// Shared by the two tools that draw one, so that a lock and a redaction cannot
@@ -2451,11 +2465,7 @@ impl PagifyApp {
             Ok(found) => {
                 for signature in &found {
                     let what = if signature.timestamp { "timestamp" } else { "signed" };
-                    let who = if signature.name.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" by {}", signature.name)
-                    };
+                    let who = signer_label(signature);
                     lines.push(format!("{what}{who}: {}", signature.verdict.describe()));
                 }
             }
@@ -3959,12 +3969,7 @@ impl PagifyApp {
                             .iter()
                             .map(|s| {
                                 let what = if s.timestamp { "timestamp" } else { "signature" };
-                                let who = if s.name.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(" by {}", s.name)
-                                };
-                                format!("{what}{who}: {}", s.verdict.describe())
+                                format!("{what}{}: {}", signer_label(s), s.verdict.describe())
                             })
                             .collect();
                         // Anything other than unaltered is a warning, not news.
@@ -15418,10 +15423,10 @@ mod lock_wiring_tests {
         app.answer_passcode("pagify");
 
         let lines = app.document_status().join("\n");
-        assert!(lines.contains("signed by"), "{lines}");
+        assert!(lines.contains("signed by O=Pagify,CN=Pagify Test Signer"), "{lines}");
         assert!(lines.contains("unchanged since it was signed"), "{lines}");
         // The limit travels with the claim here too.
-        assert!(lines.contains("who signed it"), "{lines}");
+        assert!(lines.contains("whether to trust that certificate is not checked"), "{lines}");
     }
 
     /// **A signature placed but not applied is reported as what it still is.**
@@ -15637,8 +15642,11 @@ mod lock_wiring_tests {
         app.submit("validate");
         let told = said(&app);
         assert!(told.contains("unchanged since it was signed"), "{told}");
+        // The signer named is the certificate's subject — evidence — and the
+        // line still says what it cannot tell you: whether to trust it.
+        assert!(told.contains("by O=Pagify,CN=Pagify Test Signer"), "it did not name the certificate: {told}");
         assert!(
-            told.contains("who signed it"),
+            told.contains("whether to trust that certificate is not checked"),
             "it did not say what it cannot tell you: {told}"
         );
     }
