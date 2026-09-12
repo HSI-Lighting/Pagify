@@ -518,6 +518,7 @@ name = "cad_kernel"
 version = "0.1.0"
 dependencies = [
  "cad_nurbs",
+ "serde",
 ]
 
 [[package]]

@@ -617,8 +617,15 @@ pub fn chamfer_pair(
 
     layer.replace(first, DObject::with_style(out.g1_new, a.style));
     layer.replace(second, DObject::with_style(out.g2_new, b.style));
-    layer.add_object(DObject::with_style(out.bridge, a.style));
-    Ok(3)
+    match out.bridge {
+        Some(bridge) => {
+            layer.add_object(DObject::with_style(bridge, a.style));
+            Ok(3)
+        }
+        // Both distances ~0: the objects meet at the sharp corner and the
+        // kernel emits no (zero-length) bridge — same as a zero-radius fillet.
+        None => Ok(2),
+    }
 }
 
 fn pair(

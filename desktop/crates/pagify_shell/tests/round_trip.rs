@@ -20,7 +20,7 @@ use pdf_core::document::Color;
 
 fn fixture(name: &str) -> String {
     format!(
-        "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+        "{}/../../../rust/pdf_core/fixtures/{name}",
         env!("CARGO_MANIFEST_DIR")
     )
 }
@@ -310,7 +310,7 @@ mod page_operations {
 
     fn session(name: &str) -> Session {
         let src = format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         );
         // A copy: these edit, and an edit that reached a fixture would break

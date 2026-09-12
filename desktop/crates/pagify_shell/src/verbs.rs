@@ -612,6 +612,34 @@ pub const DELIBERATE_OVERRIDES: &[Override] = &[
               the words the box accepts would be worse than none.",
         kernel_keeps: Some("?"),
     },
+    Override {
+        token: "measure",
+        kernel_meaning: "draw points at intervals along an object",
+        why: "There is nothing to divide by length in a PDF, and a reader's \
+              `measure` is the page's own: `measure distance` / `measure area`, \
+              after `calibrate` fixes the page's scale. The kernel's MEASURE \
+              needs geometry to walk along, which only exists while the Draw \
+              rail is in use — and it keeps its own alias for exactly that.",
+        kernel_keeps: Some("me"),
+    },
+    Override {
+        token: "find",
+        kernel_meaning: "find text in the drawing",
+        why: "The document here is a PDF, so the word searches its text layer — \
+              what a reader means by `find`, and what the Search & Replace tool \
+              is built on. The kernel's find, like its replace, only has \
+              geometry to walk when the drawing namespace is in use.",
+        kernel_keeps: Some("findtext"),
+    },
+    Override {
+        token: "replace",
+        kernel_meaning: "find and replace text in the drawing",
+        why: "Recognised and planned: it names the Search & Replace tool of the \
+              editing phase and says so rather than answering `unknown \
+              command`. When built it rewrites the PDF's own text layer through \
+              pdf_core — never the kernel's drawing text.",
+        kernel_keeps: Some("findreplace"),
+    },
 ];
 
 /// A verb the kernel understands that Pagify declines, and why.

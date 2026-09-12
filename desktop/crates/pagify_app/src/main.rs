@@ -9047,7 +9047,7 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9478,7 +9478,7 @@ mod text_layer_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9534,7 +9534,7 @@ mod unsaved_guard_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9673,7 +9673,7 @@ mod reading_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9768,7 +9768,7 @@ mod undo_wiring_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9884,7 +9884,7 @@ mod pointer_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -10656,7 +10656,7 @@ mod ui_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -12598,7 +12598,7 @@ mod redaction_wiring_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -12781,7 +12781,7 @@ mod lock_wiring_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -12932,9 +12932,7 @@ mod lock_wiring_tests {
     /// belongs in the line somebody reads when it works, not in a manual.
     #[test]
     fn signing_says_that_a_later_edit_breaks_it() {
-        let certificate = std::path::Path::new(
-            "/Users/hsilighting/workspace/Pagify/rust/pdf_core/fixtures/test-signer.p12",
-        );
+        let certificate = std::path::PathBuf::from(fixture("test-signer.p12"));
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
             return;
@@ -13704,14 +13702,21 @@ mod lock_wiring_tests {
         .expect("picked");
 
         match carried {
-            Some(bytes) => {
-                assert!(
-                    pdf_core::pdf::embed::metrics(&bytes).is_some(),
-                    "the run's font came back as something no reader could parse"
-                );
+            Some(bytes) if pdf_core::pdf::embed::metrics(&bytes).is_some() => {
                 assert!(
                     app.pending_face.is_some() || app.editor_face.is_some(),
                     "the editor did not ask for the face the words are drawn in"
+                );
+            }
+            Some(_) => {
+                // Carried, but a program ttf-parser cannot read — a Type 1 face
+                // or a bare CFF, as `two-column.pdf`'s body font is. There is
+                // no atlas to build, so the editor falls back exactly as it
+                // does for a merely named font; it must not install something
+                // unreadable and it must not complain.
+                assert!(
+                    app.pending_face.is_none() && app.editor_face.is_none(),
+                    "it installed a face that no reader could parse"
                 );
             }
             None => {
@@ -14051,9 +14056,7 @@ mod lock_wiring_tests {
     /// hold?**
     #[test]
     fn the_status_of_a_signed_document_says_whether_it_still_holds() {
-        let certificate = std::path::Path::new(
-            "/Users/hsilighting/workspace/Pagify/rust/pdf_core/fixtures/test-signer.p12",
-        );
+        let certificate = std::path::PathBuf::from(fixture("test-signer.p12"));
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
             return;
@@ -14267,9 +14270,7 @@ mod lock_wiring_tests {
     /// claims more than it did.
     #[test]
     fn validating_a_signed_document_separates_unchanged_from_who_signed_it() {
-        let certificate = std::path::Path::new(
-            "/Users/hsilighting/workspace/Pagify/rust/pdf_core/fixtures/test-signer.p12",
-        );
+        let certificate = std::path::PathBuf::from(fixture("test-signer.p12"));
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
             return;
