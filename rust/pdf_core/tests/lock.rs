@@ -1439,3 +1439,394 @@ fn an_edit_it_can_make_changes_only_what_was_asked() {
     };
     assert_eq!(rest(&after), rest(&before), "the text around the edit changed");
 }
+
+/// **A selection over two lines is not a rectangle.**
+///
+/// Reported from use as "the exact selected text isn't getting locked, the
+/// whole line is" — and reported *twice*, because the first fix went in without
+/// this test beside it. Nothing here was wrong: the engine cut precisely, the
+/// single-line case was measured at 32 of 37 pages precise, and every test
+/// passed. The app was collapsing the selection into the smallest rectangle
+/// holding it before the engine ever saw it, and that rectangle holds the head
+/// of the first line and the tail of the last as well.
+///
+/// Measured on this fixture: a 39-character selection took 68 characters and
+/// the word before it. With the lines sent as themselves, 38 — the selection,
+/// exactly.
+#[test]
+fn locking_a_selection_across_two_lines_leaves_the_ends_of_those_lines_alone() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let before = text_of(&doc, 0);
+
+    // A phrase that runs off the end of one line and onto the next, with a word
+    // before it on the first line and a word after it on the second. Those two
+    // are what the union used to swallow.
+    let (head, tail) = ("The", "ed");
+    let phrase = "luminaire housing is formed from";
+    assert!(
+        before.contains(&format!("{head} {phrase}")),
+        "the fixture is not what this test expects:\n{before:?}"
+    );
+
+    let chars = doc.page(0).expect("page").characters().expect("characters");
+    let at = before.find(phrase).expect("the phrase");
+    let at = before[..at].chars().count();
+    // Past the line break and a few characters into the next line.
+    let to = at + phrase.chars().count() + 8;
+
+    let box_at = |i: usize| {
+        let b = &chars.boxes[i * 4..i * 4 + 4];
+        Rect { left: b[0], top: b[1], right: b[2], bottom: b[3] }
+    };
+
+    // One rect per line, which is what `Characters::line_rects` builds and what
+    // the app now sends.
+    let mut lines: Vec<Rect> = Vec::new();
+    let mut current = box_at(at);
+    for index in at + 1..to {
+        let b = box_at(index);
+        if b.top < current.bottom && b.bottom > current.top {
+            current = Rect {
+                left: current.left.min(b.left),
+                top: current.top.min(b.top),
+                right: current.right.max(b.right),
+                bottom: current.bottom.max(b.bottom),
+            };
+        } else {
+            lines.push(current);
+            current = b;
+        }
+    }
+    lines.push(current);
+    assert!(lines.len() >= 2, "the selection should span two lines, not {}", lines.len());
+
+    let request = Redaction {
+        require_complete: false,
+        ..Redaction::over(0, lines).expect("shapes")
+    };
+    doc.lock_area(&request, PASSCODE, None).expect("lock the selection");
+
+    let after = text_of(&doc, 0);
+    assert!(!after.contains(phrase), "the selection was not hidden:\n{after:?}");
+    assert!(
+        after.contains(head),
+        "it took the word before the selection, on the line above:\n{after:?}"
+    );
+    assert!(
+        after.contains(tail),
+        "it took the words after the selection, on the line below:\n{after:?}"
+    );
+}
+
+/// The union — what the app used to send — is measurably worse on the same
+/// selection, which is the whole reason the shapes travel separately.
+///
+/// Kept as a test rather than a comment so that anyone tempted to simplify
+/// `Redaction::parts` away is told what it costs.
+#[test]
+fn the_union_of_two_lines_takes_more_than_the_selection() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let before = text_of(&doc, 0);
+    let phrase = "luminaire housing is formed from";
+    let at = before.find(phrase).expect("the phrase");
+    let at = before[..at].chars().count();
+    let to = at + phrase.chars().count() + 8;
+
+    let chars = doc.page(0).expect("page").characters().expect("characters");
+    let mut area = Rect { left: f32::MAX, top: f32::MAX, right: f32::MIN, bottom: f32::MIN };
+    for index in at..to {
+        let b = &chars.boxes[index * 4..index * 4 + 4];
+        area.left = area.left.min(b[0]);
+        area.top = area.top.min(b[1]);
+        area.right = area.right.max(b[2]);
+        area.bottom = area.bottom.max(b[3]);
+    }
+
+    let report = doc
+        .lock_area(
+            &Redaction { require_complete: false, ..Redaction::new(0, area) },
+            PASSCODE,
+            None,
+        )
+        .expect("lock the union");
+
+    assert!(
+        report.characters > to - at,
+        "the union should over-remove — if it no longer does, this test has \
+         stopped measuring anything ({} for a {}-character selection)",
+        report.characters,
+        to - at
+    );
+}
+
+/// **Two pictures the same size on one page can still be locked.**
+///
+/// Reported from use, on a brochure: *"lock: two images of the same size on one
+/// page, which cannot be told apart"* — and the padlock appeared anyway, over a
+/// picture that was still perfectly visible.
+///
+/// The cause was the way a locked image was matched back to its PDF object:
+/// by the pixel size PDFium reported, which two images of the same size share.
+/// The content stream is what actually joins them — the picture is drawn by a
+/// `Do` that names it — and this fixture has two 4 × 4 images precisely so that
+/// the size can never be the discriminator again.
+#[test]
+fn two_pictures_of_the_same_size_can_be_told_apart() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("pictures.pdf");
+    let pictures = doc.images_on(0).expect("images");
+    assert_eq!(pictures.len(), 2, "the fixture should have two pictures");
+    assert_eq!(
+        pictures[0].pixel_width, pictures[1].pixel_width,
+        "the fixture's pictures must be the same size, or this proves nothing"
+    );
+
+    // The fixture's two pictures are flat red and flat blue, so which one went
+    // is readable off a render — where counting objects is not: a locked
+    // picture is replaced by a blank mask, and PDFium still reports an image.
+    let red = (0xE0, 0x20, 0x20);
+    let blue = (0x20, 0x40, 0xE0);
+    let was = colours(&doc, 0);
+    assert!(near(&was, red) > 20, "the fixture should draw something red: {was:?}");
+    assert!(near(&was, blue) > 20, "the fixture should draw something blue: {was:?}");
+
+    let first = pictures[0].object;
+    doc.lock_image(0, first, PASSCODE).expect("lock the first picture");
+
+    let now = colours(&doc, 0);
+    assert!(near(&now, red) < 5, "the locked picture is still on the page: {now:?}");
+    assert!(near(&now, blue) > 20, "locking one picture took the other as well: {now:?}");
+}
+
+/// How much of a render is each colour, quantised so anti-aliasing does not
+/// invent a bucket per edge pixel.
+fn colours(doc: &dyn Document, page: usize) -> std::collections::BTreeMap<(u8, u8, u8), usize> {
+    let size = doc.page_size(page).expect("size");
+    let width = 300u32;
+    let scale = width as f32 / size.width_pt;
+    let height = (size.height_pt * scale).max(1.0) as u32;
+
+    let mut pixels = vec![0u8; (width * height * 4) as usize];
+    let mut target = pdf_core::render::RenderTarget {
+        width,
+        height,
+        stride: (width * 4) as usize,
+        order: pdf_core::render::PixelOrder::Rgba,
+        pixels: &mut pixels,
+    };
+    doc.page(page)
+        .expect("page")
+        .render_into(
+            &pdf_core::document::RenderRequest { scale, ..Default::default() },
+            &mut target,
+        )
+        .expect("render");
+
+    let mut counts = std::collections::BTreeMap::new();
+    for p in pixels.chunks_exact(4) {
+        *counts.entry((p[0], p[1], p[2])).or_insert(0usize) += 1;
+    }
+    counts
+}
+
+/// How many pixels sit near a colour, which is what survives anti-aliasing.
+fn near(counts: &std::collections::BTreeMap<(u8, u8, u8), usize>, want: (u8, u8, u8)) -> usize {
+    counts
+        .iter()
+        .filter(|((r, g, b), _)| {
+            (*r as i32 - want.0 as i32).abs() < 40
+                && (*g as i32 - want.1 as i32).abs() < 40
+                && (*b as i32 - want.2 as i32).abs() < 40
+        })
+        .map(|(_, n)| *n)
+        .sum()
+}
+
+/// **And the badge does not appear when the picture does not go.**
+///
+/// The vault is written before the page is changed, so a failure in between
+/// leaves a document claiming a lock that is not there. Asserted by counting
+/// badges against pictures rather than by forcing a failure, which no fixture
+/// here can do now that the identification is exact.
+#[test]
+fn a_padlock_never_stands_over_a_picture_that_is_still_there() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("pictures.pdf");
+    // Named up front. A locked picture is replaced by a blank mask rather than
+    // removed, so it is still an image object afterwards and re-reading the
+    // list would hand back the one just locked.
+    let both: Vec<usize> = doc.images_on(0).expect("images").iter().map(|i| i.object).collect();
+    let before = both.len();
+    assert_eq!(before, 2, "the fixture should have two pictures");
+
+    for object in &both {
+        doc.lock_image(0, *object, PASSCODE).expect("lock a picture");
+    }
+
+    let badges = doc.locked_items_on(0).expect("badges").len();
+    assert_eq!(badges, before, "a badge is missing for a picture that did go");
+
+    // And nothing either badge stands over is still being drawn.
+    let now = colours(&doc, 0);
+    assert!(near(&now, (0xE0, 0x20, 0x20)) < 5, "a padlock stands over a picture still on the page: {now:?}");
+    assert!(near(&now, (0x20, 0x40, 0xE0)) < 5, "a padlock stands over a picture still on the page: {now:?}");
+}
+
+/// **Unlocking one thing does not release another.**
+///
+/// Reported from use: *"the locked text became visible again somehow but the
+/// padlock is there"*. Undoing a lock replaces the whole page with its sealed
+/// original — which brings back everything that was ever taken off it — and the
+/// step that re-hides things afterwards only knew about pictures. A locked
+/// *area* is a shape somebody drew and is nowhere on the page to be found, so
+/// it came back and stayed back, with its badge still sitting over it.
+#[test]
+fn unlocking_a_picture_leaves_the_locked_words_on_that_page_locked() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("pictures.pdf");
+    let before = text_of(&doc, 0);
+    let phrase = "A paragraph that must not move";
+    assert!(before.contains(phrase), "the fixture is not what this test expects");
+
+    // Lock the words, then a picture — the order the report described.
+    let chars = doc.page(0).expect("page").characters().expect("characters");
+    let at = before.find(phrase).expect("the phrase");
+    let at = before[..at].chars().count();
+    let mut area = Rect { left: f32::MAX, top: f32::MAX, right: f32::MIN, bottom: f32::MIN };
+    for index in at..at + phrase.chars().count() {
+        let b = &chars.boxes[index * 4..index * 4 + 4];
+        area.left = area.left.min(b[0]);
+        area.top = area.top.min(b[1]);
+        area.right = area.right.max(b[2]);
+        area.bottom = area.bottom.max(b[3]);
+    }
+    doc.lock_area(
+        &Redaction { require_complete: false, ..Redaction::new(0, area) },
+        PASSCODE,
+        None,
+    )
+    .expect("lock the words");
+    assert!(!text_of(&doc, 0).contains(phrase), "the words were not hidden");
+
+    let picture = doc.images_on(0).expect("images").first().map(|i| i.object).expect("a picture");
+    doc.lock_image(0, picture, PASSCODE).expect("lock the picture");
+    assert!(!text_of(&doc, 0).contains(phrase), "locking a picture brought the words back");
+
+    // Now let the picture go. The words must stay gone.
+    let badge = doc
+        .locked_items_on(0)
+        .expect("badges")
+        .into_iter()
+        .find(|i| !i.is_area)
+        .expect("the picture's badge");
+    doc.unlock_item(&badge.id, PASSCODE).expect("unlock the picture");
+
+    assert_eq!(doc.images_on(0).expect("images").len(), 2, "the picture did not come back");
+    assert!(
+        !text_of(&doc, 0).contains(phrase),
+        "unlocking the picture brought the locked words back:\n{}",
+        text_of(&doc, 0)
+    );
+    // And the words' badge is still the one thing standing over them.
+    let left = doc.locked_items_on(0).expect("badges");
+    assert_eq!(left.len(), 1, "the badges are not what is actually locked: {left:#?}");
+    assert!(left[0].is_area, "the surviving badge should be the locked words");
+}
+
+/// **A badge over a picture that is still there is finished, not left.**
+///
+/// Reported from use, with a screenshot: a grey layer over a picture that could
+/// not be selected, moved, or sent back. It was not a layer. It was the
+/// chequerboard the app draws over a *locked* picture — over a picture that
+/// had never been taken off the page, because the lock recorded its badge
+/// first and then failed to find the picture among two of the same size. The
+/// cause is fixed; the documents written while it was not still carry the
+/// badge.
+///
+/// Built here the way such a document actually is: a real lock, saved, with
+/// the picture's original bytes put back behind the badge.
+#[test]
+fn a_lock_that_never_took_its_picture_is_completed_on_repair() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    // The picture's own object, before anything happens to it.
+    let original = {
+        let mut doc = open("pictures.pdf");
+        let mut bytes = Vec::new();
+        doc.save_full_copy(&mut bytes).expect("save");
+        let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+        let mut found = None;
+        for number in 1..64u32 {
+            if let Ok(pdf_core::pdf::Object::Stream(dict, span)) = file.object(number) {
+                if dict.get(b"Subtype").and_then(pdf_core::pdf::Object::as_name) == Some(&b"Image"[..])
+                    && dict.get(b"Width").and_then(pdf_core::pdf::Object::as_i64) == Some(4)
+                {
+                    // The stream's raw bytes, exactly as the file holds them.
+                    found = Some((number, pdf_core::pdf::write_stream(&dict, &bytes[span])));
+                    break;
+                }
+            }
+        }
+        found.expect("the fixture's first picture")
+    };
+
+    // A real lock, then the picture put back behind its badge — which is what
+    // a document written by the version with the bug looks like.
+    let mut doc = open("pictures.pdf");
+    let picture = doc.images_on(0).expect("images")[0].object;
+    doc.lock_image(0, picture, PASSCODE).expect("lock");
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+    let broken = file.rewrite(&[original]).expect("put the picture back");
+    let mut doc = PdfiumDocument::open_bytes(broken, None).expect("reopen");
+
+    // Which is exactly the state that was reported.
+    let badges = doc.locked_items_on(0).expect("badges");
+    assert_eq!(badges.len(), 1);
+    assert!(badges[0].stale, "the badge should know its picture is still there");
+    assert!(near(&colours(&doc, 0), (0xE0, 0x20, 0x20)) > 20, "the picture should still be drawn");
+
+    // Repair finishes the lock.
+    let (completed, dropped) = doc.repair_locks().expect("repair");
+    assert_eq!((completed, dropped), (1, 0), "the lock should have been completed, not dropped");
+    let badges = doc.locked_items_on(0).expect("badges");
+    assert_eq!(badges.len(), 1, "the badge should still be there — it is now true");
+    assert!(!badges[0].stale);
+    assert!(
+        near(&colours(&doc, 0), (0xE0, 0x20, 0x20)) < 5,
+        "the picture is still on the page after repair"
+    );
+
+    // And the passcode still brings it back, which is the whole point of the
+    // badge having been kept.
+    doc.unlock_item(&badges[0].id, PASSCODE).expect("unlock");
+    assert!(near(&colours(&doc, 0), (0xE0, 0x20, 0x20)) > 20, "the picture did not come back");
+}
+
+/// **A document with nothing wrong is left exactly alone by repair.**
+#[test]
+fn repair_touches_nothing_when_every_lock_is_whole() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("pictures.pdf");
+    assert_eq!(doc.repair_locks().expect("repair"), (0, 0), "nothing is locked");
+
+    let picture = doc.images_on(0).expect("images")[0].object;
+    doc.lock_image(0, picture, PASSCODE).expect("lock");
+    assert_eq!(doc.repair_locks().expect("repair"), (0, 0), "a whole lock is not repaired");
+}

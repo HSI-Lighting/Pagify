@@ -218,20 +218,66 @@ pub fn origins(operations: &[Operation]) -> Vec<Origin> {
     placed(operations).into_iter().map(|p| p.origin).collect()
 }
 
-/// The same walk, keeping the font each operator draws in.
-pub fn placed(operations: &[Operation]) -> Vec<Placed> {
-    let mut out = Vec::new();
+/// The graphics and text state in force **while an operation draws**.
+///
+/// One entry per operation, in the same order. A positioning operator's own
+/// effect is already in its entry — `states[i]` for a `Tm` is the matrix that
+/// `Tm` just set — because the question every caller asks is "what was in force
+/// when this drew", and for the operators that draw, the two are the same
+/// thing.
+///
+/// **Why this is exposed rather than kept inside [`placed`].** Moving a run
+/// without re-emitting the page means writing a `Tm` that puts the text back
+/// where it was, shifted — and that needs the absolute text matrix, which only
+/// this walk knows. See `PdfiumDocument::move_run_in_stream`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct State {
+    /// The current transformation matrix, from `q`/`Q`/`cm`.
+    pub ctm: [f32; 6],
+    /// The text matrix: where the next glyph goes.
+    pub text: [f32; 6],
+    /// The line matrix, which `Td`, `TD` and `T*` move from.
+    ///
+    /// **Not the same as [`State::text`] once anything has been drawn**, and
+    /// the difference is what a restoring `Tm` has to respect: putting the text
+    /// matrix back but leaving the line matrix shifted moves every line after
+    /// the one that was touched.
+    pub line: [f32; 6],
+    /// The name last given to `Tf`, if any.
+    pub font: Option<Vec<u8>>,
+    /// The size last given to `Tf`.
+    pub size: f32,
+    /// Horizontal scaling, as a factor — `Tz` divided by a hundred.
+    ///
+    /// Every horizontal displacement in text space is multiplied by it,
+    /// including the one a lone number in a `TJ` array makes. Left out, a run
+    /// set at 50% would move twice as far as it was asked to.
+    pub horizontal_scale: f32,
+    /// Text rise, from `Ts`: how far glyphs are drawn above the baseline.
+    ///
+    /// **Not a pen movement.** Rise offsets where a glyph is painted and leaves
+    /// the pen exactly where it was, which is what makes it the one way to move
+    /// a run vertically without disturbing the words after it on the same line.
+    pub rise: f32,
+    /// Which line of text this belongs to — see [`Placed::line`].
+    pub line_number: usize,
+}
+
+/// Walk the stream, keeping every matrix it sets.
+pub fn states(operations: &[Operation]) -> Vec<State> {
+    let mut out = Vec::with_capacity(operations.len());
     let mut ctm = IDENTITY;
     let mut stack: Vec<[f32; 6]> = Vec::new();
     // The text matrix, and the line matrix each new line starts from.
     let (mut text, mut line) = (IDENTITY, IDENTITY);
     let mut leading = 0.0f32;
     let (mut font, mut size) = (None::<Vec<u8>>, 0.0f32);
+    let (mut horizontal_scale, mut rise) = (1.0f32, 0.0f32);
     // Bumped by everything that starts a new line of text, so operators that
     // continue one another share a number.
     let mut line_number = 0usize;
 
-    for (index, operation) in operations.iter().enumerate() {
+    for operation in operations {
         match operation.operator.as_slice() {
             b"q" => stack.push(ctm),
             b"Q" => ctm = stack.pop().unwrap_or(IDENTITY),
@@ -268,6 +314,16 @@ pub fn placed(operations: &[Operation]) -> Vec<Placed> {
                     leading = n[0];
                 }
             }
+            b"Tz" => {
+                if let Some(n) = numbers(&operation.operands, 1) {
+                    horizontal_scale = n[0] / 100.0;
+                }
+            }
+            b"Ts" => {
+                if let Some(n) = numbers(&operation.operands, 1) {
+                    rise = n[0];
+                }
+            }
             b"Td" => {
                 if let Some(n) = numbers(&operation.operands, 2) {
                     line = multiply([1.0, 0.0, 0.0, 1.0, n[0], n[1]], line);
@@ -297,27 +353,47 @@ pub fn placed(operations: &[Operation]) -> Vec<Placed> {
             _ => {}
         }
 
-        if operation.shows_text() {
-            // `'` and `"` move to the next line before drawing.
-            if matches!(operation.operator.as_slice(), b"'" | b"\"") {
-                line = multiply([1.0, 0.0, 0.0, 1.0, 0.0, -leading], line);
-                text = line;
-                line_number += 1;
-            }
-            let at = multiply(text, ctm);
+        // `'` and `"` move to the next line before drawing.
+        if operation.shows_text() && matches!(operation.operator.as_slice(), b"'" | b"\"") {
+            line = multiply([1.0, 0.0, 0.0, 1.0, 0.0, -leading], line);
+            text = line;
+            line_number += 1;
+        }
+
+        out.push(State {
+            ctm,
+            text,
+            line,
+            font: font.clone(),
+            size,
+            horizontal_scale,
+            rise,
+            line_number,
+        });
+    }
+    out
+}
+
+/// The same walk, keeping the font each operator draws in.
+pub fn placed(operations: &[Operation]) -> Vec<Placed> {
+    states(operations)
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| operations[*index].shows_text())
+        .map(|(index, state)| {
+            let at = multiply(state.text, state.ctm);
             // The length of the transformed x-axis: what one unit of text space
             // measures on the page.
             let scale = (at[0] * at[0] + at[1] * at[1]).sqrt();
-            out.push(Placed {
+            Placed {
                 origin: Origin { operation: index, x: at[4], y: at[5] },
-                font: font.clone(),
-                size,
+                font: state.font,
+                size: state.size,
                 scale,
-                line: line_number,
-            });
-        }
-    }
-    out
+                line: state.line_number,
+            }
+        })
+        .collect()
 }
 
 /// One piece of what a show-text operator draws.

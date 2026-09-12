@@ -593,6 +593,30 @@ pub trait Document: Send + Sync {
     /// `FPDFPage_GenerateContent`. Measured before it was offered — see the
     /// tests — because a move that quietly reflowed the paragraph beside it
     /// would be a poor trade.
+    /// Put one thing at the front or the back of the page's drawing order.
+    ///
+    /// **The only way a PDF stacks anything is the order it draws it**, so this
+    /// moves the operators that draw the object to the start or the end of the
+    /// content stream — leaving every other byte alone — and re-establishes the
+    /// state they were drawn under, because that state is set by operators they
+    /// have now been moved away from.
+    ///
+    /// Words, pictures and shapes. Refuses rather than guess: a clipping path
+    /// in force where the object was drawn cannot be reproduced at the other
+    /// end of the stream without carrying the clip too, and an object drawn
+    /// behind one that is no longer there is a worse answer than declining. A
+    /// shape that *sets* a clip is refused for the mirror of that reason —
+    /// `q`/`Q` restores the clipping path, so wrapping one would close its clip
+    /// at the wrong moment.
+    fn restack(
+        &mut self,
+        _page_index: usize,
+        _object: usize,
+        _where_to: Stacking,
+    ) -> Result<()> {
+        Err(PdfError::Unsupported("changing the drawing order"))
+    }
+
     fn move_object(&mut self, _page_index: usize, _object: usize, _by: Point) -> Result<()> {
         Err(PdfError::Unsupported("moving an object on this page"))
     }
@@ -605,6 +629,14 @@ pub trait Document: Send + Sync {
     /// rather than containing it — which is the difference between a shape that
     /// can be taken off the page and one that cannot. A caller told *which*
     /// object is in the way needs to know how far it reaches.
+    /// Everything drawn on a page, bottom first.
+    ///
+    /// The order is the page's own drawing order, which is the only stacking a
+    /// PDF has — see [`DrawnObject`].
+    fn drawn_objects(&self, _page_index: usize) -> Result<Vec<DrawnObject>> {
+        Err(PdfError::Unsupported("listing what a page draws"))
+    }
+
     fn object_bounds(&self, _page_index: usize, _object: usize) -> Result<Rect> {
         Err(PdfError::Unsupported("measuring an object on this page"))
     }
@@ -914,6 +946,16 @@ pub trait DocumentMut {
     }
 
     /// Everything sealed on one page, for drawing its badges.
+    /// Finish any lock that recorded its badge but never took its picture off
+    /// the page — and drop the badge where that still cannot be done.
+    ///
+    /// Returns how many were completed and how many were dropped. Nothing is
+    /// touched on a document with no such lock, so this is safe to call on
+    /// every open.
+    fn repair_locks(&mut self) -> Result<(usize, usize)> {
+        Ok((0, 0))
+    }
+
     fn locked_items_on(&self, _page_index: usize) -> Result<Vec<LockedItem>> {
         Ok(Vec::new())
     }
@@ -1592,6 +1634,16 @@ pub struct LockedItem {
     /// "nothing here" — and that chequerboard must not be painted over an area,
     /// where it would hide the black mark rather than explain it.
     pub is_area: bool,
+    /// **The picture this stands over is still on the page.**
+    ///
+    /// A lock is two things: a sealed copy and a badge, written first, and the
+    /// picture taken off the page, done second. A failure in between — and
+    /// there was one, on any page carrying two pictures of the same size —
+    /// left the badge with nothing behind it to explain. Reported from use as
+    /// a grey layer over a picture that could not be selected or sent back:
+    /// the chequerboard the badge draws, over a picture that was never
+    /// removed. See [`DocumentMut::repair_locks`].
+    pub stale: bool,
 }
 
 /// An image on a page, as the file stores it.
@@ -1616,6 +1668,83 @@ pub struct PageImage {
     /// The stream filters, outermost first — `DCTDecode` for a JPEG,
     /// `FlateDecode` for a PNG-ish one. Empty when the pixels are stored raw.
     pub filters: Vec<String>,
+}
+
+/// What kind of thing is drawn on a page.
+///
+/// Deliberately coarse. The question a reader is asking of a layer list is
+/// "which of these is the photograph and which is the caption", not which PDF
+/// operator drew it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DrawnKind {
+    Words,
+    Picture,
+    /// A path: a rule, a box, a background panel.
+    Shape,
+    /// A form XObject, a shading, or anything else with its own contents.
+    Group,
+}
+
+impl DrawnKind {
+    /// What to call it in a list somebody is reading.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            DrawnKind::Words => "words",
+            DrawnKind::Picture => "picture",
+            DrawnKind::Shape => "shape",
+            DrawnKind::Group => "group",
+        }
+    }
+}
+
+/// One thing drawn on a page, in the order the page draws it.
+///
+/// **The order is the whole point.** A PDF has no z-index: what is drawn later
+/// is on top, so the position in this list *is* the stacking. Index 0 is at the
+/// bottom and the last entry is what covers everything else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DrawnObject {
+    /// Position in the page's object list — the address [`TextRun::object`] and
+    /// [`PageImage::object`] use, and what [`DocumentMut::move_object`] and
+    /// [`DocumentMut::restack`] take.
+    pub object: usize,
+    pub kind: DrawnKind,
+    /// Page points, top-left origin.
+    pub rect: Rect,
+    /// Something to show in a list: the first few words, or the picture's size.
+    pub label: String,
+    /// How deep inside a group this sits. `0` is drawn by the page itself.
+    ///
+    /// **A page can put nearly everything inside one group.** A brochure laid
+    /// out in a design program routinely draws a whole panel through a single
+    /// form, and a list that stopped at the page's own objects said "group,
+    /// 145 × 63 pt" and nothing else — reported from use as a page that looked
+    /// like it had layers which could not be read.
+    pub depth: usize,
+    /// Whether the drawing order can be changed for this one.
+    ///
+    /// **False inside a group.** What a group draws is a stream of its own,
+    /// shared by every place the page draws it — restacking something in there
+    /// would move it everywhere the group appears, which is not what anybody
+    /// clicking one of them means. They are listed so the page can be read, and
+    /// the group itself is what moves.
+    pub movable: bool,
+}
+
+/// Where to put something in the page's drawing order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Stacking {
+    /// Drawn last, so it covers everything.
+    Front,
+    /// Drawn first, so everything covers it.
+    Back,
+    /// One step later in the order — over the thing that was just above it.
+    Up,
+    /// One step earlier — under the thing that was just below it.
+    Down,
 }
 
 /// What an edit should change about a run, beyond its words.

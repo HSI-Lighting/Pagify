@@ -1,8 +1,8 @@
 # pagify-icons.ttf
 
 **Material Symbols Outlined**, Apache 2.0 (see `LICENSE`), instanced to one
-weight and subsetted to the **183 glyphs the ribbon actually draws** — 10.6 MB
-down to 28 kB. (A 184th, ⌘, is a standard Unicode symbol outside Material
+weight and subsetted to the **187 glyphs the ribbon actually draws** — 10.6 MB
+down to 29 kB. (One more, ⌘, is a standard Unicode symbol outside Material
 Symbols entirely; it reaches the ribbon through egui's own fallback font.)
 
 It is embedded in the binary with `include_bytes!`. An icon set that can go

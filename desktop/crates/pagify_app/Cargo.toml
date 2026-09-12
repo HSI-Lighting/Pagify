@@ -5,6 +5,10 @@ version.workspace = true
 description = "Pagify Desktop: the eframe binary."
 
 [dependencies]
+# Wipes the held lock passcode when it is dropped rather than leaving it in
+# freed memory — see `PagifyApp::held_passcode`.
+zeroize = "1"
+
 pagify_shell = { path = "../pagify_shell" }
 pdf_core.workspace   = true
 cad_kernel.workspace = true

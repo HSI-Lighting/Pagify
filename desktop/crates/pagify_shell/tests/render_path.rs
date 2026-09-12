@@ -15,7 +15,7 @@ use pagify_shell::Session;
 
 fn fixture(name: &str) -> String {
     format!(
-        "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+        "{}/../../../rust/pdf_core/fixtures/{name}",
         env!("CARGO_MANIFEST_DIR")
     )
 }

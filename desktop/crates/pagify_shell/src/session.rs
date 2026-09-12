@@ -530,20 +530,69 @@ impl Session {
         outlined_fonts: &[&[u8]],
         require_complete: bool,
     ) -> Result<pdf_core::document::RedactionReport> {
+        self.lock_shapes(page_index, &[area], passcode, outlined_fonts, require_complete)
+    }
+
+    /// Lock an exact set of shapes, which is what a text selection is.
+    ///
+    /// **A selection over two lines is not a rectangle.** The smallest
+    /// rectangle holding it also holds the head of the first line and the tail
+    /// of the last, and locking that takes words nobody picked — measured, a
+    /// 39-character selection took 68. So the shapes travel whole, one per
+    /// line, and the engine keeps their union only for the badge that undoes
+    /// the lock. A dragged rectangle is one shape and takes the same path.
+    pub fn lock_shapes(
+        &self,
+        page_index: usize,
+        shapes: &[pdf_core::document::Rect],
+        passcode: &[u8],
+        outlined_fonts: &[&[u8]],
+        require_complete: bool,
+    ) -> Result<pdf_core::document::RedactionReport> {
         let catalogue = merged_catalogue(outlined_fonts);
+        let request = pdf_core::document::Redaction::over(page_index, shapes.to_vec())
+            .ok_or(pdf_core::PdfError::InvalidArgument("nothing to lock".into()))?;
+        let request = pdf_core::document::Redaction { require_complete, ..request };
         registry::with_session(self.handle, |s| {
             s.document
                 .as_document_mut()
                 .ok_or(pdf_core::PdfError::Unsupported("locking this document"))?
-                .lock_area(
-                    &pdf_core::document::Redaction {
-                        require_complete,
-                        ..pdf_core::document::Redaction::new(page_index, area)
-                    },
-                    passcode,
-                    catalogue.as_ref(),
-                )
+                .lock_area(&request, passcode, catalogue.as_ref())
         })
+    }
+
+    /// Finish any lock that recorded its badge but never took its picture off
+    /// the page. Returns how many were completed and how many dropped.
+    ///
+    /// Nothing is touched on a document with no such lock — see
+    /// [`pdf_core::document::DocumentMut::repair_locks`].
+    pub fn repair_locks(&self) -> Result<(usize, usize)> {
+        registry::with_session(self.handle, |s| {
+            s.document
+                .as_document_mut()
+                .ok_or(pdf_core::PdfError::Unsupported("repairing this document"))?
+                .repair_locks()
+        })
+    }
+
+    /// What a page draws, in the order it draws it — bottom first.
+    pub fn drawn_objects(&self, page_index: usize) -> Result<Vec<pdf_core::document::DrawnObject>> {
+        registry::with_session(self.handle, |s| s.document.drawn_objects(page_index))
+    }
+
+    /// Put one thing at the front or the back of a page's drawing order.
+    ///
+    /// **The only stacking a PDF has is the order it draws things in**, so this
+    /// moves the operators that draw it and carries the state they were drawn
+    /// under along with them. See [`pdf_core::document::DocumentMut::restack`]
+    /// for what it declines.
+    pub fn restack(
+        &self,
+        page_index: usize,
+        object: usize,
+        where_to: pdf_core::document::Stacking,
+    ) -> Result<()> {
+        registry::with_session(self.handle, |s| s.document.restack(page_index, object, where_to))
     }
 
     /// Lock whole pages, sealing each and leaving it blank.

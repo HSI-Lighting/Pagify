@@ -172,6 +172,21 @@ pub enum Verb {
     /// succeed on different documents — whole pages need no content identified,
     /// so this works where an area lock refuses.
     LockPages(String),
+    /// Show what a page draws, in the order it draws it.
+    ///
+    /// **A PDF has no z-index.** What is drawn later covers what came before,
+    /// so the page's own drawing order *is* its stacking, and a list of it in
+    /// that order is the only honest layer panel there is.
+    Layers,
+    /// Put the thing that is picked at the front of the page's drawing order.
+    BringToFront,
+    /// Put it at the back.
+    SendToBack,
+    /// Finish any lock whose badge stands over a picture still on the page.
+    ///
+    /// Done on every open without being asked; this is for a document already
+    /// open when the badge was noticed.
+    RepairLocks,
     /// Bring back everything a passcode has sealed in this document.
     Unlock,
     /// Put a password on the file — one any reader will ask for.
@@ -807,6 +822,12 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         }
         "lockall" => Ok(Verb::LockPages("all".into())),
         "lockarea" => Ok(Verb::LockArea),
+        "layers" => Ok(Verb::Layers),
+        // Said the way every other program says it, because this is one of the
+        // few gestures a reader arrives already knowing.
+        "bringtofront" | "bringforward" | "tofront" => Ok(Verb::BringToFront),
+        "sendtoback" | "sendbackward" | "toback" => Ok(Verb::SendToBack),
+        "repairlocks" => Ok(Verb::RepairLocks),
         "secure" => SecureOptions::parse(tail).map(Verb::Secure),
         "whiteout" => Ok(Verb::Whiteout),
         "signrectangle" => Ok(Verb::SignRectangle),

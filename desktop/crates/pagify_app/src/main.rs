@@ -568,6 +568,22 @@ struct PagifyApp {
     ortho: bool,
     grid_pt: f64,
     show_thumbs: bool,
+    /// Whether the layer rail is showing.
+    show_layers: bool,
+    /// What the current page draws, cached per page.
+    ///
+    /// Read fresh whenever the page changes or the document does: restacking
+    /// rewrites the page and renumbers its objects, so a list held over would
+    /// name things that have moved.
+    layers: Option<(usize, Vec<pdf_core::document::DrawnObject>)>,
+    /// Where the last right-click landed, kept for the menu built after it.
+    right_clicked_at: Option<(usize, AppPoint)>,
+    /// Which entry in that list is picked, **by position in the list**.
+    ///
+    /// Not by object number: what a group draws is listed under the group's
+    /// own number, so several entries share one and a pick keyed by it would
+    /// select all of them at once.
+    picked_layer: Option<usize>,
     /// Whether the command box shows its history, or is the single line the
     /// mockup draws. Collapsed by default — the history is worth seeing when
     /// you are working in it and is dead space when you are reading.
@@ -603,6 +619,23 @@ struct PagifyApp {
     /// dropped, never touching the visible history, the recorder, or this
     /// struct.
     awaiting_password: Option<Awaiting>,
+    /// The passcode this document's locks are already made under.
+    ///
+    /// **A deliberate exception to the line above, and worth being exact about
+    /// where it stops.** Reported from use: locking six things meant typing the
+    /// same passcode six times, and being asked again for the seventh. Every
+    /// lock in a document shares one vault and therefore one passcode, so after
+    /// the first the program is asking a question it already knows the answer
+    /// to.
+    ///
+    /// What it is used for is **locking only** — putting more content away
+    /// under a passcode already in force. Unlocking still asks, every time,
+    /// because that is the direction that reveals something: somebody who walks
+    /// up to an unattended screen must not be able to click a padlock open.
+    ///
+    /// It is held in memory, never written anywhere, wiped when it is dropped,
+    /// and let go the moment the document does — see [`Self::forget_passcode`].
+    held_passcode: Option<zeroize::Zeroizing<String>>,
     /// What has been typed into the password window.
     password_typed: String,
     /// Whether the window's field has been given the caret yet.
@@ -787,8 +820,14 @@ enum Awaiting {
     /// `require_complete` carries which gesture asked. A dragged rectangle
     /// means "this area" and must refuse what it cannot clear; a text selection
     /// means "these words" and must not refuse on account of an image that was
-    /// never selected — see `Session::lock_area`.
-    Lock { page: usize, area: pdf_core::document::Rect, require_complete: bool },
+    /// never selected — see `Session::lock_shapes`.
+    ///
+    /// **Shapes rather than one rectangle**, because a selection over two lines
+    /// is not a rectangle: the smallest one holding it also holds the head of
+    /// the first line and the tail of the last. Collapsing them here is what
+    /// made a 39-character selection take 68 characters and the word before it.
+    /// A dragged rectangle is simply a list of one.
+    Lock { page: usize, shapes: Vec<pdf_core::document::Rect>, require_complete: bool },
     /// Whole pages to hide, once there is a passcode to seal them under.
     LockPages(Vec<usize>),
     /// The password on a certificate file, asked for before signing with it.
@@ -938,6 +977,9 @@ impl Tab {
                 ("\u{E41A}", "Rotate View", "rotate"),
                 ("\u{E262}", "Edit Text", "edittext"),
                 ("\u{E162}", "Edit Object", "editobject"),
+                ("\u{E53B}", "Layers", "layers"),
+                ("\u{E883}", "Bring to Front", "bringtofront"),
+                ("\u{E882}", "Send to Back", "sendtoback"),
                 ("\u{E89F}", "Move", "moveobject"),
                 ("\u{F82B}", "Highlight", "highlight"),
                 ("\u{E312}", "Typewriter", "addtext "),
@@ -1436,6 +1478,10 @@ impl PagifyApp {
             ortho: false,
             grid_pt: 0.0,
             show_thumbs: true,
+            show_layers: false,
+            layers: None,
+            picked_layer: None,
+            right_clicked_at: None,
             command_open: false,
             ribbon: Tab::Home,
             closing: None,
@@ -1443,6 +1489,7 @@ impl PagifyApp {
             reading: None,
             recogniser: None,
             awaiting_password: None,
+            held_passcode: None,
             password_typed: String::new(),
             password_field_focused: false,
             password_problem: None,
@@ -1602,6 +1649,7 @@ impl PagifyApp {
                 if self.doc.take().is_some() {
                     self.markup.clear();
                     self.text = None;
+                    self.forget_passcode();
                     self.cmd.prompt_mut().document = None;
                     self.ribbon = Tab::File;
                     self.say_info("closed.");
@@ -1989,8 +2037,8 @@ impl PagifyApp {
 
         match self.awaiting_password.take().expect("checked above") {
             Awaiting::Open(path) => self.open_with(&path, Some(&typed)),
-            Awaiting::Lock { page, area, require_complete } => {
-                match self.lock_area(page, area, typed.as_bytes(), require_complete) {
+            Awaiting::Lock { page, shapes, require_complete } => {
+                match self.lock_shapes(page, &shapes, typed.as_bytes(), require_complete) {
                     Ok(said) => self.say_info(said),
                     Err(e) => self.say_error(e),
                 }
@@ -2129,7 +2177,18 @@ impl PagifyApp {
                     thumbs: HashMap::new(),
                 });
                 self.page = 0;
+                // A passcode belongs to the document it was typed for, and this
+                // is a different one.
+                self.forget_passcode();
                 self.saved_revision = self.markup.revision();
+
+                // **A badge over a picture that is still there is finished
+                // now, not carried.** Documents written while a lock could
+                // record its badge and then fail to take the picture off the
+                // page show a chequerboard over a picture that is plainly
+                // still drawn — reported from use as a grey layer that could
+                // not be selected or sent back. Repaired on open, and said.
+                self.repair_locks(false);
                 // Said once, on opening, and only when there is something wrong
                 // — otherwise selection silently doing nothing is left for the
                 // reader to work out.
@@ -2492,10 +2551,13 @@ impl PagifyApp {
 
     /// What is under a point, as something that could be picked up.
     ///
-    /// Words first, then pictures. A caption sits *on* a photograph, and
-    /// somebody clicking the caption means the caption — the smaller, more
+    /// Words first, then pictures, then **shapes** — a rule, a box, the panel a
+    /// brochure sets its type on. A caption sits *on* a photograph, and
+    /// somebody clicking the caption means the caption: the smaller, more
     /// specific thing is what was aimed at, which is the same rule
-    /// `pick_text_run` follows among overlapping runs.
+    /// `pick_text_run` follows among overlapping runs. A shape comes last for
+    /// the same reason — a page-wide background is under everything and is
+    /// almost never what a click on it means.
     fn thing_at(
         &self,
         page: usize,
@@ -2540,11 +2602,49 @@ impl PagifyApp {
                 })
                 .map(|image| (image.object, image.rect, "the picture"))
         };
+        let shapes = || {
+            doc.session
+                .drawn_objects(page)
+                .ok()?
+                .into_iter()
+                .filter(|d| {
+                    d.depth == 0
+                        && d.kind == pdf_core::document::DrawnKind::Shape
+                        && holds(&d.rect)
+                })
+                .min_by(|a, b| {
+                    let area = |d: &pdf_core::document::DrawnObject| {
+                        ((d.rect.right - d.rect.left) * (d.rect.bottom - d.rect.top)).abs()
+                    };
+                    area(a).total_cmp(&area(b))
+                })
+                .map(|d| (d.object, d.rect, "the shape"))
+        };
+
+        // **Inside a group, if nothing of the page's own is there.** A brochure
+        // draws its panels through a form, and a click on one of those used to
+        // find nothing at all — reported from use as the grey layer that could
+        // not be selected. What comes back names the *group*, because that is
+        // what can be moved; the outline is the thing that was clicked.
+        let grouped = || {
+            doc.session
+                .drawn_objects(page)
+                .ok()?
+                .into_iter()
+                .filter(|d| d.depth > 0 && holds(&d.rect))
+                .min_by(|a, b| {
+                    let area = |d: &pdf_core::document::DrawnObject| {
+                        ((d.rect.right - d.rect.left) * (d.rect.bottom - d.rect.top)).abs()
+                    };
+                    area(a).total_cmp(&area(b))
+                })
+                .map(|d| (d.object, d.rect, "the group it is drawn in"))
+        };
 
         if pictures_first {
-            pictures().or_else(words)
+            pictures().or_else(words).or_else(shapes).or_else(grouped)
         } else {
-            words().or_else(pictures)
+            words().or_else(pictures).or_else(shapes).or_else(grouped)
         }
     }
 
@@ -3060,6 +3160,7 @@ impl PagifyApp {
                 }
                 if self.doc.take().is_some() {
                     self.markup.clear();
+                    self.forget_passcode();
                     self.cmd.prompt_mut().document = None;
                     self.ribbon = Tab::File;
                     self.say_info("closed.");
@@ -3683,6 +3784,34 @@ impl PagifyApp {
                     Err(e) => self.say_error(e.to_string()),
                 }
             }
+            Verb::Layers => {
+                if self.doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                self.show_layers = !self.show_layers;
+                if self.show_layers {
+                    self.layers = None;
+                    let count = self.layers_on(self.page).len();
+                    self.say_info(format!(
+                        "layers: page {} draws {count} thing{}, topmost first. \
+                         Pick one, then `bringtofront` or `sendtoback`.",
+                        self.page + 1,
+                        if count == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    self.say_info("layers: closed.");
+                }
+            }
+            Verb::RepairLocks => {
+                if self.doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                self.repair_locks(true);
+            }
+            Verb::BringToFront => self.restack_picked(pdf_core::document::Stacking::Front),
+            Verb::SendToBack => self.restack_picked(pdf_core::document::Stacking::Back),
             Verb::LockArea => {
                 if self.doc.is_none() {
                     self.say_error("nothing open.");
@@ -3698,8 +3827,8 @@ impl PagifyApp {
                 };
                 match pagify_shell::organize::parse_range(&spec, doc.page_count) {
                     Ok(pages) => {
-                        self.awaiting_password = Some(Awaiting::LockPages(pages));
-                        self.say_info(
+                        self.ask_or_reuse_passcode(
+                            Awaiting::LockPages(pages),
                             "type a passcode to lock these pages with, or Escape to give up.",
                         );
                     }
@@ -3933,10 +4062,21 @@ impl PagifyApp {
     /// the engine and nothing else — not the command history, which is visible;
     /// not the recorder, which replays; and not the undo stack, where it would
     /// outlive the moment it was typed.
+    /// Hide one rectangle — a dragged area, which is a list of one shape.
     fn lock_area(
         &mut self,
         page: usize,
         area: pdf_core::document::Rect,
+        passcode: &[u8],
+        require_complete: bool,
+    ) -> Result<String, String> {
+        self.lock_shapes(page, &[area], passcode, require_complete)
+    }
+
+    fn lock_shapes(
+        &mut self,
+        page: usize,
+        shapes: &[pdf_core::document::Rect],
         passcode: &[u8],
         require_complete: bool,
     ) -> Result<String, String> {
@@ -3946,7 +4086,7 @@ impl PagifyApp {
         let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
         let fonts = self.outlined_font_bytes();
         let font_refs: Vec<&[u8]> = fonts.iter().map(|f| f.as_slice()).collect();
-        match doc.session.lock_area(page, area, passcode, &font_refs, require_complete) {
+        match doc.session.lock_shapes(page, shapes, passcode, &font_refs, require_complete) {
             Ok(report) => {
                 if let Some(doc) = &mut self.doc {
                     doc.rendered_is_stale();
@@ -4099,6 +4239,158 @@ impl PagifyApp {
             .unwrap_or_default()
     }
 
+    /// What this page draws, bottom first — read fresh when the page changes.
+    ///
+    /// **Not cached across an edit.** Restacking rewrites the content stream
+    /// and PDFium renumbers the page's objects afterwards, so a list held from
+    /// before would name things that have since moved.
+    fn layers_on(&mut self, page: usize) -> &[pdf_core::document::DrawnObject] {
+        if self.layers.as_ref().map(|(p, _)| *p) != Some(page) {
+            let found = self
+                .doc
+                .as_ref()
+                .and_then(|d| d.session.drawn_objects(page).ok())
+                .unwrap_or_default();
+            self.layers = Some((page, found));
+        }
+        self.layers.as_ref().map(|(_, l)| l.as_slice()).unwrap_or(&[])
+    }
+
+    /// Put something at the front or the back of a page's drawing order.
+    fn restack(
+        &mut self,
+        page: usize,
+        object: usize,
+        where_to: pdf_core::document::Stacking,
+    ) -> Result<String, String> {
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        doc.session.restack(page, object, where_to).map_err(|e| format!("layers: {e}"))?;
+
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        // The page has been rewritten, so everything read off it is stale —
+        // but a one-step move is usually the first of several, so the same
+        // thing is found again in the fresh list and stays picked.
+        let follow = {
+            let entries = self.layers_on(page).to_vec();
+            self.picked_layer.and_then(|at| entries.get(at).cloned())
+        };
+        self.layers = None;
+        self.picked_layer = follow.and_then(|was| {
+            let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+            self.layers_on(page).iter().position(|d| {
+                d.kind == was.kind
+                    && d.depth == was.depth
+                    && close(d.rect.left, was.rect.left)
+                    && close(d.rect.top, was.rect.top)
+                    && close(d.rect.right, was.rect.right)
+                    && close(d.rect.bottom, was.rect.bottom)
+            })
+        });
+        self.text = None;
+        self.text_selection = None;
+        self.find_hits.clear();
+        Ok(match where_to {
+            pdf_core::document::Stacking::Front => {
+                format!("brought to the front of page {}.", page + 1)
+            }
+            pdf_core::document::Stacking::Back => {
+                format!("sent to the back of page {}.", page + 1)
+            }
+            pdf_core::document::Stacking::Up => format!("moved up one on page {}.", page + 1),
+            pdf_core::document::Stacking::Down => {
+                format!("moved down one on page {}.", page + 1)
+            }
+        })
+    }
+
+    /// Everything drawn at a point, **topmost first**.
+    ///
+    /// **The whole stack, not the top of it.** Somebody right-clicking where
+    /// their picture used to be is pointing at whatever is now covering it, so
+    /// a menu that offered only the thing under the pointer would offer them
+    /// the wrong object — and "bring to front" would raise the very panel they
+    /// are trying to get out from behind.
+    fn layers_under(&mut self, page: usize, at: AppPoint) -> Vec<usize> {
+        let mut found: Vec<usize> = self
+            .layers_on(page)
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| {
+                at.x >= d.rect.left as f64
+                    && at.x <= d.rect.right as f64
+                    && at.y >= d.rect.top as f64
+                    && at.y <= d.rect.bottom as f64
+            })
+            .map(|(index, _)| index)
+            .collect();
+        // The list is in drawing order, so the last is on top.
+        found.reverse();
+        found
+    }
+
+    /// The row in the layer list for something found on the page, matched by
+    /// object and — because a group's contents share the group's number — by
+    /// where it sits.
+    fn layer_index_for(
+        &mut self,
+        page: usize,
+        object: usize,
+        rect: pdf_core::document::Rect,
+    ) -> Option<usize> {
+        let close = |a: f32, b: f32| (a - b).abs() < 0.5;
+        self.layers_on(page).iter().position(|d| {
+            d.object == object
+                && close(d.rect.left, rect.left)
+                && close(d.rect.top, rect.top)
+                && close(d.rect.right, rect.right)
+                && close(d.rect.bottom, rect.bottom)
+        })
+    }
+
+    /// Which entry in the layer list is drawn topmost at a point.
+    fn layer_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
+        self.layers_under(page, at).into_iter().next()
+    }
+
+    /// Show the layer rail with one entry picked, by its place in the list.
+    fn pick_layer(&mut self, page: usize, at: usize) {
+        self.show_layers = true;
+        self.picked_layer = Some(at);
+        let told = self
+            .layers_on(page)
+            .get(at)
+            .map(|d| format!("{} — {}", d.kind.describe(), d.label))
+            .unwrap_or_default();
+        self.say_info(format!("layers: {told}"));
+    }
+
+    /// Move whatever the layer rail has picked, or say why it cannot.
+    fn restack_picked(&mut self, where_to: pdf_core::document::Stacking) {
+        let page = self.page;
+        let Some(at) = self.picked_layer else {
+            self.say_info("pick something in the layer rail first — `layers` opens it.");
+            return;
+        };
+        let Some(entry) = self.layers_on(page).get(at).cloned() else {
+            self.say_error("that layer is no longer there.");
+            return;
+        };
+        // Something inside a group moves *with* the group — which is what
+        // somebody who picked a picture inside one means, and is why this acts
+        // rather than declining.
+        let grouped = !entry.movable;
+        match self.restack(page, entry.object, where_to) {
+            Ok(said) => self.say_info(if grouped {
+                format!("{said} (the group it is drawn in went with it.)")
+            } else {
+                said
+            }),
+            Err(e) => self.say_error(e),
+        }
+    }
+
     /// What is sealed on a page, for drawing its padlocks.
     fn locked_items_on(&self, page: usize) -> Vec<pdf_core::document::LockedItem> {
         self.doc.as_ref().map(|d| d.session.locked_items_on(page)).unwrap_or_default()
@@ -4121,33 +4413,35 @@ impl PagifyApp {
             self.say_error("nothing selected.");
             return;
         };
-        let boxes = chars.line_rects(range);
-        let Some(first) = boxes.first() else {
+        // **One shape per line, and they travel that way.**
+        //
+        // The union of them is not the selection: a drag from the middle of one
+        // line to the middle of the next makes a rectangle that also holds the
+        // start of the first line and the end of the second, and locking that
+        // takes words nobody picked. Measured on `two-column.pdf` before this:
+        // a 39-character selection locked 68 characters and took the word
+        // before it off the page.
+        let shapes: Vec<pdf_core::document::Rect> = chars
+            .line_rects(range)
+            .into_iter()
+            .map(|r| pdf_core::document::Rect {
+                left: r.left,
+                top: r.top,
+                right: r.right,
+                bottom: r.bottom,
+            })
+            .collect();
+        if shapes.is_empty() {
             self.say_error("nothing selected.");
             return;
-        };
-        // The union of the selected lines, which is what a reader means by "the
-        // part I highlighted" even when it spans several of them.
-        let area = boxes.iter().fold(
-            pdf_core::document::Rect {
-                left: first.left,
-                top: first.top,
-                right: first.right,
-                bottom: first.bottom,
-            },
-            |acc, r| pdf_core::document::Rect {
-                left: acc.left.min(r.left),
-                top: acc.top.min(r.top),
-                right: acc.right.max(r.right),
-                bottom: acc.bottom.max(r.bottom),
-            },
-        );
+        }
 
         // `require_complete: false` — the selection is the words, and an
         // image beneath them was never part of it.
-        self.awaiting_password =
-            Some(Awaiting::Lock { page, area, require_complete: false });
-        self.say_info("type a passcode to lock the selection with, or Escape to give up.");
+        self.ask_or_reuse_passcode(
+            Awaiting::Lock { page, shapes, require_complete: false },
+            "type a passcode to lock the selection with, or Escape to give up.",
+        );
     }
 
     /// Take one image off the page, sealed under a passcode.
@@ -4174,6 +4468,41 @@ impl PagifyApp {
                 Ok("unlocked.".into())
             }
             Err(e) => Err(format!("unlock: {e}")),
+        }
+    }
+
+    /// Finish any lock whose badge stands over a picture that is still on the
+    /// page, and say so. `quiet` keeps silent when there was nothing to do,
+    /// which is every ordinary open.
+    fn repair_locks(&mut self, say_if_nothing: bool) {
+        let repaired = self.doc.as_ref().and_then(|d| d.session.repair_locks().ok());
+        match repaired {
+            Some((completed, dropped)) if (completed, dropped) != (0, 0) => {
+                if let Some(doc) = &mut self.doc {
+                    doc.rendered_is_stale();
+                }
+                let mut said = Vec::new();
+                if completed > 0 {
+                    said.push(format!(
+                        "{completed} picture lock{} that had never taken effect {} now been \
+                         completed — the passcode still brings {} back",
+                        if completed == 1 { "" } else { "s" },
+                        if completed == 1 { "has" } else { "have" },
+                        if completed == 1 { "it" } else { "them" },
+                    ));
+                }
+                if dropped > 0 {
+                    said.push(format!(
+                        "{dropped} lock badge{} stood over a picture that could not be taken \
+                         off the page and {} been removed",
+                        if dropped == 1 { "" } else { "s" },
+                        if dropped == 1 { "has" } else { "have" },
+                    ));
+                }
+                self.say_info(format!("{}. Save to keep this.", said.join("; ")));
+            }
+            Some(_) if say_if_nothing => self.say_info("every lock in this document is whole."),
+            _ => {}
         }
     }
 
@@ -4464,6 +4793,34 @@ impl PagifyApp {
         }
     }
 
+    /// Ask for a passcode to lock something with — or use the one already in
+    /// force, if this document has locks and it has been typed once.
+    ///
+    /// **Every locking gesture goes through here.** The three of them —
+    /// selected words, a dragged area, an image, whole pages — used to arm
+    /// `awaiting_password` each in their own way, which is how asking twice for
+    /// the same secret became four separate places to fix.
+    fn ask_or_reuse_passcode(&mut self, what: Awaiting, prompt: &str) {
+        if let Some(held) = self.held_passcode.clone() {
+            // Straight through, by the same route the window takes, so a held
+            // passcode and a typed one cannot drift apart.
+            self.awaiting_password = Some(what);
+            self.answer_lock_passcode(&held);
+            return;
+        }
+        self.awaiting_password = Some(what);
+        self.say_info(prompt);
+    }
+
+    /// Let go of the passcode being held for this document.
+    ///
+    /// Called whenever the document does — closing one and opening another must
+    /// not carry a secret across, and a document that is no longer on screen has
+    /// no business leaving one in memory.
+    fn forget_passcode(&mut self) {
+        self.held_passcode = None;
+    }
+
     /// Hand a passcode to whichever lock is waiting for it.
     ///
     /// Its own method so the window and a test take one path — the alternative
@@ -4471,18 +4828,26 @@ impl PagifyApp {
     fn answer_lock_passcode(&mut self, typed: &str) {
         let Some(what) = self.awaiting_password.take() else { return };
         match what {
-            Awaiting::Lock { page, area, require_complete } => {
-                match self.lock_area(page, area, typed.as_bytes(), require_complete) {
+            Awaiting::Lock { page, shapes, require_complete } => {
+                let done = self.lock_shapes(page, &shapes, typed.as_bytes(), require_complete);
+                self.hold_or_drop(typed, &done);
+                match done {
                     Ok(said) => self.say_info(said),
                     Err(e) => self.say_error(e),
                 }
             }
-            Awaiting::LockPages(pages) => match self.lock_pages(&pages, typed.as_bytes()) {
-                Ok(said) => self.say_info(said),
-                Err(e) => self.say_error(e),
-            },
+            Awaiting::LockPages(pages) => {
+                let done = self.lock_pages(&pages, typed.as_bytes());
+                self.hold_or_drop(typed, &done);
+                match done {
+                    Ok(said) => self.say_info(said),
+                    Err(e) => self.say_error(e),
+                }
+            }
             Awaiting::LockImage { page, object } => {
-                match self.lock_image(page, object, typed.as_bytes()) {
+                let done = self.lock_image(page, object, typed.as_bytes());
+                self.hold_or_drop(typed, &done);
+                match done {
                     Ok(said) => self.say_info(said),
                     Err(e) => self.say_error(e),
                 }
@@ -4497,6 +4862,20 @@ impl PagifyApp {
             },
             // Not a lock; put it back for whoever does handle it.
             other => self.awaiting_password = Some(other),
+        }
+    }
+
+    /// Keep a passcode that locked something; let go of one that did not.
+    ///
+    /// **Both halves matter.** Keeping it is the feature. Dropping it on
+    /// failure is what stops a held passcode that has stopped working — a
+    /// document saved under a new one, say — from silently failing every lock
+    /// after it while the person watching is never given the chance to type the
+    /// right one.
+    fn hold_or_drop(&mut self, typed: &str, outcome: &Result<String, String>) {
+        match outcome {
+            Ok(_) => self.held_passcode = Some(zeroize::Zeroizing::new(typed.to_owned())),
+            Err(_) => self.forget_passcode(),
         }
     }
 
@@ -6855,8 +7234,35 @@ self.foreign = None;
                     return;
                 }
             }
-        } else if let Some(p) = self.pending.as_mut() {
-            p.points.push(at);
+        } else {
+            // **The first click of a move has to land on something, and says
+            // what.** A point recorded over bare paper meant the second click
+            // moved nothing and explained nothing. Reported from use as "once
+            // I click it, it should be selected".
+            let starting_a_move = self
+                .pending
+                .as_ref()
+                .and_then(|p| match p.kind {
+                    PendingKind::Move { pictures_first } if p.points.is_empty() => {
+                        Some(pictures_first)
+                    }
+                    _ => None,
+                });
+            if let Some(pictures_first) = starting_a_move {
+                let Some((object, rect, what)) = self.thing_at(page, at, pictures_first) else {
+                    self.say_info("nothing to move there — click on words, a picture or a shape.");
+                    return;
+                };
+                // Picked in the layer list too, so the same thing can be sent
+                // forward or back from there without finding it again.
+                if let Some(index) = self.layer_index_for(page, object, rect) {
+                    self.picked_layer = Some(index);
+                }
+                self.say_info(format!("{what} — now click where it should go."));
+            }
+            if let Some(p) = self.pending.as_mut() {
+                p.points.push(at);
+            }
         }
 
         if self.pending.as_ref().is_some_and(Pending::ready) {
@@ -6950,9 +7356,14 @@ self.foreign = None;
                         // The passcode is asked for *after* the area is drawn, so
                         // it is typed once and used immediately rather than being
                         // held while the user aims.
-                        self.awaiting_password =
-                            Some(Awaiting::Lock { page, area, require_complete: true });
-                        self.say_info("type a passcode to lock it with, or Escape to give up.");
+                        self.ask_or_reuse_passcode(
+                            Awaiting::Lock {
+                                page,
+                                shapes: vec![area],
+                                require_complete: true,
+                            },
+                            "type a passcode to lock it with, or Escape to give up.",
+                        );
                         Ok(String::new())
                     }
                     None => Err("lock: that area has no size.".into()),
@@ -7704,6 +8115,131 @@ impl eframe::App for PagifyApp {
             });
         }
 
+        // -- layers ------------------------------------------------------------
+        //
+        // **A floating window, not a rail.** Asked for from use as a popup
+        // with the order in it and the means to move things up and down — and
+        // a window can be dragged next to the thing being re-ordered, where a
+        // rail on the far side of the page cannot.
+        let mut restack_to: Option<(usize, pdf_core::document::Stacking)> = None;
+        if self.show_layers && !backstage && self.doc.is_some() {
+            let page = self.page;
+            let picked = self.picked_layer;
+            let entries: Vec<pdf_core::document::DrawnObject> = self.layers_on(page).to_vec();
+            let mut pick: Option<usize> = None;
+            let chosen_entry = picked.and_then(|at| entries.get(at));
+            let armed = chosen_entry.is_some();
+            let grouped = chosen_entry.is_some_and(|e| !e.movable);
+            let mut open = true;
+
+            egui::Window::new(format!("Layers — page {}", page + 1))
+                .id(egui::Id::new("layers-window"))
+                .open(&mut open)
+                .default_size(egui::vec2(300.0, 380.0))
+                .resizable(true)
+                .collapsible(false)
+                .show(&ctx, |ui| {
+                    // Said once, here, because "later is on top" is the one fact
+                    // that makes the list make sense and nothing else on screen
+                    // says it.
+                    ui.small("Topmost first — what is listed above covers what is below.");
+                    ui.add_space(4.0);
+
+                    if entries.is_empty() {
+                        ui.label("Nothing this page draws could be listed.");
+                        return;
+                    }
+
+                    let object = chosen_entry.map(|e| e.object);
+                    ui.horizontal(|ui| {
+                        use pdf_core::document::Stacking;
+                        for (glyph, tip, to) in [
+                            ("\u{E5D8}", "Move up one", Stacking::Up),
+                            ("\u{E5DB}", "Move down one", Stacking::Down),
+                            ("\u{E883}", "Bring to front", Stacking::Front),
+                            ("\u{E882}", "Send to back", Stacking::Back),
+                        ] {
+                            let button = egui::Button::new(
+                                egui::RichText::new(glyph).font(icon_font(18.0)),
+                            )
+                            .min_size(egui::vec2(34.0, 28.0));
+                            if ui.add_enabled(armed, button).on_hover_text(tip).clicked() {
+                                if let Some(object) = object {
+                                    restack_to = Some((object, to));
+                                }
+                            }
+                        }
+                    });
+                    if grouped {
+                        ui.small("Drawn inside a group — the whole group moves.");
+                    } else if !armed {
+                        ui.small("Pick a row, or click something on the page with Edit Object.");
+                    }
+                    ui.add_space(6.0);
+                    ui.separator();
+
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        // Drawn last is on top, so the list reads the other way
+                        // round from the page's own order.
+                        for (at, entry) in entries.iter().enumerate().rev() {
+                            let chosen = picked == Some(at);
+                            let row = ui
+                                .horizontal(|ui| {
+                                    // What a group draws is stepped in under it,
+                                    // so a page laid out as one panel reads as
+                                    // the panel and its contents rather than as
+                                    // a single unreadable entry.
+                                    ui.add_space(entry.depth as f32 * 14.0);
+                                    ui.selectable_label(
+                                        chosen,
+                                        format!(
+                                            "{}  {}",
+                                            match entry.kind {
+                                                pdf_core::document::DrawnKind::Words => "\u{E262}",
+                                                pdf_core::document::DrawnKind::Picture => "\u{E3F4}",
+                                                pdf_core::document::DrawnKind::Shape => "\u{E3C6}",
+                                                pdf_core::document::DrawnKind::Group => "\u{E2C7}",
+                                            },
+                                            entry.label
+                                        ),
+                                    )
+                                })
+                                .inner;
+                            if row.clicked() {
+                                pick = Some(at);
+                            }
+                            row.on_hover_text(format!(
+                                "{} — {:.0} × {:.0} pt at {:.0}, {:.0}{}",
+                                entry.kind.describe(),
+                                entry.rect.right - entry.rect.left,
+                                entry.rect.bottom - entry.rect.top,
+                                entry.rect.left,
+                                entry.rect.top,
+                                if entry.movable {
+                                    ""
+                                } else {
+                                    "\ndrawn inside a group — the group is what moves"
+                                },
+                            ));
+                        }
+                    });
+                });
+
+            if !open {
+                self.show_layers = false;
+            }
+            if let Some(at) = pick {
+                self.picked_layer = Some(at);
+            }
+        }
+        if let Some((object, where_to)) = restack_to {
+            let page = self.page;
+            match self.restack(page, object, where_to) {
+                Ok(said) => self.say_info(said),
+                Err(e) => self.say_error(e),
+            }
+        }
+
         // -- the pages ---------------------------------------------------------
         let mut home_command: Option<String> = None;
         egui::CentralPanel::default_margins().show(ui, |ui| {
@@ -8060,6 +8596,7 @@ impl PagifyApp {
                         // declaring the badges first meant the page swallowed
                         // every click and a padlock could never be pressed.
                         self.draw_lock_badges(ui, page, view);
+                        self.draw_picked_layer(ui, page, view);
                         // On top of the page and its badges, under the editor:
                         // a tool part-way through is the most recent thing the
                         // reader did and the thing they are aiming with.
@@ -8511,6 +9048,36 @@ impl PagifyApp {
         }
     }
 
+    /// An outline around whatever the layer rail has picked.
+    ///
+    /// **A list of labels is not enough to pick from.** "words: Project
+    /// Category" names one of several things that could be under the pointer,
+    /// and the only way to know which is to see it on the page.
+    fn draw_picked_layer(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        if !self.show_layers {
+            return;
+        }
+        let Some(at) = self.picked_layer else { return };
+        let Some(entry) = self.layers_on(page).get(at).cloned() else { return };
+
+        let outline = egui::Rect::from_min_max(
+            view.to_screen(AppPoint::new(entry.rect.left as f64, entry.rect.top as f64)),
+            view.to_screen(AppPoint::new(entry.rect.right as f64, entry.rect.bottom as f64)),
+        );
+        let painter = ui.painter();
+        painter.rect_stroke(
+            outline.expand(1.5),
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(2.0, theme::VIOLET),
+            egui::StrokeKind::Outside,
+        );
+        painter.rect_filled(
+            outline,
+            egui::CornerRadius::ZERO,
+            theme::VIOLET.gamma_multiply(0.12),
+        );
+    }
+
     /// A padlock over every sealed object on this page, and the click that
     /// brings one back.
     ///
@@ -8568,7 +9135,33 @@ impl PagifyApp {
             // black mark that says so. Drawing anything over it would be a
             // second answer to the same question — and would hide the very
             // thing it was trying to explain. Only the padlock goes on top.
-            if !item.is_area {
+            //
+            // **And nothing is painted over a picture that is still there.**
+            // The chequerboard says "the picture is gone"; over a picture that
+            // was never taken off it said something untrue, and read as a grey
+            // panel nobody could select or send back — reported from use, with
+            // a screenshot. A stale badge gets a dashed outline and its own
+            // words instead, until the lock is finished.
+            if item.stale {
+                painter.rect_stroke(
+                    area,
+                    egui::CornerRadius::same(2),
+                    egui::Stroke::new(2.0, theme::DANGER),
+                    egui::StrokeKind::Inside,
+                );
+                let label = egui::Rect::from_min_size(
+                    area.left_top() + egui::vec2(4.0, 4.0),
+                    egui::vec2(area.width() - 8.0, 16.0),
+                );
+                painter.rect_filled(label, egui::CornerRadius::same(2), theme::DANGER);
+                painter.text(
+                    label.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "lock not applied — reopen the file, or `repairlocks`",
+                    egui::FontId::proportional(11.0),
+                    egui::Color32::WHITE,
+                );
+            } else if !item.is_area {
                 let squares = painter.with_clip_rect(area.intersect(painter.clip_rect()));
 
                 // **The grid is laid out in page points, not screen pixels.**
@@ -8740,12 +9333,22 @@ impl PagifyApp {
                             && at.y <= i.rect.bottom as f64
                     })
                     .map(|i| (page, i));
+                // Where the pointer was, kept for the menu built on a later
+                // frame — the same reason `selected_image` is kept.
+                self.right_clicked_at = Some((page, at));
             }
         }
 
         let over_text = self.text_selection.is_some() && page == self.selection_page;
         let over_image = self.selected_image.as_ref().is_some_and(|(p, _)| *p == page);
-        if over_text || over_image {
+        // **Offered wherever the pointer is**, not only over a selection.
+        //
+        // It used to appear only over selected text or a picture, so a
+        // right-click on a panel, a rule or bare paper produced nothing at all
+        // — which is where somebody whose picture has gone behind something is
+        // most likely to be clicking. Reported from use as the layer option not
+        // being there.
+        if self.doc.is_some() {
             response.context_menu(|ui| {
                 if over_text && ui.button("Copy").clicked() {
                     self.copy_wanted = true;
@@ -8758,9 +9361,8 @@ impl PagifyApp {
                     if over_image {
                         if ui.button("🔒 Lock this image").clicked() {
                             if let Some((page, image)) = self.selected_image.clone() {
-                                self.awaiting_password =
-                                    Some(Awaiting::LockImage { page, object: image.object });
-                                self.say_info(
+                                self.ask_or_reuse_passcode(
+                                    Awaiting::LockImage { page, object: image.object },
                                     "type a passcode to lock this image with, or Escape to give up.",
                                 );
                             }
@@ -8771,6 +9373,99 @@ impl PagifyApp {
                         self.lock_selection();
                         ui.close();
                     }
+                }
+
+                // **The drawing order, where somebody looks for it.** A picture
+                // that has gone behind a panel is not reachable from a ribbon
+                // button, because the thing to act on is the thing under the
+                // pointer.
+                ui.separator();
+                let spot = self.right_clicked_at.filter(|(p, _)| *p == page).map(|(_, at)| at);
+                if let Some(at) = spot {
+                    // **A lock badge is not a layer, and says so.** The
+                    // chequerboard over a locked picture reads as a grey panel,
+                    // and somebody trying to send it back was pointing at the
+                    // one thing on the page the drawing order cannot touch.
+                    let badge = self.locked_items_on(page).into_iter().find(|i| {
+                        at.x >= i.rect.left as f64
+                            && at.x <= i.rect.right as f64
+                            && at.y >= i.rect.top as f64
+                            && at.y <= i.rect.bottom as f64
+                    });
+                    if let Some(badge) = badge {
+                        ui.weak(if badge.is_area {
+                            "🔒 Locked words — not a layer. The padlock brings them back."
+                        } else if badge.stale {
+                            "🔒 A lock badge over a picture that was never taken off — `repairlocks` finishes it."
+                        } else {
+                            "🔒 A locked picture — not a layer. The padlock brings it back."
+                        });
+                        ui.separator();
+                    }
+                    let under = self.layers_under(page, at);
+                    if under.is_empty() {
+                        ui.weak("Nothing is drawn here.");
+                    } else {
+                        ui.weak("Layers here — topmost first");
+                        let listed: Vec<(usize, String, bool)> = under
+                            .iter()
+                            .take(8)
+                            .filter_map(|index| {
+                                self.layers
+                                    .as_ref()
+                                    .and_then(|(_, l)| l.get(*index))
+                                    .map(|d| {
+                                        (
+                                            *index,
+                                            format!("{}  {}", d.kind.describe(), d.label),
+                                            !d.movable,
+                                        )
+                                    })
+                            })
+                            .collect();
+                        for (index, label, grouped) in listed {
+                            let picked = self.picked_layer == Some(index);
+                            let row = ui.selectable_label(
+                                picked,
+                                if grouped { format!("{label}   (in a group)") } else { label },
+                            );
+                            if row.clicked() {
+                                self.pick_layer(page, index);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        // These act on what has been picked, so somebody can
+                        // choose the thing that is *behind* and raise that,
+                        // rather than the thing on top of it.
+                        let armed = self.picked_layer.is_some();
+                        for (label, to) in [
+                            ("\u{E5D8}  Move the picked one up", pdf_core::document::Stacking::Up),
+                            ("\u{E5DB}  Move the picked one down", pdf_core::document::Stacking::Down),
+                            ("\u{E883}  Bring the picked one to front", pdf_core::document::Stacking::Front),
+                            ("\u{E882}  Send the picked one to back", pdf_core::document::Stacking::Back),
+                        ] {
+                            if ui.add_enabled(armed, egui::Button::new(label)).clicked() {
+                                self.restack_picked(to);
+                                ui.close();
+                            }
+                        }
+                        if !armed {
+                            ui.small("Choose one above first.");
+                        }
+                    }
+                    ui.separator();
+                }
+                let shown = self.show_layers;
+                if ui
+                    .button(if shown { "Hide the layer list" } else { "Show all layers" })
+                    .clicked()
+                {
+                    self.show_layers = !shown;
+                    if self.show_layers {
+                        self.layers = None;
+                    }
+                    ui.close();
                 }
             });
         }
@@ -9047,7 +9742,7 @@ mod tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9478,7 +10173,7 @@ mod text_layer_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9534,7 +10229,7 @@ mod unsaved_guard_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9673,7 +10368,7 @@ mod reading_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9768,7 +10463,7 @@ mod undo_wiring_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -9884,7 +10579,7 @@ mod pointer_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -10656,7 +11351,7 @@ mod ui_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -12598,7 +13293,7 @@ mod redaction_wiring_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -12781,7 +13476,7 @@ mod lock_wiring_tests {
 
     fn fixture(name: &str) -> String {
         format!(
-            "{}/../../../workspace/Pagify/rust/pdf_core/fixtures/{name}",
+            "{}/../../../rust/pdf_core/fixtures/{name}",
             env!("CARGO_MANIFEST_DIR")
         )
     }
@@ -12933,7 +13628,7 @@ mod lock_wiring_tests {
     #[test]
     fn signing_says_that_a_later_edit_breaks_it() {
         let certificate = std::path::Path::new(
-            "/Users/hsilighting/workspace/Pagify/rust/pdf_core/fixtures/test-signer.p12",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer.p12"),
         );
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
@@ -13590,6 +14285,53 @@ mod lock_wiring_tests {
     ///
     /// Two clicks: what to move, and where it goes. Whatever is under the first
     /// one — a caption sitting on a photograph is the caption, because the
+    /// **A picture moves where it is put, and takes nothing with it.**
+    ///
+    /// This is the "Edit Object" gesture: `pictures_first`, so a click over a
+    /// picture picks the picture rather than any words on top of it. Reported
+    /// from use as the picture disappearing, so this asserts it is still on the
+    /// page afterwards as well as where it went.
+    #[test]
+    fn a_picture_can_be_moved_and_is_still_on_the_page() {
+        // Not `app`: the helper of that name is called again inside the loop,
+        // and a local would shadow it.
+        let opened = app("pictures.pdf");
+        let before = opened.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        assert_eq!(before.len(), 2, "the fixture should have two pictures");
+        let words = page_text(&opened, 0);
+        drop(opened);
+
+        for target in &before {
+            let mut carrying = app("pictures.pdf");
+            let middle = |r: &pdf_core::document::Rect| AppPoint {
+                x: ((r.left + r.right) / 2.0) as f64,
+                y: ((r.top + r.bottom) / 2.0) as f64,
+            };
+            let from = middle(&target.rect);
+            let to = AppPoint { x: from.x + 30.0, y: from.y + 18.0 };
+
+            let told = carrying.move_thing(0, from, to, true).expect("moved");
+            assert!(told.contains("the picture"), "it did not pick the picture: {told}");
+
+            let after =
+                carrying.doc.as_ref().expect("open").session.images_on(0).expect("images");
+            assert_eq!(after.len(), 2, "a picture left the page");
+            let now = after
+                .iter()
+                .find(|i| i.object == target.object)
+                .expect("the picture that was moved is gone");
+            assert!(
+                (now.rect.left - target.rect.left - 30.0).abs() < 0.5
+                    && (now.rect.top - target.rect.top - 18.0).abs() < 0.5,
+                "object {} went to {:?} from {:?}",
+                target.object,
+                now.rect,
+                target.rect
+            );
+            assert_eq!(page_text(&carrying, 0), words, "moving a picture changed the words");
+        }
+    }
+
     /// smaller thing is what was aimed at.
     #[test]
     fn a_run_of_words_can_be_moved_across_the_page() {
@@ -14052,7 +14794,7 @@ mod lock_wiring_tests {
     #[test]
     fn the_status_of_a_signed_document_says_whether_it_still_holds() {
         let certificate = std::path::Path::new(
-            "/Users/hsilighting/workspace/Pagify/rust/pdf_core/fixtures/test-signer.p12",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer.p12"),
         );
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
@@ -14268,7 +15010,7 @@ mod lock_wiring_tests {
     #[test]
     fn validating_a_signed_document_separates_unchanged_from_who_signed_it() {
         let certificate = std::path::Path::new(
-            "/Users/hsilighting/workspace/Pagify/rust/pdf_core/fixtures/test-signer.p12",
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer.p12"),
         );
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
@@ -14904,6 +15646,435 @@ mod lock_wiring_tests {
         assert_eq!(page_text(&app, 0), hidden, "undo did not re-hide it:\n{}", said(&app));
     }
 
+    /// **The passcode is asked for once per document, not once per lock.**
+    ///
+    /// Reported from use: locking several things meant typing the same passcode
+    /// for each of them. Every lock in a document shares one vault and so one
+    /// passcode, so after the first the program was asking a question it
+    /// already had the answer to.
+    #[test]
+    fn a_second_lock_uses_the_passcode_the_first_one_was_given() {
+        let mut app = app("text-lines.pdf");
+
+        // The first lock asks, and is answered.
+        app.awaiting_password =
+            Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
+        app.answer_lock_passcode("a good passcode");
+        assert!(
+            !page_text(&app, 0).contains("The quick brown fox"),
+            "the first lock did not take:\n{}",
+            said(&app)
+        );
+
+        // The second does not ask at all.
+        app.ask_or_reuse_passcode(Awaiting::LockPages(vec![0]), "should never be shown");
+        assert!(
+            app.awaiting_password.is_none(),
+            "it asked again for a passcode it already had"
+        );
+        assert!(
+            !said(&app).contains("should never be shown"),
+            "it showed the prompt anyway:\n{}",
+            said(&app)
+        );
+        assert!(
+            app.doc.as_ref().is_some_and(|d| !d.session.locked_pages().is_empty()),
+            "the second lock did not happen:\n{}",
+            said(&app)
+        );
+    }
+
+    /// **Unlocking always asks.** Holding the passcode is for putting things
+    /// away, never for bringing them back — somebody at an unattended screen
+    /// must not be able to click a padlock open.
+    #[test]
+    fn a_held_passcode_does_not_unlock_anything() {
+        let mut app = app("text-lines.pdf");
+        app.awaiting_password =
+            Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
+        app.answer_lock_passcode("a good passcode");
+        assert!(app.held_passcode.is_some(), "the passcode was not kept");
+
+        // The gesture that brings something back still asks.
+        app.submit("unlock");
+        assert!(
+            matches!(app.awaiting_password, Some(Awaiting::Unlock)),
+            "unlocking did not ask for the passcode:\n{}",
+            said(&app)
+        );
+        assert!(
+            !page_text(&app, 0).contains("The quick brown fox"),
+            "the held passcode brought the words back without being typed:\n{}",
+            said(&app)
+        );
+    }
+
+    /// **A passcode that stops working is let go**, so the next lock asks
+    /// instead of failing silently for the rest of the session.
+    #[test]
+    fn a_passcode_that_is_refused_is_not_kept() {
+        let mut app = app("text-lines.pdf");
+        app.awaiting_password =
+            Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
+        app.answer_lock_passcode("a good passcode");
+        assert!(app.held_passcode.is_some());
+
+        // A wrong one, forced in the way a stale held passcode would arrive.
+        app.awaiting_password = Some(Awaiting::LockPages(vec![0]));
+        app.answer_lock_passcode("the wrong passcode");
+        assert!(
+            app.held_passcode.is_none(),
+            "a refused passcode was kept, so every lock after it would fail quietly"
+        );
+    }
+
+    /// **And it does not follow the reader to the next document.**
+    #[test]
+    fn closing_a_document_lets_go_of_its_passcode() {
+        let mut app = app("text-lines.pdf");
+        app.awaiting_password =
+            Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
+        app.answer_lock_passcode("a good passcode");
+        assert!(app.held_passcode.is_some());
+
+        app.submit("close!");
+        assert!(app.doc.is_none(), "it did not close:\n{}", said(&app));
+        assert!(app.held_passcode.is_none(), "the passcode outlived the document");
+    }
+
+    /// **A selection over two lines locks the selection, not the two lines.**
+    ///
+    /// The app used to collapse it into the smallest rectangle holding it,
+    /// which also holds the head of the first line and the tail of the last.
+    /// Reported from use as "the exact selected text isn't getting locked, the
+    /// whole line is" — and the engine was never the part that was wrong.
+    #[test]
+    fn locking_a_selection_across_lines_sends_the_lines_not_their_union() {
+        let mut app = app("two-column.pdf");
+        let page = app.page;
+        let chars = app.characters(page).expect("characters");
+        let text: String = chars.text();
+        let phrase = "luminaire housing is formed from";
+        let at = text.find(phrase).expect("the fixture phrase");
+        let at = text[..at].chars().count();
+        // Past the line break, so the selection is genuinely two lines.
+        let to = at + phrase.chars().count() + 8;
+
+        app.selection_page = page;
+        app.text_selection = Some(at..to);
+        app.lock_selection();
+
+        match app.awaiting_password.take() {
+            Some(Awaiting::Lock { shapes, .. }) => {
+                assert!(
+                    shapes.len() >= 2,
+                    "the selection was collapsed into {} shape(s) — the union is \
+                     wider than the selection and takes words either side of it",
+                    shapes.len()
+                );
+            }
+            other => panic!("no lock was armed: {other:?}"),
+        }
+    }
+
+    /// **The layer rail says what the page draws, topmost first.**
+    #[test]
+    fn layers_lists_what_the_page_draws() {
+        let mut app = app("pictures.pdf");
+        assert!(!app.show_layers, "it should start closed");
+
+        app.submit("layers");
+        assert!(app.show_layers, "`layers` did not open it:\n{}", said(&app));
+
+        let listed = app.layers_on(0).to_vec();
+        assert_eq!(listed.len(), 5, "the fixture draws five things: {listed:#?}");
+        assert!(
+            listed.iter().any(|d| d.kind == pdf_core::document::DrawnKind::Picture),
+            "no picture was listed: {listed:#?}"
+        );
+
+        app.submit("layers");
+        assert!(!app.show_layers, "it did not close again");
+    }
+
+    /// **Restacking needs something picked**, and says so rather than guessing
+    /// which of the things on the page was meant.
+    #[test]
+    fn bringing_to_front_with_nothing_picked_says_to_pick_something() {
+        let mut app = app("pictures.pdf");
+        app.submit("bringtofront");
+        assert!(
+            said(&app).contains("pick something"),
+            "it did not say what to do:\n{}",
+            said(&app)
+        );
+    }
+
+    /// **And with something picked, it goes to the front.**
+    #[test]
+    fn a_picked_layer_can_be_brought_to_the_front() {
+        let mut app = app("pictures.pdf");
+        let listed = app.layers_on(0).to_vec();
+        // The bottom-most thing, which is the one a reader would be reaching
+        // for when something has covered it.
+        let bottom = listed.first().cloned().expect("something is drawn");
+
+        app.picked_layer = Some(bottom.object);
+        app.submit("bringtofront");
+        assert!(
+            said(&app).contains("brought to the front"),
+            "it did not restack:\n{}",
+            said(&app)
+        );
+
+        // The list is read again, because the page has been rewritten.
+        let now = app.layers_on(0).to_vec();
+        assert_eq!(now.len(), listed.len(), "something left the page");
+        assert_eq!(
+            now.last().map(|d| d.label.clone()),
+            Some(bottom.label.clone()),
+            "it is not at the front: {now:#?}"
+        );
+        // And the pick follows it to its new place, so the next move acts on
+        // the same thing rather than on whatever now sits at the old row.
+        assert_eq!(
+            app.picked_layer,
+            Some(now.len() - 1),
+            "the pick did not follow the thing it was on"
+        );
+    }
+
+    /// **A picture that has gone behind something can be got back.**
+    ///
+    /// Reported from use: *"images are going behind layers I can't edit"*. The
+    /// fixture draws a picture and then paints a panel over it, which is the
+    /// ordinary layout of a brochure and the ordinary way a picture ends up
+    /// underneath something.
+    ///
+    /// The whole route is asserted, because each half of it was wrong on its
+    /// own: right-clicking where the picture *was* points at the panel now
+    /// covering it, so the menu has to offer the **stack** under the pointer
+    /// rather than the top of it — otherwise "bring to front" raises the very
+    /// panel somebody is trying to get out from behind.
+    #[test]
+    fn a_picture_under_a_panel_can_be_found_and_brought_back() {
+        let mut app = app("covered.pdf");
+        let listed = app.layers_on(0).to_vec();
+        assert_eq!(listed.len(), 3, "the fixture draws a picture, a panel and a line: {listed:#?}");
+
+        let picture = listed
+            .iter()
+            .find(|d| d.kind == pdf_core::document::DrawnKind::Picture)
+            .cloned()
+            .expect("the picture");
+        let panel = listed
+            .iter()
+            .find(|d| d.kind == pdf_core::document::DrawnKind::Shape)
+            .cloned()
+            .expect("the panel");
+        assert!(
+            listed.iter().position(|d| d.object == picture.object)
+                < listed.iter().position(|d| d.object == panel.object),
+            "the fixture should draw the picture first, so it is underneath"
+        );
+
+        // A point where the panel covers the picture — where somebody looking
+        // for their picture would click.
+        let middle = AppPoint {
+            x: ((picture.rect.left.max(panel.rect.left) + picture.rect.right.min(panel.rect.right))
+                / 2.0) as f64,
+            y: ((picture.rect.top.max(panel.rect.top) + picture.rect.bottom.min(panel.rect.bottom))
+                / 2.0) as f64,
+        };
+
+        // The stack under the pointer, topmost first: the panel is on top and
+        // the picture is under it.
+        let under = app.layers_under(0, middle);
+        assert!(under.len() >= 2, "only one thing found under the pointer: {under:?}");
+        let kinds: Vec<pdf_core::document::DrawnKind> =
+            under.iter().filter_map(|i| listed.get(*i)).map(|d| d.kind).collect();
+        // Topmost first, so the picture — drawn before everything else there —
+        // is reported last, under whatever is covering it.
+        assert_eq!(
+            kinds.last(),
+            Some(&pdf_core::document::DrawnKind::Picture),
+            "the picture should be reported at the bottom of the stack: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().position(|k| *k == pdf_core::document::DrawnKind::Shape)
+                < kinds.iter().position(|k| *k == pdf_core::document::DrawnKind::Picture),
+            "the panel should be reported above the picture it covers: {kinds:?}"
+        );
+
+        // Pick the picture out of that stack and raise it.
+        let at = *under
+            .iter()
+            .find(|i| listed.get(**i).is_some_and(|d| d.object == picture.object))
+            .expect("the picture in the stack");
+        app.pick_layer(0, at);
+        app.restack_picked(pdf_core::document::Stacking::Front);
+        assert!(
+            said(&app).contains("brought to the front"),
+            "it did not raise the picture:\n{}",
+            said(&app)
+        );
+
+        // And it is now the last thing the page draws, which is what puts it on
+        // top of the panel.
+        let now = app.layers_on(0).to_vec();
+        assert_eq!(
+            now.last().map(|d| d.kind),
+            Some(pdf_core::document::DrawnKind::Picture),
+            "the picture is still not on top: {now:#?}"
+        );
+    }
+
+    /// **The first click of a move selects, and says what it selected.**
+    ///
+    /// Reported from use: "once I click it, it should be selected". A click on
+    /// bare paper used to be recorded as the start of a move that then moved
+    /// nothing; now it says so and waits for a click that lands on something.
+    #[test]
+    fn the_first_click_of_a_move_selects_what_it_lands_on() {
+        let mut app = app("covered.pdf");
+        app.submit("editobject");
+        assert!(app.pending.is_some(), "the tool did not arm:\n{}", said(&app));
+
+        // Bare paper: nothing recorded, and told why.
+        app.take_pick(AppPoint { x: 590.0, y: 780.0 });
+        assert_eq!(
+            app.pending.as_ref().map(|p| p.points.len()),
+            Some(0),
+            "a click on nothing was taken as the start of a move"
+        );
+        assert!(said(&app).contains("nothing to move there"), "{}", said(&app));
+
+        // The panel, where nothing else is under the pointer: its right-hand
+        // end, past the picture it covers and the words on it. Selected,
+        // named, and picked in the layer list.
+        let panel = app
+            .layers_on(0)
+            .iter()
+            .find(|d| d.kind == pdf_core::document::DrawnKind::Shape)
+            .cloned()
+            .expect("the fixture's panel");
+        let corner = AppPoint {
+            x: (panel.rect.right - 20.0) as f64,
+            y: (panel.rect.bottom - 20.0) as f64,
+        };
+        app.take_pick(corner);
+        assert_eq!(app.pending.as_ref().map(|p| p.points.len()), Some(1));
+        assert!(said(&app).contains("the shape"), "it did not say what it picked:\n{}", said(&app));
+        let picked = app.picked_layer.and_then(|at| app.layers_on(0).get(at).cloned());
+        assert_eq!(
+            picked.map(|d| d.kind),
+            Some(pdf_core::document::DrawnKind::Shape),
+            "the click did not pick the shape in the layer list"
+        );
+    }
+
+    /// **The layer window moves things one step, and keeps them picked.**
+    #[test]
+    fn a_picked_layer_can_be_nudged_up_and_stays_picked() {
+        let mut app = app("pictures.pdf");
+        let listed = app.layers_on(0).to_vec();
+        let bottom = listed.first().cloned().expect("something is drawn");
+        app.picked_layer = Some(0);
+
+        app.restack_picked(pdf_core::document::Stacking::Up);
+        assert!(said(&app).contains("moved up one"), "{}", said(&app));
+
+        let now = app.layers_on(0).to_vec();
+        assert_eq!(
+            now.get(1).map(|d| d.label.clone()),
+            Some(bottom.label.clone()),
+            "it did not move up exactly one: {now:#?}"
+        );
+        // Still picked, at its new place, so the next nudge acts on the same thing.
+        assert_eq!(app.picked_layer, Some(1), "the pick did not follow the thing it was on");
+
+        app.restack_picked(pdf_core::document::Stacking::Down);
+        let back = app.layers_on(0).to_vec();
+        assert_eq!(back.first().map(|d| d.label.clone()), Some(bottom.label));
+        assert_eq!(app.picked_layer, Some(0));
+    }
+
+    /// **A lock that never took is finished when the document opens.**
+    ///
+    /// Reported from use with a screenshot: a grey layer over a picture that
+    /// could not be selected or sent back. It was the chequerboard drawn over a
+    /// locked picture that was never actually taken off the page. The engine
+    /// test builds that document; this checks the app repairs it on open and
+    /// says so.
+    #[test]
+    fn a_document_with_a_lock_that_never_took_is_repaired_on_open() {
+        use pdf_core::document::{Document, DocumentMut};
+
+        // Build the broken document the way the engine test does.
+        let path = fixture("pictures.pdf");
+        let original = {
+            let mut doc = pdf_core::document::pdfium_doc::PdfiumDocument::open_path(&path, None)
+                .expect("open");
+            let mut bytes = Vec::new();
+            doc.save_full_copy(&mut bytes).expect("save");
+            let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+            (1..64u32)
+                .find_map(|number| match file.object(number) {
+                    Ok(pdf_core::pdf::Object::Stream(dict, span))
+                        if dict.get(b"Subtype").and_then(pdf_core::pdf::Object::as_name)
+                            == Some(&b"Image"[..])
+                            && dict.get(b"Width").and_then(pdf_core::pdf::Object::as_i64)
+                                == Some(4) =>
+                    {
+                        Some((number, pdf_core::pdf::write_stream(&dict, &bytes[span])))
+                    }
+                    _ => None,
+                })
+                .expect("the first picture")
+        };
+        let broken = {
+            let mut doc = pdf_core::document::pdfium_doc::PdfiumDocument::open_path(&path, None)
+                .expect("open");
+            let picture = doc.images_on(0).expect("images")[0].object;
+            doc.lock_image(0, picture, b"a good passcode").expect("lock");
+            let mut bytes = Vec::new();
+            doc.save_full_copy(&mut bytes).expect("save");
+            let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+            file.rewrite(&[original]).expect("put the picture back")
+        };
+        let scratch = std::env::temp_dir().join(format!(
+            "pagify-stale-lock-{}.pdf",
+            std::process::id()
+        ));
+        std::fs::write(&scratch, broken).expect("write");
+
+        let app = PagifyApp::new(Some(scratch.to_str().expect("path")));
+        assert!(app.doc.is_some(), "did not open");
+        assert!(
+            said(&app).contains("had never taken effect"),
+            "the repair was not reported:\n{}",
+            said(&app)
+        );
+        let badges = app.locked_items_on(0);
+        assert_eq!(badges.len(), 1);
+        assert!(!badges[0].stale, "the badge is still stale after open");
+        let _ = std::fs::remove_file(&scratch);
+    }
+
+    /// Typing into the command box must never take the program down.
+    ///
+    /// Seen from outside while looking at a real document: the app vanished
+    /// the moment `goto 3` was typed — twice, with no crash report, which is
+    /// what a panic looks like from the desktop.
+    #[test]
+    fn typing_a_page_number_does_not_panic() {
+        let mut app = app("pages-ladder.pdf");
+        for line in ["goto 3", "goto", "page 3", "3", "goto 99", "goto x"] {
+            app.submit(line);
+        }
+        assert!(app.doc.is_some());
+    }
+
     /// **Escape gives up on a passcode prompt** without locking anything, and
     /// says which prompt it abandoned.
     #[test]
@@ -14911,7 +16082,7 @@ mod lock_wiring_tests {
         let mut app = app("text-lines.pdf");
         let before = page_text(&app, 0);
         app.awaiting_password =
-            Some(Awaiting::Lock { page: 0, area: fox_area(), require_complete: true });
+            Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
 
         app.escape();
         assert!(app.awaiting_password.is_none());

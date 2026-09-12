@@ -132,3 +132,97 @@ Page geometry cannot answer that — a crop of the wrong part of a page is exact
 many pixels as a crop of the right part, so a size assertion passes either way.
 Four flat colours make the answer readable off a single pixel, and any colour that
 is not the cropped quadrant's is content leaking in from outside the crop.
+
+## pictures.pdf
+
+One 612 × 792 pt page: three lines of text and two small pictures, one placed by
+a plain `cm` and one by a **`cm` inside another `cm`** — which is how a producer
+nests a placed graphic.
+
+It exists because the nesting is where moving a picture goes wrong. A
+translation written naively at the `Do` lands multiplied by the picture's own
+scaling: measured once at 3916 points for a 20-point move. Every other fixture
+here places its one picture flat, so the whole suite stayed green while the
+nested case was broken.
+
+Rebuild it with `tools/make_pictures_fixture.py fixtures/pictures.pdf`. Kept as
+a generator rather than only as bytes so the *reason* for its shape — the nested
+`cm` — is legible, which a 1.3 kB binary is not.
+
+## coloured.pdf
+
+One 612 × 792 pt page: a yellow panel and four lines of 24-point text in black,
+red, blue and green.
+
+It exists because **every other fixture here is black on white**, and on a black
+page an edit that repaints the type looks exactly like one that does not.
+Reported from use as text changing colour when it was moved — which the checks
+of the day could not have caught, because they compared words and positions and
+a re-emission preserves both while repainting.
+
+The colours are far apart on purpose, so a thumbnail-sized render still
+separates them and no anti-aliased edge can be mistaken for one of the others.
+Rebuild it with `tools/make_coloured_fixture.py fixtures/coloured.pdf`.
+
+## forms.pdf
+
+One 612 × 792 pt page with a heading of its own and **the same form XObject
+drawn twice** — each holding two lines of text and a blue bar.
+
+It exists because a page laid out in a design program routinely draws a whole
+panel through one form, and nothing else here does. A layer list that stopped at
+the page's own objects said `group, 145 × 63 pt` and nothing else, which is true
+and useless — reported from use as a page that looked like it had layers which
+could not be read.
+
+Drawn **twice on purpose**: that is what makes re-stacking a form's contents on
+its own the wrong answer rather than a missing feature, because moving one would
+move it in both places.
+
+Rebuild it with `tools/make_forms_fixture.py fixtures/forms.pdf`.
+
+## covered.pdf
+
+One 612 × 792 pt page: a red picture, then a grey panel painted **over** it, then
+a line of text on the panel.
+
+It exists because "my picture went behind a layer" is not something the other
+fixtures can express. In every one of them the pictures are drawn last, so they
+are on top and no amount of moving one can put it underneath anything — which is
+why the whole business of getting a covered picture back had no test until this.
+
+The order is the point: picture, then panel, then words. A right-click in the
+middle finds all three, and the one somebody is looking for is the one at the
+bottom.
+
+Rebuild it with `tools/make_covered_fixture.py fixtures/covered.pdf`.
+
+## clipped.pdf
+
+One 612 × 792 pt page whose grey panel is painted with **`W f`** — one path
+doing two jobs. It paints, so PDFium reports it as an object somebody can click;
+and it clips, so the 30-point line drawn after it is held inside its 200 pt
+width instead of running off the page.
+
+It exists because that combination is the one case moving a shape must refuse.
+`q`/`Q` saves and restores the clipping path, so wrapping such a path to move it
+would put the clip back the instant the wrapper closed, and the words it was
+holding in would spread across the page. Nothing else here sets a clip from a
+painted path, so without this the refusal was a rule with no case behind it.
+
+Rebuild it with `tools/make_clipped_fixture.py fixtures/clipped.pdf`.
+
+## framed.pdf
+
+One 612 × 792 pt page with a picture placed **the way a design program places
+one**: a grey placeholder rectangle (`0.659 0.662 0.664`), then a clip exactly
+the frame's size, then the picture inside it, then a caption drawn over the top.
+
+It exists because that is how every photograph in a real brochure is written,
+and moving the `Do` alone slid the picture out of its own clip and off into
+nothing — leaving the grey placeholder showing. Reported from use, over several
+days, as a grey layer that nothing could be brought in front of. Nothing could:
+the picture was no longer being drawn. The test asserts on a render, because the
+object list said the picture had moved and was still there.
+
+Rebuild it with `tools/make_framed_fixture.py fixtures/framed.pdf`.

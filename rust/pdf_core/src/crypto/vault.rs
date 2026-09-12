@@ -99,6 +99,21 @@ pub struct SealedItem {
     /// show a badge over the gap. **In the clear, deliberately**: the gap is
     /// visible anyway, and a badge nobody can place is a lock nobody can undo.
     pub rect: [f32; 4],
+    /// For a locked *area*, the exact shapes it covered — one per line of a
+    /// text selection, of which [`SealedItem::rect`] is the union.
+    ///
+    /// **Kept because unlocking anything else on the page brings this back.**
+    /// Undoing one lock replaces the whole page with its sealed original, and
+    /// everything else still locked on it then has to be taken off again. An
+    /// image can be found from the page; an area cannot — it is a shape somebody
+    /// drew, and if it is not written down it is gone. Reported from use as
+    /// locked text becoming visible again with its padlock still there.
+    ///
+    /// `#[serde(default)]` rather than a version bump, for the reason
+    /// [`Vault::items`] gives: a vault written before this simply has none, and
+    /// an empty list means the rect is the shape.
+    #[serde(default)]
+    pub parts: Vec<[f32; 4]>,
 }
 
 /// Everything a passcode has to open.
@@ -222,8 +237,20 @@ impl Vault {
         object: usize,
         rect: [f32; 4],
     ) -> Result<String> {
+        self.hide_shapes(page_index, object, rect, Vec::new())
+    }
+
+    /// Hide something whose shape is not a single rectangle — see
+    /// [`SealedItem::parts`].
+    pub fn hide_shapes(
+        &mut self,
+        page_index: usize,
+        object: usize,
+        rect: [f32; 4],
+        parts: Vec<[f32; 4]>,
+    ) -> Result<String> {
         let id = hex(&cipher::random::<8>()?);
-        self.items.push(SealedItem { id: id.clone(), page_index, object, rect });
+        self.items.push(SealedItem { id: id.clone(), page_index, object, rect, parts });
         Ok(id)
     }
 

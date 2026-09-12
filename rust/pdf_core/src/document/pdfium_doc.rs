@@ -836,6 +836,31 @@ impl Document for PdfiumDocument {
             }
         }
 
+        // **And so does a run of words.** Shifting the text matrix its
+        // operators draw under moves them and reaches nothing else, so this
+        // needs no re-emission either — see `move_run_in_stream` for the two
+        // operators it inserts and the cases it declines. What it declines
+        // falls through to the guarded path below, which still works and still
+        // refuses on a page it would rewrite.
+        if self.text_runs(page_index)?.iter().any(|r| r.object == object) {
+            match self.move_run_in_stream(page_index, object, by) {
+                Ok(()) => return Ok(()),
+                Err(PdfError::Unsupported(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+
+        // **And so does a drawn shape.** Its operators are pure graphics, so
+        // `q`/`Q` around them is legal and reaches nothing else — see
+        // `move_path_in_stream`.
+        if self.path_ordinal(page_index, object)?.is_some() {
+            match self.move_path_in_stream(page_index, object, by) {
+                Ok(()) => return Ok(()),
+                Err(PdfError::Unsupported(_)) => {}
+                Err(other) => return Err(other),
+            }
+        }
+
         // **What the page says now, and a way back to it.**
         //
         // Committing a move needs `FPDFPage_GenerateContent`, which re-emits
@@ -853,6 +878,11 @@ impl Document for PdfiumDocument {
             .iter()
             .map(|r| r.text.trim().to_string())
             .collect();
+        // **And what is on the page besides its words.** A page with no text
+        // compares nothing with nothing, so the words alone let a re-emission
+        // through on exactly the pages that have no other protection — see
+        // `object_census`.
+        let census_before = self.object_census(page_index)?;
         let snapshot = self
             .document
             .save_to_bytes()
@@ -884,7 +914,28 @@ impl Document for PdfiumDocument {
         let (mut was, mut now) = (before.clone(), after.clone());
         was.sort();
         now.sort();
-        if was != now {
+
+        // Every object still there, still its own kind, and still where it was
+        // — bar the one that was asked to move, which has to have moved by
+        // exactly what was asked.
+        let census_after = self.object_census(page_index)?;
+        let lost = census_after.len() != census_before.len()
+            || census_before.iter().zip(&census_after).enumerate().any(|(at, (a, b))| {
+                // Kind and colour must match exactly; position must match bar
+                // the move that was asked for. Order is checked by comparing
+                // index against index: a page whose objects came back
+                // re-stacked has a different kind or a different rectangle at
+                // some index, which is what a picture sinking behind its
+                // neighbours looks like from here.
+                if a.kind != b.kind || a.fill != b.fill || a.stroke != b.stroke {
+                    return true;
+                }
+                let (dx, dy) = if at == object { (by.x, by.y) } else { (0.0, 0.0) };
+                (b.rect.left - a.rect.left - dx).abs() > 0.5
+                    || (b.rect.top - a.rect.top - dy).abs() > 0.5
+            });
+
+        if was != now || lost {
             // Put the page back exactly as it was and say why.
             let restored = Self::open_bytes(snapshot, None)?;
             self.document = restored.document;
@@ -892,11 +943,364 @@ impl Document for PdfiumDocument {
             if let Ok(mut cached) = self.vault.lock() {
                 *cached = None;
             }
-            return Err(PdfError::Unsupported(
-                "moving anything on this page rewrites its text, so nothing was moved",
-            ));
+            return Err(PdfError::Unsupported(if was == now {
+                "moving anything on this page rewrites what is drawn on it, so nothing was moved"
+            } else {
+                "moving anything on this page rewrites its text, so nothing was moved"
+            }));
         }
 
+        self.dirty = true;
+        Ok(())
+    }
+
+    fn drawn_objects(&self, page_index: usize) -> Result<Vec<crate::document::DrawnObject>> {
+        use crate::document::{DrawnKind, DrawnObject};
+        use pdfium_render::prelude::{
+            FPDF_PAGEOBJ_FORM, FPDF_PAGEOBJ_IMAGE, FPDF_PAGEOBJ_PATH, FPDF_PAGEOBJ_SHADING,
+            FPDF_PAGEOBJ_TEXT,
+        };
+
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let space = raw.space()?;
+        let bindings = pdfium()?.bindings();
+        // Open once for the whole walk: `FPDFTextObj_GetText` needs one, and
+        // opening a text page per object on a busy page is the difference
+        // between a list and a wait.
+        let text_page = unsafe { bindings.FPDFText_LoadPage(raw.handle) };
+
+        // The pictures, for their pixel size — which is the useful thing to say
+        // about one in a list, and is not on the object.
+        let pictures = self.images_on(page_index).unwrap_or_default();
+
+        /// How far in this will go. A form inside a form inside a form is real;
+        /// an unbounded walk of a malformed one is a hang.
+        const DEEPEST: usize = 4;
+
+        let mut out: Vec<DrawnObject> = Vec::new();
+        let mut stack: Vec<(FPDF_PAGEOBJECT, usize, usize)> = Vec::new();
+        let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
+        // Pushed backwards so the first object is taken first.
+        for index in (0..count).rev() {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if !handle.is_null() {
+                stack.push((handle, 0, index as usize));
+            }
+        }
+
+        while let Some((handle, depth, top)) = stack.pop() {
+            let kind_code = unsafe { bindings.FPDFPageObj_GetType(handle) };
+            let kind = match kind_code as u32 {
+                FPDF_PAGEOBJ_TEXT => DrawnKind::Words,
+                FPDF_PAGEOBJ_IMAGE => DrawnKind::Picture,
+                FPDF_PAGEOBJ_PATH => DrawnKind::Shape,
+                FPDF_PAGEOBJ_FORM | FPDF_PAGEOBJ_SHADING => DrawnKind::Group,
+                _ => DrawnKind::Group,
+            };
+
+            let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            let rect =
+                if unsafe { bindings.FPDFPageObj_GetBounds(handle, &mut l, &mut b, &mut r, &mut t) }
+                    == 0
+                {
+                    Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 }
+                } else {
+                    let (left, top_pt) = space.to_top_left(l, t);
+                    let (right, bottom) = space.to_top_left(r, b);
+                    Rect { left, top: top_pt, right, bottom }
+                };
+
+            let label = match kind {
+                DrawnKind::Words => {
+                    let words = object_text(bindings, text_page, handle);
+                    let words = words.trim();
+                    let short: String = words.chars().take(40).collect();
+                    if words.chars().count() > 40 {
+                        format!("{short}…")
+                    } else if short.is_empty() {
+                        "(blank)".to_string()
+                    } else {
+                        short
+                    }
+                }
+                DrawnKind::Picture => pictures
+                    .iter()
+                    .find(|i| i.object == top && depth == 0)
+                    .map(|i| {
+                        let filter = i.filters.first().map(String::as_str).unwrap_or("raw");
+                        format!("{}×{} {}", i.pixel_width, i.pixel_height, filter)
+                    })
+                    .unwrap_or_else(|| {
+                        format!("{:.0} × {:.0} pt", rect.right - rect.left, rect.bottom - rect.top)
+                    }),
+                DrawnKind::Shape | DrawnKind::Group => {
+                    format!("{:.0} × {:.0} pt", rect.right - rect.left, rect.bottom - rect.top)
+                }
+            };
+
+            out.push(DrawnObject {
+                object: top,
+                kind,
+                rect,
+                label,
+                depth,
+                // Only what the page itself draws can be re-ordered — see
+                // `DrawnObject::movable`.
+                movable: depth == 0,
+            });
+
+            // What a group draws goes in straight after it, so the list reads
+            // as the page draws: the group, then its contents on top of it.
+            if kind_code as u32 == FPDF_PAGEOBJ_FORM && depth < DEEPEST {
+                let children = unsafe { bindings.FPDFFormObj_CountObjects(handle) };
+                for i in (0..children).rev() {
+                    let child = unsafe { bindings.FPDFFormObj_GetObject(handle, i as c_ulong) };
+                    if !child.is_null() {
+                        stack.push((child, depth + 1, top));
+                    }
+                }
+            }
+        }
+
+        unsafe { bindings.FPDFText_ClosePage(text_page) };
+        Ok(out)
+    }
+
+    fn restack(
+        &mut self,
+        page_index: usize,
+        object: usize,
+        where_to: crate::document::Stacking,
+    ) -> Result<()> {
+        use crate::document::Stacking;
+        use crate::pdf::content;
+
+        let pictures = self.images_on(page_index)?;
+        let runs = self.text_runs(page_index)?;
+        let height = self.page_size(page_index)?.height_pt;
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let bytes = self.readable_bytes()?;
+        let file = crate::pdf::File::parse(&bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let states = content::states(&operations);
+        let placed = content::placed(&operations);
+
+        // **Which operations draw it, and whether they are words.** A run has
+        // to be re-opened inside its own `BT`; a picture does not. A shape may
+        // also set a clip — `W f`, one path doing two jobs — in which case the
+        // clip stays where it is and only the paint travels.
+        let mut self_clips = false;
+        let (first, last, words) = if let Some(which) =
+            pictures.iter().position(|i| i.object == object)
+        {
+            let names = self.image_names(&file, &page)?;
+            let drawn = image_operators(&operations, &names);
+            if drawn.len() != pictures.len() {
+                return Err(PdfError::Unsupported(
+                    "this page draws its pictures in a way this cannot follow",
+                ));
+            }
+            (drawn[which], drawn[which], false)
+        } else if let Some((first, last)) = self
+            .object_spans(page_index, &file, &page, &operations, &placed)?
+            .get(object)
+            .copied()
+            .flatten()
+            .filter(|_| {
+                // A group or a shading: one operator, placed by ordinal like a
+                // picture. Words and shapes take their own branches below.
+                use pdfium_render::prelude::{FPDF_PAGEOBJ_FORM, FPDF_PAGEOBJ_SHADING};
+                self.object_census(page_index)
+                    .ok()
+                    .and_then(|c| c.get(object).map(|d| d.kind as u32))
+                    .is_some_and(|k| k == FPDF_PAGEOBJ_FORM || k == FPDF_PAGEOBJ_SHADING)
+            })
+        {
+            (first, last, false)
+        } else if let Some((which, paths)) = self.path_ordinal(page_index, object)? {
+            let painted = path_operators(&operations);
+            if painted.len() != paths {
+                return Err(PdfError::Unsupported(
+                    "this page paints its shapes in a way this cannot follow",
+                ));
+            }
+            let (span, clips) = painted
+                .get(which)
+                .cloned()
+                .ok_or(PdfError::Unsupported("that shape is not painted on this page"))?;
+            self_clips = clips;
+            (span.start, span.end - 1, false)
+        } else if let Some(run) = runs.iter().find(|r| r.object == object) {
+            let fonts = self.page_fonts(&file, &page);
+            let codes_in = |p: &content::Placed| -> usize {
+                let width = p
+                    .font
+                    .as_ref()
+                    .zip(fonts.as_ref())
+                    .and_then(|(name, dict)| code_width(&file, dict, name))
+                    .unwrap_or(1)
+                    .max(1);
+                content::pieces(&operations[p.origin.operation])
+                    .iter()
+                    .map(|piece| match piece {
+                        content::Piece::Codes(bytes) => bytes.len() / width,
+                        content::Piece::Kern(_) => 0,
+                    })
+                    .sum()
+            };
+            let (first, last, continues) =
+                run_operators(run, height, &placed, &operations, &codes_in)?;
+            if continues {
+                // Lifting them out takes their advance with them, and the words
+                // that follow on the line would close up over the gap.
+                return Err(PdfError::Unsupported(
+                    "the words after these continue the same line",
+                ));
+            }
+            (first, last, true)
+        } else {
+            return Err(PdfError::Unsupported(
+                "this is drawn in a way this cannot follow through the drawing order",
+            ));
+        };
+
+        // Where it lands, and the transform in force there.
+        let (landing_span, landing_ctm) = match where_to {
+            // Nothing has run yet at the head of a stream.
+            Stacking::Back => (0..0, IDENTITY_MATRIX),
+            // Whatever is left in force once the page has finished drawing.
+            Stacking::Front => (
+                stream.len()..stream.len(),
+                states.last().map(|s| s.ctm).unwrap_or(IDENTITY_MATRIX),
+            ),
+            // **One step: just past the neighbour.** The neighbour has to be
+            // found in the stream too — whatever kind it is — and the landing
+            // point moved out of any text object it sits in, because the block
+            // this writes opens with `q`, which is not allowed inside one.
+            Stacking::Up | Stacking::Down => {
+                let spans = self.object_spans(page_index, &file, &page, &operations, &placed)?;
+                let neighbour = match where_to {
+                    Stacking::Up => object.checked_add(1).filter(|n| *n < spans.len()),
+                    _ => object.checked_sub(1),
+                };
+                let Some(neighbour) = neighbour else {
+                    return Err(PdfError::InvalidArgument(
+                        match where_to {
+                            Stacking::Up => "that is already at the front",
+                            _ => "that is already at the back",
+                        }
+                        .into(),
+                    ));
+                };
+                let Some((n_first, n_last)) = spans[neighbour] else {
+                    return Err(PdfError::Unsupported(
+                        "the thing next to this is drawn in a way this cannot follow",
+                    ));
+                };
+                // **And out of any clip the neighbour sits under.** The block
+                // carries the object's own clips, but whatever clip is in
+                // force where it lands applies on top — and a neighbour inside
+                // a panel's clip would pull the object in under it, where it
+                // may never have been and may not be visible at all.
+                match where_to {
+                    Stacking::Up => {
+                        let mut after = n_last;
+                        if inside_text_object(&operations, after) {
+                            after = operations
+                                .iter()
+                                .enumerate()
+                                .skip(after)
+                                .find(|(_, op)| op.operator == b"ET")
+                                .map(|(i, _)| i)
+                                .unwrap_or(after);
+                        }
+                        after = leave_clips_after(&operations, &states, after);
+                        (
+                            operations[after].span.end..operations[after].span.end,
+                            states[after].ctm,
+                        )
+                    }
+                    _ => {
+                        let mut before = n_first;
+                        if inside_text_object(&operations, before) {
+                            before = operations[..before]
+                                .iter()
+                                .rposition(|op| op.operator == b"BT")
+                                .unwrap_or(before);
+                        }
+                        before = leave_clips_before(&operations, &states, before);
+                        let ctm = before
+                            .checked_sub(1)
+                            .and_then(|i| states.get(i))
+                            .map(|s| s.ctm)
+                            .unwrap_or(IDENTITY_MATRIX);
+                        (operations[before].span.start..operations[before].span.start, ctm)
+                    }
+                }
+            }
+        };
+
+        let block = self.carried_block(
+            &stream,
+            &operations,
+            &states,
+            first,
+            last,
+            words,
+            self_clips,
+            landing_ctm,
+        )?;
+
+        // What stays behind. Ordinarily nothing; for a shape that also set a
+        // clip, the same path closed with `n` — the clip, and none of the paint.
+        let lifted = operations[first].span.start..operations[last].span.end;
+        let stays = if self_clips {
+            let mut kept: Vec<u8> = Vec::new();
+            for operation in operations.iter().take(last + 1).skip(first) {
+                if matches!(
+                    operation.operator.as_slice(),
+                    b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" | b"n"
+                ) {
+                    kept.extend_from_slice(b"n");
+                } else {
+                    kept.extend_from_slice(&stream[operation.span.clone()]);
+                }
+                kept.push(b'\n');
+            }
+            kept
+        } else {
+            Vec::new()
+        };
+        let edited = content::splice(&stream, &[(lifted, stays), (landing_span, block)]);
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
+
+        let rewritten = file.rewrite(&replacements)?;
+        let reopened = Self::open_bytes(rewritten, None)?;
+        self.document = reopened.document;
+        self.page_count = reopened.page_count;
+        if let Ok(mut cached) = self.vault.lock() {
+            *cached = None;
+        }
+        self.rearm_security(was_secured, plus, permissions);
         self.dirty = true;
         Ok(())
     }
@@ -1902,7 +2306,7 @@ impl DocumentMut for PdfiumDocument {
         // it like anything else. `usize::MAX` for the object because a locked
         // area is not one object — nothing is blanked again when the page comes
         // back, which is right: the redaction is undone by the restore itself.
-        vault.hide_item(
+        vault.hide_shapes(
             request.page_index,
             usize::MAX,
             [
@@ -1911,6 +2315,14 @@ impl DocumentMut for PdfiumDocument {
                 request.area.right,
                 request.area.bottom,
             ],
+            // The shapes themselves, so that unlocking something else on this
+            // page — which brings the page back whole — can take these words
+            // off it again. The union alone would take more than was picked.
+            request
+                .shapes()
+                .iter()
+                .map(|s| [s.left, s.top, s.right, s.bottom])
+                .collect(),
         )?;
         self.write_vault(&vault)?;
 
@@ -1928,7 +2340,10 @@ impl DocumentMut for PdfiumDocument {
         // replaces the whole page and the marks come back with it.
         //
         // Done before the content is cut, so it is one save rather than two.
-        let hidden = self.hide_annotations_in(request.page_index, &request.area)?;
+        let mut hidden = 0usize;
+        for shape in request.shapes() {
+            hidden += self.hide_annotations_in(request.page_index, shape)?;
+        }
 
         // The words come off through `crate::pdf`, which cuts the operators
         // that drew them out of the content stream and copies every other byte
@@ -1941,13 +2356,18 @@ impl DocumentMut for PdfiumDocument {
         // operator cannot be located — it falls back rather than refusing. A
         // lock that works and disturbs the layout is worth more than one that
         // declines, and the original is sealed either way.
-        let mut report = match self.cut_text_in_area(request) {
+        let mut report = match self.hide_area_content(request, catalogue) {
             Ok(report) => report,
-            Err(_) => self.redact_inner(request, Intent::Apply, catalogue)?,
+            // Shape by shape. PDFium's own path takes one rectangle, and
+            // handing it the union of a two-line selection would clear the
+            // words either side of what was picked — the very thing the parts
+            // exist to avoid.
+            Err(e) => return Err(e),
         };
         report.objects += hidden;
         Ok(report)
     }
+
 
     fn lock_pages(&mut self, pages: &[usize], passcode: &[u8]) -> Result<usize> {
         if pages.is_empty() {
@@ -2040,7 +2460,17 @@ impl DocumentMut for PdfiumDocument {
         self.write_vault(&vault)?;
 
         // Rewritten now, not at save time: see `apply_locks`.
-        self.apply_locks()?;
+        //
+        // **And the badge comes back out if that fails.** The vault is written
+        // before the page is changed, so a failure here leaves a document
+        // claiming a lock over a picture that is still perfectly visible —
+        // reported from use, with the padlock sitting on top of the image it
+        // was supposed to have taken away.
+        if let Err(why) = self.apply_locks() {
+            vault.forget_item(&id);
+            let _ = self.write_vault(&vault);
+            return Err(why);
+        }
         Ok(id)
     }
 
@@ -2065,31 +2495,110 @@ impl DocumentMut for PdfiumDocument {
         vault.forget_item(id);
         self.write_vault(&vault)?;
 
-        // The page came back whole, so everything else that is still locked on
-        // it has to be hidden again — which `apply_locks` does for the whole
-        // document from the vault, through the same rewrite.
+        // **Every *area* still locked on that page has to be taken off it
+        // again**, and `apply_locks` cannot do it: that path knows about
+        // images, which it finds from the page, and an area is a shape somebody
+        // drew that is nowhere on the page to be found. Reported from use as
+        // locked text becoming visible again after an image on the same page
+        // was unlocked, with its padlock still sitting over it.
+        let areas: Vec<(Rect, Vec<Rect>)> = vault
+            .items_on(item.page_index)
+            .into_iter()
+            .filter(|i| i.object == usize::MAX)
+            .map(|i| {
+                let rect = |r: &[f32; 4]| Rect {
+                    left: r[0],
+                    top: r[1],
+                    right: r[2],
+                    bottom: r[3],
+                };
+                (rect(&i.rect), i.parts.iter().map(rect).collect())
+            })
+            .collect();
+        for (area, parts) in areas {
+            let request = Redaction {
+                require_complete: false,
+                parts,
+                ..Redaction::new(item.page_index, area)
+            };
+            // A page that cannot be re-cleared is worse than one that never
+            // was, so this is refused rather than left half-done. The words are
+            // back on the page and the badge has been taken off the item that
+            // was unlocked, which is a consistent document either way.
+            self.hide_area_content(&request, None)?;
+        }
+
+        // And everything else that is still locked on it, which `apply_locks`
+        // does for the whole document from the vault, through the same rewrite.
         self.apply_locks()?;
         Ok(())
     }
 
     fn locked_items_on(&self, page_index: usize) -> Result<Vec<crate::document::LockedItem>> {
         let Some(vault) = self.read_vault()? else { return Ok(Vec::new()) };
+        // A locked picture is replaced by a one-pixel mask, so one that is any
+        // bigger than that was never taken off the page.
+        let pictures = self.images_on(page_index).unwrap_or_default();
         Ok(vault
             .items_on(page_index)
             .into_iter()
-            .map(|i| crate::document::LockedItem {
-                id: i.id.clone(),
-                rect: crate::document::Rect {
-                    left: i.rect[0],
-                    top: i.rect[1],
-                    right: i.rect[2],
-                    bottom: i.rect[3],
-                },
-                // `usize::MAX` is how a locked region is recorded — it names no
-                // object, because it is not one.
-                is_area: i.object == usize::MAX,
+            .map(|i| {
+                let is_area = i.object == usize::MAX;
+                let stale = !is_area
+                    && pictures
+                        .iter()
+                        .find(|p| p.object == i.object)
+                        .is_some_and(|p| p.pixel_width > 1 || p.pixel_height > 1);
+                crate::document::LockedItem {
+                    id: i.id.clone(),
+                    rect: crate::document::Rect {
+                        left: i.rect[0],
+                        top: i.rect[1],
+                        right: i.rect[2],
+                        bottom: i.rect[3],
+                    },
+                    // `usize::MAX` is how a locked region is recorded — it
+                    // names no object, because it is not one.
+                    is_area,
+                    stale,
+                }
             })
             .collect())
+    }
+
+    fn repair_locks(&mut self) -> Result<(usize, usize)> {
+        let Some(mut vault) = self.read_vault()? else { return Ok((0, 0)) };
+        let stale_before: Vec<String> = (0..self.page_count)
+            .flat_map(|page| self.locked_items_on(page).unwrap_or_default())
+            .filter(|i| i.stale)
+            .map(|i| i.id)
+            .collect();
+        if stale_before.is_empty() {
+            return Ok((0, 0));
+        }
+
+        // **Finish the job first.** The picture is identified exactly now, so
+        // the blanking that failed once has every chance of going through —
+        // and a lock the reader asked for is better completed than forgotten.
+        let _ = self.apply_locks();
+
+        let still_stale: Vec<String> = (0..self.page_count)
+            .flat_map(|page| self.locked_items_on(page).unwrap_or_default())
+            .filter(|i| i.stale)
+            .map(|i| i.id)
+            .collect();
+        let completed = stale_before.len() - still_stale.len();
+
+        // What still cannot be taken off the page is not locked, whatever the
+        // badge says. The badge goes; the sealed copy stays, harmlessly.
+        if !still_stale.is_empty() {
+            vault = self.read_vault()?.unwrap_or(vault);
+            for id in &still_stale {
+                vault.forget_item(id);
+            }
+            self.write_vault(&vault)?;
+        }
+        Ok((completed, still_stale.len()))
     }
 
     fn open_lock(&mut self, passcode: &[u8]) -> Result<Vec<(usize, Vec<u8>)>> {
@@ -3360,6 +3869,42 @@ impl PdfiumDocument {
         Ok(Some((raw, handle)))
     }
 
+    /// Take the words inside a request's shapes off the page, and mark them.
+    ///
+    /// The content half of a lock, without any of the vault's business — so
+    /// that re-applying an area lock after a page has been restored takes the
+    /// same path as making one, rather than a second implementation that can
+    /// drift from it.
+    fn hide_area_content(
+        &mut self,
+        request: &Redaction,
+        catalogue: Option<&crate::document::glyphs::Catalogue>,
+    ) -> Result<RedactionReport> {
+        match self.cut_text_in_area(request) {
+            Ok(report) => Ok(report),
+            // Shape by shape. PDFium's own path takes one rectangle, and
+            // handing it the union of a two-line selection would clear the
+            // words either side of what was picked — the very thing the parts
+            // exist to avoid.
+            Err(_) => {
+                let mut report = RedactionReport::default();
+                for shape in request.shapes() {
+                    let one = Redaction {
+                        area: *shape,
+                        parts: Vec::new(),
+                        ..request.clone()
+                    };
+                    let part = self.redact_inner(&one, Intent::Apply, catalogue)?;
+                    report.characters += part.characters;
+                    report.objects += part.objects;
+                    report.spilled.extend(part.spilled);
+                    report.uncleared.extend(part.uncleared);
+                }
+                Ok(report)
+            }
+        }
+    }
+
     /// Take the text inside an area off the page, and mark it.
     ///
     /// **Cuts the operators that drew it out of the content stream**, so every
@@ -3385,12 +3930,7 @@ impl PdfiumDocument {
         let runs = self.text_runs(request.page_index)?;
         let covered: Vec<&crate::document::TextRun> = runs
             .iter()
-            .filter(|r| {
-                r.rect.left < request.area.right
-                    && r.rect.right > request.area.left
-                    && r.rect.top < request.area.bottom
-                    && r.rect.bottom > request.area.top
-            })
+            .filter(|r| request.touches(&r.rect))
             .collect();
         if covered.is_empty() {
             return Err(PdfError::InvalidArgument("no text in that area".into()));
@@ -3569,12 +4109,7 @@ impl PdfiumDocument {
             let covered_chars: Vec<usize> = mine
                 .iter()
                 .enumerate()
-                .filter(|(_, (_, r))| {
-                    r.left < request.area.right
-                        && r.right > request.area.left
-                        && r.top < request.area.bottom
-                        && r.bottom > request.area.top
-                })
+                .filter(|(_, (_, r))| request.touches(r))
                 .map(|(n, _)| n)
                 .collect();
 
@@ -3674,10 +4209,7 @@ impl PdfiumDocument {
                 // wholly inside the selection loses nothing extra by being cut
                 // whole, and reporting it would tell the caller a line vanished
                 // when it did not.
-                let beyond = run.rect.left < request.area.left - 0.5
-                    || run.rect.right > request.area.right + 0.5
-                    || run.rect.top < request.area.top - 0.5
-                    || run.rect.bottom > request.area.bottom + 0.5;
+                let beyond = request.spills(&run.rect, 0.5);
                 if beyond {
                     spilled.push(run.text.clone());
                 }
@@ -3690,10 +4222,7 @@ impl PdfiumDocument {
         // is being sliced there, or the two edits would fight over the bytes.
         for p in &placed {
             let (x, y) = (p.origin.x, height - p.origin.y);
-            if x >= request.area.left
-                && x <= request.area.right
-                && y >= request.area.top
-                && y <= request.area.bottom
+            if request.holds(x, y)
                 && !edits.iter().any(|(span, _)| *span == operations[p.origin.operation].span)
             {
                 cut_whole.push(p.origin.operation);
@@ -3707,7 +4236,11 @@ impl PdfiumDocument {
 
         let mut edited = content::splice(&stream, &edits);
         if let Some(fill) = request.fill {
-            edited.extend_from_slice(&mark(request.area, height, fill));
+            // One mark per shape. Painting the union instead would put a black
+            // box over the words a two-line selection deliberately left alone.
+            for shape in request.shapes() {
+                edited.extend_from_slice(&mark(*shape, height, fill));
+            }
         }
 
         // The edited stream goes into the first of the page's content streams;
@@ -4059,39 +4592,8 @@ fn font_to_unicode(
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
 
-        // Which names in this page's resources are images, so a `Do` that draws
-        // a form is not mistaken for one that draws a picture.
-        let images: std::collections::BTreeSet<Vec<u8>> = self
-            .inherited(&file, &page, b"Resources")?
-            .and_then(|r| r.as_dict().and_then(|d| d.get(b"XObject")).cloned())
-            .and_then(|x| file.resolve(&x).ok())
-            .and_then(|x| x.as_dict().cloned())
-            .map(|dict| {
-                dict.0
-                    .iter()
-                    .filter(|(_, entry)| {
-                        matches!(
-                            file.resolve(entry),
-                            Ok(crate::pdf::Object::Stream(ref d, _))
-                                if d.get(b"Subtype").and_then(crate::pdf::Object::as_name)
-                                    == Some(&b"Image"[..])
-                        )
-                    })
-                    .map(|(name, _)| name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let drawn: Vec<&content::Operation> = operations
-            .iter()
-            .filter(|op| {
-                op.operator == b"Do"
-                    && matches!(
-                        op.operands.first(),
-                        Some(crate::pdf::Object::Name(name)) if images.contains(name)
-                    )
-            })
-            .collect();
+        let images = self.image_names(&file, &page)?;
+        let drawn = image_operators(&operations, &images);
 
         // The evidence: as many pictures drawn as PDFium reports.
         if drawn.len() != pictures.len() {
@@ -4099,16 +4601,37 @@ fn font_to_unicode(
                 "this page draws its pictures in a way this cannot follow",
             ));
         }
-        let target = drawn[which];
+        let at = drawn[which];
+        let target = &operations[at];
+        let states = content::states(&operations);
 
         // **The distance has to be expressed in the space the operator sits
         // in.** A picture is placed by a `cm` that scales the unit square up to
         // its size on the page, so a translation written *inside* that is
         // multiplied by the picture's own width and height — measured, twenty
-        // points came out as three thousand nine hundred. So the walk below
-        // rebuilds the transform in force at that operator, and the move is
-        // carried back through it.
-        let ctm = ctm_at(&operations, target);
+        // points came out as three thousand nine hundred. So the move is
+        // carried back through the transform in force where it is written.
+        //
+        // **And where it is written is the picture's frame, if it has one.**
+        // See `frame_scope`: a placed picture sits inside a clip its own size,
+        // and a translation applied to the `Do` alone slides it out of that
+        // clip and off into nothing. Written just inside the frame's `q`, the
+        // same `cm` carries the clip and the picture together.
+        let frame = frame_scope(&operations, at..at + 1);
+        // **And the placeholder under it.** The same programs paint a filled
+        // rectangle the exact size of the frame immediately before it — the
+        // grey that shows through while a photograph loads, and the grey block
+        // a reader sees left behind when the photograph moves without it.
+        // Reported from use as "the grey layer". It is part of the picture as
+        // anyone reading the page understands it, so it goes along.
+        let placeholder = frame.and_then(|(open, _)| placeholder_before(&operations, open));
+        let (insert_at, ctm) = match (placeholder, frame) {
+            (Some(first), Some((open, _))) => {
+                (operations[first].span.start, states[open].ctm)
+            }
+            (None, Some((open, _))) => (operations[open].span.end, states[open].ctm),
+            (_, None) => (target.span.start, states[at].ctm),
+        };
         let (det, wanted_x, wanted_y) = (
             ctm[0] * ctm[3] - ctm[1] * ctm[2],
             by.x,
@@ -4120,18 +4643,38 @@ fn font_to_unicode(
                 "this picture is placed by a transform this cannot invert",
             ));
         }
-        let local = (
+        let local = [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
             (ctm[3] * wanted_x - ctm[2] * wanted_y) / det,
             (-ctm[1] * wanted_x + ctm[0] * wanted_y) / det,
-        );
+        ];
 
-        let wrapped = format!(
-            "q 1 0 0 1 {} {} cm\n{}\nQ",
-            local.0,
-            local.1,
-            String::from_utf8_lossy(&stream[target.span.clone()])
-        );
-        let edited = content::splice(&stream, &[(target.span.clone(), wrapped.into_bytes())]);
+        let edited = match (placeholder, frame) {
+            (Some(_), Some((_, close))) => {
+                // Placeholder and frame together, in a scope of their own.
+                let mut opening: Vec<u8> = b"q\n".to_vec();
+                opening.extend_from_slice(&concat_matrix(&local)?);
+                let after = operations[close].span.end;
+                content::splice(&stream, &[(insert_at..insert_at, opening), (after..after, b"Q".to_vec())])
+            }
+            (None, Some(_)) => {
+                // Inside the frame, whose `Q` already closes the scope.
+                content::splice(&stream, &[(insert_at..insert_at, concat_matrix(&local)?)])
+            }
+            (_, None) => {
+                // No frame of its own: the `Do` is wrapped so the translation
+                // can reach nothing else.
+                let mut wrapped: Vec<u8> = b"q\n".to_vec();
+                wrapped.extend_from_slice(&concat_matrix(&local)?);
+                wrapped.push(b'\n');
+                wrapped.extend_from_slice(&stream[target.span.clone()]);
+                wrapped.extend_from_slice(b"\nQ");
+                content::splice(&stream, &[(target.span.clone(), wrapped)])
+            }
+        };
 
         let mut replacements = Vec::new();
         for (index, (number, dict)) in streams.iter().enumerate() {
@@ -4153,6 +4696,782 @@ fn font_to_unicode(
         self.rearm_security(was_secured, plus, permissions);
         self.dirty = true;
         Ok(())
+    }
+
+    /// Move one text run by writing where it sits, not by re-emitting the page.
+    ///
+    /// # What this replaces
+    ///
+    /// Committing a move through PDFium needs `FPDFPage_GenerateContent`, which
+    /// re-emits the whole content stream. On a real catalogue that came back
+    /// scrambled — `HSI Lighting I HUE . SATURATION` as
+    /// `ABOThe Boer T UOur e xpiunpics` — so [`Self::move_object`] guards it by
+    /// reading the page's words before and after and undoing a move that
+    /// changed any of them. That guard works, and its cost is that moving text
+    /// on exactly the documents worth moving text on refuses: *"moving anything
+    /// on this page rewrites its text, so nothing was moved"*.
+    ///
+    /// # How a run moves without touching anything else
+    ///
+    /// Glyphs land at `Tm × CTM`, so shifting a run means shifting the text
+    /// matrix its operators draw under. Two operators are inserted and **every
+    /// other byte of the page is copied through**:
+    ///
+    /// - before the run's first show-text operator, a `Tm` carrying the matrix
+    ///   that was already in force with the move added to its translation;
+    /// - after its last, a `Tm` putting the **line** matrix back, so that a
+    ///   `Td`, `TD` or `T*` following it starts from where it always did.
+    ///
+    /// The second one is the half that is easy to miss. `Td` moves relative to
+    /// the line matrix rather than the text matrix, and `Tm` sets both — so a
+    /// shifted `Tm` with nothing after it drags every following line of the
+    /// paragraph along with the run.
+    ///
+    /// # Where it refuses
+    ///
+    /// Rather than guess, it declines and lets the caller fall back:
+    ///
+    /// - a run whose operators cannot be located in the stream;
+    /// - operators that are not one contiguous stretch, or that have another
+    ///   run's drawing interleaved with them;
+    /// - a `BT` or `ET` inside that stretch, which would mean the run is not
+    ///   one text object;
+    /// - a show-text operator immediately after the run, which continues the
+    ///   same line and would need the run's own advance to restore;
+    /// - a transform that cannot be inverted, or a matrix with a value that
+    ///   cannot be written as a PDF number.
+    fn move_run_in_stream(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
+        use crate::pdf::content;
+
+        let runs = self.text_runs(page_index)?;
+        let run = runs
+            .iter()
+            .find(|r| r.object == object)
+            .cloned()
+            .ok_or_else(|| PdfError::InvalidArgument("that is not a run of text".into()))?;
+        let height = self.page_size(page_index)?.height_pt;
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let bytes = self.readable_bytes()?;
+        let file = crate::pdf::File::parse(&bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+        let states = content::states(&operations);
+
+        // How many codes each show-text operator draws, which is what says
+        // where this run's own operators stop — see `run_operators`.
+        let fonts = self.page_fonts(&file, &page);
+        let codes_in = |p: &content::Placed| -> usize {
+            let width = p
+                .font
+                .as_ref()
+                .zip(fonts.as_ref())
+                .and_then(|(name, dict)| code_width(&file, dict, name))
+                .unwrap_or(1)
+                .max(1);
+            content::pieces(&operations[p.origin.operation])
+                .iter()
+                .map(|piece| match piece {
+                    content::Piece::Codes(bytes) => bytes.len() / width,
+                    content::Piece::Kern(_) => 0,
+                })
+                .sum()
+        };
+        let (first, last, continues) =
+            run_operators(&run, height, &placed, &operations, &codes_in)?;
+
+        // **The move, expressed where the operator lives.** A text matrix's
+        // translation reaches the page through the CTM alone, so the distance
+        // has to be carried back through it — the same inversion a picture
+        // needs, and for the same reason.
+        let ctm = states[first].ctm;
+        let det = ctm[0] * ctm[3] - ctm[1] * ctm[2];
+        if det.abs() < 1e-9 {
+            return Err(PdfError::Unsupported(
+                "these words are placed by a transform this cannot invert",
+            ));
+        }
+        // Page space counts downwards, a content stream upwards.
+        let (wanted_x, wanted_y) = (by.x, -by.y);
+        let shift = (
+            (ctm[3] * wanted_x - ctm[2] * wanted_y) / det,
+            (-ctm[1] * wanted_x + ctm[0] * wanted_y) / det,
+        );
+
+        let edits = if let Some((open, _)) = frame_scope(&operations, first..last + 1) {
+            // **Its own frame**: a text box holding only this run. The move goes
+            // just inside the frame's `q` — outside the text object, where a
+            // `cm` is allowed — and carries the box's clip along with the
+            // words, which neither matrix strategy below can do.
+            let frame_ctm = states[open].ctm;
+            let det = frame_ctm[0] * frame_ctm[3] - frame_ctm[1] * frame_ctm[2];
+            if det.abs() < 1e-9 {
+                return Err(PdfError::Unsupported(
+                    "these words are placed by a transform this cannot invert",
+                ));
+            }
+            let local = [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                (frame_ctm[3] * wanted_x - frame_ctm[2] * wanted_y) / det,
+                (-frame_ctm[1] * wanted_x + frame_ctm[0] * wanted_y) / det,
+            ];
+            let at = operations[open].span.end;
+            vec![(at..at, concat_matrix(&local)?)]
+        } else if continues {
+            self.glyph_shift(&stream, &operations, &states, first, last, ctm, (wanted_x, wanted_y))?
+        } else {
+            // **Nothing goes on drawing this line, so the matrix can simply be
+            // set.** A `Tm` before the run puts it where it is going; a second
+            // one after puts the *line* matrix back, so a `Td`, `TD` or `T*`
+            // that follows starts from where it always did.
+            let mut moved = states[first].text;
+            moved[4] += shift.0;
+            moved[5] += shift.1;
+            let restore = states[last].line;
+            vec![
+                // Written in front of the first operator rather than replacing
+                // it, so the operator itself goes through untouched.
+                (
+                    operations[first].span.start..operations[first].span.start,
+                    text_matrix(&moved)?,
+                ),
+                (
+                    operations[last].span.end..operations[last].span.end,
+                    text_matrix(&restore)?,
+                ),
+            ]
+        };
+        let edited = content::splice(&stream, &edits);
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
+
+        let rewritten = file.rewrite(&replacements)?;
+        let reopened = Self::open_bytes(rewritten, None)?;
+        self.document = reopened.document;
+        self.page_count = reopened.page_count;
+        if let Ok(mut cached) = self.vault.lock() {
+            *cached = None;
+        }
+        self.rearm_security(was_secured, plus, permissions);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Every object on a page: what kind it is and where it sits.
+    ///
+    /// **What the move guard watches.** Reading the words back caught a
+    /// re-emission that scrambled a paragraph, but on a page with no text it
+    /// compares an empty list with an empty list and lets anything through —
+    /// including a picture PDFium could not decode and so did not write back
+    /// out. That is a page object silently disappearing, which is the one
+    /// failure a guard exists to prevent.
+    fn object_census(&self, page_index: usize) -> Result<Vec<Drawn>> {
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let space = raw.space()?;
+        let bindings = pdfium()?.bindings();
+
+        let mut census = Vec::new();
+        for index in 0..unsafe { bindings.FPDFPage_CountObjects(raw.handle) } {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if handle.is_null() {
+                continue;
+            }
+            let kind = unsafe { bindings.FPDFPageObj_GetType(handle) };
+
+            // **Colour, because a re-emission can keep every word and every
+            // position and still repaint the page.** Reported from use as text
+            // changing colour when it was moved, which the words-and-bounds
+            // check let straight through.
+            let colour = {
+                let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 0u32);
+                let fill = unsafe {
+                    bindings.FPDFPageObj_GetFillColor(handle, &mut r, &mut g, &mut b, &mut a)
+                } != 0;
+                let (mut sr, mut sg, mut sb, mut sa) = (0u32, 0u32, 0u32, 0u32);
+                let stroke = unsafe {
+                    bindings.FPDFPageObj_GetStrokeColor(
+                        handle, &mut sr, &mut sg, &mut sb, &mut sa,
+                    )
+                } != 0;
+                (
+                    fill.then_some((r, g, b, a)),
+                    stroke.then_some((sr, sg, sb, sa)),
+                )
+            };
+
+            let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            if unsafe { bindings.FPDFPageObj_GetBounds(handle, &mut l, &mut b, &mut r, &mut t) } == 0
+            {
+                // No measurable bounds is itself a fact worth keeping: one
+                // appearing or disappearing is a change.
+                census.push(Drawn {
+                    kind,
+                    rect: Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 },
+                    fill: colour.0,
+                    stroke: colour.1,
+                });
+                continue;
+            }
+            let (left, top) = space.to_top_left(l, t);
+            let (right, bottom) = space.to_top_left(r, b);
+            census.push(Drawn {
+                kind,
+                rect: Rect { left, top, right, bottom },
+                fill: colour.0,
+                stroke: colour.1,
+            });
+        }
+        Ok(census)
+    }
+
+    /// Where a page object sits among that page's **paths**, and how many there
+    /// are — the ordinal `path_operators` is indexed by.
+    fn path_ordinal(&self, page_index: usize, object: usize) -> Result<Option<(usize, usize)>> {
+        use pdfium_render::prelude::FPDF_PAGEOBJ_PATH;
+
+        let census = self.object_census(page_index)?;
+        let mut which = None;
+        let mut seen = 0usize;
+        for (index, drawn) in census.iter().enumerate() {
+            if drawn.kind as u32 == FPDF_PAGEOBJ_PATH {
+                if index == object {
+                    which = Some(seen);
+                }
+                seen += 1;
+            }
+        }
+        Ok(which.map(|w| (w, seen)))
+    }
+
+    /// Which names in a page's resources are pictures.
+    ///
+    /// A `Do` may draw a form rather than an image, and the operator does not
+    /// say which — only the resource dictionary does. Shared so that the paths
+    /// which move a picture and the one which restacks it agree about what
+    /// counts as one.
+    fn image_names(
+        &self,
+        file: &crate::pdf::File,
+        page: &crate::pdf::Object,
+    ) -> Result<std::collections::BTreeSet<Vec<u8>>> {
+        Ok(self
+            .inherited(file, page, b"Resources")?
+            .and_then(|r| r.as_dict().and_then(|d| d.get(b"XObject")).cloned())
+            .and_then(|x| file.resolve(&x).ok())
+            .and_then(|x| x.as_dict().cloned())
+            .map(|dict| {
+                dict.0
+                    .iter()
+                    .filter(|(_, entry)| {
+                        matches!(
+                            file.resolve(entry),
+                            Ok(crate::pdf::Object::Stream(ref d, _))
+                                if d.get(b"Subtype").and_then(crate::pdf::Object::as_name)
+                                    == Some(&b"Image"[..])
+                        )
+                    })
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// Where each of a page's own objects is drawn in its stream, as first and
+    /// last operation inclusive — or `None` for one this cannot place.
+    ///
+    /// **What a one-step move needs and a jump to either end does not.** Going
+    /// up one means landing just after the neighbour, so the neighbour has to
+    /// be found too — whatever kind it is. Each kind is matched the way its own
+    /// path already matches it, and each is checked against PDFium's count
+    /// before any of its members is trusted.
+    fn object_spans(
+        &self,
+        page_index: usize,
+        file: &crate::pdf::File<'_>,
+        page: &crate::pdf::Object,
+        operations: &[crate::pdf::content::Operation],
+        placed: &[crate::pdf::content::Placed],
+    ) -> Result<Vec<Option<(usize, usize)>>> {
+        use crate::pdf::{content, Object};
+        use pdfium_render::prelude::{
+            FPDF_PAGEOBJ_FORM, FPDF_PAGEOBJ_IMAGE, FPDF_PAGEOBJ_PATH, FPDF_PAGEOBJ_SHADING,
+            FPDF_PAGEOBJ_TEXT,
+        };
+
+        let census = self.object_census(page_index)?;
+        let height = self.page_size(page_index)?.height_pt;
+        let mut spans: Vec<Option<(usize, usize)>> = vec![None; census.len()];
+
+        // Words, each by its own run.
+        let fonts = self.page_fonts(file, page);
+        let codes_in = |p: &content::Placed| -> usize {
+            let width = p
+                .font
+                .as_ref()
+                .zip(fonts.as_ref())
+                .and_then(|(name, dict)| code_width(file, dict, name))
+                .unwrap_or(1)
+                .max(1);
+            content::pieces(&operations[p.origin.operation])
+                .iter()
+                .map(|piece| match piece {
+                    content::Piece::Codes(bytes) => bytes.len() / width,
+                    content::Piece::Kern(_) => 0,
+                })
+                .sum()
+        };
+        for run in self.text_runs(page_index).unwrap_or_default() {
+            if let Ok((first, last, continues)) =
+                run_operators(&run, height, placed, operations, &codes_in)
+            {
+                // A run whose line goes on cannot be lifted out — see
+                // `restack` — so it is not placed either.
+                if !continues {
+                    if let Some(slot) = spans.get_mut(run.object) {
+                        *slot = Some((first, last));
+                    }
+                }
+            }
+        }
+
+        // Everything drawn by an ordinal — the *n*th of its kind in the stream
+        // is the *n*th of its kind PDFium reports, once the counts agree.
+        let by_kind = |kind: u32, found: Vec<(usize, usize)>, spans: &mut Vec<Option<(usize, usize)>>| {
+            let members: Vec<usize> = census
+                .iter()
+                .enumerate()
+                .filter(|(_, d)| d.kind as u32 == kind)
+                .map(|(index, _)| index)
+                .collect();
+            if members.len() != found.len() {
+                return;
+            }
+            for (object, span) in members.into_iter().zip(found) {
+                spans[object] = Some(span);
+            }
+        };
+
+        let names = self.image_names(file, page)?;
+        by_kind(
+            FPDF_PAGEOBJ_IMAGE,
+            image_operators(operations, &names).into_iter().map(|i| (i, i)).collect(),
+            &mut spans,
+        );
+        by_kind(
+            FPDF_PAGEOBJ_PATH,
+            path_operators(operations).into_iter().map(|(r, _)| (r.start, r.end - 1)).collect(),
+            &mut spans,
+        );
+
+        // Forms are the other thing `Do` draws; shadings are `sh`.
+        let forms: Vec<(usize, usize)> = operations
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| {
+                op.operator == b"Do"
+                    && matches!(op.operands.first(), Some(Object::Name(name)) if !names.contains(name))
+            })
+            .map(|(i, _)| (i, i))
+            .collect();
+        by_kind(FPDF_PAGEOBJ_FORM, forms, &mut spans);
+        let shadings: Vec<(usize, usize)> = operations
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| op.operator == b"sh")
+            .map(|(i, _)| (i, i))
+            .collect();
+        by_kind(FPDF_PAGEOBJ_SHADING, shadings, &mut spans);
+
+        let _ = FPDF_PAGEOBJ_TEXT;
+        Ok(spans)
+    }
+
+    /// A block that draws one object exactly as the page did, anywhere in the
+    /// stream — the state it was drawn under, every clip that was holding it,
+    /// its transform, and the operators themselves, inside one `q`/`Q`.
+    ///
+    /// **The transforms are chained rather than reset.** `cm` can only
+    /// concatenate, so getting from the transform in force at the landing
+    /// point to the one a clip was set under, then to the next clip's, then to
+    /// the object's, is a sequence of `cm`s each carrying the difference —
+    /// which is why every one of them needs the previous to be invertible.
+    #[allow(clippy::too_many_arguments)]
+    fn carried_block(
+        &self,
+        stream: &[u8],
+        operations: &[crate::pdf::content::Operation],
+        states: &[crate::pdf::content::State],
+        first: usize,
+        last: usize,
+        words: bool,
+        self_clips: bool,
+        landing_ctm: [f32; 6],
+    ) -> Result<Vec<u8>> {
+        let step = |from: [f32; 6], to: [f32; 6]| -> Result<[f32; 6]> {
+            inverse(from).map(|back| matrices(to, back)).ok_or(PdfError::Unsupported(
+                "this is placed by a transform this cannot invert",
+            ))
+        };
+
+        let mut block: Vec<u8> = Vec::new();
+        block.extend_from_slice(b"\nq\n");
+
+        // The state it was drawn under — colour, line width, the `gs` that
+        // carries transparency, the font — see `state_in_force`.
+        for operator in state_in_force(operations, stream, first) {
+            block.extend_from_slice(&operator);
+            block.push(b'\n');
+        }
+
+        // **Every clip that was holding it, replayed.** Each under the transform
+        // it was set under, and closed with `n` so it paints nothing — the
+        // page already painted whatever that path painted, where it was.
+        let mut current = landing_ctm;
+        for clip in clips_in_force(operations, states, first) {
+            let to_clip = step(current, clip.ctm)?;
+            block.extend_from_slice(&concat_matrix(&to_clip)?);
+            block.push(b'\n');
+            for operation in &operations[clip.construction.clone()] {
+                if matches!(operation.operator.as_slice(), b"W" | b"W*") {
+                    continue;
+                }
+                block.extend_from_slice(&stream[operation.span.clone()]);
+                block.push(b'\n');
+            }
+            block.extend_from_slice(if clip.even_odd { b"W* n\n" } else { b"W n\n" });
+            current = clip.ctm;
+        }
+
+        // Then the object's own transform, as one `cm` from wherever the
+        // chain has got to.
+        let to_object = step(current, states[first].ctm)?;
+        block.extend_from_slice(&concat_matrix(&to_object)?);
+        block.push(b'\n');
+
+        if words {
+            block.extend_from_slice(b"BT\n");
+            block.extend_from_slice(&text_matrix(&states[first].text)?);
+            block.push(b'\n');
+        }
+        for operation in operations.iter().take(last + 1).skip(first) {
+            // A shape that also set a clip leaves that job behind — see the
+            // caller — so its `W` does not travel.
+            if self_clips && matches!(operation.operator.as_slice(), b"W" | b"W*") {
+                continue;
+            }
+            block.extend_from_slice(&stream[operation.span.clone()]);
+            block.push(b'\n');
+        }
+        if words {
+            block.extend_from_slice(b"ET\n");
+        }
+        block.extend_from_slice(b"Q\n");
+        Ok(block)
+    }
+
+    /// The document's bytes as the editing paths read them, for a probe.
+    pub fn readable_bytes_for_probe(&self) -> Result<Vec<u8>> {
+        self.readable_bytes()
+    }
+
+    /// A page's XObject resources by name, for a probe: name → object number.
+    pub fn xobject_names_for_probe(
+        &self,
+        file: &crate::pdf::File<'_>,
+        page_index: usize,
+    ) -> Result<Vec<(Vec<u8>, u32)>> {
+        let page = self.page_object(file, page_index)?;
+        let Some(resources) = self.inherited(file, &page, b"Resources")? else {
+            return Ok(Vec::new());
+        };
+        let Some(xobjects) = resources
+            .as_dict()
+            .and_then(|d| d.get(b"XObject"))
+            .map(|x| file.resolve(x))
+            .transpose()?
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(xobjects
+            .as_dict()
+            .map(|d| {
+                d.0.iter()
+                    .filter_map(|(name, entry)| {
+                        entry.as_reference().map(|(number, _)| (name.clone(), number))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// A page's content stream, decoded and concatenated, for a probe to read.
+    ///
+    /// Read-only, and the same bytes the editing paths work on — so a probe
+    /// that reports which operator draws a run is reporting about the stream
+    /// those paths will edit rather than a re-derived one.
+    pub fn page_stream(&self, page_index: usize) -> Result<Vec<u8>> {
+        let bytes = self.readable_bytes()?;
+        let file = crate::pdf::File::parse(&bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, _) = self.page_content(&file, &page)?;
+        Ok(stream)
+    }
+
+    /// Move a run whose line goes on after it, by moving the **glyphs** and
+    /// leaving the pen exactly where it was.
+    ///
+    /// # The problem this solves
+    ///
+    /// Where a line is drawn as several show-text operators with nothing
+    /// repositioning between them — a brochure setting one phrase in three
+    /// fonts does exactly that — the words after a run start wherever its
+    /// glyphs left the pen. Shifting the run's text matrix shifts the pen with
+    /// it, so everything after it on the line moves too; putting the matrix
+    /// back afterwards needs the run's own advance, which is the font's
+    /// business and not written anywhere in the stream.
+    ///
+    /// # Two operators that move glyphs and not the pen
+    ///
+    /// - **`Ts`, text rise**, offsets where a glyph is painted above the
+    ///   baseline and advances nothing at all. That is the vertical.
+    /// - **A lone number in a `TJ` array** displaces the pen horizontally
+    ///   without drawing, and — unlike `Td` — leaves the *line* matrix alone.
+    ///   Put one before the run and its negative after, and the pen ends
+    ///   exactly where it would have without either. That is the horizontal.
+    ///
+    /// Both are exact, and neither needs a glyph width.
+    ///
+    /// # What it declines
+    ///
+    /// Anything inside the run that sets the text matrix from the line matrix —
+    /// `Td`, `TD`, `T*`, `Tm`, and the `'` and `"` that begin a line before
+    /// drawing — because that would discard the horizontal displacement partway
+    /// through. Those runs are rare, and the caller falls back.
+    #[allow(clippy::too_many_arguments)]
+    fn glyph_shift(
+        &self,
+        stream: &[u8],
+        operations: &[crate::pdf::content::Operation],
+        states: &[crate::pdf::content::State],
+        first: usize,
+        last: usize,
+        ctm: [f32; 6],
+        wanted: (f32, f32),
+    ) -> Result<Vec<(std::ops::Range<usize>, Vec<u8>)>> {
+        let _ = stream;
+        for operation in operations.iter().take(last + 1).skip(first) {
+            if matches!(
+                operation.operator.as_slice(),
+                b"Td" | b"TD" | b"T*" | b"Tm" | b"'" | b"\""
+            ) {
+                return Err(PdfError::Unsupported(
+                    "these words re-position themselves partway through",
+                ));
+            }
+        }
+
+        // **The distance, in the space a rise and a displacement live in.**
+        // Both act before the text matrix, so the move has to be carried back
+        // through the text matrix *and* the transform — one more step than a
+        // matrix translation, which the transform alone reaches.
+        let text = states[first].text;
+        let full = matrices(text, ctm);
+        let Some(back) = inverse(full) else {
+            return Err(PdfError::Unsupported(
+                "these words are placed by a transform this cannot invert",
+            ));
+        };
+        // A direction, so only the linear part applies.
+        let local = (
+            wanted.0 * back[0] + wanted.1 * back[2],
+            wanted.0 * back[1] + wanted.1 * back[3],
+        );
+
+        // The horizontal goes through `TJ`, whose numbers are thousandths of
+        // unscaled text space and reach the page multiplied by the font size
+        // and the horizontal scaling — so both have to be divided back out.
+        let scale = states[first].size * states[first].horizontal_scale;
+        let closing = states[last].size * states[last].horizontal_scale;
+        if scale.abs() < 1e-6 || closing.abs() < 1e-6 {
+            return Err(PdfError::Unsupported(
+                "these words are set at a size this cannot displace",
+            ));
+        }
+        let displacement = -local.0 * 1000.0 / scale;
+        let putting_back = local.0 * 1000.0 / closing;
+
+        // The vertical is a rise, which is already in unscaled text space.
+        let rise = states[first].rise + local.1;
+
+        Ok(vec![
+            (
+                operations[first].span.start..operations[first].span.start,
+                [
+                    number_operand(rise)?.as_slice(),
+                    b" Ts [",
+                    number_operand(displacement)?.as_slice(),
+                    b"] TJ",
+                ]
+                .concat(),
+            ),
+            (
+                operations[last].span.end..operations[last].span.end,
+                [
+                    b"[".as_slice(),
+                    number_operand(putting_back)?.as_slice(),
+                    b"] TJ ",
+                    number_operand(states[last].rise)?.as_slice(),
+                    b" Ts",
+                ]
+                .concat(),
+            ),
+        ])
+    }
+
+    /// Move one drawn shape by wrapping the operators that paint it.
+    ///
+    /// **A path is pure graphics**, so `q`/`Q` around it is legal where it is
+    /// not inside a text object, and a `cm` in between moves it and reaches
+    /// nothing else. The distance is carried back through the transform in
+    /// force, exactly as a picture's is, because the path's own coordinates are
+    /// written in that space.
+    ///
+    /// # What it declines
+    ///
+    /// A path that **also sets a clip** — `W` before its painting operator.
+    /// `q`/`Q` saves and restores the clipping path, so wrapping one would put
+    /// the clip back the moment it closed and every later thing the clip was
+    /// holding in would spill out. Rare, and worth refusing rather than
+    /// discovering afterwards.
+    fn move_path_in_stream(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
+        use crate::pdf::content;
+
+        let Some((which, paths)) = self.path_ordinal(page_index, object)? else {
+            return Err(PdfError::InvalidArgument("that is not a drawn shape".into()));
+        };
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let bytes = self.readable_bytes()?;
+        let file = crate::pdf::File::parse(&bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let states = content::states(&operations);
+
+        let painted = path_operators(&operations);
+        // The evidence: as many shapes painted as PDFium reports.
+        if painted.len() != paths {
+            return Err(PdfError::Unsupported(
+                "this page paints its shapes in a way this cannot follow",
+            ));
+        }
+        let (span, clips) = painted
+            .get(which)
+            .cloned()
+            .ok_or(PdfError::Unsupported("that shape is not painted on this page"))?;
+        if clips {
+            return Err(PdfError::Unsupported(
+                "this shape also sets a clipping path, which cannot move with it",
+            ));
+        }
+
+        // Inside its frame if it has one — see `frame_scope` — so a clip that
+        // belongs to the shape travels with it.
+        let frame = frame_scope(&operations, span.clone());
+        let ctm = match frame {
+            Some((open, _)) => states[open].ctm,
+            None => states[span.start].ctm,
+        };
+        let det = ctm[0] * ctm[3] - ctm[1] * ctm[2];
+        if det.abs() < 1e-9 {
+            return Err(PdfError::Unsupported(
+                "this shape is placed by a transform this cannot invert",
+            ));
+        }
+        // Page space counts downwards, a content stream upwards.
+        let (wanted_x, wanted_y) = (by.x, -by.y);
+        let local = [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            (ctm[3] * wanted_x - ctm[2] * wanted_y) / det,
+            (-ctm[1] * wanted_x + ctm[0] * wanted_y) / det,
+        ];
+
+        let edited = match frame {
+            Some((open, _)) => {
+                let at = operations[open].span.end;
+                content::splice(&stream, &[(at..at, concat_matrix(&local)?)])
+            }
+            None => {
+                let from = operations[span.start].span.start;
+                let to = operations[span.end - 1].span.end;
+                let mut wrapped: Vec<u8> = Vec::new();
+                wrapped.extend_from_slice(b"q\n");
+                wrapped.extend_from_slice(&concat_matrix(&local)?);
+                wrapped.extend_from_slice(b"\n");
+                wrapped.extend_from_slice(&stream[from..to]);
+                wrapped.extend_from_slice(b"\nQ");
+                content::splice(&stream, &[(from..to, wrapped)])
+            }
+        };
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
+
+        let rewritten = file.rewrite(&replacements)?;
+        let reopened = Self::open_bytes(rewritten, None)?;
+        self.document = reopened.document;
+        self.page_count = reopened.page_count;
+        if let Ok(mut cached) = self.vault.lock() {
+            *cached = None;
+        }
+        self.rearm_security(was_secured, plus, permissions);
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// The byte-safe move, exposed so a probe can ask *why* it refused.
+    ///
+    /// The ordinary path swallows the reason and falls back to PDFium; knowing
+    /// what it swallowed is how the coverage gets better — the same bargain as
+    /// [`Self::try_set_run_in_stream`].
+    pub fn try_move_run_in_stream(
+        &mut self,
+        page_index: usize,
+        object: usize,
+        by: Point,
+    ) -> Result<()> {
+        self.move_run_in_stream(page_index, object, by)
     }
 
     /// The content-stream edit, exposed so a probe can ask *why* it refused.
@@ -4693,6 +6012,62 @@ fn font_to_unicode(
         file.rewrite(&replacements)
     }
 
+    /// The object number of the *n*th picture a page draws, found through the
+    /// `Do` that draws it.
+    ///
+    /// **The exact answer**, where matching on pixel size is a guess that fails
+    /// on the ordinary case of a page carrying two images the same size —
+    /// reported from use as *"two images of the same size on one page, which
+    /// cannot be told apart"* on a brochure, where it left a padlock over an
+    /// image that was still perfectly visible.
+    fn image_drawn_as(
+        &self,
+        file: &crate::pdf::File<'_>,
+        page: &crate::pdf::Object,
+        which: usize,
+        pictures: usize,
+    ) -> Result<u32> {
+        use crate::pdf::{content, Object};
+
+        let names = self.image_names(file, page)?;
+        let (stream, _) = self.page_content(file, page)?;
+        let operations = content::parse(&stream)?;
+        let drawn = image_operators(&operations, &names);
+
+        // The evidence, as everywhere else this walks a stream: as many
+        // pictures drawn as PDFium reports. Without it the *n*th `Do` is not
+        // necessarily the *n*th picture.
+        if drawn.len() != pictures {
+            return Err(PdfError::Unsupported(
+                "this page draws its pictures in a way this cannot follow",
+            ));
+        }
+        let at = *drawn
+            .get(which)
+            .ok_or(PdfError::Unsupported("that picture is not drawn on this page"))?;
+        let Some(Object::Name(name)) = operations[at].operands.first() else {
+            return Err(PdfError::Unsupported("that picture is drawn without a name"));
+        };
+
+        let resources = self
+            .inherited(file, page, b"Resources")?
+            .ok_or_else(|| PdfError::InvalidArgument("that page declares no resources".into()))?;
+        let xobjects = resources
+            .as_dict()
+            .and_then(|d| d.get(b"XObject"))
+            .map(|found| file.resolve(found))
+            .transpose()?
+            .ok_or_else(|| PdfError::InvalidArgument("that page draws no images".into()))?;
+
+        xobjects
+            .as_dict()
+            .and_then(|d| d.get(name).cloned())
+            .and_then(|entry| entry.as_reference().map(|(number, _)| number))
+            .ok_or_else(|| {
+                PdfError::InvalidArgument("that picture is not among the page's resources".into())
+            })
+    }
+
     /// Which PDF object holds one locked image.
     ///
     /// Reached through the page's own resources rather than by searching the
@@ -4716,12 +6091,25 @@ fn font_to_unicode(
             }
         };
 
+        // **Which name the page draws it under, read from the page itself.**
+        //
         // The record keeps PDFium's object index, which counts every object on
-        // the page; the resource dictionary is keyed by name and unordered. So
-        // the two are matched on what the image *is* — the pixel size PDFium
-        // reported when it was locked — rather than on position.
-        let locked = self
-            .images_on(item.page_index)?
+        // the page; the resource dictionary is keyed by name and unordered. The
+        // content stream is what joins them: the Nth image PDFium reports is
+        // drawn by the Nth image-drawing `Do`, and that operator carries the
+        // name. Exact, where anything inferred from the image itself is a
+        // guess.
+        let pictures = self.images_on(item.page_index)?;
+        if let Some(which) = pictures.iter().position(|i| i.object == item.object) {
+            if let Ok(number) = self.image_drawn_as(file, &page, which, pictures.len()) {
+                return Ok(number);
+            }
+        }
+
+        // Failing that — a page whose pictures this cannot follow in the stream
+        // — the two are matched on what the image *is*, by the pixel size
+        // PDFium reported when it was locked.
+        let locked = pictures
             .into_iter()
             .find(|i| i.object == item.object)
             .ok_or_else(|| PdfError::InvalidArgument("the locked image has moved".into()))?;
@@ -5604,6 +6992,567 @@ fn fill_box(area: Rect, page_height: f32) -> Vec<u8> {
 /// Appended after everything else, so it covers what it is over. Wrapped in
 /// `q`/`Q` so the colour it sets does not leak into whatever a later stream
 /// draws — the page's own operators are untouched, and must stay that way.
+/// One thing drawn on a page, as the move guard sees it.
+#[derive(Debug, Clone, PartialEq)]
+struct Drawn {
+    kind: i32,
+    rect: Rect,
+    fill: Option<(u32, u32, u32, u32)>,
+    stroke: Option<(u32, u32, u32, u32)>,
+}
+
+/// The `q`/`Q` scope that is one object's **frame**: the innermost scope around
+/// it that draws nothing else.
+///
+/// **How a placed picture is actually written.** A design program wraps each
+/// one as `q <its bounds> re W n q cm /Im Do Q Q` — a clip exactly the size of
+/// the frame, then the picture inside it. Moving the `Do` alone slides the
+/// picture out of its own clip, and past the frame's edge it is cut to
+/// nothing: reported from use, with a screenshot, as a picture that vanished
+/// when moved and left a grey block where it was — the placeholder rectangle
+/// the same program paints under every photograph.
+///
+/// So when the innermost scope holds only this object and clip-setting paths,
+/// the scope *is* the object's frame, and a move goes just inside its `q` —
+/// where it carries the clip and the object together. Returns the `q` and the
+/// `Q`. `None` where the scope also draws something else, or there is none.
+fn frame_scope(
+    operations: &[crate::pdf::content::Operation],
+    object: std::ops::Range<usize>,
+) -> Option<(usize, usize)> {
+    /// The `q` that opens the innermost scope around `before`, if any.
+    fn opening(operations: &[crate::pdf::content::Operation], before: usize) -> Option<usize> {
+        let mut depth = 0i32;
+        for index in (0..before).rev() {
+            match operations[index].operator.as_slice() {
+                b"Q" => depth += 1,
+                b"q" => {
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    /// The `Q` that closes the scope opened at `open`.
+    fn closing(operations: &[crate::pdf::content::Operation], open: usize) -> Option<usize> {
+        let mut depth = 0i32;
+        for (index, operation) in operations.iter().enumerate().skip(open + 1) {
+            match operation.operator.as_slice() {
+                b"q" => depth += 1,
+                b"Q" => {
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    // **Outward, as far as nothing else is drawn.** A placed picture sits in
+    // two scopes — `q clip q cm Do Q Q` — and the innermost holds only the
+    // `cm` and the `Do`. Stopping there moves the picture and leaves the clip
+    // behind, which is exactly the vanishing this exists to prevent. So each
+    // enclosing scope is tried in turn and the widest one that still draws
+    // only this object is the frame.
+    let mut frame = None;
+    let mut from = object.start;
+    while let Some(open) = opening(operations, from) {
+        let Some(close) = closing(operations, open) else { break };
+        let draws_something_else =
+            operations.iter().enumerate().take(close).skip(open + 1).any(|(index, operation)| {
+                !object.contains(&index)
+                    && (operation.shows_text()
+                        || matches!(
+                            operation.operator.as_slice(),
+                            b"Do" | b"sh" | b"BI" | b"S" | b"s" | b"f" | b"F" | b"f*" | b"B"
+                                | b"B*" | b"b" | b"b*"
+                        ))
+            });
+        if draws_something_else {
+            break;
+        }
+        frame = Some((open, close));
+        from = open;
+    }
+    frame
+}
+
+/// A filled rectangle the size of a frame's clip, painted immediately before
+/// the frame — the placeholder a design program puts under every placed
+/// picture. Returns the index of its `re`.
+///
+/// Two things have to hold, and both are checked: the operation before the
+/// frame's `q` fills a path, and that path is one `re` whose corners are
+/// within a point of the first clipping `re` inside the frame.
+fn placeholder_before(operations: &[crate::pdf::content::Operation], open: usize) -> Option<usize> {
+    let fill = open.checked_sub(1)?;
+    if !matches!(operations[fill].operator.as_slice(), b"f" | b"F" | b"f*") {
+        return None;
+    }
+    let rect = fill.checked_sub(1)?;
+    if operations[rect].operator != b"re" {
+        return None;
+    }
+    let clip = operations.iter().skip(open + 1).find(|o| o.operator == b"re")?;
+    let corners = |o: &crate::pdf::content::Operation| -> Option<[f32; 4]> {
+        let n: Vec<f32> = o.operands.iter().filter_map(|v| v.as_f64().map(|x| x as f32)).collect();
+        (n.len() == 4).then(|| {
+            // Normalised, because a negative height is how one of these
+            // programs writes the same rectangle upside down.
+            let (x, y, w, h) = (n[0], n[1], n[2], n[3]);
+            [x.min(x + w), y.min(y + h), x.max(x + w), y.max(y + h)]
+        })
+    };
+    let (a, b) = (corners(&operations[rect])?, corners(clip)?);
+    let same = a.iter().zip(b.iter()).all(|(p, q)| (p - q).abs() <= 1.0);
+    same.then_some(rect)
+}
+
+/// The operations that paint each path, in the order the page paints them, and
+/// whether each one also sets a clip.
+///
+/// A path is a run of construction operators — `m`, `l`, `c`, `v`, `y`, `re`,
+/// `h` — closed by a painting one. **Those ending in `n` paint nothing**: they
+/// exist to set a clipping path, and PDFium does not report them as objects, so
+/// leaving them out is what makes the *n*th of these the *n*th path object.
+///
+/// Measured on a real report rather than reasoned from the specification: ten
+/// pages of ten agreeing, one of them with fifty painted paths and twenty-eight
+/// clip-only ones.
+fn path_operators(
+    operations: &[crate::pdf::content::Operation],
+) -> Vec<(std::ops::Range<usize>, bool)> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut clips = false;
+
+    for (index, operation) in operations.iter().enumerate() {
+        match operation.operator.as_slice() {
+            b"m" | b"re" => {
+                if start.is_none() {
+                    start = Some(index);
+                    clips = false;
+                }
+            }
+            b"l" | b"c" | b"v" | b"y" | b"h" => {}
+            b"W" | b"W*" => clips = true,
+            b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" | b"n" => {
+                if let Some(from) = start.take() {
+                    // `n` paints nothing; it is here to close a clip.
+                    if operation.operator.as_slice() != b"n" {
+                        out.push((from..index + 1, clips));
+                    }
+                    clips = false;
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The operations that draw a picture, in the order the page draws them.
+///
+/// A `Do` may draw a form rather than a picture, so the names are checked
+/// against the page's own resources — which is why this takes the set rather
+/// than working it out from the operator alone.
+fn image_operators(
+    operations: &[crate::pdf::content::Operation],
+    images: &std::collections::BTreeSet<Vec<u8>>,
+) -> Vec<usize> {
+    operations
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| {
+            op.operator == b"Do"
+                && matches!(
+                    op.operands.first(),
+                    Some(crate::pdf::Object::Name(name)) if images.contains(name)
+                )
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// **Which operators draw a run**, and whether they can be lifted out.
+///
+/// Found the way the locking path finds them: the nearest placed origin to
+/// where PDFium says the run starts, then everything continuing that line
+/// within the run's own width. Proximity alone sweeps up a neighbouring column.
+///
+/// Returns the first and last operation inclusive, and **whether the line goes
+/// on after them** — which is the difference between the two ways a run can be
+/// moved, and a refusal for anything that lifts the run out of the stream.
+///
+/// Refuses outright where the operators cannot be isolated at all:
+///
+/// - another run drawn between them;
+/// - a `BT` or `ET` inside, which means they are not one text object.
+fn run_operators(
+    run: &crate::document::TextRun,
+    page_height: f32,
+    placed: &[crate::pdf::content::Placed],
+    operations: &[crate::pdf::content::Operation],
+    codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
+) -> Result<(usize, usize, bool)> {
+    const NEAR: f32 = 4.0;
+    // **The baseline origin, not the box's corner.** The box's bottom sits a
+    // descender below the baseline and its left a side bearing past the pen,
+    // and for large type either is more than four points — measured, a 30pt
+    // line matched nothing. `TextRun::origin` is read from the text object's
+    // own matrix and is exactly what `content::placed` computes.
+    let (want_x, want_y) = (run.origin.x, page_height - run.origin.y);
+    let start = placed
+        .iter()
+        .map(|p| {
+            let d = ((p.origin.x - want_x).powi(2) + (p.origin.y - want_y).powi(2)).sqrt();
+            (p, d)
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .filter(|(_, d)| *d <= NEAR)
+        .map(|(p, _)| p)
+        .ok_or(PdfError::Unsupported(
+            "those words are drawn in a way this cannot follow",
+        ))?;
+
+    // Everything continuing that line, from where the run begins.
+    //
+    // **The x bound cannot separate them.** `content::placed` reports where the
+    // last positioning operator put the pen, not where the pen actually is —
+    // so a line drawn as three `TJ`s with nothing between them reports all
+    // three at the same place, and every test of position lets all three
+    // through. What separates them is *how many codes each draws*: the run's
+    // own operators are however many it takes to cover its characters, and the
+    // rest of the line belongs to somebody else. Measured before this: dragging
+    // `08-29 21:20` on a real page took the arrow and the date after it.
+    let mut following: Vec<&crate::pdf::content::Placed> = placed
+        .iter()
+        .filter(|p| {
+            p.line == start.line
+                && p.origin.x >= start.origin.x - 0.5
+                && p.origin.x <= run.rect.right + NEAR
+        })
+        .collect();
+    following.sort_by_key(|p| p.origin.operation);
+
+    let wanted = run.text.chars().count();
+    let mut mine: Vec<usize> = Vec::new();
+    let mut covered = 0usize;
+    for p in &following {
+        mine.push(p.origin.operation);
+        covered += codes_in(p);
+        if covered >= wanted {
+            break;
+        }
+    }
+    let (Some(&first), Some(&last)) = (mine.first(), mine.last()) else {
+        return Err(PdfError::Unsupported(
+            "those words are drawn in a way this cannot follow",
+        ));
+    };
+
+    for (index, operation) in operations.iter().enumerate().take(last + 1).skip(first) {
+        if operation.shows_text() && !mine.contains(&index) {
+            return Err(PdfError::Unsupported("other words are drawn between these ones"));
+        }
+        if matches!(operation.operator.as_slice(), b"BT" | b"ET") {
+            return Err(PdfError::Unsupported(
+                "those words are split across more than one text object",
+            ));
+        }
+    }
+
+    // **Does anything go on drawing this line?** The scan walks past the
+    // operators that do not move the pen — `Tf`, a colour, a `gs` — and looks
+    // at the first one that does. A show-text operator reached that way
+    // continues this very line, and where the pen leaves off is decided by the
+    // advance of the glyphs in between.
+    let mut continues = false;
+    for operation in operations.iter().skip(last + 1) {
+        if matches!(
+            operation.operator.as_slice(),
+            b"Tm" | b"Td" | b"TD" | b"T*" | b"ET" | b"BT"
+        ) {
+            break;
+        }
+        if operation.shows_text() {
+            continues = true;
+            break;
+        }
+    }
+
+    Ok((first, last, continues))
+}
+
+/// One PDF number, refusing anything that cannot be written as one.
+///
+/// PDF numbers have no exponent form and no infinity, so a value that needs one
+/// would be a syntax error in the middle of a content stream — a corrupt page,
+/// not a failed edit.
+fn number_operand(v: f32) -> Result<Vec<u8>> {
+    if !v.is_finite() {
+        return Err(PdfError::Unsupported(
+            "these words are placed by a number this cannot write",
+        ));
+    }
+    let mut text = format!("{v:.4}");
+    if text.contains('.') {
+        text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+    }
+    Ok(if text == "-0" { b"0".to_vec() } else { text.into_bytes() })
+}
+
+/// A `Tm` operator carrying this matrix.
+///
+/// **Refuses rather than writing a number no reader can parse.** PDF numbers
+/// have no exponent form and no infinity, so a matrix holding one would be a
+/// syntax error in the middle of a content stream — which is a corrupt page,
+/// not a failed move.
+fn text_matrix(m: &[f32; 6]) -> Result<Vec<u8>> {
+    matrix_operator(m, "Tm")
+}
+
+/// A `cm` operator carrying this matrix.
+fn concat_matrix(m: &[f32; 6]) -> Result<Vec<u8>> {
+    matrix_operator(m, "cm")
+}
+
+/// Multiply two PDF matrices, `a b c d e f`.
+fn matrices(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
+    [
+        a[0] * b[0] + a[1] * b[2],
+        a[0] * b[1] + a[1] * b[3],
+        a[2] * b[0] + a[3] * b[2],
+        a[2] * b[1] + a[3] * b[3],
+        a[4] * b[0] + a[5] * b[2] + b[4],
+        a[4] * b[1] + a[5] * b[3] + b[5],
+    ]
+}
+
+/// The inverse of a PDF matrix, or `None` where there is none.
+fn inverse(m: [f32; 6]) -> Option<[f32; 6]> {
+    let det = m[0] * m[3] - m[1] * m[2];
+    if det.abs() < 1e-9 {
+        return None;
+    }
+    let (a, b, c, d) = (m[3] / det, -m[1] / det, -m[2] / det, m[0] / det);
+    Some([a, b, c, d, -(m[4] * a + m[5] * c), -(m[4] * b + m[5] * d)])
+}
+
+fn matrix_operator(m: &[f32; 6], operator: &str) -> Result<Vec<u8>> {
+    fn number(v: f32) -> Result<String> {
+        if !v.is_finite() {
+            return Err(PdfError::Unsupported(
+                "these words are placed by a matrix this cannot write",
+            ));
+        }
+        // Six places holds a page-space position to well under a thousandth of
+        // a point, and the trim keeps the stream readable.
+        let mut text = format!("{v:.6}");
+        if text.contains('.') {
+            text = text.trim_end_matches('0').trim_end_matches('.').to_string();
+        }
+        Ok(if text == "-0" { "0".into() } else { text })
+    }
+
+    let parts: Result<Vec<String>> = m.iter().map(|v| number(*v)).collect();
+    Ok(format!("{} {operator}", parts?.join(" ")).into_bytes())
+}
+
+/// The graphics and text state set before an operation, as the bytes that set
+/// it — colour, line width, the `gs` that carries transparency, the font.
+///
+/// **Copied rather than parsed.** Re-serialising a colour means knowing its
+/// space, and a `/GS0 gs` means nothing without the dictionary it names. The
+/// operators that set the state are already in the stream and already correct,
+/// so they are lifted whole and put back in the order they were last set —
+/// which keeps `cs` in front of the `scn` that needs it.
+fn state_in_force(operations: &[crate::pdf::content::Operation], stream: &[u8], upto: usize) -> Vec<Vec<u8>> {
+    const TRACKED: &[&[u8]] = &[
+        b"g", b"G", b"rg", b"RG", b"k", b"K", b"cs", b"CS", b"sc", b"scn", b"SC", b"SCN", b"gs",
+        b"w", b"J", b"j", b"M", b"d", b"ri", b"i", b"Tf", b"Tc", b"Tw", b"Tz", b"TL", b"Ts", b"Tr",
+    ];
+
+    let mut live: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    let mut stack: Vec<Vec<(Vec<u8>, Vec<u8>)>> = Vec::new();
+    for operation in operations.iter().take(upto) {
+        match operation.operator.as_slice() {
+            b"q" => stack.push(live.clone()),
+            b"Q" => {
+                if let Some(saved) = stack.pop() {
+                    live = saved;
+                }
+            }
+            other if TRACKED.contains(&other) => {
+                live.retain(|(name, _)| name != other);
+                live.push((
+                    other.to_vec(),
+                    stream.get(operation.span.clone()).unwrap_or_default().to_vec(),
+                ));
+            }
+            _ => {}
+        }
+    }
+    live.into_iter().map(|(_, bytes)| bytes).collect()
+}
+
+/// One clipping path in force at some point in a stream: the operations that
+/// build it, whether it used the even-odd rule, and the transform it was set
+/// under.
+#[derive(Debug, Clone)]
+struct ClipInForce {
+    /// The construction operators, `m`/`re`/`l`/… up to but not including the
+    /// `W` — so they can be replayed anywhere.
+    construction: std::ops::Range<usize>,
+    even_odd: bool,
+    ctm: [f32; 6],
+}
+
+/// Every clipping path in force where an operation sits, outermost first.
+///
+/// **What lets something drawn inside a clip be re-stacked.** A clip is set by
+/// `W` and lasts until the enclosing `Q`, so something lifted out from under
+/// one and put back at the other end of the stream arrives unclipped, and
+/// paints over whatever the clip was keeping it off. The first version refused
+/// that case outright — measured on a real brochure page, that was 22 of 50
+/// shapes and 9 of the words and pictures, which is most of what anyone would
+/// want to move. Carrying the clips is the answer: each one is replayed, under
+/// the transform it was set under, inside the block that carries the object.
+fn clips_in_force(
+    operations: &[crate::pdf::content::Operation],
+    states: &[crate::pdf::content::State],
+    upto: usize,
+) -> Vec<ClipInForce> {
+    // Per `q` level, the clips set at that level.
+    let mut levels: Vec<Vec<ClipInForce>> = vec![Vec::new()];
+    let mut path_start: Option<usize> = None;
+    let mut pending: Option<bool> = None;
+    for (index, operation) in operations.iter().enumerate().take(upto) {
+        match operation.operator.as_slice() {
+            b"q" => levels.push(Vec::new()),
+            b"Q" => {
+                if levels.len() > 1 {
+                    levels.pop();
+                }
+            }
+            b"m" | b"re" => {
+                if path_start.is_none() {
+                    path_start = Some(index);
+                }
+            }
+            b"l" | b"c" | b"v" | b"y" | b"h" => {}
+            b"W" => pending = Some(false),
+            b"W*" => pending = Some(true),
+            b"S" | b"s" | b"f" | b"F" | b"f*" | b"B" | b"B*" | b"b" | b"b*" | b"n" => {
+                if let (Some(from), Some(even_odd)) = (path_start, pending) {
+                    // The clip takes effect after the painting operator, under
+                    // the transform in force for the path — which is the one at
+                    // its first construction operator.
+                    let ctm = states.get(from).map(|s| s.ctm).unwrap_or(IDENTITY_MATRIX);
+                    if let Some(level) = levels.last_mut() {
+                        level.push(ClipInForce { construction: from..index, even_odd, ctm });
+                    }
+                }
+                path_start = None;
+                pending = None;
+            }
+            _ => {}
+        }
+    }
+    levels.into_iter().flatten().collect()
+}
+
+/// The nearest point after an operation where no clip is in force: past the
+/// `Q` that closes each clipping scope, innermost first.
+fn leave_clips_after(
+    operations: &[crate::pdf::content::Operation],
+    states: &[crate::pdf::content::State],
+    mut at: usize,
+) -> usize {
+    loop {
+        if clips_in_force(operations, states, at + 1).is_empty() {
+            return at;
+        }
+        // The `Q` that closes the level `at` is in: the first one reached at
+        // depth zero, counting the `q`s opened on the way.
+        let mut depth = 0usize;
+        let mut index = at + 1;
+        let closing = loop {
+            let Some(operation) = operations.get(index) else { break None };
+            match operation.operator.as_slice() {
+                b"q" => depth += 1,
+                b"Q" => {
+                    if depth == 0 {
+                        break Some(index);
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+            index += 1;
+        };
+        // Unbalanced: land where asked rather than nowhere.
+        let Some(closing) = closing else { return at };
+        at = closing;
+    }
+}
+
+/// The nearest point before an operation where no clip is in force: before
+/// the `q` that opens each clipping scope, innermost first.
+fn leave_clips_before(
+    operations: &[crate::pdf::content::Operation],
+    states: &[crate::pdf::content::State],
+    mut at: usize,
+) -> usize {
+    loop {
+        if clips_in_force(operations, states, at).is_empty() {
+            return at;
+        }
+        let mut depth = 0usize;
+        let mut index = at;
+        let opening = loop {
+            if index == 0 {
+                break None;
+            }
+            index -= 1;
+            match operations[index].operator.as_slice() {
+                b"Q" => depth += 1,
+                b"q" => {
+                    if depth == 0 {
+                        break Some(index);
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        };
+        let Some(opening) = opening else { return at };
+        at = opening;
+    }
+}
+
+/// Whether an operation sits inside a `BT … ET` text object.
+fn inside_text_object(operations: &[crate::pdf::content::Operation], at: usize) -> bool {
+    let mut open = false;
+    for operation in operations.iter().take(at + 1) {
+        match operation.operator.as_slice() {
+            b"BT" => open = true,
+            b"ET" => open = false,
+            _ => {}
+        }
+    }
+    open
+}
+
+const IDENTITY_MATRIX: [f32; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+
 fn mark(area: Rect, page_height: f32, fill: crate::document::Color) -> Vec<u8> {
     // The area arrives top-left down; a content stream works bottom-left up.
     let (bottom, top) = (page_height - area.bottom, page_height - area.top);

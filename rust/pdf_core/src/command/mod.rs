@@ -525,6 +525,8 @@ impl Command {
                         area: *area,
                         fill: *fill,
                         require_complete: !*allow_incomplete,
+                        // A recorded redaction is a rectangle by construction.
+                        parts: Vec::new(),
                     },
                     catalogue.as_ref(),
                 )?;

@@ -27,7 +27,7 @@ DYLIB="$ROOT/third_party/pdfium/$SLICE/lib/libpdfium.dylib"
 if [ ! -f "$DYLIB" ]; then
   # Fall back to the Pagify repo's vendored copy, which is where development
   # builds find it.
-  DYLIB="$ROOT/../workspace/Pagify/third_party/pdfium/$SLICE/lib/libpdfium.dylib"
+  DYLIB="$ROOT/../third_party/pdfium/$SLICE/lib/libpdfium.dylib"
 fi
 [ -f "$DYLIB" ] || { echo "no PDFium for $ARCH — run tools/fetch_pdfium.sh" >&2; exit 1; }
 

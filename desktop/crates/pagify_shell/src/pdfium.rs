@@ -53,7 +53,7 @@ const VENDORED_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_pa
 /// builds on a Mac.
 const PAGIFY_ROOT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "/../../../workspace/Pagify/third_party/pdfium"
+    "/../../../third_party/pdfium"
 );
 
 /// The library file this build expects, wherever it is found.

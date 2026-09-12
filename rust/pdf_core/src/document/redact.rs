@@ -123,6 +123,24 @@ pub struct Redaction {
     /// refusing, because the failure mode of the other default is a document
     /// that everyone believes is redacted.
     pub require_complete: bool,
+    /// The exact shapes asked for, when what was asked for is not a rectangle.
+    ///
+    /// **A text selection spanning two lines is not a rectangle.** It is the
+    /// tail of one line and the head of the next, and the smallest rectangle
+    /// holding both also holds the head of the first line and the tail of the
+    /// last — the words on either side of what was actually picked. Sending
+    /// only the union hides them too: measured on `two-column.pdf`, a
+    /// 39-character selection took 68 characters and the word before it.
+    ///
+    /// So the caller may send the shapes themselves — one per line — and
+    /// [`Redaction::area`] stays their union, which is what everything wanting
+    /// a single rectangle still uses: the badge that undoes the lock, the
+    /// survey, and the bounds a caller draws.
+    ///
+    /// Empty means the rectangle *is* the shape, which is what a dragged
+    /// rectangle means and what every caller before this meant.
+    #[serde(default)]
+    pub parts: Vec<Rect>,
 }
 
 impl Redaction {
@@ -133,7 +151,61 @@ impl Redaction {
             area,
             fill: Some(Color { r: 0, g: 0, b: 0, a: 255 }),
             require_complete: true,
+            parts: Vec::new(),
         }
+    }
+
+    /// The same request over an explicit set of shapes, with `area` their union.
+    ///
+    /// The union is computed here rather than trusted from the caller, because
+    /// everything that reads `area` — the badge, the survey — depends on it
+    /// actually containing the parts.
+    pub fn over(page_index: usize, parts: Vec<Rect>) -> Option<Self> {
+        let first = *parts.first()?;
+        let area = parts.iter().fold(first, |acc, r| Rect {
+            left: acc.left.min(r.left),
+            top: acc.top.min(r.top),
+            right: acc.right.max(r.right),
+            bottom: acc.bottom.max(r.bottom),
+        });
+        Some(Redaction { parts, ..Redaction::new(page_index, area) })
+    }
+
+    /// The shapes to clear: the parts when there are any, the area when not.
+    ///
+    /// Every test of "is this inside what was asked for" goes through here, so
+    /// that a request carrying parts and one carrying a bare rectangle take the
+    /// same path and only the shape differs.
+    pub fn shapes(&self) -> &[Rect] {
+        if self.parts.is_empty() {
+            std::slice::from_ref(&self.area)
+        } else {
+            &self.parts
+        }
+    }
+
+    /// Whether any shape overlaps this rectangle.
+    pub fn touches(&self, r: &Rect) -> bool {
+        self.shapes().iter().any(|s| {
+            r.left < s.right && r.right > s.left && r.top < s.bottom && r.bottom > s.top
+        })
+    }
+
+    /// Whether any shape holds this point.
+    pub fn holds(&self, x: f32, y: f32) -> bool {
+        self.shapes()
+            .iter()
+            .any(|s| x >= s.left && x <= s.right && y >= s.top && y <= s.bottom)
+    }
+
+    /// Whether this rectangle spills outside every shape, within a tolerance.
+    pub fn spills(&self, r: &Rect, slack: f32) -> bool {
+        !self.shapes().iter().any(|s| {
+            r.left >= s.left - slack
+                && r.right <= s.right + slack
+                && r.top >= s.top - slack
+                && r.bottom <= s.bottom + slack
+        })
     }
 }
 
