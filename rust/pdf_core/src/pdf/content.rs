@@ -253,6 +253,10 @@ pub struct State {
     /// including the one a lone number in a `TJ` array makes. Left out, a run
     /// set at 50% would move twice as far as it was asked to.
     pub horizontal_scale: f32,
+    /// The name last given to `gs`, if any — the ExtGState in force, which is
+    /// where an object's opacity lives. Saved and restored with `q`/`Q` like
+    /// the rest of the graphics state.
+    pub ext_gstate: Option<Vec<u8>>,
     /// Text rise, from `Ts`: how far glyphs are drawn above the baseline.
     ///
     /// **Not a pen movement.** Rise offsets where a glyph is painted and leaves
@@ -267,20 +271,30 @@ pub struct State {
 pub fn states(operations: &[Operation]) -> Vec<State> {
     let mut out = Vec::with_capacity(operations.len());
     let mut ctm = IDENTITY;
-    let mut stack: Vec<[f32; 6]> = Vec::new();
+    let mut stack: Vec<([f32; 6], Option<Vec<u8>>)> = Vec::new();
     // The text matrix, and the line matrix each new line starts from.
     let (mut text, mut line) = (IDENTITY, IDENTITY);
     let mut leading = 0.0f32;
     let (mut font, mut size) = (None::<Vec<u8>>, 0.0f32);
     let (mut horizontal_scale, mut rise) = (1.0f32, 0.0f32);
+    let mut ext_gstate: Option<Vec<u8>> = None;
     // Bumped by everything that starts a new line of text, so operators that
     // continue one another share a number.
     let mut line_number = 0usize;
 
     for operation in operations {
         match operation.operator.as_slice() {
-            b"q" => stack.push(ctm),
-            b"Q" => ctm = stack.pop().unwrap_or(IDENTITY),
+            b"q" => stack.push((ctm, ext_gstate.clone())),
+            b"Q" => {
+                let (c, g) = stack.pop().unwrap_or((IDENTITY, None));
+                ctm = c;
+                ext_gstate = g;
+            }
+            b"gs" => {
+                if let Some(Object::Name(name)) = operation.operands.first() {
+                    ext_gstate = Some(name.clone());
+                }
+            }
             b"cm" => {
                 if let Some(n) = numbers(&operation.operands, 6) {
                     ctm = multiply([n[0], n[1], n[2], n[3], n[4], n[5]], ctm);
@@ -367,6 +381,7 @@ pub fn states(operations: &[Operation]) -> Vec<State> {
             font: font.clone(),
             size,
             horizontal_scale,
+            ext_gstate: ext_gstate.clone(),
             rise,
             line_number,
         });

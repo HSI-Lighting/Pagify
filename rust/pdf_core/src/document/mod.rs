@@ -593,6 +593,50 @@ pub trait Document: Send + Sync {
     /// `FPDFPage_GenerateContent`. Measured before it was offered — see the
     /// tests — because a move that quietly reflowed the paragraph beside it
     /// would be a poor trade.
+    /// What one step up or down through the drawing order would pass — the
+    /// nearest thing in that direction that **overlaps** this one.
+    ///
+    /// **Stacking is only visible where things overlap.** A step past the next
+    /// object in the file is invisible when that object is on the other side
+    /// of the page, which is most of the time; reported from use as "moving up
+    /// or down doesn't do anything". So a step is defined against what shares
+    /// the object's space. `None` means there is nothing to pass: it is
+    /// already in front of, or behind, everything it overlaps.
+    fn stacking_neighbour(
+        &self,
+        _page_index: usize,
+        _object: usize,
+        _up: bool,
+    ) -> Result<Option<DrawnObject>> {
+        Err(PdfError::Unsupported("reading the drawing order"))
+    }
+
+    /// Resize one thing about a point, keeping that point where it is.
+    ///
+    /// `anchor` is in page points with a top-left origin — the corner or edge
+    /// opposite the one being dragged — and `sx`, `sy` are the factors. Words
+    /// inside a text box of their own resize with the box; words sharing a
+    /// text object with others cannot be resized this way, because there is
+    /// nothing of their own to transform, and are refused — their size is a
+    /// font size, which the run editor changes.
+    fn scale_object(
+        &mut self,
+        _page_index: usize,
+        _object: usize,
+        _anchor: Point,
+        _sx: f32,
+        _sy: f32,
+    ) -> Result<()> {
+        Err(PdfError::Unsupported("resizing an object"))
+    }
+
+    /// Make one thing more or less see-through: `opacity` from 0 (invisible)
+    /// to 1 (as drawn). Absolute, not cumulative — setting it twice sets it
+    /// twice, it does not multiply.
+    fn set_opacity(&mut self, _page_index: usize, _object: usize, _opacity: f32) -> Result<()> {
+        Err(PdfError::Unsupported("changing an object's opacity"))
+    }
+
     /// Put one thing at the front or the back of the page's drawing order.
     ///
     /// **The only way a PDF stacks anything is the order it draws it**, so this
@@ -1723,6 +1767,8 @@ pub struct DrawnObject {
     /// 145 × 63 pt" and nothing else — reported from use as a page that looked
     /// like it had layers which could not be read.
     pub depth: usize,
+    /// How see-through it is drawn, 0 to 1, as the page has it.
+    pub opacity: f32,
     /// Whether the drawing order can be changed for this one.
     ///
     /// **False inside a group.** What a group draws is a stream of its own,

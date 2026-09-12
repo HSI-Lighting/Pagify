@@ -580,6 +580,37 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.drawn_objects(page_index))
     }
 
+    /// Resize one thing about a point — see
+    /// [`pdf_core::document::DocumentMut::scale_object`].
+    pub fn scale_object(
+        &self,
+        page: usize,
+        object: usize,
+        anchor: pdf_core::document::Point,
+        sx: f32,
+        sy: f32,
+    ) -> Result<()> {
+        registry::with_session(self.handle, |s| s.document.scale_object(page, object, anchor, sx, sy))
+    }
+
+    /// Make one thing more or less see-through — see
+    /// [`pdf_core::document::DocumentMut::set_opacity`].
+    pub fn set_opacity(&self, page: usize, object: usize, opacity: f32) -> Result<()> {
+        registry::with_session(self.handle, |s| s.document.set_opacity(page, object, opacity))
+    }
+
+    /// What one step up or down would pass: the nearest thing that overlaps
+    /// this one in that direction — see
+    /// [`pdf_core::document::Document::stacking_neighbour`].
+    pub fn stacking_neighbour(
+        &self,
+        page_index: usize,
+        object: usize,
+        up: bool,
+    ) -> Result<Option<pdf_core::document::DrawnObject>> {
+        registry::with_session(self.handle, |s| s.document.stacking_neighbour(page_index, object, up))
+    }
+
     /// Put one thing at the front or the back of a page's drawing order.
     ///
     /// **The only stacking a PDF has is the order it draws things in**, so this

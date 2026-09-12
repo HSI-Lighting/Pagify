@@ -182,6 +182,8 @@ pub enum Verb {
     BringToFront,
     /// Put it at the back.
     SendToBack,
+    /// How see-through the selected thing is drawn, as a percentage.
+    Opacity(f32),
     /// Finish any lock whose badge stands over a picture still on the page.
     ///
     /// Done on every open without being asked; this is for a document already
@@ -828,6 +830,11 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         "bringtofront" | "bringforward" | "tofront" => Ok(Verb::BringToFront),
         "sendtoback" | "sendbackward" | "toback" => Ok(Verb::SendToBack),
         "repairlocks" => Ok(Verb::RepairLocks),
+        "opacity" | "transparency" => match tail.trim().trim_end_matches('%').parse::<f32>() {
+            Ok(percent) if (0.0..=100.0).contains(&percent) => Ok(Verb::Opacity(percent)),
+            Ok(_) => Err("opacity is between 0 and 100".into()),
+            Err(_) => Err("opacity takes a percentage, 0 to 100 — `opacity 50`".into()),
+        },
         "secure" => SecureOptions::parse(tail).map(Verb::Secure),
         "whiteout" => Ok(Verb::Whiteout),
         "signrectangle" => Ok(Verb::SignRectangle),

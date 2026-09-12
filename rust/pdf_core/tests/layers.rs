@@ -331,47 +331,61 @@ fn words_pictures_and_shapes_can_all_be_re_stacked() {
     }
 }
 
-/// **One step up puts it over exactly the thing that was above it.**
+/// **One step up puts it over the nearest thing that overlaps it.**
 ///
-/// Asked for from use: a panel with the order in it, and the means to move
-/// things up and down. A jump to either end is easy — nothing is in force at
-/// the head or tail of a stream — and a single step is not: the landing point
-/// is wherever the neighbour ends, with whatever transform and clip are in
-/// force there.
+/// Asked for from use: "moving a layer up and down means moving an object in
+/// front of or behind another object". A step past the next object in the
+/// *file* is invisible when that object is on the other side of the page —
+/// which is most of the time, and was reported as the buttons doing nothing.
+/// So a step is defined against what shares the object's space: the picture
+/// here sits under a panel, which sits under a caption; up passes the panel,
+/// up again passes the caption, and a third time there is nothing to pass.
 #[test]
-fn moving_up_one_swaps_it_with_its_neighbour_and_nothing_else() {
+fn moving_up_one_passes_the_nearest_thing_that_overlaps_it() {
     let Some(_) = skip_without_pdfium() else { return };
     let _lock = serial();
 
-    let doc = open("pictures.pdf");
-    let was = named(&doc, 0);
-    let drawn = doc.drawn_objects(0).expect("objects");
-    drop(doc);
+    let mut doc = open("covered.pdf");
+    let picture = doc
+        .drawn_objects(0)
+        .expect("objects")
+        .into_iter()
+        .find(|d| d.kind == DrawnKind::Picture)
+        .expect("the picture");
+    let find = |doc: &PdfiumDocument| {
+        doc.drawn_objects(0)
+            .expect("objects")
+            .into_iter()
+            .find(|d| d.kind == DrawnKind::Picture)
+            .expect("the picture")
+            .object
+    };
 
-    // Every one but the last can go up; every one but the first can go down.
-    for (position, target) in drawn.iter().enumerate() {
-        if position + 1 < drawn.len() {
-            let mut doc = open("pictures.pdf");
-            doc.restack(0, target.object, Stacking::Up).expect("move up one");
-            let mut expected = was.clone();
-            expected.swap(position, position + 1);
-            assert_eq!(named(&doc, 0), expected, "up from {position}");
-        }
-        if position > 0 {
-            let mut doc = open("pictures.pdf");
-            doc.restack(0, target.object, Stacking::Down).expect("move down one");
-            let mut expected = was.clone();
-            expected.swap(position, position - 1);
-            assert_eq!(named(&doc, 0), expected, "down from {position}");
-        }
-    }
+    // What the first step will pass is the panel, and it says so beforehand.
+    let over = doc.stacking_neighbour(0, picture.object, true).expect("ask").expect("something overlaps");
+    assert_eq!(over.kind, DrawnKind::Shape, "the panel is what the picture is under: {over:?}");
+    doc.restack(0, find(&doc), Stacking::Up).expect("up past the panel");
+    let order = named(&doc, 0);
+    assert!(
+        order.iter().position(|n| n.starts_with("picture")) > order.iter().position(|n| n.starts_with("shape")),
+        "the picture should now be over the panel: {order:?}"
+    );
 
-    // And the ends say so rather than doing nothing quietly.
-    let mut doc = open("pictures.pdf");
-    let last = drawn.last().expect("something").object;
-    assert!(doc.restack(0, last, Stacking::Up).is_err(), "the top can go no higher");
-    let first = drawn.first().expect("something").object;
-    assert!(doc.restack(0, first, Stacking::Down).is_err(), "the bottom can go no lower");
+    // Then the caption.
+    let over = doc.stacking_neighbour(0, find(&doc), true).expect("ask").expect("the caption overlaps");
+    assert_eq!(over.kind, DrawnKind::Words);
+    doc.restack(0, find(&doc), Stacking::Up).expect("up past the caption");
+    assert_eq!(named(&doc, 0).last().map(|n| n.starts_with("picture")), Some(true));
+
+    // And then there is nothing above it to pass.
+    assert!(doc.stacking_neighbour(0, find(&doc), true).expect("ask").is_none());
+    assert!(doc.restack(0, find(&doc), Stacking::Up).is_err(), "nothing overlaps above");
+
+    // Down retraces the same two steps.
+    doc.restack(0, find(&doc), Stacking::Down).expect("down past the caption");
+    doc.restack(0, find(&doc), Stacking::Down).expect("down past the panel");
+    assert_eq!(named(&doc, 0).first().map(|n| n.starts_with("picture")), Some(true));
+    assert!(doc.restack(0, find(&doc), Stacking::Down).is_err(), "nothing overlaps below");
 }
 
 /// **Something drawn inside a clip can be re-stacked, and stays clipped.**
@@ -476,4 +490,108 @@ fn a_shape_that_paints_and_clips_leaves_its_clip_behind_when_re_stacked() {
         panel.rect,
         first.rect
     );
+}
+
+/// **A picture and its placeholder are one thing to re-stack.**
+///
+/// Reported from use, over days, as pictures going behind a grey layer: sent
+/// to the back, a picture went under its *own* placeholder rectangle, which
+/// painted grey over it. The placeholder, the frame and the picture travel as
+/// one unit now, and the placeholder is listed under its picture rather than
+/// as a shape of its own.
+#[test]
+fn a_picture_sent_back_does_not_go_under_its_own_placeholder() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    fn red(doc: &dyn Document) -> usize {
+        let size = doc.page_size(0).expect("size");
+        let width = 306u32;
+        let scale = width as f32 / size.width_pt;
+        let height = (size.height_pt * scale).max(1.0) as u32;
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        let mut target = pdf_core::render::RenderTarget {
+            width,
+            height,
+            stride: (width * 4) as usize,
+            order: pdf_core::render::PixelOrder::Rgba,
+            pixels: &mut pixels,
+        };
+        doc.page(0)
+            .expect("page")
+            .render_into(
+                &pdf_core::document::RenderRequest { scale, ..Default::default() },
+                &mut target,
+            )
+            .expect("render");
+        pixels.chunks_exact(4).filter(|p| p[0] > 180 && p[1] < 80 && p[2] < 80).count()
+    }
+
+    let doc = open("framed.pdf");
+    let listed = doc.drawn_objects(0).expect("objects");
+    let picture = listed.iter().find(|d| d.kind == DrawnKind::Picture).cloned().expect("the picture");
+    let placeholder = listed.iter().find(|d| d.label == "placeholder").cloned();
+    assert!(
+        placeholder.as_ref().is_some_and(|p| p.depth == 1 && p.object == picture.object),
+        "the placeholder should be listed under its picture and addressed as it: {listed:#?}"
+    );
+    let visible = red(&doc);
+    assert!(visible > 500, "the fixture should draw the picture");
+    drop(doc);
+
+    // To the back: still visible, because the placeholder is part of it.
+    let mut doc = open("framed.pdf");
+    doc.restack(0, picture.object, Stacking::Back).expect("back");
+    assert!(
+        red(&doc) as f32 > visible as f32 * 0.9,
+        "the back put the picture under its own placeholder: {} red pixels, was {visible}",
+        red(&doc)
+    );
+
+    // One step down: its placeholder is not something it can go behind, and
+    // nothing else below overlaps it, so there is nothing to pass.
+    let mut doc = open("framed.pdf");
+    assert!(
+        doc.stacking_neighbour(0, picture.object, false).expect("ask").is_none(),
+        "the placeholder must not count as something to step behind"
+    );
+    assert!(doc.restack(0, picture.object, Stacking::Down).is_err());
+}
+
+/// **"To the back" stays in front of anything that would hide the object.**
+///
+/// On the brochure the right page's gradient is drawn after the whole left
+/// page; a picture sent to the literal back of the stream went behind it and
+/// disappeared. The back is now just above the nearest thing below that would
+/// cover the object entirely.
+#[test]
+fn sending_to_the_back_never_hides_the_object_behind_a_background() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let doc = open("covered.pdf");
+    let before = named(&doc, 0);
+    // The picture is under the panel to begin with; the panel is the one that
+    // would hide it if it were sent behind.
+    let picture = doc
+        .drawn_objects(0)
+        .expect("objects")
+        .into_iter()
+        .find(|d| d.kind == DrawnKind::Picture)
+        .expect("the picture");
+    drop(doc);
+
+    let mut doc = open("covered.pdf");
+    doc.restack(0, picture.object, Stacking::Front).expect("front");
+    // Now send it to the back from the front: it must land above the panel
+    // that would hide it — which, on this fixture, means back where it was.
+    let at_front = doc
+        .drawn_objects(0)
+        .expect("objects")
+        .into_iter()
+        .find(|d| d.kind == DrawnKind::Picture)
+        .expect("the picture");
+    doc.restack(0, at_front.object, Stacking::Back).expect("back");
+    let now = named(&doc, 0);
+    assert_eq!(now, before, "the back should be in front of the panel that would hide the picture");
 }

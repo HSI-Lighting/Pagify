@@ -1043,11 +1043,24 @@ impl Document for PdfiumDocument {
                 }
             };
 
+            // The fill alpha is the object's own opacity as PDFium resolved it
+            // — the `ca` in force when it was drawn.
+            let opacity = {
+                let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 255u32);
+                if unsafe { bindings.FPDFPageObj_GetFillColor(handle, &mut r, &mut g, &mut b, &mut a) }
+                    == 0
+                {
+                    a = 255;
+                }
+                a as f32 / 255.0
+            };
+
             out.push(DrawnObject {
                 object: top,
                 kind,
                 rect,
                 label,
+                opacity,
                 depth,
                 // Only what the page itself draws can be re-ordered — see
                 // `DrawnObject::movable`.
@@ -1068,7 +1081,209 @@ impl Document for PdfiumDocument {
         }
 
         unsafe { bindings.FPDFText_ClosePage(text_page) };
+
+        // **A picture's opacity comes from the stream, not from PDFium.**
+        // `FPDFPageObj_GetFillColor` has no answer for an image object, so the
+        // `gs` in force at its `Do` is resolved through the page's ExtGState
+        // resources to its `ca`. Read once for the page, only when it has a
+        // picture at all.
+        if out.iter().any(|d| d.kind == DrawnKind::Picture && d.depth == 0) {
+            if let Some(found) = self.picture_opacities(page_index) {
+                for entry in out.iter_mut().filter(|d| d.kind == DrawnKind::Picture && d.depth == 0) {
+                    if let Some(alpha) = found.get(&entry.object) {
+                        entry.opacity = *alpha;
+                    }
+                }
+            }
+        }
+
+        // **A placeholder is listed under its picture, not beside it.** The
+        // grey rectangle a design program paints under every photograph is a
+        // separate object to the page and one thing to anybody reading it.
+        // Listed as its own row it doubled the length of the list and, picked
+        // by mistake, was the "grey layer" that could not be moved. It stays
+        // in the list — it is real, and it is where a hidden picture went —
+        // but stepped in under the picture, which is what moves.
+        let mut index = 0;
+        while index + 1 < out.len() {
+            let (a, b) = (&out[index], &out[index + 1]);
+            let close = |x: f32, y: f32| (x - y).abs() <= 3.0;
+            let placeholder = a.depth == 0
+                && b.depth == 0
+                && a.kind == DrawnKind::Shape
+                && b.kind == DrawnKind::Picture
+                && close(a.rect.left, b.rect.left)
+                && close(a.rect.top, b.rect.top)
+                && close(a.rect.right, b.rect.right)
+                && close(a.rect.bottom, b.rect.bottom);
+            if placeholder {
+                out.swap(index, index + 1);
+                let picture = out[index].object;
+                let under = &mut out[index + 1];
+                under.depth = 1;
+                under.label = "placeholder".to_string();
+                under.movable = false;
+                // Addressed as its picture, so that picking it and moving it
+                // moves the picture — the whole of which it is part.
+                under.object = picture;
+                index += 2;
+            } else {
+                index += 1;
+            }
+        }
         Ok(out)
+    }
+
+    fn stacking_neighbour(
+        &self,
+        page_index: usize,
+        object: usize,
+        up: bool,
+    ) -> Result<Option<crate::document::DrawnObject>> {
+        let drawn = self.drawn_objects(page_index)?;
+        let top: Vec<&crate::document::DrawnObject> = drawn.iter().filter(|d| d.depth == 0).collect();
+        let Some(me) = top.iter().find(|d| d.object == object) else {
+            return Err(PdfError::InvalidArgument("that object is not on this page".into()));
+        };
+        let overlaps = |d: &crate::document::DrawnObject| {
+            d.rect.left < me.rect.right
+                && d.rect.right > me.rect.left
+                && d.rect.top < me.rect.bottom
+                && d.rect.bottom > me.rect.top
+        };
+        // In drawing order, so "the nearest above" is the first after it.
+        let found = if up {
+            top.iter().filter(|d| d.object > object).find(|d| overlaps(d))
+        } else {
+            top.iter().filter(|d| d.object < object).rev().find(|d| overlaps(d))
+        };
+        Ok(found.map(|d| (*d).clone()))
+    }
+
+    fn scale_object(
+        &mut self,
+        page_index: usize,
+        object: usize,
+        anchor: Point,
+        sx: f32,
+        sy: f32,
+    ) -> Result<()> {
+        if !(sx.is_finite() && sy.is_finite()) || sx.abs() < 1e-3 || sy.abs() < 1e-3 {
+            return Err(PdfError::InvalidArgument("that would resize it to nothing".into()));
+        }
+        // The anchor arrives top-left down; page space is bottom-left up.
+        let height = self.page_size(page_index)?.height_pt;
+        let (ax, ay) = (anchor.x, height - anchor.y);
+        // Scale about the anchor: p' = (p − a)·S + a.
+        let page_matrix = [sx, 0.0, 0.0, sy, ax * (1.0 - sx), ay * (1.0 - sy)];
+        self.transform_in_stream(page_index, object, page_matrix)
+    }
+
+    fn set_opacity(&mut self, page_index: usize, object: usize, opacity: f32) -> Result<()> {
+        use crate::pdf::{content, Object};
+
+        let opacity = opacity.clamp(0.0, 1.0);
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let bytes = self.readable_bytes()?;
+        let file = crate::pdf::File::parse(&bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let states = content::states(&operations);
+        let placed = content::placed(&operations);
+        let site = self.object_wrap_site(page_index, object, &file, &page, &operations, &states, &placed)?;
+
+        // **A resource of its own on the page.** Opacity is a graphics-state
+        // parameter set through an `ExtGState`, which has to be named in the
+        // page's resources — written onto the page rather than into whatever
+        // it inherits, because that is shared with every other page.
+        let mut resources = self
+            .inherited(&file, &page, b"Resources")?
+            .and_then(|r| r.as_dict().cloned())
+            .unwrap_or(crate::pdf::Dict(Vec::new()));
+        let mut states_dict = resources
+            .get(b"ExtGState")
+            .and_then(|g| file.resolve(g).ok())
+            .and_then(|g| g.as_dict().cloned())
+            .unwrap_or(crate::pdf::Dict(Vec::new()));
+        let mut name = b"PagifyAlpha1".to_vec();
+        for suffix in 1..=999u32 {
+            let candidate = format!("PagifyAlpha{suffix}").into_bytes();
+            if states_dict.get(&candidate).is_none() {
+                name = candidate;
+                break;
+            }
+        }
+        let number = file.numbers().max().unwrap_or(0) + 1;
+        let alpha = format!("{opacity:.4}");
+        let alpha = alpha.trim_end_matches('0').trim_end_matches('.').to_string();
+        let mut state = crate::pdf::Dict(Vec::new());
+        state.set(b"Type", Object::Name(b"ExtGState".to_vec()));
+        state.set(b"ca", Object::Number(alpha.clone().into_bytes()));
+        state.set(b"CA", Object::Number(alpha.into_bytes()));
+        let mut state_bytes = Vec::new();
+        crate::pdf::write_object(&mut state_bytes, &Object::Dict(state));
+        states_dict.set(&name, Object::Reference(number, 0));
+        resources.set(b"ExtGState", Object::Dict(states_dict));
+        let mut page_dict = page
+            .as_dict()
+            .cloned()
+            .ok_or(PdfError::Unsupported("that page cannot be read"))?;
+        page_dict.set(b"Resources", Object::Dict(resources));
+        let page_number = self.page_object_number(&file, page_index)?;
+        let mut page_bytes = Vec::new();
+        crate::pdf::write_object(&mut page_bytes, &Object::Dict(page_dict));
+
+        // **Absolute, not cumulative.** An opacity set earlier is a `gs` this
+        // wrote just inside the object's scope; setting it again replaces that
+        // operator rather than nesting another, or two settings of 50% would
+        // draw at 25%.
+        let gs = format!("/{} gs", String::from_utf8_lossy(&name)).into_bytes();
+        let earlier = (site.span.start + 1..site.span.end).find(|i| {
+            let op = &operations[*i];
+            op.operator == b"gs"
+                && matches!(op.operands.first(), Some(Object::Name(n)) if n.starts_with(b"PagifyAlpha"))
+        });
+        let edited = match (site.own_scope, earlier) {
+            (_, Some(at)) => content::splice(&stream, &[(operations[at].span.clone(), gs)]),
+            (true, None) => {
+                let at = operations[site.span.start].span.end;
+                content::splice(&stream, &[(at..at, gs)])
+            }
+            (false, None) => {
+                let from = operations[site.span.start].span.start;
+                let to = operations[site.span.end - 1].span.end;
+                let mut opening: Vec<u8> = b"q\n".to_vec();
+                opening.extend_from_slice(&gs);
+                content::splice(&stream, &[(from..from, opening), (to..to, b"\nQ".to_vec())])
+            }
+        };
+
+        let mut replacements = vec![(page_number, page_bytes)];
+        for (index, (stream_number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*stream_number, crate::pdf::write_stream(&dict, &packed)));
+        }
+        let rewritten = file.rewrite_adding(
+            &replacements,
+            &[(number, state_bytes)],
+            &crate::pdf::Dict(Vec::new()),
+        )?;
+        let reopened = Self::open_bytes(rewritten, None)?;
+        self.document = reopened.document;
+        self.page_count = reopened.page_count;
+        if let Ok(mut cached) = self.vault.lock() {
+            *cached = None;
+        }
+        self.rearm_security(was_secured, plus, permissions);
+        self.dirty = true;
+        Ok(())
     }
 
     fn restack(
@@ -1110,7 +1325,11 @@ impl Document for PdfiumDocument {
                     "this page draws its pictures in a way this cannot follow",
                 ));
             }
-            (drawn[which], drawn[which], false)
+            // The whole unit — placeholder, frame and picture — see
+            // `picture_unit`. Its own clip is inside the span and travels
+            // as bytes, so it is not also replayed as a clip in force.
+            let unit = picture_unit(&operations, drawn[which]);
+            (unit.start, unit.end - 1, false)
         } else if let Some((first, last)) = self
             .object_spans(page_index, &file, &page, &operations, &placed)?
             .get(object)
@@ -1174,10 +1393,65 @@ impl Document for PdfiumDocument {
             ));
         };
 
+        // **"To the back" means behind the other things on the page, not
+        // behind the paper.** A page usually opens with something that covers
+        // all of it — a background panel, a gradient — and landing in front of
+        // nothing at all puts the picture underneath that, where it cannot be
+        // seen. Measured on a brochure: sent to the back, a photograph
+        // vanished behind the page's gradient. So the back is just above the
+        // last of the page-covering things the stream opens with.
+        let background_end: Option<usize> = {
+            let census = self.object_census(page_index)?;
+            let spans = self.object_spans(page_index, &file, &page, &operations, &placed)?;
+            let Some(me) = census.get(object).map(|d| d.rect) else {
+                return Err(PdfError::InvalidArgument("that object is not on this page".into()));
+            };
+            // "Background" is relative: anything the page opens with that
+            // would cover this object entirely. On a spread, the right page's
+            // gradient is two-thirds of the sheet and all of any photograph
+            // on it.
+            let covers = |r: &Rect| {
+                r.left <= me.left + 1.0
+                    && r.top <= me.top + 1.0
+                    && r.right >= me.right - 1.0
+                    && r.bottom >= me.bottom - 1.0
+            };
+            // The nearest thing below this one that would hide it: the back
+            // is just above that. On a spread the right page's gradient sits
+            // in the middle of the stream, after the whole left page, so this
+            // is a search from the object downwards, not from the top.
+            (0..object)
+                .rev()
+                .filter(|i| spans.get(*i).copied().flatten() != spans.get(object).copied().flatten())
+                .find(|i| census.get(*i).is_some_and(|d| covers(&d.rect)))
+                .and_then(|i| spans.get(i).copied().flatten())
+                .map(|(_, end)| end)
+        };
+
         // Where it lands, and the transform in force there.
         let (landing_span, landing_ctm) = match where_to {
-            // Nothing has run yet at the head of a stream.
-            Stacking::Back => (0..0, IDENTITY_MATRIX),
+            // Just past the page's background, if it has one; otherwise
+            // nothing has run yet at the head of the stream.
+            Stacking::Back => match background_end {
+                Some(after) => {
+                    let mut after = after;
+                    if inside_text_object(&operations, after) {
+                        after = operations
+                            .iter()
+                            .enumerate()
+                            .skip(after)
+                            .find(|(_, op)| op.operator == b"ET")
+                            .map(|(i, _)| i)
+                            .unwrap_or(after);
+                    }
+                    after = leave_clips_after(&operations, &states, after);
+                    (
+                        operations[after].span.end..operations[after].span.end,
+                        states[after].ctm,
+                    )
+                }
+                None => (0..0, IDENTITY_MATRIX),
+            },
             // Whatever is left in force once the page has finished drawing.
             Stacking::Front => (
                 stream.len()..stream.len(),
@@ -1189,15 +1463,54 @@ impl Document for PdfiumDocument {
             // this writes opens with `q`, which is not allowed inside one.
             Stacking::Up | Stacking::Down => {
                 let spans = self.object_spans(page_index, &file, &page, &operations, &placed)?;
-                let neighbour = match where_to {
-                    Stacking::Up => object.checked_add(1).filter(|n| *n < spans.len()),
-                    _ => object.checked_sub(1),
+                // The next thing that is not part of this one's own unit — a
+                // picture's placeholder shares its span, and stepping "down"
+                // onto that would be stepping onto itself.
+                let mine = spans.get(object).copied().flatten();
+                let census = self.object_census(page_index)?;
+                let me = census.get(object).map(|d| d.rect);
+                // Stepping down never goes behind something that would hide
+                // this object entirely — the step would look like it vanished.
+                let hides = |n: usize| {
+                    match (me, census.get(n)) {
+                        (Some(me), Some(d)) => {
+                            d.rect.left <= me.left + 1.0
+                                && d.rect.top <= me.top + 1.0
+                                && d.rect.right >= me.right - 1.0
+                                && d.rect.bottom >= me.bottom - 1.0
+                        }
+                        _ => false,
+                    }
+                };
+                // **The neighbour is the nearest thing that overlaps this
+                // one**, not the next thing in the file — see
+                // `stacking_neighbour`. Going down, one that would hide this
+                // object entirely is passed over rather than gone behind.
+                let neighbour = match self.stacking_neighbour(page_index, object, matches!(where_to, Stacking::Up))? {
+                    Some(over) => match where_to {
+                        Stacking::Up => Some(over.object),
+                        _ => {
+                            if hides(over.object) {
+                                (0..over.object)
+                                    .rev()
+                                    .find(|n| (spans[*n] != mine || mine.is_none()) && !hides(*n)
+                                        && census.get(*n).is_some_and(|d| {
+                                            let me = me.expect("checked");
+                                            d.rect.left < me.right && d.rect.right > me.left
+                                                && d.rect.top < me.bottom && d.rect.bottom > me.top
+                                        }))
+                            } else {
+                                Some(over.object)
+                            }
+                        }
+                    },
+                    None => None,
                 };
                 let Some(neighbour) = neighbour else {
                     return Err(PdfError::InvalidArgument(
                         match where_to {
-                            Stacking::Up => "that is already at the front",
-                            _ => "that is already at the back",
+                            Stacking::Up => "that is already in front of everything it overlaps",
+                            _ => "that is already behind everything it overlaps",
                         }
                         .into(),
                     ));
@@ -4576,126 +4889,11 @@ fn font_to_unicode(
     /// the stream draws them, so the *n*th image object is the *n*th image
     /// drawn; that is checked by counting before it is relied on.
     fn move_picture_in_stream(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
-        use crate::pdf::content;
-
-        let pictures = self.images_on(page_index)?;
-        let Some(which) = pictures.iter().position(|i| i.object == object) else {
-            return Err(PdfError::InvalidArgument("that is not a picture".into()));
-        };
-
-        let was_secured = self.already_secured;
-        let plus = self.secure_plus;
-        let permissions = self.permissions();
-        let bytes = self.readable_bytes()?;
-        let file = crate::pdf::File::parse(&bytes)?;
-        let page = self.page_object(&file, page_index)?;
-        let (stream, streams) = self.page_content(&file, &page)?;
-        let operations = content::parse(&stream)?;
-
-        let images = self.image_names(&file, &page)?;
-        let drawn = image_operators(&operations, &images);
-
-        // The evidence: as many pictures drawn as PDFium reports.
-        if drawn.len() != pictures.len() {
-            return Err(PdfError::Unsupported(
-                "this page draws its pictures in a way this cannot follow",
-            ));
-        }
-        let at = drawn[which];
-        let target = &operations[at];
-        let states = content::states(&operations);
-
-        // **The distance has to be expressed in the space the operator sits
-        // in.** A picture is placed by a `cm` that scales the unit square up to
-        // its size on the page, so a translation written *inside* that is
-        // multiplied by the picture's own width and height — measured, twenty
-        // points came out as three thousand nine hundred. So the move is
-        // carried back through the transform in force where it is written.
-        //
-        // **And where it is written is the picture's frame, if it has one.**
-        // See `frame_scope`: a placed picture sits inside a clip its own size,
-        // and a translation applied to the `Do` alone slides it out of that
-        // clip and off into nothing. Written just inside the frame's `q`, the
-        // same `cm` carries the clip and the picture together.
-        let frame = frame_scope(&operations, at..at + 1);
-        // **And the placeholder under it.** The same programs paint a filled
-        // rectangle the exact size of the frame immediately before it — the
-        // grey that shows through while a photograph loads, and the grey block
-        // a reader sees left behind when the photograph moves without it.
-        // Reported from use as "the grey layer". It is part of the picture as
-        // anyone reading the page understands it, so it goes along.
-        let placeholder = frame.and_then(|(open, _)| placeholder_before(&operations, open));
-        let (insert_at, ctm) = match (placeholder, frame) {
-            (Some(first), Some((open, _))) => {
-                (operations[first].span.start, states[open].ctm)
-            }
-            (None, Some((open, _))) => (operations[open].span.end, states[open].ctm),
-            (_, None) => (target.span.start, states[at].ctm),
-        };
-        let (det, wanted_x, wanted_y) = (
-            ctm[0] * ctm[3] - ctm[1] * ctm[2],
-            by.x,
-            // Page space counts downwards, a content stream upwards.
-            -by.y,
-        );
-        if det.abs() < 1e-9 {
-            return Err(PdfError::Unsupported(
-                "this picture is placed by a transform this cannot invert",
-            ));
-        }
-        let local = [
-            1.0,
-            0.0,
-            0.0,
-            1.0,
-            (ctm[3] * wanted_x - ctm[2] * wanted_y) / det,
-            (-ctm[1] * wanted_x + ctm[0] * wanted_y) / det,
-        ];
-
-        let edited = match (placeholder, frame) {
-            (Some(_), Some((_, close))) => {
-                // Placeholder and frame together, in a scope of their own.
-                let mut opening: Vec<u8> = b"q\n".to_vec();
-                opening.extend_from_slice(&concat_matrix(&local)?);
-                let after = operations[close].span.end;
-                content::splice(&stream, &[(insert_at..insert_at, opening), (after..after, b"Q".to_vec())])
-            }
-            (None, Some(_)) => {
-                // Inside the frame, whose `Q` already closes the scope.
-                content::splice(&stream, &[(insert_at..insert_at, concat_matrix(&local)?)])
-            }
-            (_, None) => {
-                // No frame of its own: the `Do` is wrapped so the translation
-                // can reach nothing else.
-                let mut wrapped: Vec<u8> = b"q\n".to_vec();
-                wrapped.extend_from_slice(&concat_matrix(&local)?);
-                wrapped.push(b'\n');
-                wrapped.extend_from_slice(&stream[target.span.clone()]);
-                wrapped.extend_from_slice(b"\nQ");
-                content::splice(&stream, &[(target.span.clone(), wrapped)])
-            }
-        };
-
-        let mut replacements = Vec::new();
-        for (index, (number, dict)) in streams.iter().enumerate() {
-            let data = if index == 0 { edited.clone() } else { Vec::new() };
-            let packed = content::encode(&data)?;
-            let mut dict = dict.clone();
-            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
-            dict.remove(b"DecodeParms");
-            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
-        }
-
-        let rewritten = file.rewrite(&replacements)?;
-        let reopened = Self::open_bytes(rewritten, None)?;
-        self.document = reopened.document;
-        self.page_count = reopened.page_count;
-        if let Ok(mut cached) = self.vault.lock() {
-            *cached = None;
-        }
-        self.rearm_security(was_secured, plus, permissions);
-        self.dirty = true;
-        Ok(())
+        // A move is a translation on the page — see `transform_in_stream`,
+        // which finds the picture's frame and placeholder and writes just
+        // inside them, so the clip and the grey travel with the picture.
+        // Page space counts downwards, a content stream upwards.
+        self.transform_in_stream(page_index, object, [1.0, 0.0, 0.0, 1.0, by.x, -by.y])
     }
 
     /// Move one text run by writing where it sits, not by re-emitting the page.
@@ -5071,14 +5269,29 @@ fn font_to_unicode(
         };
 
         let names = self.image_names(file, page)?;
+        // A picture is its whole unit — placeholder, frame and `Do` — and the
+        // placeholder shape belongs to that same unit, so that a step through
+        // the order goes over the picture as one thing rather than into it.
+        let units: Vec<std::ops::Range<usize>> = image_operators(operations, &names)
+            .into_iter()
+            .map(|at| picture_unit(operations, at))
+            .collect();
         by_kind(
             FPDF_PAGEOBJ_IMAGE,
-            image_operators(operations, &names).into_iter().map(|i| (i, i)).collect(),
+            units.iter().map(|u| (u.start, u.end - 1)).collect(),
             &mut spans,
         );
         by_kind(
             FPDF_PAGEOBJ_PATH,
-            path_operators(operations).into_iter().map(|(r, _)| (r.start, r.end - 1)).collect(),
+            path_operators(operations)
+                .into_iter()
+                .map(|(r, _)| {
+                    match units.iter().find(|u| u.start <= r.start && r.end <= u.end) {
+                        Some(unit) => (unit.start, unit.end - 1),
+                        None => (r.start, r.end - 1),
+                    }
+                })
+                .collect(),
             &mut spans,
         );
 
@@ -5223,6 +5436,47 @@ fn font_to_unicode(
             .unwrap_or_default())
     }
 
+    /// Each picture's opacity as the stream sets it — `None` where the stream
+    /// cannot be followed, in which case the caller keeps PDFium's answer.
+    fn picture_opacities(&self, page_index: usize) -> Option<std::collections::HashMap<usize, f32>> {
+        use crate::pdf::{content, Object};
+        let pictures = self.images_on(page_index).ok()?;
+        let bytes = self.readable_bytes().ok()?;
+        let file = crate::pdf::File::parse(&bytes).ok()?;
+        let page = self.page_object(&file, page_index).ok()?;
+        let (stream, _) = self.page_content(&file, &page).ok()?;
+        let operations = content::parse(&stream).ok()?;
+        let states = content::states(&operations);
+        let names = self.image_names(&file, &page).ok()?;
+        let drawn = image_operators(&operations, &names);
+        if drawn.len() != pictures.len() {
+            return None;
+        }
+        let ext = self
+            .inherited(&file, &page, b"Resources")
+            .ok()
+            .flatten()
+            .and_then(|r| r.as_dict().and_then(|d| d.get(b"ExtGState")).cloned())
+            .and_then(|g| file.resolve(&g).ok())
+            .and_then(|g| g.as_dict().cloned());
+        let mut out = std::collections::HashMap::new();
+        for (picture, at) in pictures.iter().zip(drawn) {
+            let alpha = states[at]
+                .ext_gstate
+                .as_ref()
+                .and_then(|name| ext.as_ref()?.get(name).cloned())
+                .and_then(|g| file.resolve(&g).ok())
+                .and_then(|g| g.as_dict().and_then(|d| d.get(b"ca")).cloned())
+                .and_then(|ca| match ca {
+                    Object::Number(n) => String::from_utf8_lossy(&n).parse::<f32>().ok(),
+                    _ => None,
+                })
+                .unwrap_or(1.0);
+            out.insert(picture.object, alpha.clamp(0.0, 1.0));
+        }
+        Some(out)
+    }
+
     /// A page's content stream, decoded and concatenated, for a probe to read.
     ///
     /// Read-only, and the same bytes the editing paths work on — so a probe
@@ -5363,11 +5617,120 @@ fn font_to_unicode(
     /// holding in would spill out. Rare, and worth refusing rather than
     /// discovering afterwards.
     fn move_path_in_stream(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
-        use crate::pdf::content;
+        // The same translation, written where the shape's own scope begins.
+        self.transform_in_stream(page_index, object, [1.0, 0.0, 0.0, 1.0, by.x, -by.y])
+    }
 
-        let Some((which, paths)) = self.path_ordinal(page_index, object)? else {
-            return Err(PdfError::InvalidArgument("that is not a drawn shape".into()));
-        };
+    /// Where an object lives in its page's stream and how to wrap it.
+    ///
+    /// The one answer every wrapping edit needs — a move, a resize, an
+    /// opacity — so that each of them lands in the same place: inside a
+    /// picture's frame (with its placeholder), around a shape, around a text
+    /// box holding only this run.
+    fn object_wrap_site(
+        &self,
+        page_index: usize,
+        object: usize,
+        file: &crate::pdf::File<'_>,
+        page: &crate::pdf::Object,
+        operations: &[crate::pdf::content::Operation],
+        states: &[crate::pdf::content::State],
+        placed: &[crate::pdf::content::Placed],
+    ) -> Result<WrapSite> {
+        use crate::pdf::content;
+        let pictures = self.images_on(page_index)?;
+        if let Some(which) = pictures.iter().position(|i| i.object == object) {
+            let names = self.image_names(file, page)?;
+            let drawn = image_operators(operations, &names);
+            if drawn.len() != pictures.len() {
+                return Err(PdfError::Unsupported(
+                    "this page draws its pictures in a way this cannot follow",
+                ));
+            }
+            let at = drawn[which];
+            return Ok(match frame_scope(operations, at..at + 1) {
+                Some((open, close)) => {
+                    let start = placeholder_before(operations, open);
+                    match start {
+                        // Placeholder and frame together need a scope of their own.
+                        Some(first) => WrapSite {
+                            span: first..close + 1,
+                            own_scope: false,
+                            ctm: states[open].ctm,
+                        },
+                        // The frame is a scope of its own: write just inside it.
+                        None => WrapSite { span: open..close + 1, own_scope: true, ctm: states[open].ctm },
+                    }
+                }
+                None => WrapSite { span: at..at + 1, own_scope: false, ctm: states[at].ctm },
+            });
+        }
+
+        if let Some((which, paths)) = self.path_ordinal(page_index, object)? {
+            let painted = path_operators(operations);
+            if painted.len() != paths {
+                return Err(PdfError::Unsupported(
+                    "this page paints its shapes in a way this cannot follow",
+                ));
+            }
+            let (span, clips) = painted
+                .get(which)
+                .cloned()
+                .ok_or(PdfError::Unsupported("that shape is not painted on this page"))?;
+            if clips {
+                return Err(PdfError::Unsupported(
+                    "this shape also sets a clipping path, which cannot move with it",
+                ));
+            }
+            return Ok(match frame_scope(operations, span.clone()) {
+                Some((open, close)) => WrapSite { span: open..close + 1, own_scope: true, ctm: states[open].ctm },
+                None => WrapSite { span: span.clone(), own_scope: false, ctm: states[span.start].ctm },
+            });
+        }
+
+        let runs = self.text_runs(page_index)?;
+        if let Some(run) = runs.iter().find(|r| r.object == object) {
+            let height = self.page_size(page_index)?.height_pt;
+            let fonts = self.page_fonts(file, page);
+            let codes_in = |p: &content::Placed| -> usize {
+                let width = p
+                    .font
+                    .as_ref()
+                    .zip(fonts.as_ref())
+                    .and_then(|(name, dict)| code_width(file, dict, name))
+                    .unwrap_or(1)
+                    .max(1);
+                content::pieces(&operations[p.origin.operation])
+                    .iter()
+                    .map(|piece| match piece {
+                        content::Piece::Codes(bytes) => bytes.len() / width,
+                        content::Piece::Kern(_) => 0,
+                    })
+                    .sum()
+            };
+            let (first, last, _) = run_operators(run, height, placed, operations, &codes_in)?;
+            return match frame_scope(operations, first..last + 1) {
+                Some((open, close)) => Ok(WrapSite { span: open..close + 1, own_scope: true, ctm: states[open].ctm }),
+                None => Err(PdfError::Unsupported(
+                    "these words share a text box with others, so only the box can be transformed — \
+                     their size is a font size, which Edit Text changes",
+                )),
+            };
+        }
+
+        Err(PdfError::Unsupported("that is not something this can transform"))
+    }
+
+    /// Apply an affine transform, given in page space, to one object — by
+    /// writing a single `cm` where its own scope begins.
+    ///
+    /// Everything drawn by the object goes through its scope's transform to
+    /// reach the page, so a change wanted *on the page* is carried back
+    /// through that transform: with `C` in force, `C · M · C⁻¹` written inside
+    /// makes the page see `M`. A move is `M` = a translation; a resize about a
+    /// point is a scale conjugated by that point.
+    fn transform_in_stream(&mut self, page_index: usize, object: usize, page_matrix: [f32; 6]) -> Result<()> {
+        use crate::pdf::content;
 
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
@@ -5378,64 +5741,24 @@ fn font_to_unicode(
         let (stream, streams) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
         let states = content::states(&operations);
+        let placed = content::placed(&operations);
 
-        let painted = path_operators(&operations);
-        // The evidence: as many shapes painted as PDFium reports.
-        if painted.len() != paths {
-            return Err(PdfError::Unsupported(
-                "this page paints its shapes in a way this cannot follow",
-            ));
-        }
-        let (span, clips) = painted
-            .get(which)
-            .cloned()
-            .ok_or(PdfError::Unsupported("that shape is not painted on this page"))?;
-        if clips {
-            return Err(PdfError::Unsupported(
-                "this shape also sets a clipping path, which cannot move with it",
-            ));
-        }
+        let site = self.object_wrap_site(page_index, object, &file, &page, &operations, &states, &placed)?;
+        let back = inverse(site.ctm).ok_or(PdfError::Unsupported(
+            "this is placed by a transform this cannot invert",
+        ))?;
+        let local = matrices(matrices(site.ctm, page_matrix), back);
 
-        // Inside its frame if it has one — see `frame_scope` — so a clip that
-        // belongs to the shape travels with it.
-        let frame = frame_scope(&operations, span.clone());
-        let ctm = match frame {
-            Some((open, _)) => states[open].ctm,
-            None => states[span.start].ctm,
-        };
-        let det = ctm[0] * ctm[3] - ctm[1] * ctm[2];
-        if det.abs() < 1e-9 {
-            return Err(PdfError::Unsupported(
-                "this shape is placed by a transform this cannot invert",
-            ));
-        }
-        // Page space counts downwards, a content stream upwards.
-        let (wanted_x, wanted_y) = (by.x, -by.y);
-        let local = [
-            1.0,
-            0.0,
-            0.0,
-            1.0,
-            (ctm[3] * wanted_x - ctm[2] * wanted_y) / det,
-            (-ctm[1] * wanted_x + ctm[0] * wanted_y) / det,
-        ];
-
-        let edited = match frame {
-            Some((open, _)) => {
-                let at = operations[open].span.end;
-                content::splice(&stream, &[(at..at, concat_matrix(&local)?)])
-            }
-            None => {
-                let from = operations[span.start].span.start;
-                let to = operations[span.end - 1].span.end;
-                let mut wrapped: Vec<u8> = Vec::new();
-                wrapped.extend_from_slice(b"q\n");
-                wrapped.extend_from_slice(&concat_matrix(&local)?);
-                wrapped.extend_from_slice(b"\n");
-                wrapped.extend_from_slice(&stream[from..to]);
-                wrapped.extend_from_slice(b"\nQ");
-                content::splice(&stream, &[(from..to, wrapped)])
-            }
+        let from = operations[site.span.start].span.start;
+        let to = operations[site.span.end - 1].span.end;
+        let edited = if site.own_scope {
+            // Just inside the scope's `q`.
+            let at = operations[site.span.start].span.end;
+            content::splice(&stream, &[(at..at, concat_matrix(&local)?)])
+        } else {
+            let mut opening: Vec<u8> = b"q\n".to_vec();
+            opening.extend_from_slice(&concat_matrix(&local)?);
+            content::splice(&stream, &[(from..from, opening), (to..to, b"\nQ".to_vec())])
         };
 
         let mut replacements = Vec::new();
@@ -5447,7 +5770,6 @@ fn font_to_unicode(
             dict.remove(b"DecodeParms");
             replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
         }
-
         let rewritten = file.rewrite(&replacements)?;
         let reopened = Self::open_bytes(rewritten, None)?;
         self.document = reopened.document;
@@ -6992,6 +7314,18 @@ fn fill_box(area: Rect, page_height: f32) -> Vec<u8> {
 /// Appended after everything else, so it covers what it is over. Wrapped in
 /// `q`/`Q` so the colour it sets does not leak into whatever a later stream
 /// draws — the page's own operators are untouched, and must stay that way.
+/// Where a wrapping edit goes for one object — see
+/// `PdfiumDocument::object_wrap_site`.
+struct WrapSite {
+    /// The operations that are the object, first to one past the last.
+    span: std::ops::Range<usize>,
+    /// Whether that span is already `q … Q` of its own, so an edit can be
+    /// written just inside its `q`; otherwise the span gets a scope around it.
+    own_scope: bool,
+    /// The transform in force where the edit is written.
+    ctm: [f32; 6],
+}
+
 /// One thing drawn on a page, as the move guard sees it.
 #[derive(Debug, Clone, PartialEq)]
 struct Drawn {
@@ -7092,12 +7426,53 @@ fn frame_scope(
 /// frame's `q` fills a path, and that path is one `re` whose corners are
 /// within a point of the first clipping `re` inside the frame.
 fn placeholder_before(operations: &[crate::pdf::content::Operation], open: usize) -> Option<usize> {
-    let fill = open.checked_sub(1)?;
-    if !matches!(operations[fill].operator.as_slice(), b"f" | b"F" | b"f*") {
-        return None;
-    }
-    let rect = fill.checked_sub(1)?;
-    if operations[rect].operator != b"re" {
+    // Two shapes the same placeholder takes. Written by the design program it
+    // is bare — `re f` straight before the frame. After PDFium has re-emitted
+    // the page (a lock's fallback does that) it comes back wrapped in a scope
+    // of its own with its colour inside: `q cs sc gs re f Q`. Either way the
+    // fill is the last drawing before the frame and the `re` is the only path.
+    let before = open.checked_sub(1)?;
+    let (start, fill) = if operations[before].operator == b"Q" {
+        // Back to the `q` that this `Q` closes.
+        let mut depth = 0i32;
+        let mut index = before;
+        let opening = loop {
+            if index == 0 {
+                return None;
+            }
+            index -= 1;
+            match operations[index].operator.as_slice() {
+                b"Q" => depth += 1,
+                b"q" => {
+                    if depth == 0 {
+                        break index;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        };
+        // Inside: one `re`, one fill, and nothing but state around them.
+        let inner = &operations[opening + 1..before];
+        let mut fill_at = None;
+        for (offset, op) in inner.iter().enumerate() {
+            match op.operator.as_slice() {
+                b"re" => {}
+                b"f" | b"F" | b"f*" => fill_at = Some(opening + 1 + offset),
+                b"cs" | b"CS" | b"sc" | b"scn" | b"SC" | b"SCN" | b"g" | b"G" | b"rg" | b"RG"
+                | b"k" | b"K" | b"gs" | b"w" | b"J" | b"j" | b"M" | b"d" | b"ri" | b"i" => {}
+                _ => return None,
+            }
+        }
+        (opening, fill_at?)
+    } else {
+        if !matches!(operations[before].operator.as_slice(), b"f" | b"F" | b"f*") {
+            return None;
+        }
+        (before.checked_sub(1)?, before)
+    };
+    let rect = (start..fill).rev().find(|i| operations[*i].operator == b"re")?;
+    if (start..fill).filter(|i| operations[*i].operator == b"re").count() != 1 {
         return None;
     }
     let clip = operations.iter().skip(open + 1).find(|o| o.operator == b"re")?;
@@ -7112,7 +7487,29 @@ fn placeholder_before(operations: &[crate::pdf::content::Operation], open: usize
     };
     let (a, b) = (corners(&operations[rect])?, corners(clip)?);
     let same = a.iter().zip(b.iter()).all(|(p, q)| (p - q).abs() <= 1.0);
-    same.then_some(rect)
+    same.then_some(start)
+}
+
+/// Everything that is, to a reader, one placed picture: its placeholder
+/// rectangle, its frame and the picture itself — as a range of operations.
+///
+/// **Why the unit and not the `Do`.** A design program writes a picture as
+/// three things: a grey placeholder, a clip its own size, the picture inside
+/// the clip. Sending the picture alone to the back put it *under its own
+/// placeholder*, which painted grey over it — reported from use, for days, as
+/// a grey layer that pictures kept going behind. Nobody looking at the page
+/// means the third of those things when they point at a photograph.
+fn picture_unit(
+    operations: &[crate::pdf::content::Operation],
+    at: usize,
+) -> std::ops::Range<usize> {
+    match frame_scope(operations, at..at + 1) {
+        Some((open, close)) => {
+            let start = placeholder_before(operations, open).unwrap_or(open);
+            start..close + 1
+        }
+        None => at..at + 1,
+    }
 }
 
 /// The operations that paint each path, in the order the page paints them, and

@@ -49,6 +49,24 @@ fn lock() -> MutexGuard<'static, HashMap<i64, DocumentSession>> {
     sessions().lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Run something that uses PDFium directly, without a session, while nothing
+/// else can.
+///
+/// **PDFium is not thread-safe, and the registry lock is what keeps every
+/// session's use of it apart.** Code that opens a `PdfiumDocument` of its own
+/// — a test checking what a save wrote, a probe — runs outside that lock and
+/// races with everything inside it. Measured in the desktop test suite: one
+/// run in three died of a SIGSEGV six tests in, when a test working an
+/// engine document directly overlapped the others opening theirs. Holding the
+/// lock for the duration puts it in the same queue.
+///
+/// `f` must not touch any session: the lock is not re-entrant, and
+/// [`with_session`] inside it would wait for itself.
+pub fn exclusive<T>(f: impl FnOnce() -> T) -> T {
+    let _held = lock();
+    f()
+}
+
 /// Register an already-constructed document.
 ///
 /// Prefer [`insert_with`] for anything backed by PDFium: constructing the document

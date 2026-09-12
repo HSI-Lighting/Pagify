@@ -142,12 +142,6 @@ enum PendingKind {
     Signature,
     /// Two corners of a box to draw while filling a form in.
     SignRectangle,
-    /// Something on the page, and where it is to go.
-    ///
-    /// `pictures_first` is which of two overlapping things is meant. The Move
-    /// tool takes the smallest — a caption on a photograph is the caption. Edit
-    /// Object sits beside a separate text tool, so there it is the picture.
-    Move { pictures_first: bool },
     /// The two ends of a line to rule while filling a form in.
     SignLine,
     /// Two corners of an area to paint over.
@@ -228,7 +222,6 @@ impl PendingKind {
             PendingKind::Fill(_) => (0, 1),
             PendingKind::Signature => (0, 1),
             PendingKind::SignRectangle => (0, 2),
-            PendingKind::Move { .. } => (0, 2),
             PendingKind::SignLine => (0, 2),
             PendingKind::Measure(MeasureKind::Distance) => (0, 2),
             PendingKind::Measure(MeasureKind::Area) => (0, usize::MAX),
@@ -267,11 +260,6 @@ impl PendingKind {
             PendingKind::SignRectangle => match points_done {
                 0 => "rectangle: first corner — a mark on the form, not a drawing".into(),
                 _ => "rectangle: opposite corner".into(),
-            },
-            PendingKind::Move { pictures_first } => match (pictures_first, points_done) {
-                (true, 0) => "edit object: click the picture to move".into(),
-                (false, 0) => "move: click the words or the picture to move".into(),
-                (_, _) => "click where it goes".into(),
             },
             PendingKind::SignLine => match points_done {
                 0 => "line: from — a mark on the form, not a drawing".into(),
@@ -344,8 +332,6 @@ impl PendingKind {
             PendingKind::Fill(_) => return None,
             PendingKind::Signature => "signature",
             PendingKind::SignRectangle => "signrectangle",
-            PendingKind::Move { pictures_first: true } => "editobject",
-            PendingKind::Move { pictures_first: false } => "moveobject",
             PendingKind::SignLine => "signline",
             PendingKind::Lock => "lock",
             PendingKind::PickText => "edittext",
@@ -578,6 +564,22 @@ struct PagifyApp {
     layers: Option<(usize, Vec<pdf_core::document::DrawnObject>)>,
     /// Where the last right-click landed, kept for the menu built after it.
     right_clicked_at: Option<(usize, AppPoint)>,
+    /// The object tool, when it is in hand: `true` picks pictures before
+    /// words under the pointer, `false` the other way round.
+    ///
+    /// **A selection tool, not a two-click move.** Asked for from use: a click
+    /// selects; the selected thing is moved by holding and dragging it, and
+    /// resized by dragging one of the handles on its outline. Nothing changes
+    /// in the document until the pointer is let go.
+    object_tool: Option<bool>,
+    /// What the object tool has selected.
+    selected: Option<Selected>,
+    /// A drag in progress on the selection — where it started, what part of
+    /// the selection was grabbed, and how far it has come.
+    grab: Option<Grab>,
+    /// The opacity slider's value while it is being dragged, before it is
+    /// applied on release.
+    opacity_draft: Option<f32>,
     /// Which entry in that list is picked, **by position in the list**.
     ///
     /// Not by object number: what a group draws is listed under the group's
@@ -603,6 +605,18 @@ struct PagifyApp {
     /// What the user asked to do, held while they decide what to do about
     /// unsaved marks.
     closing: Option<Closing>,
+    /// A save that would write a *first* password over the only unsecured
+    /// copy, waiting on the person to say what they meant.
+    ///
+    /// **A question, not a refusal.** This used to say "use `saveas`" and
+    /// stop, which left somebody who had pressed Secure Document unable to
+    /// save at all — reported from use as "why can't I just save". The
+    /// irreversible thing still needs a deliberate click; it is just one of
+    /// the buttons now, beside the two safe ones.
+    asking_to_secure: Option<PathBuf>,
+    /// Set for the one save that has been told, in the dialog above, to write
+    /// the password over the original after all.
+    secure_in_place_confirmed: bool,
     /// A redaction the survey found something in the way of, waiting on an
     /// answer.
     ///
@@ -885,6 +899,119 @@ struct PendingRedaction {
 /// giving them no way through except a command they have to be told about is
 /// not a safeguard, it is a trap — the window simply will not close, and the
 /// only escape is typing something.
+/// Something the object tool has picked up.
+#[derive(Debug, Clone, PartialEq)]
+struct Selected {
+    page: usize,
+    object: usize,
+    rect: pdf_core::document::Rect,
+    what: &'static str,
+}
+
+/// One of the eight places on a selection's outline that resizes it.
+///
+/// Named by which sides move: dragging the right edge changes the right side
+/// only; a corner changes two. The anchor — the point that stays still — is
+/// the opposite side or corner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handle {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl Handle {
+    const ALL: [Handle; 8] = [
+        Handle::TopLeft,
+        Handle::Top,
+        Handle::TopRight,
+        Handle::Right,
+        Handle::BottomRight,
+        Handle::Bottom,
+        Handle::BottomLeft,
+        Handle::Left,
+    ];
+
+    /// Where this handle sits on a rectangle.
+    fn at(&self, r: &pdf_core::document::Rect) -> (f32, f32) {
+        let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        match self {
+            Handle::Left => (r.left, cy),
+            Handle::Right => (r.right, cy),
+            Handle::Top => (cx, r.top),
+            Handle::Bottom => (cx, r.bottom),
+            Handle::TopLeft => (r.left, r.top),
+            Handle::TopRight => (r.right, r.top),
+            Handle::BottomLeft => (r.left, r.bottom),
+            Handle::BottomRight => (r.right, r.bottom),
+        }
+    }
+
+    /// The point that does not move when this handle is dragged.
+    fn anchor(&self, r: &pdf_core::document::Rect) -> (f32, f32) {
+        let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        match self {
+            Handle::Left => (r.right, cy),
+            Handle::Right => (r.left, cy),
+            Handle::Top => (cx, r.bottom),
+            Handle::Bottom => (cx, r.top),
+            Handle::TopLeft => (r.right, r.bottom),
+            Handle::TopRight => (r.left, r.bottom),
+            Handle::BottomLeft => (r.right, r.top),
+            Handle::BottomRight => (r.left, r.top),
+        }
+    }
+
+    /// The scale a drag of `by` page points means, for a rectangle this size.
+    fn scale(&self, r: &pdf_core::document::Rect, by: (f32, f32)) -> (f32, f32) {
+        let (w, h) = ((r.right - r.left).max(0.01), (r.bottom - r.top).max(0.01));
+        let sx = match self {
+            Handle::Left | Handle::TopLeft | Handle::BottomLeft => (w - by.0) / w,
+            Handle::Right | Handle::TopRight | Handle::BottomRight => (w + by.0) / w,
+            _ => 1.0,
+        };
+        let sy = match self {
+            Handle::Top | Handle::TopLeft | Handle::TopRight => (h - by.1) / h,
+            Handle::Bottom | Handle::BottomLeft | Handle::BottomRight => (h + by.1) / h,
+            _ => 1.0,
+        };
+        (sx.max(0.05), sy.max(0.05))
+    }
+
+    fn cursor(&self) -> egui::CursorIcon {
+        match self {
+            Handle::Left | Handle::Right => egui::CursorIcon::ResizeHorizontal,
+            Handle::Top | Handle::Bottom => egui::CursorIcon::ResizeVertical,
+            Handle::TopLeft | Handle::BottomRight => egui::CursorIcon::ResizeNwSe,
+            Handle::TopRight | Handle::BottomLeft => egui::CursorIcon::ResizeNeSw,
+        }
+    }
+}
+
+/// A drag on the selection, from press to release.
+#[derive(Debug, Clone, PartialEq)]
+struct Grab {
+    /// A handle, or `None` for the body of the selection.
+    handle: Option<Handle>,
+    from: AppPoint,
+    /// How far it has come, in page points.
+    by: (f32, f32),
+}
+
+/// What a save did — or did not — do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveOutcome {
+    Done,
+    Failed,
+    /// Nothing written yet: a question is up — see `PagifyApp::asking_to_secure`.
+    Asking,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Closing {
     /// Close the document, keep the program.
@@ -1431,6 +1558,9 @@ fn tool_button(
 
 /// Sized so a two-line name still leaves the glyph centred, and so a row of
 /// them reads as a grid rather than as a ragged line.
+/// Half the side of a resize handle, in screen pixels.
+const HANDLE_PX: f32 = 4.0;
+
 const TOOL_WIDTH: f32 = 82.0;
 const TOOL_HEIGHT: f32 = 58.0;
 
@@ -1462,8 +1592,16 @@ impl PagifyApp {
             pan_by: None,
             scroll_to_pt: None,
             canvas_pt: egui::vec2(800.0, 600.0),
-            recent: Recent::load(),
-            outlined_fonts: pagify_shell::outlined_fonts::OutlinedFonts::load(),
+            // **Nothing of the person's own under test.** The test suite
+            // constructs hundreds of apps, and every one of them was writing
+            // its fixture into the real Recent Documents list and reading the
+            // real font list — reported as a recents list full of test files.
+            recent: if cfg!(test) { Recent::default() } else { Recent::load() },
+            outlined_fonts: if cfg!(test) {
+                pagify_shell::outlined_fonts::OutlinedFonts::default()
+            } else {
+                pagify_shell::outlined_fonts::OutlinedFonts::load()
+            },
             selected_image: None,
             text: None,
             text_selection: None,
@@ -1482,9 +1620,15 @@ impl PagifyApp {
             layers: None,
             picked_layer: None,
             right_clicked_at: None,
+            object_tool: None,
+            selected: None,
+            grab: None,
+            opacity_draft: None,
             command_open: false,
             ribbon: Tab::Home,
             closing: None,
+            asking_to_secure: None,
+            secure_in_place_confirmed: false,
             asking_to_redact: None,
             reading: None,
             recogniser: None,
@@ -1494,12 +1638,20 @@ impl PagifyApp {
             password_field_focused: false,
             password_problem: None,
             password_plus: false,
-            signatures: pagify_shell::signatures::Signatures::load(),
-            signatures_path: pagify_shell::signatures::Signatures::path(),
+            signatures: if cfg!(test) {
+                pagify_shell::signatures::Signatures::default()
+            } else {
+                pagify_shell::signatures::Signatures::load()
+            },
+            signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() },
             pad: None,
             signature_list: None,
-            predefined: pagify_shell::predefined::Predefined::load(),
-            predefined_path: pagify_shell::predefined::Predefined::path(),
+            predefined: if cfg!(test) {
+                pagify_shell::predefined::Predefined::default()
+            } else {
+                pagify_shell::predefined::Predefined::load()
+            },
+            predefined_path: if cfg!(test) { None } else { pagify_shell::predefined::Predefined::path() },
             snippets: None,
             drawn_words: None,
             editor_face: None,
@@ -1620,7 +1772,11 @@ impl PagifyApp {
             }
             Some(Decision::Save) => {
                 self.closing = None;
-                self.save(None);
+                if self.save(None) == SaveOutcome::Asking {
+                    // The password question has taken over; closing waits
+                    // until that is answered and can be asked again.
+                    return;
+                }
                 // **Not `would_lose_work`.** A chosen password stays on the
                 // document after it is written, deliberately — every later save
                 // has to re-apply it, so the engine keeps it. It is therefore no
@@ -2161,7 +2317,9 @@ impl PagifyApp {
                     self.ribbon = Tab::Home;
                 }
                 self.recent.record(session.path(), page_count, pagify_shell::recent::now());
-                self.recent.save();
+                if !cfg!(test) {
+                    self.recent.save();
+                }
                 self.cmd.prompt_mut().document = Some(name.clone());
                 self.say_info(format!(
                     "{name} — {page_count} page{}.{}",
@@ -2648,6 +2806,294 @@ impl PagifyApp {
         }
     }
 
+    /// Take the object tool in hand.
+    fn take_up_object_tool(&mut self, pictures_first: bool, page: usize) {
+        if self.doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        self.pending = None;
+        self.markup_armed = None;
+        self.object_tool = Some(pictures_first);
+        self.selected = None;
+        self.grab = None;
+        let _ = page;
+        self.say_info(if pictures_first {
+            "edit object: click a picture or shape to select it, or words where there is nothing \
+             else. Drag to move; drag a handle to resize; Escape puts the tool down."
+        } else {
+            "move: click words or a picture to select; drag to move, drag a handle to resize."
+        });
+    }
+
+    /// Select whatever is drawn at a point, or clear the selection.
+    fn select_thing_at(&mut self, page: usize, at: AppPoint) -> bool {
+        let Some(pictures_first) = self.object_tool else { return false };
+        match self.thing_at(page, at, pictures_first) {
+            Some((object, rect, what)) => {
+                self.selected = Some(Selected { page, object, rect, what });
+                if let Some(index) = self.layer_index_for(page, object, rect) {
+                    self.picked_layer = Some(index);
+                }
+                self.say_info(format!("{what} selected."));
+                true
+            }
+            None => {
+                self.selected = None;
+                false
+            }
+        }
+    }
+
+    /// The handle under a point on the current selection, if any, allowing
+    /// for the handles being drawn at a fixed size on screen.
+    fn handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
+        let sel = self.selected.as_ref()?;
+        let reach = (HANDLE_PX / view.scale as f32).max(2.0);
+        Handle::ALL.iter().copied().find(|h| {
+            let (hx, hy) = h.at(&sel.rect);
+            (at.x as f32 - hx).abs() <= reach && (at.y as f32 - hy).abs() <= reach
+        })
+    }
+
+    /// The object tool's own pointer handling: select on click, move by
+    /// dragging the body, resize by dragging a handle. The document changes
+    /// once, when the pointer is let go.
+    fn interact_objects(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        page: usize,
+        at: AppPoint,
+        view: PageView,
+    ) {
+        // The cursor says what a press here would do.
+        if self.grab.is_none() {
+            if let Some(handle) = self.selected.as_ref().filter(|s| s.page == page).and_then(|_| self.handle_at(at, view)) {
+                ui.output_mut(|o| o.cursor_icon = handle.cursor());
+            } else if self.selected.as_ref().is_some_and(|s| {
+                s.page == page
+                    && at.x >= s.rect.left as f64
+                    && at.x <= s.rect.right as f64
+                    && at.y >= s.rect.top as f64
+                    && at.y <= s.rect.bottom as f64
+            }) {
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+            }
+        }
+
+        if response.drag_started() {
+            let on_handle = self
+                .selected
+                .as_ref()
+                .filter(|s| s.page == page)
+                .and_then(|_| self.handle_at(at, view));
+            let on_body = self.selected.as_ref().is_some_and(|s| {
+                s.page == page
+                    && at.x >= s.rect.left as f64
+                    && at.x <= s.rect.right as f64
+                    && at.y >= s.rect.top as f64
+                    && at.y <= s.rect.bottom as f64
+            });
+            // A drag that starts on something not yet selected selects it and
+            // carries on — one gesture, not two.
+            if on_handle.is_none() && !on_body {
+                self.select_thing_at(page, at);
+            }
+            if self.selected.as_ref().is_some_and(|s| s.page == page) {
+                self.grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
+            }
+        }
+
+        if response.dragged() {
+            if let Some(grab) = self.grab.as_mut() {
+                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                ui.output_mut(|o| {
+                    o.cursor_icon = match grab.handle {
+                        Some(h) => h.cursor(),
+                        None => egui::CursorIcon::Grabbing,
+                    }
+                });
+            }
+        }
+
+        if response.drag_stopped() {
+            if let (Some(grab), Some(sel)) = (self.grab.take(), self.selected.clone()) {
+                self.finish_grab(sel, grab);
+            }
+        }
+
+        if response.clicked() {
+            self.select_thing_at(page, at);
+        }
+    }
+
+    /// Apply what a drag asked for, once, and re-find the selection where it
+    /// now is.
+    fn finish_grab(&mut self, sel: Selected, grab: Grab) {
+        let (dx, dy) = grab.by;
+        let told = match grab.handle {
+            None => {
+                if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                    return;
+                }
+                self.move_thing(
+                    sel.page,
+                    grab.from,
+                    AppPoint { x: grab.from.x + dx as f64, y: grab.from.y + dy as f64 },
+                    self.object_tool.unwrap_or(true),
+                )
+            }
+            Some(handle) => {
+                let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                if (sx - 1.0).abs() < 0.005 && (sy - 1.0).abs() < 0.005 {
+                    return;
+                }
+                let (ax, ay) = handle.anchor(&sel.rect);
+                self.scale_thing(sel.page, sel.object, pdf_core::document::Point { x: ax, y: ay }, sx, sy)
+            }
+        };
+        match told {
+            Ok(said) => self.say_info(said),
+            Err(e) => self.say_error(e),
+        }
+
+        // Where it is now: the same kind of thing, at the rectangle the drag
+        // implied. Found again because the page was rewritten and the object
+        // numbers may have moved.
+        let wanted = match grab.handle {
+            None => pdf_core::document::Rect {
+                left: sel.rect.left + dx,
+                top: sel.rect.top + dy,
+                right: sel.rect.right + dx,
+                bottom: sel.rect.bottom + dy,
+            },
+            Some(handle) => {
+                let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                let (ax, ay) = handle.anchor(&sel.rect);
+                pdf_core::document::Rect {
+                    left: ax + (sel.rect.left - ax) * sx,
+                    top: ay + (sel.rect.top - ay) * sy,
+                    right: ax + (sel.rect.right - ax) * sx,
+                    bottom: ay + (sel.rect.bottom - ay) * sy,
+                }
+            }
+        };
+        let middle = AppPoint {
+            x: ((wanted.left + wanted.right) / 2.0) as f64,
+            y: ((wanted.top + wanted.bottom) / 2.0) as f64,
+        };
+        self.layers = None;
+        if !self.select_thing_at(sel.page, middle) {
+            self.selected = None;
+        }
+    }
+
+    /// Resize something about a point.
+    fn scale_thing(
+        &mut self,
+        page: usize,
+        object: usize,
+        anchor: pdf_core::document::Point,
+        sx: f32,
+        sy: f32,
+    ) -> Result<String, String> {
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        doc.session.scale_object(page, object, anchor, sx, sy).map_err(|e| e.to_string())?;
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.text = None;
+        self.text_selection = None;
+        self.find_hits.clear();
+        self.layers = None;
+        Ok(format!(
+            "resized to {:.0}% across and {:.0}% down on page {}.",
+            sx * 100.0,
+            sy * 100.0,
+            page + 1
+        ))
+    }
+
+    /// Make the selected thing more or less see-through.
+    fn set_opacity_of(&mut self, page: usize, object: usize, opacity: f32) -> Result<String, String> {
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        doc.session.set_opacity(page, object, opacity).map_err(|e| e.to_string())?;
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.layers = None;
+        Ok(format!("opacity {:.0}% on page {}.", opacity * 100.0, page + 1))
+    }
+
+    /// The selection's outline, its handles, and — mid-drag — where it is
+    /// going.
+    fn draw_object_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let Some(sel) = self.selected.clone().filter(|s| s.page == page) else { return };
+        let to_screen = |r: &pdf_core::document::Rect| {
+            egui::Rect::from_min_max(
+                view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
+                view.to_screen(AppPoint::new(r.right as f64, r.bottom as f64)),
+            )
+        };
+        let painter = ui.painter();
+        let outline = to_screen(&sel.rect);
+
+        // Where it is now.
+        painter.rect_stroke(
+            outline,
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(1.5, theme::VIOLET),
+            egui::StrokeKind::Outside,
+        );
+
+        // Where it is going, while it is being dragged.
+        if let Some(grab) = &self.grab {
+            let (dx, dy) = grab.by;
+            let going = match grab.handle {
+                None => pdf_core::document::Rect {
+                    left: sel.rect.left + dx,
+                    top: sel.rect.top + dy,
+                    right: sel.rect.right + dx,
+                    bottom: sel.rect.bottom + dy,
+                },
+                Some(handle) => {
+                    let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                    let (ax, ay) = handle.anchor(&sel.rect);
+                    pdf_core::document::Rect {
+                        left: ax + (sel.rect.left - ax) * sx,
+                        top: ay + (sel.rect.top - ay) * sy,
+                        right: ax + (sel.rect.right - ax) * sx,
+                        bottom: ay + (sel.rect.bottom - ay) * sy,
+                    }
+                }
+            };
+            let ghost = to_screen(&going);
+            painter.rect_filled(ghost, egui::CornerRadius::ZERO, theme::VIOLET.gamma_multiply(0.10));
+            painter.rect_stroke(
+                ghost,
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.5, theme::VIOLET_BRIGHT),
+                egui::StrokeKind::Outside,
+            );
+            return;
+        }
+
+        // The handles, at a fixed size on screen whatever the zoom.
+        for handle in Handle::ALL {
+            let (hx, hy) = handle.at(&sel.rect);
+            let centre = view.to_screen(AppPoint::new(hx as f64, hy as f64));
+            let square = egui::Rect::from_center_size(centre, egui::Vec2::splat(HANDLE_PX * 2.0));
+            painter.rect_filled(square, egui::CornerRadius::same(1), egui::Color32::WHITE);
+            painter.rect_stroke(
+                square,
+                egui::CornerRadius::same(1),
+                egui::Stroke::new(1.0, theme::VIOLET),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
     /// Pick something up and put it down somewhere else.
     fn move_thing(
         &mut self,
@@ -2938,7 +3384,11 @@ impl PagifyApp {
     fn add_outlined_font(&mut self, path: PathBuf) {
         match self.outlined_fonts.add(path) {
             Ok(()) => {
-                self.outlined_fonts.save();
+                if !cfg!(test) {
+                    if !cfg!(test) {
+            self.outlined_fonts.save();
+        }
+                }
                 self.say_info("font added — tried on outlined pages from now on.");
             }
             Err(why) => self.say_error(why),
@@ -2947,13 +3397,17 @@ impl PagifyApp {
 
     fn remove_outlined_font(&mut self, path: PathBuf) {
         self.outlined_fonts.remove(&path);
-        self.outlined_fonts.save();
+        if !cfg!(test) {
+            self.outlined_fonts.save();
+        }
         self.say_info("removed.");
     }
 
     fn clear_outlined_fonts(&mut self) {
         self.outlined_fonts.clear();
-        self.outlined_fonts.save();
+        if !cfg!(test) {
+            self.outlined_fonts.save();
+        }
         self.say_info("cleared — only the bundled fonts will be tried now.");
     }
 
@@ -3306,7 +3760,7 @@ impl PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.arm(PendingKind::Move { pictures_first: true }, page);
+                self.take_up_object_tool(true, page);
             }
             Verb::MoveThing => {
                 let page = self.page;
@@ -3314,7 +3768,7 @@ impl PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.arm(PendingKind::Move { pictures_first: false }, page);
+                self.take_up_object_tool(false, page);
             }
             Verb::SignLine => {
                 let page = self.page;
@@ -3810,6 +4264,24 @@ impl PagifyApp {
                 }
                 self.repair_locks(true);
             }
+            Verb::Opacity(percent) => {
+                let page = self.page;
+                let target = self
+                    .selected
+                    .as_ref()
+                    .filter(|s| s.page == page)
+                    .map(|s| s.object)
+                    .or_else(|| {
+                        self.picked_layer.and_then(|at| self.layers_on(page).get(at).map(|d| d.object))
+                    });
+                match target {
+                    Some(object) => match self.set_opacity_of(page, object, percent / 100.0) {
+                        Ok(said) => self.say_info(said),
+                        Err(e) => self.say_error(e),
+                    },
+                    None => self.say_info("select something first — Edit Object, or a row in the layer list."),
+                }
+            }
             Verb::BringToFront => self.restack_picked(pdf_core::document::Stacking::Front),
             Verb::SendToBack => self.restack_picked(pdf_core::document::Stacking::Back),
             Verb::LockArea => {
@@ -3893,8 +4365,12 @@ impl PagifyApp {
                     self.say_error("nothing to finish.");
                 }
             }
-            Verb::Save => self.save(None),
-            Verb::SaveAs(path) => self.save(Some(path)),
+            Verb::Save => {
+                self.save(None);
+            }
+            Verb::SaveAs(path) => {
+                self.save(Some(path));
+            }
 
             Verb::Extract { pages, dest } => self.extract(&pages, &dest),
             Verb::Import { source, pages } => self.import(&source, &pages),
@@ -4038,6 +4514,11 @@ impl PagifyApp {
         }
         if self.editing_run.take().is_some() {
             self.say_info("left as it was.");
+        }
+        if self.object_tool.take().is_some() {
+            self.selected = None;
+            self.grab = None;
+            self.say_info("object tool put down.");
         }
         if self.markup_armed.take().is_some() {
             self.say_info("tool put down.");
@@ -4264,6 +4745,12 @@ impl PagifyApp {
         where_to: pdf_core::document::Stacking,
     ) -> Result<String, String> {
         let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        // What a step will pass, asked before the page changes under it.
+        let passing = match where_to {
+            pdf_core::document::Stacking::Up => doc.session.stacking_neighbour(page, object, true).ok().flatten(),
+            pdf_core::document::Stacking::Down => doc.session.stacking_neighbour(page, object, false).ok().flatten(),
+            _ => None,
+        };
         doc.session.restack(page, object, where_to).map_err(|e| format!("layers: {e}"))?;
 
         if let Some(doc) = &mut self.doc {
@@ -4277,7 +4764,7 @@ impl PagifyApp {
             self.picked_layer.and_then(|at| entries.get(at).cloned())
         };
         self.layers = None;
-        self.picked_layer = follow.and_then(|was| {
+        self.picked_layer = follow.as_ref().and_then(|was| {
             let close = |a: f32, b: f32| (a - b).abs() < 0.5;
             self.layers_on(page).iter().position(|d| {
                 d.kind == was.kind
@@ -4291,17 +4778,56 @@ impl PagifyApp {
         self.text = None;
         self.text_selection = None;
         self.find_hits.clear();
+
+        // **Say when nothing will look different.** The order changed, and
+        // that is real — but if nothing else is drawn where this thing is, the
+        // page looks exactly as it did, and a reader pressing the button again
+        // and again was reported as "it doesn't do anything".
+        let overlaps = follow.as_ref().is_some_and(|me| {
+            self.layers_on(page).iter().any(|d| {
+                d.depth == 0
+                    && !(d.kind == me.kind
+                        && (d.rect.left - me.rect.left).abs() < 0.5
+                        && (d.rect.top - me.rect.top).abs() < 0.5)
+                    && d.rect.left < me.rect.right
+                    && d.rect.right > me.rect.left
+                    && d.rect.top < me.rect.bottom
+                    && d.rect.bottom > me.rect.top
+            })
+        });
+        let note = if overlaps {
+            ""
+        } else {
+            " Nothing else is drawn where it is, so it looks the same — the order \
+             matters once something overlaps it."
+        };
         Ok(match where_to {
             pdf_core::document::Stacking::Front => {
-                format!("brought to the front of page {}.", page + 1)
+                format!("brought to the front of page {}.{note}", page + 1)
             }
             pdf_core::document::Stacking::Back => {
-                format!("sent to the back of page {}.", page + 1)
+                format!(
+                    "sent to the back of page {} — behind everything it overlaps, in front \
+                     of anything that would hide it.{note}",
+                    page + 1
+                )
             }
-            pdf_core::document::Stacking::Up => format!("moved up one on page {}.", page + 1),
-            pdf_core::document::Stacking::Down => {
-                format!("moved down one on page {}.", page + 1)
-            }
+            pdf_core::document::Stacking::Up => match passing {
+                Some(over) => format!(
+                    "now in front of the {} {:?}.",
+                    over.kind.describe(),
+                    over.label.chars().take(30).collect::<String>()
+                ),
+                None => format!("moved up one on page {}.{note}", page + 1),
+            },
+            pdf_core::document::Stacking::Down => match passing {
+                Some(under) => format!(
+                    "now behind the {} {:?}.",
+                    under.kind.describe(),
+                    under.label.chars().take(30).collect::<String>()
+                ),
+                None => format!("moved down one on page {}.{note}", page + 1),
+            },
         })
     }
 
@@ -4347,11 +4873,6 @@ impl PagifyApp {
                 && close(d.rect.right, rect.right)
                 && close(d.rect.bottom, rect.bottom)
         })
-    }
-
-    /// Which entry in the layer list is drawn topmost at a point.
-    fn layer_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
-        self.layers_under(page, at).into_iter().next()
     }
 
     /// Show the layer rail with one entry picked, by its place in the list.
@@ -5660,10 +6181,10 @@ impl PagifyApp {
         }
     }
 
-    fn save(&mut self, dest: Option<PathBuf>) {
+    fn save(&mut self, dest: Option<PathBuf>) -> SaveOutcome {
         let Some(doc) = &self.doc else {
             self.say_error("nothing open.");
-            return;
+            return SaveOutcome::Failed;
         };
         let over_the_original = dest.is_none();
         let path = dest.unwrap_or_else(|| doc.session.path().to_path_buf());
@@ -5691,13 +6212,15 @@ impl PagifyApp {
         if over_the_original
             && doc.session.is_secured()
             && !doc.session.had_password_on_open()
+            && !std::mem::take(&mut self.secure_in_place_confirmed)
         {
-            self.say_error(
-                "this document has a password waiting — use `saveas <path>` so the \
-                 unsecured original is kept. A password written over the only copy \
-                 cannot be undone.",
+            // Asked, not refused — see `asking_to_secure`.
+            self.asking_to_secure = Some(path);
+            self.say_info(
+                "this save would put a password on the file itself — choose what to do \
+                 in the window.",
             );
-            return;
+            return SaveOutcome::Asking;
         }
 
         // Commit every marked page before writing: real ink for any reader,
@@ -5713,7 +6236,7 @@ impl PagifyApp {
                     }
                     Err(e) => {
                         self.say_error(format!("could not write the markup on page {}: {e}", page + 1));
-                        return;
+                        return SaveOutcome::Failed;
                     }
                 }
             }
@@ -5749,8 +6272,103 @@ impl PagifyApp {
                         skipped.join(", ")
                     ));
                 }
+                SaveOutcome::Done
             }
-            Err(e) => self.say_error(format!("save failed: {e}")),
+            Err(e) => {
+                self.say_error(format!("save failed: {e}"));
+                SaveOutcome::Failed
+            }
+        }
+    }
+
+    /// The window that asks what a save should do about a password that has
+    /// not been written yet — see `asking_to_secure`.
+    fn ask_about_securing(&mut self, ctx: &egui::Context) {
+        let Some(original) = self.asking_to_secure.clone() else { return };
+        let name = original
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "this file".to_string());
+
+        #[derive(Clone, Copy)]
+        enum Choice {
+            SaveCopy,
+            DropPassword,
+            WriteOver,
+            Cancel,
+        }
+        let mut choice: Option<Choice> = None;
+        egui::Modal::new(egui::Id::new("securing")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("Put a password on this file?");
+            ui.add_space(6.0);
+            ui.label(format!(
+                "{name} is not password-protected on disk. Saving now writes the \
+                 password you chose over it: anyone opening the file — including you — \
+                 will need that password, and there is no way back if it is forgotten."
+            ));
+            ui.add_space(4.0);
+            ui.small("Locked text and pictures keep their own passcode either way.");
+            ui.add_space(10.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Save a secured copy as…").clicked() {
+                    choice = Some(Choice::SaveCopy);
+                }
+                if ui.button("Take the password off and save").clicked() {
+                    choice = Some(Choice::DropPassword);
+                }
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Write the password over the original").clicked() {
+                    choice = Some(Choice::WriteOver);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(Choice::Cancel);
+                }
+            });
+        });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            choice = Some(Choice::Cancel);
+        }
+
+        let Some(choice) = choice else { return };
+        self.asking_to_secure = None;
+        match choice {
+            Choice::Cancel => self.say_info("not saved."),
+            Choice::SaveCopy => {
+                let mut dialog = rfd::FileDialog::new()
+                    .set_title("Save a secured copy")
+                    .add_filter("PDF", &["pdf"]);
+                if let Some(dir) = original.parent() {
+                    dialog = dialog.set_directory(dir);
+                }
+                let suggested = original
+                    .file_stem()
+                    .map(|s| format!("{} (secured).pdf", s.to_string_lossy()))
+                    .unwrap_or_else(|| "secured.pdf".to_string());
+                match dialog.set_file_name(&suggested).save_file() {
+                    Some(dest) => {
+                        self.save(Some(dest));
+                    }
+                    None => self.say_info("not saved."),
+                }
+            }
+            Choice::DropPassword => {
+                let dropped = self.doc.as_ref().map(|d| d.session.unsecure_document());
+                match dropped {
+                    Some(Ok(())) => {
+                        self.say_info("password taken off.");
+                        self.save(None);
+                    }
+                    Some(Err(e)) => self.say_error(format!("could not take the password off: {e}")),
+                    None => {}
+                }
+            }
+            Choice::WriteOver => {
+                self.secure_in_place_confirmed = true;
+                self.save(None);
+            }
         }
     }
 
@@ -7239,27 +7857,6 @@ self.foreign = None;
             // what.** A point recorded over bare paper meant the second click
             // moved nothing and explained nothing. Reported from use as "once
             // I click it, it should be selected".
-            let starting_a_move = self
-                .pending
-                .as_ref()
-                .and_then(|p| match p.kind {
-                    PendingKind::Move { pictures_first } if p.points.is_empty() => {
-                        Some(pictures_first)
-                    }
-                    _ => None,
-                });
-            if let Some(pictures_first) = starting_a_move {
-                let Some((object, rect, what)) = self.thing_at(page, at, pictures_first) else {
-                    self.say_info("nothing to move there — click on words, a picture or a shape.");
-                    return;
-                };
-                // Picked in the layer list too, so the same thing can be sent
-                // forward or back from there without finding it again.
-                if let Some(index) = self.layer_index_for(page, object, rect) {
-                    self.picked_layer = Some(index);
-                }
-                self.say_info(format!("{what} — now click where it should go."));
-            }
             if let Some(p) = self.pending.as_mut() {
                 p.points.push(at);
             }
@@ -7339,13 +7936,6 @@ self.foreign = None;
                 (Some(a), Some(b)) => self.stamp_box(page, *a, *b),
                 _ => Err("rectangle: two corners are needed.".into()),
             },
-            PendingKind::Move { pictures_first } => {
-                let pictures_first = *pictures_first;
-                match (pending.points.first().copied(), pending.points.get(1).copied()) {
-                    (Some(from), Some(to)) => self.move_thing(page, from, to, pictures_first),
-                    _ => Err("a thing to move and somewhere to put it.".into()),
-                }
-            }
             PendingKind::SignLine => match (pending.points.first(), pending.points.get(1)) {
                 (Some(a), Some(b)) => self.stamp_line(page, *a, *b),
                 _ => Err("line: two ends are needed.".into()),
@@ -7591,6 +8181,7 @@ impl eframe::App for PagifyApp {
             self.closing = Some(Closing::Program);
         }
         self.ask_about_unsaved(&ctx);
+        self.ask_about_securing(&ctx);
         self.ask_about_redaction(&ctx);
         self.collect_reading(&ctx);
 
@@ -7829,12 +8420,19 @@ impl eframe::App for PagifyApp {
                 // is part-way through collecting its clicks — a user who armed
                 // Line and looked away needs to see that it is still armed.
                 let armed = self.pending.as_ref().and_then(|p| p.kind.command());
-                let in_hand = self.markup_armed.map(|k| match k {
-                    pagify_shell::verbs::Markup::Highlight => "highlight",
-                    pagify_shell::verbs::Markup::Underline => "underline",
-                    pagify_shell::verbs::Markup::StrikeOut => "strikeout",
-                    pagify_shell::verbs::Markup::Squiggly => "squiggly",
-                });
+                let in_hand = self
+                    .markup_armed
+                    .map(|k| match k {
+                        pagify_shell::verbs::Markup::Highlight => "highlight",
+                        pagify_shell::verbs::Markup::Underline => "underline",
+                        pagify_shell::verbs::Markup::StrikeOut => "strikeout",
+                        pagify_shell::verbs::Markup::Squiggly => "squiggly",
+                    })
+                    .or(match self.object_tool {
+                        Some(true) => Some("editobject"),
+                        Some(false) => Some("moveobject"),
+                        None => None,
+                    });
                 let live = |command: &str| -> bool {
                     let c = command.trim();
                     in_hand == Some(c)
@@ -8122,6 +8720,7 @@ impl eframe::App for PagifyApp {
         // a window can be dragged next to the thing being re-ordered, where a
         // rail on the far side of the page cannot.
         let mut restack_to: Option<(usize, pdf_core::document::Stacking)> = None;
+        let mut opacity_to: Option<(usize, f32)> = None;
         if self.show_layers && !backstage && self.doc.is_some() {
             let page = self.page;
             let picked = self.picked_layer;
@@ -8171,9 +8770,36 @@ impl eframe::App for PagifyApp {
                         }
                     });
                     if grouped {
-                        ui.small("Drawn inside a group — the whole group moves.");
+                        ui.small(if chosen_entry.is_some_and(|e| e.label == "placeholder") {
+                            "The picture's placeholder — it moves with the picture."
+                        } else {
+                            "Drawn inside a group — the whole group moves."
+                        });
                     } else if !armed {
                         ui.small("Pick a row, or click something on the page with Edit Object.");
+                    }
+
+                    // **Opacity, applied when the slider is let go** — not on
+                    // every frame of the drag, which would rewrite the page
+                    // sixty times a second.
+                    if let Some(entry) = chosen_entry.filter(|e| e.movable) {
+                        let mut alpha = self.opacity_draft.unwrap_or(entry.opacity);
+                        ui.add_space(6.0);
+                        let slider = ui.add(
+                            egui::Slider::new(&mut alpha, 0.0..=1.0)
+                                .text("opacity")
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                                .custom_parser(|t| t.trim_end_matches('%').parse::<f64>().ok().map(|p| p / 100.0)),
+                        );
+                        if slider.changed() {
+                            self.opacity_draft = Some(alpha);
+                        }
+                        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                            if (alpha - entry.opacity).abs() > 0.005 {
+                                opacity_to = Some((entry.object, alpha));
+                            }
+                            self.opacity_draft = None;
+                        }
                     }
                     ui.add_space(6.0);
                     ui.separator();
@@ -8217,6 +8843,8 @@ impl eframe::App for PagifyApp {
                                 entry.rect.top,
                                 if entry.movable {
                                     ""
+                                } else if entry.label == "placeholder" {
+                                    "\nthe picture's placeholder — moves with the picture"
                                 } else {
                                     "\ndrawn inside a group — the group is what moves"
                                 },
@@ -8238,6 +8866,17 @@ impl eframe::App for PagifyApp {
                 Ok(said) => self.say_info(said),
                 Err(e) => self.say_error(e),
             }
+        }
+        if let Some((object, alpha)) = opacity_to {
+            let page = self.page;
+            let kept = self.picked_layer;
+            match self.set_opacity_of(page, object, alpha) {
+                Ok(said) => self.say_info(said),
+                Err(e) => self.say_error(e),
+            }
+            // The page was rewritten, but nothing moved: the same row is the
+            // same thing.
+            self.picked_layer = kept;
         }
 
         // -- the pages ---------------------------------------------------------
@@ -8597,6 +9236,7 @@ impl PagifyApp {
                         // every click and a padlock could never be pressed.
                         self.draw_lock_badges(ui, page, view);
                         self.draw_picked_layer(ui, page, view);
+                        self.draw_object_selection(ui, page, view);
                         // On top of the page and its badges, under the editor:
                         // a tool part-way through is the most recent thing the
                         // reader did and the thing they are aiming with.
@@ -8722,32 +9362,6 @@ impl PagifyApp {
                     egui::Stroke::new(1.0, theme::DANGER),
                     egui::StrokeKind::Inside,
                 );
-            }
-            // What is being carried, drawn where it would land.
-            PendingKind::Move { pictures_first } => {
-                if let Some((_, rect, _)) = self.thing_at(page, first, *pictures_first) {
-                    let by = egui::vec2(
-                        (on(at).x - on(first).x),
-                        (on(at).y - on(first).y),
-                    );
-                    let outline = egui::Rect::from_two_pos(
-                        on(AppPoint { x: rect.left as f64, y: rect.top as f64 }),
-                        on(AppPoint { x: rect.right as f64, y: rect.bottom as f64 }),
-                    );
-                    // Where it is now, faint; where it is going, solid.
-                    painter.rect_stroke(
-                        outline,
-                        egui::CornerRadius::ZERO,
-                        egui::Stroke::new(1.0, theme::INK_FAINT),
-                        egui::StrokeKind::Inside,
-                    );
-                    painter.rect_stroke(
-                        outline.translate(by),
-                        egui::CornerRadius::ZERO,
-                        stroke,
-                        egui::StrokeKind::Inside,
-                    );
-                }
             }
             PendingKind::Whiteout | PendingKind::Lock => {
                 painter.rect_stroke(
@@ -9501,6 +10115,14 @@ impl PagifyApp {
 
         if let Some(snapped) = &self.last_snap {
             overlay::draw_snap(ui.painter(), view.to_screen(snapped.at), snapped.kind, theme::SNAP);
+        }
+
+        // The object tool takes the pointer whole while it is in hand — its
+        // clicks select and its drags move or resize, none of which is a mark
+        // or a text selection.
+        if self.object_tool.is_some() {
+            self.interact_objects(ui, &response, page, at, view);
+            return;
         }
 
         // A click is *not* subject to the focus guard, and conflating the two
@@ -14262,23 +14884,13 @@ mod lock_wiring_tests {
     fn both_moving_tools_arm_and_say_what_they_take() {
         let mut first = app("two-column.pdf");
         first.submit("editobject");
-        assert!(
-            matches!(
-                first.pending.as_ref().map(|p| &p.kind),
-                Some(PendingKind::Move { pictures_first: true })
-            ),
-            "edit object did not arm:\n{}",
-            said(&first)
-        );
+        assert_eq!(first.object_tool, Some(true), "edit object did not arm:\n{}", said(&first));
         assert!(said(&first).contains("picture"), "{}", said(&first));
 
         let mut second = app("two-column.pdf");
         second.submit("moveobject");
-        assert!(matches!(
-            second.pending.as_ref().map(|p| &p.kind),
-            Some(PendingKind::Move { pictures_first: false })
-        ));
-        assert!(said(&second).contains("words or the picture"), "{}", said(&second));
+        assert_eq!(second.object_tool, Some(false));
+        assert!(said(&second).contains("words or a picture"), "{}", said(&second));
     }
 
     /// **Words and pictures can be picked up and put down.**
@@ -15220,22 +15832,22 @@ mod lock_wiring_tests {
 
         let bytes = std::fs::read(&out).expect("read it back");
         assert!(
-            pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes.clone(), Some("pagify"))
+            pdf_core::registry::exclusive(|| pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes.clone(), Some("pagify")))
                 .is_err(),
             "the old password still opens it"
         );
-        pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(
+        pdf_core::registry::exclusive(|| pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(
             bytes,
             Some("New-Password-99!"),
-        )
+        ))
         .expect("the new password does not open it");
         let _ = std::fs::remove_file(&out);
     }
 
     /// And the guard still holds where it matters: a first password over
-    /// somebody's only plain copy.
+    /// somebody's only plain copy is not written without their say-so.
     #[test]
-    fn a_first_password_over_a_plain_original_is_still_refused() {
+    fn a_first_password_over_a_plain_original_is_still_held_back() {
         let out = std::env::temp_dir().join("pagify-first-password.pdf");
         let _ = std::fs::remove_file(&out);
         std::fs::copy(fixture("two-column.pdf"), &out).expect("copy the fixture");
@@ -15246,10 +15858,10 @@ mod lock_wiring_tests {
         app.answer_passcode("Correct-Horse-99-Battery");
         app.submit("save");
 
-        assert!(said(&app).contains("saveas"), "it wrote over the only plain copy");
+        assert!(app.asking_to_secure.is_some(), "it wrote over the only plain copy without asking");
         let bytes = std::fs::read(&out).expect("read");
         assert!(
-            pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes, None).is_ok(),
+            pdf_core::registry::exclusive(|| pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes, None)).is_ok(),
             "the plain original was encrypted in place after all"
         );
         let _ = std::fs::remove_file(&out);
@@ -15337,14 +15949,14 @@ mod lock_wiring_tests {
         let bytes = std::fs::read(&out).expect("nothing was written");
 
         assert!(
-            pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes.clone(), Some("pagify"))
+            pdf_core::registry::exclusive(|| pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes.clone(), Some("pagify")))
                 .is_err(),
             "the old password still opens it"
         );
-        pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(
+        pdf_core::registry::exclusive(|| pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(
             bytes,
             Some("Correct-Horse-99-Battery"),
-        )
+        ))
         .expect("the new password does not open it");
         let _ = std::fs::remove_file(&out);
     }
@@ -15410,11 +16022,11 @@ mod lock_wiring_tests {
             // The file must refuse everyone else and open for this password.
             let bytes = std::fs::read(&out).expect("read back");
             assert!(
-                pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes.clone(), None)
+                pdf_core::registry::exclusive(|| pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes.clone(), None))
                     .is_err(),
                 "{password:?}: the file opened with no password at all"
             );
-            pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes, Some(password))
+            pdf_core::registry::exclusive(|| pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes, Some(password)))
                 .unwrap_or_else(|e| {
                     panic!("{password:?}: the password that was set does not open it: {e}")
                 });
@@ -15422,15 +16034,17 @@ mod lock_wiring_tests {
         }
     }
 
-    /// **A password is never written over the only copy.**
+    /// **A password is never written over the only copy quietly.**
     ///
     /// Securing a document and saving it makes a file nobody can read without
     /// the password — including the person who typed it, if they mistype or
     /// forget it. Doing that to the original in place, on a plain `save`, is
     /// irreversible. It happened to a real document during this program's own
-    /// development, which is why the refusal is here rather than in advice.
+    /// development. It used to be refused outright; now it is asked, because a
+    /// refusal with one exit left somebody unable to save at all — see
+    /// `asking_to_secure`. Either way nothing is written until a person says.
     #[test]
-    fn saving_over_the_original_is_refused_while_a_password_is_waiting() {
+    fn saving_over_the_original_is_not_done_quietly_while_a_password_is_waiting() {
         let mut app = app("two-column.pdf");
         app.submit("secure");
         app.answer_passcode("Correct-Horse-99-Battery");
@@ -15438,9 +16052,12 @@ mod lock_wiring_tests {
         assert!(app.doc.as_ref().expect("doc").session.is_secured());
 
         app.submit("save");
-        let said = said(&app);
-        assert!(said.contains("saveas"), "it did not say what to do instead: {said}");
-        assert!(said.contains("cannot be undone"), "it understated it: {said}");
+        assert!(app.asking_to_secure.is_some(), "no question was raised:\n{}", said(&app));
+        assert!(
+            !said(&app).contains("saved "),
+            "the file was written without an answer:\n{}",
+            said(&app)
+        );
     }
 
     /// **Secure asks for a password, and says what it will do.**
@@ -15929,74 +16546,140 @@ mod lock_wiring_tests {
         );
     }
 
-    /// **The first click of a move selects, and says what it selected.**
+    /// **A click selects; it does not move.**
     ///
-    /// Reported from use: "once I click it, it should be selected". A click on
-    /// bare paper used to be recorded as the start of a move that then moved
-    /// nothing; now it says so and waits for a click that lands on something.
+    /// Asked for from use: "clicking an object should select. Just select." A
+    /// click on bare paper clears the selection and takes nothing else.
     #[test]
-    fn the_first_click_of_a_move_selects_what_it_lands_on() {
+    fn a_click_with_the_object_tool_selects_and_moves_nothing() {
         let mut app = app("covered.pdf");
+        let before = app.doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
         app.submit("editobject");
-        assert!(app.pending.is_some(), "the tool did not arm:\n{}", said(&app));
+        assert!(app.object_tool.is_some(), "the tool did not arm:\n{}", said(&app));
+        assert!(app.pending.is_none(), "the old two-click gesture is still armed");
 
-        // Bare paper: nothing recorded, and told why.
-        app.take_pick(AppPoint { x: 590.0, y: 780.0 });
-        assert_eq!(
-            app.pending.as_ref().map(|p| p.points.len()),
-            Some(0),
-            "a click on nothing was taken as the start of a move"
-        );
-        assert!(said(&app).contains("nothing to move there"), "{}", said(&app));
+        // Bare paper: nothing selected.
+        assert!(!app.select_thing_at(0, AppPoint { x: 590.0, y: 780.0 }));
+        assert!(app.selected.is_none());
 
-        // The panel, where nothing else is under the pointer: its right-hand
-        // end, past the picture it covers and the words on it. Selected,
-        // named, and picked in the layer list.
-        let panel = app
-            .layers_on(0)
-            .iter()
-            .find(|d| d.kind == pdf_core::document::DrawnKind::Shape)
-            .cloned()
-            .expect("the fixture's panel");
-        let corner = AppPoint {
-            x: (panel.rect.right - 20.0) as f64,
-            y: (panel.rect.bottom - 20.0) as f64,
-        };
-        app.take_pick(corner);
-        assert_eq!(app.pending.as_ref().map(|p| p.points.len()), Some(1));
-        assert!(said(&app).contains("the shape"), "it did not say what it picked:\n{}", said(&app));
+        // The panel's far corner, where nothing else is: selected, named, and
+        // picked in the layer list — and the page untouched.
+        let panel = before.iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).expect("panel");
+        let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
+        assert!(app.select_thing_at(0, corner));
+        let sel = app.selected.clone().expect("selected");
+        assert_eq!(sel.what, "the shape");
+        assert!(said(&app).contains("the shape selected"), "{}", said(&app));
         let picked = app.picked_layer.and_then(|at| app.layers_on(0).get(at).cloned());
-        assert_eq!(
-            picked.map(|d| d.kind),
-            Some(pdf_core::document::DrawnKind::Shape),
-            "the click did not pick the shape in the layer list"
-        );
+        assert_eq!(picked.map(|d| d.kind), Some(pdf_core::document::DrawnKind::Shape));
+        let after = app.doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
+        assert_eq!(after.len(), before.len());
+        for (a, b) in before.iter().zip(&after) {
+            assert_eq!(a.rect, b.rect, "selecting moved something");
+        }
     }
 
-    /// **The layer window moves things one step, and keeps them picked.**
+    /// **Dragging the body of the selection moves it, once, on release.**
+    #[test]
+    fn dragging_a_selection_moves_it_when_let_go() {
+        let mut app = app("covered.pdf");
+        app.submit("editobject");
+        let panel = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
+        let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
+        assert!(app.select_thing_at(0, corner));
+        let sel = app.selected.clone().expect("selected");
+
+        // Mid-drag, nothing has changed in the document.
+        app.grab = Some(Grab { handle: None, from: corner, by: (30.0, 18.0) });
+        let unmoved = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
+        assert_eq!(unmoved.rect, panel.rect, "the page changed before the pointer was let go");
+
+        // Let go.
+        let grab = app.grab.take().expect("grab");
+        app.finish_grab(sel, grab);
+        let moved = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
+        assert!(
+            (moved.rect.left - panel.rect.left - 30.0).abs() < 0.5 && (moved.rect.top - panel.rect.top - 18.0).abs() < 0.5,
+            "it did not move by the drag: {:?} then {:?}",
+            panel.rect,
+            moved.rect
+        );
+        // And it is still selected, where it now is.
+        let still = app.selected.clone().expect("still selected");
+        assert!((still.rect.left - moved.rect.left).abs() < 0.5, "the selection did not follow the thing");
+    }
+
+    /// **Dragging a handle resizes about the opposite side.**
+    #[test]
+    fn dragging_a_handle_resizes_about_the_opposite_corner() {
+        let mut app = app("covered.pdf");
+        app.submit("editobject");
+        let panel = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
+        let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
+        assert!(app.select_thing_at(0, corner));
+        let sel = app.selected.clone().expect("selected");
+
+        // Drag the bottom-right handle in by half the width and height.
+        let (w, h) = (panel.rect.right - panel.rect.left, panel.rect.bottom - panel.rect.top);
+        let grab = Grab {
+            handle: Some(Handle::BottomRight),
+            from: AppPoint { x: panel.rect.right as f64, y: panel.rect.bottom as f64 },
+            by: (-w / 2.0, -h / 2.0),
+        };
+        app.finish_grab(sel, grab);
+        assert!(said(&app).contains("resized to 50%"), "{}", said(&app));
+
+        let now = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
+        assert!((now.rect.left - panel.rect.left).abs() < 0.5 && (now.rect.top - panel.rect.top).abs() < 0.5, "the anchored corner moved");
+        assert!(((now.rect.right - now.rect.left) - w / 2.0).abs() < 1.0, "width did not halve");
+        assert!(((now.rect.bottom - now.rect.top) - h / 2.0).abs() < 1.0, "height did not halve");
+    }
+
+    /// **`opacity 50` fades the selected thing**, and the list reports it.
+    #[test]
+    fn the_opacity_verb_fades_the_selected_thing() {
+        let mut app = app("framed.pdf");
+        app.submit("editobject");
+        let picture = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Picture).cloned().expect("picture");
+        let middle = AppPoint {
+            x: ((picture.rect.left + picture.rect.right) / 2.0) as f64,
+            y: ((picture.rect.top + picture.rect.bottom) / 2.0) as f64,
+        };
+        assert!(app.select_thing_at(0, middle));
+
+        app.submit("opacity 50");
+        assert!(said(&app).contains("opacity 50%"), "{}", said(&app));
+        let faded = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Picture).cloned().expect("picture");
+        assert!((faded.opacity - 0.5).abs() < 0.02, "the list does not report the fade: {}", faded.opacity);
+
+        app.submit("opacity 200");
+        assert!(said(&app).contains("between 0 and 100"), "{}", said(&app));
+    }
+
+    /// **The layer window steps things over what they overlap, and keeps them
+    /// picked.**
     #[test]
     fn a_picked_layer_can_be_nudged_up_and_stays_picked() {
-        let mut app = app("pictures.pdf");
+        let mut app = app("covered.pdf");
         let listed = app.layers_on(0).to_vec();
-        let bottom = listed.first().cloned().expect("something is drawn");
-        app.picked_layer = Some(0);
+        let picture_at = listed.iter().position(|d| d.kind == pdf_core::document::DrawnKind::Picture).expect("the picture");
+        app.picked_layer = Some(picture_at);
 
+        // Up passes the panel it was under, and says so.
         app.restack_picked(pdf_core::document::Stacking::Up);
-        assert!(said(&app).contains("moved up one"), "{}", said(&app));
-
+        assert!(said(&app).contains("now in front of the shape"), "{}", said(&app));
         let now = app.layers_on(0).to_vec();
-        assert_eq!(
-            now.get(1).map(|d| d.label.clone()),
-            Some(bottom.label.clone()),
-            "it did not move up exactly one: {now:#?}"
-        );
-        // Still picked, at its new place, so the next nudge acts on the same thing.
-        assert_eq!(app.picked_layer, Some(1), "the pick did not follow the thing it was on");
+        let picture_now = now.iter().position(|d| d.kind == pdf_core::document::DrawnKind::Picture).expect("still there");
+        let panel_now = now.iter().position(|d| d.kind == pdf_core::document::DrawnKind::Shape).expect("panel");
+        assert!(picture_now > panel_now, "the picture should now be over the panel: {now:#?}");
+        // Still picked, at its new row, so the next nudge acts on the same thing.
+        assert_eq!(app.picked_layer, Some(picture_now), "the pick did not follow the thing it was on");
 
+        // Down puts it back under.
         app.restack_picked(pdf_core::document::Stacking::Down);
+        assert!(said(&app).contains("now behind the shape"), "{}", said(&app));
         let back = app.layers_on(0).to_vec();
-        assert_eq!(back.first().map(|d| d.label.clone()), Some(bottom.label));
-        assert_eq!(app.picked_layer, Some(0));
+        assert_eq!(back.iter().position(|d| d.kind == pdf_core::document::DrawnKind::Picture), Some(picture_at));
     }
 
     /// **A lock that never took is finished when the document opens.**
@@ -16012,7 +16695,7 @@ mod lock_wiring_tests {
 
         // Build the broken document the way the engine test does.
         let path = fixture("pictures.pdf");
-        let original = {
+        let original = pdf_core::registry::exclusive(|| {
             let mut doc = pdf_core::document::pdfium_doc::PdfiumDocument::open_path(&path, None)
                 .expect("open");
             let mut bytes = Vec::new();
@@ -16031,8 +16714,8 @@ mod lock_wiring_tests {
                     _ => None,
                 })
                 .expect("the first picture")
-        };
-        let broken = {
+        });
+        let broken = pdf_core::registry::exclusive(|| {
             let mut doc = pdf_core::document::pdfium_doc::PdfiumDocument::open_path(&path, None)
                 .expect("open");
             let picture = doc.images_on(0).expect("images")[0].object;
@@ -16041,7 +16724,7 @@ mod lock_wiring_tests {
             doc.save_full_copy(&mut bytes).expect("save");
             let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
             file.rewrite(&[original]).expect("put the picture back")
-        };
+        });
         let scratch = std::env::temp_dir().join(format!(
             "pagify-stale-lock-{}.pdf",
             std::process::id()
@@ -16073,6 +16756,109 @@ mod lock_wiring_tests {
             app.submit(line);
         }
         assert!(app.doc.is_some());
+    }
+
+    /// **A document opened with its password saves in place after an edit.**
+    ///
+    /// Reported from use: after moving a picture in a password-protected
+    /// catalogue, `save` refused with "this document has a password waiting
+    /// — use saveas", which is the guard against writing a *first* password
+    /// over somebody's only plain copy. This document was encrypted before and
+    /// is encrypted after; the guard has no business firing.
+    #[test]
+    fn a_document_opened_with_a_password_can_still_be_saved_after_an_edit() {
+        let scratch = std::env::temp_dir().join(format!("pagify-encrypted-{}.pdf", std::process::id()));
+        std::fs::copy(fixture("encrypted.pdf"), &scratch).expect("copy");
+        let mut app = PagifyApp::new(None);
+        app.open_with(scratch.to_str().expect("path"), Some("pagify"));
+        assert!(app.doc.is_some(), "did not open:\n{}", said(&app));
+
+        let run = app
+            .doc
+            .as_ref()
+            .expect("open")
+            .session
+            .text_runs(0)
+            .expect("runs")
+            .first()
+            .cloned()
+            .expect("a run");
+        let from = AppPoint {
+            x: ((run.rect.left + run.rect.right) / 2.0) as f64,
+            y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
+        };
+        app.move_thing(0, from, AppPoint { x: from.x + 10.0, y: from.y + 6.0 }, false)
+            .expect("move");
+
+        app.submit("save");
+        let told = said(&app);
+        assert!(
+            !told.contains("password waiting"),
+            "save was refused on a document that already had a password:\n{told}"
+        );
+        assert!(told.contains("saved"), "it did not say it saved:\n{told}");
+        let _ = std::fs::remove_file(&scratch);
+    }
+
+    /// **Saving with a first password over the only plain copy asks; it does
+    /// not refuse.**
+    ///
+    /// Reported from use as "why can't I just save": Secure Document had been
+    /// pressed on a plain file, and every `save` after that came back with a
+    /// message that offered `saveas` and nothing else. The irreversible thing
+    /// still takes a deliberate click; the two safe things are beside it.
+    #[test]
+    fn saving_a_first_password_over_the_original_asks_and_can_be_declined() {
+        let scratch = std::env::temp_dir().join(format!("pagify-plain-{}.pdf", std::process::id()));
+        std::fs::copy(fixture("text-lines.pdf"), &scratch).expect("copy");
+        let before = std::fs::read(&scratch).expect("read");
+        let mut app = PagifyApp::new(Some(scratch.to_str().expect("path")));
+        assert!(app.doc.is_some());
+
+        // Secure Document, answered with a strong password, twice.
+        app.submit("secure");
+        app.answer_passcode("Correct-Horse-99-Battery");
+        app.answer_passcode("Correct-Horse-99-Battery");
+        assert!(app.unsaved_password(), "the password was not set:\n{}", said(&app));
+
+        // A plain save asks rather than refusing, and writes nothing yet.
+        assert_eq!(app.save(None), SaveOutcome::Asking);
+        assert!(app.asking_to_secure.is_some(), "no question was raised");
+        assert_eq!(std::fs::read(&scratch).expect("read"), before, "the file was written before the answer");
+        assert!(!said(&app).contains("use `saveas"), "the old refusal is back:\n{}", said(&app));
+
+        // Taking the password off and saving is one of the answers, and it works.
+        app.asking_to_secure = None;
+        app.doc.as_ref().expect("open").session.unsecure_document().expect("unsecure");
+        assert_eq!(app.save(None), SaveOutcome::Done, "{}", said(&app));
+        assert!(said(&app).contains("saved"), "{}", said(&app));
+        let _ = std::fs::remove_file(&scratch);
+    }
+
+    /// **And writing it over the original, once confirmed, goes through.**
+    #[test]
+    fn a_confirmed_password_is_written_over_the_original() {
+        let scratch = std::env::temp_dir().join(format!("pagify-plain-2-{}.pdf", std::process::id()));
+        std::fs::copy(fixture("text-lines.pdf"), &scratch).expect("copy");
+        let mut app = PagifyApp::new(Some(scratch.to_str().expect("path")));
+        app.submit("secure");
+        app.answer_passcode("Correct-Horse-99-Battery");
+        app.answer_passcode("Correct-Horse-99-Battery");
+        assert_eq!(app.save(None), SaveOutcome::Asking);
+
+        // The deliberate click.
+        app.asking_to_secure = None;
+        app.secure_in_place_confirmed = true;
+        assert_eq!(app.save(None), SaveOutcome::Done, "{}", said(&app));
+
+        // The file now needs the password; the confirmation was spent.
+        let written = std::fs::read(&scratch).expect("read");
+        assert!(
+            String::from_utf8_lossy(&written).contains("/Encrypt"),
+            "the password was not written into the file"
+        );
+        assert!(!app.secure_in_place_confirmed, "the confirmation must not outlive one save");
+        let _ = std::fs::remove_file(&scratch);
     }
 
     /// **Escape gives up on a passcode prompt** without locking anything, and
