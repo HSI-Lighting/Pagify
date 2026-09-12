@@ -33,9 +33,12 @@ fi
 rm -rf "$APP"
 cp -R "$ROOT/target/Pagify.app" "$APP"
 
-# Delete the staging copy rather than merely unregistering it. macOS re-scans
-# and re-registers any bundle it can still see, so an unregister alone lasts
-# until the next scan and the duplicate quietly comes back.
+# Unregister *and* delete the staging copy. macOS re-scans and re-registers
+# any bundle it can still see, so an unregister alone lasts until the next
+# scan and the duplicate quietly comes back; and a bundle deleted while still
+# registered leaves a ghost entry behind until the database is next rebuilt —
+# seen after a bundle-only build that was installed later.
+"$LSREG" -u "$ROOT/target/Pagify.app" 2>/dev/null || true
 rm -rf "$ROOT/target/Pagify.app"
 "$LSREG" -f "$APP" 2>/dev/null || true
 
