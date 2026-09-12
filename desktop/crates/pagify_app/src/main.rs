@@ -6036,7 +6036,8 @@ impl PagifyApp {
             // Which handler writes it. Offered only where a password is being
             // chosen for the *file* — locking has no such choice, and a
             // password being used has already been decided.
-            if matches!(waiting, Awaiting::Secure(_)) {
+            let mut restrictions_would_be_lost = false;
+            if let Awaiting::Secure(options) = &waiting {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.password_plus, false, "Secure");
@@ -6051,6 +6052,23 @@ impl PagifyApp {
                          not a browser — only Pagify, with this password. There is no \
                          way back without it.",
                     );
+                    // **Secure Plus carries no permissions.** A `secure readonly`
+                    // under it used to store "everything permitted" and say
+                    // nothing — the restriction quietly dropped. Found by audit.
+                    // Refused here, where the choice is being made.
+                    if *options != pagify_shell::verbs::SecureOptions::default() {
+                        restrictions_would_be_lost = true;
+                        ui.add_space(4.0);
+                        ui.colored_label(
+                            theme::DANGER,
+                            format!(
+                                "Secure Plus keeps no permissions, so \"{}\" cannot be set \
+                                 under it. Choose Secure to keep the restriction, or run \
+                                 `secure` without one.",
+                                options.describe()
+                            ),
+                        );
+                    }
                 } else {
                     ui.colored_label(
                         theme::INK_DIM,
@@ -6067,6 +6085,7 @@ impl PagifyApp {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 let ready = !self.password_typed.is_empty()
+                    && !restrictions_would_be_lost
                     && (!ruled || confirming || passphrase::is_strong_enough(&self.password_typed));
                 if ui.add_enabled(ready, egui::Button::new(act)).clicked() {
                     submitted = true;
@@ -6167,7 +6186,17 @@ impl PagifyApp {
                 }
                 self.awaiting_password = None;
                 let outcome = if self.password_plus {
-                    self.secure_document_plus(typed.as_bytes())
+                    // The window refuses this before a password is typed; the
+                    // same rule here, for the paths that do not go through it.
+                    if options != pagify_shell::verbs::SecureOptions::default() {
+                        Err(format!(
+                            "Secure Plus keeps no permissions, so \"{}\" cannot be set under \
+                             it — nothing was set. Use `secure` without Secure Plus for that.",
+                            options.describe()
+                        ))
+                    } else {
+                        self.secure_document_plus(typed.as_bytes())
+                    }
                 } else {
                     self.secure_document(typed.as_bytes(), options)
                 };
@@ -15507,6 +15536,52 @@ mod lock_wiring_tests {
         assert!(lines.contains("any PDF reader"), "{lines}");
         assert!(lines.contains("not written until you save"), "{lines}");
         assert!(lines.contains("permissions: reading only"), "{lines}");
+    }
+
+    /// **Secure Plus keeps no permissions, and says so rather than dropping
+    /// them.** Found by audit: `secure readonly` under Secure Plus stored
+    /// "everything permitted" and the dialog said nothing.
+    #[test]
+    fn secure_readonly_under_secure_plus_is_refused_not_silently_dropped() {
+        let mut app = app("two-column.pdf");
+        app.submit("secure readonly");
+        app.password_plus = true;
+        app.answer_passcode("Correct-Horse-99-Battery");
+        app.answer_passcode("Correct-Horse-99-Battery");
+
+        let told = said(&app);
+        assert!(told.contains("keeps no permissions"), "{told}");
+        assert!(told.contains("nothing was set"), "{told}");
+        let doc = app.doc.as_ref().expect("doc");
+        assert!(!doc.session.is_secured(), "a password was set with the restriction dropped");
+    }
+
+    /// And the window says it before a password is typed, with the button
+    /// held back.
+    #[test]
+    fn the_password_window_says_secure_plus_would_lose_the_restriction() {
+        use eframe::App as _;
+        use egui_kittest::kittest::Queryable;
+        use egui_kittest::Harness;
+
+        let app = app("two-column.pdf");
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1200.0, 900.0))
+            .build_ui_state(
+                |ui, app: &mut PagifyApp| {
+                    let mut frame = eframe::Frame::_new_kittest();
+                    app.ui(ui, &mut frame);
+                },
+                app,
+            );
+        h.run_steps(2);
+        h.state_mut().submit("secure readonly");
+        h.run();
+        h.get_by_label("Secure Plus").click();
+        h.run();
+        // The command line already quotes "reading only"; the warning is the
+        // one that names both.
+        h.get_by_label_contains("keeps no permissions, so \"reading only\"");
     }
 
     /// Secure Plus says the thing that makes it different.
