@@ -2405,12 +2405,12 @@ impl PagifyApp {
             doc.rendered_is_stale();
         }
         self.text = None;
-        // Says the thing somebody will otherwise learn the hard way: the
-        // signature is over the file as it now stands, and the next edit
-        // breaks it.
+        // Says the two things somebody will otherwise learn the hard way:
+        // the signature is not on disk until a save writes it, and it covers
+        // the file as it now stands — an edit after this is outside it.
         Ok(format!(
-            "signed as {who}. The signature covers the file as it is now — \
-             anything changed after this breaks it."
+            "signed as {who} — save to write it out. The signature covers the file \
+             exactly as it is now; anything changed after this breaks it."
         ))
     }
 
@@ -6303,6 +6303,10 @@ impl PagifyApp {
         // the page's content stream, so any signature over this document is void
         // whichever way it is written.
         let incremental = !doc.session.must_save_full_copy();
+        // A rewrite relocates every object, and a signature covers a byte
+        // range: one made before the redaction or the password is void
+        // afterwards. Said at the save, which is where it happens.
+        let signatures_lost = if incremental { 0 } else { doc.session.signature_count() };
         match doc.session.save_to(&path, incremental) {
             Ok(()) => {
                 self.saved_revision = self.markup.revision();
@@ -6311,6 +6315,13 @@ impl PagifyApp {
                     path.display(),
                     if incremental { "" } else { " — the file was rewritten" }
                 ));
+                if signatures_lost > 0 {
+                    self.say_error(format!(
+                        "the rewrite broke {signatures_lost} signature{} — sign after redacting \
+                         or securing, not before.",
+                        if signatures_lost == 1 { "" } else { "s" }
+                    ));
+                }
                 if !skipped.is_empty() {
                     self.say_error(format!(
                         "{} mark{} could not be stored and will not come back: {}",
@@ -14318,6 +14329,40 @@ mod lock_wiring_tests {
         let mut app = app("two-column.pdf");
         app.submit("timestamp not-an-address");
         assert!(said(&app).contains("http://"), "{}", said(&app));
+    }
+
+    /// **A certified document is unsaved work until it is saved, and what
+    /// the save writes is the signed file.** Found by audit: the signed bytes
+    /// lived only in memory, marked clean; a save re-serialised the document
+    /// and broke the signature; a close discarded it without asking.
+    #[test]
+    fn certifying_is_unsaved_work_and_saving_writes_the_signed_file() {
+        let certificate = std::path::Path::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer.p12"),
+        );
+        if !certificate.is_file() {
+            eprintln!("skipping: no test certificate");
+            return;
+        }
+        let mut app = app("two-column.pdf");
+        assert!(!app.would_lose_work());
+        app.submit(&format!("certify {}", certificate.display()));
+        app.answer_passcode("pagify");
+        assert!(said(&app).contains("signed as"), "{}", said(&app));
+        assert!(app.would_lose_work(), "a signature not yet on disk was not guarded");
+
+        let out = std::env::temp_dir().join(format!("pagify-certified-{}.pdf", std::process::id()));
+        app.submit(&format!("saveas {}", out.display()));
+        assert!(said(&app).contains("saved"), "{}", said(&app));
+        assert!(!app.would_lose_work(), "saved, and still guarded");
+
+        // The file on disk, checked with none of the signing code in the way.
+        let bytes = std::fs::read(&out).expect("the file was written");
+        let _ = std::fs::remove_file(&out);
+        let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+        let found = pdf_core::pdf::validate::check(&file, &bytes).expect("check");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].verdict, pdf_core::pdf::validate::Verdict::Unaltered, "{:?}", found[0]);
     }
 
     /// **Signing says the thing people learn the hard way.**

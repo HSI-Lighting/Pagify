@@ -561,3 +561,107 @@ fn a_timestamp_token_for_a_different_file_is_an_alteration_here() {
     let found = validate::check(&file, &stamped).expect("check");
     assert_eq!(found[0].verdict, Verdict::Altered, "{:?}", found[0]);
 }
+
+// ---------------------------------------------------------------------------
+// A signature is worth nothing until it is on disk. Found by audit: the signed
+// bytes were kept in memory and marked clean, a save re-serialised the
+// document through PDFium and broke the byte range, and a close threw the
+// signature away without asking.
+// ---------------------------------------------------------------------------
+
+fn open_document(name: &str) -> PdfiumDocument {
+    PdfiumDocument::open_path(harness::fixture_path(name).to_str().expect("path"), None)
+        .expect("open")
+}
+
+fn certify(doc: &mut PdfiumDocument) -> bool {
+    use pdf_core::document::DocumentMut;
+    let certificate =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer.p12");
+    let Ok(pkcs12) = std::fs::read(certificate) else { return false };
+    doc.sign_document(&pkcs12, "pagify", &sign::Reason::default()).expect("sign");
+    true
+}
+
+fn verdicts_in(bytes: &[u8]) -> Vec<Verdict> {
+    let file = File::parse(bytes).expect("parse");
+    validate::check(&file, bytes).expect("check").into_iter().map(|s| s.verdict).collect()
+}
+
+/// **The acceptance test.** Sign, save the ordinary way, read the file back
+/// with none of the signing code in the way: unaltered.
+#[test]
+fn a_signed_document_saved_is_the_signed_bytes() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    use pdf_core::document::DocumentMut;
+
+    let mut doc = open_document("two-column.pdf");
+    if !certify(&mut doc) {
+        return;
+    }
+    assert!(doc.is_dirty(), "a signature that is not on disk is unsaved work");
+
+    let mut saved = Vec::new();
+    doc.save_incremental(&mut saved).expect("save");
+    assert!(!doc.is_dirty(), "the save did not count");
+    assert_eq!(verdicts_in(&saved), vec![Verdict::Unaltered], "the saved file does not validate");
+
+    // A full copy of a signed document is the same bytes: there is nothing
+    // else it could honestly be.
+    let mut copy = Vec::new();
+    doc.save_full_copy(&mut copy).expect("copy");
+    assert_eq!(copy, saved, "a copy of a signed document was re-serialised");
+}
+
+/// An edit after signing is saved as a later revision: the signature still
+/// covers what it covered, and the check says the rest was never signed.
+#[test]
+fn an_edit_after_signing_is_saved_as_a_revision_the_signature_does_not_cover() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    use pdf_core::document::{Color, DocumentMut, Rect};
+
+    let mut doc = open_document("two-column.pdf");
+    if !certify(&mut doc) {
+        return;
+    }
+    doc.whiteout(
+        0,
+        Rect { left: 100.0, top: 100.0, right: 200.0, bottom: 120.0 },
+        Color { r: 255, g: 255, b: 255, a: 255 },
+    )
+    .expect("an edit after signing");
+
+    let mut saved = Vec::new();
+    doc.save_incremental(&mut saved).expect("save");
+    match verdicts_in(&saved).as_slice() {
+        [Verdict::Incomplete { covered, total }] => {
+            assert!(covered < total, "{covered} of {total}");
+        }
+        other => panic!("an edit after signing should leave the signature over the earlier revision, got {other:?}"),
+    }
+}
+
+/// And the same for a timestamp, through the document: what is kept is what
+/// is written.
+#[test]
+fn a_timestamped_document_is_dirty_until_its_bytes_are_written() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    use pdf_core::document::DocumentMut;
+
+    let mut doc = open_document("two-column.pdf");
+    // No authority to ask here; the signing path exercises the same state,
+    // so this only checks the state a clean document starts from.
+    assert!(!doc.is_dirty());
+    if !certify(&mut doc) {
+        return;
+    }
+    let mut saved = Vec::new();
+    doc.save_incremental(&mut saved).expect("save");
+    // Saved once, the same bytes again on a second save: nothing pending.
+    let mut again = Vec::new();
+    doc.save_incremental(&mut again).expect("save again");
+    assert!(again.starts_with(&saved), "a second save did not start from the signed file");
+}

@@ -149,6 +149,18 @@ pub struct PdfiumDocument {
     /// path needs nothing here: its file is on disk and can be read back.
     /// `None` means "ask the source", and it is the ordinary case.
     written: Option<Vec<u8>>,
+    /// Whether `written` holds bytes that have not reached the disk.
+    ///
+    /// **Signing produces the file; nothing else can.** The signed bytes are
+    /// exact — a byte range and a digest over it — and the only way they get
+    /// to disk is to be written verbatim. A save that asked PDFium to write
+    /// the document again relocated every object and broke the signature it
+    /// had just made; a close discarded it without a word, because the
+    /// document had been marked clean to stop that save. Found by audit: a
+    /// certified document could not actually be saved. Set by signing and
+    /// timestamping, cleared by the save that writes the bytes, and by any
+    /// edit — after which the file to write is those bytes plus a revision.
+    exact_pending: bool,
     /// Whether this document was opened by giving a password.
     ///
     /// Which is to say: the file it came from is already encrypted, and cannot
@@ -203,6 +215,47 @@ unsafe impl Send for PdfiumDocument {}
 unsafe impl Sync for PdfiumDocument {}
 
 impl PdfiumDocument {
+    /// Write a signed document's bytes verbatim, when that is what the
+    /// document is. `Ok(true)` when it was written; the caller has nothing
+    /// more to write.
+    ///
+    /// Two cases, one rule — **a signed document that has not changed is its
+    /// bytes**: the ones just produced by signing and not yet on disk, and
+    /// the ones on disk when nothing has been done since. Re-serialising
+    /// either through PDFium relocates every object and breaks the signature
+    /// for nothing.
+    fn write_exact_if_unchanged(&mut self, dest: &mut dyn Write) -> Result<bool> {
+        let unchanged = !self.dirty
+            && !self.remove_password
+            && self.security.is_none()
+            && !self.redacted
+            && PdfiumDocument::signature_count(self) > 0;
+        if !(self.exact_pending || unchanged) {
+            return Ok(false);
+        }
+        let bytes = match (&self.written, &self.source) {
+            (Some(exact), _) => exact.clone(),
+            (None, DocumentSource::Path(path)) if unchanged => std::fs::read(path)?,
+            _ => {
+                // Pending with nothing kept cannot happen; treated as nothing
+                // pending rather than as a reason to write nothing.
+                self.exact_pending = false;
+                return Ok(false);
+            }
+        };
+        dest.write_all(&bytes)?;
+        self.dirty = false;
+        self.exact_pending = false;
+        Ok(true)
+    }
+
+    /// Record a change: a save is owed, and the file to write is no longer
+    /// exactly the one a signature was made over, if one was.
+    fn touch(&mut self) {
+        self.dirty = true;
+        self.exact_pending = false;
+    }
+
     /// Earlier revisions and orphaned objects exist only in the file as
     /// written; the bytes PDFium re-emits have neither, so a survey of those
     /// alone always reported one revision and nothing unreachable — for a
@@ -362,6 +415,7 @@ impl PdfiumDocument {
             security: None,
             redacted: false,
             written: None,
+            exact_pending: false,
             typing_fonts: Vec::new(),
             substituted: None,
         })
@@ -968,7 +1022,7 @@ impl Document for PdfiumDocument {
             }));
         }
 
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -1300,7 +1354,7 @@ impl Document for PdfiumDocument {
             *cached = None;
         }
         self.rearm_security(was_secured, plus, permissions);
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -1632,7 +1686,7 @@ impl Document for PdfiumDocument {
             *cached = None;
         }
         self.rearm_security(was_secured, plus, permissions);
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -2202,7 +2256,7 @@ impl DocumentMut for PdfiumDocument {
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
         self.page_count += 1;
-        self.dirty = true;
+        self.touch();
 
         let page = RawPage::open(self.document.handle(), index)?;
         let bindings = pdfium()?.bindings();
@@ -2282,7 +2336,7 @@ impl DocumentMut for PdfiumDocument {
             _ => PdfPageRenderRotation::None,
         });
 
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -2555,7 +2609,7 @@ impl DocumentMut for PdfiumDocument {
             ));
         }
 
-        self.dirty = true;
+        self.touch();
         Ok((previous, was))
     }
 
@@ -2586,7 +2640,7 @@ impl DocumentMut for PdfiumDocument {
         // The boundary lives in the page dictionary, not in its content stream,
         // so there is no content to regenerate — but the page must still be
         // marked changed or the save will not carry it.
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -2994,7 +3048,7 @@ impl DocumentMut for PdfiumDocument {
         });
         // PDF's own handler, so any reader can ask for it.
         self.secure_plus = false;
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3019,7 +3073,7 @@ impl DocumentMut for PdfiumDocument {
             permissions: crate::pdf::encrypt::Permissions::all(),
         });
         self.secure_plus = true;
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3043,7 +3097,7 @@ impl DocumentMut for PdfiumDocument {
         if has_existing {
             self.remove_password = true;
         }
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3092,10 +3146,11 @@ impl DocumentMut for PdfiumDocument {
         if let Ok(mut cached) = self.vault.lock() {
             *cached = None;
         }
-        // **Saving again would break it.** The signature is over the bytes as
-        // written; anything that rewrites them invalidates it. Marked clean so
-        // the obvious next action is not the one that undoes the work.
-        self.dirty = false;
+        // **The signed bytes are the file, and they are not on disk yet.** A
+        // save writes them verbatim — see `exact_pending` — so the document is
+        // dirty, and closing it now would lose the signature.
+        self.dirty = true;
+        self.exact_pending = true;
         Ok(who)
     }
 
@@ -3139,9 +3194,10 @@ impl DocumentMut for PdfiumDocument {
         if let Ok(mut cached) = self.vault.lock() {
             *cached = None;
         }
-        // As with a signature: it covers the bytes as written, so the obvious
-        // next action must not be the one that undoes it.
-        self.dirty = false;
+        // As with a signature: the token covers these bytes, and a save
+        // writes them verbatim.
+        self.dirty = true;
+        self.exact_pending = true;
         Ok(())
     }
 
@@ -3206,7 +3262,7 @@ impl DocumentMut for PdfiumDocument {
             return Err(PdfError::Pdfium("the signature could not be marked".into()));
         }
 
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3297,7 +3353,7 @@ impl DocumentMut for PdfiumDocument {
             )?;
         }
 
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3308,7 +3364,7 @@ impl DocumentMut for PdfiumDocument {
             // Absent on most pages most of the time; not an error.
             let _ = self.remove_text(page_index, STAMP_ID);
         }
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3376,7 +3432,7 @@ impl DocumentMut for PdfiumDocument {
         if let Ok(mut cached) = self.vault.lock() {
             *cached = None;
         }
-        self.dirty = true;
+        self.touch();
         // The file now holds one revision, and appending to it would start the
         // problem over: an earlier version of every page, in front of the new
         // one.
@@ -3423,7 +3479,7 @@ impl DocumentMut for PdfiumDocument {
                 return Err(PdfError::Pdfium("this page could not be transformed".into()));
             }
         }
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3446,7 +3502,7 @@ impl DocumentMut for PdfiumDocument {
             // window the size of the old page onto the new one.
             bindings.FPDFPage_SetCropBox(page.handle, 0.0, 0.0, width_pt, height_pt);
         }
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3516,7 +3572,7 @@ impl DocumentMut for PdfiumDocument {
         // the honest answer: this call added no annotation.
         if let Annotation::Text { .. } = annotation {
             self.write_text(&page, annotation)?;
-            self.dirty = true;
+            self.touch();
             let count =
                 unsafe { pdfium()?.bindings().FPDFPage_GetAnnotCount(page.handle) }.max(0);
             return Ok(count as usize);
@@ -3534,7 +3590,7 @@ impl DocumentMut for PdfiumDocument {
             ));
         }
 
-        self.dirty = true;
+        self.touch();
         Ok((count - 1) as usize)
     }
 
@@ -3559,7 +3615,7 @@ impl DocumentMut for PdfiumDocument {
             )));
         }
 
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3764,6 +3820,12 @@ impl DocumentMut for PdfiumDocument {
 
 
     fn save_full_copy(&mut self, dest: &mut dyn Write) -> Result<()> {
+        // A document signed and not touched since *is* its signed bytes: a
+        // copy of it is those bytes, and rewriting them would break the
+        // signature for nothing.
+        if self.write_exact_if_unchanged(dest)? {
+            return Ok(());
+        }
         // A rewrite, and safe to build on the binding's own save: this is the
         // path that is *supposed* to relocate every object. Never the default —
         // it is what destroys a signature's byte range.
@@ -3825,6 +3887,13 @@ impl DocumentMut for PdfiumDocument {
             ));
         }
 
+        // The signed bytes themselves, when that is what the document is.
+        // Otherwise PDFium's incremental save starts from those same bytes
+        // — it was reopened from them — and appends the changes since, so a
+        // signature made earlier still covers the revision it was made over.
+        if self.write_exact_if_unchanged(dest)? {
+            return Ok(());
+        }
         let bytes = close_trailing_xref_object(self.save_with_flags(FPDF_INCREMENTAL)?);
         dest.write_all(&bytes)?;
         self.dirty = false;
@@ -3858,7 +3927,7 @@ impl DocumentMut for PdfiumDocument {
         }
 
         self.page_count -= 1;
-        self.dirty = true;
+        self.touch();
         Ok(RemovedPage::new(size, payload))
     }
 
@@ -3896,7 +3965,7 @@ impl DocumentMut for PdfiumDocument {
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
 
         self.page_count += 1;
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -3960,7 +4029,7 @@ impl DocumentMut for PdfiumDocument {
             current.insert(position, moved);
         }
 
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -4600,7 +4669,7 @@ impl PdfiumDocument {
         let reopened = Self::open_bytes(rewritten, None)?;
         self.document = reopened.document;
         self.page_count = reopened.page_count;
-        self.dirty = true;
+        self.touch();
         self.redacted = true;
 
         Ok(RedactionReport {
@@ -4839,7 +4908,7 @@ fn font_to_unicode(
         if unsafe { bindings.FPDFPage_GenerateContent(raw.handle) } == 0 {
             return Err(PdfError::Pdfium("the page could not be rewritten".into()));
         }
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -5090,7 +5159,7 @@ fn font_to_unicode(
             *cached = None;
         }
         self.rearm_security(was_secured, plus, permissions);
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -5802,7 +5871,7 @@ fn font_to_unicode(
             *cached = None;
         }
         self.rearm_security(was_secured, plus, permissions);
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -6036,7 +6105,7 @@ fn font_to_unicode(
         // Recorded rather than returned, so the caller can say what happened
         // without every signature in the chain growing a field for it.
         self.substituted = swap.map(|s| s.face);
-        self.dirty = true;
+        self.touch();
         Ok(previous)
     }
 
@@ -6233,7 +6302,7 @@ fn font_to_unicode(
             *cached = None;
         }
         self.rearm_security(was_secured, plus, permissions);
-        self.dirty = true;
+        self.touch();
         Ok(())
     }
 
@@ -6322,7 +6391,7 @@ fn font_to_unicode(
         }
         // The source stays as it was — this is still the same document, from
         // wherever it came from — and it is still unsaved.
-        self.dirty = true;
+        self.touch();
         // A document carrying a lock must be saved as a full copy, or the
         // image stays in the file's earlier revision.
         self.redacted = true;
@@ -6699,7 +6768,7 @@ fn font_to_unicode(
             return Err(PdfError::Pdfium("the lock could not be written".into()));
         }
 
-        self.dirty = true;
+        self.touch();
         // A locked document carries its original inside itself. Appending a
         // delta would leave the *unsealed* page in the file's earlier revision,
         // which is the same trap redaction has and the same answer.
@@ -8615,7 +8684,7 @@ impl PdfiumDocument {
             return Err(PdfError::Pdfium("the page could not be rewritten".into()));
         }
 
-        self.dirty = true;
+        self.touch();
         // Set even when the rectangle matched nothing. Whether an incremental
         // save is safe is not a judgement to make from one rectangle's yield.
         self.redacted = true;
@@ -10082,7 +10151,7 @@ impl PdfiumDocument {
         // list the caller does not know how many arrived, and after a partial
         // failure neither would we.
         self.page_count = self.document.pages().len() as usize;
-        self.dirty = true;
+        self.touch();
         Ok(self.page_count.saturating_sub(before))
     }
 }
