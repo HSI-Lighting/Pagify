@@ -1,0 +1,19 @@
+# What every binary under third_party/ must hash to.
+#
+# Checked by tools/verify_third_party.sh, and by tools/fetch_pdfium.sh after
+# each download — a PDFium that does not match is deleted, not loaded. The
+# PDFium lines are for release chromium/7881 of bblanchon/pdfium-binaries;
+# moving the pin means re-deriving them from the release's own assets and
+# changing them here on purpose, in the same commit.
+#
+# Format: sha256sum / shasum -a 256, paths relative to this directory.
+f2ffc3e5ef41cb02c8b716a838c0d6b977b1f76bf4be9a27172a41023ff3a62e  fonts/Montserrat-Bold.ttf
+f51f410374dd54f45717a3f83159d03e62cf07ac34e16d85cbd3b5eabff80eae  fonts/Montserrat-Regular.ttf
+3f89c135b9b61391659de07183e82c26d265dd05ce5af19792c550b1bc1fbe7d  icons/pagify-icons.ttf
+f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca  ocr/text-detection.rten
+e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e  ocr/text-recognition.rten
+f728930966f503652b92acc89b9374a2eeca00ce42e26dccd3e4b5c5161b2d64  pdfium/pdfium-linux-x64/lib/libpdfium.so
+1bc45b15466b34cef96641ce25c77a876e70010c6b114f909dda2f5325fc5bd7  pdfium/pdfium-mac-arm64/lib/libpdfium.dylib
+4eaad6c3e8d786cf6f66a45d7d014edf5c65f372f98c3070e66595ebb50e43d9  pdfium/pdfium-mac-x64/lib/libpdfium.dylib
+79d4676b656cfb1abcea88f9ade3b4b0826c5200382db5f4ec72a636c598c118  pdfium/pdfium-win-x64/bin/pdfium.dll
+7cdd473f6b4fd454c9761ae9de41c1241afd18420c136ca1112730c37b8ef544  pdfium/pdfium-win-x64/lib/pdfium.dll.lib

@@ -10,11 +10,69 @@
 # PDFium is pinned to chromium/7881 to match `pdfium-render`'s `pdfium_latest`
 # feature. Changing one without the other is an ABI mismatch that presents as a
 # crash inside PDFium with no Rust frame to look at.
+#
+# **What is downloaded is checked before it is kept.** The library in each
+# slice must hash to the line for it in third_party/CHECKSUMS.sha256; one that
+# does not is deleted and the script fails. Found by audit: this used to be
+# `curl | tar` with nothing between a release page and a native library that
+# runs in-process with every document. Moving the pin means re-deriving the
+# checksums from the new release's own assets and changing both on purpose.
 set -euo pipefail
 
-TAG="${PDFIUM_TAG:-chromium/7881}"
-DEST="${1:-$(cd "$(dirname "$0")/.." && pwd)/third_party/pdfium}"
+PINNED="chromium/7881"
+TAG="${PDFIUM_TAG:-$PINNED}"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DEST="${1:-$ROOT/third_party/pdfium}"
 BASE="https://github.com/bblanchon/pdfium-binaries/releases/download"
+CHECKSUMS="$ROOT/third_party/CHECKSUMS.sha256"
+
+if [ "$TAG" != "$PINNED" ]; then
+  echo "PDFIUM_TAG=$TAG is not the pinned $PINNED: the checksums in $CHECKSUMS are for the" >&2
+  echo "pinned release, so anything fetched will be refused. Change both together." >&2
+  exit 1
+fi
+
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# The library file inside a slice, as CHECKSUMS names it (relative to third_party).
+library_in() {
+  case "$1" in
+    pdfium-win-x64) echo "pdfium/$1/bin/pdfium.dll" ;;
+    pdfium-linux-x64) echo "pdfium/$1/lib/libpdfium.so" ;;
+    *) echo "pdfium/$1/lib/libpdfium.dylib" ;;
+  esac
+}
+
+# Check a slice's library against its pinned checksum; delete the slice on a
+# mismatch so nothing unverified is left where the loader looks.
+verify_slice() {
+  local slice="$1" rel expected actual
+  rel="$(library_in "$slice")"
+  expected="$(grep -E "  ${rel}\$" "$CHECKSUMS" | cut -d' ' -f1 || true)"
+  if [ -z "$expected" ]; then
+    echo "        REFUSED — no checksum for $rel in $CHECKSUMS" >&2
+    rm -rf "$DEST/$slice"
+    return 1
+  fi
+  if [ ! -f "$ROOT/third_party/$rel" ]; then
+    echo "        REFUSED — $rel is not in the archive" >&2
+    rm -rf "$DEST/$slice"
+    return 1
+  fi
+  actual="$(sha256_of "$ROOT/third_party/$rel")"
+  if [ "$actual" != "$expected" ]; then
+    echo "        REFUSED — $rel hashes to $actual, expected $expected" >&2
+    rm -rf "$DEST/$slice"
+    return 1
+  fi
+  echo "        verified $rel"
+}
 
 # slice directory : release asset
 SLICES=(
@@ -44,6 +102,7 @@ for entry in "${SLICES[@]}"; do
   mkdir -p "$DEST/$slice"
   tar -xzf "$tmp/$asset" -C "$DEST/$slice"
   rm -rf "$tmp"
+  verify_slice "$slice"
 done
 
 echo

@@ -23,13 +23,15 @@ case "$ARCH" in
   *) echo "unsupported arch $ARCH" >&2; exit 1 ;;
 esac
 
+# Only this workspace's own, checked tree — the fallback to the phone builds'
+# copy in the parent repository went with the audit: nothing checked it.
 DYLIB="$ROOT/third_party/pdfium/$SLICE/lib/libpdfium.dylib"
-if [ ! -f "$DYLIB" ]; then
-  # Fall back to the Pagify repo's vendored copy, which is where development
-  # builds find it.
-  DYLIB="$ROOT/../third_party/pdfium/$SLICE/lib/libpdfium.dylib"
-fi
 [ -f "$DYLIB" ] || { echo "no PDFium for $ARCH — run tools/fetch_pdfium.sh" >&2; exit 1; }
+
+# What goes into the bundle is what the checksums say it is. A native library
+# that runs in-process with every document is not worth shipping on trust.
+echo "==> verify third_party"
+"$ROOT/tools/verify_third_party.sh"
 
 echo "==> build"
 cargo build --release -p pagify_app

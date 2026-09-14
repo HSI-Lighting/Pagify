@@ -39,22 +39,18 @@ const SLICE: (&str, &str) = ("pdfium-linux-x64", "lib/libpdfium.so");
 compile_error!(
     "No PDFium slice is mapped for this target. Add one to SLICE in \
      crates/pagify_shell/src/pdfium.rs and fetch the matching binary into \
-     third_party/pdfium/ — see tools/fetch_pdfium.ps1, which currently fetches \
-     the Apple slices only."
+     third_party/pdfium/ — tools/fetch_pdfium.sh fetches and checks the four \
+     it knows."
 );
 
 /// This workspace's own PDFium tree, resolved from the crate rather than the
 /// working directory so a test runner and the app agree about where it is.
-/// Populated by `tools/fetch_pdfium.sh`.
+/// Populated by `tools/fetch_pdfium.sh`, which checks what it fetches against
+/// `third_party/CHECKSUMS.sha256` — **the only tree this loads from**. There
+/// used to be a fallback to the phone builds' tree in the parent repository,
+/// which nothing checked; found by audit, and dropped. A checkout without the
+/// slices runs the fetch script.
 const VENDORED_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_party/pdfium");
-
-/// The Pagify repo's tree, which carries the Apple slices the phone builds use.
-/// Kept as a fallback so a checkout that has not run the fetch script still
-/// builds on a Mac.
-const PAGIFY_ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../../third_party/pdfium"
-);
 
 /// The library file this build expects, wherever it is found.
 pub fn library_file_name() -> &'static str {
@@ -77,13 +73,8 @@ pub fn locate() -> Option<PathBuf> {
         }
     }
 
-    for root in [VENDORED_ROOT, PAGIFY_ROOT] {
-        let vendored = PathBuf::from(root).join(SLICE.0).join(SLICE.1);
-        if vendored.is_file() {
-            return Some(vendored);
-        }
-    }
-    None
+    let vendored = PathBuf::from(VENDORED_ROOT).join(SLICE.0).join(SLICE.1);
+    vendored.is_file().then_some(vendored)
 }
 
 /// Point `pdf_core` at a PDFium build. Idempotent, and safe to call from every
