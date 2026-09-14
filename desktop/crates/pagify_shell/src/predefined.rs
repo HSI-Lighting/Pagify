@@ -85,16 +85,7 @@ impl Predefined {
     // -- persistence, same shape as `Recent` ---------------------------------
 
     pub fn path() -> Option<PathBuf> {
-        let base = if cfg!(target_os = "macos") {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
-        } else if cfg!(target_os = "windows") {
-            std::env::var_os("APPDATA").map(PathBuf::from)
-        } else {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        };
-        base.map(|b| b.join("Pagify").join("predefined.json"))
+        crate::state::state_dir().map(|dir| dir.join("predefined.json"))
     }
 
     /// A missing or unreadable file is an empty list, never an error.
@@ -113,12 +104,9 @@ impl Predefined {
     /// Write the list, and say if it could not be written — the same reasoning
     /// as [`crate::signatures::Signatures::save_to`].
     pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let text = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, text)
+        crate::state::write_own(path, text.as_bytes())
     }
 }
 

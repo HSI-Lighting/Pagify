@@ -4409,6 +4409,22 @@ impl PagifyApp {
             Verb::RotatePages { pages, quarters } => self.rotate_pages(&pages, quarters),
             Verb::ExtractText(spec) => self.extract_text(&spec),
             Verb::OutlinedFont(action) => self.outlined_font_action(action),
+            Verb::ClearHistory => {
+                // The list is a record of what somebody has been reading;
+                // clearing it removes the file, and says what else is kept
+                // beside it so they can decide about those too.
+                let where_kept = pagify_shell::state::state_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| "nowhere on this system".into());
+                match self.recent.forget_all() {
+                    Ok(()) => self.say_info(format!(
+                        "the recent-documents list is gone. Pagify keeps its own files in \
+                         {where_kept}: predefined.json (saved texts), signatures.json (drawn \
+                         signatures), and scripts/ (recordings) — delete any of them there."
+                    )),
+                    Err(e) => self.say_error(format!("could not remove the list: {e}")),
+                }
+            }
 
             // The typed form of pressing Enter over the page.
             Verb::Finish => {
@@ -16069,6 +16085,22 @@ mod lock_wiring_tests {
         assert!(written.is_file(), "the script is not where it was said to be: {told}");
         assert!(!std::path::Path::new("stamp-every-page.json").exists(), "it also wrote beside the process");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **What Pagify keeps about somebody can be cleared, and they are told
+    /// where the rest is.** Found by audit: the recent list, texts and
+    /// signatures were kept in plaintext with no way to clear them from
+    /// inside the app, and nothing said where they were.
+    #[test]
+    fn clearhistory_forgets_the_recent_list_and_says_where_the_rest_is_kept() {
+        let mut app = app("two-column.pdf");
+        app.recent.record(std::path::Path::new("/tmp/something.pdf"), 3, 0);
+        assert!(!app.recent.entries.is_empty());
+        app.submit("clearhistory");
+        let told = said(&app);
+        assert!(app.recent.entries.is_empty(), "the list was not cleared: {told}");
+        assert!(told.contains("recent-documents list is gone"), "{told}");
+        assert!(told.contains("signatures.json"), "it did not say what else is kept: {told}");
     }
 
     /// **Smart Redact reports before it acts, and says what it found.**

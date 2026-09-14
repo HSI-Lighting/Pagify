@@ -92,16 +92,7 @@ impl Recent {
     /// next to the executable — a bundle should be read-only, and on Windows it
     /// is in Program Files where it certainly is.
     pub fn path() -> Option<PathBuf> {
-        let base = if cfg!(target_os = "macos") {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
-        } else if cfg!(target_os = "windows") {
-            std::env::var_os("APPDATA").map(PathBuf::from)
-        } else {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        };
-        base.map(|b| b.join("Pagify").join("recent.json"))
+        crate::state::state_dir().map(|dir| dir.join("recent.json"))
     }
 
     /// Read the list. A missing or unreadable file is an empty list, never an
@@ -114,11 +105,19 @@ impl Recent {
 
     pub fn save(&self) {
         let Some(path) = Recent::path() else { return };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
+            let _ = crate::state::write_own(&path, text.as_bytes());
+        }
+    }
+
+    /// Forget every entry, on disk as well: the file goes, not an empty list
+    /// in its place. The paths and page counts in it are a record of what
+    /// somebody has been reading, and "clear" has to mean gone.
+    pub fn forget_all(&mut self) -> std::io::Result<()> {
+        self.entries.clear();
+        match Recent::path() {
+            Some(path) if path.exists() => std::fs::remove_file(path),
+            _ => Ok(()),
         }
     }
 }

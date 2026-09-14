@@ -425,6 +425,9 @@ pub enum Verb {
     /// Manage the extra fonts tried, alongside the bundled ones, when a page
     /// turns out to be outlined type rather than real text.
     OutlinedFont(OutlinedFontAction),
+    /// Forget the recent-documents list, on disk too, and say where Pagify
+    /// keeps what is its own.
+    ClearHistory,
 
     /// What the pointer does on the page.
     ///
@@ -1055,6 +1058,7 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
                 Ok(Verb::OutlinedFont(OutlinedFontAction::Add(resolve_path(tail))))
             }
         }
+        "clearhistory" | "forgethistory" => Ok(Verb::ClearHistory),
         "selecttool" => Ok(Verb::Pointer(PointerMode::Select)),
         "hand" | "pan" => Ok(Verb::Pointer(PointerMode::Pan)),
         "open" => {

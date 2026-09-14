@@ -239,7 +239,7 @@ view       page <n|next|prev|first|last>   zoom <percent|in|out|fit|width|actual
 organize   extract <pages> <file>   import <file> [pages]   deletepage <pages>   insertpage   movepage <pages> <before>
 review     highlight   note <text>
 measure    calibrate <distance> [unit]   pagescale   measure <distance|area>
-automate   record [name]   stop   replay <script.json>
+automate   record [name]   stop   replay <script.json>   clearhistory
 edit       undo redo
 drawing    every SIMLUX command — line, polyline, trim, fillet, offset, … — with the same aliases
 ```
@@ -248,6 +248,26 @@ Page operations are spelt out — `deletepage`, `insertpage`, `pagescale` —
 because `delete`, `insert` and `scale` are live drawing commands in the kernel.
 The guard test in `tests/command_box.rs` is what caught all six of those
 collisions.
+
+## What Pagify keeps about you, and where
+
+Everything Pagify keeps for itself lives in one folder, under the platform's
+per-user configuration directory — `~/Library/Application Support/Pagify` on
+macOS, `%APPDATA%\Pagify` on Windows, `$XDG_CONFIG_HOME/Pagify` (or
+`~/.config/Pagify`) on Linux — readable by the user alone where the platform
+can say so. Nothing is kept beside a document or beside the executable.
+
+| file | what it holds |
+|---|---|
+| `recent.json` | the documents opened recently: path, page count, when |
+| `predefined.json` | texts saved with `predefined` for typing into forms |
+| `signatures.json` | drawn signatures, as strokes, with their names |
+| `scripts/*.json` | recordings made with `record` |
+
+All of it is plain JSON, on purpose: it is yours to read. `clearhistory`
+removes the recent list from inside the app and names the folder; delete any
+of the others there. Passwords are never written to any of them, and never
+into the command history.
 
 ## PDFium
 
