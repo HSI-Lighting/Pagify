@@ -45,6 +45,42 @@ pub struct KdfParams {
     pub lanes: u32,
 }
 
+impl KdfParams {
+    /// The most memory a document may ask a derivation to use, in KiB: 1 GiB.
+    pub const MAX_MEMORY_KIB: u32 = 1024 * 1024;
+    /// The most passes.
+    pub const MAX_TIME: u32 = 10;
+    /// The most lanes.
+    pub const MAX_LANES: u32 = 16;
+
+    /// Refuse costs beyond what any document of ours would carry.
+    ///
+    /// **The parameters come from the file, and the file is untrusted.** A
+    /// document that names `/M 4294967295` asks for four terabytes, and one
+    /// that names `/T 4294967295` for four billion passes — before the
+    /// password has been checked, because the check needs the key, so typing
+    /// anything at all set it off. Found by audit. The ceilings are far above
+    /// what this engine ever writes and well below what a machine can give.
+    pub fn check(&self) -> Result<()> {
+        if self.memory_kib > Self::MAX_MEMORY_KIB
+            || self.time > Self::MAX_TIME
+            || self.lanes > Self::MAX_LANES
+        {
+            return Err(PdfError::InvalidArgument(format!(
+                "this document asks for a key derivation costing more than is allowed here \
+                 ({} KiB, {} passes, {} lanes; the most is {} KiB, {} and {})",
+                self.memory_kib,
+                self.time,
+                self.lanes,
+                Self::MAX_MEMORY_KIB,
+                Self::MAX_TIME,
+                Self::MAX_LANES
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl Default for KdfParams {
     /// ~48 MiB, three passes, one lane.
     ///
@@ -79,6 +115,10 @@ impl KeyDerivation for Argon2id {
         if salt.len() < 8 {
             return Err(PdfError::InvalidArgument("the salt is too short".into()));
         }
+        // Here, so every path that reads a cost out of a file — the Secure
+        // Plus dictionary, the lock's envelope, the ledger — is covered by
+        // the one check.
+        params.check()?;
 
         let settings = Params::new(params.memory_kib, params.time, params.lanes, Some(16))
             .map_err(|e| PdfError::InvalidArgument(format!("argon2: {e}")))?;
@@ -115,6 +155,35 @@ pub fn by_id(id: &str) -> Result<Box<dyn KeyDerivation>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A cost the file names is refused before a byte is allocated.**
+    /// Found by audit: `/M 4294967295` is four terabytes, asked for before
+    /// the password is checked.
+    #[test]
+    fn costs_beyond_the_ceiling_are_refused_before_deriving() {
+        let salt = [7u8; 16];
+        for params in [
+            KdfParams { memory_kib: u32::MAX, time: 1, lanes: 1 },
+            KdfParams { memory_kib: KdfParams::MAX_MEMORY_KIB + 1, time: 1, lanes: 1 },
+            KdfParams { memory_kib: 64, time: u32::MAX, lanes: 1 },
+            KdfParams { memory_kib: 64, time: 1, lanes: KdfParams::MAX_LANES + 1 },
+        ] {
+            let started = std::time::Instant::now();
+            let outcome = Argon2id.derive(b"anything", &salt, &params);
+            assert!(outcome.is_err(), "{params:?} was accepted");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "{params:?} took {:?} to refuse",
+                started.elapsed()
+            );
+            assert!(
+                outcome.unwrap_err().to_string().contains("more than is allowed"),
+                "the refusal does not say why"
+            );
+        }
+        // The defaults, which every document of ours carries, are within it.
+        KdfParams::default().check().expect("the defaults are allowed");
+    }
 
     /// Cheap parameters. The defaults are memory-hard on purpose and would make
     /// this suite crawl; what is under test here is the plumbing, and the cost

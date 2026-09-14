@@ -368,6 +368,23 @@ mod tests {
 
     /// The cost is written into the file, so a document sealed today still
     /// opens after the default changes.
+    /// **The audit's dictionary.** `/M 4294967295` in the file, any password
+    /// typed: refused at once, with nothing allocated.
+    #[test]
+    fn a_document_asking_for_terabytes_is_refused_before_the_password_is_tried() {
+        let plus = SecurePlus::new(b"open sesame", quick(), fixed).expect("secure plus");
+        let mut dict = plus.dictionary().expect("dictionary");
+        dict.set(b"M", Object::Number(b"4294967295".to_vec()));
+        let started = std::time::Instant::now();
+        let outcome = SecurePlus::open(b"open sesame", &dict);
+        assert!(outcome.is_err(), "a four-terabyte derivation was attempted");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+
+        dict.set(b"M", Object::Number(b"64".to_vec()));
+        dict.set(b"T", Object::Number(b"4294967295".to_vec()));
+        assert!(SecurePlus::open(b"open sesame", &dict).is_err());
+    }
+
     #[test]
     fn the_cost_travels_with_the_document() {
         let plus = SecurePlus::new(b"open sesame", KdfParams { memory_kib: 16, time: 2, lanes: 1 }, fixed)
