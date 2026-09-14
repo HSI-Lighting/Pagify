@@ -269,6 +269,48 @@ removes the recent list from inside the app and names the folder; delete any
 of the others there. Passwords are never written to any of them, and never
 into the command history.
 
+## Security: what is checked, and what is not
+
+A source-level security audit on 2026-09-12 found the security features
+making claims the code did not keep. Every finding was fixed on this branch,
+one commit per finding, each with a test built from the audit's own input;
+`git log --grep=audit` lists them. What the tools now guarantee:
+
+- **`validate`** verifies the signature over the signed attributes under the
+  certificate the signature carries (RSA PKCS#1 v1.5 and PSS, SHA-256/384/512)
+  and names that certificate. It does **not** decide whether to trust the
+  certificate — there is no trust store — and says so on every line. Anything
+  it cannot check (another scheme, an EC key, no certificate) is "could not be
+  checked", never "unchanged". Timestamp tokens are checked the same way, at
+  stamping time as well as afterwards.
+- **`certify`** is unsaved work until saved, and the save writes the signed
+  bytes verbatim. An edit afterwards is a later revision the signature does
+  not cover; a rewrite (after a redaction, or to put a password on) breaks it,
+  and the save says so.
+- **`smartredact`** says "gone for good" only of words proven gone; text
+  inside form XObjects is not reached and is reported as left. **`hiddendata
+  clean`** reports from a second survey of the cleaned bytes.
+- **Secure Plus** binds the whole file's structure under the key, not only its
+  strings; a reordered, dropped or repointed page is refused as a whole.
+  `secure readonly` is refused under it rather than dropped. `unsecure` takes
+  the password off the file, not only off the document in hand.
+- **A crafted document** ends the call, not the program: every call through
+  the engine registry catches a panic and returns it as an error, six panic
+  sites are clamped, nesting is capped, inflation is bounded, and a key
+  derivation the document prices beyond 1 GiB / 10 passes / 16 lanes is
+  refused before anything is allocated.
+- **What is fetched and shipped** is checked: `tools/fetch_pdfium.sh` and
+  `tools/verify_third_party.sh` against `third_party/CHECKSUMS.sha256`;
+  `tools/audit.sh` against the RustSec database, with the one accepted
+  advisory written down in `.cargo/audit.toml`. The macOS bundle runs both.
+- **Files reach the disk** through one path: staged beside the target with
+  `create_new`, the target's own permissions kept, renamed over it whole.
+
+Still open, and said plainly: no certificate trust chain; the unmaintained
+font parsers (`rustybuzz`, `ttf-parser`) await a migration; the `rsa` upgrade
+is owed when 0.10 and `cms` 0.3 ship; text inside form XObjects is not
+redacted.
+
 ## PDFium
 
 All four slices are fetched by `tools/fetch_pdfium.sh`, pinned to
