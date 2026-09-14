@@ -25,6 +25,7 @@ pub mod reader;
 pub mod recent;
 pub mod session;
 pub mod signatures;
+pub mod state;
 pub mod tools;
 pub mod models;
 pub mod outlined_fonts;

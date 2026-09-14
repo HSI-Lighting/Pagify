@@ -668,6 +668,9 @@ struct PagifyApp {
     /// settings would be a poor way to find out this works.
     signatures: pagify_shell::signatures::Signatures,
     signatures_path: Option<std::path::PathBuf>,
+    /// Where recorded scripts are written: Pagify's own folder, and nowhere
+    /// in a test.
+    scripts_dir: Option<std::path::PathBuf>,
     /// The pad, while a signature is being drawn on it.
     pad: Option<SignaturePad>,
     /// The Manage Signatures panel, while it is open.
@@ -1658,6 +1661,11 @@ impl PagifyApp {
                 pagify_shell::signatures::Signatures::load()
             },
             signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() },
+            scripts_dir: if cfg!(test) {
+                None
+            } else {
+                pagify_shell::state::state_dir().map(|d| d.join("scripts"))
+            },
             pad: None,
             signature_list: None,
             predefined: if cfg!(test) {
@@ -4449,6 +4457,15 @@ impl PagifyApp {
 
             Verb::Record(name) => {
                 let name = if name.trim().is_empty() { "script".to_string() } else { name };
+                // A name, checked now rather than when the script is written,
+                // so nothing is recorded under a name that cannot be kept.
+                let name = match pagify_shell::state::file_name_only(&name) {
+                    Ok(name) => name,
+                    Err(why) => {
+                        self.say_error(format!("record: {why}."));
+                        return;
+                    }
+                };
                 self.recorder.start(name.clone());
                 self.say_info(format!("recording `{name}` — every command from here is a step."));
             }
@@ -7853,9 +7870,24 @@ self.foreign = None;
         match self.recorder.finish() {
             None => self.say_error("not recording."),
             Some(script) => {
-                let path = PathBuf::from(format!("{}.json", script.name.replace(' ', "-")));
-                match std::fs::write(&path, script.to_json()) {
-                    Ok(()) => self.say_info(format!(
+                // **Into Pagify's own folder, under a name that is only a
+                // name.** It used to be `<name>.json` relative to wherever the
+                // process was started, with the name unchecked — so
+                // `record ../../x` wrote `../../x.json`. Found by audit.
+                let written = pagify_shell::state::file_name_only(&script.name)
+                    .and_then(|name| {
+                        self.scripts_dir
+                            .as_ref()
+                            .map(|dir| dir.join(format!("{name}.json")))
+                            .ok_or_else(|| "there is nowhere to keep scripts on this system".into())
+                    })
+                    .and_then(|path| {
+                        pagify_shell::state::write_own(&path, script.to_json().as_bytes())
+                            .map(|()| path)
+                            .map_err(|e| e.to_string())
+                    });
+                match written {
+                    Ok(path) => self.say_info(format!(
                         "{} step(s) written to {}",
                         script.steps.len(),
                         path.display()
@@ -16008,6 +16040,30 @@ mod lock_wiring_tests {
         let _ = std::fs::remove_file(&out);
         assert!(text.contains("4111 1111 1111 1111"), "the control went missing: {text}");
         assert!(!text.contains("7946"), "the telephone number survived: {text}");
+    }
+
+    /// **A recording's name is a name, and the script lands in Pagify's own
+    /// folder.** Found by audit: `record ../../x` wrote `../../x.json`
+    /// relative to wherever the process happened to be.
+    #[test]
+    fn a_recording_named_like_a_path_is_refused_and_a_good_one_lands_in_pagifys_folder() {
+        let mut app = app("two-column.pdf");
+        app.submit("record ../../x");
+        assert!(said(&app).contains("not a name"), "{}", said(&app));
+        assert!(!app.recorder.is_recording(), "it recorded under a path");
+
+        let dir = std::env::temp_dir().join(format!("pagify-scripts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        app.scripts_dir = Some(dir.clone());
+        app.submit("record stamp every page");
+        app.submit("rotate 90");
+        app.submit("stop");
+        let told = said(&app);
+        assert!(told.contains("written to"), "{told}");
+        let written = dir.join("stamp-every-page.json");
+        assert!(written.is_file(), "the script is not where it was said to be: {told}");
+        assert!(!std::path::Path::new("stamp-every-page.json").exists(), "it also wrote beside the process");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **Smart Redact reports before it acts, and says what it found.**
