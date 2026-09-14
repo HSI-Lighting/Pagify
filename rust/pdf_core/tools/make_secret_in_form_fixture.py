@@ -11,6 +11,9 @@ inside the form. Three shapes of it, chosen by the second argument:
           page asked about, left as it is on the other
   nested  the form drawn through another form — a level further down than
           the cut follows, so it is reported rather than reached
+  kerned  the form's line drawn as two operators sharing one text object —
+          `(HSI) Tj` then `[( Lighting)] TJ`, how a design program kerns —
+          so cutting the first must leave the second where it was
 """
 import zlib, sys
 
@@ -18,6 +21,9 @@ mode = sys.argv[2] if len(sys.argv) > 2 else "once"
 
 # The card number is the classic test number, which passes Luhn.
 inner = b"""BT /F1 14 Tf 1 0 0 1 10 20 Tm (Card on file: 4111 1111 1111 1111) Tj ET
+"""
+if mode == "kerned":
+    inner = b"""BT /F1 14 Tf 1 0 0 1 10 20 Tm (HSI) Tj [( Lighting) -250 (Catalogue)] TJ ET
 """
 packed_inner = zlib.compress(inner)
 

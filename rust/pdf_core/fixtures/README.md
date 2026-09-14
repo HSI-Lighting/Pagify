@@ -195,12 +195,15 @@ telephone number at page level as the control. Four shapes of it:
   private copy on the page asked about, left as it is on the other, and said.
 - `secret-in-nested-form.pdf` — the form drawn through another form, a level
   further down than the cut follows; reported, never painted over.
+- `kerned-in-form.pdf` — the form's line drawn as two operators in one text
+  object, `(HSI) Tj` then `[( Lighting) …] TJ`, how a design program kerns.
+  Cutting `HSI` whole must leave ` Lighting` where it was.
 
 They began as the security audit's probe (a number "redacted" while still in
 the file) and became the form-redaction fixtures.
 
 Rebuild them with `tools/make_secret_in_form_fixture.py fixtures/<name>.pdf
-<once|twice|shared|nested>`.
+<once|twice|shared|nested|kerned>`.
 
 ## hidden-things.pdf
 

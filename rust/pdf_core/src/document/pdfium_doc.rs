@@ -4518,6 +4518,7 @@ impl PdfiumDocument {
                 &run.rect,
                 &parts,
                 mine,
+                &[],
                 &mut cuts,
             );
         }
@@ -8249,6 +8250,7 @@ impl PdfiumDocument {
         // slicing a run drawn through a form needs, since its operators are in
         // a stream the page's glyph list cannot be asked about.
         let mut boxes: HashMap<usize, Vec<Rect>> = HashMap::new();
+        let mut loose_boxes: HashMap<usize, Vec<Rect>> = HashMap::new();
         let mut texts: HashMap<usize, String> = HashMap::new();
         let mut unreadable: HashSet<usize> = HashSet::new();
         let mut report = RedactionReport::default();
@@ -8326,6 +8328,7 @@ impl PdfiumDocument {
                     boxes.entry(object).or_default().push(Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 });
                     if inside_form[object] {
                         walked.entry(object).or_default().push('\u{FFFD}');
+                        loose_boxes.entry(object).or_default().push(Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 });
                     }
                     continue;
                 }
@@ -8339,6 +8342,15 @@ impl PdfiumDocument {
                     .push(Marked { covered: overlaps(&glyph, &area), left: l as f32 });
                 boxes.entry(object).or_default().push(glyph);
                 if inside_form[object] {
+                    let mut wide = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+                    let loose = if unsafe { bindings.FPDFText_GetLooseCharBox(text_page, index, &mut wide) } != 0 {
+                        let (l, t) = space.to_top_left(wide.left, wide.top);
+                        let (r, b) = space.to_top_left(wide.right, wide.bottom);
+                        Rect { left: l.min(r), top: t.min(b), right: l.max(r), bottom: t.max(b) }
+                    } else {
+                        glyph
+                    };
+                    loose_boxes.entry(object).or_default().push(loose);
                     let unicode = unsafe { bindings.FPDFText_GetUnicode(text_page, index) };
                     walked
                         .entry(object)
@@ -8396,6 +8408,7 @@ impl PdfiumDocument {
                             text: walked.get(&position).cloned().unwrap_or_else(|| text.clone()),
                             origin: (m.e, m.f),
                             boxes: boxes.get(&position).cloned().unwrap_or_default(),
+                            loose: loose_boxes.get(&position).cloned().unwrap_or_default(),
                             unreadable: unreadable.contains(&position),
                         });
                     }
@@ -8747,6 +8760,9 @@ struct NestedRun {
     /// Page-space glyph boxes, one per character, in the order the text page
     /// gave them.
     boxes: Vec<Rect>,
+    /// Each character's loose box — its advance box, page space — one per
+    /// character, for measuring what a cut has to keep.
+    loose: Vec<Rect>,
     /// A character whose box could not be read: the run goes whole.
     unreadable: bool,
 }
@@ -8809,14 +8825,12 @@ impl PdfiumDocument {
         let page = self.page_object(&file, request.page_index)?;
         let (stream, _) = self.page_content(&file, &page)?;
         let operations = content::parse(&stream)?;
-        let states = content::states(&operations);
         let images = self.image_names(&file, &page)?;
         let xobjects = self
             .inherited(&file, &page, b"Resources")?
             .and_then(|r| r.as_dict().and_then(|d| d.get(b"XObject")).cloned())
             .and_then(|x| file.resolve(&x).ok())
             .and_then(|x| x.as_dict().cloned());
-        let height = self.page_size(request.page_index)?.height_pt;
 
         // The page's form `Do`s, in order.
         let form_dos: Vec<(usize, Vec<u8>)> = operations
@@ -8910,21 +8924,6 @@ impl PdfiumDocument {
                     .sum()
             };
 
-            // Where this drawing of the form lands on the page: the form's own
-            // matrix, then the state at its `Do`.
-            let form_matrix = dict
-                .get(b"Matrix")
-                .and_then(|m| match m {
-                    Object::Array(items) if items.len() == 6 => {
-                        let n: Vec<f32> = items.iter().filter_map(|i| i.as_f64()).map(|v| v as f32).collect();
-                        (n.len() == 6).then(|| [n[0], n[1], n[2], n[3], n[4], n[5]])
-                    }
-                    _ => None,
-                })
-                .unwrap_or(IDENTITY_MATRIX);
-            let ctm = states.get(do_at).map(|s| s.ctm).unwrap_or(IDENTITY_MATRIX);
-            let to_page = matrices(form_matrix, ctm);
-
             const NEAR: f32 = 4.0;
             let mut cuts = Cuts::default();
             let mut handled = 0usize;
@@ -8982,25 +8981,20 @@ impl PdfiumDocument {
                     })
                 });
                 let run_rect = run_rect.unwrap_or(Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 });
-                Self::cut_run(&ctx, request, &run.text, &run_rect, &parts, mine, &mut cuts);
+                Self::cut_run(&ctx, request, &run.text, &run_rect, &parts, mine, &run.loose, &mut cuts);
                 handled += 1;
             }
             if handled == 0 {
                 continue;
             }
 
-            // Anything else starting inside the area — fragments the text page
-            // folded into a neighbouring run — judged where it lands on the
-            // page. Only where nothing is being sliced there.
-            for p in &placed {
-                let x = p.origin.x * to_page[0] + p.origin.y * to_page[2] + to_page[4];
-                let y = p.origin.x * to_page[1] + p.origin.y * to_page[3] + to_page[5];
-                if request.holds(x, height - y)
-                    && !cuts.edits.iter().any(|(span, _)| *span == form_ops[p.origin.operation].span)
-                {
-                    cuts.cut_whole.push(p.origin.operation);
-                }
-            }
+            // **No sweep by origin here**, unlike the page path. The text
+            // page reported every real character in the form and which
+            // object drew it, so anything the area touches is already in
+            // `nested`. A sweep would only add what `content::placed` cannot
+            // place: an operator continuing another reports the origin of
+            // the one before it, and on a real catalogue's footer that took
+            // ` Lighting` for starting where `HSI` did.
             let Cuts { mut edits, mut cut_whole, spilled, characters } = cuts;
             cut_whole.sort_unstable();
             cut_whole.dedup();
@@ -9263,6 +9257,7 @@ impl PdfiumDocument {
         run_rect: &Rect,
         parts: &[&crate::pdf::content::Placed],
         mine: Vec<(usize, Rect)>,
+        loose: &[Rect],
         cuts: &mut Cuts,
     ) {
         use crate::pdf::content;
@@ -9340,17 +9335,49 @@ impl PdfiumDocument {
             && !covered_chars.is_empty()
             && covered_chars.len() < mine.len();
 
+        // Where each code's characters begin — and from that, how far each
+        // code moved the pen: from where its characters start to where the
+        // next code's do, measured across the glyphs rather than from font
+        // metrics, so side bearings and character spacing are already in it.
+        // Known whenever the codes align with the characters and the glyphs
+        // were measured, whether or not the run is being sliced.
+        let measured = widths.iter().all(Option::is_some) && owner.is_some() && !mine.is_empty();
+        let first_char: std::collections::BTreeMap<usize, usize> = owner
+            .as_ref()
+            .map(|owner| {
+                let mut first_char = std::collections::BTreeMap::new();
+                for (character, code) in owner.iter().enumerate() {
+                    if *code != usize::MAX {
+                        first_char.entry(*code).or_insert(character);
+                    }
+                }
+                first_char
+            })
+            .unwrap_or_default();
+        let starts: Vec<(usize, usize)> = first_char.iter().map(|(c, ch)| (*c, *ch)).collect();
+        let advance_of = |code: usize| -> f32 {
+            let Some(position) = starts.iter().position(|(c, _)| *c == code) else {
+                // Owns no character, so it moved the pen by nothing that
+                // can be seen.
+                return 0.0;
+            };
+            let from = starts[position].1;
+            // **Loose boxes where they were read.** A glyph's own box stops
+            // at its ink — short of the pen on both sides by a side bearing —
+            // and an advance measured between ink edges is short by the
+            // difference, so a fragment continuing the line landed to the
+            // left of where it was. The loose box is the advance box: they
+            // tile the line exactly. Measured: 2.4 points on `HSI`.
+            let left_of = |i: usize| loose.get(mine[i].0).map(|r| r.left).unwrap_or(mine[i].1.left);
+            let right_of = |i: usize| loose.get(mine[i].0).map(|r| r.right).unwrap_or(mine[i].1.right);
+            match starts.get(position + 1) {
+                Some((_, next)) => left_of(*next) - left_of(from),
+                None => right_of(mine.len() - 1) - left_of(from),
+            }
+        };
+
         if sliceable {
             let owner = owner.expect("checked");
-
-            // Where each code's characters begin, and therefore which codes
-            // the covered characters belong to.
-            let mut first_char: std::collections::BTreeMap<usize, usize> = Default::default();
-            for (character, code) in owner.iter().enumerate() {
-                if *code != usize::MAX {
-                    first_char.entry(*code).or_insert(character);
-                }
-            }
             let mut drop_codes: Vec<usize> = covered_chars
                 .iter()
                 .filter_map(|c| owner.get(*c).copied())
@@ -9372,25 +9399,6 @@ impl PdfiumDocument {
                 drop_codes.sort_unstable();
                 drop_codes.dedup();
             }
-
-            // How far each dropped code advanced the pen: from where its
-            // characters start to where the next code's do. Measured across
-            // the glyphs rather than from font metrics, so side bearings and
-            // character spacing are already in it.
-            let starts: Vec<(usize, usize)> =
-                first_char.iter().map(|(c, ch)| (*c, *ch)).collect();
-            let advance_of = |code: usize| -> f32 {
-                let Some(position) = starts.iter().position(|(c, _)| *c == code) else {
-                    // Owns no character, so it moved the pen by nothing that
-                    // can be seen.
-                    return 0.0;
-                };
-                let from = starts[position].1;
-                match starts.get(position + 1) {
-                    Some((_, next)) => mine[*next].1.left - mine[from].1.left,
-                    None => mine[mine.len() - 1].1.right - mine[from].1.left,
-                }
-            };
 
             // Each part is rebuilt from the codes dropped inside it,
             // renumbered to its own.
@@ -9423,8 +9431,29 @@ impl PdfiumDocument {
             cuts.characters += covered_chars.len();
         } else {
             cuts.characters += run_text.chars().count();
-            for part in parts {
-                cuts.cut_whole.push(part.origin.operation);
+            if measured {
+                // **Taken whole, but the space it took is kept.** A fragment
+                // that continues the line in the same text object — `HSI`
+                // then ` Lighting`, one operator each, which is how a design
+                // program kerns — would otherwise slide left into the gap.
+                // Each operator becomes a pen movement of exactly its own
+                // width, drawing nothing. Measured on a real catalogue's
+                // footer, where a run cut outright took the word after it.
+                let mut at = 0usize;
+                for (part, size) in parts.iter().zip(&counts) {
+                    let gap: f32 = (at..at + size).map(advance_of).sum();
+                    at += size;
+                    let operation = &ctx.operations[part.origin.operation];
+                    let font = part.font.clone().unwrap_or_default();
+                    cuts.edits.push((
+                        operation.span.clone(),
+                        content::advance_only(&font, part.size, part.scale, gap),
+                    ));
+                }
+            } else {
+                for part in parts {
+                    cuts.cut_whole.push(part.origin.operation);
+                }
             }
             // Only when something went that was *not* asked for. A run
             // wholly inside the selection loses nothing extra by being cut

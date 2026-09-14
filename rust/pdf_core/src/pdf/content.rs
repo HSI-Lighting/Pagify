@@ -532,6 +532,26 @@ fn unescape(raw: &[u8]) -> Vec<u8> {
     out
 }
 
+/// A show-text operator that draws nothing and moves the pen by `advance`
+/// points — what stands in for an operator taken out whole when something
+/// continues its line.
+///
+/// A `Tj` removed outright takes its advance with it, and a fragment that
+/// shares the text object — `HSI` then ` Lighting`, one operator each — slides
+/// left into the gap. This keeps the gap: a `TJ` with only a spacing number,
+/// negated, in thousandths of the font size, as the numbers in `without_codes`
+/// are. Nothing where the size cannot carry it.
+pub fn advance_only(font: &[u8], size: f32, scale: f32, advance: f32) -> Vec<u8> {
+    let per_point = size * scale;
+    if per_point.abs() <= f32::EPSILON || advance == 0.0 {
+        return Vec::new();
+    }
+    let mut out = b"/".to_vec();
+    out.extend_from_slice(font);
+    out.extend_from_slice(format!(" {size} Tf [ {} ] TJ", -advance / per_point * 1000.0).as_bytes());
+    out
+}
+
 /// Rebuild a show-text operator with some of its codes removed.
 ///
 /// # Holding the rest of the line still

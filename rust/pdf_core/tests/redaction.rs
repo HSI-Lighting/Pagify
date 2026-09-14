@@ -405,6 +405,42 @@ fn words_in_a_form_inside_a_form_are_still_refused_by_name() {
     }
 }
 
+/// **A run taken whole keeps the space it took.** A line drawn as two
+/// operators in one text object — `(HSI) Tj` then `[( Lighting)] TJ`, how
+/// a design program kerns — used to lose the second's place when the first
+/// was cut outright: the pen no longer advanced past `HSI`, and ` Lighting`
+/// slid left into the mark. Measured on a real catalogue's footer.
+#[test]
+fn cutting_a_run_whole_leaves_what_continues_its_line_where_it_was() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("kerned-in-form.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let before = doc.page(0).expect("page").characters().expect("characters");
+    let at = before.text.find("Lighting").expect("the second operator's words");
+    let index = before.text[..at].chars().count();
+    let l_before = before.boxes[index * 4];
+
+    let area = box_around(&doc, 0, "HSI");
+    let report = doc.redact(&Redaction::new(0, area), None).expect("redact");
+    assert_eq!(report.characters, 3, "{report:?}");
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes, None).expect("reopen");
+    let after = reopened.page(0).expect("page").characters().expect("characters");
+    assert!(!after.text.contains("HSI"), "{}", after.text);
+    let at = after.text.find("Lighting").expect("the second operator survived");
+    let index = after.text[..at].chars().count();
+    let l_after = after.boxes[index * 4];
+    assert!(
+        (l_after - l_before).abs() < 0.5,
+        "` Lighting` moved from {l_before} to {l_after} when `HSI` was cut"
+    );
+}
+
 /// **A form the file draws on another page too is cut from a private copy.**
 /// The page asked about loses the number; the other page, which nobody
 /// asked about, keeps it — and the report says so.
