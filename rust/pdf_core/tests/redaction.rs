@@ -379,14 +379,114 @@ fn a_form_drawn_twice_on_the_page_is_cut_for_the_drawing_asked_about() {
     assert_eq!(text.matches("Card on file:").count(), 2, "{text}");
 }
 
-/// **A form inside a form is a level further down than the cut follows**,
-/// and is reported rather than reached — never painted over and called gone.
+/// **A form inside a form is followed down.** The chain is the n-th form
+/// of the page, then the m-th form of that one; both being the page's own,
+/// the inner form is cut in place.
 #[test]
-fn words_in_a_form_inside_a_form_are_still_refused_by_name() {
+fn words_in_a_form_inside_a_form_are_cut_down_the_chain() {
     let Some(_) = skip_without_pdfium() else { return };
     let _lock = serial();
 
     let path = harness::fixture_path("secret-in-nested-form.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let card = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .find(|f| f.text.contains("4111"))
+        .expect("found");
+    let report = doc.redact(&Redaction::new(0, card.area), None).expect("redact");
+    assert_eq!(report.characters, 19, "{report:?}");
+    assert!(report.uncleared.is_empty(), "{report:?}");
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes.clone(), None).expect("reopen");
+    let text = text_of(&reopened as &dyn Document, 0);
+    assert!(!text.contains("4111"), "{text}");
+    assert!(text.contains("Card on file:"), "{text}");
+    assert!(appears_in(&bytes, "4111 1111").is_empty(), "the number is still in the file");
+}
+
+/// **A shared inner form under the page's own outer form.** Two pages, each
+/// with an outer form of its own, both drawing one inner form: the inner is
+/// copied for the page asked about, and that page's outer — its own — is
+/// pointed at the copy in place. The other page keeps the number.
+#[test]
+fn a_shared_inner_form_is_copied_and_the_pages_own_outer_form_repointed() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-nested-inner-shared.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let card = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .find(|f| f.text.contains("4111"))
+        .expect("found");
+    let report = doc.redact(&Redaction::new(0, card.area), None).expect("redact");
+    assert_eq!(report.characters, 19, "{report:?}");
+    assert!(
+        report.uncleared.iter().any(|u| matches!(u, Uncleared::SharedForm { elsewhere: 1, .. })),
+        "{report:?}"
+    );
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes, None).expect("reopen");
+    let first = text_of(&reopened as &dyn Document, 0);
+    let second = text_of(&reopened as &dyn Document, 1);
+    assert!(!first.contains("4111"), "{first}");
+    assert!(first.contains("Card on file:"), "{first}");
+    assert!(second.contains("4111 1111 1111 1111"), "the other page lost what nobody asked about: {second}");
+}
+
+/// **A shared outer form.** Two pages drawing the same outer form, which
+/// draws the inner: the chain is copied from the outer down — outer copy
+/// pointing at inner copy — and the other page keeps both as they were.
+#[test]
+fn a_shared_outer_form_is_copied_with_its_inner_form_down_the_chain() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-nested-outer-shared.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let card = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .find(|f| f.text.contains("4111"))
+        .expect("found");
+    let report = doc.redact(&Redaction::new(0, card.area), None).expect("redact");
+    assert_eq!(report.characters, 19, "{report:?}");
+    assert!(
+        report.uncleared.iter().any(|u| matches!(u, Uncleared::SharedForm { .. })),
+        "{report:?}"
+    );
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes, None).expect("reopen");
+    let first = text_of(&reopened as &dyn Document, 0);
+    let second = text_of(&reopened as &dyn Document, 1);
+    assert!(!first.contains("4111"), "{first}");
+    assert!(first.contains("Card on file:"), "{first}");
+    assert!(second.contains("4111 1111 1111 1111"), "the other page lost what nobody asked about: {second}");
+}
+
+/// **What the byte-level reader cannot decode is still refused by name.** A
+/// form stream deflated with a PNG predictor is one this does not undo; the
+/// words in it are reported as nested content and never painted over.
+#[test]
+fn words_in_a_form_this_cannot_decode_are_refused_by_name() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-predicted-form.pdf");
     let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
     let card = doc
         .sensitive_on(0)
@@ -401,7 +501,7 @@ fn words_in_a_form_inside_a_form_are_still_refused_by_name() {
             assert!(why.contains("nested content"), "the reason is not named: {why}");
         }
         Err(other) => panic!("wrong error: {other}"),
-        Ok(report) => panic!("words two forms down reported a redaction: {report:?}"),
+        Ok(report) => panic!("words this cannot reach reported a redaction: {report:?}"),
     }
 }
 

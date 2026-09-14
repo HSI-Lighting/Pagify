@@ -16105,12 +16105,22 @@ mod lock_wiring_tests {
         assert_eq!(text.matches("Card on file:").count(), 2, "a caption went too: {text}");
     }
 
+    /// A form inside a form: the chain is followed down, and the words come
+    /// out of the inner form.
+    #[test]
+    fn smartredact_cuts_words_out_of_a_form_inside_a_form() {
+        let mut app = app("secret-in-nested-form.pdf");
+        app.submit("smartredact redact");
+        let told = said(&app);
+        assert!(told.contains("2 redacted — gone for good"), "{told}");
+    }
+
     /// **And what still cannot be reached is still said, never claimed
-    /// gone.** A form inside a form is a level further down than the cut
-    /// follows.
+    /// gone.** A form stream deflated with a PNG predictor is one the
+    /// byte-level reader does not undo.
     #[test]
     fn smartredact_says_what_it_could_not_reach_instead_of_claiming_it_gone() {
-        let mut app = app("secret-in-nested-form.pdf");
+        let mut app = app("secret-in-predicted-form.pdf");
         app.submit("smartredact redact");
         let told = said(&app);
         assert!(!told.contains("gone for good. Save"), "it claimed everything was gone: {told}");
@@ -16118,7 +16128,7 @@ mod lock_wiring_tests {
         assert!(told.contains("4111") && told.contains("nested content"), "{told}");
         assert!(told.contains("1 gone for good"), "{told}");
 
-        let out = std::env::temp_dir().join(format!("pagify-smartredact-nested-{}.pdf", std::process::id()));
+        let out = std::env::temp_dir().join(format!("pagify-smartredact-predicted-{}.pdf", std::process::id()));
         app.submit(&format!("saveas {}", out.display()));
         let text = pdf_core::registry::exclusive(|| {
             use pdf_core::document::Document;

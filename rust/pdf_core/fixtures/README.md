@@ -193,8 +193,17 @@ telephone number at page level as the control. Four shapes of it:
   copy of its own, and the other keeps what it had.
 - `secret-in-shared-form.pdf` — two pages drawing the same form: cut from a
   private copy on the page asked about, left as it is on the other, and said.
-- `secret-in-nested-form.pdf` — the form drawn through another form, a level
-  further down than the cut follows; reported, never painted over.
+- `secret-in-nested-form.pdf` — the form drawn through another form: the
+  chain is followed down and the inner form cut in place.
+- `secret-in-nested-inner-shared.pdf` — two pages, each with an outer form of
+  its own, both drawing one inner form: the inner is copied for the page
+  asked about, and that page's outer is pointed at the copy in place.
+- `secret-in-nested-outer-shared.pdf` — two pages drawing one outer form,
+  which draws the inner: copied from the outer down; the other page keeps
+  both.
+- `secret-in-predicted-form.pdf` — the form's stream deflated with a PNG
+  predictor, which the byte-level reader does not undo: reported as nested
+  content, never painted over. The honest refusal that remains.
 - `kerned-in-form.pdf` — the form's line drawn as two operators in one text
   object, `(HSI) Tj` then `[( Lighting) …] TJ`, how a design program kerns.
   Cutting `HSI` whole must leave ` Lighting` where it was.
@@ -203,7 +212,7 @@ They began as the security audit's probe (a number "redacted" while still in
 the file) and became the form-redaction fixtures.
 
 Rebuild them with `tools/make_secret_in_form_fixture.py fixtures/<name>.pdf
-<once|twice|shared|nested|kerned>`.
+<once|twice|shared|nested|nested-inner-shared|nested-outer-shared|predicted|kerned>`.
 
 ## hidden-things.pdf
 

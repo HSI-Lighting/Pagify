@@ -288,11 +288,12 @@ one commit per finding, each with a test built from the audit's own input;
   not cover; a rewrite (after a redaction, or to put a password on) breaks it,
   and the save says so.
 - **`smartredact`** says "gone for good" only of words proven gone. Words
-  drawn through a form XObject are cut out of the form's own stream — in
-  place when the form is the page's own, from a private copy when the file
-  draws it elsewhere (and the report says so); a form inside a form is
-  reported as left, never painted over. **`hiddendata clean`** reports from a
-  second survey of the cleaned bytes.
+  drawn through a form XObject — or a form inside one, however deep — are
+  cut out of the form's own stream: in place when every form on the way is
+  the page's own, from private copies from the first shared form down when
+  the file draws it elsewhere (and the report says so). A form stream this
+  cannot decode is reported as left, never painted over. **`hiddendata
+  clean`** reports from a second survey of the cleaned bytes.
 - **Secure Plus** binds the whole file's structure under the key, not only its
   strings; a reordered, dropped or repointed page is refused as a whole.
   `secure readonly` is refused under it rather than dropped. `unsecure` takes
@@ -311,8 +312,8 @@ one commit per finding, each with a test built from the audit's own input;
 
 Still open, and said plainly: no certificate trust chain; the unmaintained
 font parsers (`rustybuzz`, `ttf-parser`) await a migration; the `rsa` upgrade
-is owed when 0.10 and `cms` 0.3 ship; text in a form drawn through another
-form is not redacted.
+is owed when 0.10 and `cms` 0.3 ship; a form stream with a predictor filter
+is not redacted (it is reported).
 
 ## PDFium
 

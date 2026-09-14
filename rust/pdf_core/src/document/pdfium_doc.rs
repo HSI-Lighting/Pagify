@@ -8231,19 +8231,30 @@ impl PdfiumDocument {
             depth += 1;
         }
 
-        // The page's own forms, in the order the page draws them — which is
-        // the order their `Do` operators come in its stream, and how a form
-        // here is found in the file there.
-        let form_ordinals: HashMap<usize, usize> = objects
-            .iter()
-            .enumerate()
-            .filter(|(position, handle)| {
-                !inside_form[*position]
-                    && unsafe { bindings.FPDFPageObj_GetType(**handle) } as u32 == FPDF_PAGEOBJ_FORM
-            })
-            .enumerate()
-            .map(|(ordinal, (position, _))| (position, ordinal))
-            .collect();
+        // **Where every form is, as a path of ordinals from the page.** The
+        // page's own forms are drawn in the order their `Do` operators come
+        // in its stream, so the n-th form PDFium lists is the n-th form `Do`
+        // there; a form inside one is the m-th form `Do` of *that* form's
+        // stream, among its children in order. `[n, m]` is how a form here
+        // is found in the file there, however deep.
+        let mut form_paths: HashMap<usize, Vec<usize>> = HashMap::new();
+        let mut siblings_seen: HashMap<Option<usize>, usize> = HashMap::new();
+        for (position, handle) in objects.iter().enumerate() {
+            if unsafe { bindings.FPDFPageObj_GetType(*handle) } as u32 != FPDF_PAGEOBJ_FORM {
+                continue;
+            }
+            let parent = parent_of[position];
+            let ordinal = siblings_seen.entry(parent).or_insert(0);
+            let mut path = parent.and_then(|p| form_paths.get(&p).cloned()).unwrap_or_default();
+            if parent.is_some() && path.is_empty() {
+                // A parent the walk did not place: neither is this.
+                *ordinal += 1;
+                continue;
+            }
+            path.push(*ordinal);
+            *ordinal += 1;
+            form_paths.insert(position, path);
+        }
 
         let mut marks: HashMap<usize, Vec<Marked>> = HashMap::new();
         // Each character's box, page space, in the order the marks come — what
@@ -8578,7 +8589,7 @@ impl PdfiumDocument {
             FormPlan::default()
         } else {
             let bytes = self.readable_bytes()?;
-            self.plan_form_cuts(&bytes, request, &nested_covered, &form_ordinals)?
+            self.plan_form_cuts(&bytes, request, &nested_covered, &form_paths)?
         };
         for position in &form_plan.refused {
             report.uncleared.push(Uncleared::Form { object: *position });
@@ -8734,7 +8745,7 @@ impl PdfiumDocument {
         // would point into a document that no longer exists.
         drop(raw);
         if !form_plan.cuts.is_empty() {
-            self.apply_form_cuts(request, &nested_covered, &form_ordinals)?;
+            self.apply_form_cuts(request, &nested_covered, &form_paths)?;
         }
 
         self.touch();
@@ -8767,28 +8778,45 @@ struct NestedRun {
     unreadable: bool,
 }
 
-/// One form's stream with the covered words cut out of it, ready to write.
-struct FormCut {
-    /// The form's position in the survey's object list.
-    form: usize,
-    /// The resource name the page draws it by.
+/// One link in the chain of forms a cut goes through, from the page down.
+#[derive(Clone)]
+struct Link {
+    /// The resource name the container draws it by.
     name: Vec<u8>,
     /// The XObject's object number.
     number: u32,
     dict: crate::pdf::Dict,
-    /// The form's content, decoded, with the cuts made.
+    /// The form's content, decoded.
+    decoded: Vec<u8>,
+    /// The `Do` in the container's stream that draws it.
+    do_at: usize,
+    /// How many `Do`s in the container's stream draw it under this name.
+    drawings_here: usize,
+    /// How many places outside the container draw the same XObject.
+    uses_elsewhere: usize,
+}
+
+impl Link {
+    /// Whether anything but this one drawing shows the form.
+    fn shared(&self) -> bool {
+        self.drawings_here > 1 || self.uses_elsewhere > 0
+    }
+}
+
+/// One innermost form's stream with the covered words cut out of it, and
+/// the chain of forms it is reached through, ready to write.
+struct FormCut {
+    /// The innermost form's position in the survey's object list.
+    form: usize,
+    /// From the page's own form down to the one holding the words.
+    chain: Vec<Link>,
+    /// The innermost form's content, decoded, with the cuts made.
     edited: Vec<u8>,
     characters: usize,
     spilled: Vec<String>,
-    /// How many other drawings of the same XObject there are — on this page
-    /// and elsewhere. Above zero, the cut goes into a private copy for this
-    /// drawing.
+    /// How many other drawings show the same words, through any link of the
+    /// chain. Above zero, the cut goes into private copies.
     elsewhere: usize,
-    /// The `Do` in the page's stream that draws it.
-    do_at: usize,
-    /// A fresh resource name for this drawing, when the page draws the same
-    /// XObject more than once under the one it has.
-    rename: Option<Vec<u8>>,
 }
 
 /// What can be cut out of the page's forms, and what cannot.
@@ -8799,6 +8827,54 @@ struct FormPlan {
     refused: Vec<usize>,
 }
 
+/// A form's XObjects, resolved: name to number and whether it is a form.
+fn xobjects_of(
+    file: &crate::pdf::File<'_>,
+    resources: Option<&crate::pdf::Object>,
+) -> Vec<(Vec<u8>, u32, bool)> {
+    use crate::pdf::Object;
+    resources
+        .and_then(|r| file.resolve(r).ok())
+        .and_then(|r| r.as_dict().and_then(|d| d.get(b"XObject")).cloned())
+        .and_then(|x| file.resolve(&x).ok())
+        .and_then(|x| x.as_dict().cloned())
+        .map(|dict| {
+            dict.0
+                .iter()
+                .filter_map(|(name, entry)| {
+                    let (number, _) = entry.as_reference()?;
+                    let is_form = matches!(
+                        file.object(number),
+                        Ok(Object::Stream(ref d, _))
+                            if d.get(b"Subtype").and_then(Object::as_name) == Some(&b"Form"[..])
+                    );
+                    Some((name.clone(), number, is_form))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The form `Do`s in a stream, in order, with their names.
+fn form_dos_in(
+    operations: &[crate::pdf::content::Operation],
+    xobjects: &[(Vec<u8>, u32, bool)],
+) -> Vec<(usize, Vec<u8>)> {
+    use crate::pdf::Object;
+    operations
+        .iter()
+        .enumerate()
+        .filter_map(|(at, op)| match (op.operator.as_slice(), op.operands.first()) {
+            (b"Do", Some(Object::Name(name)))
+                if xobjects.iter().any(|(n, _, is_form)| n == name && *is_form) =>
+            {
+                Some((at, name.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 impl PdfiumDocument {
     /// Work out how the covered words inside the page's forms come out.
     ///
@@ -8806,43 +8882,27 @@ impl PdfiumDocument {
     /// so the survey can report exactly what the apply will do — the two run
     /// the same code on the same bytes.
     ///
-    /// A form is found in the file by the order the page draws it: the *n*th
-    /// form PDFium lists is the *n*th `Do` of a form XObject in the page's
-    /// stream. A form drawn twice on the page is refused, because one stream
-    /// serves both drawings and only one of them was asked about; a form
-    /// inside a form is refused, because its operators are a level further
-    /// down than this follows.
+    /// A form is found in the file by its path of ordinals (see
+    /// `form_paths`): the n-th form `Do` of the page's stream, then the m-th
+    /// form `Do` of that form's stream, and so on down to the form holding
+    /// the words. Each link on the way records whether anything else draws
+    /// it, because a cut into a form the file draws elsewhere has to go into
+    /// a copy — and once a link is copied, every link below it must be too,
+    /// or the copy and the original would share what was cut.
     fn plan_form_cuts(
         &self,
         bytes: &[u8],
         request: &Redaction,
         nested: &[NestedRun],
-        form_ordinals: &HashMap<usize, usize>,
+        form_paths: &HashMap<usize, Vec<usize>>,
     ) -> Result<FormPlan> {
         use crate::pdf::{content, Object};
 
         let file = crate::pdf::File::parse(bytes)?;
         let page = self.page_object(&file, request.page_index)?;
         let (stream, _) = self.page_content(&file, &page)?;
-        let operations = content::parse(&stream)?;
-        let images = self.image_names(&file, &page)?;
-        let xobjects = self
-            .inherited(&file, &page, b"Resources")?
-            .and_then(|r| r.as_dict().and_then(|d| d.get(b"XObject")).cloned())
-            .and_then(|x| file.resolve(&x).ok())
-            .and_then(|x| x.as_dict().cloned());
-
-        // The page's form `Do`s, in order.
-        let form_dos: Vec<(usize, Vec<u8>)> = operations
-            .iter()
-            .enumerate()
-            .filter_map(|(at, op)| match (op.operator.as_slice(), op.operands.first()) {
-                (b"Do", Some(Object::Name(name))) if !images.contains(name) => {
-                    Some((at, name.clone()))
-                }
-                _ => None,
-            })
-            .collect();
+        let page_ops = content::parse(&stream)?;
+        let page_xobjects = xobjects_of(&file, self.inherited(&file, &page, b"Resources")?.as_ref());
 
         let mut plan = FormPlan::default();
         let mut by_form: std::collections::BTreeMap<usize, Vec<&NestedRun>> = Default::default();
@@ -8854,52 +8914,59 @@ impl PdfiumDocument {
         }
 
         for (form, runs) in by_form {
-            let refuse_all = |plan: &mut FormPlan| {
+            let Some(path) = form_paths.get(&form) else {
                 plan.refused.extend(runs.iter().map(|r| r.position));
-            };
-            let Some(&ordinal) = form_ordinals.get(&form) else {
-                // A form inside a form.
-                refuse_all(&mut plan);
                 continue;
             };
-            let Some((do_at, name)) = form_dos.get(ordinal).cloned() else {
-                refuse_all(&mut plan);
+
+            // Down the path, one container at a time.
+            let mut chain: Vec<Link> = Vec::new();
+            let mut ops = page_ops.clone();
+            let mut xobjects = page_xobjects.clone();
+            let mut container_number: Option<u32> = None;
+            let mut resolved = true;
+            for &ordinal in path {
+                let dos = form_dos_in(&ops, &xobjects);
+                let Some((do_at, name)) = dos.get(ordinal).cloned() else {
+                    resolved = false;
+                    break;
+                };
+                let drawings_here = dos.iter().filter(|(_, n)| *n == name).count();
+                let Some(&(_, number, _)) = xobjects.iter().find(|(n, _, _)| *n == name) else {
+                    resolved = false;
+                    break;
+                };
+                let Ok(Object::Stream(dict, range)) = file.object(number) else {
+                    resolved = false;
+                    break;
+                };
+                let Some(decoded) =
+                    file.bytes().get(range).and_then(|raw| content::decode(&dict, raw))
+                else {
+                    resolved = false;
+                    break;
+                };
+                let Ok(inner_ops) = content::parse(&decoded) else {
+                    resolved = false;
+                    break;
+                };
+                let uses_elsewhere = self.xobject_uses(&file, number, container_number, request.page_index);
+                chain.push(Link { name, number, dict: dict.clone(), decoded, do_at, drawings_here, uses_elsewhere });
+                ops = inner_ops;
+                xobjects = xobjects_of(&file, dict.get(b"Resources"));
+                container_number = Some(number);
+            }
+            if !resolved || chain.is_empty() {
+                plan.refused.extend(runs.iter().map(|r| r.position));
                 continue;
-            };
-            // Drawn more than once on the page under one name: this drawing
-            // gets a name of its own, so the cut reaches it and not the other.
-            let drawings_here = form_dos.iter().filter(|(_, n)| *n == name).count();
-            let rename = (drawings_here > 1).then(|| {
-                let mut fresh = b"PgfCut".to_vec();
-                fresh.extend_from_slice(ordinal.to_string().as_bytes());
-                fresh
-            });
-            let Some(number) = xobjects
-                .as_ref()
-                .and_then(|x| x.get(&name))
-                .and_then(|o| o.as_reference())
-                .map(|(n, _)| n)
-            else {
-                refuse_all(&mut plan);
-                continue;
-            };
-            let Ok(Object::Stream(dict, range)) = file.object(number) else {
-                refuse_all(&mut plan);
-                continue;
-            };
-            let Some(decoded) = file.bytes().get(range).and_then(|raw| content::decode(&dict, raw))
-            else {
-                refuse_all(&mut plan);
-                continue;
-            };
-            let Ok(form_ops) = content::parse(&decoded) else {
-                refuse_all(&mut plan);
-                continue;
-            };
+            }
+            let innermost = chain.last().expect("checked");
+            let form_ops = content::parse(&innermost.decoded)?;
             let placed = content::placed(&form_ops);
 
-            // The form's own fonts, or the page's where it has none of its own.
-            let fonts = dict
+            // The innermost form's own fonts, or the page's where it has none.
+            let fonts = innermost
+                .dict
                 .get(b"Resources")
                 .and_then(|r| file.resolve(r).ok())
                 .and_then(|r| r.as_dict().and_then(|d| d.get(b"Font")).cloned())
@@ -9001,33 +9068,28 @@ impl PdfiumDocument {
             for index in &cut_whole {
                 edits.push((form_ops[*index].span.clone(), Vec::new()));
             }
-            let edited = content::splice(&decoded, &edits);
+            let edited = content::splice(&innermost.decoded, &edits);
 
-            // Every other drawing of the same XObject: the rest of this
-            // page's, and every other page's and form's.
-            let elsewhere = (drawings_here - 1)
-                + self.xobject_uses(&file, number, Some(request.page_index));
-            plan.cuts.push(FormCut {
-                form,
-                name,
-                number,
-                dict,
-                edited,
-                characters,
-                spilled,
-                elsewhere,
-                do_at,
-                rename,
-            });
+            let elsewhere = chain
+                .iter()
+                .map(|link| (link.drawings_here - 1) + link.uses_elsewhere)
+                .sum();
+            plan.cuts.push(FormCut { form, chain, edited, characters, spilled, elsewhere });
         }
         Ok(plan)
     }
 
-    /// How many places in the file draw an XObject: every page's resources
-    /// (inherited ones resolved per page, so two pages sharing one resources
-    /// object count twice) and every form's own — leaving out one page's,
-    /// whose drawings the caller counts for itself.
-    fn xobject_uses(&self, file: &crate::pdf::File<'_>, number: u32, except: Option<usize>) -> usize {
+    /// How many places outside one container draw an XObject: every page's
+    /// resources but `page`'s when the container is the page (inherited ones
+    /// resolved per page, so two pages sharing one resources object count
+    /// twice), and every form's own but the container's.
+    fn xobject_uses(
+        &self,
+        file: &crate::pdf::File<'_>,
+        number: u32,
+        container: Option<u32>,
+        page: usize,
+    ) -> usize {
         use crate::pdf::Object;
         let counts = |resources: Option<Object>| -> usize {
             resources
@@ -9044,7 +9106,7 @@ impl PdfiumDocument {
         };
         let mut uses = 0usize;
         for index in 0..self.page_count {
-            if Some(index) == except {
+            if container.is_none() && index == page {
                 continue;
             }
             if let Ok(page) = self.page_object(file, index) {
@@ -9052,6 +9114,9 @@ impl PdfiumDocument {
             }
         }
         for object in file.numbers() {
+            if Some(object) == container {
+                continue;
+            }
             if let Ok(Object::Stream(dict, _)) = file.object(object) {
                 if dict.get(b"Subtype").and_then(Object::as_name) == Some(&b"Form"[..]) {
                     uses += counts(dict.get(b"Resources").and_then(|r| file.resolve(r).ok()));
@@ -9063,15 +9128,18 @@ impl PdfiumDocument {
 
     /// Write the planned cuts into the file and reopen from it.
     ///
-    /// A form the page has to itself is rewritten in place. One the file draws
-    /// elsewhere too is left as it is, and this page gets a private copy with
-    /// the cuts — pointed at from resources that are this page's own, made so
-    /// if they were shared.
+    /// The innermost form is rewritten in place when every link of its chain
+    /// is drawn by this page alone. Otherwise the chain is copied from the
+    /// first shared link down: each copy is a new object with the cut, or
+    /// with its resources pointing at the copy below it, and the container
+    /// above the first copy — a form in place, or the page — is pointed at
+    /// it under the drawing's name, made fresh where the container draws the
+    /// same form more than once under one name.
     fn apply_form_cuts(
         &mut self,
         request: &Redaction,
         nested: &[NestedRun],
-        form_ordinals: &HashMap<usize, usize>,
+        form_paths: &HashMap<usize, Vec<usize>>,
     ) -> Result<()> {
         use crate::pdf::{content, write_object, write_stream, Object};
 
@@ -9079,7 +9147,7 @@ impl PdfiumDocument {
         let plus = self.secure_plus;
         let permissions = self.permissions();
         let bytes = self.readable_bytes()?;
-        let plan = self.plan_form_cuts(&bytes, request, nested, form_ordinals)?;
+        let plan = self.plan_form_cuts(&bytes, request, nested, form_paths)?;
         if plan.cuts.is_empty() {
             return Ok(());
         }
@@ -9099,78 +9167,164 @@ impl PdfiumDocument {
         let (page_stream, page_streams) = self.page_content(&file, &Object::Dict(page_dict.clone()))?;
         let page_ops = content::parse(&page_stream)?;
         let mut page_edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
+        // Forms edited in place above a copy: their dictionaries change (a
+        // resource entry) and possibly their streams (a renamed `Do`).
+        let mut form_dict_edits: HashMap<u32, (crate::pdf::Dict, Vec<(std::ops::Range<usize>, Vec<u8>)>)> =
+            HashMap::new();
 
         for cut in &plan.cuts {
+            let depth = cut.chain.len();
+            // Where the copying starts: the first shared link, if any.
+            let copy_from = cut.chain.iter().position(Link::shared);
+
+            // The innermost form's new body.
+            let innermost = &cut.chain[depth - 1];
             let packed = content::encode(&cut.edited)?;
-            let mut dict = cut.dict.clone();
+            let mut dict = innermost.dict.clone();
             dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
             dict.remove(b"DecodeParms");
-            let body = write_stream(&dict, &packed);
-            if cut.elsewhere == 0 {
-                replacements.push((cut.number, body));
+
+            let Some(copy_from) = copy_from else {
+                replacements.push((innermost.number, write_stream(&dict, &packed)));
                 continue;
+            };
+
+            // From the innermost up to the first copied link: each becomes a
+            // new object, pointed at by the one above under the drawing's
+            // name. The link above `copy_from` is edited in place instead —
+            // a form, or the page.
+            let mut below: Option<(u32, Vec<u8>)> = None; // (new number, name it goes under)
+            for level in (copy_from..depth).rev() {
+                let link = &cut.chain[level];
+                let copy = next;
+                next += 1;
+                let mut link_dict = if level == depth - 1 { dict.clone() } else { link.dict.clone() };
+                let mut link_stream_edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
+                if let Some((child_number, child_name)) = below.take() {
+                    // This copy's resources point at the copy below it.
+                    let child = &cut.chain[level + 1];
+                    let fresh_name = Self::point_xobject(&file, &mut link_dict, &child.name, &child_name, child_number);
+                    if let Some(fresh) = fresh_name {
+                        let ops = content::parse(&link.decoded)?;
+                        let Some(op) = ops.get(child.do_at) else {
+                            return Err(PdfError::Internal("a form's Do moved between survey and cut".into()));
+                        };
+                        let mut operand = b"/".to_vec();
+                        operand.extend_from_slice(&fresh);
+                        operand.extend_from_slice(b" Do");
+                        link_stream_edits.push((op.span.clone(), operand));
+                    }
+                }
+                let body = if level == depth - 1 {
+                    write_stream(&link_dict, &packed)
+                } else {
+                    let data = content::splice(&link.decoded, &link_stream_edits);
+                    let packed = content::encode(&data)?;
+                    link_dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+                    link_dict.remove(b"DecodeParms");
+                    write_stream(&link_dict, &packed)
+                };
+                extras.push((copy, body));
+                // Under a fresh name when the container draws this form more
+                // than once under the one it has.
+                let under = if link.drawings_here > 1 {
+                    let mut fresh = b"PgfCut".to_vec();
+                    fresh.extend_from_slice(copy.to_string().as_bytes());
+                    fresh
+                } else {
+                    link.name.clone()
+                };
+                below = Some((copy, under));
             }
-            // A private copy, and this page's resources pointed at it — under
-            // the drawing's own name, where it had to be given one.
-            let copy = next;
-            next += 1;
-            extras.push((copy, body));
-            let name = match &cut.rename {
-                Some(fresh) => {
-                    let Some(op) = page_ops.get(cut.do_at) else {
+            let (copy_number, copy_name) = below.expect("at least one link was copied");
+            let top = &cut.chain[copy_from];
+
+            if copy_from == 0 {
+                // The page draws it: this page's own resources point at the copy.
+                if copy_name != top.name {
+                    let Some(op) = page_ops.get(top.do_at) else {
                         return Err(PdfError::Internal("a form's Do moved between survey and cut".into()));
                     };
                     let mut operand = b"/".to_vec();
-                    operand.extend_from_slice(fresh);
+                    operand.extend_from_slice(&copy_name);
                     operand.extend_from_slice(b" Do");
                     page_edits.push((op.span.clone(), operand));
-                    fresh.clone()
                 }
-                None => cut.name.clone(),
-            };
-            let resources = match page_dict.get(b"Resources").cloned() {
-                Some(Object::Dict(own)) => (own, None),
-                Some(Object::Reference(n, _)) => {
-                    let dict = file.object(n)?.as_dict().cloned().unwrap_or(crate::pdf::Dict(Vec::new()));
-                    // Its own only if no other page or form names the same object.
-                    let shared = self.resources_uses(&file, n) > 1;
-                    (dict, if shared { None } else { Some(n) })
+                let (mut resources, owned_object) = match page_dict.get(b"Resources").cloned() {
+                    Some(Object::Dict(own)) => (own, None),
+                    Some(Object::Reference(n, _)) => {
+                        let dict = file.object(n)?.as_dict().cloned().unwrap_or(crate::pdf::Dict(Vec::new()));
+                        let shared = self.resources_uses(&file, n) > 1;
+                        (dict, if shared { None } else { Some(n) })
+                    }
+                    _ => (
+                        self.inherited(&file, &Object::Dict(page_dict.clone()), b"Resources")?
+                            .and_then(|r| r.as_dict().cloned())
+                            .unwrap_or(crate::pdf::Dict(Vec::new())),
+                        None,
+                    ),
+                };
+                let mut xobjects = resources
+                    .get(b"XObject")
+                    .and_then(|x| file.resolve(x).ok())
+                    .and_then(|x| x.as_dict().cloned())
+                    .unwrap_or(crate::pdf::Dict(Vec::new()));
+                xobjects.set(&copy_name, Object::Reference(copy_number, 0));
+                resources.set(b"XObject", Object::Dict(xobjects));
+                match (page_dict.get(b"Resources").cloned(), owned_object) {
+                    (Some(Object::Dict(_)), _) => {
+                        page_dict.set(b"Resources", Object::Dict(resources));
+                        page_changed = true;
+                    }
+                    (Some(Object::Reference(..)), Some(n)) => {
+                        let mut body = Vec::new();
+                        write_object(&mut body, &Object::Dict(resources));
+                        replacements.push((n, body));
+                    }
+                    _ => {
+                        let own = next;
+                        next += 1;
+                        let mut body = Vec::new();
+                        write_object(&mut body, &Object::Dict(resources));
+                        extras.push((own, body));
+                        page_dict.set(b"Resources", Object::Reference(own, 0));
+                        page_changed = true;
+                    }
                 }
-                _ => (
-                    self.inherited(&file, &Object::Dict(page_dict.clone()), b"Resources")?
-                        .and_then(|r| r.as_dict().cloned())
-                        .unwrap_or(crate::pdf::Dict(Vec::new())),
-                    None,
-                ),
-            };
-            let (mut resources, owned_object) = resources;
-            let mut xobjects = resources
-                .get(b"XObject")
-                .and_then(|x| file.resolve(x).ok())
-                .and_then(|x| x.as_dict().cloned())
-                .unwrap_or(crate::pdf::Dict(Vec::new()));
-            xobjects.set(&name, Object::Reference(copy, 0));
-            resources.set(b"XObject", Object::Dict(xobjects));
-            match (page_dict.get(b"Resources").cloned(), owned_object) {
-                (Some(Object::Dict(_)), _) => {
-                    page_dict.set(b"Resources", Object::Dict(resources));
-                    page_changed = true;
-                }
-                (Some(Object::Reference(..)), Some(n)) => {
-                    let mut body = Vec::new();
-                    write_object(&mut body, &Object::Dict(resources));
-                    replacements.push((n, body));
-                }
-                _ => {
-                    let own = next;
-                    next += 1;
-                    let mut body = Vec::new();
-                    write_object(&mut body, &Object::Dict(resources));
-                    extras.push((own, body));
-                    page_dict.set(b"Resources", Object::Reference(own, 0));
-                    page_changed = true;
+            } else {
+                // A form in place draws it: its resources point at the copy,
+                // and its stream is spliced if the drawing needed a name.
+                let container = &cut.chain[copy_from - 1];
+                let entry = form_dict_edits
+                    .entry(container.number)
+                    .or_insert_with(|| (container.dict.clone(), Vec::new()));
+                let fresh = Self::point_xobject(&file, &mut entry.0, &top.name, &copy_name, copy_number);
+                if let Some(fresh) = fresh {
+                    let ops = content::parse(&container.decoded)?;
+                    let Some(op) = ops.get(top.do_at) else {
+                        return Err(PdfError::Internal("a form's Do moved between survey and cut".into()));
+                    };
+                    let mut operand = b"/".to_vec();
+                    operand.extend_from_slice(&fresh);
+                    operand.extend_from_slice(b" Do");
+                    entry.1.push((op.span.clone(), operand));
                 }
             }
+        }
+
+        for (number, (dict, stream_edits)) in form_dict_edits {
+            let link = plan
+                .cuts
+                .iter()
+                .flat_map(|c| c.chain.iter())
+                .find(|l| l.number == number)
+                .expect("an edited container is on some chain");
+            let data = content::splice(&link.decoded, &stream_edits);
+            let packed = content::encode(&data)?;
+            let mut dict = dict;
+            dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((number, write_stream(&dict, &packed)));
         }
         if page_changed {
             let mut body = Vec::new();
@@ -9201,6 +9355,36 @@ impl PdfiumDocument {
         self.rearm_security(was_secured, plus, permissions);
         self.touch();
         Ok(())
+    }
+
+    /// Point a form's `/Resources /XObject` entry for a child at `target`,
+    /// under `under` — returning the name when it differs from `was`, which
+    /// is when the child's `Do` has to be renamed to match.
+    ///
+    /// The XObject dictionary is made direct, with the one entry changed:
+    /// a shared dictionary object must not be edited for one form's sake.
+    fn point_xobject(
+        file: &crate::pdf::File<'_>,
+        dict: &mut crate::pdf::Dict,
+        was: &[u8],
+        under: &[u8],
+        target: u32,
+    ) -> Option<Vec<u8>> {
+        use crate::pdf::Object;
+        let mut resources = dict
+            .get(b"Resources")
+            .and_then(|r| file.resolve(r).ok())
+            .and_then(|r| r.as_dict().cloned())
+            .unwrap_or(crate::pdf::Dict(Vec::new()));
+        let mut xobjects = resources
+            .get(b"XObject")
+            .and_then(|x| file.resolve(x).ok())
+            .and_then(|x| x.as_dict().cloned())
+            .unwrap_or(crate::pdf::Dict(Vec::new()));
+        xobjects.set(under, Object::Reference(target, 0));
+        resources.set(b"XObject", Object::Dict(xobjects));
+        dict.set(b"Resources", Object::Dict(resources));
+        (under != was).then(|| under.to_vec())
     }
 
     /// How many pages and forms name one resources object.
