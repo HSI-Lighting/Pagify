@@ -775,74 +775,213 @@ pub fn splice(bytes: &[u8], edits: &[(std::ops::Range<usize>, Vec<u8>)]) -> Vec<
     out
 }
 
-/// Decode a stream, if it is encoded in a way this reads.
+/// Decode a stream, whatever it says it is encoded with — as long as every
+/// filter on it is one this reads.
 ///
-/// `FlateDecode` or `LZWDecode`, on its own — with or without a predictor.
-/// Anything else — a filter chain, an encoding this does not know — comes
-/// back as `None` rather than as a guess, and the caller leaves that page
-/// alone.
+/// `FlateDecode` and `LZWDecode`, each with or without a predictor;
+/// `ASCIIHexDecode`, `ASCII85Decode` and `RunLengthDecode`; and any chain of
+/// them, applied in the order the `/Filter` array gives, with `/DecodeParms`
+/// beside it — one dictionary, or an array with an entry (or `null`) per
+/// filter. Anything else — an image encoding, a filter this does not know —
+/// comes back as `None` rather than as a guess, and the caller leaves that
+/// page alone.
 pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
+    let filters: Vec<Vec<u8>> = match dict.get(b"Filter") {
+        None => Vec::new(),
+        Some(Object::Name(name)) => vec![name.clone()],
+        Some(Object::Array(items)) => items
+            .iter()
+            .map(|item| match item {
+                Object::Name(name) => Some(name.clone()),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()?,
+        _ => return None,
+    };
+    let parms: Vec<Option<super::Dict>> = match dict.get(b"DecodeParms") {
+        None | Some(Object::Null) => vec![None; filters.len()],
+        Some(Object::Dict(d)) => {
+            // One dictionary is the one-filter form; beside several filters
+            // it is not well formed, and is not guessed at.
+            if filters.len() != 1 {
+                return None;
+            }
+            vec![Some(d.clone())]
+        }
+        Some(Object::Array(items)) => {
+            let mut out: Vec<Option<super::Dict>> = items
+                .iter()
+                .map(|item| match item {
+                    Object::Dict(d) => Some(Some(d.clone())),
+                    Object::Null => Some(None),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            out.resize(filters.len(), None);
+            out
+        }
+        _ => return None,
+    };
+
+    let mut data = raw.to_vec();
+    for (filter, parm) in filters.iter().zip(parms) {
+        data = apply_filter(filter, parm.as_ref(), &data)?;
+        // Bounded at every stage. Deflate manages about a thousand to one on
+        // the right input, so a megabyte of stream became a gigabyte of
+        // content on the first edit; fonts and `/ToUnicode` come through
+        // here too. Found by audit. Over the limit reads as "cannot decode",
+        // and the caller leaves the page alone — the same as for a filter it
+        // does not know.
+        if data.len() as u64 > INFLATED_LIMIT {
+            return None;
+        }
+    }
+    Some(data)
+}
+
+/// One filter undone, with its own parameters.
+fn apply_filter(filter: &[u8], parms: Option<&super::Dict>, data: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
 
-    let filter = match dict.get(b"Filter") {
-        None => return Some(raw.to_vec()),
-        Some(Object::Name(name)) => name.clone(),
-        Some(Object::Array(items)) if items.len() == 1 => match &items[0] {
-            Object::Name(name) => name.clone(),
-            _ => return None,
-        },
-        _ => return None,
-    };
-    let lzw = match filter.as_slice() {
-        b"FlateDecode" => false,
-        b"LZWDecode" => true,
-        _ => return None,
-    };
-    // A `/DecodeParms` names a predictor, which changes the bytes after
-    // inflating: undone below, or refused where its parameters are ones
-    // this does not read. One dictionary, or an array of one for the
-    // one-filter array form.
-    let parms = match dict.get(b"DecodeParms") {
-        None | Some(Object::Null) => None,
-        Some(Object::Dict(d)) => Some(d.clone()),
-        Some(Object::Array(items)) if items.len() == 1 => match &items[0] {
-            Object::Dict(d) => Some(d.clone()),
-            Object::Null => None,
-            _ => return None,
-        },
-        _ => return None,
-    };
-    let predictor = parms.as_ref().map(Predictor::from).unwrap_or_default();
-    if !predictor.readable() {
-        return None;
+    // A predictor rides on the two compressing filters, and changes the
+    // bytes after decompression: undone after, or refused where its
+    // parameters are ones this does not read.
+    let predictor = parms.map(Predictor::from).unwrap_or_default();
+    match filter {
+        b"FlateDecode" | b"Fl" => {
+            if !predictor.readable() {
+                return None;
+            }
+            let mut out = Vec::new();
+            flate2::read::ZlibDecoder::new(data)
+                .take(INFLATED_LIMIT + 1)
+                .read_to_end(&mut out)
+                .ok()?;
+            if out.len() as u64 > INFLATED_LIMIT {
+                return None;
+            }
+            predictor.undo(out)
+        }
+        b"LZWDecode" | b"LZW" => {
+            if !predictor.readable() {
+                return None;
+            }
+            // `/EarlyChange`: whether the code width grows one code before
+            // it has to, which is what every writer since TIFF does and the
+            // default.
+            let early = parms
+                .and_then(|p| p.get(b"EarlyChange"))
+                .and_then(Object::as_f64)
+                .map(|n| n != 0.0)
+                .unwrap_or(true);
+            predictor.undo(lzw_decode(data, early, INFLATED_LIMIT)?)
+        }
+        b"ASCIIHexDecode" | b"AHx" => ascii_hex_decode(data),
+        b"ASCII85Decode" | b"A85" => ascii_85_decode(data),
+        b"RunLengthDecode" | b"RL" => run_length_decode(data, INFLATED_LIMIT),
+        _ => None,
     }
+}
 
-    if lzw {
-        // `/EarlyChange`: whether the code width grows one code before it has
-        // to, which is what every writer since TIFF does and the default.
-        let early = parms
-            .as_ref()
-            .and_then(|p| p.get(b"EarlyChange"))
-            .and_then(Object::as_f64)
-            .map(|n| n != 0.0)
-            .unwrap_or(true);
-        return predictor.undo(lzw_decode(raw, early, INFLATED_LIMIT)?);
+/// Pairs of hex digits, whitespace between them ignored, `>` ending the
+/// data, a lone final digit read as if followed by a zero.
+fn ascii_hex_decode(data: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() / 2);
+    let mut high: Option<u8> = None;
+    for &byte in data {
+        if byte == b'>' {
+            break;
+        }
+        if byte.is_ascii_whitespace() {
+            continue;
+        }
+        let digit = (byte as char).to_digit(16)? as u8;
+        match high.take() {
+            None => high = Some(digit),
+            Some(h) => out.push(h << 4 | digit),
+        }
     }
+    if let Some(h) = high {
+        out.push(h << 4);
+    }
+    Some(out)
+}
 
-    // Bounded. Deflate manages about a thousand to one on the right input,
-    // so a megabyte of stream became a gigabyte of content on the first
-    // edit; fonts and `/ToUnicode` come through here too. Found by audit.
-    // Over the limit reads as "cannot decode", and the caller leaves the
-    // page alone — the same as for a filter it does not know.
+/// Groups of five characters `!` to `u` for four bytes, `z` for four zero
+/// bytes, `~>` ending the data, whitespace ignored, an optional `<~` in
+/// front, and a short final group padded the way the writer dropped it.
+fn ascii_85_decode(data: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() * 4 / 5);
+    let mut group: Vec<u8> = Vec::with_capacity(5);
+    let mut at = 0usize;
+    if data.starts_with(b"<~") {
+        at = 2;
+    }
+    let flush = |group: &mut Vec<u8>, out: &mut Vec<u8>| -> Option<()> {
+        if group.is_empty() {
+            return Some(());
+        }
+        if group.len() == 1 {
+            return None;
+        }
+        let short = 5 - group.len();
+        let mut value: u32 = 0;
+        for i in 0..5 {
+            let digit = group.get(i).map(|c| (c - b'!') as u32).unwrap_or(84);
+            value = value.checked_mul(85)?.checked_add(digit)?;
+        }
+        let bytes = value.to_be_bytes();
+        out.extend_from_slice(&bytes[..4 - short]);
+        group.clear();
+        Some(())
+    };
+    while at < data.len() {
+        let byte = data[at];
+        at += 1;
+        match byte {
+            b'~' => break,
+            b'z' if group.is_empty() => out.extend_from_slice(&[0, 0, 0, 0]),
+            b'!'..=b'u' => {
+                group.push(byte);
+                if group.len() == 5 {
+                    flush(&mut group, &mut out)?;
+                }
+            }
+            b if b.is_ascii_whitespace() => {}
+            _ => return None,
+        }
+    }
+    flush(&mut group, &mut out)?;
+    Some(out)
+}
+
+/// A length byte and what follows it: 0 to 127 copies that many plus one
+/// bytes, 129 to 255 repeats the next byte 257 minus that many times, 128
+/// ends the data.
+fn run_length_decode(data: &[u8], limit: u64) -> Option<Vec<u8>> {
     let mut out = Vec::new();
-    flate2::read::ZlibDecoder::new(raw)
-        .take(INFLATED_LIMIT + 1)
-        .read_to_end(&mut out)
-        .ok()?;
-    if out.len() as u64 > INFLATED_LIMIT {
-        return None;
+    let mut at = 0usize;
+    while at < data.len() {
+        let length = data[at] as usize;
+        at += 1;
+        match length {
+            128 => break,
+            0..=127 => {
+                let end = at + length + 1;
+                out.extend_from_slice(data.get(at..end)?);
+                at = end;
+            }
+            _ => {
+                let byte = *data.get(at)?;
+                at += 1;
+                out.extend(std::iter::repeat_n(byte, 257 - length));
+            }
+        }
+        if out.len() as u64 > limit {
+            return None;
+        }
     }
-    predictor.undo(out)
+    Some(out)
 }
 
 /// A predictor from a stream's `/DecodeParms`: the transform a writer applied
@@ -1101,6 +1240,77 @@ pub fn encode(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ASCII filters and run-length, each against a value worked out by
+    /// hand, and a chain of three with parameters beside the one that takes
+    /// them.
+    #[test]
+    fn the_ascii_and_run_length_filters_and_a_chain_of_them_are_undone() {
+        let mut dict = super::super::Dict(Vec::new());
+
+        // Hex: whitespace ignored, `>` ends it, an odd digit is padded.
+        dict.set(b"Filter", Object::Name(b"ASCIIHexDecode".to_vec()));
+        assert_eq!(decode(&dict, b"48 65\n6C6c 6F7>rubbish").as_deref(), Some(&b"Hello\x70"[..]));
+        assert!(decode(&dict, b"4G").is_none(), "not hex was decoded");
+
+        // Base 85: the well-known encoding of "Hello, World", `z`, a short
+        // final group, and the optional `<~`.
+        dict.set(b"Filter", Object::Name(b"ASCII85Decode".to_vec()));
+        assert_eq!(decode(&dict, b"87cURD_*#4DfTZ)~>").as_deref(), Some(&b"Hello, World"[..]));
+        assert_eq!(decode(&dict, b"<~z87cURD]i,\"Ebo80~>").as_deref(), Some(&b"\0\0\0\0Hello World!"[..]));
+        assert_eq!(decode(&dict, b"87cURDZ~>").as_deref(), Some(&b"Hello"[..]));
+        assert!(decode(&dict, b"87cURDZv~>").is_none(), "a character past `u` was accepted");
+
+        // Run length: a literal run, a repeat, and the end.
+        dict.set(b"Filter", Object::Name(b"RunLengthDecode".to_vec()));
+        assert_eq!(
+            decode(&dict, &[2, b'a', b'b', b'c', 254, b'x', 128, 0, b'?']).as_deref(),
+            Some(&b"abcxxx"[..])
+        );
+
+        // A chain: deflate, then run-length, then hex — undone in the order
+        // given, the deflate stage's predictor beside it and nothing for the
+        // others.
+        use std::io::Write;
+        let plain = b"BT /F1 12 Tf (chained) Tj ET".to_vec();
+        let mut predicted = Vec::new();
+        for byte in &plain {
+            predicted.push(0u8); // filter type None, one column
+            predicted.push(*byte);
+        }
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&predicted).expect("deflate");
+        let deflated = encoder.finish().expect("deflate");
+        let mut run_length = Vec::new();
+        for chunk in deflated.chunks(100) {
+            run_length.push((chunk.len() - 1) as u8);
+            run_length.extend_from_slice(chunk);
+        }
+        run_length.push(128);
+        let hex: Vec<u8> = run_length.iter().map(|b| format!("{b:02X}")).collect::<String>().into_bytes();
+
+        let mut parms = super::super::Dict(Vec::new());
+        parms.set(b"Predictor", Object::Number(b"12".to_vec()));
+        parms.set(b"Columns", Object::Number(b"1".to_vec()));
+        dict.set(
+            b"Filter",
+            Object::Array(vec![
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+                Object::Name(b"RunLengthDecode".to_vec()),
+                Object::Name(b"FlateDecode".to_vec()),
+            ]),
+        );
+        dict.set(b"DecodeParms", Object::Array(vec![Object::Null, Object::Null, Object::Dict(parms)]));
+        assert_eq!(decode(&dict, &hex).as_deref(), Some(plain.as_slice()));
+
+        // A filter this does not know anywhere in the chain refuses the lot.
+        dict.set(
+            b"Filter",
+            Object::Array(vec![Object::Name(b"ASCIIHexDecode".to_vec()), Object::Name(b"DCTDecode".to_vec())]),
+        );
+        dict.remove(b"DecodeParms");
+        assert!(decode(&dict, &hex).is_none());
+    }
 
     /// **The specification's own example** (ISO 32000, 7.4.4.2): the input
     /// `45 45 45 45 45 65 45 45 45 66` is written as the codes

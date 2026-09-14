@@ -16116,19 +16116,20 @@ mod lock_wiring_tests {
     }
 
     /// **And what still cannot be reached is still said, never claimed
-    /// gone.** A form stream behind a filter chain is one the byte-level
-    /// reader does not follow.
+    /// gone.** Words that are pixels: a picture of the number under invisible
+    /// text spelling it, as an OCR layer is written. The text comes out; the
+    /// picture is reported as still holding the words.
     #[test]
     fn smartredact_says_what_it_could_not_reach_instead_of_claiming_it_gone() {
-        let mut app = app("secret-in-chained-form.pdf");
+        let mut app = app("secret-in-pixels-form.pdf");
         app.submit("smartredact redact");
         let told = said(&app);
         assert!(!told.contains("gone for good. Save"), "it claimed everything was gone: {told}");
-        assert!(told.contains("left untouched"), "{told}");
-        assert!(told.contains("4111") && told.contains("nested content"), "{told}");
-        assert!(told.contains("1 gone for good"), "{told}");
+        assert!(told.contains("NOT fully cleared"), "{told}");
+        assert!(told.contains("4111") && told.contains("image"), "{told}");
+        assert!(told.contains("1 gone for good"), "the telephone number is counted: {told}");
 
-        let out = std::env::temp_dir().join(format!("pagify-smartredact-chained-{}.pdf", std::process::id()));
+        let out = std::env::temp_dir().join(format!("pagify-smartredact-pixels-{}.pdf", std::process::id()));
         app.submit(&format!("saveas {}", out.display()));
         let text = pdf_core::registry::exclusive(|| {
             use pdf_core::document::Document;
@@ -16141,7 +16142,7 @@ mod lock_wiring_tests {
             text
         });
         let _ = std::fs::remove_file(&out);
-        assert!(text.contains("4111 1111 1111 1111"), "the control went missing: {text}");
+        assert!(!text.contains("4111"), "the invisible text survived: {text}");
         assert!(!text.contains("7946"), "the telephone number survived: {text}");
     }
 

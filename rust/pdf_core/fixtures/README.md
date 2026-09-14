@@ -207,9 +207,14 @@ telephone number at page level as the control. Four shapes of it:
 - `secret-in-lzw-form.pdf` — the form's stream LZW-encoded, decoded by the
   byte-level reader like any other.
 - `secret-in-chained-form.pdf` — the form's stream deflated and then
-  hex-encoded, a filter chain the byte-level reader does not follow:
-  reported as nested content, never painted over. The honest refusal that
-  remains.
+  hex-encoded, a filter chain the byte-level reader follows like any other.
+- `secret-in-matrix-form.pdf` — the form carrying a `/Matrix` that halves
+  and shifts it. PDFium reports what is inside through that matrix and the
+  stream is written before it; the cut takes it back off.
+- `secret-in-pixels-form.pdf` — a picture of the number with the same number
+  as invisible text over it, as an OCR layer is written. The text is cut and
+  the picture, where the words actually are, is reported — never painted
+  over. What genuinely remains out of reach.
 - `kerned-in-form.pdf` — the form's line drawn as two operators in one text
   object, `(HSI) Tj` then `[( Lighting) …] TJ`, how a design program kerns.
   Cutting `HSI` whole must leave ` Lighting` where it was.
@@ -218,7 +223,7 @@ They began as the security audit's probe (a number "redacted" while still in
 the file) and became the form-redaction fixtures.
 
 Rebuild them with `tools/make_secret_in_form_fixture.py fixtures/<name>.pdf
-<once|twice|shared|nested|nested-inner-shared|nested-outer-shared|predicted|lzw|chained|kerned>`.
+<once|twice|shared|nested|nested-inner-shared|nested-outer-shared|predicted|lzw|chained|matrix|pixels|kerned>`.
 
 ## hidden-things.pdf
 

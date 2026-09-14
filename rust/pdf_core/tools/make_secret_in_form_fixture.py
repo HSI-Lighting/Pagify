@@ -25,8 +25,14 @@ inside the form. Three shapes of it, chosen by the second argument:
   lzw     the form's stream LZW-encoded, decoded by the byte-level reader
           like any other
   chained the form's stream deflated and then hex-encoded, a filter chain
-          the byte-level reader does not follow: reported as nested content,
-          never painted over — the honest refusal that remains
+          the byte-level reader follows like any other
+  pixels  the form draws a picture with the number in it and, over it, the
+          same number as invisible text (the OCR-layer shape): the text is
+          cut and the picture — where the words actually are — is reported,
+          never painted over. What genuinely remains out of reach.
+  matrix  the form carrying a /Matrix that halves and shifts it: PDFium
+          reports what is inside through that matrix, the stream is written
+          before it, and the cut has to take it back off to find the words
   kerned  the form's line drawn as two operators sharing one text object —
           `(HSI) Tj` then `[( Lighting)] TJ`, how a design program kerns —
           so cutting the first must leave the second where it was
@@ -41,6 +47,11 @@ inner = b"""BT /F1 14 Tf 1 0 0 1 10 20 Tm (Card on file: 4111 1111 1111 1111) Tj
 if mode == "kerned":
     inner = b"""BT /F1 14 Tf 1 0 0 1 10 20 Tm (HSI) Tj [( Lighting) -250 (Catalogue)] TJ ET
 """
+if mode == "pixels":
+    # A grey block standing in for a scan of the number, and the number as
+    # invisible text over it, as an OCR layer is written.
+    inner = (b"q 300 0 0 40 0 0 cm /Im0 Do Q\n"
+             b"BT 3 Tr /F1 14 Tf 1 0 0 1 10 20 Tm (Card on file: 4111 1111 1111 1111) Tj ET\n")
 packed_inner = zlib.compress(inner)
 inner_extra = b""
 inner_filter = b"/FlateDecode"
@@ -116,8 +127,15 @@ def page_content(second_draw):
     return zlib.compress(content)
 
 objs = {}
-objs[6] = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 300 50] "
-           b"/Resources << /Font << /F1 4 0 R >> >> /Filter " + inner_filter + inner_extra + b" /Length %d >>\nstream\n" % len(packed_inner)
+form_resources = b"/Resources << /Font << /F1 4 0 R >> >>"
+if mode == "pixels":
+    pixels = bytes([0x80] * (60 * 8))
+    objs[11] = (b"<< /Type /XObject /Subtype /Image /Width 60 /Height 8 /ColorSpace /DeviceGray "
+                b"/BitsPerComponent 8 /Length %d >>\nstream\n" % len(pixels) + pixels + b"\nendstream")
+    form_resources = b"/Resources << /Font << /F1 4 0 R >> /XObject << /Im0 11 0 R >> >>"
+form_matrix = b"/Matrix [0.5 0 0 0.5 20 10] " if mode == "matrix" else b""
+objs[6] = (b"<< /Type /XObject /Subtype /Form " + form_matrix + b"/BBox [0 0 300 50] " + form_resources +
+           b" /Filter " + inner_filter + inner_extra + b" /Length %d >>\nstream\n" % len(packed_inner)
            + packed_inner + b"\nendstream")
 objs[4] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
 objs[1] = b"<< /Type /Catalog /Pages 2 0 R >>"

@@ -1106,17 +1106,23 @@ impl Document for PdfiumDocument {
         const DEEPEST: usize = 4;
 
         let mut out: Vec<DrawnObject> = Vec::new();
-        let mut stack: Vec<(FPDF_PAGEOBJECT, usize, usize)> = Vec::new();
+        // **An object inside a form is measured in the form's own space.**
+        // PDFium reports its bounds there, not on the page — a picture
+        // drawn at the top of a form placed low on the page read as sitting
+        // at the top of the page. Each entry carries the matrix that takes
+        // its space to the page's: the form objects' matrices, innermost
+        // first, which is what the page's own objects have as identity.
+        let mut stack: Vec<(FPDF_PAGEOBJECT, usize, usize, [f32; 6])> = Vec::new();
         let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
         // Pushed backwards so the first object is taken first.
         for index in (0..count).rev() {
             let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
             if !handle.is_null() {
-                stack.push((handle, 0, index as usize));
+                stack.push((handle, 0, index as usize, IDENTITY_MATRIX));
             }
         }
 
-        while let Some((handle, depth, top)) = stack.pop() {
+        while let Some((handle, depth, top, to_page)) = stack.pop() {
             let kind_code = unsafe { bindings.FPDFPageObj_GetType(handle) };
             let kind = match kind_code as u32 {
                 FPDF_PAGEOBJ_TEXT => DrawnKind::Words,
@@ -1133,6 +1139,7 @@ impl Document for PdfiumDocument {
                 {
                     Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 }
                 } else {
+                    let (l, b, r, t) = bounds_through(l, b, r, t, to_page);
                     let (left, top_pt) = space.to_top_left(l, t);
                     let (right, bottom) = space.to_top_left(r, b);
                     Rect { left, top: top_pt, right, bottom }
@@ -1193,11 +1200,14 @@ impl Document for PdfiumDocument {
             // What a group draws goes in straight after it, so the list reads
             // as the page draws: the group, then its contents on top of it.
             if kind_code as u32 == FPDF_PAGEOBJ_FORM && depth < DEEPEST {
+                let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+                unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) };
+                let inner = matrices([m.a, m.b, m.c, m.d, m.e, m.f], to_page);
                 let children = unsafe { bindings.FPDFFormObj_CountObjects(handle) };
                 for i in (0..children).rev() {
                     let child = unsafe { bindings.FPDFFormObj_GetObject(handle, i as c_ulong) };
                     if !child.is_null() {
-                        stack.push((child, depth + 1, top));
+                        stack.push((child, depth + 1, top, inner));
                     }
                 }
             }
@@ -7738,6 +7748,25 @@ fn matrices(a: [f32; 6], b: [f32; 6]) -> [f32; 6] {
     ]
 }
 
+/// A box's four corners through a matrix, and the box round them again —
+/// as `left, bottom, right, top`, the order PDFium reports bounds in.
+fn bounds_through(l: f32, b: f32, r: f32, t: f32, m: [f32; 6]) -> (f32, f32, f32, f32) {
+    if m == IDENTITY_MATRIX {
+        return (l, b, r, t);
+    }
+    let corners = [(l, b), (r, b), (l, t), (r, t)].map(|(x, y)| {
+        (x * m[0] + y * m[2] + m[4], x * m[1] + y * m[3] + m[5])
+    });
+    let (mut lo_x, mut lo_y, mut hi_x, mut hi_y) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+    for (x, y) in corners {
+        lo_x = lo_x.min(x);
+        lo_y = lo_y.min(y);
+        hi_x = hi_x.max(x);
+        hi_y = hi_y.max(y);
+    }
+    (lo_x, lo_y, hi_x, hi_y)
+}
+
 /// The inverse of a PDF matrix, or `None` where there is none.
 fn inverse(m: [f32; 6]) -> Option<[f32; 6]> {
     let det = m[0] * m[3] - m[1] * m[2];
@@ -8196,12 +8225,18 @@ impl PdfiumDocument {
         // drawing order, the first drawing's, then the second's.
         let mut positions_of: HashMap<usize, Vec<usize>> = HashMap::new();
 
+        // What takes each object's own space to the page's: identity for the
+        // page's own, the form objects' matrices innermost first for one
+        // inside a form — PDFium reports a nested object's bounds in the
+        // form's space, not the page's.
+        let mut to_page_of: Vec<[f32; 6]> = Vec::new();
+
         let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
-        let mut queue: Vec<(FPDF_PAGEOBJECT, bool, Option<usize>)> = Vec::new();
+        let mut queue: Vec<(FPDF_PAGEOBJECT, bool, Option<usize>, [f32; 6])> = Vec::new();
         for i in 0..count {
             let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, i) };
             if !handle.is_null() {
-                queue.push((handle, false, None));
+                queue.push((handle, false, None, IDENTITY_MATRIX));
             }
         }
 
@@ -8210,19 +8245,23 @@ impl PdfiumDocument {
         let mut depth = 0;
         while !queue.is_empty() && depth < 8 {
             let mut next = Vec::new();
-            for (handle, nested, parent) in queue.drain(..) {
+            for (handle, nested, parent, to_page) in queue.drain(..) {
                 let position = objects.len();
                 positions_of.entry(handle as usize).or_default().push(position);
                 objects.push(handle);
                 inside_form.push(nested);
                 parent_of.push(parent);
+                to_page_of.push(to_page);
 
                 if unsafe { bindings.FPDFPageObj_GetType(handle) } as u32 == FPDF_PAGEOBJ_FORM {
+                    let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+                    unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) };
+                    let inner = matrices([m.a, m.b, m.c, m.d, m.e, m.f], to_page);
                     let children = unsafe { bindings.FPDFFormObj_CountObjects(handle) };
                     for i in 0..children {
                         let child = unsafe { bindings.FPDFFormObj_GetObject(handle, i as c_ulong) };
                         if !child.is_null() {
-                            next.push((child, true, Some(position)));
+                            next.push((child, true, Some(position), inner));
                         }
                     }
                 }
@@ -8478,6 +8517,8 @@ impl PdfiumDocument {
             {
                 continue;
             }
+            // On the page, wherever the object's own space is.
+            let (l, b, r, t) = bounds_through(l, b, r, t, to_page_of[position]);
             let (left, top) = space.to_top_left(l, t);
             let (right, bottom) = space.to_top_left(r, b);
             let bounds = Rect { left, top, right, bottom };
@@ -8991,13 +9032,38 @@ impl PdfiumDocument {
                     .sum()
             };
 
+            // **PDFium folds the form's `/Matrix` into what it reports for the
+            // objects inside**, while the stream's own operators are written
+            // before it. Measured: a form with `/Matrix [0.5 0 0 0.5 20 10]`
+            // reported its words at half size and shifted, and nothing
+            // matched. The origin goes back through the inverse before it is
+            // looked for.
+            let matrix_of = |dict: &crate::pdf::Dict| -> [f32; 6] {
+                dict.get(b"Matrix")
+                    .and_then(|m| match m {
+                        Object::Array(items) if items.len() == 6 => {
+                            let n: Vec<f32> = items.iter().filter_map(|i| i.as_f64()).map(|v| v as f32).collect();
+                            (n.len() == 6).then(|| [n[0], n[1], n[2], n[3], n[4], n[5]])
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(IDENTITY_MATRIX)
+            };
+            let Some(unmatrix) = inverse(matrix_of(&innermost.dict)) else {
+                plan.refused.extend(runs.iter().map(|r| r.position));
+                continue;
+            };
+
             const NEAR: f32 = 4.0;
             let mut cuts = Cuts::default();
             let mut handled = 0usize;
             for run in &runs {
                 // The operators drawing it, from where its text matrix says it
-                // starts — in the form's space, which is what both sides speak.
-                let (want_x, want_y) = run.origin;
+                // starts — in the stream's own space, which is what both
+                // sides speak once the form's matrix is taken back off.
+                let (x, y) = run.origin;
+                let want_x = x * unmatrix[0] + y * unmatrix[2] + unmatrix[4];
+                let want_y = x * unmatrix[1] + y * unmatrix[3] + unmatrix[5];
                 let start = placed
                     .iter()
                     .map(|p| {

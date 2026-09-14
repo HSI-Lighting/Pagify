@@ -537,15 +537,30 @@ fn words_in_an_lzw_encoded_form_are_cut() {
     assert!(appears_in(&bytes, "4111 1111").is_empty(), "the number is still in the file");
 }
 
-/// **What the byte-level reader cannot decode is still refused by name.** A
-/// form stream behind a filter chain is one this does not follow; the words
-/// in it are reported as nested content and never painted over.
+/// **A form behind a filter chain is read like any other** — deflated and
+/// then hex-encoded here, undone in the order the chain gives.
 #[test]
-fn words_in_a_form_this_cannot_decode_are_refused_by_name() {
+fn words_in_a_form_behind_a_filter_chain_are_cut() {
     let Some(_) = skip_without_pdfium() else { return };
     let _lock = serial();
+    cut_the_card_number_out_of("secret-in-chained-form.pdf");
+}
 
-    let path = harness::fixture_path("secret-in-chained-form.pdf");
+/// **A form with a `/Matrix` of its own.** PDFium reports what is inside
+/// through that matrix; the stream is written before it; the cut takes it
+/// back off to find the words, and reports the picture under them where it
+/// is on the page rather than where the form's own space puts it.
+#[test]
+fn words_in_a_form_with_a_matrix_are_cut() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    cut_the_card_number_out_of("secret-in-matrix-form.pdf");
+}
+
+/// Cut the card number out of a fixture, save, reopen, and check the page
+/// and the bytes — what every readable-form fixture has to pass.
+fn cut_the_card_number_out_of(name: &str) {
+    let path = harness::fixture_path(name);
     let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
     let card = doc
         .sensitive_on(0)
@@ -553,15 +568,67 @@ fn words_in_a_form_this_cannot_decode_are_refused_by_name() {
         .into_iter()
         .find(|f| f.text.contains("4111"))
         .expect("found");
-    let mut lenient = Redaction::new(0, card.area);
-    lenient.require_complete = false;
-    match doc.redact(&lenient, None) {
+    let report = doc.redact(&Redaction::new(0, card.area), None).expect("redact");
+    assert_eq!(report.characters, 19, "{name}: {report:?}");
+    assert!(report.uncleared.is_empty(), "{name}: {report:?}");
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes.clone(), None).expect("reopen");
+    let text = text_of(&reopened as &dyn Document, 0);
+    assert!(!text.contains("4111"), "{name}: {text}");
+    assert!(text.contains("Card on file:"), "{name}: {text}");
+    assert!(appears_in(&bytes, "4111 1111").is_empty(), "{name}: the number is still in the file");
+}
+
+/// **Words that are pixels are what genuinely remains out of reach**, and
+/// they are said. A picture of the number under invisible text spelling it
+/// — the OCR-layer shape: with completeness required, refused by name; with
+/// it not required, the text comes out and the picture is reported. Never
+/// painted over and called gone.
+#[test]
+fn words_that_are_pixels_are_reported_never_painted_over() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-pixels-form.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let card = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .find(|f| f.text.contains("4111"))
+        .expect("the invisible text is found");
+
+    match doc.redact(&Redaction::new(0, card.area), None) {
         Err(PdfError::IncompleteRedaction(why)) => {
-            assert!(why.contains("nested content"), "the reason is not named: {why}");
+            assert!(why.contains("image"), "the picture is not named: {why}");
         }
         Err(other) => panic!("wrong error: {other}"),
-        Ok(report) => panic!("words this cannot reach reported a redaction: {report:?}"),
+        Ok(report) => panic!("a picture of the words reported a clean redaction: {report:?}"),
     }
+
+    let mut lenient = Redaction::new(0, card.area);
+    lenient.require_complete = false;
+    let report = doc.redact(&lenient, None).expect("the text can still come out");
+    assert_eq!(report.characters, 19, "{report:?}");
+    assert!(
+        report.uncleared.iter().any(|u| matches!(u, Uncleared::Image { .. })),
+        "the picture was not reported: {report:?}"
+    );
+    assert!(!report.is_complete());
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes.clone(), None).expect("reopen");
+    assert!(!text_of(&reopened as &dyn Document, 0).contains("4111"));
+    // The picture — where the words actually are — is still in the file.
+    assert!(
+        bytes.windows(14).any(|w| w == b"/Subtype/Image" || w == b"/Subtype /Imag"),
+        "the picture went, which nobody asked for and nothing can do"
+    );
 }
 
 /// **A run taken whole keeps the space it took.** A line drawn as two

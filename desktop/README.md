@@ -291,10 +291,12 @@ one commit per finding, each with a test built from the audit's own input;
   drawn through a form XObject — or a form inside one, however deep — are
   cut out of the form's own stream: in place when every form on the way is
   the page's own, from private copies from the first shared form down when
-  the file draws it elsewhere (and the report says so); Flate and LZW
-  streams are read, with or without predictors. A form stream this cannot
-  decode (a filter chain) is reported as left, never painted over.
-  **`hiddendata clean`** reports from a second survey of the cleaned bytes.
+  the file draws it elsewhere (and the report says so). Every encoding a
+  content stream can carry is read — Flate, LZW, ASCII hex and 85, run
+  length, chains of them, predictors. What remains out of reach is words
+  that are pixels: a picture is reported as still holding them, never
+  painted over. **`hiddendata clean`** reports from a second survey of the
+  cleaned bytes.
 - **Secure Plus** binds the whole file's structure under the key, not only its
   strings; a reordered, dropped or repointed page is refused as a whole.
   `secure readonly` is refused under it rather than dropped. `unsecure` takes
@@ -313,8 +315,8 @@ one commit per finding, each with a test built from the audit's own input;
 
 Still open, and said plainly: no certificate trust chain; the unmaintained
 font parsers (`rustybuzz`, `ttf-parser`) await a migration; the `rsa` upgrade
-is owed when 0.10 and `cms` 0.3 ship; a form stream behind a filter chain
-is not redacted (it is reported).
+is owed when 0.10 and `cms` 0.3 ship; words that are pixels are not
+redacted (the picture is reported).
 
 ## PDFium
 
