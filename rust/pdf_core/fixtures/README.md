@@ -204,9 +204,12 @@ telephone number at page level as the control. Four shapes of it:
 - `secret-in-predicted-form.pdf` — the form's stream deflated with a PNG
   predictor (15, every row its own filter type, sixteen columns), undone by
   the byte-level reader like any other.
-- `secret-in-lzw-form.pdf` — the form's stream LZW-encoded, a filter the
-  byte-level reader does not decode: reported as nested content, never
-  painted over. The honest refusal that remains.
+- `secret-in-lzw-form.pdf` — the form's stream LZW-encoded, decoded by the
+  byte-level reader like any other.
+- `secret-in-chained-form.pdf` — the form's stream deflated and then
+  hex-encoded, a filter chain the byte-level reader does not follow:
+  reported as nested content, never painted over. The honest refusal that
+  remains.
 - `kerned-in-form.pdf` — the form's line drawn as two operators in one text
   object, `(HSI) Tj` then `[( Lighting) …] TJ`, how a design program kerns.
   Cutting `HSI` whole must leave ` Lighting` where it was.
@@ -215,7 +218,7 @@ They began as the security audit's probe (a number "redacted" while still in
 the file) and became the form-redaction fixtures.
 
 Rebuild them with `tools/make_secret_in_form_fixture.py fixtures/<name>.pdf
-<once|twice|shared|nested|nested-inner-shared|nested-outer-shared|predicted|lzw|kerned>`.
+<once|twice|shared|nested|nested-inner-shared|nested-outer-shared|predicted|lzw|chained|kerned>`.
 
 ## hidden-things.pdf
 

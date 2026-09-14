@@ -22,9 +22,11 @@ inside the form. Three shapes of it, chosen by the second argument:
           the form's stream deflated with a PNG predictor (15, each row its
           own filter type, sixteen columns) — undone by the byte-level
           reader, so the words are cut like any other
-  lzw     the form's stream LZW-encoded, a filter the byte-level reader does
-          not decode: reported as nested content, never painted over — the
-          honest refusal that remains
+  lzw     the form's stream LZW-encoded, decoded by the byte-level reader
+          like any other
+  chained the form's stream deflated and then hex-encoded, a filter chain
+          the byte-level reader does not follow: reported as nested content,
+          never painted over — the honest refusal that remains
   kerned  the form's line drawn as two operators sharing one text object —
           `(HSI) Tj` then `[( Lighting)] TJ`, how a design program kerns —
           so cutting the first must leave the second where it was
@@ -101,6 +103,9 @@ elif mode == "lzw":
         return bytes(int("".join(map(str, out_bits[i:i + 8])), 2) for i in range(0, len(out_bits), 8))
     packed_inner = lzw(inner)
     inner_filter = b"/LZWDecode"
+elif mode == "chained":
+    packed_inner = zlib.compress(inner).hex().encode() + b">"
+    inner_filter = b"[/ASCIIHexDecode /FlateDecode]"
 
 def page_content(second_draw):
     content = (b"BT /F1 20 Tf 1 0 0 1 72 720 Tm (Account details) Tj ET\n"

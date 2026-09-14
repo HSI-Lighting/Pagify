@@ -775,24 +775,29 @@ pub fn splice(bytes: &[u8], edits: &[(std::ops::Range<usize>, Vec<u8>)]) -> Vec<
     out
 }
 
-/// Inflate a stream, if it says it is deflated.
+/// Decode a stream, if it is encoded in a way this reads.
 ///
-/// Only `FlateDecode`, and only on its own — with or without a predictor.
+/// `FlateDecode` or `LZWDecode`, on its own — with or without a predictor.
 /// Anything else — a filter chain, an encoding this does not know — comes
 /// back as `None` rather than as a guess, and the caller leaves that page
 /// alone.
 pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
 
-    match dict.get(b"Filter") {
+    let filter = match dict.get(b"Filter") {
         None => return Some(raw.to_vec()),
-        Some(Object::Name(name)) if name == b"FlateDecode" => {}
+        Some(Object::Name(name)) => name.clone(),
         Some(Object::Array(items)) if items.len() == 1 => match &items[0] {
-            Object::Name(name) if name == b"FlateDecode" => {}
+            Object::Name(name) => name.clone(),
             _ => return None,
         },
         _ => return None,
-    }
+    };
+    let lzw = match filter.as_slice() {
+        b"FlateDecode" => false,
+        b"LZWDecode" => true,
+        _ => return None,
+    };
     // A `/DecodeParms` names a predictor, which changes the bytes after
     // inflating: undone below, or refused where its parameters are ones
     // this does not read. One dictionary, or an array of one for the
@@ -810,6 +815,18 @@ pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
     let predictor = parms.as_ref().map(Predictor::from).unwrap_or_default();
     if !predictor.readable() {
         return None;
+    }
+
+    if lzw {
+        // `/EarlyChange`: whether the code width grows one code before it has
+        // to, which is what every writer since TIFF does and the default.
+        let early = parms
+            .as_ref()
+            .and_then(|p| p.get(b"EarlyChange"))
+            .and_then(Object::as_f64)
+            .map(|n| n != 0.0)
+            .unwrap_or(true);
+        return predictor.undo(lzw_decode(raw, early, INFLATED_LIMIT)?);
     }
 
     // Bounded. Deflate manages about a thousand to one on the right input,
@@ -973,6 +990,97 @@ fn paeth(left: u8, up: u8, upper_left: u8) -> u8 {
     }
 }
 
+/// Undo LZW as PDF writes it: codes of 9 to 12 bits, most significant bit
+/// first, 256 clearing the table and 257 ending the data.
+///
+/// The table starts as the 256 single bytes; every code after the first
+/// adds an entry — the previous string plus the first byte of this one —
+/// and the code width grows as the table does, one code early when
+/// `early_change` says so (the default, and what every writer since TIFF
+/// does). A code the table does not have yet is the one being added: the
+/// previous string plus its own first byte. Anything else is not LZW, and
+/// comes back as `None`. Bounded like inflation, for the same reason.
+fn lzw_decode(data: &[u8], early_change: bool, limit: u64) -> Option<Vec<u8>> {
+    const CLEAR: usize = 256;
+    const END: usize = 257;
+    let fresh = || -> Vec<Vec<u8>> {
+        let mut table: Vec<Vec<u8>> = (0..=255u8).map(|b| vec![b]).collect();
+        table.push(Vec::new()); // 256, never read
+        table.push(Vec::new()); // 257, never read
+        table
+    };
+    let mut table = fresh();
+    let mut width = 9usize;
+    let mut previous: Option<Vec<u8>> = None;
+    let mut out = Vec::new();
+
+    // A bit reader over the data, most significant bit first.
+    let mut bit = 0usize;
+    let total = data.len() * 8;
+    let mut read = |width: usize| -> Option<usize> {
+        if bit + width > total {
+            return None;
+        }
+        let mut code = 0usize;
+        for _ in 0..width {
+            let byte = data[bit / 8];
+            let one = (byte >> (7 - (bit % 8))) & 1;
+            code = (code << 1) | one as usize;
+            bit += 1;
+        }
+        Some(code)
+    };
+
+    loop {
+        // Data that simply ends is taken as ended: writers omit the end code.
+        let Some(code) = read(width) else { break };
+        match code {
+            CLEAR => {
+                table = fresh();
+                width = 9;
+                previous = None;
+            }
+            END => break,
+            _ => {
+                let entry = if code < table.len() {
+                    table[code].clone()
+                } else if code == table.len() {
+                    // The code being defined by this very step.
+                    let mut entry = previous.clone()?;
+                    let first = *entry.first()?;
+                    entry.push(first);
+                    entry
+                } else {
+                    return None;
+                };
+                out.extend_from_slice(&entry);
+                if out.len() as u64 > limit {
+                    return None;
+                }
+                if let Some(mut previous) = previous.take() {
+                    previous.push(entry[0]);
+                    if table.len() < 4096 {
+                        table.push(previous);
+                    }
+                }
+                previous = Some(entry);
+                // **The decoder's table is one entry behind the writer's**:
+                // the writer added an entry when it emitted this code, and
+                // this side adds it on reading the next. So the width grows
+                // when the writer's next code — this table's length plus
+                // one — reaches the limit, one code early when the writer
+                // did that too. Checked against PDFium's reading of a file
+                // written by that rule.
+                let writers_next = table.len() + 1 + usize::from(early_change);
+                if writers_next >= 1 << width && width < 12 {
+                    width += 1;
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
 /// The most a single stream is allowed to inflate to.
 ///
 /// No real content stream, font or CMap comes near it; a hostile one is
@@ -993,6 +1101,84 @@ pub fn encode(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The specification's own example** (ISO 32000, 7.4.4.2): the input
+    /// `45 45 45 45 45 65 45 45 45 66` is written as the codes
+    /// `256 45 258 258 65 259 66 257`, which pack to `80 0B 60 50 22 0C 0C
+    /// 85 01`.
+    #[test]
+    fn lzw_decodes_the_specifications_example() {
+        let encoded = [0x80u8, 0x0B, 0x60, 0x50, 0x22, 0x0C, 0x0C, 0x85, 0x01];
+        let mut dict = super::super::Dict(Vec::new());
+        dict.set(b"Filter", Object::Name(b"LZWDecode".to_vec()));
+        assert_eq!(
+            decode(&dict, &encoded).as_deref(),
+            Some(&[45u8, 45, 45, 45, 45, 65, 45, 45, 45, 66][..])
+        );
+    }
+
+    /// A stream long enough for the code width to grow to twelve bits and
+    /// the table to be cleared, written by an encoder that follows the rules
+    /// as PDF states them, read back exactly.
+    #[test]
+    fn lzw_grows_its_code_width_and_survives_a_clear() {
+        // A writer: 9-bit codes upward, early change, clear at 4094.
+        fn lzw_encode(data: &[u8]) -> Vec<u8> {
+            let mut bits: Vec<u8> = Vec::new();
+            let mut table: std::collections::HashMap<Vec<u8>, usize> =
+                (0..=255u8).map(|b| (vec![b], b as usize)).collect();
+            let mut next = 258usize;
+            let mut width = 9usize;
+            let mut emit = |code: usize, width: usize, bits: &mut Vec<u8>| {
+                for b in 0..width {
+                    bits.push(((code >> (width - 1 - b)) & 1) as u8);
+                }
+            };
+            emit(256, width, &mut bits);
+            let mut w: Vec<u8> = Vec::new();
+            for &byte in data {
+                let mut wc = w.clone();
+                wc.push(byte);
+                if table.contains_key(&wc) {
+                    w = wc;
+                } else {
+                    emit(table[&w], width, &mut bits);
+                    table.insert(wc, next);
+                    next += 1;
+                    if next + 1 >= 1 << width && width < 12 {
+                        width += 1;
+                    }
+                    if next >= 4094 {
+                        emit(256, width, &mut bits);
+                        table = (0..=255u8).map(|b| (vec![b], b as usize)).collect();
+                        next = 258;
+                        width = 9;
+                    }
+                    w = vec![byte];
+                }
+            }
+            if !w.is_empty() {
+                emit(table[&w], width, &mut bits);
+            }
+            emit(257, width, &mut bits);
+            while bits.len() % 8 != 0 {
+                bits.push(0);
+            }
+            bits.chunks(8).map(|c| c.iter().fold(0u8, |acc, b| (acc << 1) | b)).collect()
+        }
+
+        // Varied enough to fill the table several times over.
+        let plain: Vec<u8> = (0..60_000u32)
+            .map(|i| ((i * 7919) % 251) as u8 ^ ((i / 13) % 7) as u8)
+            .collect();
+        let encoded = lzw_encode(&plain);
+        let mut dict = super::super::Dict(Vec::new());
+        dict.set(b"Filter", Object::Name(b"LZWDecode".to_vec()));
+        assert_eq!(decode(&dict, &encoded).as_deref(), Some(plain.as_slice()));
+
+        // And rubbish is not LZW: a code past the table's end.
+        assert!(decode(&dict, &[0xFF, 0xFF, 0xFF, 0xFF]).is_none());
+    }
 
     /// Every PNG filter type, and the TIFF one, undone — against what a
     /// writer following the specification produces.
