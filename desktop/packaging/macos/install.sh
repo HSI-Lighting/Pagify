@@ -13,7 +13,25 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DEST="${PAGIFY_INSTALL_DIR:-$HOME/Applications}"
+# The one thing this script removes is `$DEST/Pagify.app`, and `rm -rf` on a
+# path built from an environment variable deserves a look before it runs
+# (security audit L3): the destination has to be an absolute path to a
+# directory, and what is removed has to be a bundle of ours — a directory
+# with Pagify's own Info.plist in it — or not exist yet.
+case "$DEST" in
+  /*) ;;
+  *) echo "PAGIFY_INSTALL_DIR must be an absolute path, got '$DEST'" >&2; exit 1 ;;
+esac
+case "$DEST" in
+  */../*|*/..|/) echo "PAGIFY_INSTALL_DIR '$DEST' is not somewhere to install into" >&2; exit 1 ;;
+esac
 APP="$DEST/Pagify.app"
+if [ -e "$APP" ]; then
+  if [ ! -d "$APP" ] || ! grep -q "com.hsilighting.pagify" "$APP/Contents/Info.plist" 2>/dev/null; then
+    echo "$APP exists and is not a Pagify bundle — not removing it" >&2
+    exit 1
+  fi
+fi
 LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
 "$(dirname "$0")/bundle.sh"
