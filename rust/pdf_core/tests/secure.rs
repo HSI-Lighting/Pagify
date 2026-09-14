@@ -371,6 +371,71 @@ fn a_document_secured_plus_opens_here_and_nowhere_else() {
     assert_eq!(text_of(&opened, 0), before, "the pages did not come back whole");
 }
 
+/// **From a path, the mark is found at the tail of the file.** Opening used
+/// to read the whole file to look for it (audit L5); now it reads the end.
+/// A sealed document written to disk still opens by path, and an ordinary
+/// one is not mistaken for sealed.
+#[test]
+fn a_sealed_document_on_disk_opens_by_path() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let before = text_of(&doc, 0);
+    doc.secure_document_plus(PASSWORD).expect("secure plus");
+    let bytes = saved(&mut doc);
+
+    let dir = std::env::temp_dir().join(format!("pagify-plus-path-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("dir");
+    let path = dir.join("sealed.pdf");
+    std::fs::write(&path, &bytes).expect("write");
+    let on_disk = path.to_str().expect("path");
+
+    assert!(PdfiumDocument::open_path(on_disk, None).is_err(), "it opened with no password");
+    let opened = PdfiumDocument::open_path(on_disk, Some("correct horse battery staple"))
+        .expect("the right password did not open it from disk");
+    assert!(opened.is_secure_plus(), "opened from disk, it forgot what it is");
+    assert_eq!(text_of(&opened, 0), before);
+    drop(opened);
+
+    // The same for a document several times larger than the tail that is
+    // probed: an extra two-megabyte stream in it, sealed, written, opened.
+    // The mark is at the end whatever the size, so it is still found.
+    let plain = std::fs::read(harness::fixture_path("two-column.pdf")).expect("fixture");
+    let file = pdf_core::pdf::File::parse(&plain).expect("parse");
+    // Incompressible, or the save would fold it back to nothing.
+    let mut noise = Vec::with_capacity(2 * 1024 * 1024);
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    while noise.len() < 2 * 1024 * 1024 {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        noise.extend_from_slice(&state.to_le_bytes());
+    }
+    let big = pdf_core::pdf::write_stream(&pdf_core::pdf::Dict(Vec::new()), &noise);
+    // Reachable from the catalogue, or PDFium's own save would drop it.
+    let root_number = match file.trailer().get(b"Root") {
+        Some(pdf_core::pdf::Object::Reference(n, _)) => *n,
+        other => panic!("no root: {other:?}"),
+    };
+    let mut root = file.object(root_number).expect("root").as_dict().cloned().expect("dict");
+    root.set(b"Metadata", pdf_core::pdf::Object::Reference(999, 0));
+    let mut root_bytes = Vec::new();
+    pdf_core::pdf::write_object(&mut root_bytes, &pdf_core::pdf::Object::Dict(root));
+    let large = file
+        .rewrite_adding(&[(root_number, root_bytes)], &[(999, big)], &pdf_core::pdf::Dict(Vec::new()))
+        .expect("a larger document");
+    let mut doc = PdfiumDocument::open_bytes(large, None).expect("open the larger one");
+    doc.secure_document_plus(PASSWORD).expect("secure plus");
+    let sealed = saved(&mut doc);
+    assert!(sealed.len() > 2 * 1024 * 1024, "the padding did not survive: {} bytes", sealed.len());
+    let far = dir.join("sealed-far.pdf");
+    std::fs::write(&far, &sealed).expect("write");
+    let opened = PdfiumDocument::open_path(far.to_str().expect("path"), Some("correct horse battery staple"));
+    assert!(opened.is_ok(), "the mark at the end of a large file was not found: {:?}", opened.err());
+    drop(opened);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A sealed document reopens knowing what it is, so saving it again keeps the
 /// same handler rather than quietly turning it into an ordinary one.
 #[test]

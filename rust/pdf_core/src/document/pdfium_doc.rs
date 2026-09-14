@@ -295,10 +295,19 @@ impl PdfiumDocument {
     }
 
     pub fn open_path(path: &str, password: Option<&str>) -> Result<Self> {
-        // Read once to look for our own handler. A Secure Plus document has to
-        // be unsealed here, because PDFium cannot read it — no reader can, which
+        // Look for our own handler first. A Secure Plus document has to be
+        // unsealed here, because PDFium cannot read it — no reader can, which
         // is the point of it.
-        if let Ok(bytes) = std::fs::read(path) {
+        //
+        // **The look is at the tail of the file, not the whole of it.** Every
+        // open used to read the entire document into memory — 80 MB for a
+        // catalogue — to search for seven bytes, before PDFium then streamed
+        // it. Found by audit. The `/Encrypt` dictionary this writer adds goes
+        // after every other object, just before the cross-reference table, so
+        // the last stretch of the file is where it is; only a file that shows
+        // the mark there is read whole.
+        if Self::tail_says_ours(path) {
+            let bytes = std::fs::read(path)?;
             if let Some(unsealed) = Self::unseal_if_ours(&bytes, password)? {
                 let mut doc = Self::open_bytes(unsealed, None)?;
                 doc.source = DocumentSource::Path(path.to_string());
@@ -311,6 +320,29 @@ impl PdfiumDocument {
         let file = File::open(path)?;
         Self::from_reader(file, password, DocumentSource::Path(path.to_string()))
     }
+
+    /// Whether the end of the file carries the Secure Plus handler's name.
+    ///
+    /// Bounded: the last [`Self::TAIL_PROBE`] bytes, which holds the
+    /// dictionary this writer puts there with room to spare. A file that
+    /// cannot be read at all is left to `from_reader` to report.
+    fn tail_says_ours(path: &str) -> bool {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut file) = File::open(path) else { return false };
+        let Ok(length) = file.metadata().map(|m| m.len()) else { return false };
+        let start = length.saturating_sub(Self::TAIL_PROBE);
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return false;
+        }
+        let mut tail = Vec::with_capacity((length - start) as usize);
+        if file.take(Self::TAIL_PROBE).read_to_end(&mut tail).is_err() {
+            return false;
+        }
+        tail.windows(7).any(|w| w == b"/Pagify")
+    }
+
+    /// How much of a file's end is searched for the Secure Plus mark.
+    const TAIL_PROBE: u64 = 1024 * 1024;
 
     /// Plaintext for a document sealed with Pagify's own handler, if it is one.
     ///
