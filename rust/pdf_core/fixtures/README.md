@@ -181,19 +181,26 @@ move it in both places.
 
 Rebuild it with `tools/make_forms_fixture.py fixtures/forms.pdf`.
 
-## secret-in-form.pdf
+## secret-in-form.pdf, secret-in-form-twice.pdf, secret-in-shared-form.pdf, secret-in-nested-form.pdf
 
-One 612 × 792 pt page: a heading and a telephone number drawn at page level,
-and **a payment card number drawn through a form XObject**.
+A payment card number drawn through a form XObject, with a heading and a
+telephone number at page level as the control. Four shapes of it:
 
-It is the security audit's probe. Text extraction finds the card number, so it
-can be searched for and a rectangle drawn over it — and the redaction pass,
-which does not descend into forms, removes nothing there. What the engine and
-the app *say* about that is what the fixture tests: refused by name, never
-"gone for good". The telephone number is the control — page-level, and
-redactable.
+- `secret-in-form.pdf` — the form drawn once, on one page: the page's own,
+  so the number is cut out of the form's stream in place.
+- `secret-in-form-twice.pdf` — the same form drawn twice on the page. One
+  stream, two drawings: the drawing asked about gets a resource name and a
+  copy of its own, and the other keeps what it had.
+- `secret-in-shared-form.pdf` — two pages drawing the same form: cut from a
+  private copy on the page asked about, left as it is on the other, and said.
+- `secret-in-nested-form.pdf` — the form drawn through another form, a level
+  further down than the cut follows; reported, never painted over.
 
-Rebuild it with `tools/make_secret_in_form_fixture.py fixtures/secret-in-form.pdf`.
+They began as the security audit's probe (a number "redacted" while still in
+the file) and became the form-redaction fixtures.
+
+Rebuild them with `tools/make_secret_in_form_fixture.py fixtures/<name>.pdf
+<once|twice|shared|nested>`.
 
 ## hidden-things.pdf
 

@@ -708,6 +708,23 @@ struct PagifyApp {
     last_snap: Option<tools::Snapped>,
 }
 
+/// What a redaction has to add about forms the file draws elsewhere: the
+/// words came off this page's own copy, and stay where the other pages draw
+/// the same form. Empty when there is nothing of the kind.
+fn shared_form_notes(report: &pdf_core::document::RedactionReport) -> String {
+    let notes: Vec<String> = report
+        .uncleared
+        .iter()
+        .filter(|u| matches!(u, pdf_core::document::Uncleared::SharedForm { .. }))
+        .map(|u| u.describe())
+        .collect();
+    if notes.is_empty() {
+        String::new()
+    } else {
+        format!(" Note: {}.", notes.join("; "))
+    }
+}
+
 /// Who a signature is by, for a readout.
 ///
 /// **The certificate's subject when the signature verified; otherwise the
@@ -5185,7 +5202,8 @@ impl PagifyApp {
             // Not an error — the question is on screen.
             return Ok(String::new());
         }
-        self.apply_redaction(page, area, false)
+        let notes = shared_form_notes(&report);
+        self.apply_redaction(page, area, false).map(|said| said + &notes)
     }
 
     /// Run the redaction for real, through the command stack so it undoes.
@@ -5292,8 +5310,9 @@ impl PagifyApp {
             }
             Some(true) => {
                 self.asking_to_redact = None;
+                let notes = shared_form_notes(&asking.report);
                 match self.apply_redaction(asking.page, asking.area, true) {
-                    Ok(said) => self.say_info(said),
+                    Ok(said) => self.say_info(said + &notes),
                     Err(e) => self.say_error(e),
                 }
             }
@@ -16028,26 +16047,78 @@ mod lock_wiring_tests {
         assert_eq!(after, before, "a whiteout removed text it only covered");
     }
 
-    /// **Automatic redaction never says "gone for good" of words it could not
-    /// reach.** Found by audit: a card number drawn through a form XObject was
-    /// reported redacted — mark painted, number still in the saved file.
+    /// **Words drawn through a form come out, and the file agrees.** The
+    /// audit's probe: a card number inside a form XObject, which automatic
+    /// redaction used to paint over and call gone. Now it is cut out of the
+    /// form's own stream — the caption before it stays.
     #[test]
-    fn smartredact_says_what_it_could_not_reach_instead_of_claiming_it_gone() {
+    fn smartredact_cuts_words_out_of_a_form_and_the_saved_file_agrees() {
         let mut app = app("secret-in-form.pdf");
         app.submit("smartredact");
         assert!(said(&app).contains("4111"), "the card number was not found: {}", said(&app));
 
         app.submit("smartredact redact");
         let told = said(&app);
+        assert!(told.contains("2 redacted — gone for good"), "{told}");
+
+        let out = std::env::temp_dir().join(format!("pagify-smartredact-{}.pdf", std::process::id()));
+        app.submit(&format!("saveas {}", out.display()));
+        let text = pdf_core::registry::exclusive(|| {
+            use pdf_core::document::Document;
+            let doc = pdf_core::document::pdfium_doc::PdfiumDocument::open_path(
+                out.to_str().expect("path"),
+                None,
+            )
+            .expect("reopen");
+            let text = doc.page(0).expect("page").text().expect("text");
+            text
+        });
+        let _ = std::fs::remove_file(&out);
+        assert!(!text.contains("4111"), "the card number survived: {text}");
+        assert!(text.contains("Card on file:"), "the caption went with it: {text}");
+        assert!(!text.contains("7946"), "the telephone number survived: {text}");
+    }
+
+    /// A form drawn twice on the page: each drawing is its own find, and each
+    /// is cut from a copy of its own, so both come out and the captions stay.
+    #[test]
+    fn smartredact_cuts_each_drawing_of_a_form_drawn_twice() {
+        let mut app = app("secret-in-form-twice.pdf");
+        app.submit("smartredact redact");
+        let told = said(&app);
+        assert!(told.contains("3 redacted — gone for good"), "{told}");
+
+        let out = std::env::temp_dir().join(format!("pagify-smartredact-twice-{}.pdf", std::process::id()));
+        app.submit(&format!("saveas {}", out.display()));
+        let text = pdf_core::registry::exclusive(|| {
+            use pdf_core::document::Document;
+            let doc = pdf_core::document::pdfium_doc::PdfiumDocument::open_path(
+                out.to_str().expect("path"),
+                None,
+            )
+            .expect("reopen");
+            let text = doc.page(0).expect("page").text().expect("text");
+            text
+        });
+        let _ = std::fs::remove_file(&out);
+        assert!(!text.contains("4111"), "a drawing kept the number: {text}");
+        assert_eq!(text.matches("Card on file:").count(), 2, "a caption went too: {text}");
+    }
+
+    /// **And what still cannot be reached is still said, never claimed
+    /// gone.** A form inside a form is a level further down than the cut
+    /// follows.
+    #[test]
+    fn smartredact_says_what_it_could_not_reach_instead_of_claiming_it_gone() {
+        let mut app = app("secret-in-nested-form.pdf");
+        app.submit("smartredact redact");
+        let told = said(&app);
         assert!(!told.contains("gone for good. Save"), "it claimed everything was gone: {told}");
         assert!(told.contains("left untouched"), "{told}");
         assert!(told.contains("4111") && told.contains("nested content"), "{told}");
-        // The telephone number at page level did come out, and is counted.
         assert!(told.contains("1 gone for good"), "{told}");
 
-        // And the file agrees: saved and reopened, the card number is still
-        // there and the telephone number is not.
-        let out = std::env::temp_dir().join(format!("pagify-smartredact-{}.pdf", std::process::id()));
+        let out = std::env::temp_dir().join(format!("pagify-smartredact-nested-{}.pdf", std::process::id()));
         app.submit(&format!("saveas {}", out.display()));
         let text = pdf_core::registry::exclusive(|| {
             use pdf_core::document::Document;

@@ -88,6 +88,8 @@ fn main() {
                             image_share = image_share.max(*covers);
                         }
                         Uncleared::Form { .. } => forms += 1,
+                        // Cut, from a copy; not in the way.
+                        Uncleared::SharedForm { .. } => {}
                         Uncleared::Annotation { .. } => annotations += 1,
                     }
                 }
@@ -100,6 +102,7 @@ fn main() {
                         Uncleared::Annotation { .. } => "annotation",
                         Uncleared::OutlinedText { .. } => "outlined type",
                         Uncleared::Path { .. } => "path",
+                        Uncleared::SharedForm { .. } => "shared form",
                     })
                     .collect();
                 reasons.sort_unstable();

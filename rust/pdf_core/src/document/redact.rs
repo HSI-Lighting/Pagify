@@ -253,9 +253,15 @@ pub enum Uncleared {
     /// converted to curves. Reported and refuses, because removing nothing
     /// while drawing a black mark is the one outcome redaction must never have.
     OutlinedText { object: usize },
-    /// Nested content. A form XObject is a page in miniature and this code does
-    /// not descend into one.
+    /// Nested content this pass could not take the words out of: a form
+    /// inside a form, a form drawn more than once on the page, or one whose
+    /// stream it could not follow.
     Form { object: usize },
+    /// Words cut from this page's own copy of a form the file also draws in
+    /// `elsewhere` other places — where they remain, because those places
+    /// were never asked about. Reported, and does not refuse: what was asked
+    /// for was done.
+    SharedForm { object: usize, elsewhere: usize },
     /// An annotation crossing the boundary. Its `/Contents` may quote what was
     /// removed.
     Annotation { index: usize },
@@ -290,7 +296,7 @@ impl Uncleared {
     /// [`crate::document::classify::looks_like_type`] — the same rule the page
     /// classifier uses, so they cannot disagree.
     pub fn blocks(&self) -> bool {
-        !matches!(self, Uncleared::Path { .. })
+        !matches!(self, Uncleared::Path { .. } | Uncleared::SharedForm { .. })
     }
 
     /// How to say it to somebody deciding whether to publish the file.
@@ -314,6 +320,11 @@ impl Uncleared {
             Uncleared::Form { object } => {
                 format!("nested content (object {object}) overlaps the area")
             }
+            Uncleared::SharedForm { object, elsewhere } => format!(
+                "the words came off this page's copy of a form (object {object}) that the file \
+                 also draws in {elsewhere} other place{}, where they remain",
+                if *elsewhere == 1 { "" } else { "s" }
+            ),
             Uncleared::Annotation { index } => {
                 format!("annotation {index} crosses the edge of the area")
             }
@@ -369,7 +380,9 @@ impl RedactionReport {
             && self.uncleared.iter().any(|u| match u {
                 Uncleared::Image { covers, .. } => *covers >= Self::MOSTLY_IMAGE,
                 Uncleared::Form { .. } | Uncleared::OutlinedText { .. } => true,
-                Uncleared::Path { .. } | Uncleared::Annotation { .. } => false,
+                Uncleared::Path { .. } | Uncleared::Annotation { .. } | Uncleared::SharedForm { .. } => {
+                    false
+                }
             })
     }
 

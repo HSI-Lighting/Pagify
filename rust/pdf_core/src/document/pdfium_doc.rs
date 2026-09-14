@@ -4429,12 +4429,9 @@ impl PdfiumDocument {
         // Every covered run has to be found, or something stays on the page
         // that the caller was told had gone.
         const NEAR: f32 = 4.0;
-        let mut edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
-        let mut cut_whole: Vec<usize> = Vec::new();
-        let mut spilled: Vec<String> = Vec::new();
-        // Counted as it goes, because a sliced run loses only the glyphs the
+        // Gathered as it goes, because a sliced run loses only the glyphs the
         // selection covered while one cut whole loses all of them.
-        let mut characters = 0usize;
+        let mut cuts = Cuts::default();
 
         // Which page glyph begins at a point, if any — used both for where a
         // run starts and for where the operator drawing it starts, whose
@@ -4497,72 +4494,13 @@ impl PdfiumDocument {
                 .collect();
             parts.sort_by(|a, b| a.origin.x.total_cmp(&b.origin.x));
 
-            let widths: Vec<Option<usize>> = parts
-                .iter()
-                .map(|p| {
-                    p.font
-                        .as_ref()
-                        .zip(fonts.as_ref())
-                        .and_then(|(name, dict)| code_width(&file, dict, name))
-                })
-                .collect();
-            let counts: Vec<usize> = parts
-                .iter()
-                .zip(&widths)
-                .map(|(p, width)| {
-                    let w = width.unwrap_or(1).max(1);
-                    content::pieces(&operations[p.origin.operation])
-                        .iter()
-                        .map(|piece| match piece {
-                            content::Piece::Codes(b) => b.len() / w,
-                            content::Piece::Kern(_) => 0,
-                        })
-                        .sum::<usize>()
-                })
-                .collect();
-            // **Which code produced which character**, from the font's own
-            // `/ToUnicode` table rather than by counting.
-            //
-            // Counting only works while a code spells exactly one character.
-            // Real files break that both ways — `02DB` spells `"fl"` on a
-            // catalogue page, and a code can spell something PDFium leaves out
-            // of its text entirely — after which a character index and a code
-            // index are different numbers. Two earlier attempts guessed at the
-            // difference as an offset and moved a line by three points.
-            let wanted = run.text.chars().count();
-            let spellings: Vec<Option<String>> = parts
-                .iter()
-                .zip(&widths)
-                .flat_map(|(part, width)| {
-                    let map = part
-                        .font
-                        .as_ref()
-                        .zip(fonts.as_ref())
-                        .and_then(|(name, dict)| Self::font_to_unicode(&file, &bytes, dict, name));
-                    codes_of(&operations[part.origin.operation], width.unwrap_or(1))
-                        .into_iter()
-                        .map(move |code| {
-                            map.as_ref().and_then(|m| m.get(&code)).map(String::clone)
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-
-            // Where a font carries no `/ToUnicode` — plenty do not — there is
-            // nothing to align against, and the old assumption is the best
-            // available: one code, one character, but **only** when the two
-            // counts agree exactly. That is what the simple fixtures rely on,
-            // and dropping it made a phrase there take its whole line again.
-            let owner = align_codes(&spellings, &run.text).or_else(|| {
-                (spellings.len() == wanted).then(|| (0..wanted).collect())
-            });
-
             // The glyphs the run drew — one per character it reported. Found
             // by where the run starts, nearest rather than
             // within-a-threshold: a run's rectangle bounds its ink while a
             // glyph's box carries its side bearing, so the corners never quite
             // coincide, and a tight threshold found no start at all on fifteen
             // of sixteen real pages.
+            let wanted = run.text.chars().count();
             let run_glyph = glyph_starting_at(run.rect.left, run.rect.bottom);
             let mine: Vec<(usize, crate::document::Rect)> = if indexable && wanted > 0 {
                 run_glyph
@@ -4573,115 +4511,15 @@ impl PdfiumDocument {
                 Vec::new()
             };
 
-            // Which characters the selection covers.
-            let covered_chars: Vec<usize> = mine
-                .iter()
-                .enumerate()
-                .filter(|(_, (_, r))| request.touches(r))
-                .map(|(n, _)| n)
-                .collect();
-
-            let sliceable = widths.iter().all(Option::is_some)
-                && owner.is_some()
-                && !mine.is_empty()
-                && !covered_chars.is_empty()
-                && covered_chars.len() < mine.len();
-
-            if sliceable {
-                let owner = owner.expect("checked");
-
-                // Where each code's characters begin, and therefore which codes
-                // the covered characters belong to.
-                let mut first_char: std::collections::BTreeMap<usize, usize> = Default::default();
-                for (character, code) in owner.iter().enumerate() {
-                    if *code != usize::MAX {
-                        first_char.entry(*code).or_insert(character);
-                    }
-                }
-                let mut drop_codes: Vec<usize> = covered_chars
-                    .iter()
-                    .filter_map(|c| owner.get(*c).copied())
-                    // A character no code produced — PDFium's own trailing
-                    // space — takes nothing with it.
-                    .filter(|code| *code != usize::MAX)
-                    .collect();
-                drop_codes.sort_unstable();
-                drop_codes.dedup();
-
-                // Codes that left nothing in the extracted text — a soft
-                // hyphen, say — own no character to be selected, but one lying
-                // inside the removed stretch has to go with it.
-                if let (Some(&first), Some(&last)) = (drop_codes.first(), drop_codes.last()) {
-                    let inside: Vec<usize> = (first..=last)
-                        .filter(|c| !first_char.contains_key(c))
-                        .collect();
-                    drop_codes.extend(inside);
-                    drop_codes.sort_unstable();
-                    drop_codes.dedup();
-                }
-
-                // How far each dropped code advanced the pen: from where its
-                // characters start to where the next code's do. Measured across
-                // the glyphs rather than from font metrics, so side bearings and
-                // character spacing are already in it.
-                let starts: Vec<(usize, usize)> =
-                    first_char.iter().map(|(c, ch)| (*c, *ch)).collect();
-                let advance_of = |code: usize| -> f32 {
-                    let Some(position) = starts.iter().position(|(c, _)| *c == code) else {
-                        // Owns no character, so it moved the pen by nothing that
-                        // can be seen.
-                        return 0.0;
-                    };
-                    let from = starts[position].1;
-                    match starts.get(position + 1) {
-                        Some((_, next)) => mine[*next].1.left - mine[from].1.left,
-                        None => mine[mine.len() - 1].1.right - mine[from].1.left,
-                    }
-                };
-
-                // Each part is rebuilt from the codes dropped inside it,
-                // renumbered to its own.
-                let mut at = 0usize;
-                for ((part, size), width) in parts.iter().zip(&counts).zip(&widths) {
-                    let range = at..at + size;
-                    let local: Vec<(usize, f32)> = drop_codes
-                        .iter()
-                        .filter(|c| range.contains(c))
-                        .map(|c| (c - at, advance_of(*c)))
-                        .collect();
-                    at += size;
-                    if local.is_empty() {
-                        continue;
-                    }
-                    let operation = &operations[part.origin.operation];
-                    let font = part.font.clone().unwrap_or_default();
-                    edits.push((
-                        operation.span.clone(),
-                        content::without_codes(
-                            operation,
-                            &local,
-                            &font,
-                            part.size,
-                            part.scale,
-                            width.unwrap_or(1),
-                        ),
-                    ));
-                }
-                characters += covered_chars.len();
-            } else {
-                characters += run.text.chars().count();
-                for part in &parts {
-                    cut_whole.push(part.origin.operation);
-                }
-                // Only when something went that was *not* asked for. A run
-                // wholly inside the selection loses nothing extra by being cut
-                // whole, and reporting it would tell the caller a line vanished
-                // when it did not.
-                let beyond = request.spills(&run.rect, 0.5);
-                if beyond {
-                    spilled.push(run.text.clone());
-                }
-            }
+            Self::cut_run(
+                &CutContext { file: &file, bytes: &bytes, fonts: fonts.clone(), operations: &operations },
+                request,
+                &run.text,
+                &run.rect,
+                &parts,
+                mine,
+                &mut cuts,
+            );
         }
 
         // Anything else starting inside the area — the hyphens and fragments
@@ -4691,11 +4529,12 @@ impl PdfiumDocument {
         for p in &placed {
             let (x, y) = (p.origin.x, height - p.origin.y);
             if request.holds(x, y)
-                && !edits.iter().any(|(span, _)| *span == operations[p.origin.operation].span)
+                && !cuts.edits.iter().any(|(span, _)| *span == operations[p.origin.operation].span)
             {
-                cut_whole.push(p.origin.operation);
+                cuts.cut_whole.push(p.origin.operation);
             }
         }
+        let Cuts { mut edits, mut cut_whole, spilled, characters } = cuts;
         cut_whole.sort_unstable();
         cut_whole.dedup();
         for index in &cut_whole {
@@ -8346,14 +8185,22 @@ impl PdfiumDocument {
         // reported instead, and refuses.
         let mut objects: Vec<FPDF_PAGEOBJECT> = Vec::new();
         let mut inside_form: Vec<bool> = Vec::new();
-        let mut index_of: HashMap<usize, usize> = HashMap::new();
+        // Which form each nested object is drawn through — the one whose
+        // stream holds its operators.
+        let mut parent_of: Vec<Option<usize>> = Vec::new();
+        // Every position a handle holds. **A form drawn twice has one set of
+        // children**: PDFium parses the stream once and both drawings list
+        // the same objects, so a nested handle can stand for two drawings —
+        // one position each — and its characters come from the text page in
+        // drawing order, the first drawing's, then the second's.
+        let mut positions_of: HashMap<usize, Vec<usize>> = HashMap::new();
 
         let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
-        let mut queue: Vec<(FPDF_PAGEOBJECT, bool)> = Vec::new();
+        let mut queue: Vec<(FPDF_PAGEOBJECT, bool, Option<usize>)> = Vec::new();
         for i in 0..count {
             let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, i) };
             if !handle.is_null() {
-                queue.push((handle, false));
+                queue.push((handle, false, None));
             }
         }
 
@@ -8362,17 +8209,19 @@ impl PdfiumDocument {
         let mut depth = 0;
         while !queue.is_empty() && depth < 8 {
             let mut next = Vec::new();
-            for (handle, nested) in queue.drain(..) {
-                index_of.insert(handle as usize, objects.len());
+            for (handle, nested, parent) in queue.drain(..) {
+                let position = objects.len();
+                positions_of.entry(handle as usize).or_default().push(position);
                 objects.push(handle);
                 inside_form.push(nested);
+                parent_of.push(parent);
 
                 if unsafe { bindings.FPDFPageObj_GetType(handle) } as u32 == FPDF_PAGEOBJ_FORM {
                     let children = unsafe { bindings.FPDFFormObj_CountObjects(handle) };
                     for i in 0..children {
                         let child = unsafe { bindings.FPDFFormObj_GetObject(handle, i as c_ulong) };
                         if !child.is_null() {
-                            next.push((child, true));
+                            next.push((child, true, Some(position)));
                         }
                     }
                 }
@@ -8381,15 +8230,50 @@ impl PdfiumDocument {
             depth += 1;
         }
 
+        // The page's own forms, in the order the page draws them — which is
+        // the order their `Do` operators come in its stream, and how a form
+        // here is found in the file there.
+        let form_ordinals: HashMap<usize, usize> = objects
+            .iter()
+            .enumerate()
+            .filter(|(position, handle)| {
+                !inside_form[*position]
+                    && unsafe { bindings.FPDFPageObj_GetType(**handle) } as u32 == FPDF_PAGEOBJ_FORM
+            })
+            .enumerate()
+            .map(|(ordinal, (position, _))| (position, ordinal))
+            .collect();
+
         let mut marks: HashMap<usize, Vec<Marked>> = HashMap::new();
+        // Each character's box, page space, in the order the marks come — what
+        // slicing a run drawn through a form needs, since its operators are in
+        // a stream the page's glyph list cannot be asked about.
+        let mut boxes: HashMap<usize, Vec<Rect>> = HashMap::new();
         let mut texts: HashMap<usize, String> = HashMap::new();
         let mut unreadable: HashSet<usize> = HashSet::new();
         let mut report = RedactionReport::default();
         let mut nested_text = false;
 
         let text_page = unsafe { bindings.FPDFText_LoadPage(raw.handle) };
+        // For an object several drawings share: how many characters the
+        // text page gives it altogether — its own, once per drawing — and
+        // how many have been handed out so far.
+        let mut chars_of: HashMap<usize, usize> = HashMap::new();
+        let mut seen_of: HashMap<usize, usize> = HashMap::new();
+        // Each nested object's words as the text page spells them, one
+        // character per box, so the two cannot disagree about their count.
+        let mut walked: HashMap<usize, String> = HashMap::new();
         if !text_page.is_null() {
             let chars = unsafe { bindings.FPDFText_CountChars(text_page) };
+            for index in 0..chars {
+                if unsafe { bindings.FPDFText_IsGenerated(text_page, index) } == 1 {
+                    continue;
+                }
+                let owner = unsafe { bindings.FPDFText_GetTextObject(text_page, index) };
+                if positions_of.get(&(owner as usize)).is_some_and(|p| p.len() > 1) {
+                    *chars_of.entry(owner as usize).or_insert(0) += 1;
+                }
+            }
             for index in 0..chars {
                 // Characters PDFium invented — the spaces it inserts between
                 // runs so extracted text reads as words — are not in the
@@ -8403,12 +8287,30 @@ impl PdfiumDocument {
                 if owner.is_null() {
                     continue;
                 }
-                let Some(&object) = index_of.get(&(owner as usize)) else {
+                let Some(positions) = positions_of.get(&(owner as usize)) else {
                     // A character whose object is not in the page's own list
-                    // lives inside a form XObject, and cannot be addressed for
-                    // removal from here.
+                    // lives deeper than the walk went, and cannot be addressed
+                    // for removal from here.
                     nested_text = true;
                     continue;
+                };
+                let object = if positions.len() == 1 {
+                    positions[0]
+                } else {
+                    // The same object drawn through several drawings of one
+                    // form: its characters arrive one drawing at a time, so
+                    // the n-th run of them belongs to the n-th drawing.
+                    let per = (chars_of.get(&(owner as usize)).copied().unwrap_or(0) / positions.len()).max(1);
+                    let seen = seen_of.entry(owner as usize).or_insert(0);
+                    let drawing = *seen / per;
+                    *seen += 1;
+                    match positions.get(drawing) {
+                        Some(position) => *position,
+                        None => {
+                            nested_text = true;
+                            continue;
+                        }
+                    }
                 };
 
                 let (mut l, mut r, mut b, mut t) = (0f64, 0f64, 0f64, 0f64);
@@ -8421,6 +8323,10 @@ impl PdfiumDocument {
                     // than guessing character by character.
                     unreadable.insert(object);
                     marks.entry(object).or_default().push(Marked { covered: true, left: 0.0 });
+                    boxes.entry(object).or_default().push(Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 });
+                    if inside_form[object] {
+                        walked.entry(object).or_default().push('\u{FFFD}');
+                    }
                     continue;
                 }
 
@@ -8431,6 +8337,14 @@ impl PdfiumDocument {
                     .entry(object)
                     .or_default()
                     .push(Marked { covered: overlaps(&glyph, &area), left: l as f32 });
+                boxes.entry(object).or_default().push(glyph);
+                if inside_form[object] {
+                    let unicode = unsafe { bindings.FPDFText_GetUnicode(text_page, index) };
+                    walked
+                        .entry(object)
+                        .or_default()
+                        .push(char::from_u32(unicode).unwrap_or('\u{FFFD}'));
+                }
             }
 
             // Read while the text page is open: `FPDFTextObj_GetText` needs one,
@@ -8454,6 +8368,9 @@ impl PdfiumDocument {
             Rewrite(Vec<Segment>),
         }
         let mut plan: Vec<(usize, Act)> = Vec::new();
+        // Words drawn through a form, to be cut out of the form's own stream
+        // — see `plan_form_cuts`.
+        let mut nested_covered: Vec<NestedRun> = Vec::new();
 
         for (position, &handle) in objects.iter().enumerate() {
             let kind = unsafe { bindings.FPDFPageObj_GetType(handle) } as u32;
@@ -8462,10 +8379,25 @@ impl PdfiumDocument {
                 let Some(marked) = marks.get(&position) else { continue };
                 let text = texts.get(&position).cloned().unwrap_or_default();
 
-                // Inside a shared form: seen, reported, and left alone.
+                // Inside a form: not one of the page's own objects, so not
+                // removable here — gathered for the pass over the form's
+                // stream instead, which is where its operators are.
                 if inside_form[position] {
                     if marked.iter().any(|m| m.covered) {
-                        report.uncleared.push(Uncleared::Form { object: position });
+                        let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+                        unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) };
+                        nested_covered.push(NestedRun {
+                            position,
+                            parent: parent_of[position],
+                            // As the text page walked it, not as the object
+                            // reports itself: an object several drawings
+                            // share reports the generated space between
+                            // them as its own.
+                            text: walked.get(&position).cloned().unwrap_or_else(|| text.clone()),
+                            origin: (m.e, m.f),
+                            boxes: boxes.get(&position).cloned().unwrap_or_default(),
+                            unreadable: unreadable.contains(&position),
+                        });
                     }
                     continue;
                 }
@@ -8621,6 +8553,34 @@ impl PdfiumDocument {
             });
         }
 
+        // **Words drawn through forms, cut from the forms' own streams.** The
+        // page's object list cannot remove them — an XObject exists to be drawn
+        // more than once, and `FPDFFormObj_RemoveObject` on a shared one would
+        // blank content on pages nobody was redacting — so they are planned
+        // here and cut at the byte level after the page's own objects are
+        // done: in place when the form is this page's alone, from a private
+        // copy when the file draws it elsewhere too. What the plan cannot place
+        // is reported as it always was.
+        let form_plan = if nested_covered.is_empty() {
+            FormPlan::default()
+        } else {
+            let bytes = self.readable_bytes()?;
+            self.plan_form_cuts(&bytes, request, &nested_covered, &form_ordinals)?
+        };
+        for position in &form_plan.refused {
+            report.uncleared.push(Uncleared::Form { object: *position });
+        }
+        for cut in &form_plan.cuts {
+            report.characters += cut.characters;
+            report.spilled.extend(cut.spilled.iter().cloned());
+            if cut.elsewhere > 0 {
+                report.uncleared.push(Uncleared::SharedForm {
+                    object: cut.form,
+                    elsewhere: cut.elsewhere,
+                });
+            }
+        }
+
         // Annotations are overlay content: one wholly inside goes, and one
         // crossing the edge is reported rather than removed, since most of what
         // it covers is outside what was asked to be cleared.
@@ -8756,11 +8716,725 @@ impl PdfiumDocument {
             return Err(PdfError::Pdfium("the page could not be rewritten".into()));
         }
 
+        // The forms, with the page handle closed first: the cut rewrites the
+        // file and reopens the document, and a page handle held across that
+        // would point into a document that no longer exists.
+        drop(raw);
+        if !form_plan.cuts.is_empty() {
+            self.apply_form_cuts(request, &nested_covered, &form_ordinals)?;
+        }
+
         self.touch();
         // Set even when the rectangle matched nothing. Whether an incremental
         // save is safe is not a judgement to make from one rectangle's yield.
         self.redacted = true;
         Ok(report)
+    }
+}
+
+/// A run of words inside a form, as the survey found it: where it is drawn
+/// from in the form's own space, and one page-space box per character.
+struct NestedRun {
+    /// Its position in the survey's object list.
+    position: usize,
+    /// The form it is drawn through — the page's own, or `None` for one the
+    /// survey could not attribute.
+    parent: Option<usize>,
+    text: String,
+    /// The text matrix's translation, in the form's coordinate space — what
+    /// `content::placed` reports for the operator that draws it.
+    origin: (f32, f32),
+    /// Page-space glyph boxes, one per character, in the order the text page
+    /// gave them.
+    boxes: Vec<Rect>,
+    /// A character whose box could not be read: the run goes whole.
+    unreadable: bool,
+}
+
+/// One form's stream with the covered words cut out of it, ready to write.
+struct FormCut {
+    /// The form's position in the survey's object list.
+    form: usize,
+    /// The resource name the page draws it by.
+    name: Vec<u8>,
+    /// The XObject's object number.
+    number: u32,
+    dict: crate::pdf::Dict,
+    /// The form's content, decoded, with the cuts made.
+    edited: Vec<u8>,
+    characters: usize,
+    spilled: Vec<String>,
+    /// How many other drawings of the same XObject there are — on this page
+    /// and elsewhere. Above zero, the cut goes into a private copy for this
+    /// drawing.
+    elsewhere: usize,
+    /// The `Do` in the page's stream that draws it.
+    do_at: usize,
+    /// A fresh resource name for this drawing, when the page draws the same
+    /// XObject more than once under the one it has.
+    rename: Option<Vec<u8>>,
+}
+
+/// What can be cut out of the page's forms, and what cannot.
+#[derive(Default)]
+struct FormPlan {
+    cuts: Vec<FormCut>,
+    /// Nested runs this pass could not place: reported as uncleared.
+    refused: Vec<usize>,
+}
+
+impl PdfiumDocument {
+    /// Work out how the covered words inside the page's forms come out.
+    ///
+    /// **Pure with respect to the document**: reads `bytes`, changes nothing,
+    /// so the survey can report exactly what the apply will do — the two run
+    /// the same code on the same bytes.
+    ///
+    /// A form is found in the file by the order the page draws it: the *n*th
+    /// form PDFium lists is the *n*th `Do` of a form XObject in the page's
+    /// stream. A form drawn twice on the page is refused, because one stream
+    /// serves both drawings and only one of them was asked about; a form
+    /// inside a form is refused, because its operators are a level further
+    /// down than this follows.
+    fn plan_form_cuts(
+        &self,
+        bytes: &[u8],
+        request: &Redaction,
+        nested: &[NestedRun],
+        form_ordinals: &HashMap<usize, usize>,
+    ) -> Result<FormPlan> {
+        use crate::pdf::{content, Object};
+
+        let file = crate::pdf::File::parse(bytes)?;
+        let page = self.page_object(&file, request.page_index)?;
+        let (stream, _) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let states = content::states(&operations);
+        let images = self.image_names(&file, &page)?;
+        let xobjects = self
+            .inherited(&file, &page, b"Resources")?
+            .and_then(|r| r.as_dict().and_then(|d| d.get(b"XObject")).cloned())
+            .and_then(|x| file.resolve(&x).ok())
+            .and_then(|x| x.as_dict().cloned());
+        let height = self.page_size(request.page_index)?.height_pt;
+
+        // The page's form `Do`s, in order.
+        let form_dos: Vec<(usize, Vec<u8>)> = operations
+            .iter()
+            .enumerate()
+            .filter_map(|(at, op)| match (op.operator.as_slice(), op.operands.first()) {
+                (b"Do", Some(Object::Name(name))) if !images.contains(name) => {
+                    Some((at, name.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut plan = FormPlan::default();
+        let mut by_form: std::collections::BTreeMap<usize, Vec<&NestedRun>> = Default::default();
+        for run in nested {
+            match run.parent {
+                Some(parent) => by_form.entry(parent).or_default().push(run),
+                None => plan.refused.push(run.position),
+            }
+        }
+
+        for (form, runs) in by_form {
+            let refuse_all = |plan: &mut FormPlan| {
+                plan.refused.extend(runs.iter().map(|r| r.position));
+            };
+            let Some(&ordinal) = form_ordinals.get(&form) else {
+                // A form inside a form.
+                refuse_all(&mut plan);
+                continue;
+            };
+            let Some((do_at, name)) = form_dos.get(ordinal).cloned() else {
+                refuse_all(&mut plan);
+                continue;
+            };
+            // Drawn more than once on the page under one name: this drawing
+            // gets a name of its own, so the cut reaches it and not the other.
+            let drawings_here = form_dos.iter().filter(|(_, n)| *n == name).count();
+            let rename = (drawings_here > 1).then(|| {
+                let mut fresh = b"PgfCut".to_vec();
+                fresh.extend_from_slice(ordinal.to_string().as_bytes());
+                fresh
+            });
+            let Some(number) = xobjects
+                .as_ref()
+                .and_then(|x| x.get(&name))
+                .and_then(|o| o.as_reference())
+                .map(|(n, _)| n)
+            else {
+                refuse_all(&mut plan);
+                continue;
+            };
+            let Ok(Object::Stream(dict, range)) = file.object(number) else {
+                refuse_all(&mut plan);
+                continue;
+            };
+            let Some(decoded) = file.bytes().get(range).and_then(|raw| content::decode(&dict, raw))
+            else {
+                refuse_all(&mut plan);
+                continue;
+            };
+            let Ok(form_ops) = content::parse(&decoded) else {
+                refuse_all(&mut plan);
+                continue;
+            };
+            let placed = content::placed(&form_ops);
+
+            // The form's own fonts, or the page's where it has none of its own.
+            let fonts = dict
+                .get(b"Resources")
+                .and_then(|r| file.resolve(r).ok())
+                .and_then(|r| r.as_dict().and_then(|d| d.get(b"Font")).cloned())
+                .and_then(|f| file.resolve(&f).ok())
+                .and_then(|f| f.as_dict().cloned())
+                .or_else(|| self.page_fonts(&file, &page));
+            let ctx = CutContext { file: &file, bytes, fonts, operations: &form_ops };
+            let codes_in = |p: &content::Placed| -> usize {
+                let width = p
+                    .font
+                    .as_ref()
+                    .zip(ctx.fonts.as_ref())
+                    .and_then(|(name, dict)| code_width(&file, dict, name))
+                    .unwrap_or(1)
+                    .max(1);
+                content::pieces(&form_ops[p.origin.operation])
+                    .iter()
+                    .map(|piece| match piece {
+                        content::Piece::Codes(bytes) => bytes.len() / width,
+                        content::Piece::Kern(_) => 0,
+                    })
+                    .sum()
+            };
+
+            // Where this drawing of the form lands on the page: the form's own
+            // matrix, then the state at its `Do`.
+            let form_matrix = dict
+                .get(b"Matrix")
+                .and_then(|m| match m {
+                    Object::Array(items) if items.len() == 6 => {
+                        let n: Vec<f32> = items.iter().filter_map(|i| i.as_f64()).map(|v| v as f32).collect();
+                        (n.len() == 6).then(|| [n[0], n[1], n[2], n[3], n[4], n[5]])
+                    }
+                    _ => None,
+                })
+                .unwrap_or(IDENTITY_MATRIX);
+            let ctm = states.get(do_at).map(|s| s.ctm).unwrap_or(IDENTITY_MATRIX);
+            let to_page = matrices(form_matrix, ctm);
+
+            const NEAR: f32 = 4.0;
+            let mut cuts = Cuts::default();
+            let mut handled = 0usize;
+            for run in &runs {
+                // The operators drawing it, from where its text matrix says it
+                // starts — in the form's space, which is what both sides speak.
+                let (want_x, want_y) = run.origin;
+                let start = placed
+                    .iter()
+                    .map(|p| {
+                        let d = ((p.origin.x - want_x).powi(2) + (p.origin.y - want_y).powi(2)).sqrt();
+                        (p, d)
+                    })
+                    .min_by(|a, b| a.1.total_cmp(&b.1))
+                    .filter(|(_, d)| *d <= NEAR)
+                    .map(|(p, _)| p);
+                let Some(start) = start else {
+                    plan.refused.push(run.position);
+                    continue;
+                };
+                let wanted = run.text.chars().count();
+                let mut following: Vec<&content::Placed> = placed
+                    .iter()
+                    .filter(|p| p.line == start.line && p.origin.x >= start.origin.x - 0.5)
+                    .collect();
+                following.sort_by_key(|p| p.origin.operation);
+                let mut parts: Vec<&content::Placed> = Vec::new();
+                let mut covered = 0usize;
+                for p in following {
+                    parts.push(p);
+                    covered += codes_in(p);
+                    if covered >= wanted {
+                        break;
+                    }
+                }
+                if parts.is_empty() {
+                    plan.refused.push(run.position);
+                    continue;
+                }
+
+                let mine: Vec<(usize, Rect)> = if !run.unreadable && wanted > 0 && run.boxes.len() == wanted {
+                    run.boxes.iter().copied().enumerate().collect()
+                } else {
+                    Vec::new()
+                };
+                let run_rect = run.boxes.iter().fold(None::<Rect>, |acc, b| {
+                    Some(match acc {
+                        None => *b,
+                        Some(r) => Rect {
+                            left: r.left.min(b.left),
+                            top: r.top.min(b.top),
+                            right: r.right.max(b.right),
+                            bottom: r.bottom.max(b.bottom),
+                        },
+                    })
+                });
+                let run_rect = run_rect.unwrap_or(Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 });
+                Self::cut_run(&ctx, request, &run.text, &run_rect, &parts, mine, &mut cuts);
+                handled += 1;
+            }
+            if handled == 0 {
+                continue;
+            }
+
+            // Anything else starting inside the area — fragments the text page
+            // folded into a neighbouring run — judged where it lands on the
+            // page. Only where nothing is being sliced there.
+            for p in &placed {
+                let x = p.origin.x * to_page[0] + p.origin.y * to_page[2] + to_page[4];
+                let y = p.origin.x * to_page[1] + p.origin.y * to_page[3] + to_page[5];
+                if request.holds(x, height - y)
+                    && !cuts.edits.iter().any(|(span, _)| *span == form_ops[p.origin.operation].span)
+                {
+                    cuts.cut_whole.push(p.origin.operation);
+                }
+            }
+            let Cuts { mut edits, mut cut_whole, spilled, characters } = cuts;
+            cut_whole.sort_unstable();
+            cut_whole.dedup();
+            for index in &cut_whole {
+                edits.push((form_ops[*index].span.clone(), Vec::new()));
+            }
+            let edited = content::splice(&decoded, &edits);
+
+            // Every other drawing of the same XObject: the rest of this
+            // page's, and every other page's and form's.
+            let elsewhere = (drawings_here - 1)
+                + self.xobject_uses(&file, number, Some(request.page_index));
+            plan.cuts.push(FormCut {
+                form,
+                name,
+                number,
+                dict,
+                edited,
+                characters,
+                spilled,
+                elsewhere,
+                do_at,
+                rename,
+            });
+        }
+        Ok(plan)
+    }
+
+    /// How many places in the file draw an XObject: every page's resources
+    /// (inherited ones resolved per page, so two pages sharing one resources
+    /// object count twice) and every form's own — leaving out one page's,
+    /// whose drawings the caller counts for itself.
+    fn xobject_uses(&self, file: &crate::pdf::File<'_>, number: u32, except: Option<usize>) -> usize {
+        use crate::pdf::Object;
+        let counts = |resources: Option<Object>| -> usize {
+            resources
+                .and_then(|r| r.as_dict().and_then(|d| d.get(b"XObject")).cloned())
+                .and_then(|x| file.resolve(&x).ok())
+                .and_then(|x| x.as_dict().cloned())
+                .map(|dict| {
+                    dict.0
+                        .iter()
+                        .filter(|(_, entry)| matches!(entry, Object::Reference(n, _) if *n == number))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let mut uses = 0usize;
+        for index in 0..self.page_count {
+            if Some(index) == except {
+                continue;
+            }
+            if let Ok(page) = self.page_object(file, index) {
+                uses += counts(self.inherited(file, &page, b"Resources").ok().flatten());
+            }
+        }
+        for object in file.numbers() {
+            if let Ok(Object::Stream(dict, _)) = file.object(object) {
+                if dict.get(b"Subtype").and_then(Object::as_name) == Some(&b"Form"[..]) {
+                    uses += counts(dict.get(b"Resources").and_then(|r| file.resolve(r).ok()));
+                }
+            }
+        }
+        uses
+    }
+
+    /// Write the planned cuts into the file and reopen from it.
+    ///
+    /// A form the page has to itself is rewritten in place. One the file draws
+    /// elsewhere too is left as it is, and this page gets a private copy with
+    /// the cuts — pointed at from resources that are this page's own, made so
+    /// if they were shared.
+    fn apply_form_cuts(
+        &mut self,
+        request: &Redaction,
+        nested: &[NestedRun],
+        form_ordinals: &HashMap<usize, usize>,
+    ) -> Result<()> {
+        use crate::pdf::{content, write_object, write_stream, Object};
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let bytes = self.readable_bytes()?;
+        let plan = self.plan_form_cuts(&bytes, request, nested, form_ordinals)?;
+        if plan.cuts.is_empty() {
+            return Ok(());
+        }
+        let file = crate::pdf::File::parse(&bytes)?;
+        let page_number = self.page_object_number(&file, request.page_index)?;
+        let mut page_dict = self
+            .page_object(&file, request.page_index)?
+            .as_dict()
+            .cloned()
+            .ok_or_else(|| PdfError::InvalidArgument("the page is not a dictionary".into()))?;
+        let mut replacements: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut extras: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut next = file.numbers().max().unwrap_or(0) + 1;
+        let mut page_changed = false;
+        // The page's stream, spliced where a drawing is given a name of its
+        // own; written back only if something was.
+        let (page_stream, page_streams) = self.page_content(&file, &Object::Dict(page_dict.clone()))?;
+        let page_ops = content::parse(&page_stream)?;
+        let mut page_edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
+
+        for cut in &plan.cuts {
+            let packed = content::encode(&cut.edited)?;
+            let mut dict = cut.dict.clone();
+            dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            let body = write_stream(&dict, &packed);
+            if cut.elsewhere == 0 {
+                replacements.push((cut.number, body));
+                continue;
+            }
+            // A private copy, and this page's resources pointed at it — under
+            // the drawing's own name, where it had to be given one.
+            let copy = next;
+            next += 1;
+            extras.push((copy, body));
+            let name = match &cut.rename {
+                Some(fresh) => {
+                    let Some(op) = page_ops.get(cut.do_at) else {
+                        return Err(PdfError::Internal("a form's Do moved between survey and cut".into()));
+                    };
+                    let mut operand = b"/".to_vec();
+                    operand.extend_from_slice(fresh);
+                    operand.extend_from_slice(b" Do");
+                    page_edits.push((op.span.clone(), operand));
+                    fresh.clone()
+                }
+                None => cut.name.clone(),
+            };
+            let resources = match page_dict.get(b"Resources").cloned() {
+                Some(Object::Dict(own)) => (own, None),
+                Some(Object::Reference(n, _)) => {
+                    let dict = file.object(n)?.as_dict().cloned().unwrap_or(crate::pdf::Dict(Vec::new()));
+                    // Its own only if no other page or form names the same object.
+                    let shared = self.resources_uses(&file, n) > 1;
+                    (dict, if shared { None } else { Some(n) })
+                }
+                _ => (
+                    self.inherited(&file, &Object::Dict(page_dict.clone()), b"Resources")?
+                        .and_then(|r| r.as_dict().cloned())
+                        .unwrap_or(crate::pdf::Dict(Vec::new())),
+                    None,
+                ),
+            };
+            let (mut resources, owned_object) = resources;
+            let mut xobjects = resources
+                .get(b"XObject")
+                .and_then(|x| file.resolve(x).ok())
+                .and_then(|x| x.as_dict().cloned())
+                .unwrap_or(crate::pdf::Dict(Vec::new()));
+            xobjects.set(&name, Object::Reference(copy, 0));
+            resources.set(b"XObject", Object::Dict(xobjects));
+            match (page_dict.get(b"Resources").cloned(), owned_object) {
+                (Some(Object::Dict(_)), _) => {
+                    page_dict.set(b"Resources", Object::Dict(resources));
+                    page_changed = true;
+                }
+                (Some(Object::Reference(..)), Some(n)) => {
+                    let mut body = Vec::new();
+                    write_object(&mut body, &Object::Dict(resources));
+                    replacements.push((n, body));
+                }
+                _ => {
+                    let own = next;
+                    next += 1;
+                    let mut body = Vec::new();
+                    write_object(&mut body, &Object::Dict(resources));
+                    extras.push((own, body));
+                    page_dict.set(b"Resources", Object::Reference(own, 0));
+                    page_changed = true;
+                }
+            }
+        }
+        if page_changed {
+            let mut body = Vec::new();
+            write_object(&mut body, &Object::Dict(page_dict));
+            replacements.push((page_number, body));
+        }
+        if !page_edits.is_empty() {
+            // As the page path writes it: everything into the first stream,
+            // the others emptied, the dictionary untouched.
+            let edited = content::splice(&page_stream, &page_edits);
+            for (index, (number, dict)) in page_streams.iter().enumerate() {
+                let data = if index == 0 { edited.clone() } else { Vec::new() };
+                let packed = content::encode(&data)?;
+                let mut dict = dict.clone();
+                dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+                dict.remove(b"DecodeParms");
+                replacements.push((*number, write_stream(&dict, &packed)));
+            }
+        }
+
+        let rewritten = file.rewrite_adding(&replacements, &extras, &crate::pdf::Dict(Vec::new()))?;
+        let reopened = Self::open_bytes(rewritten, None)?;
+        self.document = reopened.document;
+        self.page_count = reopened.page_count;
+        if let Ok(mut cached) = self.vault.lock() {
+            *cached = None;
+        }
+        self.rearm_security(was_secured, plus, permissions);
+        self.touch();
+        Ok(())
+    }
+
+    /// How many pages and forms name one resources object.
+    fn resources_uses(&self, file: &crate::pdf::File<'_>, number: u32) -> usize {
+        use crate::pdf::Object;
+        let names_it = |dict: &crate::pdf::Dict| {
+            matches!(dict.get(b"Resources"), Some(Object::Reference(n, _)) if *n == number)
+        };
+        file.numbers()
+            .filter(|n| match file.object(*n) {
+                Ok(Object::Dict(d)) => names_it(&d),
+                Ok(Object::Stream(d, _)) => names_it(&d),
+                _ => false,
+            })
+            .count()
+    }
+}
+
+
+/// Everything a cut needs to know about the stream it is cutting from.
+struct CutContext<'a> {
+    file: &'a crate::pdf::File<'a>,
+    bytes: &'a [u8],
+    /// The `/Font` resources the stream's operators name.
+    fonts: Option<crate::pdf::Dict>,
+    operations: &'a [crate::pdf::content::Operation],
+}
+
+/// What cutting runs out of one content stream produced, gathered as it goes.
+#[derive(Default)]
+struct Cuts {
+    /// Byte ranges of the stream, each with what replaces it.
+    edits: Vec<(std::ops::Range<usize>, Vec<u8>)>,
+    /// Operations to take out whole.
+    cut_whole: Vec<usize>,
+    /// Runs cut whole that reached beyond the area.
+    spilled: Vec<String>,
+    characters: usize,
+}
+
+impl PdfiumDocument {
+    /// Cut one run's covered characters out of its operators — sliced where
+    /// the codes can be told apart, whole where they cannot.
+    ///
+    /// **The one decision the page path and the form path share**, so that
+    /// words drawn through a form XObject are cut by exactly the rule words
+    /// on the page are. `parts` are the operators drawing the run, in order;
+    /// `mine` is one page-space box per character the run reported, or empty
+    /// where the boxes could not be matched to the characters.
+    fn cut_run(
+        ctx: &CutContext<'_>,
+        request: &Redaction,
+        run_text: &str,
+        run_rect: &Rect,
+        parts: &[&crate::pdf::content::Placed],
+        mine: Vec<(usize, Rect)>,
+        cuts: &mut Cuts,
+    ) {
+        use crate::pdf::content;
+        let widths: Vec<Option<usize>> = parts
+            .iter()
+            .map(|p| {
+                p.font
+                    .as_ref()
+                    .zip(ctx.fonts.as_ref())
+                    .and_then(|(name, dict)| code_width(ctx.file, dict, name))
+            })
+            .collect();
+        let counts: Vec<usize> = parts
+            .iter()
+            .zip(&widths)
+            .map(|(p, width)| {
+                let w = width.unwrap_or(1).max(1);
+                content::pieces(&ctx.operations[p.origin.operation])
+                    .iter()
+                    .map(|piece| match piece {
+                        content::Piece::Codes(b) => b.len() / w,
+                        content::Piece::Kern(_) => 0,
+                    })
+                    .sum::<usize>()
+            })
+            .collect();
+        // **Which code produced which character**, from the font's own
+        // `/ToUnicode` table rather than by counting.
+        //
+        // Counting only works while a code spells exactly one character.
+        // Real files break that both ways — `02DB` spells `"fl"` on a
+        // catalogue page, and a code can spell something PDFium leaves out
+        // of its text entirely — after which a character index and a code
+        // index are different numbers. Two earlier attempts guessed at the
+        // difference as an offset and moved a line by three points.
+        let wanted = run_text.chars().count();
+        let spellings: Vec<Option<String>> = parts
+            .iter()
+            .zip(&widths)
+            .flat_map(|(part, width)| {
+                let map = part
+                    .font
+                    .as_ref()
+                    .zip(ctx.fonts.as_ref())
+                    .and_then(|(name, dict)| Self::font_to_unicode(ctx.file, ctx.bytes, dict, name));
+                codes_of(&ctx.operations[part.origin.operation], width.unwrap_or(1))
+                    .into_iter()
+                    .map(move |code| {
+                        map.as_ref().and_then(|m| m.get(&code)).map(String::clone)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        // Where a font carries no `/ToUnicode` — plenty do not — there is
+        // nothing to align against, and the old assumption is the best
+        // available: one code, one character, but **only** when the two
+        // counts agree exactly. That is what the simple fixtures rely on,
+        // and dropping it made a phrase there take its whole line again.
+        let owner = align_codes(&spellings, &run_text).or_else(|| {
+            (spellings.len() == wanted).then(|| (0..wanted).collect())
+        });
+
+        // Which characters the selection covers.
+        let covered_chars: Vec<usize> = mine
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, r))| request.touches(r))
+            .map(|(n, _)| n)
+            .collect();
+
+        let sliceable = widths.iter().all(Option::is_some)
+            && owner.is_some()
+            && !mine.is_empty()
+            && !covered_chars.is_empty()
+            && covered_chars.len() < mine.len();
+
+        if sliceable {
+            let owner = owner.expect("checked");
+
+            // Where each code's characters begin, and therefore which codes
+            // the covered characters belong to.
+            let mut first_char: std::collections::BTreeMap<usize, usize> = Default::default();
+            for (character, code) in owner.iter().enumerate() {
+                if *code != usize::MAX {
+                    first_char.entry(*code).or_insert(character);
+                }
+            }
+            let mut drop_codes: Vec<usize> = covered_chars
+                .iter()
+                .filter_map(|c| owner.get(*c).copied())
+                // A character no code produced — PDFium's own trailing
+                // space — takes nothing with it.
+                .filter(|code| *code != usize::MAX)
+                .collect();
+            drop_codes.sort_unstable();
+            drop_codes.dedup();
+
+            // Codes that left nothing in the extracted text — a soft
+            // hyphen, say — own no character to be selected, but one lying
+            // inside the removed stretch has to go with it.
+            if let (Some(&first), Some(&last)) = (drop_codes.first(), drop_codes.last()) {
+                let inside: Vec<usize> = (first..=last)
+                    .filter(|c| !first_char.contains_key(c))
+                    .collect();
+                drop_codes.extend(inside);
+                drop_codes.sort_unstable();
+                drop_codes.dedup();
+            }
+
+            // How far each dropped code advanced the pen: from where its
+            // characters start to where the next code's do. Measured across
+            // the glyphs rather than from font metrics, so side bearings and
+            // character spacing are already in it.
+            let starts: Vec<(usize, usize)> =
+                first_char.iter().map(|(c, ch)| (*c, *ch)).collect();
+            let advance_of = |code: usize| -> f32 {
+                let Some(position) = starts.iter().position(|(c, _)| *c == code) else {
+                    // Owns no character, so it moved the pen by nothing that
+                    // can be seen.
+                    return 0.0;
+                };
+                let from = starts[position].1;
+                match starts.get(position + 1) {
+                    Some((_, next)) => mine[*next].1.left - mine[from].1.left,
+                    None => mine[mine.len() - 1].1.right - mine[from].1.left,
+                }
+            };
+
+            // Each part is rebuilt from the codes dropped inside it,
+            // renumbered to its own.
+            let mut at = 0usize;
+            for ((part, size), width) in parts.iter().zip(&counts).zip(&widths) {
+                let range = at..at + size;
+                let local: Vec<(usize, f32)> = drop_codes
+                    .iter()
+                    .filter(|c| range.contains(c))
+                    .map(|c| (c - at, advance_of(*c)))
+                    .collect();
+                at += size;
+                if local.is_empty() {
+                    continue;
+                }
+                let operation = &ctx.operations[part.origin.operation];
+                let font = part.font.clone().unwrap_or_default();
+                cuts.edits.push((
+                    operation.span.clone(),
+                    content::without_codes(
+                        operation,
+                        &local,
+                        &font,
+                        part.size,
+                        part.scale,
+                        width.unwrap_or(1),
+                    ),
+                ));
+            }
+            cuts.characters += covered_chars.len();
+        } else {
+            cuts.characters += run_text.chars().count();
+            for part in parts {
+                cuts.cut_whole.push(part.origin.operation);
+            }
+            // Only when something went that was *not* asked for. A run
+            // wholly inside the selection loses nothing extra by being cut
+            // whole, and reporting it would tell the caller a line vanished
+            // when it did not.
+            let beyond = request.spills(run_rect, 0.5);
+            if beyond {
+                cuts.spilled.push(run_text.to_string());
+            }
+        }
     }
 }
 

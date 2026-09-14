@@ -298,16 +298,17 @@ fn a_refused_redaction_changes_nothing() {
     assert_eq!(before, after, "a refused redaction still changed the page");
 }
 
-/// **Words inside a form XObject are not reached, and the refusal says so.**
+/// **Words inside a form XObject are cut out of the form's own stream.**
 ///
-/// The audit's probe: a card number drawn through a form. Extraction finds it,
-/// so it can be searched for and a rectangle drawn over it — and the redaction
-/// pass, which does not descend into forms, removes nothing. That used to go
-/// through with `require_complete` off: a black mark painted, the number still
-/// in the saved file, and a report of success. Now the survey sees nested
-/// content under an area it took no characters out of, and refuses by name.
+/// The audit's probe: a card number drawn through a form. Extraction finds
+/// it, so it can be searched for and a rectangle drawn over it — and the
+/// page's object list cannot remove it, because the text object lives in
+/// the XObject. It used to be refused (after first being painted over and
+/// reported gone). Now the form is found in the file, the operators drawing
+/// the number are found in its stream, and the number is sliced out of them
+/// — the caption before it stays.
 #[test]
-fn words_inside_a_form_refuse_rather_than_being_painted_over() {
+fn words_inside_a_form_are_cut_from_the_forms_own_stream() {
     let Some(_) = skip_without_pdfium() else { return };
     let _lock = serial();
 
@@ -320,34 +321,125 @@ fn words_inside_a_form_refuse_rather_than_being_painted_over() {
         .find(|f| f.text.contains("4111"))
         .expect("the card number is found by extraction — that is the point");
 
-    // The survey says what is there.
-    let mut lenient = Redaction::new(0, card.area);
-    lenient.require_complete = false;
-    let report = doc.preview_redaction(&lenient, None).expect("survey");
-    assert_eq!(report.characters, 0, "no page-level characters are under the area");
+    // The survey says what will happen: the number's characters, nothing
+    // left uncleared.
+    let report = doc.preview_redaction(&Redaction::new(0, card.area), None).expect("survey");
+    assert_eq!(report.characters, 19, "{report:?}");
+    assert!(report.uncleared.is_empty(), "{report:?}");
+    assert!(!report.would_only_draw_a_mark());
+
+    // Applied, with completeness required — nothing to acknowledge.
+    let done = doc.redact(&Redaction::new(0, card.area), None).expect("redact");
+    assert_eq!(done.characters, 19, "{done:?}");
+    assert!(done.spilled.is_empty(), "the caption went with the number: {done:?}");
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes.clone(), None).expect("reopen");
+    let text = text_of(&reopened as &dyn Document, 0);
+    assert!(!text.contains("4111"), "the number is still on the page: {text}");
+    assert!(text.contains("Card on file:"), "the caption went too: {text}");
+    assert!(text.contains("Telephone: 020 7946 0018"), "the control went missing: {text}");
+    // And not in the bytes, in any encoding.
+    assert!(appears_in(&bytes, "4111 1111").is_empty(), "the number is still in the file");
+}
+
+/// **A form drawn twice on a page is cut for the drawing asked about.** One
+/// stream served both drawings; the one asked about gets a name and a copy
+/// of its own, and the other keeps what it had — which the report says.
+#[test]
+fn a_form_drawn_twice_on_the_page_is_cut_for_the_drawing_asked_about() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-form-twice.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let cards: Vec<_> = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .filter(|f| f.text.contains("4111"))
+        .collect();
+    assert_eq!(cards.len(), 2, "both drawings are found");
+
+    let report = doc.redact(&Redaction::new(0, cards[0].area), None).expect("redact");
+    assert_eq!(report.characters, 19, "{report:?}");
     assert!(
-        report.uncleared.iter().any(|u| matches!(u, Uncleared::Form { .. })),
-        "the form was not seen: {report:?}"
+        report.uncleared.iter().any(|u| matches!(u, Uncleared::SharedForm { elsewhere: 1, .. })),
+        "the other drawing was not mentioned: {report:?}"
     );
-    assert!(report.would_only_draw_a_mark(), "a mark over nothing removed was allowed");
 
-    // And going ahead — even with completeness not required — is refused.
-    match doc.redact(&lenient, None) {
-        Err(PdfError::IncompleteRedaction(why)) => {
-            assert!(why.contains("nested content"), "the reason is not named: {why}");
-            assert!(why.contains("remove nothing"), "{why}");
-        }
-        Err(other) => panic!("wrong error: {other}"),
-        Ok(report) => panic!("words inside a form reported a redaction: {report:?}"),
-    }
-
-    // The control: the number is still there, which is exactly why refusing
-    // was right.
     let mut bytes = Vec::new();
     doc.save_full_copy(&mut bytes).expect("save");
     drop(doc);
     let reopened = PdfiumDocument::open_bytes(bytes, None).expect("reopen");
-    assert!(text_of(&reopened as &dyn Document, 0).contains("4111 1111 1111 1111"));
+    let text = text_of(&reopened as &dyn Document, 0);
+    assert_eq!(text.matches("4111").count(), 1, "one drawing cleared, one kept: {text}");
+    assert_eq!(text.matches("Card on file:").count(), 2, "{text}");
+}
+
+/// **A form inside a form is a level further down than the cut follows**,
+/// and is reported rather than reached — never painted over and called gone.
+#[test]
+fn words_in_a_form_inside_a_form_are_still_refused_by_name() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-nested-form.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let card = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .find(|f| f.text.contains("4111"))
+        .expect("found");
+    let mut lenient = Redaction::new(0, card.area);
+    lenient.require_complete = false;
+    match doc.redact(&lenient, None) {
+        Err(PdfError::IncompleteRedaction(why)) => {
+            assert!(why.contains("nested content"), "the reason is not named: {why}");
+        }
+        Err(other) => panic!("wrong error: {other}"),
+        Ok(report) => panic!("words two forms down reported a redaction: {report:?}"),
+    }
+}
+
+/// **A form the file draws on another page too is cut from a private copy.**
+/// The page asked about loses the number; the other page, which nobody
+/// asked about, keeps it — and the report says so.
+#[test]
+fn a_form_shared_with_another_page_is_cut_for_this_page_alone() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-shared-form.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    assert_eq!(doc.page_count(), 2);
+    let card = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .find(|f| f.text.contains("4111"))
+        .expect("found on the first page");
+
+    let report = doc.redact(&Redaction::new(0, card.area), None).expect("redact");
+    assert_eq!(report.characters, 19, "{report:?}");
+    assert!(
+        report.uncleared.iter().any(|u| matches!(u, Uncleared::SharedForm { elsewhere: 1, .. })),
+        "the other page was not mentioned: {report:?}"
+    );
+    assert!(report.is_complete() == false, "a shared form is not silently complete");
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes, None).expect("reopen");
+    let first = text_of(&reopened as &dyn Document, 0);
+    let second = text_of(&reopened as &dyn Document, 1);
+    assert!(!first.contains("4111"), "the first page still shows the number: {first}");
+    assert!(first.contains("Card on file:"), "{first}");
+    assert!(second.contains("4111 1111 1111 1111"), "the second page lost what nobody asked about: {second}");
 }
 
 /// The page-level words on the same page are still redactable — the form's
