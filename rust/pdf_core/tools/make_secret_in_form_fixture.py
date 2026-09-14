@@ -19,9 +19,12 @@ inside the form. Three shapes of it, chosen by the second argument:
           two pages drawing the same outer form, which draws the inner: the
           chain is copied from the outer down, and the other page keeps both
   predicted
-          the form's stream deflated with a PNG predictor, which the byte-
-          level reader does not undo: reported as nested content, never
-          painted over — the honest refusal that remains
+          the form's stream deflated with a PNG predictor (15, each row its
+          own filter type, sixteen columns) — undone by the byte-level
+          reader, so the words are cut like any other
+  lzw     the form's stream LZW-encoded, a filter the byte-level reader does
+          not decode: reported as nested content, never painted over — the
+          honest refusal that remains
   kerned  the form's line drawn as two operators sharing one text object —
           `(HSI) Tj` then `[( Lighting)] TJ`, how a design program kerns —
           so cutting the first must leave the second where it was
@@ -38,10 +41,66 @@ if mode == "kerned":
 """
 packed_inner = zlib.compress(inner)
 inner_extra = b""
+inner_filter = b"/FlateDecode"
 if mode == "predicted":
-    # PNG predictor, one column: a filter byte (None) before every byte.
-    packed_inner = zlib.compress(b"".join(b"\x00" + bytes([b]) for b in inner))
-    inner_extra = b" /DecodeParms << /Predictor 12 /Columns 1 >>"
+    # PNG predictors, sixteen columns of one byte, each row filtered with its
+    # own type (None, Sub, Up, Average, Paeth in turn) — predictor 15.
+    columns = 16
+    padded = inner + b" " * (-len(inner) % columns)
+    rows = [padded[i:i + columns] for i in range(0, len(padded), columns)]
+    def paeth(a, b, c):
+        p = a + b - c
+        pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+        return a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+    stored = bytearray()
+    previous = bytes(columns)
+    for r, row in enumerate(rows):
+        t = r % 5
+        stored.append(t)
+        for i in range(columns):
+            left = row[i - 1] if i >= 1 else 0
+            up = previous[i]
+            ul = previous[i - 1] if i >= 1 else 0
+            predicted = {0: 0, 1: left, 2: up, 3: (left + up) // 2, 4: paeth(left, up, ul)}[t]
+            stored.append((row[i] - predicted) % 256)
+        previous = row
+    packed_inner = zlib.compress(bytes(stored))
+    inner_extra = b" /DecodeParms << /Predictor 15 /Columns %d >>" % columns
+elif mode == "lzw":
+    # PDF LZW: 9- to 12-bit codes, clear 256, end 257, early change.
+    def lzw(data):
+        table = {bytes([i]): i for i in range(256)}
+        next_code = 258
+        width = 9
+        out_bits = []
+        def emit(code):
+            out_bits.extend(((code >> (width - 1 - b)) & 1) for b in range(width))
+        emit(256)
+        w = b""
+        for byte in data:
+            wc = w + bytes([byte])
+            if wc in table:
+                w = wc
+            else:
+                emit(table[w])
+                table[wc] = next_code
+                next_code += 1
+                if next_code + 1 >= (1 << width) and width < 12:
+                    width += 1
+                if next_code >= 4094:
+                    emit(256)
+                    table = {bytes([i]): i for i in range(256)}
+                    next_code = 258
+                    width = 9
+                w = bytes([byte])
+        if w:
+            emit(table[w])
+        emit(257)
+        while len(out_bits) % 8:
+            out_bits.append(0)
+        return bytes(int("".join(map(str, out_bits[i:i + 8])), 2) for i in range(0, len(out_bits), 8))
+    packed_inner = lzw(inner)
+    inner_filter = b"/LZWDecode"
 
 def page_content(second_draw):
     content = (b"BT /F1 20 Tf 1 0 0 1 72 720 Tm (Account details) Tj ET\n"
@@ -53,7 +112,7 @@ def page_content(second_draw):
 
 objs = {}
 objs[6] = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 300 50] "
-           b"/Resources << /Font << /F1 4 0 R >> >> /Filter /FlateDecode" + inner_extra + b" /Length %d >>\nstream\n" % len(packed_inner)
+           b"/Resources << /Font << /F1 4 0 R >> >> /Filter " + inner_filter + inner_extra + b" /Length %d >>\nstream\n" % len(packed_inner)
            + packed_inner + b"\nendstream")
 objs[4] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
 objs[1] = b"<< /Type /Catalog /Pages 2 0 R >>"

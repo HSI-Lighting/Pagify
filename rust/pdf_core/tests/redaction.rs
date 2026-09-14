@@ -478,15 +478,45 @@ fn a_shared_outer_form_is_copied_with_its_inner_form_down_the_chain() {
     assert!(second.contains("4111 1111 1111 1111"), "the other page lost what nobody asked about: {second}");
 }
 
-/// **What the byte-level reader cannot decode is still refused by name.** A
-/// form stream deflated with a PNG predictor is one this does not undo; the
-/// words in it are reported as nested content and never painted over.
+/// **A form deflated with a predictor is read like any other.** PNG
+/// predictor 15, every row its own filter type, sixteen columns — undone
+/// after inflating, and the words cut.
+#[test]
+fn words_in_a_form_deflated_with_a_predictor_are_cut() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let path = harness::fixture_path("secret-in-predicted-form.pdf");
+    let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
+    let card = doc
+        .sensitive_on(0)
+        .expect("scan")
+        .into_iter()
+        .find(|f| f.text.contains("4111"))
+        .expect("found");
+    let report = doc.redact(&Redaction::new(0, card.area), None).expect("redact");
+    assert_eq!(report.characters, 19, "{report:?}");
+    assert!(report.uncleared.is_empty(), "{report:?}");
+
+    let mut bytes = Vec::new();
+    doc.save_full_copy(&mut bytes).expect("save");
+    drop(doc);
+    let reopened = PdfiumDocument::open_bytes(bytes.clone(), None).expect("reopen");
+    let text = text_of(&reopened as &dyn Document, 0);
+    assert!(!text.contains("4111"), "{text}");
+    assert!(text.contains("Card on file:"), "{text}");
+    assert!(appears_in(&bytes, "4111 1111").is_empty(), "the number is still in the file");
+}
+
+/// **What the byte-level reader cannot decode is still refused by name.** An
+/// LZW-encoded form stream is one this does not decode; the words in it are
+/// reported as nested content and never painted over.
 #[test]
 fn words_in_a_form_this_cannot_decode_are_refused_by_name() {
     let Some(_) = skip_without_pdfium() else { return };
     let _lock = serial();
 
-    let path = harness::fixture_path("secret-in-predicted-form.pdf");
+    let path = harness::fixture_path("secret-in-lzw-form.pdf");
     let mut doc = PdfiumDocument::open_path(path.to_str().expect("path"), None).expect("open");
     let card = doc
         .sensitive_on(0)

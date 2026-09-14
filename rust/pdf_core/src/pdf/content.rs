@@ -777,9 +777,10 @@ pub fn splice(bytes: &[u8], edits: &[(std::ops::Range<usize>, Vec<u8>)]) -> Vec<
 
 /// Inflate a stream, if it says it is deflated.
 ///
-/// Only `FlateDecode`, and only on its own. Anything else — a filter chain, an
-/// encoding this does not know — comes back as `None` rather than as a guess,
-/// and the caller leaves that page alone.
+/// Only `FlateDecode`, and only on its own — with or without a predictor.
+/// Anything else — a filter chain, an encoding this does not know — comes
+/// back as `None` rather than as a guess, and the caller leaves that page
+/// alone.
 pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read;
 
@@ -792,9 +793,22 @@ pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
         },
         _ => return None,
     }
-    // A `/DecodeParms` means a predictor, which changes the bytes after
-    // inflating. Not handled, so not guessed at.
-    if dict.get(b"DecodeParms").is_some_and(|p| *p != Object::Null) {
+    // A `/DecodeParms` names a predictor, which changes the bytes after
+    // inflating: undone below, or refused where its parameters are ones
+    // this does not read. One dictionary, or an array of one for the
+    // one-filter array form.
+    let parms = match dict.get(b"DecodeParms") {
+        None | Some(Object::Null) => None,
+        Some(Object::Dict(d)) => Some(d.clone()),
+        Some(Object::Array(items)) if items.len() == 1 => match &items[0] {
+            Object::Dict(d) => Some(d.clone()),
+            Object::Null => None,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let predictor = parms.as_ref().map(Predictor::from).unwrap_or_default();
+    if !predictor.readable() {
         return None;
     }
 
@@ -811,7 +825,152 @@ pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
     if out.len() as u64 > INFLATED_LIMIT {
         return None;
     }
-    Some(out)
+    predictor.undo(out)
+}
+
+/// A predictor from a stream's `/DecodeParms`: the transform a writer applied
+/// to the bytes before deflating them, to make them deflate better, which a
+/// reader undoes after inflating.
+///
+/// Two families. The PNG predictors (10 to 15) put a filter-type byte in front
+/// of every row and filter each row against itself and the row above, exactly
+/// as PNG does — 15 means each row says which. The TIFF predictor (2) is
+/// horizontal differencing: each sample is stored as the difference from the
+/// one before it in the row. 1 is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Predictor {
+    kind: u32,
+    colors: u32,
+    bits_per_component: u32,
+    columns: u32,
+}
+
+impl Default for Predictor {
+    fn default() -> Self {
+        Predictor { kind: 1, colors: 1, bits_per_component: 8, columns: 1 }
+    }
+}
+
+impl From<&super::Dict> for Predictor {
+    fn from(parms: &super::Dict) -> Self {
+        let number = |key: &[u8], fallback: u32| -> u32 {
+            parms
+                .get(key)
+                .and_then(Object::as_f64)
+                .filter(|n| *n >= 0.0)
+                .map(|n| n as u32)
+                .unwrap_or(fallback)
+        };
+        Predictor {
+            kind: number(b"Predictor", 1),
+            colors: number(b"Colors", 1),
+            bits_per_component: number(b"BitsPerComponent", 8),
+            columns: number(b"Columns", 1),
+        }
+    }
+}
+
+impl Predictor {
+    /// Whether this is a predictor the reader undoes: none, TIFF at eight bits
+    /// a sample, or any PNG one — with parameters that describe a row.
+    fn readable(&self) -> bool {
+        let sane = (1..=64).contains(&self.colors)
+            && matches!(self.bits_per_component, 1 | 2 | 4 | 8 | 16)
+            && (1..=1 << 20).contains(&self.columns);
+        match self.kind {
+            1 => true,
+            2 => sane && self.bits_per_component == 8,
+            10..=15 => sane,
+            _ => false,
+        }
+    }
+
+    /// Bytes in one row of samples.
+    fn row_length(&self) -> usize {
+        let bits = self.columns as usize * self.colors as usize * self.bits_per_component as usize;
+        bits.div_ceil(8)
+    }
+
+    /// Bytes in one pixel, rounded up — what the PNG filters look back by.
+    fn bytes_per_pixel(&self) -> usize {
+        (self.colors as usize * self.bits_per_component as usize).div_ceil(8).max(1)
+    }
+
+    /// The data as it was before the predictor was applied.
+    fn undo(&self, data: Vec<u8>) -> Option<Vec<u8>> {
+        match self.kind {
+            1 => Some(data),
+            2 => Some(self.undo_tiff(data)),
+            10..=15 => self.undo_png(&data),
+            _ => None,
+        }
+    }
+
+    fn undo_tiff(&self, mut data: Vec<u8>) -> Vec<u8> {
+        let row = self.row_length().max(1);
+        let colors = self.colors as usize;
+        for line in data.chunks_mut(row) {
+            for i in colors..line.len() {
+                line[i] = line[i].wrapping_add(line[i - colors]);
+            }
+        }
+        data
+    }
+
+    fn undo_png(&self, data: &[u8]) -> Option<Vec<u8>> {
+        let row = self.row_length();
+        let bpp = self.bytes_per_pixel();
+        let mut out = Vec::with_capacity(data.len());
+        let mut previous = vec![0u8; row];
+        // Each stored row is a filter byte and then the row; a short last row
+        // is what a writer that padded nothing leaves, and is taken as far as
+        // it goes.
+        for stored in data.chunks(row + 1) {
+            let (Some(&filter), line) = (stored.first(), &stored[1.min(stored.len())..]) else {
+                break;
+            };
+            let mut current = line.to_vec();
+            for i in 0..current.len() {
+                let left = if i >= bpp { current[i - bpp] } else { 0 };
+                let up = previous.get(i).copied().unwrap_or(0);
+                let upper_left = if i >= bpp { previous.get(i - bpp).copied().unwrap_or(0) } else { 0 };
+                let add = match filter {
+                    0 => 0,
+                    1 => left,
+                    2 => up,
+                    3 => ((left as u16 + up as u16) / 2) as u8,
+                    4 => paeth(left, up, upper_left),
+                    // A filter type PNG does not define: the row is not one
+                    // this can read, and guessing at it is not reading it.
+                    _ => return None,
+                };
+                current[i] = current[i].wrapping_add(add);
+            }
+            out.extend_from_slice(&current);
+            if current.len() == row {
+                previous = current;
+            } else {
+                previous.clear();
+                previous.extend_from_slice(&current);
+                previous.resize(row, 0);
+            }
+        }
+        Some(out)
+    }
+}
+
+/// PNG's Paeth predictor: whichever of left, up and upper-left is nearest the
+/// linear estimate `left + up - upper_left`.
+fn paeth(left: u8, up: u8, upper_left: u8) -> u8 {
+    let p = left as i16 + up as i16 - upper_left as i16;
+    let (pa, pb, pc) = ((p - left as i16).abs(), (p - up as i16).abs(), (p - upper_left as i16).abs());
+    if pa <= pb && pa <= pc {
+        left
+    } else if pb <= pc {
+        up
+    } else {
+        upper_left
+    }
 }
 
 /// The most a single stream is allowed to inflate to.
@@ -834,6 +993,76 @@ pub fn encode(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every PNG filter type, and the TIFF one, undone — against what a
+    /// writer following the specification produces.
+    #[test]
+    fn predictors_are_undone_row_by_row() {
+        use std::io::Write;
+        // Four rows of six bytes, two samples of three components each.
+        let plain: Vec<u8> = (0u8..24).map(|n| n.wrapping_mul(37).wrapping_add(11)).collect();
+        let (columns, colors) = (2u32, 3u32);
+        let row = 6usize;
+        let bpp = 3usize;
+
+        // PNG, each row filtered with its own type (0, 1, 2, 3 then 4).
+        let mut stored = Vec::new();
+        let mut previous = vec![0u8; row];
+        for (r, line) in plain.chunks(row).enumerate() {
+            let filter = (r % 5) as u8;
+            stored.push(filter);
+            for i in 0..row {
+                let left = if i >= bpp { line[i - bpp] } else { 0 };
+                let up = previous[i];
+                let upper_left = if i >= bpp { previous[i - bpp] } else { 0 };
+                let predicted = match filter {
+                    0 => 0,
+                    1 => left,
+                    2 => up,
+                    3 => ((left as u16 + up as u16) / 2) as u8,
+                    _ => paeth(left, up, upper_left),
+                };
+                stored.push(line[i].wrapping_sub(predicted));
+            }
+            previous = line.to_vec();
+        }
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&stored).expect("deflate");
+        let packed = encoder.finish().expect("deflate");
+
+        let mut parms = super::super::Dict(Vec::new());
+        parms.set(b"Predictor", Object::Number(b"15".to_vec()));
+        parms.set(b"Colors", Object::Number(colors.to_string().into_bytes()));
+        parms.set(b"Columns", Object::Number(columns.to_string().into_bytes()));
+        let mut dict = super::super::Dict(Vec::new());
+        dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+        dict.set(b"DecodeParms", Object::Dict(parms.clone()));
+        assert_eq!(decode(&dict, &packed).as_deref(), Some(plain.as_slice()), "PNG predictors");
+
+        // TIFF: each sample stored as the difference from the one before it.
+        let mut differenced = plain.clone();
+        for line in differenced.chunks_mut(row) {
+            for i in (colors as usize..row).rev() {
+                line[i] = line[i].wrapping_sub(line[i - colors as usize]);
+            }
+        }
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        encoder.write_all(&differenced).expect("deflate");
+        let packed = encoder.finish().expect("deflate");
+        parms.set(b"Predictor", Object::Number(b"2".to_vec()));
+        dict.set(b"DecodeParms", Object::Dict(parms.clone()));
+        assert_eq!(decode(&dict, &packed).as_deref(), Some(plain.as_slice()), "TIFF predictor");
+
+        // And what is not read is refused, not guessed: a predictor number
+        // PDF does not define, and TIFF at a depth this does not do.
+        parms.set(b"Predictor", Object::Number(b"7".to_vec()));
+        dict.set(b"DecodeParms", Object::Dict(parms.clone()));
+        assert!(decode(&dict, &packed).is_none());
+        parms.set(b"Predictor", Object::Number(b"2".to_vec()));
+        parms.set(b"BitsPerComponent", Object::Number(b"16".to_vec()));
+        dict.set(b"DecodeParms", Object::Dict(parms));
+        assert!(decode(&dict, &packed).is_none());
+    }
 
     /// **A stream that inflates past the limit is not decoded.** Found by
     /// audit: a megabyte of zeros deflates to about a kilobyte and came back
@@ -1248,13 +1477,20 @@ mod tests {
         assert!(decode(&dict, b"anything").is_none());
     }
 
-    /// A predictor changes the bytes after inflating, and ignoring one would
-    /// hand back something that is not the stream.
+    /// An empty `/DecodeParms` names no predictor, which is predictor 1: the
+    /// bytes as inflated. A predictor this does not read is refused rather
+    /// than ignored — ignoring one would hand back something that is not
+    /// the stream.
     #[test]
-    fn a_predictor_is_refused_rather_than_ignored() {
+    fn a_predictor_this_does_not_read_is_refused_rather_than_ignored() {
         let mut dict = super::super::Dict::default();
         dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
         dict.set(b"DecodeParms", Object::Dict(super::super::Dict::default()));
+        assert_eq!(decode(&dict, &encode(b"x").expect("encode")).as_deref(), Some(&b"x"[..]));
+
+        let mut parms = super::super::Dict::default();
+        parms.set(b"Predictor", Object::Number(b"3".to_vec()));
+        dict.set(b"DecodeParms", Object::Dict(parms));
         assert!(decode(&dict, &encode(b"x").expect("encode")).is_none());
     }
 }

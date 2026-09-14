@@ -16116,11 +16116,11 @@ mod lock_wiring_tests {
     }
 
     /// **And what still cannot be reached is still said, never claimed
-    /// gone.** A form stream deflated with a PNG predictor is one the
-    /// byte-level reader does not undo.
+    /// gone.** An LZW-encoded form stream is one the byte-level reader does
+    /// not decode.
     #[test]
     fn smartredact_says_what_it_could_not_reach_instead_of_claiming_it_gone() {
-        let mut app = app("secret-in-predicted-form.pdf");
+        let mut app = app("secret-in-lzw-form.pdf");
         app.submit("smartredact redact");
         let told = said(&app);
         assert!(!told.contains("gone for good. Save"), "it claimed everything was gone: {told}");
@@ -16128,7 +16128,7 @@ mod lock_wiring_tests {
         assert!(told.contains("4111") && told.contains("nested content"), "{told}");
         assert!(told.contains("1 gone for good"), "{told}");
 
-        let out = std::env::temp_dir().join(format!("pagify-smartredact-predicted-{}.pdf", std::process::id()));
+        let out = std::env::temp_dir().join(format!("pagify-smartredact-lzw-{}.pdf", std::process::id()));
         app.submit(&format!("saveas {}", out.display()));
         let text = pdf_core::registry::exclusive(|| {
             use pdf_core::document::Document;
