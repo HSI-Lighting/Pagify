@@ -33,6 +33,11 @@ DYLIB="$ROOT/third_party/pdfium/$SLICE/lib/libpdfium.dylib"
 echo "==> verify third_party"
 "$ROOT/tools/verify_third_party.sh"
 
+# And the dependencies against the advisory database: a release built on a
+# known vulnerability nobody accepted is not a release.
+echo "==> audit dependencies"
+"$ROOT/tools/audit.sh"
+
 echo "==> build"
 cargo build --release -p pagify_app
 

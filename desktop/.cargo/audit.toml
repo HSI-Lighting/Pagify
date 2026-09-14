@@ -1,0 +1,25 @@
+# What `cargo audit` is allowed to pass over, and why. Read by tools/audit.sh,
+# which release builds run. Every entry here is a decision, dated, with the
+# condition that ends it — an ignore with no end is a vulnerability nobody is
+# looking at.
+
+[advisories]
+ignore = [
+    # rsa 0.9: RUSTSEC-2023-0071, the Marvin timing side channel in RSA private
+    # key operations. No fixed release: the fix is rsa 0.10, still a release
+    # candidate (0.10.0-rc.18 on 2026-09-14), and the cms/x509-cert stack the
+    # signing code is built on has not moved to it (cms 0.3 is a pre-release).
+    #
+    # Exposure here: the private key is used once per `certify`, on the user's
+    # own machine, with their own key. The attack needs code on that machine
+    # measuring the timing of many signing operations — at which point the
+    # key file and the password prompt are the softer targets. Accepted on
+    # that basis; **ends when rsa 0.10 and cms 0.3 ship**, at which point the
+    # upgrade is owed and this line comes out. (Security audit M6, 2026-09-12.)
+    "RUSTSEC-2023-0071",
+]
+# Unmaintained crates are reported as warnings and not hidden: rustybuzz and
+# ttf-parser (RUSTSEC-2026-0206, -0192) parse document fonts for outlined
+# text, and their successors are a migration to plan, not an ignore to add.
+# (Security audit L6.)
+informational_warnings = ["unmaintained"]
