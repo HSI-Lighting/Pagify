@@ -31,14 +31,18 @@ version = "0.1.0"
 [workspace.dependencies]
 # Inside this repository, so a clone builds without anything beside it.
 pdf_core   = { path = "../rust/pdf_core" }
-# **Not** in this repository. Consumed, never forked — so it is expected as a
-# sibling checkout of HSI-Lighting/3D-factory:
+# **Not** in this repository. Consumed, never forked — and **pinned to a
+# commit**, so every checkout builds the same kernel. It used to be a path to
+# a sibling checkout of HSI-Lighting/3D-factory, which built whatever that
+# checkout happened to hold, recorded nothing in the lockfile, and had already
+# drifted; found by audit. Moving the pin is a deliberate change here.
 #
-#     git clone https://github.com/HSI-Lighting/Pagify.git
-#     git clone https://github.com/HSI-Lighting/3D-factory.git
+# To work against a local checkout while changing the kernel itself, add to a
+# local (uncommitted) Cargo.toml patch:
 #
-# leaving the two side by side, which is what the path below assumes.
-cad_kernel = { path = "../../3D-factory/cad_kernel" }
+#     [patch."https://github.com/HSI-Lighting/3D-factory.git"]
+#     cad_kernel = { path = "../../3D-factory/cad_kernel" }
+cad_kernel = { git = "https://github.com/HSI-Lighting/3D-factory.git", rev = "2f6c8a9e4f6f521eb8a69d8f19fdd17c391b051a" }
 
 [profile.release]
 opt-level     = 3

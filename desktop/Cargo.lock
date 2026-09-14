@@ -516,6 +516,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 [[package]]
 name = "cad_kernel"
 version = "0.1.0"
+source = "git+https://github.com/HSI-Lighting/3D-factory.git?rev=2f6c8a9e4f6f521eb8a69d8f19fdd17c391b051a#2f6c8a9e4f6f521eb8a69d8f19fdd17c391b051a"
 dependencies = [
  "cad_nurbs",
 ]
@@ -523,6 +524,7 @@ dependencies = [
 [[package]]
 name = "cad_nurbs"
 version = "0.1.0"
+source = "git+https://github.com/HSI-Lighting/3D-factory.git?rev=2f6c8a9e4f6f521eb8a69d8f19fdd17c391b051a#2f6c8a9e4f6f521eb8a69d8f19fdd17c391b051a"
 
 [[package]]
 name = "calloop"
