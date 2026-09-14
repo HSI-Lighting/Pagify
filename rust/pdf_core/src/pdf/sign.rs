@@ -44,7 +44,8 @@ pub struct Identity {
     /// The signer's certificate, DER encoded, and any chain above it.
     pub certificates: Vec<Vec<u8>>,
     /// The private key, DER encoded (PKCS#8).
-    key: Vec<u8>,
+    /// The PKCS#8 private key, wiped when the identity is dropped.
+    key: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl Identity {
@@ -65,7 +66,14 @@ impl Identity {
         // would send somebody hunting for a typo that is not there, so the
         // answer names all three wherever it comes from.
         let certificates = pfx.cert_x509_bags(password).unwrap_or_default();
-        let keys = pfx.key_bags(password).unwrap_or_default();
+        // Every key the file holds, wiped together when this returns; the one
+        // kept is moved out rather than copied.
+        let mut keys: Vec<zeroize::Zeroizing<Vec<u8>>> = pfx
+            .key_bags(password)
+            .unwrap_or_default()
+            .into_iter()
+            .map(zeroize::Zeroizing::new)
+            .collect();
 
         if certificates.is_empty() || keys.is_empty() {
             // **Two very different causes, one symptom.** A wrong password and
@@ -84,7 +92,7 @@ impl Identity {
                     .into(),
             ));
         }
-        Ok(Identity { certificates, key: keys[0].clone() })
+        Ok(Identity { certificates, key: keys.swap_remove(0) })
     }
 
     /// The signing key, as a usable RSA key.

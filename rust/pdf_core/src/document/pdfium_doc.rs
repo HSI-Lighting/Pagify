@@ -97,9 +97,15 @@ pub enum DocumentSource {
 
 /// A password waiting to be written onto the file.
 #[derive(Debug, Clone)]
+///
+/// **Wiped when dropped.** A password waiting to be written is held here
+/// until the save; `Zeroizing` sees to it that when the document goes, the
+/// bytes go too, rather than staying in freed memory for as long as the
+/// allocator leaves them. Found by audit: the derived keys were already
+/// wiped, and the passwords they came from were not.
 struct Wanted {
-    user: Vec<u8>,
-    owner: Option<Vec<u8>>,
+    user: zeroize::Zeroizing<Vec<u8>>,
+    owner: Option<zeroize::Zeroizing<Vec<u8>>>,
     permissions: crate::pdf::encrypt::Permissions,
 }
 
@@ -194,7 +200,7 @@ pub struct PdfiumDocument {
     /// it. **Not an additional exposure worth worrying about**: the decrypted
     /// document is already in this process's memory, and anyone who could read
     /// this could read that. It is dropped with the document.
-    opened_with: Option<Vec<u8>>,
+    opened_with: Option<zeroize::Zeroizing<Vec<u8>>>,
     /// A password to put on the file when it is next saved.
     ///
     /// The password is kept rather than the derived key, because every save
@@ -313,7 +319,7 @@ impl PdfiumDocument {
                 doc.source = DocumentSource::Path(path.to_string());
                 doc.already_secured = true;
                 doc.secure_plus = true;
-                doc.opened_with = password.map(|p| p.as_bytes().to_vec());
+                doc.opened_with = password.map(|p| zeroize::Zeroizing::new(p.as_bytes().to_vec()));
                 return Ok(doc);
             }
         }
@@ -416,7 +422,7 @@ impl PdfiumDocument {
             let mut doc = Self::open_bytes(unsealed, None)?;
             doc.already_secured = true;
             doc.secure_plus = true;
-            doc.opened_with = password.map(|p| p.as_bytes().to_vec());
+            doc.opened_with = password.map(|p| zeroize::Zeroizing::new(p.as_bytes().to_vec()));
             return Ok(doc);
         }
         let byte_len = bytes.len();
@@ -454,7 +460,9 @@ impl PdfiumDocument {
             already_secured: password.is_some_and(|p| !p.is_empty()),
             remove_password: false,
             secure_plus: false,
-            opened_with: password.filter(|p| !p.is_empty()).map(|p| p.as_bytes().to_vec()),
+            opened_with: password
+                .filter(|p| !p.is_empty())
+                .map(|p| zeroize::Zeroizing::new(p.as_bytes().to_vec())),
             security: None,
             redacted: false,
             written: None,
@@ -3085,8 +3093,8 @@ impl DocumentMut for PdfiumDocument {
         // used is refused while the person is still typing it.
         crate::pdf::encrypt::Security::new(user, owner, permissions, Self::randomness)?;
         self.security = Some(Wanted {
-            user: user.to_vec(),
-            owner: owner.map(<[u8]>::to_vec),
+            user: zeroize::Zeroizing::new(user.to_vec()),
+            owner: owner.map(|o| zeroize::Zeroizing::new(o.to_vec())),
             permissions,
         });
         // PDF's own handler, so any reader can ask for it.
@@ -3111,7 +3119,7 @@ impl DocumentMut for PdfiumDocument {
             Self::randomness,
         )?;
         self.security = Some(Wanted {
-            user: user.to_vec(),
+            user: zeroize::Zeroizing::new(user.to_vec()),
             owner: None,
             permissions: crate::pdf::encrypt::Permissions::all(),
         });
@@ -3153,7 +3161,7 @@ impl DocumentMut for PdfiumDocument {
     }
 
     fn password_matches(&self, typed: &[u8]) -> bool {
-        self.opened_with.as_deref() == Some(typed)
+        self.opened_with.as_deref().map(|p| p.as_slice()) == Some(typed)
     }
 
     fn already_has_password(&self) -> bool {
@@ -6290,7 +6298,7 @@ fn font_to_unicode(
         }
         let security = crate::pdf::encrypt::Security::new(
             &wanted.user,
-            wanted.owner.as_deref(),
+            wanted.owner.as_deref().map(|o| o.as_slice()),
             wanted.permissions,
             Self::randomness,
         )?;

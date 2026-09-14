@@ -651,7 +651,11 @@ struct PagifyApp {
     /// and let go the moment the document does — see [`Self::forget_passcode`].
     held_passcode: Option<zeroize::Zeroizing<String>>,
     /// What has been typed into the password window.
-    password_typed: String,
+    /// What is being typed into the password window. Wiped when it is taken
+    /// or cleared, not merely emptied: `String::clear` leaves the bytes in the
+    /// buffer, and a password that was typed a minute ago should not still be
+    /// in memory now. Found by audit.
+    password_typed: zeroize::Zeroizing<String>,
     /// Whether the window's field has been given the caret yet.
     password_field_focused: bool,
     /// What the window should say went wrong, if anything.
@@ -1651,7 +1655,7 @@ impl PagifyApp {
             recogniser: None,
             awaiting_password: None,
             held_passcode: None,
-            password_typed: String::new(),
+            password_typed: zeroize::Zeroizing::new(String::new()),
             password_field_focused: false,
             password_problem: None,
             password_plus: false,
@@ -6008,7 +6012,7 @@ impl PagifyApp {
             ui.add_space(10.0);
 
             let field = ui.add(
-                egui::TextEdit::singleline(&mut self.password_typed)
+                egui::TextEdit::singleline(&mut *self.password_typed)
                     .password(true)
                     .desired_width(f32::INFINITY)
                     .hint_text("password"),
@@ -6118,7 +6122,8 @@ impl PagifyApp {
         }
         if gave_up {
             self.awaiting_password = None;
-            self.password_typed.clear();
+            // `Zeroizing` wipes on drop; taking the value drops it.
+            drop(std::mem::take(&mut self.password_typed));
             self.password_problem = None;
             self.password_field_focused = false;
             self.say_info(match waiting {
@@ -12353,7 +12358,7 @@ mod ui_tests {
 
         // And it takes the passcode straight through — no rule, no second
         // typing, because nothing is being chosen.
-        h.state_mut().password_typed = strong.into();
+        h.state_mut().password_typed = String::from(strong).into();
         h.run();
         h.get_by_label_contains("Unlock document").click();
         h.run_steps(3);
@@ -12406,7 +12411,7 @@ mod ui_tests {
         // absent — a disabled widget is still in the accessibility tree — so
         // the property to check is that pressing it locks nothing and leaves
         // the window up.
-        h.state_mut().password_typed = "short".into();
+        h.state_mut().password_typed = String::from("short").into();
         h.run();
         h.get_by_label_contains("Lock document").click();
         h.run();
@@ -12473,7 +12478,7 @@ mod ui_tests {
         h.get_by_label_contains("This document needs a password");
 
         // Type into it and press Open, as a person would.
-        h.state_mut().password_typed = "pagify".into();
+        h.state_mut().password_typed = String::from("pagify").into();
         h.run_steps(1);
         // Exact, because the ribbon has an "Open..." of its own.
         h.get_by_label("Open").click();
