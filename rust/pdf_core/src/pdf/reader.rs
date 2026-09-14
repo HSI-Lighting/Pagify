@@ -330,7 +330,7 @@ impl<'a> File<'a> {
     }
 
     /// Where one object's own bytes begin and end — `n g obj` to `endobj`.
-    fn span_of(&self, number: u32) -> Result<std::ops::Range<usize>> {
+    pub fn span_of(&self, number: u32) -> Result<std::ops::Range<usize>> {
         let at = *self
             .offsets
             .get(&number)
