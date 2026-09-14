@@ -242,6 +242,64 @@ fn an_incremental_save_keeps_the_original_bytes_in_front() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// How a file reaches the disk. Found by audit: the staging file was created
+// with a fixed, guessable name and opened through whatever was there; a saved
+// document lost its own permissions; an extract truncated its destination
+// before the pages were checked.
+// ---------------------------------------------------------------------------
+
+/// A document kept private stays private across a save.
+#[cfg(unix)]
+#[test]
+fn a_save_keeps_the_files_own_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let scratch = Scratch::new("permissions");
+    let kept = scratch.file("private.pdf");
+    std::fs::copy(fixture("single-page.pdf"), &kept).expect("copy");
+    std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+    {
+        let session = Session::open(&kept).expect("open");
+        let height = session.page_size(0).expect("size").height_pt as f64;
+        session.commit_markup(0, &drawn_on(height), INK, 1.0).expect("commit");
+        session.save_to(&kept, true).expect("save");
+    }
+
+    let mode = std::fs::metadata(&kept).expect("metadata").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "the save changed the file's mode to {mode:o}");
+    // And nothing was left beside it.
+    let leftovers: Vec<_> = std::fs::read_dir(scratch.file(""))
+        .expect("dir")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains("pagify-save"))
+        .collect();
+    assert!(leftovers.is_empty(), "staging files left behind: {leftovers:?}");
+}
+
+/// An extract that fails leaves nothing behind — not an empty file, not a
+/// truncated one that was there before.
+#[test]
+fn a_failed_extract_leaves_the_destination_as_it_was() {
+    let scratch = Scratch::new("extract");
+    let dest = scratch.file("pages.pdf");
+    std::fs::write(&dest, b"something that was here before").expect("seed");
+
+    let session = Session::open(fixture("single-page.pdf")).expect("open");
+    let outcome = session.extract_to(&[7], &dest);
+    assert!(outcome.is_err(), "a page that does not exist was extracted");
+    assert_eq!(
+        std::fs::read(&dest).expect("read"),
+        b"something that was here before",
+        "the destination was truncated by a failed extract"
+    );
+
+    // And a good one replaces it whole.
+    session.extract_to(&[0], &dest).expect("extract");
+    assert!(std::fs::read(&dest).expect("read").starts_with(b"%PDF"));
+}
+
 #[test]
 fn a_file_whose_name_has_spaces_opens_through_the_command_box() {
     // The reported bug, end to end: dispatch a typed line, take the path it

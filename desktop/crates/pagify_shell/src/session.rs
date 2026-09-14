@@ -35,11 +35,141 @@
 
 use std::path::{Path, PathBuf};
 
-/// Where a save is staged before it replaces its target.
+/// Where a write is staged before it replaces its target.
+///
+/// A sibling, so the rename stays on one filesystem and is therefore atomic.
+/// Named so that no two writes — and no leftover from a crash — land on the
+/// same path: the old fixed `name.pdf.pagify-save` could be guessed, and a
+/// symlink planted there would have been followed. Found by audit. The name
+/// is the second guard; the first is that the file is opened with
+/// `create_new`, so nothing already at the path is ever written through.
 fn staging_path(target: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let mut name = target.file_name().unwrap_or_default().to_os_string();
-    name.push(".pagify-save");
+    name.push(format!(
+        ".pagify-save-{:x}-{:x}-{:x}",
+        std::process::id(),
+        nanos,
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     target.with_file_name(name)
+}
+
+/// Write a file beside its target and rename it over the target.
+///
+/// What this guarantees, and every caller relies on:
+///
+/// - **Nothing at the staging path is ever opened.** `create_new` refuses an
+///   existing file, a symlink included, so a path somebody else planted is
+///   an error rather than a write through it.
+/// - **A target that exists keeps its own permissions.** A document kept at
+///   0600 was coming back 0644 after a save, because the staging file had
+///   the process's default mode. Found by audit.
+/// - **A failure leaves the target exactly as it was**, and nothing beside
+///   it: the staging file is removed on any error, before or during the
+///   rename.
+fn write_then_rename(
+    target: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<()> {
+    write_then_rename_via(target, &staging_path(target), write)
+}
+
+/// [`write_then_rename`] with the staging path chosen by the caller — which
+/// is only ever a test planting something there.
+fn write_then_rename_via(
+    target: &Path,
+    staging: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> Result<()>,
+) -> Result<()> {
+    let outcome = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)?;
+        write(&mut file)?;
+        file.sync_all()?;
+        if let Ok(existing) = std::fs::metadata(target) {
+            std::fs::set_permissions(&staging, existing.permissions())?;
+        }
+        Ok(())
+    })();
+    if let Err(problem) = outcome {
+        // Only what this created: a file that was already there is somebody
+        // else's, and is exactly what `create_new` refused to touch.
+        if !matches!(&problem, pdf_core::PdfError::Io(e) if e.kind() == std::io::ErrorKind::AlreadyExists)
+        {
+            let _ = std::fs::remove_file(staging);
+        }
+        return Err(problem);
+    }
+    std::fs::rename(staging, target).map_err(|e| {
+        let _ = std::fs::remove_file(staging);
+        pdf_core::PdfError::Io(e)
+    })
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pagify-staging-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        dir
+    }
+
+    /// Two saves of one file never stage at the same place, so nothing can be
+    /// waiting there.
+    #[test]
+    fn no_two_staging_paths_are_the_same() {
+        let target = Path::new("/tmp/doc.pdf");
+        let a = staging_path(target);
+        let b = staging_path(target);
+        assert_ne!(a, b);
+        assert_eq!(a.parent(), target.parent(), "staged somewhere other than beside the target");
+    }
+
+    /// **A file already at the staging path is not written through** — not a
+    /// plain file, and not a symlink to something else. Found by audit.
+    #[test]
+    fn something_planted_at_the_staging_path_is_refused_and_left_alone() {
+        let dir = scratch("planted");
+        let target = dir.join("doc.pdf");
+        std::fs::write(&target, b"the document").expect("target");
+        let planted = dir.join("doc.pdf.pagify-save-planted");
+        std::fs::write(&planted, b"planted").expect("plant");
+
+        let outcome = write_then_rename_via(&target, &planted, |f| {
+            use std::io::Write;
+            f.write_all(b"new contents").map_err(pdf_core::PdfError::Io)
+        });
+        assert!(outcome.is_err(), "a planted file was opened for writing");
+        assert_eq!(std::fs::read(&planted).expect("read"), b"planted", "the planted file was written through");
+        assert_eq!(std::fs::read(&target).expect("read"), b"the document", "the target changed");
+
+        #[cfg(unix)]
+        {
+            let victim = dir.join("victim");
+            std::fs::write(&victim, b"untouched").expect("victim");
+            let link = dir.join("doc.pdf.pagify-save-link");
+            std::os::unix::fs::symlink(&victim, &link).expect("symlink");
+            let outcome = write_then_rename_via(&target, &link, |f| {
+                use std::io::Write;
+                f.write_all(b"through the link").map_err(pdf_core::PdfError::Io)
+            });
+            assert!(outcome.is_err(), "a symlink at the staging path was followed");
+            assert_eq!(std::fs::read(&victim).expect("read"), b"untouched");
+            assert!(link.symlink_metadata().is_ok(), "the symlink was removed as if it were ours");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 use pdf_core::document::pdfium_doc::PdfiumDocument;
@@ -282,30 +412,8 @@ impl Session {
     /// leaves the original document exactly as it was, rather than half of a
     /// new one.
     pub fn save_to(&self, path: &Path, incremental: bool) -> Result<()> {
-        // A sibling, so the rename stays on one filesystem and is therefore
-        // atomic. A temporary directory could be on another volume, where
-        // "rename" becomes copy-then-delete and stops being atomic at all.
-        let staging = staging_path(path);
-
-        let write = || -> Result<()> {
-            let mut file = std::fs::File::create(&staging)?;
-            registry::with_session(self.handle, |s| {
-                pdf_core::engine::save(s, &mut file, incremental)
-            })?;
-            file.sync_all()?;
-            Ok(())
-        };
-
-        if let Err(problem) = write() {
-            // Leave nothing behind on failure. A stray `.pagify-save` beside
-            // someone's document is litter at best and confusing at worst.
-            let _ = std::fs::remove_file(&staging);
-            return Err(problem);
-        }
-
-        std::fs::rename(&staging, path).map_err(|e| {
-            let _ = std::fs::remove_file(&staging);
-            pdf_core::PdfError::Io(e)
+        write_then_rename(path, |file| {
+            registry::with_session(self.handle, |s| pdf_core::engine::save(s, file, incremental))
         })
     }
 
@@ -1025,21 +1133,27 @@ impl Session {
     }
 
     /// Pull pages out into a new document on disk.
+    ///
+    /// Staged and renamed like a save: the destination used to be created —
+    /// truncated — before the pages were checked, so a bad page number left
+    /// an empty file where a document may have been. Found by audit.
     pub fn extract_to(&self, pages: &[usize], dest: &Path) -> Result<usize> {
-        let mut file = std::fs::File::create(dest)?;
-        registry::with_session(self.handle, |s| {
-            let mut extracted = s
-                .document
-                .as_document_mut()
-                .ok_or(pdf_core::PdfError::Unsupported("extracting from this document"))?
-                .extract_pages(pages)?;
-            let count = extracted.page_count();
-            extracted
-                .as_document_mut()
-                .ok_or(pdf_core::PdfError::Unsupported("saving the extracted pages"))?
-                .save_full_copy(&mut file)?;
-            Ok(count)
-        })
+        let mut count = 0;
+        write_then_rename(dest, |file| {
+            registry::with_session(self.handle, |s| {
+                let mut extracted = s
+                    .document
+                    .as_document_mut()
+                    .ok_or(pdf_core::PdfError::Unsupported("extracting from this document"))?
+                    .extract_pages(pages)?;
+                count = extracted.page_count();
+                extracted
+                    .as_document_mut()
+                    .ok_or(pdf_core::PdfError::Unsupported("saving the extracted pages"))?
+                    .save_full_copy(file)
+            })
+        })?;
+        Ok(count)
     }
 
     /// Every run of text on a page, in the order the file stores them.
