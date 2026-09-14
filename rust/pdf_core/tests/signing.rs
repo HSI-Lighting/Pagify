@@ -47,7 +47,9 @@ fn declared_range(bytes: &[u8]) -> Option<sign::ByteRange> {
     Some(sign::ByteRange { hole_at: first, hole_len: second_at - first, total: bytes.len() })
 }
 
-/// The blob, pulled back out of the hole.
+/// The blob, pulled back out of the hole — cut where its DER header says it
+/// ends, not where the padding's zeros begin: one signature in 256 ends in a
+/// zero byte.
 fn blob_in(bytes: &[u8], range: &sign::ByteRange) -> Vec<u8> {
     let hex = &bytes[range.hole_at + 1..range.hole_at + range.hole_len - 1];
     let mut raw: Vec<u8> = hex
@@ -58,9 +60,19 @@ fn blob_in(bytes: &[u8], range: &sign::ByteRange) -> Vec<u8> {
             high << 4 | low
         })
         .collect();
-    while raw.last() == Some(&0) {
-        raw.pop();
-    }
+    let length = match raw.get(1).copied() {
+        Some(first) if first < 0x80 => 2 + first as usize,
+        Some(first) => {
+            let count = (first & 0x7f) as usize;
+            let mut length = 0usize;
+            for byte in &raw[2..2 + count] {
+                length = length * 256 + *byte as usize;
+            }
+            2 + count + length
+        }
+        None => 0,
+    };
+    raw.truncate(length);
     raw
 }
 

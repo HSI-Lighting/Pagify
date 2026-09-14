@@ -521,11 +521,39 @@ fn hex_of(object: Option<&Object>) -> Option<Vec<u8>> {
     let Object::HexString(raw) = object? else { return None };
     let mut bytes = from_hex(raw);
     // The hole is padded with zeros after the blob; a DER structure ends where
-    // it says it does, and the padding is not part of it.
-    while bytes.last() == Some(&0) {
-        bytes.pop();
+    // it says it does, and the padding is not part of it. **Where it says it
+    // does** — not where the zeros start. Stripping trailing zero bytes cut a
+    // signature whose last byte happened to be zero, one in 256, and the
+    // document then read as "not a CMS structure". So the outer length is
+    // read from the DER header and the blob cut there; the strip is only for a
+    // blob whose header cannot be read.
+    match der_length(&bytes) {
+        Some(length) if length <= bytes.len() => bytes.truncate(length),
+        _ => {
+            while bytes.last() == Some(&0) {
+                bytes.pop();
+            }
+        }
     }
     Some(bytes)
+}
+
+/// How many bytes the DER structure at the start of `bytes` occupies, header
+/// included, read from its own length field.
+fn der_length(bytes: &[u8]) -> Option<usize> {
+    let first = *bytes.get(1)?;
+    if first < 0x80 {
+        return Some(2 + first as usize);
+    }
+    let count = (first & 0x7f) as usize;
+    if count == 0 || count > 4 || bytes.len() < 2 + count {
+        return None;
+    }
+    let mut length = 0usize;
+    for byte in &bytes[2..2 + count] {
+        length = length.checked_mul(256)?.checked_add(*byte as usize)?;
+    }
+    (2 + count).checked_add(length)
 }
 
 fn from_hex(raw: &[u8]) -> Vec<u8> {
@@ -543,6 +571,25 @@ fn from_hex(raw: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A blob ends where its DER header says, not where the padding's
+    /// zeros begin.** One signature in 256 ends in a zero byte, and stripping
+    /// zeros cut it short.
+    #[test]
+    fn a_blob_ending_in_a_zero_byte_is_not_cut_short() {
+        // A SEQUENCE of three bytes, the last of them zero, then padding.
+        let hex = b"3003010200000000".to_vec();
+        let got = hex_of(Some(&Object::HexString(hex))).expect("hex");
+        assert_eq!(got, vec![0x30, 0x03, 0x01, 0x02, 0x00]);
+        // Long-form length: 0x82 then two bytes.
+        let mut long = vec![0x30, 0x82, 0x01, 0x00];
+        long.extend(vec![0xab; 0x100]);
+        long[3 + 0x100] = 0x00;
+        let mut padded = long.clone();
+        padded.extend([0u8; 16]);
+        let hex: Vec<u8> = padded.iter().map(|b| format!("{b:02X}")).collect::<String>().into_bytes();
+        assert_eq!(hex_of(Some(&Object::HexString(hex))).expect("hex"), long);
+    }
 
     /// **A byte range that does not add up is unreadable, not a panic.**
     /// Found by audit: `[0 0 1e308 n]` wrapped past the guard and panicked on
