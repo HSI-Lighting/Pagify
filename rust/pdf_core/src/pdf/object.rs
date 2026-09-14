@@ -98,11 +98,32 @@ pub type Offsets = BTreeMap<u32, usize>;
 pub struct Lexer<'a> {
     pub bytes: &'a [u8],
     pub at: usize,
+    /// How many arrays and dictionaries are open around the object being
+    /// read. Each one is a frame of `object()` on the stack, and a file can
+    /// open as many as it likes: with nothing counting them, `[[[[…` a few
+    /// tens of thousands deep ran the stack out — a SIGSEGV, which nothing
+    /// catches. Found by audit.
+    depth: usize,
 }
+
+/// Deeper than any real document nests, and far shallower than the stack.
+const MAX_DEPTH: usize = 256;
 
 impl<'a> Lexer<'a> {
     pub fn new(bytes: &'a [u8], at: usize) -> Self {
-        Lexer { bytes, at }
+        Lexer { bytes, at, depth: 0 }
+    }
+
+    /// One level further in, or a refusal.
+    fn descend(&mut self) -> Result<()> {
+        if self.depth >= MAX_DEPTH {
+            return Err(PdfError::InvalidArgument(format!(
+                "objects nested more than {MAX_DEPTH} deep at {}",
+                self.at
+            )));
+        }
+        self.depth += 1;
+        Ok(())
     }
 
     fn peek(&self) -> Option<u8> {
@@ -175,6 +196,7 @@ impl<'a> Lexer<'a> {
             }
             Some(b'(') => self.literal_string(),
             Some(b'[') => {
+                self.descend()?;
                 self.at += 1;
                 let mut items = Vec::new();
                 loop {
@@ -182,6 +204,7 @@ impl<'a> Lexer<'a> {
                     match self.peek() {
                         Some(b']') => {
                             self.at += 1;
+                            self.depth -= 1;
                             return Ok(Object::Array(items));
                         }
                         None => {
@@ -191,7 +214,12 @@ impl<'a> Lexer<'a> {
                     }
                 }
             }
-            Some(b'<') if self.bytes.get(self.at + 1) == Some(&b'<') => self.dict_or_stream(),
+            Some(b'<') if self.bytes.get(self.at + 1) == Some(&b'<') => {
+                self.descend()?;
+                let object = self.dict_or_stream();
+                self.depth -= 1;
+                object
+            }
             Some(b'<') => self.hex_string(),
             Some(b'0'..=b'9' | b'+' | b'-' | b'.') => self.number_or_reference(),
             _ => {
@@ -439,6 +467,36 @@ mod tests {
     fn a_stream_whose_length_is_indirect_is_refused_not_guessed() {
         let bytes = b"<< /Length 9 0 R >>\nstream\n....endstream\nendstream";
         assert!(Lexer::new(bytes, 0).object().is_err());
+    }
+
+    /// **A file can nest as deep as it likes; the stack cannot.** Each open
+    /// array is a frame, and a hundred thousand of them was a SIGSEGV, which
+    /// nothing catches. Found by audit. Refused at a depth no real document
+    /// reaches.
+    #[test]
+    fn nesting_beyond_reason_is_refused_rather_than_overflowing_the_stack() {
+        let mut bytes = vec![b'['; 100_000];
+        bytes.extend(std::iter::repeat_n(b']', 100_000));
+        match Lexer::new(&bytes, 0).object() {
+            Err(PdfError::InvalidArgument(why)) => assert!(why.contains("nested"), "{why}"),
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        // The same for dictionaries.
+        let mut bytes = Vec::new();
+        for _ in 0..100_000 {
+            bytes.extend_from_slice(b"<< /K ");
+        }
+        bytes.extend_from_slice(b"1");
+        for _ in 0..100_000 {
+            bytes.extend_from_slice(b" >>");
+        }
+        assert!(Lexer::new(&bytes, 0).object().is_err());
+
+        // And ordinary depth is untouched: fifty levels is plenty and reads.
+        let mut bytes = vec![b'['; 50];
+        bytes.extend(std::iter::repeat_n(b']', 50));
+        read(&bytes);
     }
 
     #[test]

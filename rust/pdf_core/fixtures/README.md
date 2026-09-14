@@ -208,6 +208,16 @@ tests clean it, save, and read the bytes back the way anyone else would.
 
 Rebuild it with `tools/make_hidden_things_fixture.py fixtures/hidden-things.pdf`.
 
+## long-mark.pdf
+
+One page whose first line is inside a marked-content sequence with a
+120-character tag. PDFium reports a mark's name through a fixed buffer and
+says how long the name *is*; the audit found the check for Pagify's own marks
+slicing by that length, which ended the process on open. `tests/hostile.rs`
+opens it and walks the marks.
+
+Rebuild it with `tools/make_long_mark_fixture.py fixtures/long-mark.pdf`.
+
 ## covered.pdf
 
 One 612 × 792 pt page: a red picture, then a grey panel painted **over** it, then

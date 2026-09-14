@@ -9603,11 +9603,19 @@ fn set_annotation_colour_key(
 /// Only this engine's own marks carry it. Anything else falls through to `/C`,
 /// which is the right answer for an annotation somebody else wrote.
 fn annotation_colour_key(annot: FPDF_ANNOTATION) -> Option<Color> {
-    let packed = read_annotation_string(annot, COLOUR_KEY)?;
-    if packed.len() != 8 {
+    packed_colour(&read_annotation_string(annot, COLOUR_KEY)?)
+}
+
+/// `AARRGGBB` as this engine writes it, or nothing.
+///
+/// Eight *hex digits*, not eight bytes: a value somebody else wrote under the
+/// key with a multi-byte character in it is the same length in bytes and
+/// panicked on the slice — on `marks`, `status`, or any click on the page.
+/// Found by audit.
+fn packed_colour(packed: &str) -> Option<Color> {
+    if packed.len() != 8 || !packed.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-
     let byte = |at: usize| u8::from_str_radix(&packed[at..at + 2], 16).ok();
     Some(Color {
         a: byte(0)?,
@@ -10045,7 +10053,11 @@ unsafe fn mark_is_ours(
     {
         return false;
     }
-    let characters = (length as usize / 2).saturating_sub(1);
+    // `length` is what the name *needs*, not what the buffer got: a name
+    // longer than the buffer reports a length past its end, and slicing by it
+    // collapsed the document on open. Found by audit. A name that does not
+    // fit is not ours in any case.
+    let characters = (length as usize / 2).saturating_sub(1).min(buffer.len());
     String::from_utf16_lossy(&buffer[..characters]) == TEXT_MARK_NAME
 }
 
@@ -10360,5 +10372,23 @@ mod order_tests {
         let runs = vec![run(0, 100.0, 100.0)];
         let ops = vec![placed(0, 100.0, 100.0)];
         assert!(placed_in_order(&runs, &ops, HEIGHT, 7).is_none());
+    }
+}
+
+#[cfg(test)]
+mod colour_key_tests {
+    use super::*;
+
+    /// Found by audit: `0é00000` is eight bytes and not eight digits.
+    #[test]
+    fn a_colour_key_that_is_not_hex_is_ignored_rather_than_sliced() {
+        assert!(packed_colour("0é00000").is_none());
+        assert!(packed_colour("0é000000").is_none());
+        assert!(packed_colour("zz000000").is_none());
+        assert!(packed_colour("ff00ff").is_none());
+        assert_eq!(
+            packed_colour("80FF7f00"),
+            Some(Color { a: 0x80, r: 0xff, g: 0x7f, b: 0x00 })
+        );
     }
 }

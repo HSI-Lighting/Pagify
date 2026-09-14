@@ -258,8 +258,11 @@ pub fn ask(authority: &str, digest: &[u8]) -> Result<Vec<u8>> {
         .and_then(|()| socket.write_all(&body))
         .map_err(|e| PdfError::InvalidArgument(format!("could not ask {host}: {e}")))?;
 
+    // A token is a few kilobytes; an answer that runs on is not one, and is
+    // not read to the end of memory either.
     let mut answer = Vec::new();
     socket
+        .take(1024 * 1024)
         .read_to_end(&mut answer)
         .map_err(|e| PdfError::InvalidArgument(format!("{host} did not answer: {e}")))?;
 

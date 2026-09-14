@@ -158,15 +158,20 @@ fn verdict_for(dict: &super::Dict, bytes: &[u8]) -> Checked {
         return Checked::failed(Verdict::Unreadable("it declares no byte range".into()));
     };
     let [_, first, second_at, second_len] = numbers;
-    let covered = first + second_len;
-    let reaches = second_at + second_len;
+    // Checked, because the numbers are the file's: `[0 0 1e308 n]` wrapped
+    // past the guard below and panicked on the slice. Found by audit.
+    let (Some(covered), Some(reaches)) =
+        (first.checked_add(second_len), second_at.checked_add(second_len))
+    else {
+        return Checked::failed(Verdict::Unreadable("its byte range does not add up".into()));
+    };
     if reaches != bytes.len() {
         // **The append.** Everything named is untouched and the digest will
         // match; what matters is that the file is longer than the signature
         // ever claimed.
         return Checked::failed(Verdict::Incomplete { covered, total: bytes.len() });
     }
-    if second_at + second_len > bytes.len() || first > bytes.len() {
+    if reaches > bytes.len() || first > bytes.len() || first > second_at {
         return Checked::failed(Verdict::Unreadable("its byte range runs past the file".into()));
     }
     let signed_bytes = [&bytes[..first], &bytes[second_at..second_at + second_len]];
@@ -538,6 +543,33 @@ fn from_hex(raw: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A byte range that does not add up is unreadable, not a panic.**
+    /// Found by audit: `[0 0 1e308 n]` wrapped past the guard and panicked on
+    /// the slice.
+    #[test]
+    fn a_byte_range_that_overflows_is_reported_not_sliced() {
+        let bytes = vec![b'x'; 100];
+        for range in [
+            ["0", "0", "1e308", "101"],
+            ["0", "18446744073709551615", "1", "1"],
+            ["0", "60", "50", "50"],
+        ] {
+            let mut dict = super::super::Dict(Vec::new());
+            dict.set(b"Type", Object::Name(b"Sig".to_vec()));
+            dict.set(
+                b"ByteRange",
+                Object::Array(range.iter().map(|n| Object::Number(n.as_bytes().to_vec())).collect()),
+            );
+            dict.set(b"Contents", Object::HexString(b"00".to_vec()));
+            let checked = verdict_for(&dict, &bytes);
+            assert!(
+                matches!(checked.verdict, Verdict::Unreadable(_) | Verdict::Incomplete { .. }),
+                "{range:?} gave {:?}",
+                checked.verdict
+            );
+        }
+    }
 
     #[test]
     fn every_verdict_says_what_it_means() {

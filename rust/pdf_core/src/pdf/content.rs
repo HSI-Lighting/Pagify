@@ -778,10 +778,27 @@ pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
+    // Bounded. Deflate manages about a thousand to one on the right input,
+    // so a megabyte of stream became a gigabyte of content on the first
+    // edit; fonts and `/ToUnicode` come through here too. Found by audit.
+    // Over the limit reads as "cannot decode", and the caller leaves the
+    // page alone — the same as for a filter it does not know.
     let mut out = Vec::new();
-    flate2::read::ZlibDecoder::new(raw).read_to_end(&mut out).ok()?;
+    flate2::read::ZlibDecoder::new(raw)
+        .take(INFLATED_LIMIT + 1)
+        .read_to_end(&mut out)
+        .ok()?;
+    if out.len() as u64 > INFLATED_LIMIT {
+        return None;
+    }
     Some(out)
 }
+
+/// The most a single stream is allowed to inflate to.
+///
+/// No real content stream, font or CMap comes near it; a hostile one is
+/// stopped a long way short of the memory it was aiming for.
+pub const INFLATED_LIMIT: u64 = 128 * 1024 * 1024;
 
 /// Deflate a stream back, at the default level.
 pub fn encode(data: &[u8]) -> Result<Vec<u8>> {
@@ -797,6 +814,33 @@ pub fn encode(data: &[u8]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **A stream that inflates past the limit is not decoded.** Found by
+    /// audit: a megabyte of zeros deflates to about a kilobyte and came back
+    /// as a gigabyte on the first edit.
+    #[test]
+    fn a_stream_that_inflates_past_the_limit_is_refused() {
+        use std::io::Write;
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        let block = vec![0u8; 1024 * 1024];
+        let over = INFLATED_LIMIT as usize / block.len() + 1;
+        for _ in 0..over {
+            encoder.write_all(&block).expect("deflate");
+        }
+        let bomb = encoder.finish().expect("deflate");
+        assert!(bomb.len() < 1024 * 1024, "the bomb did not compress: {} bytes", bomb.len());
+
+        let mut dict = super::super::Dict(Vec::new());
+        dict.set(b"Filter", Object::Name(b"FlateDecode".to_vec()));
+        assert!(decode(&dict, &bomb).is_none(), "the bomb was inflated");
+
+        // Under the limit, the same stream decodes.
+        let mut small = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        small.write_all(&block).expect("deflate");
+        let small = small.finish().expect("deflate");
+        assert_eq!(decode(&dict, &small).map(|d| d.len()), Some(block.len()));
+    }
 
     fn ops(bytes: &[u8]) -> Vec<Operation> {
         parse(bytes).expect("parse")

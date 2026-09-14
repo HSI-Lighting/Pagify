@@ -160,13 +160,23 @@ pub(crate) mod hex_bytes {
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let text = String::deserialize(d)?;
-        if text.len() % 2 != 0 {
+        // Read as bytes, and only hex digits. Slicing the string by byte
+        // index panicked on a multi-byte character at an even offset — in a
+        // lock attachment, on the first frame drawn. Found by audit.
+        let digits = text.as_bytes();
+        if digits.len() % 2 != 0 {
             return Err(serde::de::Error::custom("odd number of hex digits"));
         }
-        (0..text.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).map_err(serde::de::Error::custom))
-            .collect()
+        if !digits.iter().all(u8::is_ascii_hexdigit) {
+            return Err(serde::de::Error::custom("not hex"));
+        }
+        Ok(digits
+            .chunks(2)
+            .map(|pair| {
+                let nibble = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+                nibble(pair[0]) << 4 | nibble(pair[1])
+            })
+            .collect())
     }
 }
 
@@ -176,6 +186,24 @@ mod tests {
 
     fn quick() -> KdfParams {
         KdfParams { memory_kib: 64, time: 1, lanes: 1 }
+    }
+
+    /// **Hex that is not hex is an error, not a panic.** Found by audit: a
+    /// multi-byte character at an even offset in a lock attachment panicked
+    /// on the first frame drawn, before any click.
+    #[test]
+    fn hex_with_a_multibyte_character_in_it_is_refused() {
+        #[derive(serde::Deserialize)]
+        struct Holder {
+            #[serde(with = "hex_bytes")]
+            bytes: Vec<u8>,
+        }
+        for text in ["\"0é00000\"", "\"é0\"", "\"zz\"", "\"0\""] {
+            let json = format!("{{\"bytes\": {text}}}");
+            assert!(serde_json::from_str::<Holder>(&json).is_err(), "{text} was accepted");
+        }
+        let good: Holder = serde_json::from_str("{\"bytes\": \"00ff7A\"}").expect("hex");
+        assert_eq!(good.bytes, vec![0x00, 0xff, 0x7a]);
     }
 
     #[test]

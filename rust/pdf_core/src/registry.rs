@@ -113,8 +113,9 @@ pub fn insert(document: Box<dyn Document>) -> i64 {
 pub fn insert_with(open: impl FnOnce() -> Result<Box<dyn Document>>) -> Result<i64> {
     let mut guard = lock();
     // Failing here drops the guard on the way out, so a failed open never leaves
-    // the registry locked.
-    let document = open()?;
+    // the registry locked. Opening parses the file, which is where a crafted
+    // one does its work, so it is contained like every other call.
+    let document = contained(open)?;
     let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
     guard.insert(handle, DocumentSession::new(document));
     Ok(handle)
@@ -134,7 +135,34 @@ pub fn with_session<T>(
     let session = guard
         .get_mut(&handle)
         .ok_or(PdfError::InvalidHandle(handle))?;
-    f(session)
+    contained(|| f(session))
+}
+
+/// Run engine code with a panic turned into an error.
+///
+/// **A crafted document must not end the program.** The JNI and C boundaries
+/// have always caught panics, because a panic across them takes the host app
+/// down; the desktop calls the engine as a library, and nothing stood between
+/// a bad slice in a page's marks and the process — with every unsaved edit in
+/// it. Found by audit. The registry's own lock is released as the panic
+/// unwinds and recovered from poisoning on the next take, so the document is
+/// still there afterwards; what it holds is whatever the interrupted call
+/// left, which is the same as at the C boundary and is why the error says
+/// what happened.
+fn contained<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(outcome) => outcome,
+        Err(payload) => {
+            let message = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            Err(PdfError::Panic(message))
+        }
+    }
 }
 
 /// Run `f` against two sessions at once: one to change, one to read from.
@@ -163,7 +191,7 @@ pub fn with_two_sessions<T>(
         .get_disjoint_mut([&target, &source]);
     let target_session = target_session.ok_or(PdfError::InvalidHandle(target))?;
     let source_session = source_session.ok_or(PdfError::InvalidHandle(source))?;
-    f(target_session, source_session)
+    contained(|| f(target_session, source_session))
 }
 
 /// Close a document, returning whether a live document was actually closed.
@@ -218,6 +246,23 @@ mod tests {
 
     fn insert_fake(pages: usize) -> i64 {
         insert(Box::new(FakeDocument { pages }))
+    }
+
+    /// **A panic inside a call is that call's error, and the document is
+    /// still there.** Found by audit: the desktop had no such boundary, and
+    /// a crafted document ended the program with every unsaved edit in it.
+    #[test]
+    fn a_panic_in_the_engine_is_an_error_and_the_session_survives() {
+        let handle = insert_fake(2);
+        let outcome: Result<()> = with_session(handle, |_| panic!("a bad slice in a mark"));
+        match outcome {
+            Err(PdfError::Panic(message)) => assert!(message.contains("bad slice"), "{message}"),
+            other => panic!("the panic was not contained: {other:?}"),
+        }
+        // Still open, still usable.
+        let pages = with_session(handle, |s| Ok(s.document.page_count())).expect("still there");
+        assert_eq!(pages, 2);
+        remove(handle);
     }
 
     #[test]

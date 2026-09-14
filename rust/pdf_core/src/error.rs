@@ -55,8 +55,9 @@ pub enum PdfError {
     #[error("this area cannot be fully cleared: {0}")]
     IncompleteRedaction(String),
 
-    /// Raised by `catch_unwind` at the JNI boundary.
-    #[error("internal error: {0}")]
+    /// A panic caught at a boundary — the JNI and C ones, and every call
+    /// through the registry — and reported as the failure of that one call.
+    #[error("the engine hit a bug on this document: {0}")]
     Panic(String),
 
     #[error("{0} is not implemented yet")]
