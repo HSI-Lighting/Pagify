@@ -1263,8 +1263,10 @@ pub trait DocumentMut {
     /// what leaves the machine, which is a digest and nothing else.
     ///
     /// `authority` has no default and no fallback: nothing is contacted unless
-    /// a caller names where.
-    fn timestamp_document(&mut self, _authority: &str) -> Result<()> {
+    /// a caller names where. What comes back is the subject of the certificate
+    /// the token verified under — the authority as it names itself, which is
+    /// not the same as an authority worth trusting.
+    fn timestamp_document(&mut self, _authority: &str) -> Result<String> {
         Err(PdfError::Unsupported("timestamping this document"))
     }
 

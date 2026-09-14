@@ -20,13 +20,20 @@
 //! already held a copy of the document could confirm this is that document. If
 //! that matters, the answer is not to timestamp.
 //!
-//! # Plain HTTP, deliberately
+//! # Plain HTTP, deliberately — because the token is checked
 //!
 //! The token comes back signed by the authority, so transport security adds
 //! nothing to its trustworthiness — a token altered in flight fails to verify
 //! exactly as one altered anywhere else. RFC 3161 over `http://` is what most
 //! authorities offer, and taking it avoids a TLS stack to protect thirty-two
 //! bytes of hash that are already public knowledge to the party receiving them.
+//!
+//! That argument rests on the token actually being verified, and for a while
+//! it was not: the answer was parsed for shape and written into the file.
+//! Found by audit. [`crate::pdf::validate::check_token`] now checks the
+//! imprint, the signer's digest and the signature under the certificate the
+//! token carries before [`crate::pdf::sign::timestamp`] writes it — which is
+//! why the request asks for the certificate back.
 
 use crate::error::{PdfError, Result};
 

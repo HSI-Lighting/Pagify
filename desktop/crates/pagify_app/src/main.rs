@@ -4016,15 +4016,16 @@ impl PagifyApp {
                     return;
                 };
                 match doc.session.timestamp_document(&authority) {
-                    Ok(()) => {
+                    Ok(named) => {
                         if let Some(doc) = &mut self.doc {
                             doc.rendered_is_stale();
                         }
                         self.text = None;
-                        self.say_info(
-                            "timestamped. It covers the file as it is now — anything \
-                             changed after this breaks it.",
-                        );
+                        self.say_info(format!(
+                            "timestamped by {named} (as its certificate names it — whether to \
+                             trust it is not checked) — save to write it out. It covers the \
+                             file exactly as it is now; anything changed after this breaks it."
+                        ));
                     }
                     Err(e) => self.say_error(e.to_string()),
                 }

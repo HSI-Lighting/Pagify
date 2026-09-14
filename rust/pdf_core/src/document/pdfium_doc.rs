@@ -3229,13 +3229,13 @@ impl DocumentMut for PdfiumDocument {
         crate::pdf::validate::check(&file, &bytes)
     }
 
-    fn timestamp_document(&mut self, authority: &str) -> Result<()> {
+    fn timestamp_document(&mut self, authority: &str) -> Result<String> {
         let bytes = self
             .document
             .save_to_bytes()
             .map_err(|e| PdfError::Pdfium(e.to_string()))?;
         let file = crate::pdf::File::parse(&bytes)?;
-        let stamped = crate::pdf::sign::timestamp(&file, authority)?;
+        let (stamped, authority_named) = crate::pdf::sign::timestamp(&file, authority)?;
 
         let exact = stamped.clone();
         let reopened = Self::open_bytes(stamped, None)?;
@@ -3249,7 +3249,7 @@ impl DocumentMut for PdfiumDocument {
         // writes them verbatim.
         self.dirty = true;
         self.exact_pending = true;
-        Ok(())
+        Ok(authority_named)
     }
 
     fn set_typing_fonts(&mut self, fonts: Vec<Vec<u8>>) {

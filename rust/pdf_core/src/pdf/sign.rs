@@ -590,7 +590,7 @@ pub fn sign(file: &File<'_>, identity: &Identity, about: &Reason) -> Result<Vec<
 /// **The only difference that matters** is `/SubFilter`: a reader that sees
 /// `ETSI.RFC3161` knows to check the token against a time authority rather than
 /// against a signer's identity.
-pub fn timestamp(file: &File<'_>, authority: &str) -> Result<Vec<u8>> {
+pub fn timestamp(file: &File<'_>, authority: &str) -> Result<(Vec<u8>, String)> {
     let mut prepared = prepare(file, Flavour::Timestamp, "", &Reason::default())?;
     let range = find_placeholder(&prepared)?;
     write_byte_range(&mut prepared, &range)?;
@@ -599,8 +599,12 @@ pub fn timestamp(file: &File<'_>, authority: &str) -> Result<Vec<u8>> {
     // The one call that leaves the machine, and only because somebody named
     // where. See `crate::pdf::timestamp`.
     let token = super::timestamp::ask(authority, &digest)?;
+    // **Checked before it is written.** The token is worth exactly its
+    // signature over our digest; one that does not verify is not put into
+    // the document on the authority's say-so. Found by audit.
+    let authority_named = super::validate::check_token(&token, &digest)?;
     fill_placeholder(&mut prepared, &range, &token)?;
-    Ok(prepared)
+    Ok((prepared, authority_named))
 }
 
 /// Which kind of thing is being put in the file.

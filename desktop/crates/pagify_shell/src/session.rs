@@ -844,8 +844,9 @@ impl Session {
         })
     }
 
-    /// Ask a time authority to attest that this document exists now.
-    pub fn timestamp_document(&self, authority: &str) -> Result<()> {
+    /// Ask a time authority to attest that this document exists now. What
+    /// comes back is the authority as its certificate names it.
+    pub fn timestamp_document(&self, authority: &str) -> Result<String> {
         registry::with_session(self.handle, |s| {
             s.document
                 .as_document_mut()

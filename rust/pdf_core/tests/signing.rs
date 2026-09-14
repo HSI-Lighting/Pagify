@@ -677,3 +677,70 @@ fn a_timestamped_document_is_dirty_until_its_bytes_are_written() {
     doc.save_incremental(&mut again).expect("save again");
     assert!(again.starts_with(&saved), "a second save did not start from the signed file");
 }
+
+// ---------------------------------------------------------------------------
+// A token is checked before it goes into the file. Found by audit: the
+// timestamp module's comment said the token's signature was what made plain
+// HTTP acceptable, and nothing checked the signature.
+// ---------------------------------------------------------------------------
+
+/// A token from an authority — the test identity standing in — verifies
+/// against the digest it was asked for, and names the authority.
+#[test]
+fn a_timestamp_token_is_verified_against_the_digest_it_was_asked_for() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let Some(identity) = identity() else { return };
+    let digest = [0x5au8; 32];
+    let token = token_over(&identity, &digest);
+    let named = validate::check_token(&token, &digest).expect("a genuine token");
+    assert_eq!(named, identity.subject().expect("subject"));
+
+    // For a different digest, it is somebody else's statement.
+    let other = validate::check_token(&token, &[0x00; 32]).expect_err("a token for another digest");
+    assert!(other.to_string().contains("different digest"), "{other}");
+}
+
+/// A token that does not carry a certificate cannot be checked, and is not
+/// written into a document on the authority's say-so.
+#[test]
+fn a_timestamp_token_without_a_certificate_is_refused() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let Some(identity) = identity() else { return };
+    let digest = [0x5au8; 32];
+    let token = token_over(&identity, &digest);
+
+    use der::{Decode, Encode};
+    let info = cms::content_info::ContentInfo::from_der(&token).expect("CMS");
+    let mut data: cms::signed_data::SignedData = info.content.decode_as().expect("SignedData");
+    data.certificates = None;
+    let stripped = cms::content_info::ContentInfo {
+        content_type: const_oid::db::rfc5911::ID_SIGNED_DATA,
+        content: der::Any::encode_from(&data).expect("encode"),
+    }
+    .to_der()
+    .expect("DER");
+
+    let refused = validate::check_token(&stripped, &digest).expect_err("no certificate, yet accepted");
+    assert!(refused.to_string().contains("could not be checked"), "{refused}");
+}
+
+/// A token altered in flight — one byte of the signature — is refused, which
+/// is the whole argument for plain HTTP.
+#[test]
+fn a_timestamp_token_altered_in_flight_is_refused() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let Some(identity) = identity() else { return };
+    let digest = [0x5au8; 32];
+    let mut token = token_over(&identity, &digest);
+    // The signature is the last OCTET STRING in the structure; flipping a
+    // byte near the end lands in it.
+    let last = token.len() - 4;
+    token[last] ^= 0x01;
+    assert!(validate::check_token(&token, &digest).is_err(), "an altered token was accepted");
+}

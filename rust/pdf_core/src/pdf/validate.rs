@@ -39,7 +39,7 @@
 //! scheme it does not know, a certificate it cannot read — is reported as
 //! *unreadable*, never as unaltered. The green tick is only ever earned.
 
-use crate::error::Result;
+use crate::error::{PdfError, Result};
 
 use super::{File, Object};
 
@@ -254,6 +254,66 @@ fn verdict_for(dict: &super::Dict, bytes: &[u8]) -> Checked {
         Ok(subject) => Checked { verdict: Verdict::Unaltered, signer: Some(subject) },
         Err(verdict) => Checked::failed(verdict),
     }
+}
+
+/// Check a timestamp token against the digest it was asked for, before it
+/// goes into a document.
+///
+/// **The check the timestamp module always said happened, and did not.**
+/// The token is a signed statement — "this digest existed at this moment"
+/// — and its whole worth is the signature; an authority's answer was written
+/// into the file on the strength of parsing as one. Found by audit. Now the
+/// token must carry a `TSTInfo` whose imprint is exactly `digest`, its
+/// signer's own digest must be over that `TSTInfo`, and its signature must
+/// verify under a certificate it carries. What comes back is that
+/// certificate's subject — whether to trust it is a separate question.
+pub fn check_token(token: &[u8], digest: &[u8]) -> Result<String> {
+    use der::Decode;
+    let refuse = |why: &str| PdfError::InvalidArgument(format!("the timestamp token {why}"));
+
+    let info = cms::content_info::ContentInfo::from_der(token)
+        .map_err(|_| refuse("is not a CMS structure"))?;
+    let data = info
+        .content
+        .decode_as::<cms::signed_data::SignedData>()
+        .map_err(|_| refuse("is not SignedData"))?;
+    if data.encap_content_info.econtent_type != ID_CT_TST_INFO {
+        return Err(refuse("does not carry a TSTInfo"));
+    }
+    let tst_info = data
+        .encap_content_info
+        .econtent
+        .as_ref()
+        .and_then(|any| any.decode_as::<der::asn1::OctetStringRef>().ok())
+        .map(|octets| octets.as_bytes().to_vec())
+        .ok_or_else(|| refuse("carries an empty TSTInfo"))?;
+    let (imprint_alg, imprint) =
+        imprint_in(&tst_info).ok_or_else(|| refuse("has an imprint that cannot be read"))?;
+    if imprint_alg != const_oid::db::rfc5912::ID_SHA_256 || imprint != digest {
+        return Err(refuse("vouches for a different digest than the one asked about"));
+    }
+    let signer = data
+        .signer_infos
+        .0
+        .as_ref()
+        .first()
+        .ok_or_else(|| refuse("names no signer"))?;
+    let attributes = signer.signed_attrs.as_ref().ok_or_else(|| refuse("has no signed attributes"))?;
+    let hash = Hash::named(&signer.digest_alg.oid)
+        .ok_or_else(|| refuse("uses a digest this does not implement"))?;
+    let committed = attributes
+        .iter()
+        .find(|a| a.oid == const_oid::db::rfc5911::ID_MESSAGE_DIGEST)
+        .and_then(|a| a.values.as_ref().first().map(|v| v.value().to_vec()))
+        .ok_or_else(|| refuse("commits to no digest"))?;
+    if hash.over(&[&tst_info]) != committed {
+        return Err(refuse("has a digest that is not the digest of its own contents"));
+    }
+    let certificates = certificates_in(&data);
+    verify(signer, attributes, &certificates, hash).map_err(|verdict| match verdict {
+        Verdict::Unreadable(why) => refuse(&format!("could not be checked: {why}")),
+        _ => refuse("is not signed by the certificate it carries"),
+    })
 }
 
 /// The hashes this checks with. Anything else is reported as unreadable,
