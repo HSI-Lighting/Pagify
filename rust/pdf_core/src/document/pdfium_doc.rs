@@ -103,6 +103,10 @@ struct Wanted {
     permissions: crate::pdf::encrypt::Permissions,
 }
 
+/// What the last read of the lock attachment found: the lock, no lock, or
+/// why it could not be read.
+type CachedVault = std::result::Result<Option<Vault>, String>;
+
 pub struct PdfiumDocument {
     document: PdfDocument<'static>,
     source: DocumentSource,
@@ -122,7 +126,14 @@ pub struct PdfiumDocument {
     /// A `Mutex` rather than a `RefCell` because this type is `Sync`, and the
     /// outer `None` means "not read yet" against an inner `None` meaning "read,
     /// and there is no lock".
-    vault: std::sync::Mutex<Option<Option<Vault>>>,
+    ///
+    /// **A failed read is cached too.** The lock is read while drawing, and
+    /// an attachment named as ours that does not parse used to fall through
+    /// `?` before the cache was written — so a large, bad `pagify-lock.json`
+    /// was pulled out of the file and re-parsed every frame. Found by audit.
+    /// The failure is kept, as its message, until something rewrites the
+    /// attachment or reopens the document.
+    vault: std::sync::Mutex<Option<CachedVault>>,
     /// Fonts a caller has offered for typing characters the document's own
     /// fonts cannot spell.
     ///
@@ -6690,12 +6701,18 @@ fn font_to_unicode(
         let mut cached = self.vault.lock().map_err(|_| {
             PdfError::Pdfium("the lock cache was poisoned by an earlier panic".into())
         })?;
-        if let Some(vault) = cached.as_ref() {
-            return Ok(vault.clone());
+        if let Some(known) = cached.as_ref() {
+            return match known {
+                Ok(vault) => Ok(vault.clone()),
+                Err(why) => Err(PdfError::InvalidArgument(why.clone())),
+            };
         }
-        let read = self.read_vault_uncached()?;
-        *cached = Some(read.clone());
-        Ok(read)
+        let read = self.read_vault_uncached();
+        *cached = Some(match &read {
+            Ok(vault) => Ok(vault.clone()),
+            Err(e) => Err(e.to_string()),
+        });
+        read
     }
 
     fn read_vault_uncached(&self) -> Result<Option<Vault>> {
@@ -6750,7 +6767,7 @@ fn font_to_unicode(
     fn write_vault(&mut self, vault: &Vault) -> Result<()> {
         // What was cached is now what is being replaced.
         if let Ok(mut cached) = self.vault.lock() {
-            *cached = Some(Some(vault.clone()));
+            *cached = Some(Ok(Some(vault.clone())));
         }
         let bytes = vault.to_bytes()?;
         let bindings = pdfium()?.bindings();
@@ -10390,5 +10407,37 @@ mod colour_key_tests {
             packed_colour("80FF7f00"),
             Some(Color { a: 0x80, r: 0xff, g: 0x7f, b: 0x00 })
         );
+    }
+}
+
+#[cfg(test)]
+mod vault_cache_tests {
+    use super::*;
+
+    /// **A lock that cannot be read is read once.** Found by audit: the
+    /// failure fell through `?` before the cache was written, so a large,
+    /// bad attachment was pulled out of the file and re-parsed every frame.
+    #[test]
+    fn a_lock_that_cannot_be_read_is_read_once_and_the_failure_kept() {
+        if std::env::var_os("PAGIFY_PDFIUM_LIB").is_none() {
+            eprintln!("skipping: PAGIFY_PDFIUM_LIB is not set");
+            return;
+        }
+        crate::registry::exclusive(|| {
+            let doc = PdfiumDocument::open_path(
+                concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/bad-lock.pdf"),
+                None,
+            )
+            .expect("open");
+            let first = doc.read_vault().expect_err("a lock that is not one read as one");
+            assert!(
+                matches!(doc.vault.lock().expect("cache").as_ref(), Some(Err(_))),
+                "the failure was not cached"
+            );
+            let started = std::time::Instant::now();
+            let second = doc.read_vault().expect_err("read as one the second time");
+            assert!(started.elapsed() < std::time::Duration::from_millis(5), "it read the file again");
+            assert_eq!(first.to_string(), second.to_string());
+        });
     }
 }

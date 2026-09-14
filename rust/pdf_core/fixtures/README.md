@@ -218,6 +218,15 @@ opens it and walks the marks.
 
 Rebuild it with `tools/make_long_mark_fixture.py fixtures/long-mark.pdf`.
 
+## bad-lock.pdf
+
+One page carrying a ~10 MB attachment named `pagify-lock.json` that is not a
+lock — wrong from its first byte. The lock is read while drawing, and a
+failed read used to be repeated every frame because only a successful one
+was cached (the audit's M5). The unit test in `pdfium_doc.rs` reads it twice.
+
+Rebuild it with `tools/make_bad_lock_fixture.py fixtures/bad-lock.pdf`.
+
 ## covered.pdf
 
 One 612 × 792 pt page: a red picture, then a grey panel painted **over** it, then
