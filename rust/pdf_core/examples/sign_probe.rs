@@ -3,16 +3,18 @@
 //! Four questions, and only the last two are interesting:
 //!   1. does the file still open?
 //!   2. does a reader see a signature in it?
-//!   3. does the digest in the blob match the bytes the range covers?
-//!   4. does the signature verify under the certificate's public key?
+//!   3. does the range it declares cover the whole file?
+//!   4. does the engine's own check read it back as unaltered, under the
+//!      certificate — and does the digest it committed to match the file?
 //!
 //! ```text
 //! PAGIFY_PDFIUM_LIB=<pdfium> cargo run --release --example sign_probe -- <file.pdf> [out.pdf]
 //! ```
 //!
-//! Signs with `fixtures/test-signer.p12` (RSA) unless `P12=<path>` names
-//! another identity — `fixtures/test-signer-sm2.p12` for SM2 — with its
-//! password in `P12_PASSWORD` (default `pagify`, the test identities' own).
+//! Signs with `fixtures/test-signer-sm2.p12` unless `P12=<path>` names another
+//! identity, with its password in `P12_PASSWORD` (default `pagify`, the test
+//! identity's own). The identity must hold an SM2 key; the RSA one in
+//! `fixtures/test-signer.p12` is refused, which is the point of keeping it.
 
 use pdf_core::document::Document;
 use pdf_core::pdf::{sign, validate, File};
@@ -20,17 +22,18 @@ use pdf_core::pdf::{sign, validate, File};
 fn main() {
     let path = std::env::args().nth(1).expect("a pdf path");
     let p12 = std::env::var("P12").map(std::path::PathBuf::from).unwrap_or_else(|_| {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer.p12")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer-sm2.p12")
     });
     let password = std::env::var("P12_PASSWORD").unwrap_or_else(|_| "pagify".into());
 
-    let identity = sign::Identity::from_pkcs12(&std::fs::read(&p12).expect("read"), &password)
-        .expect("the test certificate");
-    println!(
-        "signing as: {} ({})",
-        identity.subject().unwrap_or_default(),
-        if identity.is_sm2() { "SM2 over SM3" } else { "RSA over SHA-256" }
-    );
+    let identity = match sign::Identity::from_pkcs12(&std::fs::read(&p12).expect("read"), &password) {
+        Ok(identity) => identity,
+        Err(e) => {
+            println!("{}: {e}", p12.display());
+            std::process::exit(1);
+        }
+    };
+    println!("signing as: {} (SM2 over SM3)", identity.subject().unwrap_or_default());
 
     let bytes = std::fs::read(&path).expect("read");
     let file = File::parse(&bytes).expect("parse");
@@ -59,27 +62,21 @@ fn main() {
     // 2. A reader sees the signature.
     println!("  PDFium sees        : {} signature(s)", count_signatures(&signed));
 
-    // 3. The digest in the blob is the digest of the file.
+    // 3. The range it declares covers the whole file but the hole.
     //
     // Read from `/ByteRange` in the finished file, which is what a reader does
     // — `find_placeholder` only works before the hole is filled.
     let range = range_from_file(&signed).expect("no /ByteRange in the signed file");
     println!("  range covers all   : {}", range.covers_everything());
 
-    // 4. The signature verifies under the certificate's own key.
-    if identity.is_sm2() {
-        // Through the engine's own check, which is what a Pagify reader runs.
-        let file = File::parse(&signed).expect("parse");
-        for found in validate::check(&file, &signed).expect("check") {
-            println!(
-                "  engine verdict     : {} — signer {:?}",
-                found.verdict.describe(),
-                found.signer
-            );
-        }
-    } else {
-        let digest = sign::digest_of(&signed, &range).expect("digest");
-        println!("  verifies           : {}", verify(&signed, &range, &digest, &identity));
+    // 4. The engine's own check, which is what a Pagify reader runs.
+    let file = File::parse(&signed).expect("parse");
+    for found in validate::check(&file, &signed).expect("check") {
+        println!(
+            "  engine verdict     : {} — signer {:?}",
+            found.verdict.describe(),
+            found.signer
+        );
     }
 }
 
@@ -89,82 +86,6 @@ fn count_signatures(bytes: &[u8]) -> i32 {
     doc.signature_count()
 }
 
-/// Pull the blob back out of the file and check it against the digest.
-fn verify(
-    signed: &[u8],
-    range: &sign::ByteRange,
-    digest: &[u8],
-    identity: &sign::Identity,
-) -> String {
-    use der::{Decode, Encode};
-
-    // The hex between the angle brackets, trailing zeros trimmed.
-    let hex = &signed[range.hole_at + 1..range.hole_at + range.hole_len - 1];
-    let mut raw: Vec<u8> = hex
-        .chunks(2)
-        .map(|pair| {
-            let high = (pair[0] as char).to_digit(16).unwrap_or(0) as u8;
-            let low = pair.get(1).and_then(|b| (*b as char).to_digit(16)).unwrap_or(0) as u8;
-            high << 4 | low
-        })
-        .collect();
-    while raw.last() == Some(&0) {
-        raw.pop();
-    }
-
-    let Ok(info) = cms::content_info::ContentInfo::from_der(&raw) else {
-        return "the blob is not CMS".into();
-    };
-    let Ok(data): Result<cms::signed_data::SignedData, _> = info.content.decode_as() else {
-        return "the CMS is not SignedData".into();
-    };
-    let Some(signer) = data.signer_infos.0.as_ref().first() else {
-        return "no signer in the blob".into();
-    };
-
-    // The message digest the signer committed to.
-    let Some(attributes) = &signer.signed_attrs else {
-        return "the signer signed no attributes".into();
-    };
-    // The attribute's value is a DER OCTET STRING; `value()` is already its
-    // content, so nothing is stripped from it.
-    let committed = attributes.iter().find_map(|a| {
-        (a.oid == const_oid::db::rfc5911::ID_MESSAGE_DIGEST)
-            .then(|| a.values.as_ref().first().map(|v| v.value().to_vec()))
-            .flatten()
-    });
-    if committed.as_deref() != Some(digest) {
-        return format!("the digest does not match the file ({committed:?})");
-    }
-
-    // And the signature itself, over those attributes.
-    use rsa::signature::Verifier;
-    use x509_cert::Certificate;
-    let Ok(certificate) = Certificate::from_der(&identity.certificates[0]) else {
-        return "the certificate cannot be read".into();
-    };
-    // From the DER of the whole key info, which needs no borrow gymnastics.
-    let Ok(spki) = certificate.tbs_certificate.subject_public_key_info.to_der() else {
-        return "the certificate's key cannot be read".into();
-    };
-    use rsa::pkcs8::DecodePublicKey;
-    let Ok(key) = rsa::RsaPublicKey::from_public_key_der(&spki) else {
-        return "the certificate has no RSA key".into();
-    };
-    let verifying = rsa::pkcs1v15::VerifyingKey::<sha2::Sha256>::new(key);
-    let Ok(signed_attrs) = attributes.to_der() else {
-        return "the attributes cannot be re-encoded".into();
-    };
-    let Ok(signature) = rsa::pkcs1v15::Signature::try_from(signer.signature.as_bytes()) else {
-        return "the signature is malformed".into();
-    };
-    match verifying.verify(&signed_attrs, &signature) {
-        Ok(()) => "yes — the digest matches and the signature is good".into(),
-        Err(e) => format!("NO ({e})"),
-    }
-}
-
-/// The four numbers, read back out of a signed file.
 fn range_from_file(bytes: &[u8]) -> Option<sign::ByteRange> {
     let at = bytes.windows(10).position(|w| w == b"/ByteRange")?;
     let open = bytes[at..].iter().position(|b| *b == b'[').map(|n| at + n)?;

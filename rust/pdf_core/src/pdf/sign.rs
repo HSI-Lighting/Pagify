@@ -8,6 +8,16 @@
 //! written as two spans that between them cover the whole file *except* the
 //! `/Contents` placeholder, because a signature cannot sign itself.
 //!
+//! # One scheme: SM2 over SM3
+//!
+//! The signature is SM2, over an SM3 digest, under the conventions in
+//! [`super::sm`] — and nothing else. Pagify signs documents that are read in
+//! Pagify, so there is one scheme to get right rather than two to keep in
+//! step, and the identity handed in must hold an SM2 key: one that does not
+//! is refused when it is loaded, not discovered when it signs. A reader that
+//! is not Pagify opens, reads and prints the document exactly as before; only
+//! its signature panel will say it could not check the signature.
+//!
 //! ```text
 //! /ByteRange [0 a b c]
 //!            └─ 0..a ─┘ <hex placeholder> └─ b..b+c ─┘
@@ -92,14 +102,12 @@ impl Identity {
                     .into(),
             ));
         }
-        Ok(Identity { certificates, key: keys.swap_remove(0) })
-    }
-
-    /// The signing key, as a usable RSA key.
-    pub fn rsa_key(&self) -> Result<rsa::RsaPrivateKey> {
-        use rsa::pkcs8::DecodePrivateKey;
-        rsa::RsaPrivateKey::from_pkcs8_der(&self.key)
-            .map_err(|_| PdfError::Unsupported("only RSA keys can sign, and this is not one"))
+        let identity = Identity { certificates, key: keys.swap_remove(0) };
+        // **The key must be one this signs with**, and the person is told at
+        // the door rather than after they have chosen a name and a reason. An
+        // RSA identity opens fine as a file and would sign nothing.
+        identity.sm2_key()?;
+        Ok(identity)
     }
 
     /// The signing key, as an SM2 key bound to the pinned distinguishing ID.
@@ -108,15 +116,14 @@ impl Identity {
     /// own — so an RSA or P-256 key is an error here, not a wrong signature.
     pub fn sm2_key(&self) -> Result<sm2::dsa::SigningKey> {
         use sm2::pkcs8::DecodePrivateKey;
-        let secret = sm2::SecretKey::from_pkcs8_der(&self.key)
-            .map_err(|_| PdfError::Unsupported("this is not an SM2 key"))?;
+        let secret = sm2::SecretKey::from_pkcs8_der(&self.key).map_err(|_| {
+            PdfError::Unsupported(
+                "the key in that identity is not an SM2 key — Pagify signs with SM2 over \
+                 SM3, and cannot sign with an RSA or ECDSA certificate",
+            )
+        })?;
         sm2::dsa::SigningKey::new(super::sm::DISTINGUISHING_ID, &secret)
             .map_err(|_| PdfError::Unsupported("this SM2 key cannot sign"))
-    }
-
-    /// Whether the key is an SM2 key.
-    pub fn is_sm2(&self) -> bool {
-        self.sm2_key().is_ok()
     }
 
     /// What the certificate says about who is signing.
@@ -133,9 +140,10 @@ impl Identity {
 
 /// How much room the signature is given in the file.
 ///
-/// A CMS blob with one RSA-2048 signature and a certificate chain runs to a few
-/// kilobytes. Sixteen is generous without being absurd — and being generous
-/// costs only file size, while being tight costs the signature.
+/// A CMS blob with one SM2 signature and a certificate runs to under a
+/// kilobyte; with a chain of two or three, a few. Sixteen is generous without
+/// being absurd — and being generous costs only file size, while being tight
+/// costs the signature.
 pub const PLACEHOLDER: usize = 16 * 1024;
 
 /// Where the signature sits in a prepared file, and what is signed.
@@ -350,53 +358,50 @@ mod tests {
 mod identity_tests {
     use super::*;
 
-    fn p12() -> Option<Vec<u8>> {
+    /// The SM2 test identity, which is the one that signs.
+    fn p12() -> Vec<u8> {
         std::fs::read(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer.p12"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer-sm2.p12"),
         )
-        .ok()
+        .expect("the SM2 test identity is committed")
     }
 
     #[test]
     fn a_certificate_and_key_are_read_from_a_pkcs12_file() {
-        let Some(bytes) = p12() else {
-            eprintln!("skipping: no test certificate");
-            return;
-        };
-        let identity = Identity::from_pkcs12(&bytes, "pagify").expect("read the identity");
+        let identity = Identity::from_pkcs12(&p12(), "pagify").expect("read the identity");
         assert!(!identity.certificates.is_empty(), "no certificate came back");
-        identity.rsa_key().expect("the key is not usable");
+        identity.sm2_key().expect("the key is not usable");
 
         // And it says whose it is, which is what a person is shown before they
         // put a name on a document.
         let subject = identity.subject().expect("subject");
-        assert!(subject.contains("Pagify Test Signer"), "{subject}");
+        assert!(subject.contains("Pagify SM2 Test Signer"), "{subject}");
     }
 
-    /// The SM2 identity loads through the same door, and each identity knows
-    /// which kind of key it holds — the RSA one is not an SM2 key, and the
-    /// SM2 one is not an RSA key.
+    /// **An identity whose key is not SM2 is refused at the door**, and the
+    /// refusal says which scheme this signs with — not "wrong password", and
+    /// not a signature that fails later. The RSA identity that used to sign
+    /// here is the case.
     #[test]
-    fn an_sm2_identity_is_read_from_a_pkcs12_file_and_says_so() {
-        let Some(rsa) = p12() else { return };
-        let sm2 = std::fs::read(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer-sm2.p12"),
+    fn an_identity_with_a_key_that_is_not_sm2_is_refused_and_told_why() {
+        let rsa = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer.p12"),
         )
-        .expect("the SM2 test identity is committed");
-        let sm2 = Identity::from_pkcs12(&sm2, "pagify").expect("read the SM2 identity");
-        assert!(sm2.is_sm2());
-        sm2.sm2_key().expect("the SM2 key is not usable");
-        assert!(sm2.rsa_key().is_err(), "an SM2 key was read as RSA");
-        assert!(sm2.subject().expect("subject").contains("Pagify SM2 Test Signer"));
-
-        let rsa = Identity::from_pkcs12(&rsa, "pagify").expect("read the RSA identity");
-        assert!(!rsa.is_sm2());
-        assert!(rsa.sm2_key().is_err(), "an RSA key was read as SM2");
+        .expect("the RSA test identity is committed");
+        match Identity::from_pkcs12(&rsa, "pagify") {
+            Ok(_) => panic!("an RSA identity was accepted as a signer"),
+            Err(problem) => {
+                let said = problem.to_string();
+                assert!(said.contains("not an SM2 key"), "unhelpful: {said}");
+                assert!(said.contains("RSA"), "it did not name what it was handed: {said}");
+                assert!(!said.contains("password"), "it blamed the password: {said}");
+            }
+        }
     }
 
     #[test]
     fn a_wrong_password_does_not_open_it() {
-        let Some(bytes) = p12() else { return };
+        let bytes = p12();
         // Not `expect_err`: a private key is not a thing to print, so
         // `Identity` has no `Debug`.
         match Identity::from_pkcs12(&bytes, "not the password") {
@@ -428,90 +433,24 @@ mod identity_tests {
 ///
 /// **Detached**, which is what `/SubFilter /adbe.pkcs7.detached` means: the
 /// signed content is not carried inside the blob — it is the file itself, and
-/// only its digest goes in. That is why `external_message_digest` is handed
-/// over rather than the bytes.
+/// only its digest goes in. The digest is [`digest_of`]: SM3 over everything
+/// but the hole the blob is about to fill.
 ///
-/// The digest is over what [`ByteRange::covered`] returns — everything but the
-/// hole the blob is about to fill — under the hash the key's scheme names:
-/// SM3 for an SM2 key ([`sm3_of`]), SHA-256 for RSA ([`digest_of`]).
-pub fn detached_signature(identity: &Identity, digest: &[u8]) -> Result<Vec<u8>> {
-    use cms::builder::{SignedDataBuilder, SignerInfoBuilder};
-    use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
-    use cms::content_info::ContentInfo;
-    use cms::signed_data::{EncapsulatedContentInfo, SignerIdentifier};
-    use der::{Decode, Encode};
-    use x509_cert::Certificate;
-
-    if let Ok(key) = identity.sm2_key() {
-        return sm2_detached_signature(identity, &key, digest);
-    }
-
-    let certificate = Certificate::from_der(&identity.certificates[0])
-        .map_err(|_| PdfError::InvalidArgument("that certificate cannot be read".into()))?;
-
-    let key = identity.rsa_key()?;
-    let signer = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(key);
-
-    // Which certificate signed this, by issuer and serial — the form every
-    // reader understands.
-    let sid = SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
-        issuer: certificate.tbs_certificate.issuer.clone(),
-        serial_number: certificate.tbs_certificate.serial_number.clone(),
-    });
-
-    // `id-data` with no content: the content is the file, and it is not here.
-    let content = EncapsulatedContentInfo {
-        econtent_type: const_oid::db::rfc5911::ID_DATA,
-        econtent: None,
-    };
-
-    let digest_algorithm = spki::AlgorithmIdentifierOwned {
-        oid: const_oid::db::rfc5912::ID_SHA_256,
-        parameters: None,
-    };
-
-    let signer_info = SignerInfoBuilder::new(
-        &signer,
-        sid,
-        digest_algorithm.clone(),
-        &content,
-        Some(digest),
-    )
-    .map_err(|e| PdfError::Internal(format!("the signer could not be described: {e}")))?;
-
-    let mut builder = SignedDataBuilder::new(&content);
-    let blob = builder
-        .add_digest_algorithm(digest_algorithm)
-        .and_then(|b| b.add_certificate(CertificateChoices::Certificate(certificate)))
-        .and_then(|b| b.add_signer_info::<_, rsa::pkcs1v15::Signature>(signer_info))
-        .and_then(|b| b.build())
-        .map_err(|e| PdfError::Internal(format!("the signature could not be built: {e}")))?;
-
-    ContentInfo::to_der(&blob)
-        .map_err(|e| PdfError::Internal(format!("the signature could not be written: {e}")))
-}
-
-/// The same blob, signed with SM2 over SM3 — and built by hand.
-///
-/// **Why by hand.** `cms`'s `SignerInfoBuilder` asks two things of a signer
-/// that the `sm2` crate does not provide: `SignatureBitStringEncoding` on the
-/// signature type, and `DynSignatureAlgorithmIdentifier` on the key. Without
-/// them the builder cannot be told what an SM2 signature is called or how it
-/// is written, so the `SignerInfo` is assembled field by field from the same
-/// `cms` types the builder would have filled in. The `SignedData` around it is
-/// the builder's shape exactly: the same two signed attributes, the same
-/// version rules, the certificate carried alongside.
+/// **Built by hand, on purpose.** `cms`'s `SignerInfoBuilder` asks two things
+/// of a signer that the `sm2` crate does not provide: `SignatureBitStringEncoding`
+/// on the signature type, and `DynSignatureAlgorithmIdentifier` on the key.
+/// Without them the builder cannot be told what an SM2 signature is called or
+/// how it is written, so the `SignerInfo` is assembled field by field from the
+/// same `cms` types the builder would have filled in, and the `SignedData`
+/// around it is the builder's shape exactly: the same two signed attributes,
+/// the same version rules, the certificates carried alongside.
 ///
 /// What SM2 signs is `SM3(ZA ‖ attributes)`, where the attributes are the
 /// signed attributes in their DER form as a SET — what any reader recomputes —
 /// and `ZA` folds in the public key and [`super::sm::DISTINGUISHING_ID`]. The
 /// crate does that folding; the identity is pinned so that the check in
 /// `validate.rs` folds in the same one.
-fn sm2_detached_signature(
-    identity: &Identity,
-    key: &sm2::dsa::SigningKey,
-    digest: &[u8],
-) -> Result<Vec<u8>> {
+pub fn detached_signature(identity: &Identity, digest: &[u8]) -> Result<Vec<u8>> {
     use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
     use cms::content_info::{CmsVersion, ContentInfo};
     use cms::signed_data::{
@@ -524,6 +463,7 @@ fn sm2_detached_signature(
 
     let internal = |what: &str| PdfError::Internal(format!("the signature could not be built: {what}"));
 
+    let key = identity.sm2_key()?;
     let certificates: Vec<Certificate> = identity
         .certificates
         .iter()
@@ -610,18 +550,8 @@ fn sm2_detached_signature(
     .map_err(|e| PdfError::Internal(format!("the signature could not be written: {e}")))
 }
 
-/// The digest a signature is made over.
+/// The digest a signature is made over: SM3 of everything but the hole.
 pub fn digest_of(bytes: &[u8], range: &ByteRange) -> Result<Vec<u8>> {
-    use sha2::Digest;
-    let (before, after) = range.covered(bytes)?;
-    let mut hasher = sha2::Sha256::new();
-    hasher.update(before);
-    hasher.update(after);
-    Ok(hasher.finalize().to_vec())
-}
-
-/// The same digest under SM3, which is what an SM2 signature commits to.
-pub fn sm3_of(bytes: &[u8], range: &ByteRange) -> Result<Vec<u8>> {
     use sm3::Digest;
     let (before, after) = range.covered(bytes)?;
     let mut hasher = sm3::Sm3::new();
@@ -636,7 +566,7 @@ mod cms_tests {
 
     fn identity() -> Option<Identity> {
         let bytes = std::fs::read(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer.p12"),
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer-sm2.p12"),
         )
         .ok()?;
         Identity::from_pkcs12(&bytes, "pagify").ok()
@@ -700,23 +630,15 @@ mod cms_tests {
         );
     }
 
-    fn sm2_identity() -> Identity {
-        let bytes = std::fs::read(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer-sm2.p12"),
-        )
-        .expect("the SM2 test identity is committed");
-        Identity::from_pkcs12(&bytes, "pagify").expect("read")
-    }
-
-    /// **The SM2 blob is the same CMS shape, naming the SM algorithms.** Read
-    /// back the way a reader reads it: `SignedData` v1, one signer named by
-    /// issuer and serial, SM3 as the digest algorithm in both places it is
-    /// named, SM2-with-SM3 as the signature algorithm, the signature value a
-    /// `SEQUENCE { r, s }`, the certificate carried, the content detached.
+    /// **The blob names the SM algorithms**, read back the way a reader reads
+    /// it: `SignedData` v1, one signer named by issuer and serial, SM3 as the
+    /// digest algorithm in both places it is named, SM2-with-SM3 as the
+    /// signature algorithm, the signature value a `SEQUENCE { r, s }`, the
+    /// certificate carried, the content detached.
     #[test]
-    fn an_sm2_signature_is_a_readable_cms_structure_naming_the_sm_algorithms() {
+    fn a_signature_names_the_sm_algorithms() {
         use der::Decode;
-        let identity = sm2_identity();
+        let Some(identity) = identity() else { return };
         let digest = [7u8; 32];
         let blob = detached_signature(&identity, &digest).expect("sign");
 
@@ -753,13 +675,6 @@ mod cms_tests {
         assert_eq!(committed, digest);
         super::super::sm::signature_from_der(signer.signature.as_bytes())
             .expect("the signature value is not SEQUENCE { r, s }");
-    }
-
-    /// And it is smaller than the RSA one, so it fits the same hole.
-    #[test]
-    fn an_sm2_signature_fits_the_placeholder() {
-        let blob = detached_signature(&sm2_identity(), &[0u8; 32]).expect("sign");
-        assert!(blob.len() * 2 < PLACEHOLDER, "{} bytes", blob.len());
     }
 
     /// The digest is over everything but the hole, and changing a byte outside
@@ -812,13 +727,7 @@ pub fn sign(file: &File<'_>, identity: &Identity, about: &Reason) -> Result<Vec<
     let mut prepared = prepare(file, &name, about)?;
     let range = find_placeholder(&prepared)?;
     write_byte_range(&mut prepared, &range)?;
-    // The digest the signer commits to is under the hash its signature
-    // names: SM3 for an SM2 key, SHA-256 for RSA.
-    let digest = if identity.is_sm2() {
-        sm3_of(&prepared, &range)?
-    } else {
-        digest_of(&prepared, &range)?
-    };
+    let digest = digest_of(&prepared, &range)?;
     let blob = detached_signature(identity, &digest)?;
     fill_placeholder(&mut prepared, &range, &blob)?;
     Ok(prepared)

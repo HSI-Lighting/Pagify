@@ -307,12 +307,12 @@ Rebuild it with `tools/make_framed_fixture.py fixtures/framed.pdf`.
 Two self-signed identities, **password `pagify`** for both, committed for the
 same reason as the encrypted fixture's password: a test identity that lives
 somewhere else stops working the day somebody forgets where. Neither vouches
-for anything; they exist so that signatures can be made and read back.
+for anything.
 
-| File | Key | Subject | Made with |
+| File | Key | Subject | For |
 |---|---|---|---|
-| `test-signer.p12` | RSA-2048 | `O=Pagify, CN=Pagify Test Signer` | OpenSSL, on the day signing was built |
-| `test-signer-sm2.p12` | SM2 (curve `1.2.156.10197.1.301`) | `O=Pagify, CN=Pagify SM2 Test Signer` | OpenSSL 3.6, 15 September 2026 — the SM signatures plan's phase 0 spike |
+| `test-signer-sm2.p12` | SM2 (curve `1.2.156.10197.1.301`) | `O=Pagify, CN=Pagify SM2 Test Signer` | **The identity that signs.** Every signing test signs with it at test time. Made with OpenSSL 3.6 on 15 September 2026, the SM signatures plan's phase 0 spike |
+| `test-signer.p12` | RSA-2048 | `O=Pagify, CN=Pagify Test Signer` | Signed everything until phase 1 of that plan; now the identity `Identity::from_pkcs12` must **refuse**, naming the scheme it wanted — the test that it does is why the file stays |
 
 The SM2 one was made like this, and can be made again the same way (a new
 key each time, so nothing already signed will name it):
@@ -333,14 +333,16 @@ the older 3DES form, not the AES form OpenSSL writes by default, and
 
 `two-column.pdf`, signed once each — the SM2 one by the phase 0 spike's own
 code path (`sign::sign` with `test-signer-sm2.p12`), the RSA one by the RSA
-path on the same day, both through:
+path on the same day, the last day it existed. The SM2 one can be made again
+(a new signature each time — the key is the same, the time in `/M` is not):
 
 ```text
-PAGIFY_PDFIUM_LIB=<pdfium> P12=fixtures/test-signer-sm2.p12 \
-    cargo run --release --example sign_probe -- fixtures/two-column.pdf fixtures/sm2-signed.pdf
 PAGIFY_PDFIUM_LIB=<pdfium> \
-    cargo run --release --example sign_probe -- fixtures/two-column.pdf fixtures/rsa-signed.pdf
+    cargo run --release --example sign_probe -- fixtures/two-column.pdf fixtures/sm2-signed.pdf
 ```
+
+The RSA one cannot: nothing here signs with RSA any more, which is exactly why
+it is committed.
 
 **Why they are committed** when every other signing test signs at test time:
 they are read back on every run with no signing code in the way, so a change

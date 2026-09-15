@@ -14377,7 +14377,7 @@ mod lock_wiring_tests {
     #[test]
     fn certifying_is_unsaved_work_and_saving_writes_the_signed_file() {
         let certificate = std::path::Path::new(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer.p12"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer-sm2.p12"),
         );
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
@@ -14411,7 +14411,7 @@ mod lock_wiring_tests {
     #[test]
     fn signing_says_that_a_later_edit_breaks_it() {
         let certificate = std::path::Path::new(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer.p12"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer-sm2.p12"),
         );
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
@@ -15613,7 +15613,7 @@ mod lock_wiring_tests {
     #[test]
     fn the_status_of_a_signed_document_says_whether_it_still_holds() {
         let certificate = std::path::Path::new(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer.p12"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer-sm2.p12"),
         );
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
@@ -15625,7 +15625,7 @@ mod lock_wiring_tests {
         app.answer_passcode("pagify");
 
         let lines = app.document_status().join("\n");
-        assert!(lines.contains("signed by O=Pagify,CN=Pagify Test Signer"), "{lines}");
+        assert!(lines.contains("signed by CN=Pagify SM2 Test Signer,O=Pagify"), "{lines}");
         assert!(lines.contains("unchanged since it was signed"), "{lines}");
         // The limit travels with the claim here too.
         assert!(lines.contains("whether to trust that certificate is not checked"), "{lines}");
@@ -15829,7 +15829,7 @@ mod lock_wiring_tests {
     #[test]
     fn validating_a_signed_document_separates_unchanged_from_who_signed_it() {
         let certificate = std::path::Path::new(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer.p12"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer-sm2.p12"),
         );
         if !certificate.is_file() {
             eprintln!("skipping: no test certificate");
@@ -15846,7 +15846,7 @@ mod lock_wiring_tests {
         assert!(told.contains("unchanged since it was signed"), "{told}");
         // The signer named is the certificate's subject — evidence — and the
         // line still says what it cannot tell you: whether to trust it.
-        assert!(told.contains("by O=Pagify,CN=Pagify Test Signer"), "it did not name the certificate: {told}");
+        assert!(told.contains("by CN=Pagify SM2 Test Signer,O=Pagify"), "it did not name the certificate: {told}");
         assert!(
             told.contains("whether to trust that certificate is not checked"),
             "it did not say what it cannot tell you: {told}"

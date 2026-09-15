@@ -287,8 +287,10 @@ one commit per finding, each with a test built from the audit's own input;
   socket, is gone with the module behind it, and a token another application
   put in a file is reported as not checked — never as an alteration. A
   signature's time is the signer's own clock, in `/M`.
-- **`certify`** is unsaved work until saved, and the save writes the signed
-  bytes verbatim. An edit afterwards is a later revision the signature does
+- **`certify`** signs with SM2 over SM3 — the one scheme in the program,
+  under the conventions in `pdf/sm.rs` — and refuses an identity whose key is
+  not SM2 when it is loaded, naming the scheme it wanted. It is unsaved work
+  until saved, and the save writes the signed bytes verbatim. An edit afterwards is a later revision the signature does
   not cover; a rewrite (after a redaction, or to put a password on) breaks it,
   and the save says so.
 - **`smartredact`** says "gone for good" only of words proven gone. Words
