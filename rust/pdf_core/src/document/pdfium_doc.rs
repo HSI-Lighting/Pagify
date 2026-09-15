@@ -160,9 +160,9 @@ pub struct PdfiumDocument {
     /// in this process: the range covered 1458 bytes of a 17826-byte re-save,
     /// so a correctly signed document was reported as only partly covered.
     ///
-    /// So the bytes are kept at the moment they are produced — signing and
-    /// timestamping both have them in hand — rather than reconstructed later
-    /// from something that cannot reproduce them. A document opened from a
+    /// So the bytes are kept at the moment they are produced — signing has
+    /// them in hand — rather than reconstructed later from something that
+    /// cannot reproduce them. A document opened from a
     /// path needs nothing here: its file is on disk and can be read back.
     /// `None` means "ask the source", and it is the ordinary case.
     written: Option<Vec<u8>>,
@@ -174,9 +174,9 @@ pub struct PdfiumDocument {
     /// the document again relocated every object and broke the signature it
     /// had just made; a close discarded it without a word, because the
     /// document had been marked clean to stop that save. Found by audit: a
-    /// certified document could not actually be saved. Set by signing and
-    /// timestamping, cleared by the save that writes the bytes, and by any
-    /// edit — after which the file to write is those bytes plus a revision.
+    /// certified document could not actually be saved. Set by signing,
+    /// cleared by the save that writes the bytes, and by any edit — after
+    /// which the file to write is those bytes plus a revision.
     exact_pending: bool,
     /// Whether this document was opened by giving a password.
     ///
@@ -3237,29 +3237,6 @@ impl DocumentMut for PdfiumDocument {
         };
         let file = crate::pdf::File::parse(&bytes)?;
         crate::pdf::validate::check(&file, &bytes)
-    }
-
-    fn timestamp_document(&mut self, authority: &str) -> Result<String> {
-        let bytes = self
-            .document
-            .save_to_bytes()
-            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-        let file = crate::pdf::File::parse(&bytes)?;
-        let (stamped, authority_named) = crate::pdf::sign::timestamp(&file, authority)?;
-
-        let exact = stamped.clone();
-        let reopened = Self::open_bytes(stamped, None)?;
-        self.document = reopened.document;
-        self.page_count = reopened.page_count;
-        self.written = Some(exact);
-        if let Ok(mut cached) = self.vault.lock() {
-            *cached = None;
-        }
-        // As with a signature: the token covers these bytes, and a save
-        // writes them verbatim.
-        self.dirty = true;
-        self.exact_pending = true;
-        Ok(authority_named)
     }
 
     fn set_typing_fonts(&mut self, fonts: Vec<Vec<u8>>) {

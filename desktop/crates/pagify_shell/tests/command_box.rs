@@ -257,7 +257,6 @@ fn a_named_but_unbuilt_verb_says_so_rather_than_pretending_not_to_know_it() {
 fn the_verbs_that_were_promises_are_no_longer() {
     assert_eq!(head("redact").pagify(), Some(Verb::Redact));
     assert_eq!(head("certify").pagify(), Some(Verb::Certify(None)));
-    assert_eq!(head("timestamp").pagify(), Some(Verb::TimeStamp(None)));
     assert_eq!(head("validate").pagify(), Some(Verb::Validate));
     assert_eq!(head("signature").pagify(), Some(Verb::Signature { draw: false }));
     assert_eq!(
@@ -723,20 +722,6 @@ fn lock_takes_pages_or_arms_the_rectangle_tool() {
         Dispatch::Pagify(Verb::LockPages(spec)) => assert_eq!(spec, "all"),
         other => panic!("expected LockPages, got {other:?}"),
     }
-}
-
-/// `timestamp` needs an address, and has no default.
-///
-/// **The verb that uses the network.** A default would make the program contact
-/// somewhere nobody chose, and which authority to trust is not the program's
-/// decision to make.
-#[test]
-fn timestamp_takes_an_address_and_assumes_none() {
-    assert_eq!(head("timestamp").pagify(), Some(Verb::TimeStamp(None)));
-    assert_eq!(
-        head("timestamp http://tsa.example.com/x").pagify(),
-        Some(Verb::TimeStamp(Some("http://tsa.example.com/x".into())))
-    );
 }
 
 /// `certify` reports; with a certificate it signs.

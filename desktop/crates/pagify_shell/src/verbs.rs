@@ -268,13 +268,6 @@ pub enum Verb {
     /// the signer is who they say — that needs a chain of trust this program
     /// does not have, and every answer says so.
     Validate,
-    /// Ask a time authority to attest that this document exists now.
-    ///
-    /// **The only verb that uses the network.** It takes the authority's
-    /// address because there is no sensible default — and because contacting
-    /// somewhere nobody named is not a thing this program should do. A digest
-    /// leaves the machine; the document does not.
-    TimeStamp(Option<String>),
     /// Sign the document with a certificate — or report what signatures it has.
     ///
     /// `certify` says; `certify <file.p12>` signs with that identity. **A real
@@ -901,14 +894,6 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
             )),
         },
         "validate" => Ok(Verb::Validate),
-        "timestamp" => {
-            let tail = tail.trim();
-            if tail.is_empty() {
-                Ok(Verb::TimeStamp(None))
-            } else {
-                Ok(Verb::TimeStamp(Some(tail.to_string())))
-            }
-        }
         "certify" | "sign" => {
             let tail = tail.trim();
             if tail.is_empty() {
@@ -1323,7 +1308,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "find", "findnext", "fn", "findprev", "fp", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
-        "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "timestamp", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject",
+        "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject",
         "unsecure", "redact",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));

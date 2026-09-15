@@ -1256,20 +1256,6 @@ pub trait DocumentMut {
         Err(PdfError::Unsupported("checking this document's signatures"))
     }
 
-    /// Ask a time authority to attest that this document existed now.
-    ///
-    /// **The one thing in this program that uses the network.** A time written
-    /// here would prove nothing — see [`crate::pdf::timestamp`] for exactly
-    /// what leaves the machine, which is a digest and nothing else.
-    ///
-    /// `authority` has no default and no fallback: nothing is contacted unless
-    /// a caller names where. What comes back is the subject of the certificate
-    /// the token verified under — the authority as it names itself, which is
-    /// not the same as an authority worth trusting.
-    fn timestamp_document(&mut self, _authority: &str) -> Result<String> {
-        Err(PdfError::Unsupported("timestamping this document"))
-    }
-
     /// Put a tick, a cross or a dot on a page.
     ///
     /// # Why these are drawn rather than typed

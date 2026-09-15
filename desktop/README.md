@@ -282,8 +282,11 @@ one commit per finding, each with a test built from the audit's own input;
   and names that certificate. It does **not** decide whether to trust the
   certificate — there is no trust store — and says so on every line. Anything
   it cannot check (another scheme, an EC key, no certificate) is "could not be
-  checked", never "unchanged". Timestamp tokens are checked the same way, at
-  stamping time as well as afterwards.
+  checked", never "unchanged". Document timestamps are no longer made or
+  checked: the `timestamp` verb, the only thing in the program that opened a
+  socket, is gone with the module behind it, and a token another application
+  put in a file is reported as not checked — never as an alteration. A
+  signature's time is the signer's own clock, in `/M`.
 - **`certify`** is unsaved work until saved, and the save writes the signed
   bytes verbatim. An edit afterwards is a later revision the signature does
   not cover; a rewrite (after a redaction, or to put a password on) breaks it,

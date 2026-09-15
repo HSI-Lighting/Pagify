@@ -216,7 +216,6 @@ fn a_freshly_signed_document_validates() {
 
     assert_eq!(found.len(), 1, "expected one signature, got {found:?}");
     assert_eq!(found[0].verdict, Verdict::Unaltered, "{:?}", found[0]);
-    assert!(!found[0].timestamp, "a signature was read as a timestamp");
     assert!(!found[0].when.is_empty(), "it recorded no time");
 }
 
@@ -458,120 +457,51 @@ fn a_signature_scheme_this_does_not_know_is_unreadable_not_unaltered() {
 }
 
 // ---------------------------------------------------------------------------
-// Timestamp tokens commit to the file through the imprint inside their TSTInfo,
-// not through the digest attribute — that one is over the TSTInfo itself.
-// Comparing it with the file read every genuine timestamp as an alteration.
+// Document timestamps are not checked any more — nothing here asks a time
+// authority for one, and a token is a third party's statement in a third
+// party's scheme. What must not happen is the misreading the audit found: a
+// token commits to the file through the imprint inside its TSTInfo, not
+// through its digest attribute, and read as an ordinary signature every
+// genuine timestamp came out as an alteration.
 // ---------------------------------------------------------------------------
 
-/// A TSTInfo with the three fields the check reads, and enough after them to
-/// be the real shape.
-fn tst_info_over(digest: &[u8]) -> Vec<u8> {
-    use der::Encode;
-    fn tlv(tag: u8, body: &[u8]) -> Vec<u8> {
-        let mut out = vec![tag];
-        match body.len() {
-            n if n < 0x80 => out.push(n as u8),
-            n if n < 0x100 => out.extend([0x81, n as u8]),
-            n => out.extend([0x82, (n >> 8) as u8, n as u8]),
-        }
-        out.extend_from_slice(body);
-        out
-    }
-    let algorithm = spki::AlgorithmIdentifierOwned {
-        oid: const_oid::db::rfc5912::ID_SHA_256,
-        parameters: None,
-    };
-    let mut imprint = algorithm.to_der().expect("algorithm");
-    imprint.extend(der::asn1::OctetString::new(digest).expect("digest").to_der().expect("DER"));
+/// A timestamp token from another application is declined, and never called
+/// an alteration — not over the bytes it was made for, and not over altered
+/// ones either, because nothing about it was checked.
+#[test]
+fn a_document_timestamp_from_another_application_is_declined_never_called_altered() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
 
-    let mut body = Vec::new();
-    body.extend(tlv(0x02, &[1])); // version
-    body.extend(const_oid::ObjectIdentifier::new_unwrap("1.2.3.4").to_der().expect("policy"));
-    body.extend(tlv(0x30, &imprint)); // messageImprint
-    body.extend(tlv(0x02, &[7])); // serialNumber
-    body.extend(tlv(0x18, b"20260912120000Z")); // genTime
-    tlv(0x30, &body)
-}
+    let bytes = sm2_signed("two-column.pdf");
+    let range = declared_range(&bytes).expect("range");
 
-/// A token as an authority would make it, signed with the test identity
-/// standing in for the authority's key.
-fn token_over(identity: &sign::Identity, digest: &[u8]) -> Vec<u8> {
-    use cms::builder::{SignedDataBuilder, SignerInfoBuilder};
-    use cms::cert::{CertificateChoices, IssuerAndSerialNumber};
-    use cms::signed_data::{EncapsulatedContentInfo, SignerIdentifier};
-    use der::{Decode, Encode};
-
-    let certificate =
-        x509_cert::Certificate::from_der(&identity.certificates[0]).expect("certificate");
-    let signer = rsa::pkcs1v15::SigningKey::<sha2::Sha256>::new(identity.rsa_key().expect("key"));
-    let sid = SignerIdentifier::IssuerAndSerialNumber(IssuerAndSerialNumber {
-        issuer: certificate.tbs_certificate.issuer.clone(),
-        serial_number: certificate.tbs_certificate.serial_number.clone(),
-    });
-    let content = EncapsulatedContentInfo {
+    // The signer's blob, relabelled as a token: `id-ct-TSTInfo` content in
+    // place of the detached `id-data`. What a real token carries there is a
+    // TSTInfo; what matters here is only that the check does not read on.
+    let mut data = signed_data_in(&bytes, &range);
+    data.encap_content_info = cms::signed_data::EncapsulatedContentInfo {
         econtent_type: const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.1.4"),
         econtent: Some(
-            der::Any::new(der::Tag::OctetString, tst_info_over(digest)).expect("content"),
+            der::Any::new(der::Tag::OctetString, b"not a TSTInfo".to_vec()).expect("content"),
         ),
     };
-    let digest_algorithm = spki::AlgorithmIdentifierOwned {
-        oid: const_oid::db::rfc5912::ID_SHA_256,
-        parameters: None,
-    };
-    let signer_info =
-        SignerInfoBuilder::new(&signer, sid, digest_algorithm.clone(), &content, None)
-            .expect("signer");
-    let mut builder = SignedDataBuilder::new(&content);
-    builder
-        .add_digest_algorithm(digest_algorithm)
-        .and_then(|b| b.add_certificate(CertificateChoices::Certificate(certificate)))
-        .and_then(|b| b.add_signer_info::<_, rsa::pkcs1v15::Signature>(signer_info))
-        .and_then(|b| b.build())
-        .expect("token")
-        .to_der()
-        .expect("DER")
-}
-
-/// A token whose imprint is the file's digest verifies — and once the file
-/// is altered under it, it does not.
-#[test]
-fn a_timestamp_token_is_checked_through_the_imprint_it_carries() {
-    let Some(_) = skip_without_pdfium() else { return };
-    let _lock = serial();
-
-    let Some((bytes, identity)) = signed("two-column.pdf") else { return };
-    let range = declared_range(&bytes).expect("range");
-    let digest = sign::digest_of(&bytes, &range).expect("digest");
-
     let mut stamped = bytes.clone();
-    reblob(&mut stamped, &range, &token_over(&identity, &digest));
-    let file = File::parse(&stamped).expect("parse");
-    let found = validate::check(&file, &stamped).expect("check");
-    assert_eq!(found[0].verdict, Verdict::Unaltered, "a genuine token: {:?}", found[0]);
-    assert_eq!(found[0].signer.as_deref(), Some(identity.subject().expect("subject").as_str()));
+    reblob(&mut stamped, &range, &blob_from(&data));
 
-    let mut altered = stamped.clone();
-    altered[range.hole_at / 2] ^= 0x20;
-    let file = File::parse(&altered).expect("parse");
-    let found = validate::check(&file, &altered).expect("check");
-    assert_eq!(found[0].verdict, Verdict::Altered, "an edit under a token: {:?}", found[0]);
-}
-
-/// A token vouching for some *other* file's digest is not evidence about this
-/// one, however well it is signed.
-#[test]
-fn a_timestamp_token_for_a_different_file_is_an_alteration_here() {
-    let Some(_) = skip_without_pdfium() else { return };
-    let _lock = serial();
-
-    let Some((bytes, identity)) = signed("two-column.pdf") else { return };
-    let range = declared_range(&bytes).expect("range");
-
-    let mut stamped = bytes.clone();
-    reblob(&mut stamped, &range, &token_over(&identity, &[0x42; 32]));
-    let file = File::parse(&stamped).expect("parse");
-    let found = validate::check(&file, &stamped).expect("check");
-    assert_eq!(found[0].verdict, Verdict::Altered, "{:?}", found[0]);
+    for altered in [false, true] {
+        let mut checked = stamped.clone();
+        if altered {
+            checked[range.hole_at / 2] ^= 0x20;
+        }
+        let file = File::parse(&checked).expect("parse");
+        let found = validate::check(&file, &checked).expect("check");
+        match &found[0].verdict {
+            Verdict::Unreadable(why) => assert!(why.contains("timestamp"), "{why}"),
+            other => panic!("a token was judged rather than declined (altered: {altered}): {other:?}"),
+        }
+        assert!(found[0].signer.is_none(), "a token nobody checked names an authority");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -655,96 +585,6 @@ fn an_edit_after_signing_is_saved_as_a_revision_the_signature_does_not_cover() {
     }
 }
 
-/// And the same for a timestamp, through the document: what is kept is what
-/// is written.
-#[test]
-fn a_timestamped_document_is_dirty_until_its_bytes_are_written() {
-    let Some(_) = skip_without_pdfium() else { return };
-    let _lock = serial();
-    use pdf_core::document::DocumentMut;
-
-    let mut doc = open_document("two-column.pdf");
-    // No authority to ask here; the signing path exercises the same state,
-    // so this only checks the state a clean document starts from.
-    assert!(!doc.is_dirty());
-    if !certify(&mut doc) {
-        return;
-    }
-    let mut saved = Vec::new();
-    doc.save_incremental(&mut saved).expect("save");
-    // Saved once, the same bytes again on a second save: nothing pending.
-    let mut again = Vec::new();
-    doc.save_incremental(&mut again).expect("save again");
-    assert!(again.starts_with(&saved), "a second save did not start from the signed file");
-}
-
-// ---------------------------------------------------------------------------
-// A token is checked before it goes into the file. Found by audit: the
-// timestamp module's comment said the token's signature was what made plain
-// HTTP acceptable, and nothing checked the signature.
-// ---------------------------------------------------------------------------
-
-/// A token from an authority — the test identity standing in — verifies
-/// against the digest it was asked for, and names the authority.
-#[test]
-fn a_timestamp_token_is_verified_against_the_digest_it_was_asked_for() {
-    let Some(_) = skip_without_pdfium() else { return };
-    let _lock = serial();
-
-    let Some(identity) = identity() else { return };
-    let digest = [0x5au8; 32];
-    let token = token_over(&identity, &digest);
-    let named = validate::check_token(&token, &digest).expect("a genuine token");
-    assert_eq!(named, identity.subject().expect("subject"));
-
-    // For a different digest, it is somebody else's statement.
-    let other = validate::check_token(&token, &[0x00; 32]).expect_err("a token for another digest");
-    assert!(other.to_string().contains("different digest"), "{other}");
-}
-
-/// A token that does not carry a certificate cannot be checked, and is not
-/// written into a document on the authority's say-so.
-#[test]
-fn a_timestamp_token_without_a_certificate_is_refused() {
-    let Some(_) = skip_without_pdfium() else { return };
-    let _lock = serial();
-
-    let Some(identity) = identity() else { return };
-    let digest = [0x5au8; 32];
-    let token = token_over(&identity, &digest);
-
-    use der::{Decode, Encode};
-    let info = cms::content_info::ContentInfo::from_der(&token).expect("CMS");
-    let mut data: cms::signed_data::SignedData = info.content.decode_as().expect("SignedData");
-    data.certificates = None;
-    let stripped = cms::content_info::ContentInfo {
-        content_type: const_oid::db::rfc5911::ID_SIGNED_DATA,
-        content: der::Any::encode_from(&data).expect("encode"),
-    }
-    .to_der()
-    .expect("DER");
-
-    let refused = validate::check_token(&stripped, &digest).expect_err("no certificate, yet accepted");
-    assert!(refused.to_string().contains("could not be checked"), "{refused}");
-}
-
-/// A token altered in flight — one byte of the signature — is refused, which
-/// is the whole argument for plain HTTP.
-#[test]
-fn a_timestamp_token_altered_in_flight_is_refused() {
-    let Some(_) = skip_without_pdfium() else { return };
-    let _lock = serial();
-
-    let Some(identity) = identity() else { return };
-    let digest = [0x5au8; 32];
-    let mut token = token_over(&identity, &digest);
-    // The signature is the last OCTET STRING in the structure; flipping a
-    // byte near the end lands in it.
-    let last = token.len() - 4;
-    token[last] ^= 0x01;
-    assert!(validate::check_token(&token, &digest).is_err(), "an altered token was accepted");
-}
-
 // ---------------------------------------------------------------------------
 // SM2 over SM3 — the phase 0 spike of the SM signatures plan. The same CMS
 // shape, the same placeholder, the same byte-range discipline; a different
@@ -788,7 +628,6 @@ fn an_sm2_signed_document_validates_and_names_its_signer() {
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].verdict, Verdict::Unaltered, "{}", found[0].verdict.describe());
     assert_eq!(found[0].signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
-    assert!(!found[0].timestamp);
 }
 
 /// **The identifiers, read back from the DER** — the spike's step 3. SM3 is

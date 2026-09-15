@@ -844,17 +844,6 @@ impl Session {
         })
     }
 
-    /// Ask a time authority to attest that this document exists now. What
-    /// comes back is the authority as its certificate names it.
-    pub fn timestamp_document(&self, authority: &str) -> Result<String> {
-        registry::with_session(self.handle, |s| {
-            s.document
-                .as_document_mut()
-                .ok_or(pdf_core::PdfError::Unsupported("timestamping this document"))?
-                .timestamp_document(authority)
-        })
-    }
-
     /// Sign this document with a certificate.
     pub fn sign_document(
         &self,

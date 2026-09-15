@@ -1323,7 +1323,6 @@ impl Tab {
                 ("\u{E948}", "Mark Confidential", "sensitivity confidential"),
                 ("\u{E746}", "Fill & Sign", "fillsign"),
                 ("\u{E7AF}", "Sign & Certify", "certify"),
-                ("\u{EFD6}", "Time Stamp Document", "timestamp"),
                 ("\u{F013}", "Validate", "validate"),
             ],
             Tab::PagiSign => &[
@@ -2493,9 +2492,8 @@ impl PagifyApp {
             Ok(found) if found.is_empty() => lines.push("signed: no".into()),
             Ok(found) => {
                 for signature in &found {
-                    let what = if signature.timestamp { "timestamp" } else { "signed" };
                     let who = signer_label(signature);
-                    lines.push(format!("{what}{who}: {}", signature.verdict.describe()));
+                    lines.push(format!("signed{who}: {}", signature.verdict.describe()));
                 }
             }
             // Not fatal to the readout: everything else about the document is
@@ -3996,10 +3994,7 @@ impl PagifyApp {
                     Ok(found) => {
                         let said: Vec<String> = found
                             .iter()
-                            .map(|s| {
-                                let what = if s.timestamp { "timestamp" } else { "signature" };
-                                format!("{what}{}: {}", signer_label(s), s.verdict.describe())
-                            })
+                            .map(|s| format!("signature{}: {}", signer_label(s), s.verdict.describe()))
                             .collect();
                         // Anything other than unaltered is a warning, not news.
                         let all_well = found
@@ -4011,38 +4006,6 @@ impl PagifyApp {
                         } else {
                             self.say_error(line);
                         }
-                    }
-                    Err(e) => self.say_error(e.to_string()),
-                }
-            }
-            Verb::TimeStamp(authority) => {
-                let Some(doc) = &self.doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                let Some(authority) = authority else {
-                    // **No default address.** Naming one here would make the
-                    // program contact somewhere the person never chose, and
-                    // which authority to trust is not ours to decide.
-                    self.say_info(
-                        "timestamp <http://address-of-a-time-authority> — a digest of \
-                         this document is sent there and nothing else, and the \
-                         signed answer goes into the file. There is no default \
-                         address; the choice of who to trust is yours.",
-                    );
-                    return;
-                };
-                match doc.session.timestamp_document(&authority) {
-                    Ok(named) => {
-                        if let Some(doc) = &mut self.doc {
-                            doc.rendered_is_stale();
-                        }
-                        self.text = None;
-                        self.say_info(format!(
-                            "timestamped by {named} (as its certificate names it — whether to \
-                             trust it is not checked) — save to write it out. It covers the \
-                             file exactly as it is now; anything changed after this breaks it."
-                        ));
                     }
                     Err(e) => self.say_error(e.to_string()),
                 }
@@ -14405,32 +14368,6 @@ mod lock_wiring_tests {
             doc.session.is_secure_plus(),
             "it used PDF's handler when Secure Plus was chosen"
         );
-    }
-
-    /// **Bare `timestamp` names no authority and contacts nothing.**
-    ///
-    /// The one verb that would use the network says what it would send and
-    /// where it would not send it, rather than picking somewhere.
-    #[test]
-    fn timestamp_without_an_address_explains_rather_than_choosing_one() {
-        let mut app = app("two-column.pdf");
-        app.submit("timestamp");
-
-        let said = said(&app);
-        assert!(said.contains("no default"), "it did not say there is no default: {said}");
-        assert!(said.contains("digest"), "it did not say what would be sent: {said}");
-        assert!(
-            said.contains("nothing else"),
-            "it did not say what would not be sent: {said}"
-        );
-    }
-
-    /// And an address that is not one is refused before anything is opened.
-    #[test]
-    fn timestamp_refuses_an_address_it_cannot_use() {
-        let mut app = app("two-column.pdf");
-        app.submit("timestamp not-an-address");
-        assert!(said(&app).contains("http://"), "{}", said(&app));
     }
 
     /// **A certified document is unsaved work until it is saved, and what

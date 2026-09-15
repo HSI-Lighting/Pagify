@@ -39,7 +39,7 @@
 //! scheme it does not know, a certificate it cannot read — is reported as
 //! *unreadable*, never as unaltered. The green tick is only ever earned.
 
-use crate::error::{PdfError, Result};
+use crate::error::Result;
 
 use super::{File, Object};
 
@@ -91,10 +91,8 @@ pub struct Signature {
     /// **A label, not a finding.** It is plain text in the file, written by
     /// whoever wrote the file. The name that means something is `signer`.
     pub name: String,
-    /// When it says it was made.
+    /// When it says it was made — the signer's own clock, nobody else's.
     pub when: String,
-    /// Whether it is a signature or a document timestamp.
-    pub timestamp: bool,
     pub verdict: Verdict,
     /// The subject of the certificate the signature verified under — only
     /// when it did. Who *holds* that certificate is a question of trust this
@@ -115,16 +113,10 @@ pub fn check(file: &File<'_>, bytes: &[u8]) -> Result<Vec<Signature>> {
             continue;
         }
 
-        let subfilter = dict
-            .get(b"SubFilter")
-            .and_then(Object::as_name)
-            .map(|n| String::from_utf8_lossy(n).into_owned())
-            .unwrap_or_default();
         let Checked { verdict, signer } = verdict_for(dict, bytes);
         out.push(Signature {
             name: text_of(dict.get(b"Name")),
             when: text_of(dict.get(b"M")),
-            timestamp: subfilter.contains("RFC3161"),
             verdict,
             signer,
         });
@@ -147,7 +139,15 @@ impl Checked {
 }
 
 /// `id-ct-TSTInfo`: the content type of a timestamp token, whose content is
-/// the `TSTInfo` the authority signed. Not in the OID database this uses.
+/// the `TSTInfo` an authority signed. Not in the OID database this uses.
+///
+/// Recognised only to be declined. A token commits to the file through the
+/// imprint *inside* its `TSTInfo`, not through the digest attribute — that
+/// one is over the `TSTInfo` itself — and reading it as an ordinary
+/// signature reports every genuine timestamp as an alteration. Found by
+/// audit, when tokens were still checked; now that nothing here asks an
+/// authority for one, a token is a third party's statement in a third
+/// party's scheme, and it is reported as not checked rather than judged.
 const ID_CT_TST_INFO: const_oid::ObjectIdentifier =
     const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.1.4");
 
@@ -213,38 +213,14 @@ fn verdict_for(dict: &super::Dict, bytes: &[u8]) -> Checked {
     // -- what the signer committed to, against the file ----------------------
     //
     // A signature commits to the file's digest directly. A timestamp token
-    // commits to a `TSTInfo`, and it is the imprint *inside* that which names
-    // the file — the token's own digest is over the `TSTInfo`, and comparing
-    // it with the file reads every genuine timestamp as an alteration.
-    let content = &data.encap_content_info;
-    if content.econtent_type == ID_CT_TST_INFO {
-        let tst_info = content
-            .econtent
-            .as_ref()
-            .and_then(|any| any.decode_as::<der::asn1::OctetStringRef>().ok())
-            .map(|octets| octets.as_bytes().to_vec());
-        let Some(tst_info) = tst_info else {
-            return Checked::failed(Verdict::Unreadable("its token carries no TSTInfo".into()));
-        };
-        let Some((imprint_alg, imprint)) = imprint_in(&tst_info) else {
-            return Checked::failed(Verdict::Unreadable(
-                "its token's message imprint cannot be read".into(),
-            ));
-        };
-        let Some(imprint_hash) = Hash::named(&imprint_alg) else {
-            return Checked::failed(Verdict::Unreadable(format!(
-                "its token's imprint uses {imprint_alg}, which this does not implement"
-            )));
-        };
-        if imprint_hash.over(&signed_bytes) != imprint {
-            return Checked::failed(Verdict::Altered);
-        }
-        if hash.over(&[&tst_info]) != committed {
-            return Checked::failed(Verdict::Invalid(
-                "the token's digest is not the digest of its own contents".into(),
-            ));
-        }
-    } else if hash.over(&signed_bytes) != committed {
+    // does not — see `ID_CT_TST_INFO` — and is declined before the
+    // comparison that would misread it.
+    if data.encap_content_info.econtent_type == ID_CT_TST_INFO {
+        return Checked::failed(Verdict::Unreadable(
+            "it is a document timestamp from a time authority, which this does not check".into(),
+        ));
+    }
+    if hash.over(&signed_bytes) != committed {
         return Checked::failed(Verdict::Altered);
     }
 
@@ -254,66 +230,6 @@ fn verdict_for(dict: &super::Dict, bytes: &[u8]) -> Checked {
         Ok(subject) => Checked { verdict: Verdict::Unaltered, signer: Some(subject) },
         Err(verdict) => Checked::failed(verdict),
     }
-}
-
-/// Check a timestamp token against the digest it was asked for, before it
-/// goes into a document.
-///
-/// **The check the timestamp module always said happened, and did not.**
-/// The token is a signed statement — "this digest existed at this moment"
-/// — and its whole worth is the signature; an authority's answer was written
-/// into the file on the strength of parsing as one. Found by audit. Now the
-/// token must carry a `TSTInfo` whose imprint is exactly `digest`, its
-/// signer's own digest must be over that `TSTInfo`, and its signature must
-/// verify under a certificate it carries. What comes back is that
-/// certificate's subject — whether to trust it is a separate question.
-pub fn check_token(token: &[u8], digest: &[u8]) -> Result<String> {
-    use der::Decode;
-    let refuse = |why: &str| PdfError::InvalidArgument(format!("the timestamp token {why}"));
-
-    let info = cms::content_info::ContentInfo::from_der(token)
-        .map_err(|_| refuse("is not a CMS structure"))?;
-    let data = info
-        .content
-        .decode_as::<cms::signed_data::SignedData>()
-        .map_err(|_| refuse("is not SignedData"))?;
-    if data.encap_content_info.econtent_type != ID_CT_TST_INFO {
-        return Err(refuse("does not carry a TSTInfo"));
-    }
-    let tst_info = data
-        .encap_content_info
-        .econtent
-        .as_ref()
-        .and_then(|any| any.decode_as::<der::asn1::OctetStringRef>().ok())
-        .map(|octets| octets.as_bytes().to_vec())
-        .ok_or_else(|| refuse("carries an empty TSTInfo"))?;
-    let (imprint_alg, imprint) =
-        imprint_in(&tst_info).ok_or_else(|| refuse("has an imprint that cannot be read"))?;
-    if imprint_alg != const_oid::db::rfc5912::ID_SHA_256 || imprint != digest {
-        return Err(refuse("vouches for a different digest than the one asked about"));
-    }
-    let signer = data
-        .signer_infos
-        .0
-        .as_ref()
-        .first()
-        .ok_or_else(|| refuse("names no signer"))?;
-    let attributes = signer.signed_attrs.as_ref().ok_or_else(|| refuse("has no signed attributes"))?;
-    let hash = Hash::named(&signer.digest_alg.oid)
-        .ok_or_else(|| refuse("uses a digest this does not implement"))?;
-    let committed = attributes
-        .iter()
-        .find(|a| a.oid == const_oid::db::rfc5911::ID_MESSAGE_DIGEST)
-        .and_then(|a| a.values.as_ref().first().map(|v| v.value().to_vec()))
-        .ok_or_else(|| refuse("commits to no digest"))?;
-    if hash.over(&[&tst_info]) != committed {
-        return Err(refuse("has a digest that is not the digest of its own contents"));
-    }
-    let certificates = certificates_in(&data);
-    verify(signer, attributes, &certificates, hash).map_err(|verdict| match verdict {
-        Verdict::Unreadable(why) => refuse(&format!("could not be checked: {why}")),
-        _ => refuse("is not signed by the certificate it carries"),
-    })
 }
 
 /// The hashes this checks with. Anything else is reported as unreadable,
@@ -355,39 +271,6 @@ impl Hash {
             Hash::Sm3 => run::<sm3::Sm3>(parts),
         }
     }
-}
-
-/// The `messageImprint` of a `TSTInfo`: which hash, and the value.
-///
-/// ```text
-/// TSTInfo ::= SEQUENCE {
-///   version        INTEGER,
-///   policy         OBJECT IDENTIFIER,
-///   messageImprint SEQUENCE { hashAlgorithm AlgorithmIdentifier,
-///                             hashedMessage OCTET STRING },
-///   ... }
-/// ```
-///
-/// Read field by field rather than through a full `TSTInfo` type: the three
-/// fields wanted come first, and the ones after them are the ones that vary.
-fn imprint_in(tst_info: &[u8]) -> Option<(const_oid::ObjectIdentifier, Vec<u8>)> {
-    use der::{Decode, Reader, Tag, Tagged};
-
-    let whole = der::asn1::AnyRef::from_der(tst_info).ok()?;
-    if whole.tag() != Tag::Sequence {
-        return None;
-    }
-    let mut fields = der::SliceReader::new(whole.value()).ok()?;
-    let _version: der::asn1::AnyRef = fields.decode().ok()?;
-    let _policy: der::asn1::AnyRef = fields.decode().ok()?;
-    let imprint: der::asn1::AnyRef = fields.decode().ok()?;
-    if imprint.tag() != Tag::Sequence {
-        return None;
-    }
-    let mut inner = der::SliceReader::new(imprint.value()).ok()?;
-    let algorithm: spki::AlgorithmIdentifierOwned = inner.decode().ok()?;
-    let hashed: der::asn1::OctetStringRef = inner.decode().ok()?;
-    Some((algorithm.oid, hashed.as_bytes().to_vec()))
 }
 
 /// Every certificate the signature travels with.

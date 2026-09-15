@@ -809,7 +809,7 @@ pub fn sign(file: &File<'_>, identity: &Identity, about: &Reason) -> Result<Vec<
     } else {
         about.name.clone()
     };
-    let mut prepared = prepare(file, Flavour::Signature, &name, about)?;
+    let mut prepared = prepare(file, &name, about)?;
     let range = find_placeholder(&prepared)?;
     write_byte_range(&mut prepared, &range)?;
     // The digest the signer commits to is under the hash its signature
@@ -824,44 +824,15 @@ pub fn sign(file: &File<'_>, identity: &Identity, about: &Reason) -> Result<Vec<
     Ok(prepared)
 }
 
-/// A document timestamp: the same shape, filled by an authority rather than by
-/// a certificate here.
-///
-/// **The only difference that matters** is `/SubFilter`: a reader that sees
-/// `ETSI.RFC3161` knows to check the token against a time authority rather than
-/// against a signer's identity.
-pub fn timestamp(file: &File<'_>, authority: &str) -> Result<(Vec<u8>, String)> {
-    let mut prepared = prepare(file, Flavour::Timestamp, "", &Reason::default())?;
-    let range = find_placeholder(&prepared)?;
-    write_byte_range(&mut prepared, &range)?;
-    let digest = digest_of(&prepared, &range)?;
-
-    // The one call that leaves the machine, and only because somebody named
-    // where. See `crate::pdf::timestamp`.
-    let token = super::timestamp::ask(authority, &digest)?;
-    // **Checked before it is written.** The token is worth exactly its
-    // signature over our digest; one that does not verify is not put into
-    // the document on the authority's say-so. Found by audit.
-    let authority_named = super::validate::check_token(&token, &digest)?;
-    fill_placeholder(&mut prepared, &range, &token)?;
-    Ok((prepared, authority_named))
-}
-
-/// Which kind of thing is being put in the file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Flavour {
-    Signature,
-    Timestamp,
-}
-
 /// Write the file with a hole in it, and everything a reader needs to find the
 /// hole.
-fn prepare(
-    file: &File<'_>,
-    flavour: Flavour,
-    name: &str,
-    about: &Reason,
-) -> Result<Vec<u8>> {
+///
+/// There is no document-timestamp flavour of this any more. Asking a time
+/// authority was the one network call in the program, and the token that
+/// came back was signed by somebody else's key in somebody else's scheme —
+/// two things this program has decided not to have. The time a signature
+/// carries is the signer's own clock, and says so by being in `/M`.
+fn prepare(file: &File<'_>, name: &str, about: &Reason) -> Result<Vec<u8>> {
 
     // -- the signature dictionary, with room reserved ---------------------
     let numbers: Vec<u32> = file.numbers().collect();
@@ -871,15 +842,7 @@ fn prepare(
     let mut signature = Dict(Vec::new());
     signature.set(b"Type", Object::Name(b"Sig".to_vec()));
     signature.set(b"Filter", Object::Name(b"Adobe.PPKLite".to_vec()));
-    signature.set(
-        b"SubFilter",
-        Object::Name(match flavour {
-            Flavour::Signature => b"adbe.pkcs7.detached".to_vec(),
-            // What tells a reader to check a time authority rather than a
-            // signer's identity.
-            Flavour::Timestamp => b"ETSI.RFC3161".to_vec(),
-        }),
-    );
+    signature.set(b"SubFilter", Object::Name(b"adbe.pkcs7.detached".to_vec()));
     if !name.is_empty() {
         signature.set(b"Name", Object::LiteralString(escaped(name)));
     }
@@ -921,13 +884,7 @@ fn prepare(
     field.set(b"Type", Object::Name(b"Annot".to_vec()));
     field.set(b"Subtype", Object::Name(b"Widget".to_vec()));
     field.set(b"FT", Object::Name(b"Sig".to_vec()));
-    field.set(
-        b"T",
-        Object::LiteralString(match flavour {
-            Flavour::Signature => b"Signature1".to_vec(),
-            Flavour::Timestamp => b"Timestamp1".to_vec(),
-        }),
-    );
+    field.set(b"T", Object::LiteralString(b"Signature1".to_vec()));
     field.set(b"V", Object::Reference(signature_number, 0));
     field.set(b"F", Object::Number(b"132".to_vec()));
     field.set(
