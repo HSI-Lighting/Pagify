@@ -316,6 +316,11 @@ one commit per finding, each with a test built from the audit's own input;
   `tools/verify_third_party.sh` against `third_party/CHECKSUMS.sha256`;
   `tools/audit.sh` against the RustSec database, with the one accepted
   advisory written down in `.cargo/audit.toml`. The macOS bundle runs both.
+- **Pagify makes no network connections.** Not a comment in a module: the
+  bundle also runs `tools/no_sockets.sh`, which fails the build if any source
+  file in the engine or the desktop crates names a socket type or a network
+  module, or if any crate in the dependency graph of the shipped binaries is
+  a network client, server, TLS stack or async runtime.
 - **Files reach the disk** through one path: staged beside the target with
   `create_new`, the target's own permissions kept, renamed over it whole.
 

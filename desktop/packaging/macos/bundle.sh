@@ -38,6 +38,12 @@ echo "==> verify third_party"
 echo "==> audit dependencies"
 "$ROOT/tools/audit.sh"
 
+# And that nothing in what is about to ship opens a socket. "Pagify makes no
+# network connections" is a sentence the security posture rests on, and a
+# sentence about the whole program is checked on the whole program.
+echo "==> no sockets"
+"$ROOT/tools/no_sockets.sh"
+
 echo "==> build"
 cargo build --release -p pagify_app
 
