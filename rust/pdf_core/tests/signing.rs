@@ -744,3 +744,191 @@ fn a_timestamp_token_altered_in_flight_is_refused() {
     token[last] ^= 0x01;
     assert!(validate::check_token(&token, &digest).is_err(), "an altered token was accepted");
 }
+
+// ---------------------------------------------------------------------------
+// SM2 over SM3 — the phase 0 spike of the SM signatures plan. The same CMS
+// shape, the same placeholder, the same byte-range discipline; a different
+// key, a different digest, and a `SignerInfo` built by hand because the `cms`
+// builder cannot be told what an SM2 signature is called. Everything below
+// is checked the way the RSA tests check: read back from the finished file,
+// never through the code that wrote it.
+// ---------------------------------------------------------------------------
+
+fn sm2_identity() -> sign::Identity {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer-sm2.p12");
+    sign::Identity::from_pkcs12(&std::fs::read(path).expect("the SM2 identity is committed"), "pagify")
+        .expect("read")
+}
+
+fn sm2_signed(name: &str) -> Vec<u8> {
+    let bytes = std::fs::read(harness::fixture_path(name)).expect("fixture");
+    let file = File::parse(&bytes).expect("parse");
+    sign::sign(&file, &sm2_identity(), &sign::Reason::default()).expect("sign")
+}
+
+/// **The spike's acceptance.** Signed with SM2, still a document, the range
+/// covers the file, and the engine's own check reads it back as unaltered
+/// under the certificate — which it names.
+#[test]
+fn an_sm2_signed_document_validates_and_names_its_signer() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let bytes = sm2_signed("two-column.pdf");
+    let doc = PdfiumDocument::open_bytes(bytes.clone(), None).expect("the signed file will not open");
+    let text = doc.page(0).expect("page").characters().expect("characters").text;
+    assert!(text.contains("luminaire"), "the signature disturbed the page");
+    assert_eq!(doc.signature_count(), 1, "PDFium does not see a signature");
+    let range = declared_range(&bytes).expect("no /ByteRange");
+    assert!(range.covers_everything());
+
+    let file = File::parse(&bytes).expect("parse");
+    let found = validate::check(&file, &bytes).expect("check");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].verdict, Verdict::Unaltered, "{}", found[0].verdict.describe());
+    assert_eq!(found[0].signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
+    assert!(!found[0].timestamp);
+}
+
+/// **The identifiers, read back from the DER** — the spike's step 3. SM3 is
+/// `1.2.156.10197.1.401` wherever a digest algorithm is named, SM2-with-SM3
+/// is `1.2.156.10197.1.501`, and what the signer committed to is the SM3
+/// digest of the bytes the range covers.
+#[test]
+fn an_sm2_signature_names_the_sm_algorithms_by_their_oids() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let bytes = sm2_signed("two-column.pdf");
+    let range = declared_range(&bytes).expect("range");
+    let data = signed_data_in(&bytes, &range);
+    let sm3 = const_oid::ObjectIdentifier::new_unwrap("1.2.156.10197.1.401");
+    let sm2_with_sm3 = const_oid::ObjectIdentifier::new_unwrap("1.2.156.10197.1.501");
+
+    assert_eq!(data.digest_algorithms.iter().map(|a| a.oid).collect::<Vec<_>>(), vec![sm3]);
+    let signer = data.signer_infos.0.as_ref().first().expect("signer");
+    assert_eq!(signer.digest_alg.oid, sm3);
+    assert_eq!(signer.signature_algorithm.oid, sm2_with_sm3);
+    let committed = signer
+        .signed_attrs
+        .as_ref()
+        .expect("attributes")
+        .iter()
+        .find(|a| a.oid == const_oid::db::rfc5911::ID_MESSAGE_DIGEST)
+        .and_then(|a| a.values.as_ref().first().map(|v| v.value().to_vec()))
+        .expect("digest");
+    assert_eq!(committed, sign::sm3_of(&bytes, &range).expect("sm3"));
+    assert_ne!(committed, sign::digest_of(&bytes, &range).expect("sha256"), "that is SHA-256");
+
+    // The certificate's key is an SM2 key, said the way X.509 says it: an
+    // EC key on the curve 1.2.156.10197.1.301.
+    let certificate = match data.certificates.as_ref().and_then(|c| c.0.iter().next()) {
+        Some(cms::cert::CertificateChoices::Certificate(c)) => c.clone(),
+        _ => panic!("no certificate travelled with the signature"),
+    };
+    let spki = &certificate.tbs_certificate.subject_public_key_info;
+    assert_eq!(spki.algorithm.oid, const_oid::db::rfc5912::ID_EC_PUBLIC_KEY);
+    let curve = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .and_then(|p| p.decode_as::<const_oid::ObjectIdentifier>().ok())
+        .expect("the key names no curve");
+    assert_eq!(curve, const_oid::ObjectIdentifier::new_unwrap("1.2.156.10197.1.301"));
+}
+
+/// Changing a byte inside the signed range is caught under SM3 as it is under
+/// SHA-256.
+#[test]
+fn altering_an_sm2_signed_document_is_reported_as_altered() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut bytes = sm2_signed("two-column.pdf");
+    let range = declared_range(&bytes).expect("range");
+    bytes[range.hole_at / 2] ^= 0x20;
+    assert_eq!(verdicts_in(&bytes), vec![Verdict::Altered]);
+}
+
+/// **The forgery, under SM2.** Alter the file, recompute the SM3 digest,
+/// write it back into the blob: every number agrees with the file, and only
+/// the SM2 signature over the attributes — which needs the key — does not.
+#[test]
+fn an_sm2_document_altered_and_rehashed_is_not_reported_as_unchanged() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let bytes = sm2_signed("two-column.pdf");
+    let range = declared_range(&bytes).expect("range");
+    let before = sign::sm3_of(&bytes, &range).expect("digest");
+
+    let mut forged = bytes.clone();
+    forged[range.hole_at / 2] ^= 0x20;
+    let after = sign::sm3_of(&forged, &range).expect("digest");
+    assert_ne!(before, after);
+
+    let blob = blob_in(&bytes, &range);
+    let at = blob.windows(before.len()).position(|w| w == &before[..]).expect("the digest is in the blob");
+    let mut rehashed = blob.clone();
+    rehashed[at..at + after.len()].copy_from_slice(&after);
+    reblob(&mut forged, &range, &rehashed);
+
+    let file = File::parse(&forged).expect("parse");
+    let found = validate::check(&file, &forged).expect("check");
+    assert!(matches!(found[0].verdict, Verdict::Invalid(_)), "{:?}", found[0].verdict);
+    assert!(found[0].signer.is_none());
+}
+
+/// A signature that names SM2-with-SM3 but whose certificate holds an RSA key
+/// cannot be checked — and says so, rather than calling anything invalid.
+#[test]
+fn an_sm2_signature_under_an_rsa_certificate_is_unreadable_not_invalid() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let Some((rsa_bytes, _)) = signed("two-column.pdf") else { return };
+    let rsa_range = declared_range(&rsa_bytes).expect("range");
+    let rsa_data = signed_data_in(&rsa_bytes, &rsa_range);
+
+    // The SM2 signer, with the RSA certificate in place of its own.
+    let bytes = sm2_signed("two-column.pdf");
+    let range = declared_range(&bytes).expect("range");
+    let mut data = signed_data_in(&bytes, &range);
+    data.certificates = rsa_data.certificates.clone();
+    let mut swapped = bytes.clone();
+    reblob(&mut swapped, &range, &blob_from(&data));
+
+    match &verdicts_in(&swapped)[0] {
+        Verdict::Unreadable(why) => assert!(why.contains("not an SM2 key"), "{why}"),
+        other => panic!("judged rather than declined: {other:?}"),
+    }
+}
+
+/// **The committed fixture** — the spike's output. Signed once, by the code
+/// above, and read back on every run without PDFium and without the signing
+/// code in the way: if this stops verifying, the check changed, not the file.
+#[test]
+fn the_committed_sm2_fixture_verifies() {
+    let bytes = std::fs::read(harness::fixture_path("sm2-signed.pdf")).expect("fixture");
+    let file = File::parse(&bytes).expect("parse");
+    let found = validate::check(&file, &bytes).expect("check");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].verdict, Verdict::Unaltered, "{}", found[0].verdict.describe());
+    assert_eq!(found[0].signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
+}
+
+/// **The RSA fixture, frozen before RSA goes.** Signed by today's RSA path so
+/// that, once nothing here can make an RSA signature, a document another
+/// application signed still exists to test against. Today it verifies; the
+/// day RSA verification is removed this becomes the test that it reads as
+/// `Unreadable` naming the scheme — never `Altered`, never `Invalid`.
+#[test]
+fn the_committed_rsa_fixture_verifies_while_rsa_is_still_checked() {
+    let bytes = std::fs::read(harness::fixture_path("rsa-signed.pdf")).expect("fixture");
+    let file = File::parse(&bytes).expect("parse");
+    let found = validate::check(&file, &bytes).expect("check");
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].verdict, Verdict::Unaltered, "{}", found[0].verdict.describe());
+    assert_eq!(found[0].signer.as_deref(), Some("O=Pagify,CN=Pagify Test Signer"));
+}

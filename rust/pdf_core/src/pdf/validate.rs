@@ -323,6 +323,7 @@ enum Hash {
     Sha256,
     Sha384,
     Sha512,
+    Sm3,
 }
 
 impl Hash {
@@ -332,6 +333,7 @@ impl Hash {
             ID_SHA_256 => Some(Hash::Sha256),
             ID_SHA_384 => Some(Hash::Sha384),
             ID_SHA_512 => Some(Hash::Sha512),
+            super::sm::ID_SM3 => Some(Hash::Sm3),
             _ => None,
         }
     }
@@ -350,6 +352,7 @@ impl Hash {
             Hash::Sha256 => run::<sha2::Sha256>(parts),
             Hash::Sha384 => run::<sha2::Sha384>(parts),
             Hash::Sha512 => run::<sha2::Sha512>(parts),
+            Hash::Sm3 => run::<sm3::Sm3>(parts),
         }
     }
 }
@@ -464,6 +467,7 @@ fn verify(
         SHA_384_WITH_RSA_ENCRYPTION => Scheme::Pkcs1v15(Hash::Sha384),
         SHA_512_WITH_RSA_ENCRYPTION => Scheme::Pkcs1v15(Hash::Sha512),
         ID_RSASSA_PSS => Scheme::Pss(hash),
+        super::sm::ID_SM2_WITH_SM3 => Scheme::Sm2,
         other => {
             return Err(Verdict::Unreadable(format!(
                 "its signature scheme is {other}, which this does not check"
@@ -475,25 +479,21 @@ fn verify(
         certificates.iter().filter(|c| is_named(c, &signer.sid)).collect();
     ordered.extend(certificates.iter().filter(|c| !is_named(c, &signer.sid)));
 
+    let mut tried = false;
     let mut unusable = None;
     for certificate in ordered {
-        let key = match rsa_key_of(certificate) {
-            Ok(key) => key,
+        match scheme.verifies(certificate, &message, signature) {
+            Ok(true) => return Ok(certificate.tbs_certificate.subject.to_string()),
+            Ok(false) => tried = true,
             Err(why) => {
                 unusable.get_or_insert(why);
-                continue;
             }
-        };
-        if scheme.verifies(key, &message, signature) {
-            return Ok(certificate.tbs_certificate.subject.to_string());
         }
     }
     match unusable {
         // Nothing could even be tried: say what stood in the way rather than
         // calling a signature invalid that was never checked.
-        Some(why) if certificates.iter().all(|c| rsa_key_of(c).is_err()) => {
-            Err(Verdict::Unreadable(why))
-        }
+        Some(why) if !tried => Err(Verdict::Unreadable(why)),
         _ => Err(Verdict::Invalid(
             "the signature is not the certificate's — the digest matches, but nothing that \
              travelled with the signature made it"
@@ -518,15 +518,45 @@ fn rsa_key_of(certificate: &x509_cert::Certificate) -> std::result::Result<rsa::
         .map_err(|_| "its certificate's key cannot be read".to_string())
 }
 
+/// The SM2 public key in a certificate, bound to the pinned distinguishing
+/// ID, or why it is not one this can use.
+///
+/// The `sm2` crate reads the key info itself and refuses a key on any other
+/// curve, so an ECDSA P-256 certificate is "not an SM2 key" here rather than
+/// a signature that fails.
+fn sm2_key_of(
+    certificate: &x509_cert::Certificate,
+) -> std::result::Result<sm2::dsa::VerifyingKey, String> {
+    use der::Encode;
+    use sm2::pkcs8::DecodePublicKey;
+    let spki = &certificate.tbs_certificate.subject_public_key_info;
+    let der = spki.to_der().map_err(|_| "its certificate's key cannot be read".to_string())?;
+    let key = sm2::PublicKey::from_public_key_der(&der).map_err(|_| {
+        format!("its certificate's key is {}, not an SM2 key", spki.algorithm.oid)
+    })?;
+    sm2::dsa::VerifyingKey::new(super::sm::DISTINGUISHING_ID, key)
+        .map_err(|_| "its certificate's key cannot be read".to_string())
+}
+
 /// The signature schemes this checks.
 #[derive(Debug, Clone, Copy)]
 enum Scheme {
     Pkcs1v15(Hash),
     Pss(Hash),
+    /// SM2 over SM3, under [`super::sm::DISTINGUISHING_ID`].
+    Sm2,
 }
 
 impl Scheme {
-    fn verifies(self, key: rsa::RsaPublicKey, message: &[u8], signature: &[u8]) -> bool {
+    /// Whether `signature` over `message` is the certificate's — or, as the
+    /// error, why the certificate's key cannot be tried under this scheme
+    /// at all, which is a different thing from a signature that fails.
+    fn verifies(
+        self,
+        certificate: &x509_cert::Certificate,
+        message: &[u8],
+        signature: &[u8],
+    ) -> std::result::Result<bool, String> {
         use rsa::signature::Verifier;
         fn pkcs1v15<D>(key: rsa::RsaPublicKey, message: &[u8], signature: &[u8]) -> bool
         where
@@ -547,12 +577,38 @@ impl Scheme {
             rsa::pss::VerifyingKey::<D>::new(key).verify(message, &signature).is_ok()
         }
         match self {
-            Scheme::Pkcs1v15(Hash::Sha256) => pkcs1v15::<sha2::Sha256>(key, message, signature),
-            Scheme::Pkcs1v15(Hash::Sha384) => pkcs1v15::<sha2::Sha384>(key, message, signature),
-            Scheme::Pkcs1v15(Hash::Sha512) => pkcs1v15::<sha2::Sha512>(key, message, signature),
-            Scheme::Pss(Hash::Sha256) => pss::<sha2::Sha256>(key, message, signature),
-            Scheme::Pss(Hash::Sha384) => pss::<sha2::Sha384>(key, message, signature),
-            Scheme::Pss(Hash::Sha512) => pss::<sha2::Sha512>(key, message, signature),
+            Scheme::Sm2 => {
+                let key = sm2_key_of(certificate)?;
+                // The signature value is `SEQUENCE { r, s }`; one that is not
+                // is not a signature this made, and does not verify.
+                let Some(signature) = super::sm::signature_from_der(signature) else {
+                    return Ok(false);
+                };
+                Ok(key.verify(message, &signature).is_ok())
+            }
+            // An RSA scheme named over SM3, which nothing writes: RSA's
+            // PKCS#1 encoding needs a digest OID this does not carry.
+            Scheme::Pkcs1v15(Hash::Sm3) | Scheme::Pss(Hash::Sm3) => {
+                Err("its signature is RSA over SM3, which this does not check".into())
+            }
+            Scheme::Pkcs1v15(hash) => {
+                let key = rsa_key_of(certificate)?;
+                Ok(match hash {
+                    Hash::Sha256 => pkcs1v15::<sha2::Sha256>(key, message, signature),
+                    Hash::Sha384 => pkcs1v15::<sha2::Sha384>(key, message, signature),
+                    Hash::Sha512 => pkcs1v15::<sha2::Sha512>(key, message, signature),
+                    Hash::Sm3 => false,
+                })
+            }
+            Scheme::Pss(hash) => {
+                let key = rsa_key_of(certificate)?;
+                Ok(match hash {
+                    Hash::Sha256 => pss::<sha2::Sha256>(key, message, signature),
+                    Hash::Sha384 => pss::<sha2::Sha384>(key, message, signature),
+                    Hash::Sha512 => pss::<sha2::Sha512>(key, message, signature),
+                    Hash::Sm3 => false,
+                })
+            }
         }
     }
 }
@@ -676,6 +732,46 @@ mod tests {
                 checked.verdict
             );
         }
+    }
+
+    /// **A SignerInfo another implementation built verifies here.** The
+    /// blob is OpenSSL's, made with `openssl cms -sign -md sm3 -keyopt
+    /// distid:1234567812345678` over the thirteen bytes `hello sm2 cms`,
+    /// detached. It proves the check reads the SM suite as it is written by
+    /// somebody else — the algorithm identifiers, the `SEQUENCE { r, s }`
+    /// signature value, and the distinguishing ID folded into `ZA` — rather
+    /// than only what `sign.rs` writes.
+    ///
+    /// The mirror check, OpenSSL reading ours, is `cargo run --example
+    /// sign_probe` plus `openssl pkeyutl -verify` over the extracted signed
+    /// attributes; `openssl cms -verify` itself cannot be used, because it
+    /// hashes with an empty distinguishing ID and fails its own output.
+    #[test]
+    fn a_signature_openssl_made_with_the_pinned_identity_verifies_here() {
+        let blob = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/openssl-sm2.cms"),
+        )
+        .expect("the OpenSSL blob is committed");
+        let bytes = b"hello sm2 cms".to_vec();
+        let hex: Vec<u8> = blob.iter().map(|b| format!("{b:02X}")).collect::<String>().into_bytes();
+
+        let mut dict = super::super::Dict(Vec::new());
+        dict.set(b"Type", Object::Name(b"Sig".to_vec()));
+        let numbers = ["0", "13", "13", "0"];
+        dict.set(
+            b"ByteRange",
+            Object::Array(numbers.iter().map(|n| Object::Number(n.as_bytes().to_vec())).collect()),
+        );
+        dict.set(b"Contents", Object::HexString(hex));
+
+        let checked = verdict_for(&dict, &bytes);
+        assert_eq!(checked.verdict, Verdict::Unaltered, "{}", checked.verdict.describe());
+        assert_eq!(checked.signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
+
+        // And not over other bytes, which is the digest check under SM3.
+        let mut other = bytes.clone();
+        other[0] = b'H';
+        assert_eq!(verdict_for(&dict, &other).verdict, Verdict::Altered);
     }
 
     #[test]

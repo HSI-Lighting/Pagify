@@ -57,11 +57,10 @@ The disorder these measure is what `layout::Trust::DISORDER` is set from:
 These cannot be generated and have to be sourced. They are listed so the corpus
 does not look complete when it is not:
 
-- **signed** — needed for the §4.1 acceptance that an unrelated edit leaves the
-  signed byte range intact. Verify with `pdfsig` (poppler-utils), never
-  `qpdf --check`, which cannot inspect a signature at all. Assert byte-range
-  integrity rather than trust-chain validity, or the test starts failing on the
-  day the certificate expires.
+- ~~**signed**~~ — *landed*: `sm2-signed.pdf` and `rsa-signed.pdf`, below,
+  and every signing test signs at test time with one of the two identities.
+  Assert byte-range integrity rather than trust-chain validity, or the test
+  starts failing on the day the certificate expires.
 - ~~**encrypted**~~ — *landed*, see below.
 - **broken `/ToUnicode`** — needed to exercise `PageTextKind::Unmappable` and
   the encoding-repair path. Cannot be generated honestly here: it wants a
@@ -302,3 +301,84 @@ the picture was no longer being drawn. The test asserts on a render, because the
 object list said the picture had moved and was still there.
 
 Rebuild it with `tools/make_framed_fixture.py fixtures/framed.pdf`.
+
+## Signing identities: test-signer.p12, test-signer-sm2.p12
+
+Two self-signed identities, **password `pagify`** for both, committed for the
+same reason as the encrypted fixture's password: a test identity that lives
+somewhere else stops working the day somebody forgets where. Neither vouches
+for anything; they exist so that signatures can be made and read back.
+
+| File | Key | Subject | Made with |
+|---|---|---|---|
+| `test-signer.p12` | RSA-2048 | `O=Pagify, CN=Pagify Test Signer` | OpenSSL, on the day signing was built |
+| `test-signer-sm2.p12` | SM2 (curve `1.2.156.10197.1.301`) | `O=Pagify, CN=Pagify SM2 Test Signer` | OpenSSL 3.6, 15 September 2026 — the SM signatures plan's phase 0 spike |
+
+The SM2 one was made like this, and can be made again the same way (a new
+key each time, so nothing already signed will name it):
+
+```text
+openssl genpkey -algorithm SM2 -out sm2-leaf.key
+openssl req -new -x509 -key sm2-leaf.key -sm3 -days 3650 \
+    -subj "/O=Pagify/CN=Pagify SM2 Test Signer" -out sm2-leaf.crt
+openssl pkcs12 -export -inkey sm2-leaf.key -in sm2-leaf.crt -passout pass:pagify \
+    -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 -out test-signer-sm2.p12
+```
+
+The three `-keypbe`/`-certpbe`/`-macalg` options matter: the `p12` crate reads
+the older 3DES form, not the AES form OpenSSL writes by default, and
+`Identity::from_pkcs12` says exactly this when handed the wrong one.
+
+## sm2-signed.pdf, rsa-signed.pdf
+
+`two-column.pdf`, signed once each — the SM2 one by the phase 0 spike's own
+code path (`sign::sign` with `test-signer-sm2.p12`), the RSA one by the RSA
+path on the same day, both through:
+
+```text
+PAGIFY_PDFIUM_LIB=<pdfium> P12=fixtures/test-signer-sm2.p12 \
+    cargo run --release --example sign_probe -- fixtures/two-column.pdf fixtures/sm2-signed.pdf
+PAGIFY_PDFIUM_LIB=<pdfium> \
+    cargo run --release --example sign_probe -- fixtures/two-column.pdf fixtures/rsa-signed.pdf
+```
+
+**Why they are committed** when every other signing test signs at test time:
+they are read back on every run with no signing code in the way, so a change
+to the check — not to the file — is what makes them fail. The SM2 one is the
+spike's deliverable. The RSA one is frozen *before* RSA signing is removed
+(phase 1 of the plan): it is the "document another application signed" that
+phase 2's fail-closed test needs — `Unreadable`, naming the scheme, never
+`Altered` or `Invalid` — and after phase 1 nothing here could make it.
+
+The SM2 signature was also checked outside this code, with OpenSSL's
+primitives rather than its CMS layer: the signed attributes pulled out of the
+blob and re-tagged as a SET, then
+
+```text
+openssl pkeyutl -verify -pubin -inkey leaf-pub.pem -in attrs.der -sigfile sig.der \
+    -digest sm3 -pkeyopt distid:1234567812345678
+```
+
+verifies, and fails under any other `distid`; the `messageDigest` attribute
+equals `hashlib.new('sm3')` over the bytes the range covers; and the
+identifiers read back from the DER are `1.2.156.10197.1.401` (SM3) and
+`1.2.156.10197.1.501` (SM2-with-SM3). `openssl cms -verify` cannot be used
+for this: it hashes with an empty distinguishing ID and fails even its own
+SM2 output.
+
+## openssl-sm2.cms
+
+The other direction: a detached SM2 `SignedData` that **OpenSSL** made, over
+the thirteen bytes `hello sm2 cms`, with the same identity —
+
+```text
+printf 'hello sm2 cms' > msg.bin
+openssl cms -sign -signer sm2-leaf.crt -inkey sm2-leaf.key -md sm3 -binary \
+    -in msg.bin -outform DER -keyopt distid:1234567812345678 -out openssl-sm2.cms
+```
+
+— which `validate.rs` reads as unaltered under `CN=Pagify SM2 Test Signer`.
+It proves the check reads the SM suite as somebody else writes it: the
+algorithm identifiers, the `SEQUENCE { r, s }` signature value, and the
+distinguishing ID folded into `ZA`. (It carries a `signingTime` attribute
+too, which the check ignores.)

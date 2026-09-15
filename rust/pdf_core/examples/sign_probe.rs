@@ -9,17 +9,28 @@
 //! ```text
 //! PAGIFY_PDFIUM_LIB=<pdfium> cargo run --release --example sign_probe -- <file.pdf> [out.pdf]
 //! ```
+//!
+//! Signs with `fixtures/test-signer.p12` (RSA) unless `P12=<path>` names
+//! another identity — `fixtures/test-signer-sm2.p12` for SM2 — with its
+//! password in `P12_PASSWORD` (default `pagify`, the test identities' own).
 
 use pdf_core::document::Document;
-use pdf_core::pdf::{sign, File};
+use pdf_core::pdf::{sign, validate, File};
 
 fn main() {
     let path = std::env::args().nth(1).expect("a pdf path");
-    let p12 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer.p12");
+    let p12 = std::env::var("P12").map(std::path::PathBuf::from).unwrap_or_else(|_| {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer.p12")
+    });
+    let password = std::env::var("P12_PASSWORD").unwrap_or_else(|_| "pagify".into());
 
-    let identity = sign::Identity::from_pkcs12(&std::fs::read(p12).expect("read"), "pagify")
+    let identity = sign::Identity::from_pkcs12(&std::fs::read(&p12).expect("read"), &password)
         .expect("the test certificate");
-    println!("signing as: {}", identity.subject().unwrap_or_default());
+    println!(
+        "signing as: {} ({})",
+        identity.subject().unwrap_or_default(),
+        if identity.is_sm2() { "SM2 over SM3" } else { "RSA over SHA-256" }
+    );
 
     let bytes = std::fs::read(&path).expect("read");
     let file = File::parse(&bytes).expect("parse");
@@ -54,10 +65,22 @@ fn main() {
     // — `find_placeholder` only works before the hole is filled.
     let range = range_from_file(&signed).expect("no /ByteRange in the signed file");
     println!("  range covers all   : {}", range.covers_everything());
-    let digest = sign::digest_of(&signed, &range).expect("digest");
 
     // 4. The signature verifies under the certificate's own key.
-    println!("  verifies           : {}", verify(&signed, &range, &digest, &identity));
+    if identity.is_sm2() {
+        // Through the engine's own check, which is what a Pagify reader runs.
+        let file = File::parse(&signed).expect("parse");
+        for found in validate::check(&file, &signed).expect("check") {
+            println!(
+                "  engine verdict     : {} — signer {:?}",
+                found.verdict.describe(),
+                found.signer
+            );
+        }
+    } else {
+        let digest = sign::digest_of(&signed, &range).expect("digest");
+        println!("  verifies           : {}", verify(&signed, &range, &digest, &identity));
+    }
 }
 
 fn count_signatures(bytes: &[u8]) -> i32 {

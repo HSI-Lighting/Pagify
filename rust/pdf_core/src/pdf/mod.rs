@@ -40,6 +40,7 @@ pub mod encrypt;
 pub mod hidden;
 pub mod secure_plus;
 pub mod sign;
+pub mod sm;
 pub mod timestamp;
 pub mod validate;
 mod object;

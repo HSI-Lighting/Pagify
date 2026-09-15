@@ -277,7 +277,8 @@ one commit per finding, each with a test built from the audit's own input;
 `git log --grep=audit` lists them. What the tools now guarantee:
 
 - **`validate`** verifies the signature over the signed attributes under the
-  certificate the signature carries (RSA PKCS#1 v1.5 and PSS, SHA-256/384/512)
+  certificate the signature carries (RSA PKCS#1 v1.5 and PSS, SHA-256/384/512;
+  and SM2 over SM3 since the SM signatures spike, `docs/SM2_SPIKE.md`)
   and names that certificate. It does **not** decide whether to trust the
   certificate — there is no trust store — and says so on every line. Anything
   it cannot check (another scheme, an EC key, no certificate) is "could not be

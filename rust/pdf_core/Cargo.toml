@@ -116,6 +116,8 @@ p12 = "0.6"
 argon2 = "0.5"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
+sm2 = { version = "0.13.3", features = ["dsa", "pkcs8", "pem"] }
+sm3 = "0.4.2"
 
 # No `lopdf`. PDFium is the single writer: two independent object models writing
 # one file is a corruption class that is very hard to diagnose, and PDFium covers
