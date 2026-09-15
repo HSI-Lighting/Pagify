@@ -25,19 +25,32 @@
 //! Saying "valid" without that distinction is how a green tick comes to mean
 //! less than nothing, so every verdict here carries it.
 //!
+//! # One scheme: SM2 over SM3
+//!
+//! Pagify verifies the signatures Pagify makes — SM2 over SM3, under the
+//! conventions in [`super::sm`] — and no others. A document signed in another
+//! application opens, reads and prints exactly as it always did; its signature
+//! is reported as *not checked*, naming the scheme in words, and nothing else
+//! is said about it. That is not the same as invalid, and it is never reported
+//! as though it were: a verdict about the bytes — altered, only partly
+//! covered — is earned by a signature this can check, and for any other it
+//! would be a judgement made with no evidence, in either direction. So the
+//! scheme is looked at before the range, before the digest, before anything.
+//!
 //! # The check that catches the other real attack
 //!
 //! A signature covers a **range**, not a file. The classic way to alter a
 //! signed document is to append to it: everything the range names is untouched,
-//! the digest still matches, and the new content was never covered. So the
-//! range is checked against the length of the file before anything else, and a
-//! signature that does not reach the end is reported as exactly that.
+//! the digest still matches, and the new content was never covered. So, for a
+//! signature this checks, the range is checked against the length of the file
+//! before the digest is, and a signature that does not reach the end is
+//! reported as exactly that.
 //!
 //! # Fail closed
 //!
-//! Anything this cannot check — a hash it does not implement, a signature
-//! scheme it does not know, a certificate it cannot read — is reported as
-//! *unreadable*, never as unaltered. The green tick is only ever earned.
+//! Anything this cannot check — a scheme it does not verify, a certificate
+//! whose key is not SM2, no certificate at all — is reported as *unreadable*,
+//! never as unaltered. The green tick is only ever earned.
 
 use crate::error::Result;
 
@@ -153,7 +166,63 @@ const ID_CT_TST_INFO: const_oid::ObjectIdentifier =
 
 /// What became of one signature dictionary.
 fn verdict_for(dict: &super::Dict, bytes: &[u8]) -> Checked {
-    // -- the range, before anything else ----------------------------------
+    use der::Decode;
+
+    // -- the blob, and whether it is one this checks at all -------------------
+    //
+    // Before the range, before the digest: a signature in a scheme this does
+    // not verify is declined here with nothing computed about the document,
+    // so that "not verified by Pagify" can never come out as "altered" or
+    // "only partly covered". Those verdicts are earned by a signature this
+    // *can* check; for any other they would be a judgement made with no
+    // evidence, in either direction.
+    let Some(blob) = hex_of(dict.get(b"Contents")) else {
+        return Checked::failed(Verdict::Unreadable("it holds no signature".into()));
+    };
+    let Ok(info) = cms::content_info::ContentInfo::from_der(&blob) else {
+        return Checked::failed(Verdict::Unreadable("its signature is not a CMS structure".into()));
+    };
+    let Ok(data) = info.content.decode_as::<cms::signed_data::SignedData>() else {
+        return Checked::failed(Verdict::Unreadable("its signature is not SignedData".into()));
+    };
+    let Some(signer) = data.signer_infos.0.as_ref().first() else {
+        return Checked::failed(Verdict::Unreadable("its signature names no signer".into()));
+    };
+    if data.encap_content_info.econtent_type == ID_CT_TST_INFO {
+        return Checked::failed(Verdict::Unreadable(
+            "it is a document timestamp from a time authority, which this does not check".into(),
+        ));
+    }
+    let certificates = certificates_in(&data);
+    if signer.signature_algorithm.oid != super::sm::ID_SM2_WITH_SM3
+        || signer.digest_alg.oid != super::sm::ID_SM3
+    {
+        // Named in words, so that the line a person reads says what the
+        // document carries rather than a number — and never that anything
+        // is wrong with it.
+        return Checked::failed(Verdict::Unreadable(format!(
+            "it carries a signature in {}, which Pagify does not verify — only SM2 over SM3",
+            words::scheme(
+                &signer.signature_algorithm.oid,
+                &signer.digest_alg.oid,
+                certificates.first()
+            )
+        )));
+    }
+    let Some(attributes) = &signer.signed_attrs else {
+        return Checked::failed(Verdict::Unreadable(
+            "its signer committed to no attributes".into(),
+        ));
+    };
+    let committed = attributes
+        .iter()
+        .find(|a| a.oid == const_oid::db::rfc5911::ID_MESSAGE_DIGEST)
+        .and_then(|a| a.values.as_ref().first().map(|v| v.value().to_vec()));
+    let Some(committed) = committed else {
+        return Checked::failed(Verdict::Unreadable("its signer committed to no digest".into()));
+    };
+
+    // -- the range ------------------------------------------------------------
     let Some(numbers) = range_numbers(dict) else {
         return Checked::failed(Verdict::Unreadable("it declares no byte range".into()));
     };
@@ -176,101 +245,26 @@ fn verdict_for(dict: &super::Dict, bytes: &[u8]) -> Checked {
     }
     let signed_bytes = [&bytes[..first], &bytes[second_at..second_at + second_len]];
 
-    // -- the blob ----------------------------------------------------------
-    let Some(blob) = hex_of(dict.get(b"Contents")) else {
-        return Checked::failed(Verdict::Unreadable("it holds no signature".into()));
-    };
-
-    use der::Decode;
-    let Ok(info) = cms::content_info::ContentInfo::from_der(&blob) else {
-        return Checked::failed(Verdict::Unreadable("its signature is not a CMS structure".into()));
-    };
-    let Ok(data) = info.content.decode_as::<cms::signed_data::SignedData>() else {
-        return Checked::failed(Verdict::Unreadable("its signature is not SignedData".into()));
-    };
-    let Some(signer) = data.signer_infos.0.as_ref().first() else {
-        return Checked::failed(Verdict::Unreadable("its signature names no signer".into()));
-    };
-    let Some(attributes) = &signer.signed_attrs else {
-        return Checked::failed(Verdict::Unreadable(
-            "its signer committed to no attributes".into(),
-        ));
-    };
-    let Some(hash) = Hash::named(&signer.digest_alg.oid) else {
-        return Checked::failed(Verdict::Unreadable(format!(
-            "its digest uses {}, which this does not implement",
-            signer.digest_alg.oid
-        )));
-    };
-    let committed = attributes
-        .iter()
-        .find(|a| a.oid == const_oid::db::rfc5911::ID_MESSAGE_DIGEST)
-        .and_then(|a| a.values.as_ref().first().map(|v| v.value().to_vec()));
-    let Some(committed) = committed else {
-        return Checked::failed(Verdict::Unreadable("its signer committed to no digest".into()));
-    };
-
     // -- what the signer committed to, against the file ----------------------
-    //
-    // A signature commits to the file's digest directly. A timestamp token
-    // does not — see `ID_CT_TST_INFO` — and is declined before the
-    // comparison that would misread it.
-    if data.encap_content_info.econtent_type == ID_CT_TST_INFO {
-        return Checked::failed(Verdict::Unreadable(
-            "it is a document timestamp from a time authority, which this does not check".into(),
-        ));
-    }
-    if hash.over(&signed_bytes) != committed {
+    if sm3_over(&signed_bytes) != committed {
         return Checked::failed(Verdict::Altered);
     }
 
     // -- and whether anything vouches for what was committed to --------------
-    let certificates = certificates_in(&data);
-    match verify(signer, attributes, &certificates, hash) {
+    match verify(signer, attributes, &certificates) {
         Ok(subject) => Checked { verdict: Verdict::Unaltered, signer: Some(subject) },
         Err(verdict) => Checked::failed(verdict),
     }
 }
 
-/// The hashes this checks with. Anything else is reported as unreadable,
-/// never guessed at.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Hash {
-    Sha256,
-    Sha384,
-    Sha512,
-    Sm3,
-}
-
-impl Hash {
-    fn named(oid: &const_oid::ObjectIdentifier) -> Option<Hash> {
-        use const_oid::db::rfc5912::{ID_SHA_256, ID_SHA_384, ID_SHA_512};
-        match *oid {
-            ID_SHA_256 => Some(Hash::Sha256),
-            ID_SHA_384 => Some(Hash::Sha384),
-            ID_SHA_512 => Some(Hash::Sha512),
-            super::sm::ID_SM3 => Some(Hash::Sm3),
-            _ => None,
-        }
+/// SM3 over several stretches of bytes taken as one.
+fn sm3_over(parts: &[&[u8]]) -> Vec<u8> {
+    use sm3::Digest;
+    let mut hasher = sm3::Sm3::new();
+    for part in parts {
+        hasher.update(part);
     }
-
-    /// The digest over several stretches of bytes taken as one.
-    fn over(self, parts: &[&[u8]]) -> Vec<u8> {
-        use sha2::Digest;
-        fn run<D: Digest>(parts: &[&[u8]]) -> Vec<u8> {
-            let mut hasher = D::new();
-            for part in parts {
-                hasher.update(part);
-            }
-            hasher.finalize().to_vec()
-        }
-        match self {
-            Hash::Sha256 => run::<sha2::Sha256>(parts),
-            Hash::Sha384 => run::<sha2::Sha384>(parts),
-            Hash::Sha512 => run::<sha2::Sha512>(parts),
-            Hash::Sm3 => run::<sm3::Sm3>(parts),
-        }
-    }
+    hasher.finalize().to_vec()
 }
 
 /// Every certificate the signature travels with.
@@ -314,8 +308,8 @@ fn is_named(certificate: &x509_cert::Certificate, sid: &cms::signed_data::Signer
     }
 }
 
-/// Check the signature over the signed attributes against the certificates
-/// it carries, and name the one it verified under.
+/// Check the SM2 signature over the signed attributes against the
+/// certificates it carries, and name the one it verified under.
 ///
 /// The certificate the signer names is tried first; if it is not there or
 /// does not fit, every other carried certificate is tried, because the point
@@ -325,13 +319,9 @@ fn verify(
     signer: &cms::signed_data::SignerInfo,
     attributes: &cms::signed_data::SignedAttributes,
     certificates: &[x509_cert::Certificate],
-    hash: Hash,
 ) -> std::result::Result<String, Verdict> {
-    use const_oid::db::rfc5912::{
-        ID_RSASSA_PSS, RSA_ENCRYPTION, SHA_256_WITH_RSA_ENCRYPTION, SHA_384_WITH_RSA_ENCRYPTION,
-        SHA_512_WITH_RSA_ENCRYPTION,
-    };
     use der::Encode;
+    use sm2::dsa::signature::Verifier;
 
     if certificates.is_empty() {
         return Err(Verdict::Unreadable("it carries no certificate to check against".into()));
@@ -341,22 +331,9 @@ fn verify(
     let message = attributes
         .to_der()
         .map_err(|_| Verdict::Unreadable("its signed attributes cannot be re-encoded".into()))?;
-    let signature = signer.signature.as_bytes();
-
-    let scheme_oid = signer.signature_algorithm.oid;
-    let scheme = match scheme_oid {
-        RSA_ENCRYPTION => Scheme::Pkcs1v15(hash),
-        SHA_256_WITH_RSA_ENCRYPTION => Scheme::Pkcs1v15(Hash::Sha256),
-        SHA_384_WITH_RSA_ENCRYPTION => Scheme::Pkcs1v15(Hash::Sha384),
-        SHA_512_WITH_RSA_ENCRYPTION => Scheme::Pkcs1v15(Hash::Sha512),
-        ID_RSASSA_PSS => Scheme::Pss(hash),
-        super::sm::ID_SM2_WITH_SM3 => Scheme::Sm2,
-        other => {
-            return Err(Verdict::Unreadable(format!(
-                "its signature scheme is {other}, which this does not check"
-            )))
-        }
-    };
+    // The signature value is `SEQUENCE { r, s }`; one that is not is not a
+    // signature this made, and does not verify under anything.
+    let signature = super::sm::signature_from_der(signer.signature.as_bytes());
 
     let mut ordered: Vec<&x509_cert::Certificate> =
         certificates.iter().filter(|c| is_named(c, &signer.sid)).collect();
@@ -365,11 +342,17 @@ fn verify(
     let mut tried = false;
     let mut unusable = None;
     for certificate in ordered {
-        match scheme.verifies(certificate, &message, signature) {
-            Ok(true) => return Ok(certificate.tbs_certificate.subject.to_string()),
-            Ok(false) => tried = true,
+        let key = match sm2_key_of(certificate) {
+            Ok(key) => key,
             Err(why) => {
                 unusable.get_or_insert(why);
+                continue;
+            }
+        };
+        tried = true;
+        if let Some(signature) = &signature {
+            if key.verify(&message, signature).is_ok() {
+                return Ok(certificate.tbs_certificate.subject.to_string());
             }
         }
     }
@@ -383,22 +366,6 @@ fn verify(
                 .into(),
         )),
     }
-}
-
-/// The RSA public key in a certificate, or why it is not one this can use.
-fn rsa_key_of(certificate: &x509_cert::Certificate) -> std::result::Result<rsa::RsaPublicKey, String> {
-    use der::Encode;
-    use rsa::pkcs8::DecodePublicKey;
-    let spki = &certificate.tbs_certificate.subject_public_key_info;
-    if spki.algorithm.oid != const_oid::db::rfc5912::RSA_ENCRYPTION {
-        return Err(format!(
-            "its certificate's key is {}, which this does not check",
-            spki.algorithm.oid
-        ));
-    }
-    let der = spki.to_der().map_err(|_| "its certificate's key cannot be read".to_string())?;
-    rsa::RsaPublicKey::from_public_key_der(&der)
-        .map_err(|_| "its certificate's key cannot be read".to_string())
 }
 
 /// The SM2 public key in a certificate, bound to the pinned distinguishing
@@ -415,85 +382,115 @@ fn sm2_key_of(
     let spki = &certificate.tbs_certificate.subject_public_key_info;
     let der = spki.to_der().map_err(|_| "its certificate's key cannot be read".to_string())?;
     let key = sm2::PublicKey::from_public_key_der(&der).map_err(|_| {
-        format!("its certificate's key is {}, not an SM2 key", spki.algorithm.oid)
+        format!("its certificate's key is {}, not an SM2 key", words::key(certificate))
     })?;
     sm2::dsa::VerifyingKey::new(super::sm::DISTINGUISHING_ID, key)
         .map_err(|_| "its certificate's key cannot be read".to_string())
 }
 
-/// The signature schemes this checks.
-#[derive(Debug, Clone, Copy)]
-enum Scheme {
-    Pkcs1v15(Hash),
-    Pss(Hash),
-    /// SM2 over SM3, under [`super::sm::DISTINGUISHING_ID`].
-    Sm2,
-}
+/// Algorithm identifiers as a person would name them.
+///
+/// A verdict that says `1.2.840.113549.1.1.11` tells nobody anything; one that
+/// says `RSA-PKCS#1v1.5 / SHA-256` tells them what the document carries and
+/// that it is not what Pagify signs with. The identifiers here are the ones
+/// a document is likely to arrive with; anything else falls back to the
+/// number, which is still a fact.
+mod words {
+    use const_oid::ObjectIdentifier;
 
-impl Scheme {
-    /// Whether `signature` over `message` is the certificate's — or, as the
-    /// error, why the certificate's key cannot be tried under this scheme
-    /// at all, which is a different thing from a signature that fails.
-    fn verifies(
-        self,
-        certificate: &x509_cert::Certificate,
-        message: &[u8],
-        signature: &[u8],
-    ) -> std::result::Result<bool, String> {
-        use rsa::signature::Verifier;
-        fn pkcs1v15<D>(key: rsa::RsaPublicKey, message: &[u8], signature: &[u8]) -> bool
-        where
-            D: sha2::Digest + const_oid::AssociatedOid,
-        {
-            let Ok(signature) = rsa::pkcs1v15::Signature::try_from(signature) else {
-                return false;
-            };
-            rsa::pkcs1v15::VerifyingKey::<D>::new(key).verify(message, &signature).is_ok()
-        }
-        fn pss<D>(key: rsa::RsaPublicKey, message: &[u8], signature: &[u8]) -> bool
-        where
-            D: sha2::Digest + rsa::signature::digest::FixedOutputReset,
-        {
-            let Ok(signature) = rsa::pss::Signature::try_from(signature) else {
-                return false;
-            };
-            rsa::pss::VerifyingKey::<D>::new(key).verify(message, &signature).is_ok()
-        }
-        match self {
-            Scheme::Sm2 => {
-                let key = sm2_key_of(certificate)?;
-                // The signature value is `SEQUENCE { r, s }`; one that is not
-                // is not a signature this made, and does not verify.
-                let Some(signature) = super::sm::signature_from_der(signature) else {
-                    return Ok(false);
-                };
-                Ok(key.verify(message, &signature).is_ok())
-            }
-            // An RSA scheme named over SM3, which nothing writes: RSA's
-            // PKCS#1 encoding needs a digest OID this does not carry.
-            Scheme::Pkcs1v15(Hash::Sm3) | Scheme::Pss(Hash::Sm3) => {
-                Err("its signature is RSA over SM3, which this does not check".into())
-            }
-            Scheme::Pkcs1v15(hash) => {
-                let key = rsa_key_of(certificate)?;
-                Ok(match hash {
-                    Hash::Sha256 => pkcs1v15::<sha2::Sha256>(key, message, signature),
-                    Hash::Sha384 => pkcs1v15::<sha2::Sha384>(key, message, signature),
-                    Hash::Sha512 => pkcs1v15::<sha2::Sha512>(key, message, signature),
-                    Hash::Sm3 => false,
-                })
-            }
-            Scheme::Pss(hash) => {
-                let key = rsa_key_of(certificate)?;
-                Ok(match hash {
-                    Hash::Sha256 => pss::<sha2::Sha256>(key, message, signature),
-                    Hash::Sha384 => pss::<sha2::Sha384>(key, message, signature),
-                    Hash::Sha512 => pss::<sha2::Sha512>(key, message, signature),
-                    Hash::Sm3 => false,
-                })
-            }
+    /// `RSA-PKCS#1v1.5 / SHA-256`, `ECDSA P-256 / SHA-256`, `Ed25519`,
+    /// `1.2.3.4 / SHA-256`: the signature scheme and the digest it was made
+    /// over, from the two identifiers a `SignerInfo` carries and, for a
+    /// curve, the certificate.
+    pub fn scheme(
+        scheme: &ObjectIdentifier,
+        digest_oid: &ObjectIdentifier,
+        certificate: Option<&x509_cert::Certificate>,
+    ) -> String {
+        use const_oid::db::rfc5912::*;
+        use const_oid::db::rfc8410::{ID_ED_25519, ID_ED_448};
+        let digest_words = digest(digest_oid);
+        match *scheme {
+            RSA_ENCRYPTION => format!("RSA-PKCS#1v1.5 / {digest_words}"),
+            SHA_1_WITH_RSA_ENCRYPTION => "RSA-PKCS#1v1.5 / SHA-1".into(),
+            SHA_224_WITH_RSA_ENCRYPTION => "RSA-PKCS#1v1.5 / SHA-224".into(),
+            SHA_256_WITH_RSA_ENCRYPTION => "RSA-PKCS#1v1.5 / SHA-256".into(),
+            SHA_384_WITH_RSA_ENCRYPTION => "RSA-PKCS#1v1.5 / SHA-384".into(),
+            SHA_512_WITH_RSA_ENCRYPTION => "RSA-PKCS#1v1.5 / SHA-512".into(),
+            ID_RSASSA_PSS => format!("RSA-PSS / {digest_words}"),
+            // ECDSA names its digest in the scheme and its curve in the key.
+            ID_EC_PUBLIC_KEY => format!("ECDSA{} / {digest_words}", curve(certificate)),
+            ECDSA_WITH_SHA_224 => format!("ECDSA{} / SHA-224", curve(certificate)),
+            ECDSA_WITH_SHA_256 => format!("ECDSA{} / SHA-256", curve(certificate)),
+            ECDSA_WITH_SHA_384 => format!("ECDSA{} / SHA-384", curve(certificate)),
+            ECDSA_WITH_SHA_512 => format!("ECDSA{} / SHA-512", curve(certificate)),
+            DSA_WITH_SHA_224 => "DSA / SHA-224".into(),
+            DSA_WITH_SHA_256 => "DSA / SHA-256".into(),
+            ID_ED_25519 => "Ed25519".into(),
+            ID_ED_448 => "Ed448".into(),
+            super::super::sm::ID_SM2_WITH_SM3 => format!("SM2 / {digest_words}"),
+            other => format!("{other} / {digest_words}"),
         }
     }
+
+    /// The key in a certificate: `RSA`, `EC P-256`, `EC SM2`, `Ed25519`, or
+    /// the identifier.
+    pub fn key(certificate: &x509_cert::Certificate) -> String {
+        use const_oid::db::rfc5912::*;
+        use const_oid::db::rfc8410::{ID_ED_25519, ID_ED_448};
+        match certificate.tbs_certificate.subject_public_key_info.algorithm.oid {
+            RSA_ENCRYPTION => "RSA".into(),
+            ID_RSASSA_PSS => "RSA-PSS".into(),
+            ID_EC_PUBLIC_KEY => format!("EC{}", curve(Some(certificate))),
+            ID_ED_25519 => "Ed25519".into(),
+            ID_ED_448 => "Ed448".into(),
+            ID_DSA => "DSA".into(),
+            other => other.to_string(),
+        }
+    }
+
+    fn digest(oid: &ObjectIdentifier) -> String {
+        use const_oid::db::rfc5912::{ID_SHA_224, ID_SHA_256, ID_SHA_384, ID_SHA_512};
+        const MD5: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.2.5");
+        const SHA_1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
+        match *oid {
+            ID_SHA_224 => "SHA-224".into(),
+            ID_SHA_256 => "SHA-256".into(),
+            ID_SHA_384 => "SHA-384".into(),
+            ID_SHA_512 => "SHA-512".into(),
+            SHA_1 => "SHA-1".into(),
+            MD5 => "MD5".into(),
+            super::super::sm::ID_SM3 => "SM3".into(),
+            other => other.to_string(),
+        }
+    }
+
+    /// ` P-256`, ` P-384`, ` P-521`, ` SM2`, ` <oid>`, or nothing when the
+    /// key names no curve — leading space included, so it slots after `EC`
+    /// or `ECDSA`.
+    fn curve(certificate: Option<&x509_cert::Certificate>) -> String {
+        use const_oid::db::rfc5912::{SECP_256_R_1, SECP_384_R_1, SECP_521_R_1};
+        let Some(certificate) = certificate else { return String::new() };
+        let spki = &certificate.tbs_certificate.subject_public_key_info;
+        let Some(curve) = spki
+            .algorithm
+            .parameters
+            .as_ref()
+            .and_then(|p| p.decode_as::<ObjectIdentifier>().ok())
+        else {
+            return String::new();
+        };
+        match curve {
+            SECP_256_R_1 => " P-256".into(),
+            SECP_384_R_1 => " P-384".into(),
+            SECP_521_R_1 => " P-521".into(),
+            c if c == sm2::Sm2::OID => " SM2".into(),
+            other => format!(" {other}"),
+        }
+    }
+
+    // `sm2::Sm2::OID` needs the trait in scope.
+    use sm2::pkcs8::AssociatedOid as _;
 }
 
 /// The four numbers from a `/ByteRange`.
@@ -655,6 +652,46 @@ mod tests {
         let mut other = bytes.clone();
         other[0] = b'H';
         assert_eq!(verdict_for(&dict, &other).verdict, Verdict::Altered);
+    }
+
+    /// **Identifiers become words**, so that "not verified" names what the
+    /// document carries; an identifier this has no word for is shown as the
+    /// number, which is still a fact.
+    #[test]
+    fn schemes_are_named_in_words_with_the_number_as_the_fallback() {
+        use const_oid::db::rfc5912::*;
+        use const_oid::db::rfc8410::ID_ED_25519;
+        let oid = |text: &str| const_oid::ObjectIdentifier::new(text).unwrap();
+        let name = |scheme: &const_oid::ObjectIdentifier, digest: &const_oid::ObjectIdentifier| {
+            words::scheme(scheme, digest, None)
+        };
+        // What every RSA-signed PDF in the wild carries, in both spellings.
+        assert_eq!(name(&RSA_ENCRYPTION, &ID_SHA_256), "RSA-PKCS#1v1.5 / SHA-256");
+        assert_eq!(name(&SHA_256_WITH_RSA_ENCRYPTION, &ID_SHA_256), "RSA-PKCS#1v1.5 / SHA-256");
+        assert_eq!(name(&ID_RSASSA_PSS, &ID_SHA_384), "RSA-PSS / SHA-384");
+        assert_eq!(name(&ECDSA_WITH_SHA_256, &ID_SHA_256), "ECDSA / SHA-256");
+        assert_eq!(name(&ID_ED_25519, &ID_SHA_512), "Ed25519");
+        assert_eq!(name(&super::super::sm::ID_SM2_WITH_SM3, &super::super::sm::ID_SM3), "SM2 / SM3");
+        assert_eq!(name(&RSA_ENCRYPTION, &oid("1.3.14.3.2.26")), "RSA-PKCS#1v1.5 / SHA-1");
+        // Unknown on either side: the number.
+        assert_eq!(name(&oid("1.2.3.4"), &ID_SHA_256), "1.2.3.4 / SHA-256");
+        assert_eq!(name(&RSA_ENCRYPTION, &oid("1.2.3.5")), "RSA-PKCS#1v1.5 / 1.2.3.5");
+
+        // With a certificate, ECDSA names its curve — and the key of a
+        // certificate is named the same way.
+        use der::Decode;
+        let blob = std::fs::read(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/openssl-sm2.cms"),
+        )
+        .expect("fixture");
+        let info = cms::content_info::ContentInfo::from_der(&blob).expect("CMS");
+        let data: cms::signed_data::SignedData = info.content.decode_as().expect("SignedData");
+        let certificate = certificates_in(&data).remove(0);
+        assert_eq!(
+            words::scheme(&ECDSA_WITH_SHA_256, &ID_SHA_256, Some(&certificate)),
+            "ECDSA SM2 / SHA-256"
+        );
+        assert_eq!(words::key(&certificate), "EC SM2");
     }
 
     #[test]

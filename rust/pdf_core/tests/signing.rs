@@ -460,30 +460,38 @@ fn a_signature_with_no_certificate_cannot_be_called_unchanged() {
     assert_ne!(found[0].verdict, Verdict::Unaltered);
 }
 
-/// And a scheme this does not implement is reported as that — not verified
-/// by assumption, and not called invalid either.
+/// And a scheme this does not implement is reported as that — named in words
+/// where there are words, as the number where there are not — and never
+/// judged. The certificate carried is an SM2 one, so ECDSA is named with
+/// that curve.
 #[test]
-fn a_signature_scheme_this_does_not_know_is_unreadable_not_unaltered() {
+fn a_signature_scheme_this_does_not_verify_is_named_not_judged() {
     let Some(_) = skip_without_pdfium() else { return };
     let _lock = serial();
 
     let (bytes, _) = signed("two-column.pdf");
     let range = declared_range(&bytes).expect("range");
 
-    let mut data = signed_data_in(&bytes, &range);
-    let mut signers: Vec<cms::signed_data::SignerInfo> = data.signer_infos.0.iter().cloned().collect();
-    signers[0].signature_algorithm.oid = const_oid::db::rfc5912::ECDSA_WITH_SHA_256;
-    data.signer_infos = cms::signed_data::SignerInfos(
-        der::asn1::SetOfVec::try_from(signers).expect("signers"),
-    );
-    let mut relabelled = bytes.clone();
-    reblob(&mut relabelled, &range, &blob_from(&data));
+    for (scheme, expected) in [
+        (const_oid::db::rfc5912::ECDSA_WITH_SHA_256, "ECDSA SM2 / SHA-256"),
+        (const_oid::ObjectIdentifier::new_unwrap("1.2.3.4"), "1.2.3.4 / SM3"),
+    ] {
+        let mut data = signed_data_in(&bytes, &range);
+        let mut signers: Vec<cms::signed_data::SignerInfo> =
+            data.signer_infos.0.iter().cloned().collect();
+        signers[0].signature_algorithm.oid = scheme;
+        data.signer_infos = cms::signed_data::SignerInfos(
+            der::asn1::SetOfVec::try_from(signers).expect("signers"),
+        );
+        let mut relabelled = bytes.clone();
+        reblob(&mut relabelled, &range, &blob_from(&data));
 
-    let file = File::parse(&relabelled).expect("parse");
-    let found = validate::check(&file, &relabelled).expect("check");
-    match &found[0].verdict {
-        Verdict::Unreadable(why) => assert!(why.contains("does not check"), "{why}"),
-        other => panic!("an unknown scheme was judged rather than declined: {other:?}"),
+        let file = File::parse(&relabelled).expect("parse");
+        let found = validate::check(&file, &relabelled).expect("check");
+        match &found[0].verdict {
+            Verdict::Unreadable(why) => assert!(why.contains(expected), "{why}"),
+            other => panic!("an unknown scheme was judged rather than declined: {other:?}"),
+        }
     }
 }
 
@@ -718,17 +726,39 @@ fn the_committed_sm2_fixture_verifies() {
     assert_eq!(found[0].signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
 }
 
-/// **The RSA fixture, frozen before RSA goes.** Signed by today's RSA path so
-/// that, once nothing here can make an RSA signature, a document another
-/// application signed still exists to test against. Today it verifies; the
-/// day RSA verification is removed this becomes the test that it reads as
-/// `Unreadable` naming the scheme — never `Altered`, never `Invalid`.
+/// **The fail-closed guard — the test that protects a person from reading
+/// "not verified by Pagify" as "forged".** `rsa-signed.pdf` was signed by the
+/// RSA path on its last day, and stands in for every document signed in
+/// another application. It is reported as not checked, naming the scheme in
+/// words — never unaltered, never altered, never invalid, never partly
+/// covered — and that stays true when the file is altered under it or
+/// appended to, because nothing about it was checked.
 #[test]
-fn the_committed_rsa_fixture_verifies_while_rsa_is_still_checked() {
+fn a_document_signed_in_another_scheme_is_not_verified_and_never_judged() {
     let bytes = std::fs::read(harness::fixture_path("rsa-signed.pdf")).expect("fixture");
-    let file = File::parse(&bytes).expect("parse");
-    let found = validate::check(&file, &bytes).expect("check");
-    assert_eq!(found.len(), 1);
-    assert_eq!(found[0].verdict, Verdict::Unaltered, "{}", found[0].verdict.describe());
-    assert_eq!(found[0].signer.as_deref(), Some("O=Pagify,CN=Pagify Test Signer"));
+    let range = declared_range(&bytes).expect("range");
+
+    let mut altered = bytes.clone();
+    altered[range.hole_at / 2] ^= 0x20;
+    let mut appended = bytes.clone();
+    appended.extend_from_slice(b"\n% a revision the signature never covered\n");
+
+    for (what, file) in [("as signed", &bytes), ("altered", &altered), ("appended to", &appended)] {
+        let parsed = File::parse(file).expect("parse");
+        let found = validate::check(&parsed, file).expect("check");
+        assert_eq!(found.len(), 1, "{what}");
+        match &found[0].verdict {
+            Verdict::Unreadable(why) => {
+                assert!(why.contains("RSA-PKCS#1v1.5 / SHA-256"), "{what}: {why}");
+                assert!(why.contains("does not verify"), "{what}: {why}");
+                assert!(!why.contains("1.2.840.113549"), "{what}: a number, not words: {why}");
+            }
+            other => panic!("{what}: an RSA signature was judged rather than declined: {other:?}"),
+        }
+        assert!(found[0].signer.is_none(), "{what}: nobody was checked, yet somebody is named");
+        let said = found[0].verdict.describe();
+        assert!(!said.contains("CHANGED"), "{what}: {said}");
+        assert!(!said.contains("NOT VALID"), "{what}: {said}");
+        assert!(!said.contains("never signed"), "{what}: {said}");
+    }
 }

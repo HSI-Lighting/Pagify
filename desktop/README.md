@@ -276,16 +276,18 @@ making claims the code did not keep. Every finding was fixed on this branch,
 one commit per finding, each with a test built from the audit's own input;
 `git log --grep=audit` lists them. What the tools now guarantee:
 
-- **`validate`** verifies the signature over the signed attributes under the
-  certificate the signature carries (RSA PKCS#1 v1.5 and PSS, SHA-256/384/512;
-  and SM2 over SM3 since the SM signatures spike, `docs/SM2_SPIKE.md`)
-  and names that certificate. It does **not** decide whether to trust the
-  certificate — there is no trust store — and says so on every line. Anything
-  it cannot check (another scheme, an EC key, no certificate) is "could not be
-  checked", never "unchanged". Document timestamps are no longer made or
-  checked: the `timestamp` verb, the only thing in the program that opened a
-  socket, is gone with the module behind it, and a token another application
-  put in a file is reported as not checked — never as an alteration. A
+- **`validate`** verifies Pagify's own signatures — SM2 over SM3, the one
+  scheme in the program — over the signed attributes under the certificate the
+  signature carries, and names that certificate. It does **not** decide
+  whether to trust the certificate — there is no trust store yet — and says so
+  on every line. **A document signed in another application is not judged at
+  all**: its signature is reported as not verified, naming the scheme in words
+  (`RSA-PKCS#1v1.5 / SHA-256`, `ECDSA P-256 / SHA-256`, the number for one
+  without a name), before the range or the digest is looked at — so "not
+  verified by Pagify" can never come out as "changed" or "not valid". The same
+  for a document timestamp another application put in a file. Document
+  timestamps are no longer made either: the `timestamp` verb, the only thing
+  in the program that opened a socket, is gone with the module behind it. A
   signature's time is the signer's own clock, in `/M`.
 - **`certify`** signs with SM2 over SM3 — the one scheme in the program,
   under the conventions in `pdf/sm.rs` — and refuses an identity whose key is
