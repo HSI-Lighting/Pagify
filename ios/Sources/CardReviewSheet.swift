@@ -65,12 +65,81 @@ struct CardReviewSheet: View {
     @State private var fields: [ReviewableField]
     @Environment(\.dismiss) private var dismiss
 
+    /// **Show the card, not the desk it was lying on.** A photograph is
+    /// framed for a camera, so the card is often a small rectangle
+    /// surrounded by floor — fitting the whole frame made the one thing
+    /// being checked the smallest thing on the screen, and left the panel
+    /// below fighting the keyboard for whatever height the full photo
+    /// didn't already claim.
+    ///
+    /// The crop is the extent of every field's region plus a margin — the
+    /// same measurement the Rust parser's own `around_text` uses to size a
+    /// card in the first place, matching Android's `cropAround` exactly,
+    /// including its fallback: with no regions at all (nothing to crop to)
+    /// this is the whole frame, which is then the only honest thing to show.
+    private let cropRect: CGRect
+    private let croppedImage: UIImage
+
+    /// Blank card stock the words never reach, as a fraction of the text's
+    /// own extent — same constant Android tunes this against.
+    private static let cropMargin: CGFloat = 0.12
+    /// The panel never shrinks below this, however tall the cropped card is.
+    private static let panelMinHeight: CGFloat = 200
+
     init(image: UIImage, card: BusinessCard, onSave: @escaping (BusinessCard) -> Void, onCancel: @escaping () -> Void) {
         self.image = image
         self.card = card
         self.onSave = onSave
         self.onCancel = onCancel
-        _fields = State(initialValue: Self.flatten(card))
+        let fields = Self.flatten(card)
+        _fields = State(initialValue: fields)
+        let crop = Self.cropRect(around: fields, imageSize: image.size, margin: Self.cropMargin)
+        self.cropRect = crop
+        self.croppedImage = Self.cut(image, to: crop) ?? image
+    }
+
+    /// Matches Android's `cropAround`: an unconditional min/max envelope
+    /// over every field's region, padded proportionally to the text's own
+    /// size so it holds at any resolution. Not protected against a stray
+    /// region ballooning it — the same known, deliberately unpatched gap
+    /// `around_text` and `cropAround` both carry, for the same reason: no
+    /// distance threshold is justified without a captured card showing what
+    /// a real stray fragment looks like.
+    private static func cropRect(around fields: [ReviewableField], imageSize: CGSize, margin: CGFloat) -> CGRect {
+        let whole = CGRect(origin: .zero, size: imageSize)
+        let regions = fields.compactMap(\.region)
+        guard !regions.isEmpty else { return whole }
+
+        let left = regions.map(\.left).min()!
+        let top = regions.map(\.top).min()!
+        let right = regions.map(\.right).max()!
+        let bottom = regions.map(\.bottom).max()!
+
+        let padX = (right - left) * margin
+        let padY = (bottom - top) * margin
+        let rect = CGRect(
+            x: max(0, left - padX),
+            y: max(0, top - padY),
+            width: min(imageSize.width, right + padX) - max(0, left - padX),
+            height: min(imageSize.height, bottom + padY) - max(0, top - padY)
+        )
+        return (rect.width > 1 && rect.height > 1) ? rect : whole
+    }
+
+    /// The bitmap is actually cut, rather than drawn oversized and slid
+    /// under a clip — matches Android's own comment on why: geometry
+    /// mistakes are what this whole screen exists to catch, and a clipped-
+    /// but-still-full-size image can look right while being measured wrong.
+    private static func cut(_ image: UIImage, to rect: CGRect) -> UIImage? {
+        guard let cgImage = image.cgImage else { return nil }
+        let scaleX = CGFloat(cgImage.width) / image.size.width
+        let scaleY = CGFloat(cgImage.height) / image.size.height
+        let pixelRect = CGRect(
+            x: rect.minX * scaleX, y: rect.minY * scaleY,
+            width: rect.width * scaleX, height: rect.height * scaleY
+        ).integral
+        guard let cut = cgImage.cropping(to: pixelRect) else { return nil }
+        return UIImage(cgImage: cut, scale: 1, orientation: .up)
     }
 
     private static func flatten(_ card: BusinessCard) -> [ReviewableField] {
@@ -106,31 +175,43 @@ struct CardReviewSheet: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                GeometryReader { geometry in
-                    let scale = geometry.size.width / image.size.width
-                    ZStack(alignment: .topLeading) {
-                        Image(uiImage: image)
-                            .resizable()
-                            .aspectRatio(contentMode: .fit)
-                            .frame(width: geometry.size.width)
-                        ForEach(numbered, id: \.index) { entry in
-                            if let region = fields[entry.index].region {
-                                badge(entry.number)
-                                    // Just clear of the region's leading edge,
-                                    // not on top of it — see the type's own
-                                    // doc comment for why that matters.
-                                    .position(
-                                        x: CGFloat(region.left) * scale - 12,
-                                        y: CGFloat((region.top + region.bottom) / 2) * scale
-                                    )
+            GeometryReader { outer in
+                // A landscape card needs little height once cropped, and
+                // what it doesn't need goes to the panel rather than to
+                // empty margin — matches Android's `forPhoto`/`PANEL_MIN`
+                // split exactly, computed against this screen's actual
+                // size rather than a fixed guess.
+                let widthLimited = cropRect.height * (outer.size.width / cropRect.width)
+                let forPhoto = min(widthLimited, outer.size.height - Self.panelMinHeight)
+
+                VStack(spacing: 0) {
+                    GeometryReader { geometry in
+                        let scale = geometry.size.width / cropRect.width
+                        ZStack(alignment: .topLeading) {
+                            Image(uiImage: croppedImage)
+                                .resizable()
+                                .aspectRatio(contentMode: .fit)
+                                .frame(width: geometry.size.width)
+                            ForEach(numbered, id: \.index) { entry in
+                                if let region = fields[entry.index].region {
+                                    badge(entry.number)
+                                        // Relative to the crop, not the full
+                                        // photo — the crop is what is drawn.
+                                        // Just clear of the region's leading
+                                        // edge, not on top of it — see the
+                                        // type's own doc comment for why
+                                        // that matters.
+                                        .position(
+                                            x: (CGFloat(region.left) - cropRect.minX) * scale - 12,
+                                            y: (CGFloat((region.top + region.bottom) / 2) - cropRect.minY) * scale
+                                        )
+                                }
                             }
                         }
                     }
-                }
-                .frame(height: UIScreen.main.bounds.width * image.size.height / image.size.width)
+                    .frame(height: max(forPhoto, 0))
 
-                List {
+                    List {
                     Section {
                         ForEach($fields) { $field in
                             if !field.removed {
@@ -163,6 +244,7 @@ struct CardReviewSheet: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { onSave(rebuiltCard()); dismiss() }
                 }
+            }
             }
         }
     }

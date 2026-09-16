@@ -50,12 +50,19 @@ struct ContactsScreen: View {
     enum ScanResult: Identifiable {
         case saved(count: Int)
         case nothingFound
+        /// A QR was read and held something other than a vCard — usually a
+        /// plain URL — and the printed side of the card came to nothing
+        /// either. Matches Android's `Outcome.NotAContact`: the payload
+        /// survives rather than folding into `.nothingFound`, since it may
+        /// be the only thing the photo actually yielded.
+        case qrNotAContact(String)
         case failed(String)
 
         var id: String {
             switch self {
             case .saved(let count): return "saved-\(count)"
             case .nothingFound: return "nothing"
+            case .qrNotAContact(let payload): return "qr-\(payload)"
             case .failed(let message): return "failed-\(message)"
             }
         }
@@ -317,6 +324,9 @@ struct ContactsScreen: View {
                 case .nothingFound:
                     Alert(title: Text("No Card Found"),
                           message: Text("Nothing on that photo looked like a business card."))
+                case .qrNotAContact(let payload):
+                    Alert(title: Text("Not a Contact"),
+                          message: Text("The QR code on that photo isn't a contact card:\n\(payload)"))
                 case .failed(let message):
                     Alert(title: Text("Could Not Read Card"), message: Text(message))
                 }
@@ -387,6 +397,12 @@ struct ContactsScreen: View {
             || card.emails.contains { $0.region != nil } || card.urls.contains { $0.region != nil }
     }
 
+    /// Two routes, tried in Android's own order and for its own stated
+    /// reason: a growing share of cards carry a QR encoding a complete
+    /// vCard, and when one does the data is exact — no recognising
+    /// letters, no guessing which line is the company. Nothing downstream
+    /// can improve on it, so it is tried first and accepted outright,
+    /// before OCR ever runs.
     private func process(_ data: Data) async {
         isProcessing = true
         defer { isProcessing = false }
@@ -396,17 +412,43 @@ struct ContactsScreen: View {
             return
         }
 
+        let barcodes = (try? await CardBarcodeScanner.scan(image)) ?? []
+
+        // Every payload tried, not just the first — a card can carry two
+        // codes (one for the vCard, one for a website), and a desk of six
+        // cards can carry six vCards, which is six contacts from one photo.
+        let fromQR = barcodes.compactMap { try? VCard.read($0) }
+        if !fromQR.isEmpty {
+            for card in fromQR { modelContext.insert(Contact(from: card)) }
+            lastResult = .saved(count: fromQR.count)
+            return
+        }
+
         do {
             let segments = try await CardTextRecogniser.recognise(image)
             let cards = try CardParser.parse(segments)
             // A parsed card with nothing in it (a photographed page of notes,
             // say) is not worth keeping — matches Android's `worthKeeping`.
-            let worthKeeping = cards.filter {
+            var worthKeeping = cards.filter {
                 $0.name != nil || $0.company != nil || !$0.phones.isEmpty || !$0.emails.isEmpty
             }
             guard !worthKeeping.isEmpty else {
-                lastResult = .nothingFound
+                // A QR that is not a vCard, with nothing on the printed side
+                // either, is still worth surfacing — the website it carries
+                // may be the only thing the photo yielded at all. Matches
+                // Android's `Outcome.NotAContact`.
+                if let payload = barcodes.first {
+                    lastResult = .qrNotAContact(payload)
+                } else {
+                    lastResult = .nothingFound
+                }
                 return
+            }
+
+            // Only when there is exactly one card to attach it to — with
+            // several cards in frame there is no telling whose code it was.
+            if worthKeeping.count == 1, let payload = barcodes.first {
+                worthKeeping[0].urls.append(Field(value: payload, confidence: 1))
             }
 
             var straightThroughCount = 0

@@ -22,9 +22,26 @@ enum CardTextRecogniser {
         let height = CGFloat(cgImage.height)
 
         return try await withCheckedThrowingContinuation { continuation in
+            // Vision genuinely double-reports some failures: a model-load
+            // error ("Could not create inference context") has been measured
+            // to reach BOTH the request's own completion handler and the
+            // `catch` around `perform(_:)` for the same call — proven by
+            // crash log, not inferred — and a continuation resumed twice is
+            // a fatal `SWIFT TASK CONTINUATION MISUSE`, not a recoverable
+            // error. Both call sites run on this same thread (Vision's
+            // completion handler fires synchronously inside `perform`), so
+            // a plain flag is enough; no lock is needed for a race that
+            // cannot happen.
+            var resumed = false
+            func resumeOnce(_ body: () -> Void) {
+                guard !resumed else { return }
+                resumed = true
+                body()
+            }
+
             let request = VNRecognizeTextRequest { request, error in
                 if let error {
-                    continuation.resume(throwing: Failure.recognitionFailed(error))
+                    resumeOnce { continuation.resume(throwing: Failure.recognitionFailed(error)) }
                     return
                 }
                 let observations = (request.results as? [VNRecognizedTextObservation]) ?? []
@@ -33,7 +50,7 @@ enum CardTextRecogniser {
                     return Self.segment(from: observation.boundingBox, text: candidate.string,
                                         imageWidth: width, imageHeight: height)
                 }
-                continuation.resume(returning: segments)
+                resumeOnce { continuation.resume(returning: segments) }
             }
             // Field extraction wants what the card actually says, not Vision's
             // idea of a plausible dictionary word — a title like "CTO" or a
@@ -45,7 +62,7 @@ enum CardTextRecogniser {
             do {
                 try handler.perform([request])
             } catch {
-                continuation.resume(throwing: Failure.recognitionFailed(error))
+                resumeOnce { continuation.resume(throwing: Failure.recognitionFailed(error)) }
             }
         }
     }
