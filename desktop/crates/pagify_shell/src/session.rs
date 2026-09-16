@@ -208,6 +208,93 @@ impl PageRaster {
             .filter(|px| px[0] < threshold)
             .count()
     }
+
+    /// A representative background colour, averaged from the *perimeter* of
+    /// the pixel rectangle `(left, top)`–`(right, bottom)` rather than its
+    /// interior — a signature is placed on an otherwise blank line, and the
+    /// border around where it goes is a better sample of the page than
+    /// pixels the signature's own bulk is about to cover. White if the
+    /// rectangle is degenerate or entirely off this raster: the safe
+    /// default a picture already looked like before backgrounds were
+    /// sampled at all.
+    pub fn sample_background(&self, left: u32, top: u32, right: u32, bottom: u32) -> [u8; 3] {
+        let (left, top) = (left.min(self.width.saturating_sub(1)), top.min(self.height.saturating_sub(1)));
+        let (right, bottom) =
+            (right.min(self.width.saturating_sub(1)), bottom.min(self.height.saturating_sub(1)));
+        if self.width == 0 || self.height == 0 || left > right || top > bottom {
+            return [255, 255, 255];
+        }
+        let mut sum = [0u64; 3];
+        let mut count = 0u64;
+        let mut sample = |x: u32, y: u32| {
+            let i = ((y * self.width + x) * 4) as usize;
+            sum[0] += self.pixels[i] as u64;
+            sum[1] += self.pixels[i + 1] as u64;
+            sum[2] += self.pixels[i + 2] as u64;
+            count += 1;
+        };
+        for x in left..=right {
+            sample(x, top);
+            sample(x, bottom);
+        }
+        for y in top..=bottom {
+            sample(left, y);
+            sample(right, y);
+        }
+        if count == 0 {
+            return [255, 255, 255];
+        }
+        [(sum[0] / count) as u8, (sum[1] / count) as u8, (sum[2] / count) as u8]
+    }
+}
+
+#[cfg(test)]
+mod raster_tests {
+    use super::PageRaster;
+
+    /// A raster filled with `fill`, except for a `border`-coloured ring
+    /// `border`-px wide around the edge — a page with a plain, uniform
+    /// background and something else in the middle, the shape every real
+    /// page a signature gets sampled against roughly has: blank paper at
+    /// the edges of the line it is signing, whatever else nearby.
+    fn ringed(width: u32, height: u32, border: [u8; 3], fill: [u8; 3]) -> PageRaster {
+        let mut pixels = vec![0u8; (width * height * 4) as usize];
+        for y in 0..height {
+            for x in 0..width {
+                let on_edge = x < 3 || y < 3 || x >= width - 3 || y >= height - 3;
+                let c = if on_edge { border } else { fill };
+                let i = ((y * width + x) * 4) as usize;
+                pixels[i..i + 3].copy_from_slice(&c);
+                pixels[i + 3] = 255;
+            }
+        }
+        PageRaster { width, height, pixels, from_cache: false }
+    }
+
+    /// **The perimeter, not the interior, is what gets sampled** — a
+    /// rectangle whose own edge sits on the raster's uniform border reads
+    /// that border colour even though its interior is a completely
+    /// different colour.
+    #[test]
+    fn the_perimeter_of_the_rectangle_is_sampled_not_its_interior() {
+        let raster = ringed(100, 100, [10, 20, 30], [200, 200, 200]);
+        let sampled = raster.sample_background(0, 0, 99, 99);
+        assert_eq!(sampled, [10, 20, 30]);
+    }
+
+    /// A rectangle entirely off the raster, or inverted, is refused —
+    /// falling back to white rather than sampling nothing or panicking.
+    #[test]
+    fn a_degenerate_or_out_of_range_rectangle_falls_back_to_white() {
+        let raster = ringed(50, 50, [0, 0, 0], [0, 0, 0]);
+        assert_eq!(raster.sample_background(10, 10, 5, 5), [255, 255, 255], "inverted rectangle");
+        assert_eq!(
+            PageRaster { width: 0, height: 0, pixels: Vec::new(), from_cache: false }
+                .sample_background(0, 0, 10, 10),
+            [255, 255, 255],
+            "empty raster"
+        );
+    }
 }
 
 /// Every candidate face's glyphs, merged into one catalogue — or `None` for
@@ -818,6 +905,13 @@ impl Session {
 
     /// The same, for a signature that is a picture — see
     /// [`pdf_core::document::Annotation::Image`].
+    ///
+    /// `rgba` may carry real alpha (see [`crate::signature_extract`]) or be
+    /// uniformly opaque (any upload made before that existed); either way it
+    /// is flattened here, against a background sampled from this page at
+    /// `rect` — see [`crate::signatures::composite_onto`] — because the
+    /// mechanism this places a picture through cannot carry alpha itself,
+    /// and the page underneath is not known any earlier than this call.
     pub fn place_image_signature(
         &self,
         page: usize,
@@ -827,6 +921,24 @@ impl Session {
         height: u32,
         name: &str,
     ) -> Result<()> {
+        // A scale of 1.0 is 72 dpi, one pixel per point — the same units
+        // `rect` is already in, so placing it onto this raster is a round,
+        // not a conversion. Rendering fails open to white: a signature that
+        // cannot sample its destination looks exactly as it did before
+        // backgrounds were sampled at all, not worse.
+        let background = self
+            .render_page(page, 1.0)
+            .map(|raster| {
+                raster.sample_background(
+                    rect.left.round() as u32,
+                    rect.top.round() as u32,
+                    rect.right.round() as u32,
+                    rect.bottom.round() as u32,
+                )
+            })
+            .unwrap_or([255, 255, 255]);
+        let rgba = crate::signatures::composite_onto(&rgba, background);
+
         registry::with_session(self.handle, |s| {
             let doc = s
                 .document

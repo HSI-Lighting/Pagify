@@ -63,12 +63,18 @@ pub struct Signature {
 
 /// One uploaded signature's pixels, kept exactly as given.
 ///
-/// **Opaque, and kept that way on purpose** — see `pdf_core`'s
-/// `Annotation::Image`, which this is placed through: the PDFium call that
-/// stamps a picture onto a page does not carry an alpha channel, even before
-/// anything is saved. Flattening a transparent source onto a background, if
-/// that is ever wanted, belongs above this — where the file was decoded —
-/// not here, which only keeps what it was handed.
+/// **Alpha may be real, but it never reaches the page as transparency.**
+/// A picture from [`crate::signature_extract`] carries a genuine alpha
+/// channel — background pixels transparent, ink opaque or fading toward it
+/// — but the mechanism `pdf_core`'s `Annotation::Image` places a picture
+/// through does not carry alpha itself, even before anything is saved. What
+/// alpha is *for*, then, is compositing against wherever the signature ends
+/// up: [`composite_onto`] flattens it onto a background colour, which
+/// `Session::place_image_signature` does at the moment a signature is
+/// placed, once the page underneath it is known — not here, and not at
+/// upload, which only keeps what it was handed. A picture with no
+/// meaningful alpha (every byte 255, as any upload made before this existed
+/// still is) flattens to itself unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredImage {
     /// RGBA, row-major, top row first — one row of `width * 4` bytes,
@@ -76,6 +82,29 @@ pub struct StoredImage {
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+/// Flatten `rgba` (row-major RGBA) onto a solid `background` colour,
+/// producing an opaque buffer of the same dimensions — alpha 255 gives back
+/// the pixel unchanged, alpha 0 gives back `background`, and everything
+/// between blends the two.
+///
+/// This is where a signature's alpha — real, from
+/// [`crate::signature_extract`], or uniformly opaque, from anything made
+/// before that existed — actually gets used: the page a signature is placed
+/// on is not known until placement, so this cannot run any earlier than
+/// that.
+pub fn composite_onto(rgba: &[u8], background: [u8; 3]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(rgba.len());
+    for pixel in rgba.chunks_exact(4) {
+        let a = pixel[3] as f32 / 255.0;
+        let blend = |channel: u8, bg: u8| (channel as f32 * a + bg as f32 * (1.0 - a)).round() as u8;
+        out.push(blend(pixel[0], background[0]));
+        out.push(blend(pixel[1], background[1]));
+        out.push(blend(pixel[2], background[2]));
+        out.push(255);
+    }
+    out
 }
 
 /// The narrowest or flattest a drawing may be before it is padded rather than
@@ -529,5 +558,33 @@ mod tests {
         std::fs::write(&path, b"{ this is not json").expect("write");
         assert!(Signatures::load_from(&path).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A fully opaque picture flattens to itself** — every upload made
+    /// before real alpha existed is exactly this shape, and must not change
+    /// when it is placed.
+    #[test]
+    fn a_fully_opaque_picture_is_unchanged_by_compositing() {
+        let rgba = vec![10, 20, 30, 255, 200, 150, 100, 255];
+        assert_eq!(composite_onto(&rgba, [9, 9, 9]), rgba);
+    }
+
+    /// **A fully transparent pixel becomes exactly the background** —
+    /// nothing of its own colour should show through at alpha 0.
+    #[test]
+    fn a_fully_transparent_pixel_becomes_the_background() {
+        let rgba = vec![0, 0, 0, 0];
+        assert_eq!(composite_onto(&rgba, [200, 100, 50]), vec![200, 100, 50, 255]);
+    }
+
+    /// **Half-alpha lands halfway between the pixel's own colour and the
+    /// background** — a smoke test for the blend arithmetic itself, not
+    /// just its two endpoints.
+    #[test]
+    fn partial_alpha_blends_between_pixel_and_background() {
+        let rgba = vec![100, 100, 100, 128];
+        let out = composite_onto(&rgba, [200, 200, 200]);
+        assert!((145..=155).contains(&(out[0] as i32)), "expected roughly halfway, got {out:?}");
+        assert_eq!(out[3], 255, "a composited picture is always opaque");
     }
 }

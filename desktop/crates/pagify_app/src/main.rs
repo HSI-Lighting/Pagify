@@ -14796,6 +14796,44 @@ mod lock_wiring_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// **A picture with real alpha is composited against the page it lands
+    /// on, not placed with its background untouched** — the whole point of
+    /// carrying alpha through from extraction at all. A pixel that was
+    /// fully opaque survives exactly; a pixel that was fully transparent
+    /// picks up whatever renders at that spot on the page instead of the
+    /// arbitrary colour it happened to be uploaded with.
+    #[test]
+    fn a_placed_picture_with_alpha_is_composited_against_the_page() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "alpha-composite");
+        let rgba = vec![
+            10, 20, 30, 255, // opaque: must survive unchanged
+            1, 2, 3, 0, // transparent, holding an obviously wrong colour: must not survive
+        ];
+        app.save_uploaded_signature("mine", rgba, 2, 1).expect("kept");
+        app.submit("signature");
+
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+        let marks = app.doc.as_ref().expect("open").session.annotations(0).expect("read");
+        let placed = marks
+            .iter()
+            .rev()
+            .find_map(|m| match &m.annotation {
+                pdf_core::document::Annotation::Image { rgba, .. } => Some(rgba.clone()),
+                _ => None,
+            })
+            .expect("the signature is not a picture on the page");
+
+        assert_eq!(&placed[0..4], &[10, 20, 30, 255], "the opaque pixel should survive exactly");
+        assert_ne!(
+            &placed[4..7],
+            &[1, 2, 3],
+            "the transparent pixel should have been composited against the page, not left as uploaded"
+        );
+        assert_eq!(placed[7], 255, "a placed picture is always opaque");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// **The whole upload path, not just the part that skips the file.**
     /// A real PNG, written to a scratch file and handed to `upload_signature`
     /// exactly as the file dialog would — decoded, named from the file, and

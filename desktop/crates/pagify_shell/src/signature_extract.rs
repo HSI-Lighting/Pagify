@@ -7,8 +7,8 @@
 //! of the page, ruled lines, whatever bled through from the sheet beneath,
 //! the table it was photographed on. Someone who uploads that photo means
 //! the signature, not the page — so this finds the pen ink and returns a
-//! tight crop around it with everything else whitened, the same shape of
-//! picture a person would get by scanning just the signature by hand.
+//! tight crop around it with everything else made transparent, rather than
+//! painted over — see [`Extracted`] for why that matters downstream.
 //!
 //! # Why not one threshold
 //!
@@ -43,7 +43,22 @@
 use std::collections::VecDeque;
 
 /// A signature lifted out of a larger photo: a tight crop around the ink,
-/// with everything else forced to white.
+/// with a real alpha channel rather than a background painted over —
+/// background pixels carry alpha 0, ink pixels their own colour at full or
+/// partial opacity, fading smoothly between.
+///
+/// **Why alpha, when the picture ends up opaque wherever it is placed.**
+/// The mechanism a picture is actually placed through cannot carry alpha —
+/// see [`crate::document::Annotation::Image`] in `pdf_core` — so this alpha
+/// is never shown as transparency directly. What it *is* used for is
+/// compositing against wherever the signature ends up: the closest thing to
+/// "no visible background" available without real alpha support is a
+/// background that already matches the page underneath, and that
+/// composite — done at placement time, once the destination is known, not
+/// here — needs to know which pixels are background and which are ink.
+/// Keeping that distinction (alpha) rather than baking in one guess (white)
+/// keeps this function honest about what it found, and leaves the "what do
+/// I put behind it" decision to the code that knows where it is going.
 pub struct Extracted {
     /// RGBA, row-major, top row first — same layout as
     /// [`crate::signatures::StoredImage`].
@@ -53,11 +68,11 @@ pub struct Extracted {
 }
 
 /// Find the signature in `rgba` (row-major RGBA, `width`×`height`, as
-/// decoded from an uploaded photo) and return a tight, whitened crop around
-/// it. `None` when nothing plausible enough to be a signature was found —
-/// a blank page, or a photo of something else entirely — in which case the
-/// caller should fall back to the picture as uploaded rather than show
-/// nothing.
+/// decoded from an uploaded photo) and return a tight crop around it with
+/// real alpha — see [`Extracted`]. `None` when nothing plausible enough to
+/// be a signature was found — a blank page, or a photo of something else
+/// entirely — in which case the caller should fall back to the picture as
+/// uploaded rather than show nothing.
 pub fn extract_signature(rgba: &[u8], width: u32, height: u32) -> Option<Extracted> {
     if width == 0 || height == 0 || (rgba.len() as u64) < (width as u64) * (height as u64) * 4 {
         return None;
@@ -294,22 +309,24 @@ pub fn extract_signature(rgba: &[u8], width: u32, height: u32) -> Option<Extract
                 && grown_window[(wyr as u32 * ww + wxr as u32) as usize];
             let src_idx = ((ay * width + ax) * 4) as usize;
             let out_idx = ((y * cw + x) * 4) as usize;
-            if in_mask {
+            // The pixel's own colour survives unchanged — this crop carries
+            // real alpha now, not a paint-toward-white approximation, so
+            // fading is alpha's job, not the colour channels'.
+            out[out_idx..out_idx + 3].copy_from_slice(&rgba[src_idx..src_idx + 3]);
+            out[out_idx + 3] = if in_mask {
                 let v = luma_buf[(ay * width + ax) as usize] as f64;
-                // 0 at or below the strict threshold (all ink, keep as is),
-                // 1 at or above the loose one (background, forced white) —
-                // blended between so a stroke's edge is not a hard cliff.
+                // 0 at or below the strict threshold (all ink, fully
+                // opaque), 1 at or above the loose one (background, fully
+                // transparent) — blended between so a stroke's edge fades
+                // rather than ending in a hard cliff.
                 let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
-                let blend = |channel: u8| (channel as f64 * (1.0 - t) + 255.0 * t).round() as u8;
-                out[out_idx] = blend(rgba[src_idx]);
-                out[out_idx + 1] = blend(rgba[src_idx + 1]);
-                out[out_idx + 2] = blend(rgba[src_idx + 2]);
-                out[out_idx + 3] = 255;
+                (255.0 * (1.0 - t)).round() as u8
             } else {
-                // Outside the grown mask — forced white no matter how dark,
-                // which is what excludes a disconnected shadow or thumb.
-                out[out_idx..out_idx + 4].copy_from_slice(&[255, 255, 255, 255]);
-            }
+                // Outside the grown mask — fully transparent no matter how
+                // dark, which is what excludes a disconnected shadow or
+                // thumb.
+                0
+            };
         }
     }
     Some(Extracted { rgba: out, width: cw, height: ch })
@@ -557,6 +574,24 @@ mod tests {
         assert!(any_dark, "the ink itself should still be dark in the crop");
     }
 
+    /// The crop carries real alpha, not a background painted white: ink
+    /// pixels come back opaque, and background — including inside the
+    /// crop's own margin, which sits between the ink and the crop's edge —
+    /// comes back transparent. Both must be present, since a crop that
+    /// somehow ended up entirely one or the other would pass a check for
+    /// either alone.
+    #[test]
+    fn the_crop_carries_real_alpha_not_a_white_background() {
+        let (w, h) = (800, 600);
+        let mut rgba = white_canvas(w, h);
+        draw_ink_blob(&mut rgba, w, 300, 250, 500, 320);
+
+        let extracted = extract_signature(&rgba, w, h).expect("a signature was drawn");
+        let pixels: Vec<&[u8]> = extracted.rgba.chunks_exact(4).collect();
+        assert!(pixels.iter().any(|p| p[3] > 200), "some pixel should be opaque ink");
+        assert!(pixels.iter().any(|p| p[3] == 0), "the crop's own margin should be transparent");
+    }
+
     /// A faint pencil stroke immediately beside a bold ink blob is
     /// recovered by the loose pass rather than clipped off at the strict
     /// threshold — the crop ends up noticeably wider than the bold part
@@ -587,7 +622,7 @@ mod tests {
     /// A ruled line running the width of the photo, near an ink blob but
     /// never touching it, must not pull the whole line into the crop, and
     /// a dark blob far from the ink (a shadow, a thumb) must not survive
-    /// the whitening even though it is dark enough to otherwise qualify.
+    /// into the crop even though it is dark enough to otherwise qualify.
     #[test]
     fn a_ruled_line_and_a_distant_dark_blob_are_excluded() {
         let (w, h) = (1200, 900);
