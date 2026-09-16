@@ -115,8 +115,13 @@ struct DrawingViewerScreen: View {
                     render(document: document, size: geo.size, fullRes: true)
                 }
                 .onChange(of: geo.size) { _, newSize in
-                    document?.fit(width: Int(newSize.width), height: Int(newSize.height))
-                    render(document: document, size: newSize, fullRes: true)
+                    // Re-fitting here, like `ModelViewerScreen` never does,
+                    // would undo the user's own pan/zoom every time the
+                    // canvas resizes for a reason that has nothing to do with
+                    // them — the layers button appearing once `layers` loads
+                    // shifts the nav bar, same as a rotation would. Only the
+                    // very first layout (`onAppear`, above) gets to fit.
+                    if let document { render(document: document, size: newSize, fullRes: true) }
                 }
             }
 
