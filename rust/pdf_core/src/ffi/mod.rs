@@ -36,6 +36,7 @@ use crate::document::{
 };
 use crate::engine;
 use crate::error::{PdfError, Result};
+use crate::contacts::BusinessCard;
 use crate::registry;
 use crate::render::{self, ImageFormat, Markup, PixelOrder, RenderTarget, Tile, ViewportRequest};
 
@@ -1094,5 +1095,189 @@ pub extern "C" fn pagify_on_trim_memory(level: i32) {
     } else {
         log::debug!("trim level {level}: releasing cached pages");
         registry::trim_caches();
+    }
+}
+
+// ------------------------------------------------------------------ vCard --
+//
+// Business-card export. `contacts::parse` (the OCR/QR -> `BusinessCard`
+// pipeline) has no FFI surface of its own — Swift builds a `BusinessCard` from
+// whatever Vision or a scanned QR payload gave it, and these three functions
+// only cross the vCard boundary: write one or many cards, or read a scanned
+// QR payload back into a card.
+//
+// `pagify_vcard_parse` keeps the same distinction the Rust tests already
+// enforce: "this text is not a vCard" and "you passed a null pointer" are
+// different failures. The first is ordinary — most QR codes on a business
+// card hold a plain URL — so it returns null with *no* message on
+// [`pagify_last_error_message`], letting the caller fall through to reading
+// the card by eye without that path ever looking like an error. The second is
+// a real mistake and explains itself the normal way, through `guard`.
+
+/// Render one card as a single-`VCARD` vCard 3.0 file. Caller frees the
+/// result with [`pagify_string_free`].
+///
+/// # Safety
+/// `card_json` and `exported_at` must each be null or a NUL-terminated string
+/// valid for this call.
+#[no_mangle]
+pub unsafe extern "C" fn pagify_vcard(
+    card_json: *const c_char,
+    exported_at: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let card_json = unsafe { required_str(card_json, "card_json") }?;
+        let exported_at = unsafe { required_str(exported_at, "exported_at") }?;
+        let card: BusinessCard = serde_json::from_str(card_json)
+            .map_err(|e| PdfError::InvalidArgument(format!("card_json: {e}")))?;
+        owned_string(crate::contacts::to_vcard(&card, exported_at))
+    })
+}
+
+/// Render many cards as one file, concatenated `VCARD` blocks sharing a single
+/// `REV` — a group export leaves everyone in it at the same moment. Caller
+/// frees the result with [`pagify_string_free`].
+///
+/// # Safety
+/// As [`pagify_vcard`], and `cards_json` must be a JSON array of the same
+/// per-card shape.
+#[no_mangle]
+pub unsafe extern "C" fn pagify_vcards(
+    cards_json: *const c_char,
+    exported_at: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let cards_json = unsafe { required_str(cards_json, "cards_json") }?;
+        let exported_at = unsafe { required_str(exported_at, "exported_at") }?;
+        let cards: Vec<BusinessCard> = serde_json::from_str(cards_json)
+            .map_err(|e| PdfError::InvalidArgument(format!("cards_json: {e}")))?;
+        owned_string(crate::contacts::to_vcards(&cards, exported_at))
+    })
+}
+
+/// Read a scanned QR payload as a vCard. Returns null, with no message set,
+/// when `text` is well-formed but simply is not a vCard (an ordinary
+/// outcome — most QR codes on a business card hold a URL) — check
+/// [`pagify_last_error_message`] to tell that apart from `text` being null,
+/// which *is* a real argument error and does explain itself. Caller frees a
+/// non-null result with [`pagify_string_free`].
+///
+/// # Safety
+/// `text` must be null or a NUL-terminated string valid for this call.
+#[no_mangle]
+pub unsafe extern "C" fn pagify_vcard_parse(text: *const c_char) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let text = unsafe { required_str(text, "text") }?;
+        match crate::contacts::from_vcard(text) {
+            Some(card) => {
+                let json = serde_json::to_string(&card).map_err(|e| {
+                    PdfError::InvalidArgument(format!("could not encode the parsed card: {e}"))
+                })?;
+                owned_string(json)
+            }
+            None => Ok(std::ptr::null_mut()),
+        }
+    })
+}
+
+// ------------------------------------------------------------------ tests --
+//
+// The FFI has no test module of its own yet — the app has been exercising this
+// boundary from Swift's XCTest suite (see the module doc comment: built for
+// macOS specifically so that host suite can run against these exact bytes).
+// These three cover what only this module can get wrong: the JSON crossing
+// the boundary and the silent-null-vs-explained-null contract on
+// `pagify_vcard_parse`. `contacts::to_vcard`/`to_vcards`/`from_vcard`
+// themselves are covered by `contacts`'s own 81 tests; nothing here repeats
+// them.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn string_out(ptr: *mut c_char) -> String {
+        assert!(!ptr.is_null(), "expected a string, got null");
+        let s = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+        unsafe { pagify_string_free(ptr) };
+        s
+    }
+
+    fn a_card_json() -> CString {
+        cstr_in_static(
+            r#"{"name":{"value":"Jane Okafor","confidence":1.0},
+                "company":{"value":"Meridian Systems","confidence":1.0}}"#,
+        )
+    }
+
+    // A tiny helper so `a_card_json` can build its `CString` without an
+    // `unsafe` block of its own — the two functions above are unsafe only
+    // because every FFI entry point they feed is.
+    fn cstr_in_static(s: &str) -> CString {
+        CString::new(s).unwrap()
+    }
+
+    #[test]
+    fn a_card_crosses_into_a_vcard_and_back_out() {
+        let card = a_card_json();
+        let exported_at = cstr_in_static("2026-09-16T12:00:00Z");
+        let vcard = unsafe { pagify_vcard(card.as_ptr(), exported_at.as_ptr()) };
+        let vcard = string_out(vcard);
+
+        assert!(vcard.starts_with("BEGIN:VCARD"), "got:\n{vcard}");
+        assert!(vcard.contains("Jane Okafor"));
+        assert!(vcard.contains("Meridian Systems"));
+    }
+
+    #[test]
+    fn a_group_export_shares_one_rev() {
+        let cards = cstr_in_static(&format!("[{},{}]", strip(a_card_json()), strip(a_card_json())));
+        let exported_at = cstr_in_static("2026-09-16T12:00:00Z");
+        let file = unsafe { pagify_vcards(cards.as_ptr(), exported_at.as_ptr()) };
+        let file = string_out(file);
+
+        assert_eq!(file.matches("BEGIN:VCARD").count(), 2);
+        let revs: std::collections::HashSet<_> =
+            file.lines().filter(|l| l.starts_with("REV:")).collect();
+        assert_eq!(revs.len(), 1, "both cards must leave at the same moment");
+
+        fn strip(c: CString) -> String {
+            c.into_string().unwrap()
+        }
+    }
+
+    #[test]
+    fn a_written_vcard_reads_back_into_a_card() {
+        let card = a_card_json();
+        let exported_at = cstr_in_static("2026-09-16T12:00:00Z");
+        let vcard = unsafe { string_out(pagify_vcard(card.as_ptr(), exported_at.as_ptr())) };
+
+        let text = cstr_in_static(&vcard);
+        let parsed = unsafe { pagify_vcard_parse(text.as_ptr()) };
+        let json = string_out(parsed);
+        assert!(json.contains("Jane Okafor"));
+    }
+
+    #[test]
+    fn a_url_is_not_a_vcard_and_says_nothing_about_it() {
+        let text = cstr_in_static("https://meridian.example");
+        let result = unsafe { pagify_vcard_parse(text.as_ptr()) };
+        assert!(result.is_null(), "a plain URL is not a vCard");
+
+        let message = pagify_last_error_message();
+        assert!(
+            message.is_null(),
+            "an ordinary non-vCard payload must not look like a failure"
+        );
+    }
+
+    #[test]
+    fn a_null_argument_is_a_real_mistake_and_explains_itself() {
+        let result = unsafe { pagify_vcard_parse(std::ptr::null()) };
+        assert!(result.is_null());
+
+        let message = string_out(pagify_last_error_message());
+        assert!(
+            message.contains("text"),
+            "the message should name the argument; got: {message}"
+        );
     }
 }
