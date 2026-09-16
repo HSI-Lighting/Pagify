@@ -384,3 +384,54 @@ It proves the check reads the SM suite as somebody else writes it: the
 algorithm identifiers, the `SEQUENCE { r, s }` signature value, and the
 distinguishing ID folded into `ZA`. (It carries a `signingTime` attribute
 too, which the check ignores.)
+
+## The trust fixtures: test-root-sm2.der and the leaves issued from it
+
+A self-signed SM2 root standing in for HSI's, and what `tests/trust.rs`
+needs around it — every row of the trust table in the SM signatures plan:
+
+| File | Issued by | Subject | Serial | For |
+|---|---|---|---|---|
+| `test-root-sm2.der` | itself | `O=Pagify, CN=Pagify Test Root` | random | the root the tests pin |
+| `test-leaf-sm2.p12` | the test root | `O=Pagify, CN=Pagify Test Leaf (leaf)` | `1001` | **Pinned**: the happy path |
+| `test-revoked-leaf-sm2.p12` | the test root | `O=Pagify, CN=Pagify Test Leaf (revoked)` | `1002` | **Revoked** when the denylist names `1002 CN=Pagify Test Root,O=Pagify` |
+| `test-lookalike-root-sm2.der` | itself | `O=Pagify, CN=Pagify Test Root` — **the same name**, another key | random | a root that looks like the pinned one |
+| `test-lookalike-leaf-sm2.p12` | the lookalike root | the good leaf's subject, issuer name **and serial** | `1001` | **Unrecognised**: only the signature under the pinned key counts |
+| `test-signer-sm2.p12` | itself | `O=Pagify, CN=Pagify SM2 Test Signer` | random | **Unrecognised**: chains to nothing |
+
+Password `pagify` for every `.p12`, leaf only, no chain inside. **None of
+these is pinned into the binary** — `trust/roots.der` is empty until HSI's
+root exists — the tests hand the roots to `validate::check_with`.
+
+Made with OpenSSL 3.6 on 16 September 2026, and one option matters more than
+the rest: **`-sigopt distid:1234567812345678`** on every certificate. SM2
+signs `SM3(ZA ‖ M)` with an identity string folded into `ZA`; GM/T 0015 says
+certificates use the standard default, and so does `pdf/trust.rs`. OpenSSL,
+left to itself, signs a certificate with an *empty* identity and verifies with
+one — so a certificate it issues chains here only when told the default, and
+checking one it issued needs `-vfyopt distid:1234567812345678` on its side
+too. The root:
+
+```text
+openssl genpkey -algorithm SM2 -out root.key
+openssl req -new -x509 -key root.key -sm3 -days 7300 \
+    -subj "/O=Pagify/CN=Pagify Test Root" \
+    -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -sigopt distid:1234567812345678 -out root.crt
+openssl x509 -in root.crt -outform DER -out test-root-sm2.der
+```
+
+and a leaf from it:
+
+```text
+openssl genpkey -algorithm SM2 -out leaf.key
+openssl req -new -key leaf.key -sm3 -subj "/O=Pagify/CN=Pagify Test Leaf (leaf)" -out leaf.csr
+openssl x509 -req -in leaf.csr -CA root.crt -CAkey root.key -sm3 -days 7300 \
+    -set_serial 0x1001 -sigopt distid:1234567812345678 -out leaf.crt
+openssl pkcs12 -export -inkey leaf.key -in leaf.crt -passout pass:pagify \
+    -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 -out test-leaf-sm2.p12
+```
+
+The private keys are not committed; the roots cannot issue anything more.
+That is the point of a fixture root — and the reason HSI's real root will be
+minted by the issuing tool on an offline machine, not by these commands.

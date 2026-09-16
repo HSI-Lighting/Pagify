@@ -15,12 +15,15 @@
 //!    the digest and write it back in, with no key at all. Found by audit:
 //!    that is exactly what the check used to accept as "unchanged".
 //!
-//! It does **not** answer whether the signer is who they claim to be. That
-//! needs a chain of trust up to a root somebody has decided to believe, and no
-//! amount of checking here supplies it. A document signed with a certificate
-//! made five minutes ago verifies perfectly and means nothing at all — but it
-//! verifies under *that* certificate, whose subject is reported so a person can
-//! decide what it is worth.
+//! Whether the signer is who they claim to be is a third question, answered
+//! beside the verdict rather than inside it: [`Signature::trust`] says whether
+//! the certificate the signature verified under was issued by a root Pagify is
+//! built to believe — see [`super::trust`]. A document signed with a
+//! certificate made five minutes ago verifies perfectly and means nothing at
+//! all; it verifies under *that* certificate, whose subject is reported and
+//! whose trust is reported separately, so that a person can tell the two
+//! apart. The two axes stay orthogonal: the verdict is about the bytes, the
+//! trust is about the signer, and the green tick needs both.
 //!
 //! Saying "valid" without that distinction is how a green tick comes to mean
 //! less than nothing, so every verdict here carries it.
@@ -54,6 +57,7 @@
 
 use crate::error::Result;
 
+use super::trust::{self, Anchors, Trust};
 use super::{File, Object};
 
 /// What became of one signature.
@@ -71,8 +75,9 @@ pub enum Verdict {
     /// vouches for the blob. A document altered and re-hashed looks exactly
     /// like this.
     Invalid(String),
-    /// The signature covers only part of the file. Whatever is outside the
-    /// range was never signed, and may have been added afterwards.
+    /// The signature is sound over the revision it was made on — the first
+    /// `covered` bytes of the file — and the file is longer than that now.
+    /// Whatever follows was never signed: a later revision, or the append.
     Incomplete { covered: usize, total: usize },
     /// It could not be checked — an algorithm this does not implement, or a
     /// blob it cannot read. **Not the same as invalid**, and never reported as
@@ -84,12 +89,14 @@ impl Verdict {
     pub fn describe(&self) -> String {
         match self {
             Verdict::Unaltered => "unchanged since it was signed, and the signature is the \
-                                   certificate's (whether to trust that certificate is not checked)"
+                                   certificate's (whether to trust that certificate is said \
+                                   separately)"
                 .into(),
             Verdict::Altered => "CHANGED since it was signed".into(),
             Verdict::Invalid(why) => format!("NOT VALID — {why}"),
             Verdict::Incomplete { covered, total } => format!(
-                "covers only {covered} of {total} bytes — the rest was never signed"
+                "sound over the first {covered} of {total} bytes — the document was changed \
+                 after it was signed, and what came after was never signed"
             ),
             Verdict::Unreadable(why) => format!("could not be checked: {why}"),
         }
@@ -108,16 +115,40 @@ pub struct Signature {
     pub when: String,
     pub verdict: Verdict,
     /// The subject of the certificate the signature verified under — only
-    /// when it did. Who *holds* that certificate is a question of trust this
-    /// does not answer.
+    /// when it did. Who *holds* that certificate is what `trust` answers.
     pub signer: Option<String>,
+    /// Whether that certificate was issued by a root Pagify trusts. Set
+    /// whenever the signature verified over its own range — `Unaltered` or
+    /// `Incomplete` — and never otherwise: a signature that did not verify
+    /// has no signer to judge.
+    ///
+    /// `Unaltered` + `Pinned` is the only pair that earns a full green tick.
+    /// `Incomplete` + `Pinned` says who signed the earlier revision, and that
+    /// the document has changed since.
+    pub trust: Option<Trust>,
 }
 
-/// Check every signature in a document.
+impl Signature {
+    /// The one combination that means "this document, from this signer":
+    /// unchanged since it was signed, and signed by someone a pinned root
+    /// vouches for.
+    pub fn is_good(&self) -> bool {
+        self.verdict == Verdict::Unaltered && self.trust == Some(Trust::Pinned)
+    }
+}
+
+/// Check every signature in a document, against the roots compiled into this
+/// binary.
 ///
 /// An empty list means the document carries none — which is not a failure and
 /// must not be reported as one.
 pub fn check(file: &File<'_>, bytes: &[u8]) -> Result<Vec<Signature>> {
+    check_with(file, bytes, Anchors::pinned())
+}
+
+/// The same check against roots of the caller's choosing — how the tests
+/// judge against a test root without one being pinned into the binary.
+pub fn check_with(file: &File<'_>, bytes: &[u8], anchors: &Anchors) -> Result<Vec<Signature>> {
     let mut out = Vec::new();
     for number in file.numbers().collect::<Vec<_>>() {
         let Ok(object) = file.object(number) else { continue };
@@ -126,12 +157,13 @@ pub fn check(file: &File<'_>, bytes: &[u8]) -> Result<Vec<Signature>> {
             continue;
         }
 
-        let Checked { verdict, signer } = verdict_for(dict, bytes);
+        let Checked { verdict, signer, trust } = verdict_for(dict, bytes, anchors);
         out.push(Signature {
             name: text_of(dict.get(b"Name")),
             when: text_of(dict.get(b"M")),
             verdict,
             signer,
+            trust,
         });
     }
     Ok(out)
@@ -143,11 +175,13 @@ struct Checked {
     /// Set only when the signature verified: the subject of the certificate
     /// whose key made it.
     signer: Option<String>,
+    /// And what the anchors say about that certificate.
+    trust: Option<Trust>,
 }
 
 impl Checked {
     fn failed(verdict: Verdict) -> Self {
-        Checked { verdict, signer: None }
+        Checked { verdict, signer: None, trust: None }
     }
 }
 
@@ -165,7 +199,7 @@ const ID_CT_TST_INFO: const_oid::ObjectIdentifier =
     const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.1.4");
 
 /// What became of one signature dictionary.
-fn verdict_for(dict: &super::Dict, bytes: &[u8]) -> Checked {
+fn verdict_for(dict: &super::Dict, bytes: &[u8], anchors: &Anchors) -> Checked {
     use der::Decode;
 
     // -- the blob, and whether it is one this checks at all -------------------
@@ -229,17 +263,9 @@ fn verdict_for(dict: &super::Dict, bytes: &[u8]) -> Checked {
     let [_, first, second_at, second_len] = numbers;
     // Checked, because the numbers are the file's: `[0 0 1e308 n]` wrapped
     // past the guard below and panicked on the slice. Found by audit.
-    let (Some(covered), Some(reaches)) =
-        (first.checked_add(second_len), second_at.checked_add(second_len))
-    else {
+    let Some(reaches) = second_at.checked_add(second_len) else {
         return Checked::failed(Verdict::Unreadable("its byte range does not add up".into()));
     };
-    if reaches != bytes.len() {
-        // **The append.** Everything named is untouched and the digest will
-        // match; what matters is that the file is longer than the signature
-        // ever claimed.
-        return Checked::failed(Verdict::Incomplete { covered, total: bytes.len() });
-    }
     if reaches > bytes.len() || first > bytes.len() || first > second_at {
         return Checked::failed(Verdict::Unreadable("its byte range runs past the file".into()));
     }
@@ -250,11 +276,25 @@ fn verdict_for(dict: &super::Dict, bytes: &[u8]) -> Checked {
         return Checked::failed(Verdict::Altered);
     }
 
-    // -- and whether anything vouches for what was committed to --------------
-    match verify(signer, attributes, &certificates) {
-        Ok(subject) => Checked { verdict: Verdict::Unaltered, signer: Some(subject) },
-        Err(verdict) => Checked::failed(verdict),
+    // -- whether anything vouches for what was committed to ------------------
+    let certificate = match verify(signer, attributes, &certificates) {
+        Ok(certificate) => certificate,
+        Err(verdict) => return Checked::failed(verdict),
+    };
+    let signer = Some(certificate.tbs_certificate.subject.to_string());
+    let trust = Some(trust::trust_in(certificate, anchors));
+
+    // -- and whether it vouches for the whole file ---------------------------
+    //
+    // **The append.** Everything the range names is as it was signed, under
+    // a key that vouches for it — and the file is longer than the signature
+    // ever claimed. Who signed the earlier revision is known and reported;
+    // what came after it is not covered by anything.
+    if reaches != bytes.len() {
+        let verdict = Verdict::Incomplete { covered: reaches, total: bytes.len() };
+        return Checked { verdict, signer, trust };
     }
+    Checked { verdict: Verdict::Unaltered, signer, trust }
 }
 
 /// SM3 over several stretches of bytes taken as one.
@@ -309,17 +349,17 @@ fn is_named(certificate: &x509_cert::Certificate, sid: &cms::signed_data::Signer
 }
 
 /// Check the SM2 signature over the signed attributes against the
-/// certificates it carries, and name the one it verified under.
+/// certificates it carries, and return the one it verified under.
 ///
 /// The certificate the signer names is tried first; if it is not there or
 /// does not fit, every other carried certificate is tried, because the point
 /// is that *some* key that travelled with the signature made it — which one
-/// is reported, and trust is for somebody else to decide.
-fn verify(
+/// is reported, and whether to believe it is [`super::trust`]'s question.
+fn verify<'c>(
     signer: &cms::signed_data::SignerInfo,
     attributes: &cms::signed_data::SignedAttributes,
-    certificates: &[x509_cert::Certificate],
-) -> std::result::Result<String, Verdict> {
+    certificates: &'c [x509_cert::Certificate],
+) -> std::result::Result<&'c x509_cert::Certificate, Verdict> {
     use der::Encode;
     use sm2::dsa::signature::Verifier;
 
@@ -352,7 +392,7 @@ fn verify(
         tried = true;
         if let Some(signature) = &signature {
             if key.verify(&message, signature).is_ok() {
-                return Ok(certificate.tbs_certificate.subject.to_string());
+                return Ok(certificate);
             }
         }
     }
@@ -374,7 +414,7 @@ fn verify(
 /// The `sm2` crate reads the key info itself and refuses a key on any other
 /// curve, so an ECDSA P-256 certificate is "not an SM2 key" here rather than
 /// a signature that fails.
-fn sm2_key_of(
+pub(super) fn sm2_key_of(
     certificate: &x509_cert::Certificate,
 ) -> std::result::Result<sm2::dsa::VerifyingKey, String> {
     use der::Encode;
@@ -605,7 +645,7 @@ mod tests {
                 Object::Array(range.iter().map(|n| Object::Number(n.as_bytes().to_vec())).collect()),
             );
             dict.set(b"Contents", Object::HexString(b"00".to_vec()));
-            let checked = verdict_for(&dict, &bytes);
+            let checked = verdict_for(&dict, &bytes, &Anchors::none());
             assert!(
                 matches!(checked.verdict, Verdict::Unreadable(_) | Verdict::Incomplete { .. }),
                 "{range:?} gave {:?}",
@@ -644,14 +684,15 @@ mod tests {
         );
         dict.set(b"Contents", Object::HexString(hex));
 
-        let checked = verdict_for(&dict, &bytes);
+        let checked = verdict_for(&dict, &bytes, &Anchors::none());
         assert_eq!(checked.verdict, Verdict::Unaltered, "{}", checked.verdict.describe());
         assert_eq!(checked.signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
+        assert_eq!(checked.trust, Some(Trust::Unrecognised), "nobody pinned that signer");
 
         // And not over other bytes, which is the digest check under SM3.
         let mut other = bytes.clone();
         other[0] = b'H';
-        assert_eq!(verdict_for(&dict, &other).verdict, Verdict::Altered);
+        assert_eq!(verdict_for(&dict, &other, &Anchors::none()).verdict, Verdict::Altered);
     }
 
     /// **Identifiers become words**, so that "not verified" names what the
@@ -696,12 +737,13 @@ mod tests {
 
     #[test]
     fn every_verdict_says_what_it_means() {
-        assert!(Verdict::Unaltered.describe().contains("not checked"));
+        assert!(Verdict::Unaltered.describe().contains("said separately"));
         assert!(Verdict::Altered.describe().contains("CHANGED"));
         assert!(Verdict::Invalid("why".into()).describe().contains("NOT VALID"));
         assert!(Verdict::Incomplete { covered: 10, total: 20 }
             .describe()
             .contains("never signed"));
+        assert!(Verdict::Incomplete { covered: 10, total: 20 }.describe().contains("first 10 of 20"));
         assert!(Verdict::Unreadable("why".into()).describe().contains("could not"));
     }
 
@@ -721,6 +763,6 @@ mod tests {
     #[test]
     fn unaltered_does_not_claim_the_certificate_is_trusted() {
         let said = Verdict::Unaltered.describe();
-        assert!(said.contains("whether to trust that certificate is not checked"), "{said}");
+        assert!(said.contains("whether to trust that certificate is said separately"), "{said}");
     }
 }

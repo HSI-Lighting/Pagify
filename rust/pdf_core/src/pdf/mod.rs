@@ -41,6 +41,7 @@ pub mod hidden;
 pub mod secure_plus;
 pub mod sign;
 pub mod sm;
+pub mod trust;
 pub mod validate;
 mod object;
 mod reader;

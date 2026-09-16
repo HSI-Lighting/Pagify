@@ -607,6 +607,8 @@ fn an_edit_after_signing_is_saved_as_a_revision_the_signature_does_not_cover() {
     if !certify(&mut doc) {
         return;
     }
+    let mut signed = Vec::new();
+    doc.save_incremental(&mut signed).expect("save the signed file");
     doc.whiteout(
         0,
         Rect { left: 100.0, top: 100.0, right: 200.0, bottom: 120.0 },
@@ -616,12 +618,30 @@ fn an_edit_after_signing_is_saved_as_a_revision_the_signature_does_not_cover() {
 
     let mut saved = Vec::new();
     doc.save_incremental(&mut saved).expect("save");
-    match verdicts_in(&saved).as_slice() {
-        [Verdict::Incomplete { covered, total }] => {
-            assert!(covered < total, "{covered} of {total}");
-        }
-        other => panic!("an edit after signing should leave the signature over the earlier revision, got {other:?}"),
+    // The signed bytes are the start of the saved file, untouched — not
+    // merely "the range does not reach the end", which a full rewrite with
+    // the old numbers in it also says. Found when the check started looking
+    // at the digest before calling anything incomplete: a whiteout after
+    // signing had been re-serialising the whole file.
+    assert!(saved.starts_with(&signed), "the signed bytes were not kept in place");
+    let file = File::parse(&saved).expect("parse");
+    let found = validate::check(&file, &saved).expect("check");
+    match found.as_slice() {
+        [found] => match found.verdict {
+            Verdict::Incomplete { covered, total } => {
+                assert_eq!(covered, signed.len(), "the signature covers the signed file exactly");
+                assert!(covered < total, "{covered} of {total}");
+                assert_eq!(found.signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
+            }
+            ref other => panic!("an edit after signing should leave the signature over the earlier revision, got {other:?}"),
+        },
+        other => panic!("one signature expected, got {other:?}"),
     }
+
+    // And the edit is there: the whiteout is on the page of the saved file.
+    let reopened = PdfiumDocument::open_bytes(saved, None).expect("reopen");
+    assert_eq!(reopened.page(0).expect("page").characters().expect("characters").text,
+        doc.page(0).expect("page").characters().expect("characters").text);
 }
 
 // ---------------------------------------------------------------------------

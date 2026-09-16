@@ -281,10 +281,17 @@ one commit per finding, each with a test built from the audit's own input;
 
 - **`validate`** verifies Pagify's own signatures — SM2 over SM3, the one
   scheme in the program — over the signed attributes under the certificate the
-  signature carries, and names that certificate. It does **not** decide
-  whether to trust the certificate — there is no trust store yet — and says so
-  on every line. **A document signed in another application is not judged at
-  all**: its signature is reported as not verified, naming the scheme in words
+  signature carries, and names that certificate. Beside that verdict, and
+  never inside it, it says whether the certificate was **issued by a root
+  compiled into the app** (`rust/pdf_core/trust/roots.der`, `include_bytes!`,
+  no loose file to swap): pinned, unrecognised, or revoked by the compiled-in
+  denylist keyed by issuer *and* serial. A root that merely carries the pinned
+  root's name pins nothing — the leaf's own SM2 signature under the pinned key
+  is what counts. The green tick needs unaltered *and* pinned; an appended
+  document still names who signed the earlier revision, without the tick.
+  The pin is empty until HSI's root exists, so today every signature is
+  unrecognised — the truth, not a placeholder. **A document signed in another
+  application is not judged at all**: its signature is reported as not verified, naming the scheme in words
   (`RSA-PKCS#1v1.5 / SHA-256`, `ECDSA P-256 / SHA-256`, the number for one
   without a name), before the range or the digest is looked at — so "not
   verified by Pagify" can never come out as "changed" or "not valid". The same
@@ -295,9 +302,14 @@ one commit per finding, each with a test built from the audit's own input;
 - **`certify`** signs with SM2 over SM3 — the one scheme in the program,
   under the conventions in `pdf/sm.rs` — and refuses an identity whose key is
   not SM2 when it is loaded, naming the scheme it wanted. It is unsaved work
-  until saved, and the save writes the signed bytes verbatim. An edit afterwards is a later revision the signature does
-  not cover; a rewrite (after a redaction, or to put a password on) breaks it,
-  and the save says so.
+  until saved, and the save writes the signed bytes verbatim. An edit
+  afterwards — a mark, a whiteout, a moved or edited run — is **appended** to
+  the signed bytes as a later revision the signature does not cover, and the
+  check says so, still naming who signed the earlier revision. (It was not,
+  until the check stopped taking "the range does not reach the end" as proof
+  of an appended revision: Pagify's own writer had been re-serialising the
+  whole file under the edit.) A rewrite (after a redaction, or to put a
+  password on) breaks it, and the save says so.
 - **`smartredact`** says "gone for good" only of words proven gone. Words
   drawn through a form XObject — or a form inside one, however deep — are
   cut out of the form's own stream: in place when every form on the way is
@@ -337,8 +349,9 @@ one commit per finding, each with a test built from the audit's own input;
 - **Files reach the disk** through one path: staged beside the target with
   `create_new`, the target's own permissions kept, renamed over it whole.
 
-Still open, and said plainly: no certificate trust chain yet (one pinned
-root is the plan, `docs/SM2_SPIKE.md`); the unmaintained font parsers
+Still open, and said plainly: HSI's root is not yet minted, so nothing is
+pinned yet (the issuing tool is the next step, `docs/SM2_SPIKE.md`); the
+signature panel does not yet show trust beside the verdict; the unmaintained font parsers
 (`rustybuzz`, `ttf-parser`) await a migration; words that are pixels are not
 redacted (the picture is reported). The `rsa` upgrade that was owed is not:
 the crate is gone, and `tools/audit.sh` passes with nothing ignored.

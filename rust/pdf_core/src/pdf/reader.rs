@@ -329,6 +329,83 @@ impl<'a> File<'a> {
         Ok(out)
     }
 
+    /// Write the file out **with a revision appended**: the original bytes
+    /// untouched, then the changed and new objects, then a cross-reference
+    /// section naming only those and a trailer pointing back at the last one.
+    ///
+    /// What a signed document needs. A signature covers a byte range of the
+    /// file as it was, and [`Self::rewrite`] moves every byte after the
+    /// header; this moves none, so a reader that follows `/ByteRange` finds
+    /// exactly what was signed, and says the document was changed *after* —
+    /// which is the truth, and the whole reason PDF has incremental updates.
+    ///
+    /// The earlier revision stays in the file, readable to anyone who walks
+    /// the older table. That is the trade: for a mark or a whiteout on a
+    /// signed page it is right; for a redaction or a lock it is exactly wrong,
+    /// and those rewrite.
+    pub fn append_revision(
+        &self,
+        replacements: &[(u32, Vec<u8>)],
+        extra: &[(u32, Vec<u8>)],
+    ) -> Result<Vec<u8>> {
+        let previous = Self::start_xref(self.bytes)?;
+        let mut out = self.bytes.to_vec();
+        if !out.ends_with(b"\n") {
+            out.push(b'\n');
+        }
+
+        let mut written: Offsets = Offsets::new();
+        for (number, body) in replacements.iter().chain(extra) {
+            written.insert(*number, out.len());
+            out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+            out.extend_from_slice(body);
+            out.extend_from_slice(b"\nendobj\n");
+        }
+
+        // One subsection per run of consecutive numbers, which is what the
+        // format asks for and what every reader expects.
+        let mut numbers: Vec<u32> = written.keys().copied().collect();
+        numbers.sort_unstable();
+        let xref_at = out.len();
+        out.extend_from_slice(b"xref\n");
+        let mut from = 0;
+        while from < numbers.len() {
+            let mut to = from;
+            while to + 1 < numbers.len() && numbers[to + 1] == numbers[to] + 1 {
+                to += 1;
+            }
+            out.extend_from_slice(format!("{} {}\n", numbers[from], to - from + 1).as_bytes());
+            for number in &numbers[from..=to] {
+                out.extend_from_slice(format!("{:010} 00000 n \n", written[number]).as_bytes());
+            }
+            from = to + 1;
+        }
+
+        // The trailer carries what the last one carried and says where that
+        // one is; `/Size` grows if a new object went past it.
+        let highest = numbers.last().copied().unwrap_or(0);
+        let size = self
+            .trailer
+            .get(b"Size")
+            .and_then(Object::as_i64)
+            .map_or(0, |n| n.max(0) as u32)
+            .max(highest + 1)
+            .max(self.numbers().max().unwrap_or(0) + 1);
+        let mut trailer = Dict(Vec::new());
+        for key in [&b"Root"[..], b"Info", b"ID"] {
+            if let Some(value) = self.trailer.get(key) {
+                trailer.set(key, value.clone());
+            }
+        }
+        trailer.set(b"Size", Object::Number(format!("{size}").into_bytes()));
+        trailer.set(b"Prev", Object::Number(format!("{previous}").into_bytes()));
+
+        out.extend_from_slice(b"trailer\n");
+        write_object(&mut out, &Object::Dict(trailer));
+        out.extend_from_slice(format!("\nstartxref\n{xref_at}\n%%EOF").as_bytes());
+        Ok(out)
+    }
+
     /// Where one object's own bytes begin and end — `n g obj` to `endobj`.
     pub fn span_of(&self, number: u32) -> Result<std::ops::Range<usize>> {
         let at = *self
@@ -454,6 +531,43 @@ mod tests {
         out.extend_from_slice(b"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n");
         out.extend_from_slice(format!("{xref_at}\n%%EOF").as_bytes());
         out
+    }
+
+    /// **An appended revision moves no byte of the original**: the file is a
+    /// prefix of the result, the changed object reads back changed, the new
+    /// one reads back, everything else reads back as it was, and the new
+    /// trailer points at the old table.
+    #[test]
+    fn an_appended_revision_keeps_the_original_bytes_in_place() {
+        let bytes = a_file();
+        let file = File::parse(&bytes).expect("parse");
+        let out = file
+            .append_revision(
+                &[(3, b"<< /Type /Page /Parent 2 0 R /Rotate 90 >>".to_vec())],
+                &[(5, b"<< /Type /Annot /Subtype /Square >>".to_vec())],
+            )
+            .expect("append");
+        assert!(out.starts_with(&bytes), "the original bytes moved");
+
+        let again = File::parse(&out).expect("parse the appended file");
+        assert_eq!(again.numbers().collect::<Vec<_>>(), vec![1, 2, 3, 4, 5]);
+        let page = again.object(3).expect("object 3");
+        assert_eq!(page.as_dict().and_then(|d| d.get(b"Rotate")).and_then(Object::as_i64), Some(90));
+        assert!(again.object(5).expect("object 5").as_dict().is_some());
+        // Untouched objects are read from where they always were.
+        assert_eq!(again.span_of(1).expect("span"), file.span_of(1).expect("span"));
+        assert_eq!(again.trailer().get(b"Size").and_then(Object::as_i64), Some(6));
+        let previous = File::start_xref(&bytes).expect("old startxref");
+        assert_eq!(again.trailer().get(b"Prev").and_then(Object::as_i64), Some(previous as i64));
+        assert_eq!(again.trailer().get(b"Root").and_then(Object::as_reference), Some((1, 0)));
+
+        // And appending again appends again.
+        let twice = again
+            .append_revision(&[(3, b"<< /Type /Page /Parent 2 0 R /Rotate 180 >>".to_vec())], &[])
+            .expect("append again");
+        assert!(twice.starts_with(&out));
+        let third = File::parse(&twice).expect("parse");
+        assert_eq!(third.object(3).expect("3").as_dict().and_then(|d| d.get(b"Rotate")).and_then(Object::as_i64), Some(180));
     }
 
     #[test]

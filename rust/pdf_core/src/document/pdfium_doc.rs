@@ -168,9 +168,10 @@ pub struct PdfiumDocument {
     written: Option<Vec<u8>>,
     /// Whether `written` holds bytes that have not reached the disk.
     ///
-    /// **Signing produces the file; nothing else can.** The signed bytes are
-    /// exact — a byte range and a digest over it — and the only way they get
-    /// to disk is to be written verbatim. A save that asked PDFium to write
+    /// **Signing produces the file, and so does an edit appended to a signed
+    /// one; nothing else can.** The signed bytes are exact — a byte range and
+    /// a digest over it — and the only way they get to disk is to be written
+    /// verbatim. A save that asked PDFium to write
     /// the document again relocated every object and broke the signature it
     /// had just made; a close discarded it without a word, because the
     /// document had been marked clean to stop that save. Found by audit: a
@@ -224,6 +225,13 @@ pub struct PdfiumDocument {
     redacted: bool,
 }
 
+/// What an edit starts from: some bytes, and whether they are the document's
+/// file exactly as it exists — in which case the edit is appended to them.
+struct EditBase {
+    bytes: Vec<u8>,
+    exact: bool,
+}
+
 // `PdfDocument` already carries these under pdfium-render's `thread_safe` feature,
 // which routes every PDFium call through a global mutex. The one piece of
 // interior mutability here — the cached vault — is behind a `Mutex` of its own,
@@ -271,6 +279,92 @@ impl PdfiumDocument {
     fn touch(&mut self) {
         self.dirty = true;
         self.exact_pending = false;
+    }
+
+    /// The bytes an edit through Pagify's own writer starts from.
+    ///
+    /// For a signed document that is its file exactly — see
+    /// [`Self::exact_bytes`] — so that the edit can be *appended* and the
+    /// signed bytes stay where the signature's range says they are. For
+    /// anything else, PDFium's re-serialisation, which the writer then
+    /// rewrites: the same as ever.
+    fn edit_base(&self) -> Result<EditBase> {
+        if let Some(bytes) = self.exact_bytes() {
+            return Ok(EditBase { bytes, exact: true });
+        }
+        Ok(EditBase { bytes: self.readable_bytes()?, exact: false })
+    }
+
+    /// The document's file byte for byte, when it is signed and nothing is
+    /// pending inside PDFium that those bytes would not carry.
+    ///
+    /// A signature is a byte range, and an edit that starts from PDFium's
+    /// own re-serialisation moves every object before the edit is even made;
+    /// found when the check stopped taking "the range does not reach the end"
+    /// as proof of an appended revision and looked at the digest — a whiteout
+    /// after signing had been breaking the signature outright while being
+    /// reported as a later revision. Only a signed document gets this: for
+    /// any other the earlier revision an append leaves behind is a cost with
+    /// nothing bought.
+    fn exact_bytes(&self) -> Option<Vec<u8>> {
+        if self.already_secured || self.security.is_some() || self.remove_password || self.redacted {
+            return None;
+        }
+        if PdfiumDocument::signature_count(self) == 0 {
+            return None;
+        }
+        match (&self.written, &self.source) {
+            // Signed or appended to in this process: the bytes kept then, as
+            // long as nothing has changed inside PDFium since.
+            (Some(exact), _) if !self.dirty || self.exact_pending => Some(exact.clone()),
+            (Some(_), _) => None,
+            // Opened from disk and untouched: the file itself.
+            (None, DocumentSource::Path(path)) if !self.dirty => std::fs::read(path).ok(),
+            _ => None,
+        }
+    }
+
+    /// Write an edit out: appended to the file when the base was the file
+    /// exactly, rewritten otherwise.
+    fn write_edit(
+        base: &EditBase,
+        file: &crate::pdf::File<'_>,
+        replacements: &[(u32, Vec<u8>)],
+        extra: &[(u32, Vec<u8>)],
+    ) -> Result<Vec<u8>> {
+        if base.exact {
+            file.append_revision(replacements, extra)
+        } else {
+            file.rewrite_adding(replacements, extra, &crate::pdf::Dict(Vec::new()))
+        }
+    }
+
+    /// Take an edited file on as the document: reopen it, put the security
+    /// back, mark the document changed — and, when the edit was appended to
+    /// the file exactly, keep the result as the file exactly, so that the
+    /// save writes these bytes verbatim and the next edit appends again.
+    fn adopt_edit(
+        &mut self,
+        base: &EditBase,
+        rewritten: Vec<u8>,
+        was_secured: bool,
+        plus: bool,
+        permissions: Option<crate::pdf::encrypt::Permissions>,
+    ) -> Result<()> {
+        let exact = base.exact.then(|| rewritten.clone());
+        let reopened = Self::open_bytes(rewritten, None)?;
+        self.document = reopened.document;
+        self.page_count = reopened.page_count;
+        if let Ok(mut cached) = self.vault.lock() {
+            *cached = None;
+        }
+        self.rearm_security(was_secured, plus, permissions);
+        self.touch();
+        if let Some(exact) = exact {
+            self.written = Some(exact);
+            self.exact_pending = true;
+        }
+        Ok(())
     }
 
     /// Earlier revisions and orphaned objects exist only in the file as
@@ -1319,7 +1413,8 @@ impl Document for PdfiumDocument {
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
         let permissions = self.permissions();
-        let bytes = self.readable_bytes()?;
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
@@ -1403,20 +1498,8 @@ impl Document for PdfiumDocument {
             dict.remove(b"DecodeParms");
             replacements.push((*stream_number, crate::pdf::write_stream(&dict, &packed)));
         }
-        let rewritten = file.rewrite_adding(
-            &replacements,
-            &[(number, state_bytes)],
-            &crate::pdf::Dict(Vec::new()),
-        )?;
-        let reopened = Self::open_bytes(rewritten, None)?;
-        self.document = reopened.document;
-        self.page_count = reopened.page_count;
-        if let Ok(mut cached) = self.vault.lock() {
-            *cached = None;
-        }
-        self.rearm_security(was_secured, plus, permissions);
-        self.touch();
-        Ok(())
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[(number, state_bytes)])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
     fn restack(
@@ -1435,7 +1518,8 @@ impl Document for PdfiumDocument {
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
         let permissions = self.permissions();
-        let bytes = self.readable_bytes()?;
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
@@ -1739,16 +1823,8 @@ impl Document for PdfiumDocument {
             replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
         }
 
-        let rewritten = file.rewrite(&replacements)?;
-        let reopened = Self::open_bytes(rewritten, None)?;
-        self.document = reopened.document;
-        self.page_count = reopened.page_count;
-        if let Ok(mut cached) = self.vault.lock() {
-            *cached = None;
-        }
-        self.rearm_security(was_secured, plus, permissions);
-        self.touch();
-        Ok(())
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
     fn object_bounds(&self, page_index: usize, object: usize) -> Result<Rect> {
@@ -4934,7 +5010,8 @@ fn font_to_unicode(
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
         let permissions = self.permissions();
-        let bytes = self.readable_bytes()?;
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
@@ -5040,16 +5117,8 @@ fn font_to_unicode(
             replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
         }
 
-        let rewritten = file.rewrite(&replacements)?;
-        let reopened = Self::open_bytes(rewritten, None)?;
-        self.document = reopened.document;
-        self.page_count = reopened.page_count;
-        if let Ok(mut cached) = self.vault.lock() {
-            *cached = None;
-        }
-        self.rearm_security(was_secured, plus, permissions);
-        self.touch();
-        Ok(())
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
     /// Every object on a page: what kind it is and where it sits.
@@ -5717,7 +5786,8 @@ fn font_to_unicode(
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
         let permissions = self.permissions();
-        let bytes = self.readable_bytes()?;
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
@@ -5752,16 +5822,8 @@ fn font_to_unicode(
             dict.remove(b"DecodeParms");
             replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
         }
-        let rewritten = file.rewrite(&replacements)?;
-        let reopened = Self::open_bytes(rewritten, None)?;
-        self.document = reopened.document;
-        self.page_count = reopened.page_count;
-        if let Ok(mut cached) = self.vault.lock() {
-            *cached = None;
-        }
-        self.rearm_security(was_secured, plus, permissions);
-        self.touch();
-        Ok(())
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
     /// The byte-safe move, exposed so a probe can ask *why* it refused.
@@ -5821,7 +5883,8 @@ fn font_to_unicode(
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
         let permissions = self.permissions();
-        let bytes = self.readable_bytes()?;
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
         let (stream, streams) = self.page_content(&file, &page)?;
@@ -5982,19 +6045,12 @@ fn font_to_unicode(
             }
         }
 
-        let rewritten = file.rewrite_adding(&replacements, &extra, &crate::pdf::Dict(Vec::new()))?;
-        let reopened = Self::open_bytes(rewritten, None)?;
-        self.document = reopened.document;
-        self.page_count = reopened.page_count;
-        if let Ok(mut cached) = self.vault.lock() {
-            *cached = None;
-        }
-        // The password the read had to take off.
-        self.rearm_security(was_secured, plus, permissions);
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
         // Recorded rather than returned, so the caller can say what happened
         // without every signature in the chain growing a field for it.
-        self.substituted = swap.map(|s| s.face);
-        self.touch();
+        let face = swap.map(|s| s.face);
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)?;
+        self.substituted = face;
         Ok(previous)
     }
 
@@ -6146,7 +6202,8 @@ fn font_to_unicode(
         let was_secured = self.already_secured;
         let plus = self.secure_plus;
         let permissions = self.permissions();
-        let bytes = self.readable_bytes()?;
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
         let file = crate::pdf::File::parse(&bytes)?;
         let page = self.page_object(&file, page_index)?;
 
@@ -6186,17 +6243,8 @@ fn font_to_unicode(
             }
         }
 
-        let rewritten =
-            file.rewrite_adding(&replacements, &extra, &crate::pdf::Dict(Vec::new()))?;
-        let reopened = Self::open_bytes(rewritten, None)?;
-        self.document = reopened.document;
-        self.page_count = reopened.page_count;
-        if let Ok(mut cached) = self.vault.lock() {
-            *cached = None;
-        }
-        self.rearm_security(was_secured, plus, permissions);
-        self.touch();
-        Ok(())
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
     /// A page's content, decoded, and which stream objects it came from.

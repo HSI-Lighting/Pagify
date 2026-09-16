@@ -2435,10 +2435,12 @@ impl PagifyApp {
         self.text = None;
         // Says the two things somebody will otherwise learn the hard way:
         // the signature is not on disk until a save writes it, and it covers
-        // the file as it now stands — an edit after this is outside it.
+        // the file as it now stands — an edit after this is outside it, and
+        // the check will say so.
         Ok(format!(
             "signed as {who} — save to write it out. The signature covers the file \
-             exactly as it is now; anything changed after this breaks it."
+             exactly as it is now; anything changed after this is outside it, and \
+             `validate` will say the document was changed after it was signed."
         ))
     }
 
@@ -14406,7 +14408,8 @@ mod lock_wiring_tests {
 
     /// **Signing says the thing people learn the hard way.**
     ///
-    /// A signature covers the file as it stands; the next edit breaks it. That
+    /// A signature covers the file as it stands; the next edit is outside it,
+    /// and the check will say the document changed after it was signed. That
     /// belongs in the line somebody reads when it works, not in a manual.
     #[test]
     fn signing_says_that_a_later_edit_breaks_it() {
@@ -14433,8 +14436,8 @@ mod lock_wiring_tests {
         let told = said(&app);
         assert!(told.contains("signed as"), "it did not sign: {told}");
         assert!(
-            told.contains("breaks it"),
-            "it did not say that an edit afterwards breaks the signature: {told}"
+            told.contains("outside it"),
+            "it did not say that an edit afterwards is outside the signature: {told}"
         );
 
         // And a reader sees it.
@@ -15628,7 +15631,7 @@ mod lock_wiring_tests {
         assert!(lines.contains("signed by CN=Pagify SM2 Test Signer,O=Pagify"), "{lines}");
         assert!(lines.contains("unchanged since it was signed"), "{lines}");
         // The limit travels with the claim here too.
-        assert!(lines.contains("whether to trust that certificate is not checked"), "{lines}");
+        assert!(lines.contains("whether to trust that certificate is said separately"), "{lines}");
     }
 
     /// **A signature placed but not applied is reported as what it still is.**
@@ -15848,7 +15851,7 @@ mod lock_wiring_tests {
         // line still says what it cannot tell you: whether to trust it.
         assert!(told.contains("by CN=Pagify SM2 Test Signer,O=Pagify"), "it did not name the certificate: {told}");
         assert!(
-            told.contains("whether to trust that certificate is not checked"),
+            told.contains("whether to trust that certificate is said separately"),
             "it did not say what it cannot tell you: {told}"
         );
     }

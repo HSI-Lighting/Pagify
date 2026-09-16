@@ -1,0 +1,16 @@
+# Leaves that are not to be trusted any more, one per line:
+#
+#     <serial, hex>  <issuer, as the certificate names it>
+#
+# for example
+#
+#     1002  CN=HSI Root,O=HSI Lighting
+#
+# Keyed by issuer AND serial, never serial alone: serial-only is fine with one
+# root and wrong the day two roots overlap during a rotation, and issuer plus
+# serial is how X.509 itself identifies a certificate. Consulted only for a
+# leaf that chains to a pinned root — a leaf that does not is unrecognised
+# already, whatever this says.
+#
+# Compiled into the binary with include_str!; updated by release. Blank lines
+# and lines starting with # are ignored.
