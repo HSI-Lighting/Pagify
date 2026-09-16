@@ -267,7 +267,14 @@ struct ContactDetailView: View {
                             }
                         }
                 }
-                .presentationDetents([.medium])
+                // `.large`, not `.medium` — a graphical `DatePicker` showing
+                // both the calendar and a time row needs more height than
+                // `.medium` gives it on most phones, and the overflow was
+                // simply clipped rather than scrollable: the time wheel was
+                // in the view hierarchy the whole time, just off the bottom
+                // of the sheet, which is exactly what "no option to select a
+                // time" looks like from the outside.
+                .presentationDetents([.large])
             }
             .sheet(isPresented: $customFollowUpShowing) {
                 NavigationStack {
@@ -288,7 +295,9 @@ struct ContactDetailView: View {
                             }
                         }
                 }
-                .presentationDetents([.medium])
+                // Same fix as the meeting picker above, same reason: the
+                // time row was being clipped by `.medium`, not missing.
+                .presentationDetents([.large])
             }
             .sheet(isPresented: $addingToGroup) {
                 AddToGroupSheet(contact: contact)
