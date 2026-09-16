@@ -34,7 +34,10 @@ if [ -e "$APP" ]; then
 fi
 LSREG=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
-"$(dirname "$0")/bundle.sh"
+# A copy for this machine: unsigned unless CODESIGN_IDENTITY is set, and
+# bundle.sh is told so in as many words — it refuses to build an unsigned
+# bundle for anyone who has not said the bundle stays here.
+PAGIFY_LOCAL_UNSIGNED_BUILD=1 "$(dirname "$0")/bundle.sh"
 
 echo "==> installing to $DEST"
 mkdir -p "$DEST"

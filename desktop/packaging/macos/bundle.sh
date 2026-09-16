@@ -15,6 +15,14 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 APP="$ROOT/target/Pagify.app"
 IDENTITY="${CODESIGN_IDENTITY:-}"          # "Developer ID Application: ..."
 PROFILE="${NOTARY_PROFILE:-}"              # `xcrun notarytool store-credentials`
+# Set by install.sh, and by nothing else: this bundle is for the machine that
+# builds it. **A bundle that ships is signed with a Developer ID, or it is not
+# built.** The root certificate the signature check pins is compiled into the
+# executable, and a pin inside an unsigned executable is a file anybody can
+# patch; only a Developer ID signature turns a patched binary into one macOS
+# refuses to run. So an unsigned bundle is refused here unless the caller
+# says, in so many words, that it will not leave this machine.
+LOCAL_ONLY="${PAGIFY_LOCAL_UNSIGNED_BUILD:-}"
 
 ARCH="$(uname -m)"
 case "$ARCH" in
@@ -44,6 +52,17 @@ echo "==> audit dependencies"
 echo "==> no sockets"
 "$ROOT/tools/no_sockets.sh"
 
+# Refused before the build, not after it: the answer does not depend on the
+# binary, and a release build is minutes nobody should wait to be told.
+if [ -z "$IDENTITY" ] && [ "$LOCAL_ONLY" != "1" ]; then
+  echo "==> CODESIGN_IDENTITY is not set, and this is not a local install." >&2
+  echo "    A Pagify bundle that ships is signed with a Developer ID; the certificate" >&2
+  echo "    pinned inside the executable is only as safe as the signature that seals it." >&2
+  echo "    Set CODESIGN_IDENTITY=\"Developer ID Application: ...\" to build one that" >&2
+  echo "    ships, or use packaging/macos/install.sh for a copy that stays on this machine." >&2
+  exit 1
+fi
+
 echo "==> build"
 cargo build --release -p pagify_app
 
@@ -71,8 +90,9 @@ else
 fi
 
 if [ -z "$IDENTITY" ]; then
-  echo "==> CODESIGN_IDENTITY not set — bundle built unsigned."
-  echo "    It will run locally and be refused on any other machine."
+  # Allowed through above only because PAGIFY_LOCAL_UNSIGNED_BUILD said so.
+  echo "==> CODESIGN_IDENTITY not set — bundle built unsigned, for this machine only."
+  echo "    It will run here and be refused on any other machine. Do not ship it."
   exit 0
 fi
 
@@ -87,6 +107,16 @@ codesign --force --timestamp --options runtime \
 
 echo "==> verify"
 codesign --verify --deep --strict --verbose=2 "$APP"
+# Signed, and signed with the right kind of certificate: an ad-hoc signature
+# or a self-made one passes --verify and still lets a patched binary run
+# wherever Gatekeeper is not looking. The chain must go up to Apple through a
+# Developer ID Application certificate.
+if ! codesign -dvv "$APP" 2>&1 | grep -q "^Authority=Developer ID Application:"; then
+  echo "the bundle is signed, but not with a Developer ID Application certificate:" >&2
+  codesign -dvv "$APP" 2>&1 | grep "^Authority=" >&2 || true
+  rm -rf "$APP"
+  exit 1
+fi
 
 if [ -z "$PROFILE" ]; then
   echo "==> NOTARY_PROFILE not set — signed but not notarized."

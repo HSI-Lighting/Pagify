@@ -167,7 +167,10 @@ which need a window.**
 ```
 
 Builds, bundles, and puts one copy in `~/Applications` — then double-click it,
-or `open -a ~/Applications/Pagify.app file.pdf`.
+or `open -a ~/Applications/Pagify.app file.pdf`. The copy is unsigned unless
+`CODESIGN_IDENTITY` is set, and it is for this machine only: `bundle.sh` on its
+own refuses to build an unsigned bundle, because one that ships is signed with
+a Developer ID (see Security, below).
 
 It unregisters the staging bundle in `target/` afterwards, and the previous
 install before replacing it. Without that you get a second app in Launchpad per
@@ -323,6 +326,14 @@ one commit per finding, each with a test built from the audit's own input;
   file in the engine or the desktop crates names a socket type or a network
   module, or if any crate in the dependency graph of the shipped binaries is
   a network client, server, TLS stack or async runtime.
+- **A bundle that ships is signed with a Developer ID, or it is not built.**
+  `bundle.sh` refuses to build an unsigned bundle unless the caller says it
+  stays on this machine (`install.sh` does), and after signing checks that the
+  signature's chain runs through a *Developer ID Application* certificate —
+  not ad-hoc, not self-made. The root certificate the signature check will
+  pin is compiled into the executable; a pin in an unsigned executable is a
+  file anybody can patch, and only that signature makes a patched binary one
+  macOS refuses to run.
 - **Files reach the disk** through one path: staged beside the target with
   `create_new`, the target's own permissions kept, renamed over it whole.
 
