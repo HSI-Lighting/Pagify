@@ -158,6 +158,23 @@ char *pagify_get_cache_stats_json(int64_t handle);
 /// The onTrimMemory twin: >= 80 closes documents, lower only drops cached rasters.
 void pagify_on_trim_memory(int32_t level);
 
+// -- contacts / vCard ----------------------------------------------------------
+
+/// Render one card (a JSON-encoded BusinessCard) as a single-VCARD vCard 3.0
+/// file. `exported_at` is an RFC 3339 UTC instant, written into REV. NULL on
+/// failure — see pagify_last_error_message().
+char *pagify_vcard(const char *card_json, const char *exported_at);
+
+/// As pagify_vcard, for a JSON array of cards: one file, concatenated VCARD
+/// blocks, all sharing the same REV.
+char *pagify_vcards(const char *cards_json, const char *exported_at);
+
+/// Read a scanned QR payload back into a card (JSON-encoded BusinessCard), or
+/// NULL if `text` is not a vCard at all — an ordinary outcome, not a failure:
+/// pagify_last_error_message() stays unset. NULL with a message set means
+/// `text` itself was NULL, a real argument error.
+char *pagify_vcard_parse(const char *text);
+
 #ifdef __cplusplus
 }
 #endif

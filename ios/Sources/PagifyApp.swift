@@ -1,4 +1,5 @@
 import SwiftUI
+import SwiftData
 
 @main
 struct PagifyApp: App {
@@ -10,6 +11,11 @@ struct PagifyApp: App {
                 .environmentObject(appSettings)
                 .preferredColorScheme(appSettings.settings.theme.colorScheme)
         }
+        // One container for the whole CRM. `ContactGroup` and `Meeting` are
+        // reachable from `Contact` alone (`groups`, `meetings`), so listing
+        // them separately here only matters if a screen ever needs to query
+        // one of them with no `Contact` in hand.
+        .modelContainer(for: [Contact.self, ContactGroup.self, Meeting.self])
     }
 }
 
