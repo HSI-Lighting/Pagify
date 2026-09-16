@@ -16,6 +16,7 @@ struct ContactsScreen: View {
     private var currentReview: (image: UIImage, card: BusinessCard)? { reviewQueue.first }
 
     @State private var savedCount = 0
+    @State private var openingContact: Contact?
 
     enum ScanResult: Identifiable {
         case saved(count: Int)
@@ -43,20 +44,35 @@ struct ContactsScreen: View {
                 } else {
                     List {
                         ForEach(contacts) { contact in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(contact.name.isEmpty ? "(no name)" : contact.name)
-                                    .font(.headline)
-                                if !contact.company.isEmpty {
-                                    Text(contact.company)
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
-                                }
-                                if let phone = contact.phones.first {
-                                    Text(phone.raw)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                            Button {
+                                openingContact = contact
+                            } label: {
+                                HStack(alignment: .top) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(contact.name.isEmpty ? "(no name)" : contact.name)
+                                            .font(.headline)
+                                            .foregroundStyle(.primary)
+                                        if !contact.company.isEmpty {
+                                            Text(contact.company)
+                                                .font(.subheadline)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        if let phone = contact.phones.first {
+                                            Text(phone.raw)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    StageBadge(stage: contact.stage)
                                 }
                             }
+                            // Without this, List gives a Button-labelled row
+                            // its default interactive style, which tints the
+                            // whole label — including the `.secondary` text —
+                            // as if it were a link, `.foregroundStyle(.primary)`
+                            // on the name notwithstanding.
+                            .buttonStyle(.plain)
                         }
                         .onDelete { indices in
                             for index in indices { modelContext.delete(contacts[index]) }
@@ -87,6 +103,9 @@ struct ContactsScreen: View {
                     Task { await process(data) }
                 }
                 .ignoresSafeArea()
+            }
+            .sheet(item: $openingContact) { contact in
+                ProgressSheet(contact: contact)
             }
             .sheet(item: Binding(
                 get: { currentReview.map(ReviewItem.init) },
