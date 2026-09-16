@@ -7,6 +7,10 @@ which route step 2 needed — is `rust/pdf_core/fixtures/sm2-signed.pdf` and thi
 
 **The spike passed.** Phases 1–5 can be planned in detail.
 
+*Status:* phases 1 and 2 landed on 15–16 September 2026 — `git log --grep="SM signatures"`
+lists the commits. The "what it means for the phases" section below is the note as
+written at the end of the spike, kept as the record of what the spike found.
+
 ## The checklist, answered
 
 | # | Step | Answer |

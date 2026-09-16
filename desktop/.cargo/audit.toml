@@ -4,20 +4,12 @@
 # looking at.
 
 [advisories]
-ignore = [
-    # rsa 0.9: RUSTSEC-2023-0071, the Marvin timing side channel in RSA private
-    # key operations. No fixed release: the fix is rsa 0.10, still a release
-    # candidate (0.10.0-rc.18 on 2026-09-14), and the cms/x509-cert stack the
-    # signing code is built on has not moved to it (cms 0.3 is a pre-release).
-    #
-    # Exposure here: the private key is used once per `certify`, on the user's
-    # own machine, with their own key. The attack needs code on that machine
-    # measuring the timing of many signing operations — at which point the
-    # key file and the password prompt are the softer targets. Accepted on
-    # that basis; **ends when rsa 0.10 and cms 0.3 ship**, at which point the
-    # upgrade is owed and this line comes out. (Security audit M6, 2026-09-12.)
-    "RUSTSEC-2023-0071",
-]
+# Nothing is ignored. The one entry there was — RUSTSEC-2023-0071, the Marvin
+# timing side channel in the `rsa` crate, accepted on 2026-09-12 (security
+# audit M6) until rsa 0.10 shipped — ended on 2026-09-15 the other way: the
+# crate left the graph when signing moved to SM2 over SM3, and nothing signs
+# or verifies with RSA any more.
+ignore = []
 # Unmaintained crates are reported as warnings and not hidden: rustybuzz and
 # ttf-parser (RUSTSEC-2026-0206, -0192) parse document fonts for outlined
 # text, and their successors are a migration to plan, not an ignore to add.

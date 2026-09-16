@@ -105,9 +105,16 @@ cbc = { version = "0.1", features = ["alloc"] }
 sha2 = "0.10"
 # A PDF signature is a CMS SignedData blob over a byte range of the file
 # itself — see `crate::sign`. None of this is optional: a signature that is
-# not one is worse than none at all.
-rsa = { version = "0.9", features = ["sha2"] }
-cms = { version = "0.2", features = ["builder"] }
+# not one is worse than none at all. The signature is SM2 over SM3 and nothing
+# else (`pdf/sm.rs`); there is no `rsa` here, and with it no RUSTSEC-2023-0071.
+# `sm2` 0.13 and `sm3` 0.4 are the releases on the same `signature 2` /
+# `digest 0.10` generation as `cms` 0.2 and `sha2` 0.10 — the day `cms` moves
+# to `signature 3`, `sm2` moves to 0.14 in the same commit, or the trait
+# bounds fail in ways that look unrelated.
+# `cms` without its `builder` feature: the builder cannot describe an SM2
+# signer (see `detached_signature`), and the feature drags in `rsa`, `aes`,
+# `sha1` and `sha3` for key transport nothing here does.
+cms = { version = "0.2", features = ["alloc"] }
 der = { version = "0.7", features = ["oid"] }
 x509-cert = "0.2"
 const-oid = { version = "0.9", features = ["db"] }

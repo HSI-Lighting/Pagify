@@ -496,13 +496,23 @@ pub fn detached_signature(identity: &Identity, digest: &[u8]) -> Result<Vec<u8>>
         parameters: None,
     };
 
-    // The two attributes RFC 5652 requires whenever any are signed: what the
-    // content is, and its digest. The builder writes exactly these two.
+    // The two attributes RFC 5652 §11 requires whenever any are signed: what
+    // the content is, and its digest. What `cms`'s builder would write,
+    // written here — the builder is not linked, because its feature brings
+    // the `rsa` crate with it.
+    let attribute = |oid, tag, value: &[u8]| -> Result<x509_cert::attr::Attribute> {
+        let value = der::Any::new(tag, value).map_err(|_| internal("an attribute value"))?;
+        let mut values = der::asn1::SetOfVec::new();
+        values.insert(value).map_err(|_| internal("an attribute"))?;
+        Ok(x509_cert::attr::Attribute { oid, values })
+    };
     let attributes = SignedAttributes::try_from(vec![
-        cms::builder::create_content_type_attribute(content.econtent_type)
-            .map_err(|_| internal("the content-type attribute"))?,
-        cms::builder::create_message_digest_attribute(digest)
-            .map_err(|_| internal("the message-digest attribute"))?,
+        attribute(
+            const_oid::db::rfc5911::ID_CONTENT_TYPE,
+            der::Tag::ObjectIdentifier,
+            content.econtent_type.as_bytes(),
+        )?,
+        attribute(const_oid::db::rfc5911::ID_MESSAGE_DIGEST, der::Tag::OctetString, digest)?,
     ])
     .map_err(|_| internal("the signed attributes"))?;
 

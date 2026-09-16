@@ -326,10 +326,11 @@ one commit per finding, each with a test built from the audit's own input;
 - **Files reach the disk** through one path: staged beside the target with
   `create_new`, the target's own permissions kept, renamed over it whole.
 
-Still open, and said plainly: no certificate trust chain; the unmaintained
-font parsers (`rustybuzz`, `ttf-parser`) await a migration; the `rsa` upgrade
-is owed when 0.10 and `cms` 0.3 ship; words that are pixels are not
-redacted (the picture is reported).
+Still open, and said plainly: no certificate trust chain yet (one pinned
+root is the plan, `docs/SM2_SPIKE.md`); the unmaintained font parsers
+(`rustybuzz`, `ttf-parser`) await a migration; words that are pixels are not
+redacted (the picture is reported). The `rsa` upgrade that was owed is not:
+the crate is gone, and `tools/audit.sh` passes with nothing ignored.
 
 ## PDFium
 
