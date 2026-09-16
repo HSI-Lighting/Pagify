@@ -66,6 +66,10 @@ struct RootView: View {
             .tabItem { Label(HomeTab.library.label, systemImage: HomeTab.library.systemImage) }
             .tag(HomeTab.library)
 
+            ContactsScreen()
+                .tabItem { Label(HomeTab.contacts.label, systemImage: HomeTab.contacts.systemImage) }
+                .tag(HomeTab.contacts)
+
             SettingsScreen(
                 settings: appSettings.settings,
                 onThemeChange: { choice in
@@ -183,11 +187,13 @@ struct RootView: View {
 /// ignore it.
 enum HomeTab: String {
     case library = "library"
+    case contacts = "contacts"
     case settings = "settings"
 
     var label: String {
         switch self {
         case .library: return "Library"
+        case .contacts: return "Contacts"
         case .settings: return "Settings"
         }
     }
@@ -195,6 +201,7 @@ enum HomeTab: String {
     var systemImage: String {
         switch self {
         case .library: return "books.vertical"
+        case .contacts: return "person.crop.rectangle.stack"
         case .settings: return "gearshape.fill"
         }
     }

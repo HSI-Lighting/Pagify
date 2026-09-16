@@ -37,6 +37,7 @@ use crate::document::{
 use crate::engine;
 use crate::error::{PdfError, Result};
 use crate::contacts::BusinessCard;
+use crate::contacts::parse::{parse_card, split_cards, TextSegment};
 use crate::registry;
 use crate::render::{self, ImageFormat, Markup, PixelOrder, RenderTarget, Tile, ViewportRequest};
 
@@ -1155,6 +1156,36 @@ pub unsafe extern "C" fn pagify_vcards(
     })
 }
 
+/// Split a photograph's recognised text into cards and parse each one.
+///
+/// `segments_json` is a JSON array of `{left, top, right, bottom, text}` in
+/// the photograph's own pixel space, unscaled — the parser's rules are all
+/// relative position and relative text size, so the units cancel and neither
+/// side needs to agree on a resolution. Never null on success, possibly an
+/// empty array: whether an empty result is worth reporting is the caller's
+/// call, since it is the one that knows whether a QR code already answered
+/// the question. Caller frees the result with [`pagify_string_free`].
+///
+/// # Safety
+/// `segments_json` must be null or a NUL-terminated string valid for this
+/// call.
+#[no_mangle]
+pub unsafe extern "C" fn pagify_parse_photographed_card(
+    segments_json: *const c_char,
+) -> *mut c_char {
+    guard(std::ptr::null_mut(), || {
+        let segments_json = unsafe { required_str(segments_json, "segments_json") }?;
+        let segments: Vec<TextSegment> = serde_json::from_str(segments_json)
+            .map_err(|e| PdfError::InvalidArgument(format!("segments_json: {e}")))?;
+
+        let cards: Vec<BusinessCard> = split_cards(segments).iter().map(parse_card).collect();
+
+        let json = serde_json::to_string(&cards)
+            .map_err(|e| PdfError::InvalidArgument(format!("could not encode the cards: {e}")))?;
+        owned_string(json)
+    })
+}
+
 /// Read a scanned QR payload as a vCard. Returns null, with no message set,
 /// when `text` is well-formed but simply is not a vCard (an ordinary
 /// outcome — most QR codes on a business card hold a URL) — check
@@ -1267,6 +1298,26 @@ mod tests {
             message.is_null(),
             "an ordinary non-vCard payload must not look like a failure"
         );
+    }
+
+    #[test]
+    fn a_photograph_of_segments_becomes_a_card() {
+        // One small, unambiguous card: a name line, a phone line. Real
+        // pixel-space-shaped numbers, not normalised — this is exactly the
+        // JSON Vision's bounding boxes turn into on the Swift side.
+        let segments = cstr_in_static(
+            r#"[
+                {"left":100,"top":80,"right":420,"bottom":130,"text":"Jane Okafor"},
+                {"left":100,"top":150,"right":380,"bottom":190,"text":"+1 415 555 0100"}
+            ]"#,
+        );
+        let result = unsafe { pagify_parse_photographed_card(segments.as_ptr()) };
+        let json = string_out(result);
+
+        let cards: Vec<BusinessCard> = serde_json::from_str(&json).unwrap();
+        assert_eq!(cards.len(), 1, "one card's worth of lines, one card back");
+        assert_eq!(cards[0].name.as_ref().map(|f| f.value.as_str()), Some("Jane Okafor"));
+        assert_eq!(cards[0].phones.len(), 1);
     }
 
     #[test]

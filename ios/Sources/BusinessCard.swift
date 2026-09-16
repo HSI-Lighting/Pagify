@@ -12,6 +12,18 @@ struct Region: Codable, Equatable {
     var bottom: Double
 }
 
+/// One recognised line, in the photograph's own pixel space, unscaled — what
+/// `pagify_parse_photographed_card` expects as input. The parser's rules are
+/// all relative position and relative text size, so the units cancel and no
+/// platform-side scaling step is needed before this crosses the boundary.
+struct RecognisedTextSegment: Codable, Equatable {
+    var left: Float
+    var top: Float
+    var right: Float
+    var bottom: Float
+    var text: String
+}
+
 /// A value read off a card, with how sure the recogniser was and, when it came
 /// from a photograph, where on it — `region` is `nil` for anything from a QR
 /// code or typed by hand, per the Rust doc comment: there is nowhere on the

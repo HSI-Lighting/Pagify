@@ -160,6 +160,12 @@ void pagify_on_trim_memory(int32_t level);
 
 // -- contacts / vCard ----------------------------------------------------------
 
+/// Split a photograph's recognised text into cards and parse each one.
+/// `segments_json` is a JSON array of {left, top, right, bottom, text} in the
+/// photograph's own pixel space, unscaled. Returns a JSON array of
+/// BusinessCard (possibly empty), or NULL on failure.
+char *pagify_parse_photographed_card(const char *segments_json);
+
 /// Render one card (a JSON-encoded BusinessCard) as a single-VCARD vCard 3.0
 /// file. `exported_at` is an RFC 3339 UTC instant, written into REV. NULL on
 /// failure — see pagify_last_error_message().
