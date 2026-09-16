@@ -306,11 +306,18 @@ impl PendingKind {
     /// going back to the ribbon between every line, and drawing four sides of a
     /// box becomes four trips.
     ///
-    /// The exceptions are the two that answer a question rather than make a
-    /// mark: calibration is set once, and picking a run of text opens an editor
-    /// which is where the attention now belongs.
+    /// The exceptions are the ones that answer a question rather than make
+    /// a mark, or whose mark is immediately the thing to keep working on
+    /// rather than repeat: calibration is set once; picking a run of text
+    /// opens an editor which is where the attention now belongs; and a
+    /// placed signature is the same — what someone wants right after
+    /// placing one is almost always to move, resize or turn the one just
+    /// placed, not stamp another, and a tool left in hand would swallow
+    /// that very click, reading it as the start of a second signature
+    /// instead of a pick on the first (reported from use: "the scaling and
+    /// rotating isn't working" was this, not the drag math).
     fn repeats(&self) -> bool {
-        !matches!(self, PendingKind::Calibrate { .. } | PendingKind::PickText)
+        !matches!(self, PendingKind::Calibrate { .. } | PendingKind::PickText | PendingKind::Signature)
     }
 
     /// Whether Enter can end it early.
@@ -593,6 +600,20 @@ struct PagifyApp {
     /// same meaning as [`Self::grab`], kept separate because the two
     /// selections are independent and a signature is never page content.
     signature_grab: Option<Grab>,
+    /// The handle under the pointer as of the last frame it was only
+    /// *hovering* — read by [`Self::interact_signatures`] when a drag
+    /// starts, instead of hit-testing the drag's own current position.
+    ///
+    /// **Why this is not the same thing.** `egui` only decides a press has
+    /// become a drag once the pointer has moved past its own threshold, and
+    /// `drag_started()` reports the position *by then* — already a few
+    /// pixels off from wherever the button actually went down. Against an
+    /// eight-pixel handle that is enough to miss it entirely: a resize
+    /// aimed precisely at a corner was silently read as a body drag
+    /// instead, because by the time the drag was recognised the reported
+    /// point had already slid past the handle and onto the rect it sits
+    /// on. This is what was under the pointer just before that slide.
+    signature_hover_handle: Option<Handle>,
     /// The opacity slider's value while it is being dragged, before it is
     /// applied on release.
     opacity_draft: Option<f32>,
@@ -1757,6 +1778,7 @@ impl PagifyApp {
             grab: None,
             signature_selected: None,
             signature_grab: None,
+            signature_hover_handle: None,
             opacity_draft: None,
             command_open: false,
             ribbon: Tab::Home,
@@ -3396,22 +3418,39 @@ impl PagifyApp {
         at: AppPoint,
         view: PageView,
     ) -> bool {
+        // Read before the hover block below can overwrite it — see
+        // `Self::signature_hover_handle`'s own doc for why a drag that has
+        // just started must be classified against *that*, not against a
+        // fresh hit-test at `at`.
+        let remembered_handle = self.signature_hover_handle;
+
         if self.signature_grab.is_none() {
             if let Some(sel) = self.signature_selected.as_ref().filter(|s| s.page == page) {
-                if let Some(handle) = self.signature_handle_at(at, view) {
+                let handle = self.signature_handle_at(at, view);
+                self.signature_hover_handle = handle;
+                if let Some(handle) = handle {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &sel.rect) {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
                 }
+            } else {
+                self.signature_hover_handle = None;
             }
         }
 
         if response.drag_started() {
+            // **Not a fresh hit-test at `at`.** `egui` only decides a press
+            // has become a drag once the pointer has moved past its own
+            // threshold, and by then `at` has already slid off an
+            // eight-pixel handle and onto the rect it sits on — silently
+            // turning an aimed resize into a body move. `remembered_handle`
+            // is whatever was under the pointer the frame before that
+            // slide, which for a real press is exactly where it went down.
             let on_handle = self
                 .signature_selected
                 .as_ref()
                 .filter(|s| s.page == page)
-                .and_then(|_| self.signature_handle_at(at, view));
+                .and_then(|_| remembered_handle);
             let on_body = self
                 .signature_selected
                 .as_ref()
@@ -12896,6 +12935,131 @@ mod ui_tests {
         h.run_steps(1);
     }
 
+    /// A small solid picture, as an uploaded signature file would decode to
+    /// — the same helper `lock_wiring_tests` keeps its own copy of.
+    fn solid_rgba(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+        }
+        rgba
+    }
+
+    /// **The real pointer path, not just the commit function.** Every
+    /// signature move/resize/rotate test in `lock_wiring_tests` drives
+    /// `finish_signature_grab` directly — proving the arithmetic, never
+    /// that a real click-and-drag actually reaches it, or that placing one
+    /// leaves the tool out of the way afterward. This one goes through
+    /// `Harness` instead, where `drag` and `click` already live: a real
+    /// click places the signature, a second real click selects it, and a
+    /// real drag on its bottom-right handle resizes it — start to finish
+    /// the way someone actually using the app would, not the commit shape
+    /// either side of it already has covered.
+    #[test]
+    fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
+        let mut h = harness("two-column.pdf");
+        let path = std::env::temp_dir()
+            .join(format!("pagify-test-signatures-{}-real-drag.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        h.state_mut().signatures = Default::default();
+        h.state_mut().signatures_path = Some(path.clone());
+        h.state_mut()
+            .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
+            .expect("kept");
+        let view = h.state().last_view.expect("the page was never drawn");
+
+        h.state_mut().submit("signature");
+        h.run_steps(1);
+        click(&mut h, view.to_screen(AppPoint { x: 100.0, y: 400.0 }));
+        assert!(
+            h.state().pending.is_none(),
+            "the signature tool stayed armed after placing one, and would have swallowed \
+             the very next click instead of selecting what was just placed"
+        );
+
+        let mark = h.state().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+
+        let middle = view.to_screen(AppPoint {
+            x: ((mark.rect.left + mark.rect.right) / 2.0) as f64,
+            y: ((mark.rect.top + mark.rect.bottom) / 2.0) as f64,
+        });
+        click(&mut h, middle);
+        assert!(
+            h.state().signature_selected.is_some(),
+            "clicking the signature through a real pointer event did not select it"
+        );
+
+        let corner = view.to_screen(AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 });
+        let (w, ht) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
+        let target = view.to_screen(AppPoint {
+            x: (mark.rect.right - w / 2.0) as f64,
+            y: (mark.rect.bottom - ht / 2.0) as f64,
+        });
+        drag(&mut h, corner, target);
+
+        let resized = h.state().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        assert!(
+            (resized.rect.right - resized.rect.left) < w - 1.0,
+            "dragging the bottom-right handle through a real pointer event did not resize the \
+             signature: before {:?}, after {:?}",
+            mark.rect,
+            resized.rect
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The rotate ring, the same way: a real click to place, a real click
+    /// to select, then a real drag starting exactly where the ring is
+    /// drawn.
+    #[test]
+    fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
+        let mut h = harness("two-column.pdf");
+        let path = std::env::temp_dir()
+            .join(format!("pagify-test-signatures-{}-real-rotate.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        h.state_mut().signatures = Default::default();
+        h.state_mut().signatures_path = Some(path.clone());
+        h.state_mut()
+            .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
+            .expect("kept");
+        let view = h.state().last_view.expect("the page was never drawn");
+
+        h.state_mut().submit("signature");
+        h.run_steps(1);
+        click(&mut h, view.to_screen(AppPoint { x: 100.0, y: 400.0 }));
+        assert!(
+            h.state().pending.is_none(),
+            "the signature tool stayed armed after placing one, and would have swallowed \
+             the very next click instead of selecting what was just placed"
+        );
+
+        let mark = h.state().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+
+        let middle = view.to_screen(AppPoint {
+            x: ((mark.rect.left + mark.rect.right) / 2.0) as f64,
+            y: ((mark.rect.top + mark.rect.bottom) / 2.0) as f64,
+        });
+        click(&mut h, middle);
+        assert!(
+            h.state().signature_selected.is_some(),
+            "clicking the signature did not select it"
+        );
+
+        let ring = PagifyApp::rotate_handle_screen_pos(&mark.rect, view);
+        drag(&mut h, ring, ring + egui::vec2(60.0, 0.0));
+
+        let turned = h.state().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        assert!(
+            (turned.rotation - mark.rotation).abs() > 1.0,
+            "dragging the rotate ring through a real pointer event did not turn the signature: \
+             rotation stayed {}",
+            turned.rotation
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// The Home screen with nothing open — where the fonts panel lives — full
     /// window, real layout, not just the state `pointer_tests` checks.
     ///
@@ -14805,6 +14969,17 @@ mod redaction_wiring_tests {
     #[test]
     fn the_redaction_tool_stays_armed() {
         assert!(PendingKind::Redact.repeats());
+    }
+
+    /// **The signature tool is the odd one out.** Every other one-point
+    /// tool stays armed so a run of stamps does not mean a trip to the
+    /// ribbon between each one. A signature is different: the click right
+    /// after placing one is almost always aimed at adjusting the picture
+    /// just placed, not starting another, and a tool still in hand would
+    /// have taken that click for itself.
+    #[test]
+    fn the_signature_tool_does_not_stay_armed() {
+        assert!(!PendingKind::Signature.repeats());
     }
 
     /// **Snapping is off for it.** A redaction is placed against words, and the
