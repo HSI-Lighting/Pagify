@@ -157,7 +157,7 @@ struct ContactDetailView: View {
                                 Text("Due").font(.caption).foregroundStyle(.orange)
                             }
                         }
-                        Button("Clear", role: .destructive) { contact.setFollowUp(nil) }
+                        Button("Clear", role: .destructive) { setFollowUp(nil) }
                     }
                     HStack {
                         followUpShortcut("3 days", Calendar.current.date(byAdding: .day, value: 3, to: .now))
@@ -212,11 +212,30 @@ struct ContactDetailView: View {
             .toolbar {
                 if isNew {
                     ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") { dismiss() }
+                        Button("Cancel") {
+                            // Best-effort: a follow-up set before Save was
+                            // ever tapped can only have been scheduled
+                            // against a temporary, pre-save identifier (see
+                            // the matching comment below), so there is
+                            // nothing guaranteed to actually cancel — but
+                            // nothing is lost by trying.
+                            Reminders.cancelFollowUp(for: contact)
+                            dismiss()
+                        }
                     }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Save") {
                             modelContext.insert(contact)
+                            // A freshly-inserted object's `persistentModelID`
+                            // is temporary until the context actually saves —
+                            // encoding it into a notification identifier
+                            // before that would embed an id that stops
+                            // matching the object the moment autosave
+                            // promotes it. An explicit save here, rather than
+                            // waiting on autosave, is what makes scheduling
+                            // right after safe.
+                            try? modelContext.save()
+                            Reminders.scheduleFollowUp(for: contact)
                             dismiss()
                         }
                     }
@@ -248,7 +267,12 @@ struct ContactDetailView: View {
             }
             .sheet(isPresented: $addingMeeting) {
                 NavigationStack {
-                    DatePicker("Meeting Time", selection: $newMeetingDate)
+                    // Matches Android's `DateAndTimePicker`: days and times
+                    // that have already gone are not offered at all, rather
+                    // than accepted and then silently never reminded about —
+                    // a meeting whose reminder can't fire is worse than a
+                    // picker that refuses the moment before it's picked.
+                    DatePicker("Meeting Time", selection: $newMeetingDate, in: Date.now...)
                         .datePickerStyle(.graphical)
                         .padding()
                         .navigationTitle("Arrange a Meeting")
@@ -262,6 +286,14 @@ struct ContactDetailView: View {
                                     let meeting = Meeting(at: newMeetingDate)
                                     meeting.contact = contact
                                     modelContext.insert(meeting)
+                                    // Same reasoning as the new-contact Save
+                                    // button: a temporary id encoded now
+                                    // would stop matching this meeting the
+                                    // moment autosave promotes it, so save
+                                    // explicitly before scheduling rather
+                                    // than after.
+                                    try? modelContext.save()
+                                    Reminders.scheduleMeeting(meeting)
                                     addingMeeting = false
                                 }
                             }
@@ -278,7 +310,9 @@ struct ContactDetailView: View {
             }
             .sheet(isPresented: $customFollowUpShowing) {
                 NavigationStack {
-                    DatePicker("Follow Up", selection: $customFollowUpDate)
+                    // Same restriction as the meeting picker above, same
+                    // Android source (`DateAndTimePicker` backs both).
+                    DatePicker("Follow Up", selection: $customFollowUpDate, in: Date.now...)
                         .datePickerStyle(.graphical)
                         .padding()
                         .navigationTitle("Follow Up")
@@ -289,7 +323,7 @@ struct ContactDetailView: View {
                             }
                             ToolbarItem(placement: .confirmationAction) {
                                 Button("Set") {
-                                    contact.setFollowUp(customFollowUpDate)
+                                    setFollowUp(customFollowUpDate)
                                     customFollowUpShowing = false
                                 }
                             }
@@ -342,10 +376,19 @@ struct ContactDetailView: View {
 
     private func followUpShortcut(_ label: String, _ date: Date?) -> some View {
         Button(label) {
-            if let date { contact.setFollowUp(date) }
+            if let date { setFollowUp(date) }
         }
         .buttonStyle(.bordered)
         .disabled(date == nil)
+    }
+
+    /// The one place `contact.followUpAt` changes, so the reminder that
+    /// answers it can never fall out of step — same reasoning `setFollowUp`
+    /// itself already gives for existing at all, just one call site further
+    /// out now that scheduling a notification isn't the model layer's job.
+    private func setFollowUp(_ date: Date?) {
+        contact.setFollowUp(date)
+        Reminders.scheduleFollowUp(for: contact)
     }
 
     @ViewBuilder
@@ -361,6 +404,7 @@ struct ContactDetailView: View {
             }
             Spacer()
             Button(role: .destructive) {
+                Reminders.cancelMeeting(meeting)
                 modelContext.delete(meeting)
             } label: {
                 Image(systemName: "xmark.circle.fill")

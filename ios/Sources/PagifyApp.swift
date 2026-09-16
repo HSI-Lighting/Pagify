@@ -1,9 +1,16 @@
 import SwiftUI
 import SwiftData
+import UserNotifications
 
 @main
 struct PagifyApp: App {
     @StateObject private var appSettings = AppSettingsStore()
+
+    init() {
+        UNUserNotificationCenter.current().delegate = reminderCenterDelegate
+        Reminders.registerCategories()
+        Reminders.requestAuthorizationIfNeeded()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -34,6 +41,7 @@ struct RootView: View {
     @EnvironmentObject private var appSettings: AppSettingsStore
     @StateObject private var recents = RecentDocumentsStore()
     @StateObject private var model = ReaderModel()
+    @Environment(\.modelContext) private var modelContext
 
     /// Survives being backgrounded: turning the phone or coming back to the app
     /// while reading the settings should not quietly put you in the library.
@@ -99,6 +107,10 @@ struct RootView: View {
         .task {
             model.start(recents: recents)
             openLaunchArgumentDocument()
+            // The delegate is created before SwiftData's environment exists,
+            // so this is the first moment it can actually reach a context.
+            reminderCenterDelegate.context = modelContext
+            Reminders.resyncAll(context: modelContext)
         }
         // A file handed to us by Files, Mail, or another app.
         .onOpenURL { url in
