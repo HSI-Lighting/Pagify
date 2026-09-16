@@ -2332,18 +2332,23 @@ impl PagifyApp {
     /// nothing else — not the history, not the recording, not the recent list.
     ///
     /// Returns whether the line was taken.
+    ///
+    /// **The guard is `is_none`, not `is_some`.** Nothing is being asked for
+    /// most of the time, and that is exactly when this must do nothing and
+    /// leave the box alone — an inverted guard here cleared and swallowed
+    /// every ordinary command's Enter, silently, because `CommandBox::submit`
+    /// never got to see what had been typed. Found live, not in review: no
+    /// test exercises a real keystroke-and-Enter through this box (every
+    /// existing test calls the `submit(&str)` shortcut below, which never
+    /// passes through here at all), so nothing caught it until someone typed
+    /// `status` and pressed Enter and nothing happened.
     fn consume_password_line(&mut self) -> bool {
-        // Opening asks in a window; everything else asks here. Without this the
-        // command box would take a line meant for the window, and the person
-        // would be typing their password into two places at once.
-        // Opening and locking both ask in a window; only the `secure` prompts
-        // still use the command box. Without this the box would take a line
-        // meant for a window, and somebody would be typing a passcode into two
-        // places at once.
-        // Every password is asked for in a window now, so the command box
-        // never takes one — otherwise a password typed while a window is up
-        // goes somewhere nobody expected.
-        if self.awaiting_password.is_some() {
+        // Opening, locking and securing all still ask here rather than in a
+        // window of their own — see the match below. Only when *nothing* is
+        // being asked must this leave the box alone, or a password prompt
+        // still open at all is a plain command that was actually meant for a
+        // window somewhere.
+        if self.awaiting_password.is_none() {
             return false;
         }
         let typed = self.cmd.input_mut().trim().to_string();
@@ -9677,6 +9682,23 @@ impl eframe::App for PagifyApp {
         let mut home_command: Option<String> = None;
         egui::CentralPanel::default_margins().show(ui, |ui| {
             self.canvas_pt = ui.available_size();
+
+            // **The command box's own placeholder says "type a command" —
+            // make that literally true from the first frame.** Nothing on
+            // either "nothing open" screen (the File-tab backstage a fresh
+            // launch lands on, or this Home tab) takes keyboard focus by
+            // default, so typing right after launch went nowhere: not even
+            // into the box, just silently discarded, with no widget to
+            // route it to. Reported from use as `status` "trying to open a
+            // file" — what actually happened was a click aimed at finding
+            // somewhere to type landing on a button instead, because
+            // nothing told the thin command bar apart from the rest of an
+            // empty screen. Only when nothing has already claimed focus: a
+            // real click anywhere else must still win.
+            if self.doc.is_none() && ctx.memory(|m| m.focused()).is_none() {
+                ctx.memory_mut(|m| m.request_focus(command_id));
+            }
+
             if backstage {
                 let chosen = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -12729,6 +12751,26 @@ mod pointer_tests {
         assert!(app.doc.is_some(), "the right password did not open it:\n{}", said(&app));
     }
 
+    /// **The same thing, but typed into the box and submitted the way the
+    /// window's own field would be** — `submit`, not `answer_open_password`
+    /// directly, so this actually goes through `consume_password_line`.
+    /// Every other password test in this file calls the lower-level answer
+    /// methods instead, which is exactly how an inverted guard in
+    /// `consume_password_line` (it cleared and swallowed the typed password
+    /// whenever one *was* being asked for, the opposite of what it must do)
+    /// went unnoticed: nothing else ever asked it to actually consume a line.
+    #[test]
+    fn typing_the_right_password_and_submitting_opens_it() {
+        let mut app = PagifyApp::new(None);
+        app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
+        assert!(app.awaiting_password.is_some(), "the fixture did not ask for a password");
+
+        app.submit("pagify");
+
+        assert!(app.awaiting_password.is_none(), "still asking:\n{}", said(&app));
+        assert!(app.doc.is_some(), "typing the right password did not open it:\n{}", said(&app));
+    }
+
     #[test]
     fn escape_gives_up_on_the_password() {
         let mut app = PagifyApp::new(None);
@@ -13095,6 +13137,62 @@ mod ui_tests {
         // Nothing to remove with none configured — confirms the query above
         // is not simply matching everything on screen.
         assert!(h.query_by_label_contains("Remove").is_none());
+    }
+
+    /// **The command box's own placeholder says "type a command" — that has
+    /// to be true from the first frame.** Nothing on a fresh Home screen
+    /// took keyboard focus by default, so typing immediately after launch
+    /// went nowhere at all: not an error, not even into the box, just
+    /// silently discarded with no widget to route it to. Reported from use
+    /// as `status` "trying to open a file" — the actual mechanism was a
+    /// click aimed at finding somewhere to type landing on the prominent
+    /// "Open a PDF…" button instead, because the thin command bar gave no
+    /// sign it was the thing to click.
+    #[test]
+    fn the_command_box_is_focused_on_a_fresh_home_screen() {
+        let mut app = PagifyApp::new(None);
+        app.outlined_fonts = Default::default();
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(1400.0, 1000.0))
+            .build_ui_state(
+                |ui, app: &mut PagifyApp| {
+                    let mut frame = eframe::Frame::_new_kittest();
+                    app.ui(ui, &mut frame);
+                },
+                app,
+            );
+        h.run_steps(4);
+        assert!(
+            h.ctx.memory(|m| m.has_focus(egui::Id::new(COMMAND_INPUT))),
+            "the command box does not have focus on a fresh Home screen (ribbon: {:?})",
+            h.state().ribbon
+        );
+
+        // Typing immediately, with nothing clicked first, must reach the
+        // box and be submittable — the whole point of focusing it early.
+        for ch in "status".chars() {
+            h.input_mut().events.push(egui::Event::Text(ch.to_string()));
+            h.run_steps(1);
+        }
+        assert_eq!(h.state().cmd.input(), "status", "typing did not land in the box");
+        for pressed in [true, false] {
+            h.input_mut().events.push(egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: Default::default(),
+            });
+        }
+        h.run_steps(2);
+        let history: Vec<String> = h.state().cmd.history().iter().map(|e| e.text.clone()).collect();
+        assert!(
+            history.iter().any(|line| line == "status"),
+            "typing \"status\" with nothing clicked first was not submitted: {history:?}; \
+             box now reads {:?}; box has focus: {}",
+            h.state().cmd.input(),
+            h.ctx.memory(|m| m.has_focus(egui::Id::new(COMMAND_INPUT))),
+        );
     }
 
     /// The same screen with a font configured — set directly on the in-memory
