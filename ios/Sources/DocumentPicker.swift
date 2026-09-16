@@ -14,7 +14,16 @@ struct DocumentPicker: UIViewControllerRepresentable {
     let onPick: (URL) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.pdf], asCopy: false)
+        // STEP/DXF/DWG have no system-registered UTType — `UTType(filenameExtension:)`
+        // synthesises a dynamic one conforming to `.data`, which is enough for
+        // the picker to offer files by that extension even though iOS has
+        // never heard of the format itself.
+        let modelAndDrawingTypes = ["step", "stp", "p21", "dxf", "dwg"]
+            .compactMap { UTType(filenameExtension: $0) }
+        let picker = UIDocumentPickerViewController(
+            forOpeningContentTypes: [.pdf] + modelAndDrawingTypes,
+            asCopy: false
+        )
         picker.delegate = context.coordinator
         picker.allowsMultipleSelection = false
         return picker

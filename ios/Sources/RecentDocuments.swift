@@ -1,5 +1,28 @@
 import Foundation
 
+/// Which of the app's three viewers a file belongs in — matches Android's
+/// own `RecentKind`. Decided by extension, never by sniffing the contents:
+/// a `.dxf` that is really something else is somebody's mistake, and
+/// quietly reading it anyway would hide the mistake rather than surface it,
+/// the same reasoning `drawing::session::open` itself already gives for
+/// choosing DWG vs DXF the same way.
+enum RecentKind: String {
+    case document
+    case model
+    case drawing
+
+    /// `"step"`/`"stp"`/`"p21"` → a STEP model; `"dxf"`/`"dwg"` → a
+    /// drawing; everything else → the PDF reader, matching
+    /// `core/RecentDocuments.kt`'s own `kindOfFile`.
+    static func of(filename: String) -> RecentKind {
+        switch (filename as NSString).pathExtension.lowercased() {
+        case "step", "stp", "p21": return .model
+        case "dxf", "dwg": return .drawing
+        default: return .document
+        }
+    }
+}
+
 /// A document the reader has opened before.
 ///
 /// Held by URL string rather than by path because that is what the app is
@@ -35,6 +58,12 @@ struct RecentDocument: Identifiable, Equatable {
     /// navigating back. Android has no equivalent field, so it is written under a
     /// key of its own and read as optional.
     var bookmark: Data?
+
+    /// Which viewer reopens this row. Defaults to `.document` so every
+    /// existing library file — written before this field existed, on either
+    /// platform — still decodes: an absent kind is a PDF, which is all
+    /// there ever was before.
+    var kind: RecentKind = .document
 
     var id: String { uri }
 }
@@ -117,7 +146,11 @@ private let openedAtFormatter: DateFormatter = {
 func recentSubtitle(_ document: RecentDocument) -> String {
     [
         formatOpenedAt(document.openedAtMillis),
-        document.pageCount > 0
+        // A page count means nothing for a model or a drawing — its own
+        // viewer already gives a much more specific line (face count,
+        // shape/layer count) the moment it's open — so the library row
+        // just doesn't claim a count the field was never measuring.
+        document.kind == .document && document.pageCount > 0
             ? "\(document.pageCount) page\(document.pageCount == 1 ? "" : "s")"
             : "",
         formatFileSize(document.sizeBytes),
@@ -145,6 +178,12 @@ func recentsJSON(_ documents: [RecentDocument]) -> String {
         ]
         if let bookmark = document.bookmark {
             fields.append("\(jsonQuoted("bookmark")):\(jsonQuoted(bookmark.base64EncodedString()))")
+        }
+        // Omitted entirely for the common case rather than always written,
+        // so a library file with nothing but PDFs in it — everyone's, until
+        // today — round-trips byte-for-byte unchanged.
+        if document.kind != .document {
+            fields.append("\(jsonQuoted("kind")):\(jsonQuoted(document.kind.rawValue))")
         }
         return "{\(fields.joined(separator: ","))}"
     }
@@ -176,7 +215,8 @@ func recentsFromJSON(_ data: Data) -> [RecentDocument] {
             sizeBytes: (row["sizeBytes"] as? NSNumber)?.int64Value ?? 0,
             pageCount: (row["pageCount"] as? NSNumber)?.intValue ?? 0,
             openedAtMillis: (row["openedAtMillis"] as? NSNumber)?.int64Value ?? 0,
-            bookmark: (row["bookmark"] as? String).flatMap { Data(base64Encoded: $0) })
+            bookmark: (row["bookmark"] as? String).flatMap { Data(base64Encoded: $0) },
+            kind: (row["kind"] as? String).flatMap(RecentKind.init) ?? .document)
     }
 }
 
@@ -238,7 +278,7 @@ final class RecentDocumentsStore: ObservableObject {
     }
 
     /// Remember a document the reader just opened, taking a bookmark for it.
-    func remember(url: URL, name: String, pageCount: Int) {
+    func remember(url: URL, name: String, pageCount: Int, kind: RecentKind = .document) {
         // Only a security-scoped URL yields a scoped bookmark, and only inside an
         // access. A file in our own container needs no scope and no bookmark.
         let bookmark = try? url.bookmarkData(options: .minimalBookmark,
@@ -258,7 +298,8 @@ final class RecentDocumentsStore: ObservableObject {
             sizeBytes: size,
             pageCount: pageCount,
             openedAtMillis: Int64(Date().timeIntervalSince1970 * 1000),
-            bookmark: bookmark))
+            bookmark: bookmark,
+            kind: kind))
         write()
     }
 

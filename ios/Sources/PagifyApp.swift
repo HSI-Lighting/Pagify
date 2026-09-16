@@ -51,6 +51,12 @@ struct RootView: View {
     @State private var chooserShowing = false
     @State private var isPicking = false
     @State private var showingBlankSheet = false
+    /// Drives the STEP/drawing full-screen covers below — a separate pair
+    /// from `inDocument`/`model`, since neither viewer is `ReaderModel`'s
+    /// concern: `ReaderModel` stays exactly the PDF-only 1500-line file it
+    /// already was, and a model or drawing never enters it at all.
+    @State private var openModel: OpenedFile?
+    @State private var openDrawing: OpenedFile?
 
     /// Reader chrome, held here only until it has somewhere better to live.
     ///
@@ -104,6 +110,12 @@ struct RootView: View {
             ReaderView(model: model)
                 .environmentObject(appSettings)
         }
+        .fullScreenCover(item: $openModel) { file in
+            ModelViewerScreen(file: file, recents: recents) { openModel = nil }
+        }
+        .fullScreenCover(item: $openDrawing) { file in
+            DrawingViewerScreen(file: file, recents: recents) { openDrawing = nil }
+        }
         .task {
             model.start(recents: recents)
             openLaunchArgumentDocument()
@@ -114,8 +126,7 @@ struct RootView: View {
         }
         // A file handed to us by Files, Mail, or another app.
         .onOpenURL { url in
-            model.open(picked: url)
-            enterReader()
+            openAny(url: url)
         }
         .confirmationDialog("Add a document", isPresented: $chooserShowing,
                             titleVisibility: .visible) {
@@ -129,8 +140,7 @@ struct RootView: View {
         .sheet(isPresented: $isPicking) {
             DocumentPicker { url in
                 isPicking = false
-                model.open(picked: url)
-                enterReader()
+                openAny(url: url)
             }
         }
         .sheet(isPresented: $showingBlankSheet) {
@@ -162,8 +172,7 @@ struct RootView: View {
         let path = arguments[arguments.index(after: flag)]
         guard FileManager.default.fileExists(atPath: path) else { return }
 
-        model.open(url: URL(fileURLWithPath: path), scoped: false)
-        enterReader()
+        openAny(url: URL(fileURLWithPath: path))
     }
 
     /// Open a row from the library.
@@ -176,8 +185,31 @@ struct RootView: View {
             model.failure = "\(document.name) has moved or been deleted."
             return
         }
-        model.open(url: resolved.url, scoped: resolved.scoped)
-        enterReader()
+        switch document.kind {
+        case .document:
+            model.open(url: resolved.url, scoped: resolved.scoped)
+            enterReader()
+        case .model:
+            openModel = OpenedFile(url: resolved.url, alreadyScoped: resolved.scoped)
+        case .drawing:
+            openDrawing = OpenedFile(url: resolved.url, alreadyScoped: resolved.scoped)
+        }
+    }
+
+    /// The other three ways in — the picker, `.onOpenURL`, and (PDF only)
+    /// the `-openDocument` launch argument — hand over a fresh URL with no
+    /// access taken yet, unlike a library row's already-resolved one, so
+    /// each destination takes it in the same call that opens the file.
+    private func openAny(url: URL) {
+        switch RecentKind.of(filename: url.lastPathComponent) {
+        case .document:
+            model.open(picked: url)
+            enterReader()
+        case .model:
+            openModel = OpenedFile(url: url, alreadyScoped: false)
+        case .drawing:
+            openDrawing = OpenedFile(url: url, alreadyScoped: false)
+        }
     }
 
     /// Take the screen, if there is now something to show on it.
@@ -189,6 +221,20 @@ struct RootView: View {
     private func enterReader() {
         inDocument = model.document != nil
     }
+}
+
+/// A URL handed to `ModelViewerScreen`/`DrawingViewerScreen`, wrapped so
+/// `.fullScreenCover(item:)` has an `Identifiable` to key off.
+///
+/// `alreadyScoped` distinguishes a library row's URL (`recents.resolve`
+/// already called `startAccessingSecurityScopedResource()`) from a fresh
+/// one from the picker or `.onOpenURL` (nothing called yet) — the viewer's
+/// own `open()` only calls it itself when this is false, so the two paths
+/// never double-start the same access.
+struct OpenedFile: Identifiable {
+    let url: URL
+    let alreadyScoped: Bool
+    var id: String { url.absoluteString }
 }
 
 /// Where the tab bar can take you.
