@@ -158,6 +158,79 @@ char *pagify_get_cache_stats_json(int64_t handle);
 /// The onTrimMemory twin: >= 80 closes documents, lower only drops cached rasters.
 void pagify_on_trim_memory(int32_t level);
 
+// -- 3D model (STEP) ------------------------------------------------------------
+//
+// One flattened mesh plus a trackball camera — a STEP assembly's parts are
+// placed in world space during tessellation and never exposed as a tree (see
+// rust/pdf_core/src/step/assembly.rs). orbit/pan/zoom/fit only move the
+// camera; call pagify_render_model_into again afterwards for a fresh frame.
+
+/// Opens by path; NULL/-1 sentinel conventions match pagify_open_document.
+/// Failure is most often the audit's own refusal sentence (too many faces, no
+/// solid found) rather than a generic message — see pagify_last_error_message().
+int64_t pagify_open_model(const char *path);
+bool pagify_close_model(int64_t handle);
+char *pagify_model_summary_json(int64_t handle);
+
+/// across/down are fractions of the view, not pixels — matches Android's own
+/// orbit/pan exactly, including using the view *width* for both axes so a
+/// non-square viewport doesn't skew one axis against the other.
+int32_t pagify_orbit_model(int64_t handle, float across, float down);
+int32_t pagify_pan_model(int64_t handle, float across, float down);
+/// by > 1 moves closer, matching a pinch's apart/lastApart ratio.
+int32_t pagify_zoom_model(int64_t handle, float by);
+int32_t pagify_fit_model(int64_t handle);
+
+/// Same contract as pagify_render_page_into: stride must be at least
+/// width * 4, and the buffer must be `stride * height` bytes, writable for
+/// the call. Always RGBA8 (the software rasteriser has no separate byte-order
+/// mode) — convert if the destination needs BGRA.
+int32_t pagify_render_model_into(int64_t handle, uint32_t width, uint32_t height,
+                                 uint8_t *pixels, size_t stride);
+
+// -- drawings (DXF/DWG) -----------------------------------------------------------
+//
+// DWG and DXF are not two engines: dwg.rs converts into the exact same
+// `Drawing` type dxf.rs parses directly, so everything past open — render,
+// pan, zoom, measure, layers — is one code path regardless of which file
+// came in. Hatching needs no entry point of its own: it is expanded into
+// strokes inside the render call, scaled to the current zoom.
+
+/// font_name may be NULL; if given, it must already be registered with
+/// pagify_register_font. Drawings carry no usable font of their own
+/// (SHX/Windows fonts never travel with CAD files) — best-effort, a missing
+/// or unreadable font does not fail the open.
+int64_t pagify_open_drawing(const char *path, const char *font_name);
+bool pagify_close_drawing(int64_t handle);
+char *pagify_drawing_summary_json(int64_t handle);
+/// Layer list as JSON: name, visibility, colour.
+char *pagify_drawing_layers_json(int64_t handle);
+int32_t pagify_show_drawing_layer(int64_t handle, int64_t at, bool visible);
+
+/// across/down are fractions of the view (a one-finger drag); width/height
+/// are the current viewport size, since the pan distance in drawing-space
+/// depends on the current zoom scale.
+int32_t pagify_pan_drawing(int64_t handle, float across, float down,
+                          uint32_t width, uint32_t height);
+/// at_x/at_y are a screen-space anchor (pixels, e.g. a pinch's midpoint) that
+/// stays fixed on screen; by > 1 moves closer.
+int32_t pagify_zoom_drawing(int64_t handle, float by, float at_x, float at_y,
+                           uint32_t width, uint32_t height);
+int32_t pagify_fit_drawing(int64_t handle, uint32_t width, uint32_t height);
+
+/// Places a measure point at a screen position, snapped to nearby geometry,
+/// and returns the running measurement as JSON — what was snapped to, and
+/// once two points are placed, the distance in the drawing's own units
+/// (never converted to metric: half of these files never declare real-world
+/// units). A third tap starts over rather than chaining.
+char *pagify_measure_drawing_at(int64_t handle, float at_x, float at_y,
+                                uint32_t width, uint32_t height);
+int32_t pagify_clear_drawing_measure(int64_t handle);
+
+/// Same contract as pagify_render_page_into/pagify_render_model_into.
+int32_t pagify_render_drawing_into(int64_t handle, uint32_t width, uint32_t height,
+                                   uint8_t *pixels, size_t stride);
+
 // -- contacts / vCard ----------------------------------------------------------
 
 /// Split a photograph's recognised text into cards and parse each one.

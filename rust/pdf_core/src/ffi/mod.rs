@@ -28,6 +28,13 @@ use std::cell::RefCell;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::AssertUnwindSafe;
 
+// The 3D model (STEP) and drawing (DXF/DWG) viewers each get their own file,
+// mirroring Android's own per-feature JNI bridges (`step_bridge.rs`,
+// `drawing_bridge.rs`) — this file was already large enough before adding a
+// dozen more entry points apiece.
+pub mod drawing;
+pub mod model;
+
 use crate::command::Command;
 use crate::document::blank::{blank_document, Ruling};
 use crate::document::pdfium_doc::PdfiumDocument;

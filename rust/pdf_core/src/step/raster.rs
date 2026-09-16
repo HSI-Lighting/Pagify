@@ -1,0 +1,719 @@
+//! Triangles into pixels.
+//!
+//! A software rasteriser with a depth buffer. No GPU, no new platform surface:
+//! it writes into the same kind of buffer the PDF renderer already fills, so a
+//! 3D view is another producer of pixels for a bitmap that Kotlin and Swift
+//! already know how to display.
+//!
+//! # A depth buffer, not a depth sort
+//!
+//! Sorting triangles back to front and painting in order is the obvious cheap
+//! answer and it is wrong on exactly the geometry a CAD part is made of: two
+//! faces that pass through each other have no correct order, and neither does a
+//! cycle of three. A depth buffer decides per pixel, has no such failure, and
+//! costs one comparison and one float per pixel.
+//!
+//! # Flat shading
+//!
+//! One normal per triangle, which for machined geometry is what the surface
+//! actually does: a chamfer *is* flat, and smoothing across it invents a
+//! roundness the part does not have. Curved faces get their normals from the
+//! surface rather than the triangle — see [`super::tessellate`] — so a cylinder
+//! still shades smoothly without any per-vertex interpolation here.
+
+use super::camera::Camera;
+use super::model::Point3;
+use super::tessellate::{Mesh, Triangle};
+
+/// The picture, as bytes.
+///
+/// RGBA, one byte each, rows top to bottom with no padding. Converting to
+/// whatever the platform wants happens where every other raster in this crate
+/// is converted, rather than being a second thing this module has to know.
+pub struct Canvas {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    depth: Vec<f32>,
+}
+
+impl Canvas {
+    pub fn new(width: u32, height: u32) -> Self {
+        let count = (width as usize) * (height as usize);
+        Self {
+            width,
+            height,
+            pixels: vec![0; count * 4],
+            // Positive depth is distance from the eye, so everything starts
+            // infinitely far away and the first triangle to arrive wins.
+            depth: vec![f32::INFINITY; count],
+        }
+    }
+
+    pub fn fill(&mut self, colour: [u8; 4]) {
+        for pixel in self.pixels.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&colour);
+        }
+    }
+
+    fn put(&mut self, x: u32, y: u32, depth: f32, colour: [u8; 4]) {
+        let at = (y as usize) * (self.width as usize) + (x as usize);
+        if depth >= self.depth[at] {
+            return;
+        }
+        self.depth[at] = depth;
+        self.pixels[at * 4..at * 4 + 4].copy_from_slice(&colour);
+    }
+
+    /// How far the nearest thing at a pixel is, for tests to look at.
+    pub fn depth_at(&self, x: u32, y: u32) -> f32 {
+        self.depth[(y as usize) * (self.width as usize) + (x as usize)]
+    }
+
+    pub fn colour_at(&self, x: u32, y: u32) -> [u8; 4] {
+        let at = ((y as usize) * (self.width as usize) + (x as usize)) * 4;
+        [
+            self.pixels[at],
+            self.pixels[at + 1],
+            self.pixels[at + 2],
+            self.pixels[at + 3],
+        ]
+    }
+
+    /// How many pixels were drawn on at all.
+    pub fn covered(&self) -> usize {
+        self.depth.iter().filter(|d| d.is_finite()).count()
+    }
+}
+
+/// How the part is lit and coloured.
+#[derive(Debug, Clone, Copy)]
+pub struct Style {
+    pub background: [u8; 4],
+    pub material: [u8; 3],
+    /// Where the light comes from, in view space. Kept relative to the eye so
+    /// the part stays lit as it turns, rather than swinging into shadow.
+    pub light: Point3,
+    /// How much light a surface facing away still receives. Without it the far
+    /// side of a part is pure black and reads as a hole rather than a shadow.
+    pub ambient: f64,
+    /// How much of the light comes from the eye rather than from [`light`].
+    ///
+    /// **What stops solid material reading as empty space.** One light leaves
+    /// every surface turned away from it at the ambient level, and ambient
+    /// alone was landing on almost exactly the background colour: material at
+    /// RGB 49, 51, 53 against a background of 30, 32, 36. On a phone those are
+    /// the same colour, so the recessed web of a gear — solid metal, correctly
+    /// drawn — was indistinguishable from the hole beside it. Not one file's
+    /// problem: any surface at any angle away from the light, in every part.
+    ///
+    /// A light from the eye cannot leave a *visible* surface unlit, because
+    /// back faces are culled and everything drawn therefore faces the viewer.
+    /// It costs nothing: the term is `normal.z`, which the culling test has
+    /// already computed.
+    ///
+    /// [`light`]: Self::light
+    pub fill: f64,
+}
+
+impl Default for Style {
+    fn default() -> Self {
+        Self {
+            background: [30, 32, 36, 255],
+            material: [176, 182, 190],
+            // Over the viewer's left shoulder: the convention that makes a
+            // shape read as solid rather than lit from nowhere.
+            light: Point3::new(-0.4, 0.6, 1.0),
+            ambient: 0.28,
+            // Enough that nothing visible goes near the background, little
+            // enough that the key light still carries the form. A pure
+            // headlight lights every face equally and flattens the part into
+            // a silhouette, which loses the shape as surely as the dark did.
+            fill: 0.45,
+        }
+    }
+}
+
+/// How lit a surface is, from 0 for unlit to 1 for full on.
+///
+/// `normal` is in view space, so its `z` is how squarely the surface faces the
+/// eye — positive for anything drawn at all.
+pub(crate) fn lit(style: &Style, normal: Point3, light: Point3) -> f64 {
+    let key = normal.dot(light).max(0.0);
+    let toward_eye = normal.z.max(0.0);
+    (key * (1.0 - style.fill) + toward_eye * style.fill).clamp(0.0, 1.0)
+}
+
+/// The colour of a surface at a given light level.
+pub(crate) fn shade(style: &Style, lit: f64) -> [u8; 4] {
+    let shade = lit.clamp(0.0, 1.0) * (1.0 - style.ambient) + style.ambient;
+    [
+        (style.material[0] as f64 * shade) as u8,
+        (style.material[1] as f64 * shade) as u8,
+        (style.material[2] as f64 * shade) as u8,
+        255,
+    ]
+}
+
+/// Everything about the view that does not change from triangle to triangle.
+///
+/// **Hoisted, because it was not.** `Camera::to_view` rebuilds the camera's
+/// basis every time it is called — four trigonometric calls, two cross
+/// products and two normalisations — and it was being called once per
+/// vertex. On a 400,000-triangle part that is 1.2 million rebuilds of a
+/// thing that is the same for the whole frame, and it was most of what
+/// made dragging slow.
+struct View {
+    eye: Point3,
+    right: Point3,
+    up: Point3,
+    back: Point3,
+    /// Half the screen height over the tangent of half the field of view,
+    /// which turns a depth into pixels per unit.
+    scale: f64,
+    middle_x: f64,
+    middle_y: f64,
+    near: f64,
+}
+
+impl View {
+    fn of(camera: &Camera, width: u32, height: u32) -> Self {
+        let (right, up, back) = camera.axes();
+        Self {
+            eye: camera.eye(),
+            right,
+            up,
+            back,
+            scale: (height as f64 / 2.0) / (camera.fov / 2.0).tan(),
+            middle_x: width as f64 / 2.0,
+            middle_y: height as f64 / 2.0,
+            // Nothing nearer than this: a triangle straddling the eye plane
+            // projects to infinity and paints the whole screen.
+            near: (camera.distance * 1e-4).max(1e-6),
+        }
+    }
+
+    /// A world point straight to screen pixels and depth, in one pass.
+    #[inline]
+    fn place(&self, point: Point3) -> Option<(f64, f64, f32)> {
+        let relative = point.minus(self.eye);
+        let depth = -relative.dot(self.back);
+        if depth <= self.near {
+            return None;
+        }
+        let over = self.scale / depth;
+        Some((
+            self.middle_x + relative.dot(self.right) * over,
+            // Screen rows run down, the world's up runs up.
+            self.middle_y - relative.dot(self.up) * over,
+            depth as f32,
+        ))
+    }
+}
+/// How many distinct brightnesses a surface can take.
+///
+/// Shading is quantised into a lookup because a part is thousands of triangles
+/// sharing a few dozen normals, and rounding three floats to bytes for each of
+/// them is work done over and over for the same answer. Sixty-four steps is
+/// finer than the eye separates on a shaded solid.
+const SHADES: usize = 64;
+
+
+pub fn draw(mesh: &Mesh, camera: &Camera, style: &Style, canvas: &mut Canvas) {
+    canvas.fill(style.background);
+
+    let light = style
+        .light
+        .normalised()
+        .unwrap_or(Point3::new(0.0, 0.0, 1.0));
+    let view = View::of(camera, canvas.width, canvas.height);
+
+    // Shading is a lookup: a normal only ever gives one of these, and
+    // rounding three floats to bytes for every triangle was work repeated
+    // across the thousands of them that share a face.
+    let shades: Vec<[u8; 4]> =
+        (0..=SHADES).map(|step| shade(style, step as f64 / SHADES as f64)).collect();
+
+    for triangle in &mesh.triangles {
+        let normal = Point3::new(
+            triangle.normal.dot(view.right),
+            triangle.normal.dot(view.up),
+            triangle.normal.dot(view.back),
+        );
+        // **Facing away, so not drawn.** With a closed solid this halves the
+        // work and removes the far wall from behind the near one. A part whose
+        // faces are inverted disappears here rather than shading oddly, which
+        // is why the winding is settled in the tessellator with a test.
+        if normal.z <= 0.0 {
+            continue;
+        }
+
+        // Placed straight to screen coordinates. Any corner behind the eye
+        // drops the triangle rather than smearing it across the canvas.
+        let (Some(a), Some(b), Some(c)) = (
+            view.place(triangle.a),
+            view.place(triangle.b),
+            view.place(triangle.c),
+        ) else {
+            continue;
+        };
+
+        let step = (lit(style, normal, light) * SHADES as f64) as usize;
+        let colour = shades[step.min(SHADES)];
+
+        fill_triangle(canvas, &[a, b, c], colour);
+    }
+/// One triangle, by scanning the rows it covers.
+///
+/// Edge functions stepped along the row rather than recomputed at each pixel,
+/// and the reciprocal of the area taken once. The straightforward version
+/// divides three times per pixel, and a part covering a third of a phone
+/// screen is a quarter of a million pixels a frame.
+fn fill_triangle(canvas: &mut Canvas, corners: &[(f64, f64, f32)], colour: [u8; 4]) {
+    let (ax, ay, az) = corners[0];
+    let (bx, by, bz) = corners[1];
+    let (cx, cy, cz) = corners[2];
+
+    let area = (bx - ax) * (cy - ay) - (cx - ax) * (by - ay);
+    if area.abs() < 1e-12 {
+        return; // edge-on, so it covers nothing
+    }
+    let over_area = 1.0 / area;
+
+    let low_x = ax.min(bx).min(cx).floor().max(0.0) as i64;
+    let high_x = ax.max(bx).max(cx).ceil().min(canvas.width as f64) as i64;
+    let low_y = ay.min(by).min(cy).floor().max(0.0) as i64;
+    let high_y = ay.max(by).max(cy).ceil().min(canvas.height as f64) as i64;
+    if high_x <= low_x || high_y <= low_y {
+        return;
+    }
+
+    // How each weight changes for one pixel across and one down. The
+    // barycentric weights are affine in screen position, so they can be
+    // stepped rather than evaluated.
+    let d0_dx = (by - cy) * over_area;
+    let d0_dy = (cx - bx) * over_area;
+    let d1_dx = (cy - ay) * over_area;
+    let d1_dy = (ax - cx) * over_area;
+
+    // Sampled at the middle of the pixel, so a triangle edge falling exactly
+    // on a boundary belongs to one side or the other rather than to both,
+    // which would leave a seam of double-drawn pixels.
+    let first_x = low_x as f64 + 0.5;
+    let first_y = low_y as f64 + 0.5;
+    let mut row0 =
+        ((bx - first_x) * (cy - first_y) - (cx - first_x) * (by - first_y)) * over_area;
+    let mut row1 =
+        ((cx - first_x) * (ay - first_y) - (ax - first_x) * (cy - first_y)) * over_area;
+
+    for y in low_y..high_y {
+        let mut w0 = row0;
+        let mut w1 = row1;
+        for x in low_x..high_x {
+            let w2 = 1.0 - w0 - w1;
+            if w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0 {
+                let depth = (w0 as f32) * az + (w1 as f32) * bz + (w2 as f32) * cz;
+                canvas.put(x as u32, y as u32, depth, colour);
+            }
+            w0 += d0_dx;
+            w1 += d1_dx;
+        }
+        row0 += d0_dy;
+        row1 += d1_dy;
+    }
+}
+
+}
+
+/// The whole job: fit a mesh to a canvas and draw it.
+pub fn draw_fitted(mesh: &Mesh, canvas: &mut Canvas, style: &Style) -> Option<Camera> {
+    let (low, high) = mesh.bounds()?;
+    let camera = Camera::fit(low, high, 45.0_f64.to_radians());
+    draw(mesh, &camera, style, canvas);
+    Some(camera)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::step::model::Point3;
+
+    fn triangle(a: Point3, b: Point3, c: Point3, normal: Point3) -> Triangle {
+        Triangle { a, b, c, normal }
+    }
+
+    // ---- telling material from empty space ------------------------------------
+
+    /// How far apart two colours are, at their furthest channel.
+    fn apart(a: [u8; 4], b: [u8; 4]) -> i32 {
+        (0..3)
+            .map(|c| (a[c] as i32 - b[c] as i32).abs())
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// **Solid material never looks like a hole.**
+    ///
+    /// This is the whole reason for the fill light. A surface facing the eye
+    /// but turned away from the key light used to come out at RGB 49, 51, 53
+    /// against a background of 30, 32, 36 — the same colour on a phone. The
+    /// recessed web of a gear, correctly drawn, was indistinguishable from the
+    /// opening next to it, and the part read as full of holes it does not have.
+    ///
+    /// The exact case that was reported: turned right away from the light, and
+    /// still facing the viewer enough to be a surface rather than an edge.
+    #[test]
+    fn a_face_the_light_never_reaches_is_plainly_not_a_hole() {
+        let style = Style::default();
+        let light = style.light.normalised().expect("the light points somewhere");
+        let normal = Point3::new(0.6, -0.65, 0.5).normalised().expect("a direction");
+
+        assert!(
+            normal.dot(light) <= 0.0,
+            "this normal is meant to get nothing from the key light",
+        );
+        assert!(normal.z > 0.4, "and still to be facing the viewer");
+
+        let unlit = shade(&style, lit(&style, normal, light));
+        assert!(
+            apart(unlit, style.background) >= 40,
+            "material the light misses is {unlit:?}, background is {:?}",
+            style.background,
+        );
+    }
+
+    /// And it holds whichever way the part is turned.
+    ///
+    /// The complaint was never about one angle: it was about turning a part
+    /// until something solid stopped looking solid. Every direction that
+    /// presents real area to the viewer is checked. Surfaces nearly edge-on
+    /// are left out on purpose — they are the silhouette, a pixel or two wide,
+    /// and dark there is what makes an outline read as an outline.
+    #[test]
+    fn no_surface_facing_the_viewer_is_the_colour_of_the_background() {
+        let style = Style::default();
+        let light = style.light.normalised().expect("the light points somewhere");
+
+        let mut worst = i32::MAX;
+        let mut worst_at = Point3::new(0.0, 0.0, 1.0);
+        for x in -10..=10 {
+            for y in -10..=10 {
+                for z in 1..=10 {
+                    let Some(normal) =
+                        Point3::new(x as f64 / 10.0, y as f64 / 10.0, z as f64 / 10.0).normalised()
+                    else {
+                        continue;
+                    };
+                    // Presenting area rather than an edge. Back faces are
+                    // culled anyway, so anything below this is a silhouette.
+                    if normal.z < 0.3 {
+                        continue;
+                    }
+                    let colour = shade(&style, lit(&style, normal, light));
+                    let distance = apart(colour, style.background);
+                    if distance < worst {
+                        worst = distance;
+                        worst_at = normal;
+                    }
+                }
+            }
+        }
+
+        assert!(
+            worst >= 30,
+            "a surface facing {worst_at:?} is within {worst} of the background",
+        );
+    }
+
+    /// And the light still says which way a surface faces.
+    ///
+    /// The cheap way to pass the tests above is to flood everything with
+    /// light, which trades holes-that-are-not-there for a flat silhouette with
+    /// no shape in it at all. A part has to keep reading as a solid object, so
+    /// there has to be a real range of brightness across the surfaces that are
+    /// actually visible.
+    #[test]
+    fn the_light_still_shows_the_shape() {
+        let style = Style::default();
+        let light = style.light.normalised().expect("the light points somewhere");
+
+        let mut brightest = 0i32;
+        let mut dimmest = 255i32;
+        for x in -10..=10 {
+            for y in -10..=10 {
+                for z in 3..=10 {
+                    let Some(normal) =
+                        Point3::new(x as f64 / 10.0, y as f64 / 10.0, z as f64 / 10.0).normalised()
+                    else {
+                        continue;
+                    };
+                    if normal.z < 0.3 {
+                        continue;
+                    }
+                    let level = shade(&style, lit(&style, normal, light))[0] as i32;
+                    brightest = brightest.max(level);
+                    dimmest = dimmest.min(level);
+                }
+            }
+        }
+
+        assert!(
+            brightest - dimmest > 40,
+            "everything visible is between {dimmest} and {brightest}, so the part has no form",
+        );
+    }
+
+    /// A square facing the camera, one unit each way, at a given depth.
+    fn facing_square(z: f64) -> Mesh {
+        let towards = Point3::new(0.0, 0.0, 1.0);
+        Mesh {
+            triangles: vec![
+                triangle(
+                    Point3::new(-1.0, -1.0, z),
+                    Point3::new(1.0, -1.0, z),
+                    Point3::new(1.0, 1.0, z),
+                    towards,
+                ),
+                triangle(
+                    Point3::new(-1.0, -1.0, z),
+                    Point3::new(1.0, 1.0, z),
+                    Point3::new(-1.0, 1.0, z),
+                    towards,
+                ),
+            ],
+            skipped: Vec::new(),
+        }
+    }
+
+    fn head_on(distance: f64) -> Camera {
+        Camera {
+            target: Point3::new(0.0, 0.0, 0.0),
+            distance,
+            // Looking down the world -z, so a face pointing at +z faces the eye.
+            right: Point3::new(1.0, 0.0, 0.0),
+            up: Point3::new(0.0, 1.0, 0.0),
+            back: Point3::new(0.0, 0.0, 1.0),
+            fov: 45.0_f64.to_radians(),
+        }
+    }
+
+    // ---- something is drawn --------------------------------------------------
+
+    #[test]
+    fn a_facing_square_covers_the_middle_of_the_canvas() {
+        let mut canvas = Canvas::new(64, 64);
+        draw(&facing_square(0.0), &head_on(10.0), &Style::default(), &mut canvas);
+
+        assert!(canvas.depth_at(32, 32).is_finite(), "nothing in the middle");
+        assert!(canvas.covered() > 100, "only {} pixels drawn", canvas.covered());
+    }
+
+    #[test]
+    fn an_empty_mesh_leaves_the_background() {
+        let style = Style::default();
+        let mut canvas = Canvas::new(16, 16);
+        draw(&Mesh::default(), &head_on(10.0), &style, &mut canvas);
+
+        assert_eq!(style.background, canvas.colour_at(8, 8));
+        assert_eq!(0, canvas.covered());
+    }
+
+    // ---- the depth buffer ----------------------------------------------------
+
+    /// The nearer surface wins whichever order the triangles arrive in.
+    ///
+    /// This is the whole reason for a depth buffer rather than a back-to-front
+    /// sort. Drawn in the wrong order, a painter's algorithm shows the far
+    /// surface through the near one.
+    #[test]
+    fn the_nearer_surface_wins_whatever_the_order() {
+        let style = Style::default();
+        let near_first = {
+            let mut mesh = facing_square(2.0);
+            mesh.triangles.extend(facing_square(-2.0).triangles);
+            mesh
+        };
+        let far_first = {
+            let mut mesh = facing_square(-2.0);
+            mesh.triangles.extend(facing_square(2.0).triangles);
+            mesh
+        };
+
+        let mut one = Canvas::new(32, 32);
+        let mut other = Canvas::new(32, 32);
+        draw(&near_first, &head_on(10.0), &style, &mut one);
+        draw(&far_first, &head_on(10.0), &style, &mut other);
+
+        assert_eq!(
+            one.depth_at(16, 16),
+            other.depth_at(16, 16),
+            "the result depended on the order the triangles were given in",
+        );
+        // And it is the near one: eight away, not twelve.
+        assert!((one.depth_at(16, 16) - 8.0).abs() < 0.1, "{}", one.depth_at(16, 16));
+    }
+
+    /// Two surfaces passing through each other have no correct order at all.
+    ///
+    /// A sort has to pick one, and picks wrong for half the pixels. Each pixel
+    /// is decided on its own here, so the crossing comes out right.
+    #[test]
+    fn interpenetrating_surfaces_are_resolved_per_pixel() {
+        let mut mesh = facing_square(0.0);
+        // A second square, tilted so it passes through the first.
+        mesh.triangles.push(triangle(
+            Point3::new(-1.0, -1.0, -1.0),
+            Point3::new(1.0, -1.0, 1.0),
+            Point3::new(1.0, 1.0, 1.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ));
+
+        let mut canvas = Canvas::new(64, 64);
+        draw(&mesh, &head_on(10.0), &Style::default(), &mut canvas);
+
+        let mut depths = Vec::new();
+        for x in 20..44 {
+            let depth = canvas.depth_at(x, 32);
+            if depth.is_finite() {
+                depths.push(depth);
+            }
+        }
+        let nearest = depths.iter().cloned().fold(f32::INFINITY, f32::min);
+        let furthest = depths.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+
+        assert!(
+            furthest - nearest > 0.2,
+            "the crossing was flattened to one depth: {nearest} to {furthest}",
+        );
+    }
+
+    // ---- facing away ---------------------------------------------------------
+
+    /// A triangle facing away is not drawn.
+    #[test]
+    fn a_back_face_is_skipped() {
+        let mut mesh = facing_square(0.0);
+        for triangle in &mut mesh.triangles {
+            triangle.normal = Point3::new(0.0, 0.0, -1.0);
+        }
+
+        let mut canvas = Canvas::new(32, 32);
+        draw(&mesh, &head_on(10.0), &Style::default(), &mut canvas);
+
+        assert_eq!(0, canvas.covered(), "a face pointing away was drawn");
+    }
+
+    // ---- shading -------------------------------------------------------------
+
+    /// A surface square to the light is brighter than one turned away.
+    #[test]
+    fn shading_follows_the_normal() {
+        let style = Style::default();
+        let mut lit = Canvas::new(32, 32);
+        draw(&facing_square(0.0), &head_on(10.0), &style, &mut lit);
+
+        let mut tilted_mesh = facing_square(0.0);
+        for triangle in &mut tilted_mesh.triangles {
+            triangle.normal = Point3::new(0.8, 0.0, 0.6).normalised().expect("a normal");
+        }
+        let mut tilted = Canvas::new(32, 32);
+        draw(&tilted_mesh, &head_on(10.0), &style, &mut tilted);
+
+        assert_ne!(
+            lit.colour_at(16, 16),
+            tilted.colour_at(16, 16),
+            "turning a face changed nothing about how it is lit",
+        );
+    }
+
+    /// Nothing is ever pure black, so a shape is never mistaken for a hole.
+    #[test]
+    fn a_face_turned_from_the_light_is_still_visible() {
+        let style = Style::default();
+        let mut mesh = facing_square(0.0);
+        for triangle in &mut mesh.triangles {
+            // Facing the eye, but as far from the light as that allows.
+            triangle.normal = Point3::new(0.0, 0.0, 1.0);
+        }
+
+        let mut canvas = Canvas::new(32, 32);
+        draw(&mesh, &head_on(10.0), &style, &mut canvas);
+
+        let colour = canvas.colour_at(16, 16);
+        assert!(colour[0] > 0 || colour[1] > 0 || colour[2] > 0, "pure black");
+        assert_ne!(style.background, colour, "indistinguishable from the background");
+    }
+
+    // ---- the eye plane -------------------------------------------------------
+
+    /// A triangle behind the eye does not paint the whole screen.
+    ///
+    /// Projection divides by depth, so a corner at or behind the eye plane
+    /// gives coordinates near infinity — and a bounding box covering the canvas
+    /// is filled with a single triangle. It looks like a total rendering
+    /// failure and is one badly placed vertex.
+    #[test]
+    fn geometry_behind_the_eye_is_dropped_rather_than_smeared() {
+        let camera = head_on(10.0);
+        let behind = camera.eye().plus(Point3::new(0.0, 0.0, 5.0));
+        let mesh = Mesh {
+            triangles: vec![triangle(
+                behind,
+                behind.plus(Point3::new(1.0, 0.0, 0.0)),
+                behind.plus(Point3::new(0.0, 1.0, 0.0)),
+                Point3::new(0.0, 0.0, 1.0),
+            )],
+            skipped: Vec::new(),
+        };
+
+        let mut canvas = Canvas::new(32, 32);
+        draw(&mesh, &camera, &Style::default(), &mut canvas);
+
+        assert!(canvas.covered() < 32 * 32, "the screen was smeared");
+    }
+
+    // ---- fitting -------------------------------------------------------------
+
+    /// A fitted part is on screen, and not up against the edge.
+    #[test]
+    fn a_fitted_mesh_lands_inside_the_canvas() {
+        let mut canvas = Canvas::new(64, 64);
+        let drawn = draw_fitted(&facing_square(0.0), &mut canvas, &Style::default());
+
+        assert!(drawn.is_some());
+        assert!(canvas.depth_at(32, 32).is_finite(), "nothing in the middle");
+
+        // The border is untouched, so the part is not running off the screen.
+        for along in 0..64 {
+            assert!(!canvas.depth_at(along, 0).is_finite(), "touching the top");
+            assert!(!canvas.depth_at(0, along).is_finite(), "touching the left");
+        }
+    }
+
+    #[test]
+    fn an_empty_mesh_cannot_be_fitted() {
+        let mut canvas = Canvas::new(16, 16);
+        assert!(draw_fitted(&Mesh::default(), &mut canvas, &Style::default()).is_none());
+    }
+
+    // ---- coverage doesn't leak ----------------------------------------------
+
+    /// Nothing is written outside the canvas, whatever the geometry.
+    #[test]
+    fn an_enormous_triangle_stays_inside_the_buffer() {
+        let mesh = Mesh {
+            triangles: vec![triangle(
+                Point3::new(-1e6, -1e6, 0.0),
+                Point3::new(1e6, -1e6, 0.0),
+                Point3::new(0.0, 1e6, 0.0),
+                Point3::new(0.0, 0.0, 1.0),
+            )],
+            skipped: Vec::new(),
+        };
+
+        let mut canvas = Canvas::new(16, 16);
+        // Would panic on an out-of-bounds write rather than failing an assert.
+        draw(&mesh, &head_on(10.0), &Style::default(), &mut canvas);
+        assert_eq!(16 * 16 * 4, canvas.pixels.len());
+    }
+}

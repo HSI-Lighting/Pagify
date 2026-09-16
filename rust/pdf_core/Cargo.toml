@@ -59,6 +59,19 @@ ttf-parser = "0.25"
 unicode-bidi = "0.3"
 subsetter = "0.2.2"
 
+# DWG reading for the drawing viewer, ported from Android's own build (see
+# rust/pdf_core/src/drawing/dwg.rs). MPL-2.0, chosen there over LibreDWG
+# specifically because LibreDWG is GPL-3.0 — this crate does the binary
+# parsing; `dwg.rs` only converts its output into this crate's own `Drawing`.
+acadrust = "=0.4.1"
+
+# STEP (ISO 10303) parsing and triangulation for the 3D model viewer, same
+# versions as Android's build. `step-io` reads the raw entity graph;
+# `earcutr` triangulates the planar boundaries `step/tessellate.rs` builds
+# for each face before they become a `Mesh`.
+step-io = "=0.2.4"
+earcutr = "=0.5.0"
+
 # No `lopdf`. PDFium is the single writer: two independent object models writing
 # one file is a corruption class that is very hard to diagnose, and PDFium covers
 # the page tree, objects, text and save on its own. If lopdf ever comes back it is

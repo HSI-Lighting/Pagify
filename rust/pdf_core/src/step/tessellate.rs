@@ -1,0 +1,1341 @@
+//! Faces into triangles.
+//!
+//! Four steps per face, in this order:
+//!
+//! 1. take each bounding edge's points from the shared [cache](super::curve),
+//!    so the two faces meeting at an edge cannot disagree about where it is
+//! 2. [project](super::project) them into the surface's own `(u, v)`
+//! 3. cut the resulting polygon-with-holes into triangles
+//! 4. map the triangles back into space and give each a normal
+//!
+//! # Nothing disappears quietly
+//!
+//! A face that cannot be tessellated is **counted and named**, never dropped.
+//! A part drawn with a wall missing looks like the part — there is nothing on
+//! screen to say a face was lost — so the count is the only thing standing
+//! between a silent geometry bug and a user who believes what they are looking
+//! at.
+
+use super::curve::EdgeCache;
+use super::model::{Face, Point2, Point3, Skipped, Solid, Surface};
+use super::orient::{self, walk};
+use super::project::{self, unwrap_seam};
+
+/// A triangle in space, with the normal it should be shaded by.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Triangle {
+    pub a: Point3,
+    pub b: Point3,
+    pub c: Point3,
+    pub normal: Point3,
+}
+
+/// What came of tessellating a solid.
+#[derive(Debug, Clone, Default)]
+pub struct Mesh {
+    pub triangles: Vec<Triangle>,
+    /// Faces that produced nothing, by reason. Reported to the user.
+    pub skipped: Vec<Skipped>,
+}
+
+impl Mesh {
+    /// The corners of the box the mesh occupies, for fitting it to the view.
+    pub fn bounds(&self) -> Option<(Point3, Point3)> {
+        let mut low = Point3::new(f64::MAX, f64::MAX, f64::MAX);
+        let mut high = Point3::new(f64::MIN, f64::MIN, f64::MIN);
+
+        for triangle in &self.triangles {
+            for point in [triangle.a, triangle.b, triangle.c] {
+                low = Point3::new(low.x.min(point.x), low.y.min(point.y), low.z.min(point.z));
+                high = Point3::new(high.x.max(point.x), high.y.max(point.y), high.z.max(point.z));
+            }
+        }
+
+        if self.triangles.is_empty() {
+            None
+        } else {
+            Some((low, high))
+        }
+    }
+
+    fn skip(&mut self, reason: &str) {
+        if let Some(existing) = self.skipped.iter_mut().find(|s| s.what == reason) {
+            existing.count += 1;
+        } else {
+            self.skipped.push(Skipped { what: reason.to_string(), count: 1 });
+        }
+    }
+}
+
+
+/// The sag to tessellate a solid at, scaled to its size.
+///
+/// **A fixed tolerance is wrong at both ends of a real catalogue.** The audited
+/// parts run from a 10 mm button to a 3 m ring light. At a flat 0.02 mm the
+/// button gets 35 segments round a hole — right — and the ring light gets 604
+/// round each of its cylinders, which is half a million triangles for a shape
+/// that is smooth at any reasonable size on a phone screen. Neither part is
+/// unusual; the constant was.
+///
+/// So it is a fraction of the model's own diagonal: the error is held to
+/// roughly a pixel of whatever is on screen, whatever the part measures. The
+/// floor stops a tiny part being tessellated to the limits of `f64`.
+pub fn recommended_sag(solid: &Solid) -> f64 {
+    let mut low = Point3::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut high = Point3::new(f64::MIN, f64::MIN, f64::MIN);
+    let mut seen = false;
+
+    for edge in &solid.edges {
+        for point in [edge.start, edge.end] {
+            low = Point3::new(low.x.min(point.x), low.y.min(point.y), low.z.min(point.z));
+            high = Point3::new(high.x.max(point.x), high.y.max(point.y), high.z.max(point.z));
+            seen = true;
+        }
+    }
+
+    if !seen {
+        return crate::step::curve::DEFAULT_SAG;
+    }
+
+    let diagonal = high.minus(low).length();
+    // A thousandth of the part. On a screen a few hundred pixels across, that
+    // is well under one pixel of error, so a finer figure buys nothing that can
+    // be seen and costs triangles that must be carried.
+    (diagonal / 600.0).max(1e-4)
+}
+
+/// The most triangles a whole model is given.
+///
+/// **Measured on the phone.** It drew 3.2 million triangles in 628 ms,
+/// which is two frames a second — and that was after taking 23 seconds to
+/// build them. Four hundred thousand is about 80 ms a frame at the
+/// resolution a gesture draws at, which follows a finger.
+///
+/// Spent per face rather than checked at the end: a retry would mean
+/// paying the 23 seconds first and then paying again. A model with two
+/// thousand faces gets less for each of them than one with fifteen, which
+/// is also the right answer visually — no single face of a crowded part is
+/// large enough on screen to need what a lone one does.
+pub const TRIANGLE_BUDGET: usize = 150_000;
+
+/// Tessellate a whole solid.
+pub fn tessellate(solid: &Solid, sag: f64) -> Mesh {
+    // Every edge discretised before any face is cut, which is what makes the
+    // shared boundary shared. See [`super::curve`].
+    let cache = EdgeCache::build(&solid.edges, sag);
+    let mut mesh = Mesh::default();
+
+    for skipped in &solid.skipped {
+        mesh.skipped.push(skipped.clone());
+    }
+
+    // What each face may spend. The floor keeps a part with thousands of
+    // faces from giving each of them too little to be a shape at all.
+    let allowance = (TRIANGLE_BUDGET / solid.faces.len().max(1)).max(48);
+    let mut lost_holes = 0usize;
+
+    for group in solid.faces.chunk_by(|a, b| a.component == b.component) {
+        let began = mesh.triangles.len();
+        for face in group {
+            match face_triangles_counting(face, &cache, sag, allowance, &mut lost_holes) {
+                Ok(triangles) => mesh.triangles.extend(triangles),
+                Err(reason) => mesh.skip(reason),
+            }
+        }
+        turn_outward(&mut mesh.triangles[began..]);
+    }
+
+    if lost_holes > 0 {
+        mesh.skipped.push(Skipped {
+            what: "holes that could not be cut, so their faces are solid".to_string(),
+            count: lost_holes,
+        });
+    }
+
+    mesh
+}
+
+/// One face's triangles, or why it produced none.
+pub fn face_triangles(
+    face: &Face,
+    cache: &EdgeCache,
+    sag: f64,
+    // The most triangles this face may spend. See TRIANGLE_BUDGET.
+    allowance: usize,
+) -> Result<Vec<Triangle>, &'static str> {
+    face_triangles_counting(face, cache, sag, allowance, &mut 0)
+}
+
+/// [`face_triangles`], reporting holes it could not read.
+///
+/// **A dropped hole is not a small error.** The face is then drawn solid
+/// across it — a spoked gear becomes a disc, a bolt pattern disappears — and
+/// it looks like the part, so nobody thinks to doubt it. Counted so it can be
+/// said out loud.
+pub fn face_triangles_counting(
+    face: &Face,
+    cache: &EdgeCache,
+    sag: f64,
+    allowance: usize,
+    lost_holes: &mut usize,
+) -> Result<Vec<Triangle>, &'static str> {
+    // The reason the adapter gave, not a general one: a freeform surface and
+    // a surface type this has never heard of are different problems, and
+    // collapsing them tells the user the wrong thing about their file.
+    if let Surface::Unsupported { what } = face.surface {
+        return Err(what);
+    }
+
+    let outer = boundary(face, &face.outer, cache).ok_or("an unreadable outer boundary")?;
+    if outer.len() < 3 {
+        return Err("a boundary with no area");
+    }
+    let outer = whole_revolution(&face.surface, outer);
+
+    let mut inners = Vec::new();
+    for hole in &face.inners {
+        match boundary(face, hole, cache) {
+            Some(points) if points.len() >= 3 => inners.push(points),
+            // A hole that cannot be read is not a reason to lose the face —
+            // the face missing entirely is a gap straight through the solid —
+            // but it is not nothing either: the face is drawn solid where it
+            // should be open. Counted rather than passed over.
+            _ => {
+                *lost_holes += 1;
+                continue;
+            }
+        }
+    }
+
+    // Which loop is the outline is settled here, by the geometry, rather than
+    // upstream by what the file called them. See [`outline_first`].
+    let (outer, inners) = outline_first(outer, inners);
+
+    // **If it will not cut with its holes, cut it without them.** A boundary
+    // that defeats the triangulator -- a hole touching its outline, a loop that
+    // crosses itself where the surface wraps -- costs the whole face, and a
+    // missing face is a gap straight through the solid. Solid where it should
+    // be pierced is wrong in one small place and still reads as the part.
+    let flat = match triangulate(&outer, &inners) {
+        Ok(flat) => flat,
+        Err(reason) => {
+            if inners.is_empty() {
+                return Err(reason);
+            }
+            *lost_holes += inners.len();
+            triangulate(&outer, &[])?
+        }
+    };
+
+    // Boundary points alone leave long chords across a curved face; see
+    // [`parameter_limits`]. Splitting happens here, in parameter space, so
+    // every new vertex lands exactly on the surface rather than on the chord.
+    let (max_u, max_v) = parameter_limits(&face.surface, sag);
+
+    // **Widened until the face fits its allowance.** The sag alone says how
+    // fine the surface needs to be; it says nothing about how many faces are
+    // waiting behind this one. A part of two thousand fillets, each
+    // individually reasonable, is three million triangles and a screen that
+    // will not move.
+    let (max_u, max_v) = widened(&flat, max_u, max_v, allowance);
+    let flat: Vec<Point2> = refine(
+        flat.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect(),
+        max_u,
+        max_v,
+    )
+    .into_iter()
+    .flatten()
+    .collect();
+
+    // Which way the loop actually wound, decided once for the face rather than
+    // per triangle: a curved face's triangles do not all agree, and asking each
+    // one separately is how a cylinder ends up with a few inverted facets.
+    let sample = outer[outer.len() / 2];
+    let surface_normal =
+        project::normal_at(&face.surface, sample).ok_or("a surface with no normal")?;
+    let outward = orient::outward_normal(surface_normal, face.same_sense);
+
+    let mut triangles = Vec::with_capacity(flat.len() / 3);
+    for corner in flat.chunks_exact(3) {
+        let (Some(a), Some(b), Some(c)) = (
+            project::evaluate(&face.surface, corner[0]),
+            project::evaluate(&face.surface, corner[1]),
+            project::evaluate(&face.surface, corner[2]),
+        ) else {
+            continue;
+        };
+
+        // The normal comes from the surface at the triangle's middle, not from
+        // its winding. On a curved face the winding gives the chord's normal,
+        // which is why a coarsely tessellated cylinder looks faceted even where
+        // its silhouette is smooth.
+        let middle = Point2::new(
+            (corner[0].u + corner[1].u + corner[2].u) / 3.0,
+            (corner[0].v + corner[1].v + corner[2].v) / 3.0,
+        );
+        let normal = project::normal_at(&face.surface, middle)
+            .map(|n| orient::outward_normal(n, face.same_sense))
+            .unwrap_or(outward);
+
+        // And the winding is made to match it, so a renderer that culls back
+        // faces keeps this one. Getting this wrong does not look wrong — the
+        // face simply is not there.
+        let wound = b.minus(a).cross(c.minus(a));
+        if wound.dot(normal) < 0.0 {
+            triangles.push(Triangle { a, b: c, c: b, normal });
+        } else {
+            triangles.push(Triangle { a, b, c, normal });
+        }
+    }
+
+    if triangles.is_empty() {
+        Err("a face that produced no triangles")
+    } else {
+        Ok(triangles)
+    }
+}
+
+/// The area a loop encloses in parameter space, by the shoelace formula.
+///
+/// Unsigned, because which way a loop was walked says nothing about whether it
+/// is the outline: exporters wind holes both ways, and the triangulator does
+/// not care either.
+pub(crate) fn enclosed(points: &[Point2]) -> f64 {
+    let mut twice = 0.0;
+    for (at, point) in points.iter().enumerate() {
+        let next = points[(at + 1) % points.len()];
+        twice += point.u * next.v - next.u * point.v;
+    }
+    (twice / 2.0).abs()
+}
+
+/// Put the loop that really is the outline first.
+///
+/// **Which bound is the outline is geometry, not a name.** A face lists its
+/// boundaries, and STEP marks the outer one with `FACE_OUTER_BOUND` — except
+/// where an exporter writes every bound as a plain `FACE_BOUND`, which is
+/// common. The adapter then has to guess, and guessing "the first one" is
+/// wrong whenever a hole happens to be listed first.
+///
+/// It fails in the worst possible way: the face is still drawn, at the right
+/// size, with the right holes — only inside out. The hole is filled and the
+/// material around it is cut away, so a spoked wheel comes back with solid
+/// openings and missing spokes. Nothing is missing, so no count reports it and
+/// no warning appears; it simply is not the part.
+///
+/// A hole is inside its outline, so the outline encloses more. Settled by
+/// measurement, which is true whatever the file called them — and equally
+/// true for a file that does say `FACE_OUTER_BOUND` and says it wrongly.
+pub(crate) fn outline_first(outer: Vec<Point2>, inners: Vec<Vec<Point2>>) -> (Vec<Point2>, Vec<Vec<Point2>>) {
+    if inners.is_empty() {
+        return (outer, inners);
+    }
+
+    let mut widest = enclosed(&outer);
+    let mut swap = None;
+    for (at, hole) in inners.iter().enumerate() {
+        let area = enclosed(hole);
+        if area > widest {
+            widest = area;
+            swap = Some(at);
+        }
+    }
+
+    match swap {
+        None => (outer, inners),
+        Some(at) => {
+            let mut inners = inners;
+            let outline = std::mem::replace(&mut inners[at], outer);
+            (outline, inners)
+        }
+    }
+}
+
+/// A face bounded only by the seam is the whole way round the surface.
+///
+/// **A closed sphere or cylinder needs no boundary at all.** Where a modeller
+/// makes a complete ball, the face has no edges enclosing a patch of it — only
+/// the seam where the parameters wrap, walked up one side and back down the
+/// other. In parameter space that is a line: every point at the same `u`,
+/// enclosing nothing, and the triangulator quite correctly cuts it into no
+/// triangles. The face is the entire surface, so that is what it becomes: the
+/// full turn in `u`, across the range of `v` the seam covered.
+///
+/// Anything with real width in `u` is left exactly as it is — this is only for
+/// the boundary that has collapsed onto the seam.
+pub(crate) fn whole_revolution(surface: &Surface, outer: Vec<Point2>) -> Vec<Point2> {
+    use std::f64::consts::TAU;
+
+    if !project::u_is_periodic(surface) {
+        return outer;
+    }
+
+    let (mut lo_u, mut hi_u) = (f64::MAX, f64::MIN);
+    let (mut lo_v, mut hi_v) = (f64::MAX, f64::MIN);
+    for at in &outer {
+        lo_u = lo_u.min(at.u);
+        hi_u = hi_u.max(at.u);
+        lo_v = lo_v.min(at.v);
+        hi_v = hi_v.max(at.v);
+    }
+
+    // Width in u means an ordinary patch; no height in v means a sliver, which
+    // going round the whole way would not rescue.
+    let across = (hi_v - lo_v).abs();
+    if hi_u - lo_u > 1e-6 * across.max(1.0) || across < 1e-12 {
+        return outer;
+    }
+
+    vec![
+        Point2::new(lo_u, lo_v),
+        Point2::new(lo_u + TAU, lo_v),
+        Point2::new(lo_u + TAU, hi_v),
+        Point2::new(lo_u, hi_v),
+    ]
+}
+
+/// One loop, walked in order and expressed in the surface's coordinates.
+pub(crate) fn boundary(face: &Face, the_loop: &super::model::Loop, cache: &EdgeCache) -> Option<Vec<Point2>> {
+    let mut points: Vec<Point3> = Vec::new();
+
+    for (id, forwards) in walk(the_loop) {
+        let chain = cache.points(id, forwards)?;
+        // The first point of each edge is the last of the one before it. Kept
+        // once, or every vertex of the loop is duplicated and the triangulator
+        // sees a zero-width spike at each corner.
+        let start = usize::from(!points.is_empty());
+        points.extend(chain.into_iter().skip(start));
+    }
+
+    // A closed loop returns to its start; the repeat is not a vertex.
+    if points.len() > 1 {
+        let first = points[0];
+        if points[points.len() - 1].minus(first).length() < 1e-9 {
+            points.pop();
+        }
+    }
+
+    // A pole has no angle but does have a height, and the height is what stops
+    // the boundary collapsing. It travels as a NaN `u` for [`unwrap_seam`] to
+    // fill from a neighbour, keeping the height this point actually has.
+    let mut projected: Vec<Option<Point2>> = points
+        .iter()
+        .map(|point| {
+            project::project(&face.surface, *point).or_else(|| {
+                project::v_at(&face.surface, *point).map(|v| Point2::new(f64::NAN, v))
+            })
+        })
+        .collect();
+
+    unwrap_seam(&mut projected, project::u_is_periodic(&face.surface));
+
+    let boundary: Vec<Point2> = projected.into_iter().collect::<Option<Vec<_>>>()?;
+    // Every point on the boundary was a pole, so no neighbour had an angle to
+    // lend. Nothing sensible can be cut from that, and letting NaN through
+    // reaches the rasteriser as triangles that quietly poison the depth buffer.
+    boundary
+        .iter()
+        .all(|at| at.u.is_finite() && at.v.is_finite())
+        .then_some(boundary)
+}
+
+
+/// How far a triangle may reach across a surface before its chord sags too far.
+///
+/// **Boundary points alone are not enough on a curved face.** A cylinder wall
+/// is a rectangle in parameter space, and a triangulator handed a rectangle
+/// quite reasonably cuts it into long triangles spanning the whole width — in
+/// space, chords straight through the solid. Every vertex still sits exactly on
+/// the surface, which is what makes it easy to miss: the mesh is not wrong
+/// anywhere a vertex is, only everywhere between them.
+///
+/// The limit is the same sag rule the edges use: the angle whose chord departs
+/// from the true surface by at most `sag`. Directions the surface is straight
+/// in — a cylinder's axis, a cone's rulings — are unlimited, because a chord
+/// along a ruling *is* the surface.
+///
+/// Returns the largest allowed span in `u` and in `v`.
+pub(crate) fn parameter_limits(surface: &Surface, sag: f64) -> (f64, f64) {
+    let angular = |radius: f64| -> f64 {
+        if radius <= sag {
+            std::f64::consts::PI
+        } else {
+            2.0 * (1.0 - sag / radius).clamp(-1.0, 1.0).acos()
+        }
+    };
+
+    match surface {
+        // Flat: a triangle of any size lies exactly on it.
+        Surface::Plane { .. } | Surface::Unsupported { .. } => (f64::INFINITY, f64::INFINITY),
+        // Straight along the axis, curved around it.
+        Surface::Cylinder { radius, .. } => (angular(*radius), f64::INFINITY),
+        // A cone is ruled too, so only the sweep is limited. The radius varies
+        // with height; the base radius is the conservative choice at the narrow
+        // end and the tolerance is only ever exceeded in the direction of finer.
+        Surface::Cone { radius, .. } => (angular(radius.max(sag)), f64::INFINITY),
+        Surface::Sphere { radius, .. } => (angular(*radius), angular(*radius)),
+        Surface::Torus { major, minor, .. } => (angular(major + minor), angular(*minor)),
+        // A freeform patch has no radius to reason from, so its own sampling
+        // says how far it bows and therefore how finely it must be cut.
+        Surface::Spline(spline) => spline.parameter_limits(sag),
+    }
+}
+
+/// Split triangles until none reaches further than the surface allows.
+///
+/// Longest-edge bisection: the offending edge is halved and the triangle
+/// becomes two. The new vertex is a parameter pair, so mapping it back puts it
+/// exactly on the surface rather than on the chord — which is the entire point,
+/// and why this is done in parameter space rather than on the finished mesh.
+fn refine(triangles: Vec<[Point2; 3]>, max_u: f64, max_v: f64) -> Vec<[Point2; 3]> {
+    if !max_u.is_finite() && !max_v.is_finite() {
+        return triangles;
+    }
+
+    // A ceiling on the work, so a surface with an absurd radius cannot turn one
+    // face into millions of triangles and take the app down with it.
+    const MOST: usize = 200_000;
+
+    let mut pending = triangles;
+    let mut done: Vec<[Point2; 3]> = Vec::new();
+
+    while let Some(triangle) = pending.pop() {
+        if done.len() + pending.len() >= MOST {
+            done.push(triangle);
+            continue;
+        }
+
+        // The edge that overreaches by the most, measured as a fraction of what
+        // it is allowed, so u and v are compared on the same scale.
+        let mut worst = 0usize;
+        let mut excess = 1.0;
+        for edge in 0..3 {
+            let from = triangle[edge];
+            let to = triangle[(edge + 1) % 3];
+            let over = ((from.u - to.u).abs() / max_u).max((from.v - to.v).abs() / max_v);
+            if over > excess {
+                excess = over;
+                worst = edge;
+            }
+        }
+
+        if excess <= 1.0 {
+            done.push(triangle);
+            continue;
+        }
+
+        let from = triangle[worst];
+        let to = triangle[(worst + 1) % 3];
+        let opposite = triangle[(worst + 2) % 3];
+        let middle = Point2::new((from.u + to.u) / 2.0, (from.v + to.v) / 2.0);
+
+        pending.push([from, middle, opposite]);
+        pending.push([middle, to, opposite]);
+    }
+
+    done
+}
+/// Cut a polygon with holes into triangles, in parameter space.
+pub(crate) fn triangulate(outer: &[Point2], holes: &[Vec<Point2>]) -> Result<Vec<Point2>, &'static str> {
+    let mut flat: Vec<f64> = Vec::with_capacity((outer.len() + holes.len() * 4) * 2);
+    let mut all: Vec<Point2> = Vec::with_capacity(outer.len());
+    let mut hole_starts = Vec::with_capacity(holes.len());
+
+    for point in outer {
+        flat.push(point.u);
+        flat.push(point.v);
+        all.push(*point);
+    }
+    for hole in holes {
+        hole_starts.push(all.len());
+        for point in hole {
+            flat.push(point.u);
+            flat.push(point.v);
+            all.push(*point);
+        }
+    }
+
+    let indices = earcutr::earcut(&flat, &hole_starts, 2).map_err(|_| "a boundary that would not cut")?;
+    if indices.is_empty() {
+        return Err("a boundary that cut into nothing");
+    }
+
+    Ok(indices.into_iter().filter_map(|index| all.get(index).copied()).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::step::curve::DEFAULT_SAG;
+    use crate::step::model::{Curve, Edge, EdgeId, Frame, Loop};
+
+    fn frame() -> Frame {
+        Frame {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            axis: Point3::new(0.0, 0.0, 1.0),
+            reference: Point3::new(1.0, 0.0, 0.0),
+        }
+    }
+
+    fn line(id: u64, from: Point3, to: Point3) -> Edge {
+        Edge {
+            id: EdgeId(id),
+            curve: Curve::Line { from, direction: to.minus(from) },
+            start: from,
+            end: to,
+            same_sense: true,
+        }
+    }
+
+    /// A unit square on z = 0, as four straight edges.
+    fn square_solid(same_sense: bool) -> Solid {
+        let corners = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(4.0, 0.0, 0.0),
+            Point3::new(4.0, 4.0, 0.0),
+            Point3::new(0.0, 4.0, 0.0),
+        ];
+        let edges = (0..4)
+            .map(|index| line(index as u64 + 1, corners[index], corners[(index + 1) % 4]))
+            .collect();
+
+        Solid {
+            faces: vec![Face {
+                surface: Surface::Plane { frame: frame() },
+                outer: Loop {
+                    edges: (1..=4).map(|id| (EdgeId(id), true)).collect(),
+                    bound_forward: true,
+                },
+                inners: Vec::new(),
+                same_sense,
+                component: 0,
+            }],
+            edges,
+            skipped: Vec::new(),
+        }
+    }
+
+    // ---- surfaces that come to a point ---------------------------------------
+
+    /// A wedge of a cone, running out to the apex and back.
+    ///
+    /// The apex is one point in space but a whole edge of the cone's parameter
+    /// domain: every angle names it. So it has no `u`, and the boundary has to
+    /// borrow one — while keeping the height it really has.
+    fn cone_wedge() -> Solid {
+        let lean: f64 = 0.4; // the half angle
+        let height = 5.0;
+        let radius = height * lean.tan();
+        let apex = Point3::new(0.0, 0.0, 0.0);
+        let start = Point3::new(radius, 0.0, height);
+        let end = Point3::new(-radius, 0.0, height);
+
+        let rim = Frame {
+            origin: Point3::new(0.0, 0.0, height),
+            axis: Point3::new(0.0, 0.0, 1.0),
+            reference: Point3::new(1.0, 0.0, 0.0),
+        };
+
+        Solid {
+            faces: vec![Face {
+                surface: Surface::Cone { frame: frame(), radius: 0.0, half_angle: lean },
+                outer: Loop {
+                    edges: vec![(EdgeId(1), true), (EdgeId(2), true), (EdgeId(3), true)],
+                    bound_forward: true,
+                },
+                inners: Vec::new(),
+                same_sense: true,
+                component: 0,
+            }],
+            edges: vec![
+                Edge {
+                    id: EdgeId(1),
+                    curve: Curve::Circle { frame: rim, radius },
+                    start,
+                    end,
+                    same_sense: true,
+                },
+                line(2, end, apex),
+                line(3, apex, start),
+            ],
+            skipped: Vec::new(),
+        }
+    }
+
+    /// **The apex must not be dropped onto the rim.**
+    ///
+    /// Give the apex its neighbour's height as well as its angle and the whole
+    /// boundary lands at one height: a line, with no area, which cuts into no
+    /// triangles at all. The face then vanishes — and on a real pump and a real
+    /// valve it did, silently, every cone that came to a point.
+    #[test]
+    fn a_cone_that_comes_to_a_point_still_has_a_face() {
+        let mesh = tessellate(&cone_wedge(), DEFAULT_SAG);
+
+        assert!(!mesh.triangles.is_empty(), "the wedge cut into nothing");
+        assert!(mesh.skipped.is_empty(), "{:?}", mesh.skipped);
+
+        // Half a cone's lateral surface: pi * r * slant / 2.
+        let lean: f64 = 0.4;
+        let height = 5.0;
+        let radius = height * lean.tan();
+        let expected = std::f64::consts::PI * radius * radius.hypot(height) / 2.0;
+        let area: f64 = mesh
+            .triangles
+            .iter()
+            .map(|t| t.b.minus(t.a).cross(t.c.minus(t.a)).length() / 2.0)
+            .sum();
+
+        assert!(
+            (area - expected).abs() < expected * 0.02,
+            "covered {area}, expected about {expected}",
+        );
+    }
+
+    /// And the apex ends up at the apex, not somewhere out on the rim.
+    ///
+    /// The area check above would still pass if the boundary were merely
+    /// *some* shape of the right size; this pins the one vertex the bug moved.
+    #[test]
+    fn the_apex_is_at_the_apex() {
+        let mesh = tessellate(&cone_wedge(), DEFAULT_SAG);
+        let apex = Point3::new(0.0, 0.0, 0.0);
+
+        let nearest = mesh
+            .triangles
+            .iter()
+            .flat_map(|t| [t.a, t.b, t.c])
+            .map(|point| point.minus(apex).length())
+            .fold(f64::MAX, f64::min);
+
+        assert!(nearest < 1e-6, "no vertex reaches the apex; nearest was {nearest}");
+    }
+
+    /// A whole ball, bounded only by the seam it wraps at.
+    ///
+    /// Nothing encloses this face: the loop runs up the meridian at `u = 0` and
+    /// straight back down it. Every point has the same `u`, so in parameter
+    /// space the boundary is a line enclosing nothing at all.
+    fn whole_sphere(radius: f64) -> Solid {
+        use std::f64::consts::PI;
+
+        let meridian: Vec<Point3> = (0..=48)
+            .map(|step| {
+                let v = -PI / 2.0 + PI * step as f64 / 48.0;
+                Point3::new(radius * v.cos(), 0.0, radius * v.sin())
+            })
+            .collect();
+        let mut back = meridian.clone();
+        back.reverse();
+
+        let seam = |id: u64, points: Vec<Point3>| Edge {
+            id: EdgeId(id),
+            start: points[0],
+            end: points[points.len() - 1],
+            curve: Curve::Polyline { points },
+            same_sense: true,
+        };
+
+        Solid {
+            faces: vec![Face {
+                surface: Surface::Sphere { frame: frame(), radius },
+                outer: Loop {
+                    edges: vec![(EdgeId(1), true), (EdgeId(2), true)],
+                    bound_forward: true,
+                },
+                inners: Vec::new(),
+                same_sense: true,
+                component: 0,
+            }],
+            edges: vec![seam(1, meridian), seam(2, back)],
+            skipped: Vec::new(),
+        }
+    }
+
+    /// **A closed surface is not an empty one.**
+    ///
+    /// Read the seam as an ordinary boundary and the ball cuts into nothing and
+    /// disappears — which is what happened to fifteen faces of a real turbine.
+    #[test]
+    fn a_sphere_bounded_only_by_its_seam_is_the_whole_sphere() {
+        let mesh = tessellate(&whole_sphere(3.0), DEFAULT_SAG);
+
+        assert!(!mesh.triangles.is_empty(), "the sphere cut into nothing");
+        assert!(mesh.skipped.is_empty(), "{:?}", mesh.skipped);
+
+        let expected = 4.0 * std::f64::consts::PI * 9.0;
+        let area: f64 = mesh
+            .triangles
+            .iter()
+            .map(|t| t.b.minus(t.a).cross(t.c.minus(t.a)).length() / 2.0)
+            .sum();
+
+        assert!(
+            (area - expected).abs() < expected * 0.02,
+            "covered {area}, expected about {expected} — the whole ball",
+        );
+    }
+
+    /// It goes all the way round, not merely somewhere.
+    ///
+    /// Substituting the wrong span would still give a plausible area on some
+    /// other surface; this checks the far side of the ball is actually there.
+    #[test]
+    fn the_whole_sphere_reaches_every_side() {
+        let mesh = tessellate(&whole_sphere(3.0), DEFAULT_SAG);
+
+        for direction in [
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(-1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, -1.0, 0.0),
+        ] {
+            let reach = mesh
+                .triangles
+                .iter()
+                .flat_map(|t| [t.a, t.b, t.c])
+                .map(|point| point.dot(direction))
+                .fold(f64::MIN, f64::max);
+            assert!(reach > 2.9, "nothing out at {direction:?}: furthest was {reach}");
+        }
+    }
+
+    /// An ordinary patch is left exactly as it was.
+    ///
+    /// The substitution has to be narrow. Applied to a face that really is a
+    /// wedge, it would quietly inflate it into a full turn — a worse fault than
+    /// the one being fixed, because the extra surface looks deliberate. Checked
+    /// point by point rather than by area, which only says the answer is about
+    /// the right size and not that nothing moved.
+    #[test]
+    fn a_patch_with_real_width_is_left_alone() {
+        let patch = vec![
+            Point2::new(0.2, 0.0),
+            Point2::new(1.1, 0.0),
+            Point2::new(1.1, 2.0),
+            Point2::new(0.2, 2.0),
+        ];
+
+        for surface in [
+            Surface::Cone { frame: frame(), radius: 0.0, half_angle: 0.4 },
+            Surface::Cylinder { frame: frame(), radius: 3.0 },
+            Surface::Sphere { frame: frame(), radius: 3.0 },
+        ] {
+            let after = whole_revolution(&surface, patch.clone());
+            assert_eq!(patch.len(), after.len(), "{surface:?} was replaced");
+            for (before, now) in patch.iter().zip(&after) {
+                assert!(
+                    (before.u - now.u).abs() < 1e-12 && (before.v - now.v).abs() < 1e-12,
+                    "{surface:?} moved {before:?} to {now:?}",
+                );
+            }
+        }
+    }
+
+    /// A sliver with no height is not rescued by going round.
+    ///
+    /// Its boundary has collapsed too, but into a point rather than a line —
+    /// there is no `v` range to sweep, and inventing one would put a whole
+    /// extra surface into the part.
+    #[test]
+    fn a_boundary_with_no_height_is_not_swept_round() {
+        let sliver = vec![
+            Point2::new(0.5, 1.0),
+            Point2::new(0.5, 1.0),
+            Point2::new(0.5, 1.0),
+        ];
+        let cylinder = Surface::Cylinder { frame: frame(), radius: 3.0 };
+
+        assert_eq!(3, whole_revolution(&cylinder, sliver).len());
+    }
+
+    // ---- a face at all -------------------------------------------------------
+
+    #[test]
+    fn a_square_becomes_two_triangles() {
+        let mesh = tessellate(&square_solid(true), DEFAULT_SAG);
+        assert_eq!(2, mesh.triangles.len());
+        assert!(mesh.skipped.is_empty(), "{:?}", mesh.skipped);
+    }
+
+    /// The area is right, which a triangulation that overlaps itself would fail.
+    #[test]
+    fn the_triangles_cover_the_face_exactly_once() {
+        let mesh = tessellate(&square_solid(true), DEFAULT_SAG);
+        let area: f64 = mesh
+            .triangles
+            .iter()
+            .map(|t| t.b.minus(t.a).cross(t.c.minus(t.a)).length() / 2.0)
+            .sum();
+
+        assert!((area - 16.0).abs() < 1e-9, "covered {area}, expected 16");
+    }
+
+    // ---- the winding, which decides whether a face is visible at all ---------
+
+    /// Every triangle winds the way its face points.
+    ///
+    /// Under backface culling a triangle wound the other way is not drawn, so
+    /// this failing does not look like a shading bug — the face is simply
+    /// absent, and the part appears to have a hole in it.
+    #[test]
+    fn every_triangle_winds_with_its_normal() {
+        for same_sense in [true, false] {
+            let mesh = tessellate(&square_solid(same_sense), DEFAULT_SAG);
+            for triangle in &mesh.triangles {
+                let wound = triangle.b.minus(triangle.a).cross(triangle.c.minus(triangle.a));
+                assert!(
+                    wound.dot(triangle.normal) > 0.0,
+                    "same_sense={same_sense}: {triangle:?} winds against its normal",
+                );
+            }
+        }
+    }
+
+    /// And `same_sense = false` really does turn the face over.
+    #[test]
+    fn same_sense_false_points_the_face_the_other_way() {
+        let facing = tessellate(&square_solid(true), DEFAULT_SAG);
+        let flipped = tessellate(&square_solid(false), DEFAULT_SAG);
+
+        assert!(facing.triangles[0].normal.z > 0.9);
+        assert!(flipped.triangles[0].normal.z < -0.9);
+    }
+
+    // ---- holes ---------------------------------------------------------------
+
+    #[test]
+    fn a_face_with_a_hole_has_the_hole_taken_out_of_it() {
+        let mut solid = square_solid(true);
+
+        // A square hole in the middle, wound the other way as a hole is.
+        let hole = [
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(1.0, 3.0, 0.0),
+            Point3::new(3.0, 3.0, 0.0),
+            Point3::new(3.0, 1.0, 0.0),
+        ];
+        for index in 0..4 {
+            solid.edges.push(line(10 + index as u64, hole[index], hole[(index + 1) % 4]));
+        }
+        solid.faces[0].inners.push(Loop {
+            edges: (10..14).map(|id| (EdgeId(id), true)).collect(),
+            bound_forward: true,
+        });
+
+        let mesh = tessellate(&solid, DEFAULT_SAG);
+        let area: f64 = mesh
+            .triangles
+            .iter()
+            .map(|t| t.b.minus(t.a).cross(t.c.minus(t.a)).length() / 2.0)
+            .sum();
+
+        // Sixteen less the four of the hole.
+        assert!((area - 12.0).abs() < 1e-6, "covered {area}, expected 12");
+    }
+
+    // ---- curved faces --------------------------------------------------------
+
+    /// A cylinder wall tessellates, and its normals point outwards everywhere.
+    #[test]
+    fn a_cylinder_wall_is_round_and_faces_outwards() {
+        let radius = 5.0;
+        let bottom = Point3::new(radius, 0.0, 0.0);
+        let top = Point3::new(radius, 0.0, 10.0);
+
+        let rim = |id: u64, height: f64| Edge {
+            id: EdgeId(id),
+            curve: Curve::Circle {
+                frame: Frame {
+                    origin: Point3::new(0.0, 0.0, height),
+                    ..frame()
+                },
+                radius,
+            },
+            start: Point3::new(radius, 0.0, height),
+            end: Point3::new(radius, 0.0, height),
+            same_sense: true,
+        };
+
+        let solid = Solid {
+            faces: vec![Face {
+                surface: Surface::Cylinder { frame: frame(), radius },
+                outer: Loop {
+                    edges: vec![
+                        (EdgeId(1), true),  // bottom rim
+                        (EdgeId(2), true),  // up the seam
+                        (EdgeId(3), false), // top rim, the other way
+                        (EdgeId(4), false), // back down
+                    ],
+                    bound_forward: true,
+                },
+                inners: Vec::new(),
+                same_sense: true,
+                component: 0,
+            }],
+            edges: vec![
+                rim(1, 0.0),
+                line(2, bottom, top),
+                rim(3, 10.0),
+                line(4, bottom, top),
+            ],
+            skipped: Vec::new(),
+        };
+
+        let mesh = tessellate(&solid, DEFAULT_SAG);
+        assert!(!mesh.triangles.is_empty(), "skipped: {:?}", mesh.skipped);
+
+        // **The property that matters: no chord cuts through the solid.**
+        // Every vertex sitting exactly on the cylinder proves nothing on its
+        // own — a triangle spanning half the barrel has all three vertices on
+        // the surface and passes straight through the middle of the part. What
+        // has to hold is that the surface between the vertices is never far
+        // from the triangle, which is the same sag the edges are held to.
+        for triangle in &mesh.triangles {
+            for pair in [(triangle.a, triangle.b), (triangle.b, triangle.c), (triangle.c, triangle.a)] {
+                let middle = pair.0.plus(pair.1).scaled(0.5);
+                let sag = radius - middle.x.hypot(middle.y);
+                assert!(
+                    sag <= DEFAULT_SAG * 1.05,
+                    "a chord sags {sag} into the solid, allowed {DEFAULT_SAG}",
+                );
+            }
+            // Radial, and never inward-facing.
+            assert!(triangle.normal.z.abs() < 1e-6, "not radial: {:?}", triangle.normal);
+            let middle = triangle.a.plus(triangle.b).plus(triangle.c).scaled(1.0 / 3.0);
+            let outwards = Point3::new(middle.x, middle.y, 0.0);
+            assert!(outwards.dot(triangle.normal) > 0.0, "inwards at {middle:?}");
+        }
+    }
+
+    // ---- nothing vanishes ----------------------------------------------------
+
+    /// A freeform face is counted, by name, rather than dropped.
+    #[test]
+    fn an_unsupported_face_is_counted_and_named() {
+        let mut solid = square_solid(true);
+        solid.faces.push(Face {
+            surface: Surface::Unsupported { what: "freeform surfaces" },
+            outer: Loop { edges: vec![(EdgeId(1), true)], bound_forward: true },
+            inners: Vec::new(),
+            same_sense: true,
+            component: 0,
+        });
+
+        let mesh = tessellate(&solid, DEFAULT_SAG);
+
+        assert_eq!(2, mesh.triangles.len(), "the good face still came through");
+        assert_eq!(1, mesh.skipped.len());
+        assert_eq!("freeform surfaces", mesh.skipped[0].what);
+        assert_eq!(1, mesh.skipped[0].count);
+    }
+
+    /// Several of the same kind are counted together, not listed one by one.
+    #[test]
+    fn faces_skipped_for_the_same_reason_are_counted_together() {
+        let mut solid = square_solid(true);
+        for _ in 0..3 {
+            solid.faces.push(Face {
+                surface: Surface::Unsupported { what: "freeform surfaces" },
+                outer: Loop { edges: vec![(EdgeId(1), true)], bound_forward: true },
+                inners: Vec::new(),
+                same_sense: true,
+                component: 0,
+            });
+        }
+
+        let mesh = tessellate(&solid, DEFAULT_SAG);
+        assert_eq!(1, mesh.skipped.len());
+        assert_eq!(3, mesh.skipped[0].count);
+    }
+
+    /// A face whose edges are missing is reported, not silently absent.
+    #[test]
+    fn a_face_with_an_unreadable_boundary_is_reported() {
+        let mut solid = square_solid(true);
+        solid.edges.remove(0);
+
+        let mesh = tessellate(&solid, DEFAULT_SAG);
+        assert!(mesh.triangles.is_empty());
+        assert_eq!(1, mesh.skipped.len(), "{:?}", mesh.skipped);
+    }
+
+    /// A hole that cannot be read costs the hole, not the whole face.
+    ///
+    /// The face without its hole is wrong in one small place; the face missing
+    /// altogether is a gap straight through the solid.
+    #[test]
+    fn an_unreadable_hole_does_not_take_the_face_with_it() {
+        let mut solid = square_solid(true);
+        solid.faces[0].inners.push(Loop {
+            edges: vec![(EdgeId(999), true)], // never cached
+            bound_forward: true,
+        });
+
+        let mesh = tessellate(&solid, DEFAULT_SAG);
+        assert_eq!(2, mesh.triangles.len(), "the face itself survived");
+    }
+
+
+    // ---- inside out --------------------------------------------------------
+
+    /// A closed tetrahedron, wound so that it encloses a positive volume.
+    fn tetrahedron() -> Vec<Triangle> {
+        let o = Point3::new(0.0, 0.0, 0.0);
+        let x = Point3::new(1.0, 0.0, 0.0);
+        let y = Point3::new(0.0, 1.0, 0.0);
+        let z = Point3::new(0.0, 0.0, 1.0);
+
+        [(o, y, x), (o, x, z), (o, z, y), (x, y, z)]
+            .into_iter()
+            .map(|(a, b, c)| {
+                let normal = b.minus(a).cross(c.minus(a)).normalised().expect("a normal");
+                Triangle { a, b, c, normal }
+            })
+            .collect()
+    }
+
+    fn volume_of(triangles: &[Triangle]) -> f64 {
+        triangles.iter().map(|t| t.a.dot(t.b.cross(t.c)) / 6.0).sum()
+    }
+
+    /// A solid whose faces all point inward is turned the right way out.
+    ///
+    /// **It does not look inverted, it looks hollow.** Backface culling throws
+    /// away the near wall and draws the far one, so the part is solid from one
+    /// direction and open from another — which reads as a hole in the model
+    /// rather than as a sign error, and is what a real assembly showed on some
+    /// of its components and not on others.
+    #[test]
+    fn a_solid_wound_inside_out_is_turned_the_right_way() {
+        let right_way = tetrahedron();
+        assert!(volume_of(&right_way) > 0.0, "the fixture is not a solid");
+
+        // Turned outside in, exactly as a file with the wrong sense flags does.
+        let mut inside_out: Vec<Triangle> = right_way
+            .iter()
+            .map(|t| Triangle {
+                a: t.a,
+                b: t.c,
+                c: t.b,
+                normal: t.normal.scaled(-1.0),
+            })
+            .collect();
+        assert!(volume_of(&inside_out) < 0.0, "the fixture was not inverted");
+
+        turn_outward(&mut inside_out);
+
+        assert!(volume_of(&inside_out) > 0.0, "still inside out");
+        assert!(
+            (volume_of(&inside_out) - volume_of(&right_way)).abs() < 1e-12,
+            "the shape changed, not only its sense",
+        );
+    }
+
+    /// And the normals turn with the winding, or the shading disagrees with it.
+    #[test]
+    fn turning_a_solid_turns_its_normals_too() {
+        let mut inside_out: Vec<Triangle> = tetrahedron()
+            .iter()
+            .map(|t| Triangle { a: t.a, b: t.c, c: t.b, normal: t.normal.scaled(-1.0) })
+            .collect();
+
+        turn_outward(&mut inside_out);
+
+        for triangle in &inside_out {
+            let wound = triangle.b.minus(triangle.a).cross(triangle.c.minus(triangle.a));
+            assert!(
+                wound.dot(triangle.normal) > 0.0,
+                "winding and normal disagree after turning: {triangle:?}",
+            );
+        }
+    }
+
+    /// A solid already the right way out is left exactly as it was.
+    #[test]
+    fn a_correct_solid_is_not_disturbed() {
+        let original = tetrahedron();
+        let mut copy = original.clone();
+        turn_outward(&mut copy);
+        assert_eq!(original, copy, "a correct solid was turned over");
+    }
+
+    /// An open shell encloses nothing and is not "repaired" into nonsense.
+    ///
+    /// A single face is a surface, not a solid. Its signed volume is whatever
+    /// its position relative to the origin makes it, and flipping it on that
+    /// basis would turn correct geometry over depending on where it sits.
+    #[test]
+    fn an_open_shell_is_left_as_it_is() {
+        let mesh = tessellate(&square_solid(true), DEFAULT_SAG);
+        let normals: Vec<Point3> = mesh.triangles.iter().map(|t| t.normal).collect();
+
+        assert!(
+            normals.iter().all(|n| n.z > 0.0),
+            "a flat face was turned over by a volume it does not have",
+        );
+    }
+
+    // ---- fitting to view -----------------------------------------------------
+
+    // ---- how far a triangle may reach ---------------------------------------
+
+    /// A plane is flat, so a triangle of any size lies exactly on it.
+    #[test]
+    fn a_plane_is_never_refined() {
+        let (u, v) = parameter_limits(&Surface::Plane { frame: frame() }, DEFAULT_SAG);
+        assert!(u.is_infinite() && v.is_infinite());
+    }
+
+    /// A cylinder is straight along its axis: only the sweep is limited.
+    ///
+    /// Limiting the axis as well would multiply the triangles of every hole
+    /// and boss in a part for no gain at all -- a chord along a ruling *is*
+    /// the surface.
+    #[test]
+    fn a_cylinder_is_limited_around_but_not_along() {
+        let (u, v) = parameter_limits(&Surface::Cylinder { frame: frame(), radius: 5.0 }, DEFAULT_SAG);
+        assert!(u.is_finite() && u > 0.0, "no sweep limit: {u}");
+        assert!(v.is_infinite(), "the axis should not be subdivided");
+    }
+
+    /// A sphere curves both ways, so both are limited.
+    #[test]
+    fn a_sphere_is_limited_in_both_directions() {
+        let (u, v) = parameter_limits(&Surface::Sphere { frame: frame(), radius: 8.0 }, DEFAULT_SAG);
+        assert!(u.is_finite() && v.is_finite(), "{u}, {v}");
+    }
+
+    /// A tighter tolerance means smaller steps, which is the whole idea.
+    #[test]
+    fn a_finer_tolerance_allows_less_reach() {
+        let coarse = parameter_limits(&Surface::Cylinder { frame: frame(), radius: 5.0 }, 0.5).0;
+        let fine = parameter_limits(&Surface::Cylinder { frame: frame(), radius: 5.0 }, 0.001).0;
+        assert!(fine < coarse, "fine {fine} was not tighter than coarse {coarse}");
+    }
+
+    /// Splitting stops once every triangle is inside the limit.
+    #[test]
+    fn refining_stops_when_the_triangles_are_small_enough() {
+        let big = vec![[
+            Point2::new(0.0, 0.0),
+            Point2::new(6.0, 0.0),
+            Point2::new(0.0, 6.0),
+        ]];
+
+        let refined = refine(big, 1.0, 1.0);
+
+        assert!(refined.len() > 1, "nothing was split");
+        for triangle in &refined {
+            for edge in 0..3 {
+                let from = triangle[edge];
+                let to = triangle[(edge + 1) % 3];
+                assert!(
+                    (from.u - to.u).abs() <= 1.0 + 1e-9 && (from.v - to.v).abs() <= 1.0 + 1e-9,
+                    "an edge still spans too far: {from:?} to {to:?}",
+                );
+            }
+        }
+    }
+
+    /// Refining keeps the area it started with: no gaps, no overlaps.
+    #[test]
+    fn refining_neither_loses_nor_duplicates_area() {
+        let area = |t: &[Point2; 3]| {
+            ((t[1].u - t[0].u) * (t[2].v - t[0].v) - (t[2].u - t[0].u) * (t[1].v - t[0].v)).abs() / 2.0
+        };
+        let original = [Point2::new(0.0, 0.0), Point2::new(6.0, 0.0), Point2::new(0.0, 6.0)];
+        let before = area(&original);
+
+        let after: f64 = refine(vec![original], 0.7, 0.7).iter().map(area).sum();
+
+        assert!((before - after).abs() < 1e-9, "{before} became {after}");
+    }
+
+    #[test]
+    fn the_bounds_of_a_square_are_the_square() {
+        let mesh = tessellate(&square_solid(true), DEFAULT_SAG);
+        let (low, high) = mesh.bounds().expect("a mesh has bounds");
+
+        assert_eq!(Point3::new(0.0, 0.0, 0.0), low);
+        assert_eq!(Point3::new(4.0, 4.0, 0.0), high);
+    }
+
+    #[test]
+    fn an_empty_mesh_has_no_bounds_rather_than_a_point_at_the_origin() {
+        assert!(Mesh::default().bounds().is_none());
+    }
+}
+
+/// Loosen a face's parameter limits until it fits what it may spend.
+///
+/// The estimate is the number of cells the boundary's own extent would be cut
+/// into, which is what refinement will produce. Scaling both limits by the
+/// square root of the overshoot brings that count down to the allowance in one
+/// step rather than by trying and measuring.
+fn widened(
+    boundary: &[Point2],
+    max_u: f64,
+    max_v: f64,
+    allowance: usize,
+) -> (f64, f64) {
+    if boundary.is_empty() || allowance == 0 {
+        return (max_u, max_v);
+    }
+
+    let mut low = boundary[0];
+    let mut high = boundary[0];
+    for point in boundary {
+        low = Point2::new(low.u.min(point.u), low.v.min(point.v));
+        high = Point2::new(high.u.max(point.u), high.v.max(point.v));
+    }
+
+    let across = if max_u.is_finite() { (high.u - low.u) / max_u } else { 1.0 };
+    let down = if max_v.is_finite() { (high.v - low.v) / max_v } else { 1.0 };
+    // Two triangles a cell.
+    let estimate = (across.max(1.0) * down.max(1.0) * 2.0).max(1.0);
+
+    if estimate <= allowance as f64 {
+        return (max_u, max_v);
+    }
+
+    let loosen = (estimate / allowance as f64).sqrt();
+    (
+        if max_u.is_finite() { max_u * loosen } else { max_u },
+        if max_v.is_finite() { max_v * loosen } else { max_v },
+    )
+}
+
+/// Turn a solid the right way out, if the file had it inside in.
+///
+/// **A closed solid encloses a positive volume.** Summing `a·(b×c)/6` over its
+/// triangles gives that volume with a sign, and the sign says which way the
+/// faces point — outward for a real solid, inward for one whose `same_sense`
+/// flags or loop windings disagree with the rest of the file.
+///
+/// An inside-out solid does not look inverted. Under backface culling its near
+/// wall is thrown away and its far wall drawn, so you see *into* it: solid from
+/// one direction and hollow from another, which reads as a hole in the model
+/// rather than as a wrong sign. A real assembly showed exactly that, and only
+/// on some of its components.
+///
+/// Repaired per component rather than per file, because a file can be right
+/// about one part and wrong about the next — and per component is the only
+/// scale at which "encloses a volume" means anything.
+fn turn_outward(triangles: &mut [Triangle]) {
+    let volume: f64 = triangles
+        .iter()
+        .map(|t| t.a.dot(t.b.cross(t.c)) / 6.0)
+        .sum();
+
+    // Zero means an open shell — a surface rather than a solid — where there is
+    // no inside to be on the wrong side of, and nothing to repair.
+    if volume >= 0.0 {
+        return;
+    }
+
+    for triangle in triangles.iter_mut() {
+        std::mem::swap(&mut triangle.b, &mut triangle.c);
+        triangle.normal = triangle.normal.scaled(-1.0);
+    }
+}
