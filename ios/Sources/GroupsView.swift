@@ -25,6 +25,11 @@ struct GroupsListView: View {
 
     @State private var addingGroup = false
     @State private var newGroupName = ""
+    /// The already-stamped export, computed once when the swipe action
+    /// fires — never lazily inside the sheet's own `Binding`, which would
+    /// re-run `VCardExport.stamping` on every re-render the sheet is up for
+    /// and bump every member's `exportCount` on its own.
+    @State private var exportingGroup: VCardExport?
 
     private var ungroupedCount: Int { allContacts.filter { $0.groups.isEmpty }.count }
 
@@ -43,19 +48,45 @@ struct GroupsListView: View {
                 }
 
                 ForEach(groups) { group in
-                    NavigationLink {
-                        GroupDetailView(group: group)
-                    } label: {
-                        HStack {
-                            Text(group.name)
-                            Spacer()
-                            Text("\(group.contacts.count)")
+                    HStack {
+                        NavigationLink {
+                            GroupDetailView(group: group)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(group.name)
+                                    .font(.headline)
+                                Text(group.rowSubtitle)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        Spacer()
+                        // A menu, not a swipe: this list already has a
+                        // whole-screen left/right drag gesture for the
+                        // calendar and camera (see ContactsScreen), and it
+                        // claims a horizontal drag anywhere on the list
+                        // before a row's own swipe action ever sees it —
+                        // confirmed by reproducing it, not assumed. A tap
+                        // target has no direction to collide with. Matches
+                        // Android's own per-row "⋮" IconButton + dropdown
+                        // more closely than a swipe would have anyway.
+                        Menu {
+                            Button {
+                                exportingGroup = .stamping(group.contacts, group: group)
+                            } label: {
+                                Label("Export", systemImage: "square.and.arrow.up")
+                            }
+                            Button(role: .destructive) {
+                                modelContext.delete(group)
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
                                 .foregroundStyle(.secondary)
                         }
+                        .buttonStyle(.plain)
                     }
-                }
-                .onDelete { indices in
-                    for index in indices { modelContext.delete(groups[index]) }
                 }
 
                 if ungroupedCount > 0 {
@@ -86,6 +117,23 @@ struct GroupsListView: View {
                 onGroupCreated()
             }
         }
+        .sheet(item: $exportingGroup) { export in
+            if let url = export.fileURL {
+                ShareSheet(items: [url])
+            }
+        }
+    }
+}
+
+private extension ContactGroup {
+    /// Matches Android's own `GroupRow` subtitle exactly: the member count
+    /// on its own until this group has ever been exported as a whole, then
+    /// " · sent <date>" appended once `lastExportedAt` is set.
+    var rowSubtitle: String {
+        let count = contacts.count
+        let countPhrase = count == 1 ? "1 contact" : "\(count) contacts"
+        guard let lastExportedAt else { return countPhrase }
+        return "\(countPhrase) · sent \(lastExportedAt.formatted(.dateTime.day().month().year()))"
     }
 }
 
@@ -93,24 +141,58 @@ struct GroupDetailView: View {
     @Bindable var group: ContactGroup
     @Environment(\.modelContext) private var modelContext
 
+    @State private var searchText = ""
+    /// Scoped to this group's own members, not the whole store — matches
+    /// Android's own `pool = openGroup?.let(inGroup) ?: contacts`.
+    /// `Contact.searchable` is already lowercased, so only the query needs
+    /// folding here.
+    private var shown: [Contact] {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return group.contacts }
+        return group.contacts.filter { $0.searchable.contains(trimmed.lowercased()) }
+    }
+
+    /// Separate from the outer list row's own "…" menu — Android gives the
+    /// open group's header its own export entry point too, for exactly this
+    /// group's current members.
+    @State private var exportingGroup: VCardExport?
+
     var body: some View {
         List {
-            ForEach(group.contacts) { contact in
+            ForEach(shown) { contact in
                 ContactRow(contact: contact)
             }
             .onDelete { indices in
                 // Removes the grouping only — the contact itself is
                 // untouched, same guarantee as deleting the group entirely.
+                // Indexed into `shown`, not `group.contacts` — the two can
+                // disagree in order and length once a search is narrowing
+                // what's on screen.
                 for index in indices {
-                    group.contacts[index].groups.removeAll { $0.persistentModelID == group.persistentModelID }
+                    shown[index].groups.removeAll { $0.persistentModelID == group.persistentModelID }
                 }
             }
         }
+        .searchable(text: $searchText, prompt: "Search \(group.name)…")
         .navigationTitle(group.name)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    exportingGroup = .stamping(group.contacts, group: group)
+                } label: {
+                    Label("Export", systemImage: "square.and.arrow.up")
+                }
+            }
+        }
         .overlay {
             if group.contacts.isEmpty {
                 ContentUnavailableView("No Contacts", systemImage: "person.2",
                                        description: Text("File a contact into this group from its Progress screen."))
+            }
+        }
+        .sheet(item: $exportingGroup) { export in
+            if let url = export.fileURL {
+                ShareSheet(items: [url])
             }
         }
     }

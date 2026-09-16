@@ -31,6 +31,11 @@ struct ContactDetailView: View {
     @State private var customFollowUpDate = Date.now
     @State private var addingToGroup = false
     @State private var confirmingDelete = false
+    /// The already-stamped export, computed once when the toolbar button is
+    /// tapped — never lazily inside the sheet's own `Binding`, which would
+    /// re-run `VCardExport.stamping` on every re-render the sheet is up for
+    /// and bump `exportCount` on its own.
+    @State private var exporting: VCardExport?
 
     init(contact: Contact, isNew: Bool = false) {
         self.contact = contact
@@ -165,6 +170,30 @@ struct ContactDetailView: View {
                     }
                 }
 
+                // Android's ContactSheet keeps these two rows read-only next
+                // to its own Export button; there's no separate view screen
+                // here to hold them, so — like the rest of ContactSheet —
+                // they land in this merged one instead.
+                if !isNew {
+                    Section {
+                        HStack {
+                            Text("Added")
+                            Spacer()
+                            Text(contact.capturedAt, format: .dateTime.day().month())
+                                .foregroundStyle(.secondary)
+                        }
+                        HStack {
+                            Text("Exported")
+                            Spacer()
+                            Text(contact.exportedAt.map { date in
+                                let times = contact.exportCount == 1 ? "once" : "\(contact.exportCount) times"
+                                return "\(date.formatted(.dateTime.day().month())) · \(times)"
+                            } ?? "never")
+                            .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
                 if !isNew {
                     Section {
                         NavigationLink("Recognised Text") {
@@ -202,6 +231,14 @@ struct ContactDetailView: View {
                             confirmingDelete = true
                         } label: {
                             Image(systemName: "trash")
+                        }
+                    }
+                    // Matches Android's Share-icon Export button on ContactSheet.
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            exporting = .stamping([contact])
+                        } label: {
+                            Image(systemName: "square.and.arrow.up")
                         }
                     }
                     ToolbarItem(placement: .confirmationAction) {
@@ -255,6 +292,11 @@ struct ContactDetailView: View {
             }
             .sheet(isPresented: $addingToGroup) {
                 AddToGroupSheet(contact: contact)
+            }
+            .sheet(item: $exporting) { export in
+                if let url = export.fileURL {
+                    ShareSheet(items: [url])
+                }
             }
             .alert("Delete \(contact.name.isEmpty ? "This Contact" : contact.name)?", isPresented: $confirmingDelete) {
                 Button("Cancel", role: .cancel) {}

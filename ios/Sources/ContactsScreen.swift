@@ -43,9 +43,23 @@ struct ContactsScreen: View {
     /// SwiftUI-native `.onDelete` row swipe it started with.
     @State private var pickedContacts: Set<PersistentIdentifier> = []
     @State private var confirmingBulkDelete = false
-    @State private var exportingSelected: [Contact]?
+    /// The already-stamped export, not the raw contacts — computed once, at
+    /// the moment `onExport` fires, never lazily inside the sheet's own
+    /// `Binding`. A `get` closure that called `VCardExport.stamping` itself
+    /// would re-run on every body re-evaluation the sheet is up for, and
+    /// stamping mutates the very models that re-evaluation watches —
+    /// `exportCount` climbing on its own with the sheet merely on screen,
+    /// not because anyone tapped Export twice.
+    @State private var exportingSelected: VCardExport?
     private var picking: Bool { !pickedContacts.isEmpty }
 
+    @State private var searchText = ""
+    /// `Contact.searchable` is already lowercased, so only the query needs folding here.
+    private var shown: [Contact] {
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return contacts }
+        return contacts.filter { $0.searchable.contains(trimmed.lowercased()) }
+    }
 
     enum ScanResult: Identifiable {
         case saved(count: Int)
@@ -86,13 +100,14 @@ struct ContactsScreen: View {
                                 count: pickedContacts.count,
                                 onClose: { pickedContacts = [] },
                                 onExport: {
-                                    exportingSelected = contacts
-                                        .filter { pickedContacts.contains($0.persistentModelID) }
+                                    exportingSelected = .stamping(
+                                        contacts.filter { pickedContacts.contains($0.persistentModelID) }
+                                    )
                                 },
                                 onDelete: { confirmingBulkDelete = true }
                             )
                         }
-                        ForEach(contacts) { contact in
+                        ForEach(shown) { contact in
                             let isPicked = pickedContacts.contains(contact.persistentModelID)
                             HStack(alignment: .top) {
                                 if picking {
@@ -152,6 +167,7 @@ struct ContactsScreen: View {
                             }
                         }
                     }
+                    .searchable(text: $searchText, prompt: "Search contacts…")
                 }
             }
             .overlay {
@@ -307,10 +323,7 @@ struct ContactsScreen: View {
                     pickedContacts = []
                 }
             }
-            .sheet(item: Binding(
-                get: { exportingSelected.map { VCardExport.stamping($0) } },
-                set: { _ in exportingSelected = nil; pickedContacts = [] }
-            )) { export in
+            .sheet(item: $exportingSelected, onDismiss: { pickedContacts = [] }) { export in
                 if let url = export.fileURL {
                     ShareSheet(items: [url])
                 }
