@@ -47,18 +47,20 @@ use std::collections::VecDeque;
 /// background pixels carry alpha 0, ink pixels their own colour at full or
 /// partial opacity, fading smoothly between.
 ///
-/// **Why alpha, when the picture ends up opaque wherever it is placed.**
-/// The mechanism a picture is actually placed through cannot carry alpha —
-/// see [`crate::document::Annotation::Image`] in `pdf_core` — so this alpha
-/// is never shown as transparency directly. What it *is* used for is
-/// compositing against wherever the signature ends up: the closest thing to
-/// "no visible background" available without real alpha support is a
-/// background that already matches the page underneath, and that
-/// composite — done at placement time, once the destination is known, not
-/// here — needs to know which pixels are background and which are ink.
-/// Keeping that distinction (alpha) rather than baking in one guess (white)
-/// keeps this function honest about what it found, and leaves the "what do
-/// I put behind it" decision to the code that knows where it is going.
+/// **Why alpha, when the picture ends up opaque while merely placed.** The
+/// mechanism a picture is *placed* through — see `pdf_core`'s
+/// `Annotation::Image` — genuinely cannot carry alpha, so while a signature
+/// sits there unapplied, it is composited onto a background colour sampled
+/// from the page (`Session::place_image_signature`, at the moment the
+/// destination is known — not here). But applying goes through a different,
+/// lower-level path that hand-writes the PDF bytes and is not bound by that
+/// limit — see `pdf_core`'s `DocumentMut::remember_image_alpha` — so the
+/// real alpha extracted here does eventually reach the page as a genuine
+/// soft mask, once the signature is applied, in the same session it was
+/// placed in. Keeping the true background/ink distinction here, rather than
+/// baking in one guess (white) up front, is what makes both of those
+/// possible; deciding what either of them actually needs belongs to the
+/// code that knows where the signature is going, not to this function.
 pub struct Extracted {
     /// RGBA, row-major, top row first — same layout as
     /// [`crate::signatures::StoredImage`].

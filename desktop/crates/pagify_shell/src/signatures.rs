@@ -63,18 +63,20 @@ pub struct Signature {
 
 /// One uploaded signature's pixels, kept exactly as given.
 ///
-/// **Alpha may be real, but it never reaches the page as transparency.**
+/// **Alpha is real, but only reaches the page as transparency once applied.**
 /// A picture from [`crate::signature_extract`] carries a genuine alpha
-/// channel — background pixels transparent, ink opaque or fading toward it
-/// — but the mechanism `pdf_core`'s `Annotation::Image` places a picture
-/// through does not carry alpha itself, even before anything is saved. What
-/// alpha is *for*, then, is compositing against wherever the signature ends
-/// up: [`composite_onto`] flattens it onto a background colour, which
-/// `Session::place_image_signature` does at the moment a signature is
-/// placed, once the page underneath it is known — not here, and not at
-/// upload, which only keeps what it was handed. A picture with no
-/// meaningful alpha (every byte 255, as any upload made before this existed
-/// still is) flattens to itself unchanged.
+/// channel — background pixels transparent, ink opaque or fading toward it —
+/// and the mechanism `pdf_core`'s `Annotation::Image` is merely *placed*
+/// through cannot carry it, even before anything is saved. Two things
+/// happen with it, for two different moments: [`composite_onto`] flattens
+/// it onto a background colour for the placed annotation itself (what shows
+/// while it sits there, unapplied — `Session::place_image_signature` does
+/// this once the page underneath is known, not here, and not at upload,
+/// which only keeps what it was handed); separately, the original is kept
+/// aside for `Session::apply_signatures`, which burns a real soft mask into
+/// the page from it — see `pdf_core`'s `DocumentMut::remember_image_alpha`.
+/// A picture with no meaningful alpha (every byte 255, as any upload made
+/// before this existed still is) flattens to itself unchanged either way.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StoredImage {
     /// RGBA, row-major, top row first — one row of `width * 4` bytes,

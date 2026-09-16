@@ -9,10 +9,19 @@
 //! backwards from how it looks at first: placing is PDFium's; applying is
 //! `crate::pdf`'s.
 //!
-//! **The alpha byte is not honoured.** Confirmed by `image_signature_probe`
-//! before this test was written: `FPDFImageObj_SetBitmap` drops it even
-//! in-session, before anything is saved. Every picture placed here is opaque,
-//! and the tests below check exactly that rather than assume it.
+//! **The alpha byte is not honoured while merely placed.** Confirmed by
+//! `image_signature_probe` before this file existed: `FPDFImageObj_SetBitmap`
+//! drops it even in-session, before anything is saved. Every *placed*
+//! picture is opaque, and the tests below check exactly that rather than
+//! assume it.
+//!
+//! **Applying is a different mechanism, and can carry real alpha.** It does
+//! not go through PDFium's object API at all — see `image_xobject`'s own
+//! doc — so a picture whose original, alpha-bearing pixels were kept aside
+//! with `DocumentMut::remember_image_alpha` (same-session only; nothing here
+//! survives a save and reopen) gets a real `/SMask` when it is burnt into
+//! the page, and one without a remembered original stays exactly as opaque
+//! as before that existed. Both are checked below, not assumed.
 //!
 //! ```text
 //! PAGIFY_PDFIUM_LIB=<pdfium> cargo test --test image_signature
@@ -324,5 +333,123 @@ fn an_unrelated_pending_mark_is_not_lost_when_a_picture_signature_is_applied() {
     assert!(
         annotations.iter().any(|a| matches!(a.annotation, Annotation::Highlight { .. })),
         "the unrelated highlight did not survive: {annotations:?}"
+    );
+}
+
+/// **Real per-pixel transparency, in the one place this module's own doc
+/// says it cannot exist — applied, not merely placed.** `remember_image_alpha`
+/// is what `Session::place_image_signature` calls after marking a picture as
+/// a signature, so this reproduces that sequence directly rather than going
+/// through `place()`, which does not. Half the picture opaque, half fully
+/// transparent, over a painted background it has no business matching by
+/// coincidence — rendered afterwards through PDFium's ordinary page
+/// rendering, the same path any reader uses, not this engine's own pixel
+/// maths.
+#[test]
+fn applying_a_picture_signature_with_remembered_alpha_paints_a_real_soft_mask() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let background = Color { r: 210, g: 40, b: 150, a: 255 };
+    let area = Rect { left: 20.0, top: 20.0, right: 200.0, bottom: 120.0 };
+    doc.whiteout(0, area, background).expect("paint the background");
+
+    let rect = Rect { left: 40.0, top: 40.0, right: 120.0, bottom: 80.0 };
+    let (w, h) = (10u32, 10u32);
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            let alpha = if x < w / 2 { 255 } else { 0 };
+            rgba[i..i + 4].copy_from_slice(&[15, 15, 15, alpha]);
+        }
+    }
+    let index = place(&mut doc, 0, rect, rgba, w, h, "Half Transparent");
+    doc.remember_image_alpha(0, index, {
+        // The same pixels again: `place` already moved the first copy into
+        // the annotation, and this is what `Session` hands the remembering
+        // call too — the original, not a re-read of the (already opaque)
+        // annotation.
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let i = ((y * w + x) * 4) as usize;
+                let alpha = if x < w / 2 { 255 } else { 0 };
+                rgba[i..i + 4].copy_from_slice(&[15, 15, 15, alpha]);
+            }
+        }
+        rgba
+    })
+    .expect("remember the original pixels");
+
+    doc.apply_signatures(0).expect("apply");
+
+    let scale = 3.0;
+    let bitmap = doc
+        .render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() })
+        .expect("render");
+    let sample = |x_pt: f32, y_pt: f32| {
+        let (x, y) = ((x_pt * scale) as usize, (y_pt * scale) as usize);
+        let at = y * bitmap.stride + x * 4;
+        (bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2])
+    };
+    let close = |sample: u8, expected: u8| sample.abs_diff(expected) <= 12;
+
+    // Left quarter of the placed rect: the opaque half of the picture.
+    let opaque = sample(rect.left + 10.0, (rect.top + rect.bottom) / 2.0);
+    assert!(
+        close(opaque.0, 15) && close(opaque.1, 15) && close(opaque.2, 15),
+        "the opaque half should still be the ink, got {opaque:?}"
+    );
+    // Right quarter: the transparent half — the painted background, not
+    // white, not the ink, and not whatever the annotation's own flattened
+    // pixels happened to be.
+    let transparent = sample(rect.right - 10.0, (rect.top + rect.bottom) / 2.0);
+    assert!(
+        close(transparent.0, 210) && close(transparent.1, 40) && close(transparent.2, 150),
+        "the transparent half should show the page through it, got {transparent:?}"
+    );
+}
+
+/// **Without a remembered original, applying is exactly as opaque as
+/// before this existed** — the module's very first claim, still true for
+/// every picture that never went through `remember_image_alpha`: every
+/// existing test in this file, and every upload made before extraction
+/// carried real alpha at all.
+#[test]
+fn applying_a_picture_signature_with_no_remembered_alpha_stays_opaque() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let background = Color { r: 210, g: 40, b: 150, a: 255 };
+    let area = Rect { left: 20.0, top: 20.0, right: 200.0, bottom: 120.0 };
+    doc.whiteout(0, area, background).expect("paint the background");
+
+    let rect = Rect { left: 40.0, top: 40.0, right: 120.0, bottom: 80.0 };
+    let (w, h) = (10u32, 10u32);
+    let mut rgba = vec![0u8; (w * h * 4) as usize];
+    for pixel in rgba.chunks_exact_mut(4) {
+        // Half-transparent as far as the picture's own bytes are concerned
+        // — but `remember_image_alpha` is never called for it, so applying
+        // has nothing but the annotation's own (already opaque) pixels.
+        pixel.copy_from_slice(&[15, 15, 15, 0]);
+    }
+    place(&mut doc, 0, rect, rgba, w, h, "No Remembered Alpha");
+    doc.apply_signatures(0).expect("apply");
+
+    let scale = 3.0;
+    let bitmap = doc
+        .render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() })
+        .expect("render");
+    let mid_x = (((rect.left + rect.right) / 2.0) * scale) as usize;
+    let mid_y = (((rect.top + rect.bottom) / 2.0) * scale) as usize;
+    let at = mid_y * bitmap.stride + mid_x * 4;
+    let pixel = &bitmap.data[at..at + 4];
+    let close = |sample: u8, expected: u8| sample.abs_diff(expected) <= 12;
+    assert!(
+        close(pixel[0], 15) && close(pixel[1], 15) && close(pixel[2], 15),
+        "without a remembered original this must stay opaque, got {pixel:?}"
     );
 }

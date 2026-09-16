@@ -237,6 +237,35 @@ pub struct PdfiumDocument {
     /// cross-reference section finds them. Once this is set, saving must
     /// rewrite the whole file.
     redacted: bool,
+    /// A placed picture signature's original, alpha-bearing pixels, kept
+    /// outside the annotation PDFium actually holds — keyed by an id written
+    /// onto the annotation alongside [`SIGNATURE_KEY`].
+    ///
+    /// **Why this exists at all.** The object a picture is placed through —
+    /// `FPDFImageObj_SetBitmap` — drops alpha even in memory, proved by a
+    /// dedicated probe; what a caller reads back through PDFium's own
+    /// annotation API is never better than what went in. So a picture with
+    /// real alpha (from [`crate::document::Annotation::Image`] as produced by
+    /// signature extraction) would look exactly as opaque once burned into
+    /// the page as it does while merely placed, unless the *original* pixels
+    /// are kept somewhere PDFium's round trip cannot touch. This is that
+    /// somewhere: `apply_signatures` reads from here first and only falls
+    /// back to the (opaque, background-matched) annotation pixels when an id
+    /// is not found.
+    ///
+    /// **Deliberately not written into the file — same-session only.** A
+    /// signature placed, saved, closed and reopened before being applied
+    /// loses its entry here; applying it then falls back to the
+    /// already-opaque annotation pixels rather than failing, so the gap is a
+    /// quieter picture, never a missing one. Persisting the original pixels
+    /// across a save is a larger, separate piece of work — this is the
+    /// scope actually asked for.
+    image_alpha: std::collections::HashMap<u64, Vec<u8>>,
+    /// The next id [`Self::image_alpha`] hands out. Monotonic for the life of
+    /// this document — ids are never reused, so a stale one (an annotation
+    /// whose entry was already consumed by `apply_signatures`, or dropped
+    /// with a closed document) can never collide with a live one.
+    next_alpha_id: u64,
 }
 
 /// What an edit starts from: some bytes, and whether they are the document's
@@ -586,6 +615,8 @@ impl PdfiumDocument {
             exact_content: true,
             typing_fonts: Vec::new(),
             substituted: None,
+            image_alpha: std::collections::HashMap::new(),
+            next_alpha_id: 0,
         })
     }
 
@@ -1948,6 +1979,12 @@ impl Document for PdfiumDocument {
                 Some(_) => self.read_annotation(annot, &space),
                 None => Ok(None),
             };
+            // The id, if this picture kept one — read here, while the
+            // annotation is still open, and resolved against `image_alpha`
+            // below. See that field's doc for why the annotation's own
+            // pixels (what `read` just produced) are a fallback, not the
+            // first choice.
+            let alpha_id = read_annotation_string(annot, ALPHA_ID_KEY).and_then(|s| s.parse::<u64>().ok());
             unsafe { bindings.FPDFPage_CloseAnnot(annot) };
 
             let (Some(name), Ok(Some(Annotation::Image { rect, rgba, width, height }))) =
@@ -1955,6 +1992,12 @@ impl Document for PdfiumDocument {
             else {
                 continue;
             };
+            let resolved_alpha_id = alpha_id.filter(|id| self.image_alpha.contains_key(id));
+            let rgba = resolved_alpha_id
+                .and_then(|id| self.image_alpha.get(&id))
+                .filter(|original| original.len() == rgba.len())
+                .cloned()
+                .unwrap_or(rgba);
             found.push(crate::document::ImageSignatureMark {
                 index: i as usize,
                 name,
@@ -1962,6 +2005,7 @@ impl Document for PdfiumDocument {
                 rgba,
                 width,
                 height,
+                alpha_id: resolved_alpha_id,
             });
         }
         Ok(found)
@@ -3450,6 +3494,49 @@ impl DocumentMut for PdfiumDocument {
         Ok(())
     }
 
+    fn remember_image_alpha(&mut self, page_index: usize, index: usize, rgba: Vec<u8>) -> Result<()> {
+        // Nothing to keep for a picture that is already fully opaque — every
+        // upload made before signature extraction produced real alpha
+        // reaches here this way, and there is nothing a soft mask would add.
+        if rgba.chunks_exact(4).all(|p| p[3] == 255) {
+            return Ok(());
+        }
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let annot_index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument(format!("annotation index {index} is out of range"))
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, annot_index) };
+        if annot.is_null() {
+            return Err(PdfError::Pdfium(format!(
+                "page {page_index} has no annotation at index {index}"
+            )));
+        }
+
+        // The id, not the pixels, goes on the annotation — the pixels stay
+        // in this process. See `image_alpha`'s own doc for why.
+        let id = self.next_alpha_id;
+        self.next_alpha_id += 1;
+        let mut value: Vec<u16> = id.to_string().encode_utf16().collect();
+        value.push(0);
+        let set = unsafe { bindings.FPDFAnnot_SetStringValue(annot, ALPHA_ID_KEY, value.as_ptr()) };
+        unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+        if set == 0 {
+            return Err(PdfError::Pdfium("the signature's pixels could not be kept".into()));
+        }
+
+        self.image_alpha.insert(id, rgba);
+        // A string on an existing annotation, not page content.
+        self.touch_annotation();
+        Ok(())
+    }
+
     fn apply_signatures(&mut self, page_index: usize) -> Result<usize> {
         let ink_marks = self.signature_marks(page_index)?;
         let image_marks = self.image_signature_marks(page_index)?;
@@ -3543,9 +3630,21 @@ impl DocumentMut for PdfiumDocument {
                         break;
                     }
                 }
+                // A soft mask only when there is real transparency to carry
+                // — the common case (an ink signature never reaches here at
+                // all; a plain, pre-extraction upload is uniformly opaque)
+                // gets exactly the single-object picture it always did.
+                let smask = if mark.rgba.chunks_exact(4).any(|p| p[3] != 255) {
+                    let number = next_number;
+                    next_number += 1;
+                    extra.push((number, alpha_smask_xobject(&mark.rgba, mark.width, mark.height)?));
+                    Some(number)
+                } else {
+                    None
+                };
                 let number = next_number;
                 next_number += 1;
-                extra.push((number, image_xobject(&mark.rgba, mark.width, mark.height)?));
+                extra.push((number, image_xobject(&mark.rgba, mark.width, mark.height, smask)?));
                 xobjects.set(&resource, crate::pdf::Object::Reference(number, 0));
                 painted.extend_from_slice(&place_image_operators(&resource, mark.rect, height));
             }
@@ -3631,6 +3730,15 @@ impl DocumentMut for PdfiumDocument {
             indices.sort_unstable();
             for index in indices.into_iter().rev() {
                 self.remove_annotation(page_index, index)?;
+            }
+        }
+        // These pixels are page content now — the copy kept outside
+        // PDFium's own annotation has done its one job and is not needed
+        // again. Not required for correctness (an id is never reused), only
+        // so this does not grow for the life of the document.
+        for mark in &image_marks {
+            if let Some(id) = mark.alpha_id {
+                self.image_alpha.remove(&id);
             }
         }
         Ok(total)
@@ -7557,16 +7665,25 @@ Q
     out
 }
 
-/// A picture as an opaque Image XObject: `/DeviceRGB`, one filter,
-/// FlateDecode-compressed.
+/// A picture as an Image XObject: `/DeviceRGB`, one filter,
+/// FlateDecode-compressed — opaque unless `smask` names another XObject to
+/// pair it with.
 ///
-/// **Opaque, on purpose.** `Annotation::Image`'s own doc explains why: the
-/// convenience PDFium object API this engine places a picture through does
-/// not carry alpha even in memory, so a burnt-in picture that *did* carry a
-/// soft mask would look different from the annotation somebody placed and
-/// reviewed — worse than staying opaque throughout. The alpha byte in `rgba`
-/// is dropped here, not read.
-fn image_xobject(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+/// **Why applying can be transparent when placing cannot.** `Annotation::
+/// Image`'s own doc explains the wall: the convenience PDFium object API
+/// this engine *places* a picture through does not carry alpha even in
+/// memory, proved by a dedicated probe — so the interactive annotation
+/// somebody positions is opaque, full stop, and nothing here changes that.
+/// This function is different: it hand-writes the PDF bytes directly rather
+/// than asking PDFium to hold a bitmap, so it is not bound by that API's
+/// limit. `smask`, when given, is the object number of a `/DeviceGray`
+/// XObject the same shape as this one — see [`alpha_smask_xobject`] — built
+/// from the picture's *original* alpha, kept outside PDFium's lossy round
+/// trip for exactly this moment (`PdfiumDocument::image_alpha`). The alpha
+/// byte in `rgba` itself is still dropped here either way: colour and
+/// opacity are two separate image objects in PDF, and the mask carries the
+/// second.
+fn image_xobject(rgba: &[u8], width: u32, height: u32, smask: Option<u32>) -> Result<Vec<u8>> {
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
     for pixel in rgba.chunks_exact(4) {
         rgb.extend_from_slice(&pixel[..3]);
@@ -7578,6 +7695,27 @@ fn image_xobject(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
     dict.set(b"Width", crate::pdf::Object::Number(width.to_string().into_bytes()));
     dict.set(b"Height", crate::pdf::Object::Number(height.to_string().into_bytes()));
     dict.set(b"ColorSpace", crate::pdf::Object::Name(b"DeviceRGB".to_vec()));
+    dict.set(b"BitsPerComponent", crate::pdf::Object::Number(b"8".to_vec()));
+    dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+    if let Some(number) = smask {
+        dict.set(b"SMask", crate::pdf::Object::Reference(number, 0));
+    }
+    Ok(crate::pdf::write_stream(&dict, &packed))
+}
+
+/// A picture's alpha channel alone, as its own `/DeviceGray` Image XObject —
+/// the companion `/SMask` a colour [`image_xobject`] references to be
+/// transparent where its original pixels were. 255 (the channel's own
+/// scale) is fully opaque, matching the convention PDF's soft masks use.
+fn alpha_smask_xobject(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    let alpha: Vec<u8> = rgba.chunks_exact(4).map(|pixel| pixel[3]).collect();
+    let packed = crate::pdf::content::encode(&alpha)?;
+    let mut dict = crate::pdf::Dict(Vec::new());
+    dict.set(b"Type", crate::pdf::Object::Name(b"XObject".to_vec()));
+    dict.set(b"Subtype", crate::pdf::Object::Name(b"Image".to_vec()));
+    dict.set(b"Width", crate::pdf::Object::Number(width.to_string().into_bytes()));
+    dict.set(b"Height", crate::pdf::Object::Number(height.to_string().into_bytes()));
+    dict.set(b"ColorSpace", crate::pdf::Object::Name(b"DeviceGray".to_vec()));
     dict.set(b"BitsPerComponent", crate::pdf::Object::Number(b"8".to_vec()));
     dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
     Ok(crate::pdf::write_stream(&dict, &packed))
@@ -11217,6 +11355,13 @@ const COLOUR_KEY: &str = "PagifyColor";
 /// reopened still knows which of its ink is somebody's name — see
 /// [`crate::document::SignatureMark`].
 const SIGNATURE_KEY: &str = "PagifySignature";
+
+/// The key a picture signature's original, alpha-bearing pixels are found
+/// under in [`PdfiumDocument::image_alpha`] — see that field's doc for why
+/// they are not simply the annotation's own pixels. Written the same way
+/// [`SIGNATURE_KEY`] is, but the value only ever means anything within the
+/// session that wrote it; nothing reads this key back across a save.
+const ALPHA_ID_KEY: &str = "PagifyAlphaId";
 
 /// Read a UTF-16LE string value off an annotation.
 fn read_annotation_string(annot: FPDF_ANNOTATION, key: &str) -> Option<String> {

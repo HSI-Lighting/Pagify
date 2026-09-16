@@ -907,11 +907,19 @@ impl Session {
     /// [`pdf_core::document::Annotation::Image`].
     ///
     /// `rgba` may carry real alpha (see [`crate::signature_extract`]) or be
-    /// uniformly opaque (any upload made before that existed); either way it
-    /// is flattened here, against a background sampled from this page at
-    /// `rect` — see [`crate::signatures::composite_onto`] — because the
-    /// mechanism this places a picture through cannot carry alpha itself,
-    /// and the page underneath is not known any earlier than this call.
+    /// uniformly opaque (any upload made before that existed). Two different
+    /// things happen to it, for two different moments:
+    ///
+    /// - The annotation itself — what is actually placed, and what PDFium's
+    ///   own picture object shows while it sits there unapplied — gets a
+    ///   *flattened* copy, composited against a background sampled from this
+    ///   page at `rect` (see [`crate::signatures::composite_onto`]), because
+    ///   the mechanism a picture is placed through cannot carry alpha itself
+    ///   and the page underneath is not known any earlier than this call.
+    /// - The *original*, still carrying real alpha, is kept alongside it —
+    ///   see [`pdf_core::document::DocumentMut::remember_image_alpha`] — so
+    ///   that applying this signature later, in this same session, can burn
+    ///   in a real soft mask instead of the flattened approximation.
     pub fn place_image_signature(
         &self,
         page: usize,
@@ -937,7 +945,7 @@ impl Session {
                 )
             })
             .unwrap_or([255, 255, 255]);
-        let rgba = crate::signatures::composite_onto(&rgba, background);
+        let flattened = crate::signatures::composite_onto(&rgba, background);
 
         registry::with_session(self.handle, |s| {
             let doc = s
@@ -946,9 +954,10 @@ impl Session {
                 .ok_or(pdf_core::PdfError::Unsupported("editing this document"))?;
             let index = doc.add_annotation(
                 page,
-                &pdf_core::document::Annotation::Image { rect, rgba, width, height },
+                &pdf_core::document::Annotation::Image { rect, rgba: flattened, width, height },
             )?;
-            doc.mark_as_signature(page, index, name)
+            doc.mark_as_signature(page, index, name)?;
+            doc.remember_image_alpha(page, index, rgba)
         })
     }
 

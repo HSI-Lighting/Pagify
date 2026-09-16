@@ -116,9 +116,16 @@ pub struct ImageSignatureMark {
     pub name: String,
     pub rect: Rect,
     /// Straight RGBA, row-major, top row first — see [`Annotation::Image`].
+    /// Real alpha when one was found under [`Self::alpha_id`], the
+    /// annotation's own (opaque) pixels otherwise.
     pub rgba: Vec<u8>,
     pub width: u32,
     pub height: u32,
+    /// The id these pixels were found under, when `rgba` above is the real,
+    /// alpha-bearing original rather than the annotation's own opaque
+    /// pixels — see `PdfiumDocument::image_alpha`. Kept so a caller that
+    /// consumes this mark (applying it) can also retire the entry.
+    pub alpha_id: Option<u64>,
 }
 
 /// Something worth a second look, and where it sits.
@@ -1335,6 +1342,23 @@ pub trait DocumentMut {
         Err(PdfError::Unsupported("marking a signature in this document"))
     }
 
+    /// Keep a just-placed picture signature's original, alpha-bearing pixels
+    /// for [`DocumentMut::apply_signatures`] to use later — an optional
+    /// enhancement, not a requirement: a document type that does not
+    /// override this simply applies with whatever the annotation's own
+    /// pixels already are, exactly as before this existed.
+    ///
+    /// `rgba` is the picture as it was extracted or uploaded — not what was
+    /// stored on the annotation, which for a picture with any transparency
+    /// is a flattened, opaque approximation (see
+    /// [`crate::document::Annotation::Image`]). Same-session only: nothing
+    /// here reaches the file, so this is lost across a save and reopen —
+    /// applying then falls back to the annotation's own pixels rather than
+    /// failing.
+    fn remember_image_alpha(&mut self, _page_index: usize, _index: usize, _rgba: Vec<u8>) -> Result<()> {
+        Ok(())
+    }
+
     /// Burn this page's placed signatures — ink and image alike — into the
     /// page itself.
     ///
@@ -1626,21 +1650,26 @@ pub enum Annotation {
         /// original file's bytes so the engine never has to know PNG from
         /// JPEG from anything else; decoding happens once, above it.
         ///
-        /// **The alpha byte is not honoured — every picture is placed
-        /// opaque.** Tested, not assumed: `FPDFImageObj_SetBitmap` — the
-        /// PDFium call that gives a placed picture the rest of the
-        /// annotation machinery (selectable, removable, listed, read by any
-        /// PDF viewer) — drops alpha even before anything is saved; PDFium's
-        /// own `FPDFImageObj_GetBitmap` reads every alpha byte back as 255
-        /// regardless of what went in, in the same process, before a single
-        /// byte reaches disk. A real soft mask is possible in principle — a
-        /// separate DeviceGray XObject referenced by `/SMask`, built by
-        /// hand — but that is a second, byte-level image-writing path next
-        /// to this convenience one, and this field stays RGBA so that path
-        /// can be added later without moving to a new wire shape. Until
-        /// then, a caller placing an image with real transparency should
-        /// flatten it onto a background first — a transparent PNG signature
-        /// pastes as its shape on white, not as a cut-out.
+        /// **The alpha byte is not honoured while merely placed — every
+        /// annotation shows as opaque.** Tested, not assumed:
+        /// `FPDFImageObj_SetBitmap` — the PDFium call that gives a placed
+        /// picture the rest of the annotation machinery (selectable,
+        /// removable, listed, read by any PDF viewer) — drops alpha even
+        /// before anything is saved; PDFium's own `FPDFImageObj_GetBitmap`
+        /// reads every alpha byte back as 255 regardless of what went in, in
+        /// the same process, before a single byte reaches disk. A caller
+        /// placing an image with real transparency should still flatten it
+        /// onto a background for *this* field — a transparent PNG signature
+        /// pastes as its shape on a colour, not as a cut-out, while it is
+        /// only an annotation.
+        ///
+        /// **Applying is different, and can carry real alpha.** It never
+        /// goes through PDFium's object API — see `image_xobject` and
+        /// `alpha_smask_xobject` in `pdfium_doc` — so a picture whose
+        /// original, alpha-bearing pixels were kept aside with
+        /// [`DocumentMut::remember_image_alpha`] gets a real `/SMask` when
+        /// it is burnt into the page, same-session only (nothing here
+        /// persists across a save and reopen — see that method's doc).
         rgba: Vec<u8>,
         width: u32,
         height: u32,
