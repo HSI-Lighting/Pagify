@@ -104,6 +104,23 @@ pub struct SignatureMark {
     pub width: f32,
 }
 
+/// The same idea, for a signature that is a picture rather than ink — kept as
+/// a separate type rather than folded into [`SignatureMark`] because that is
+/// how every caller already thinks of the two: strokes are one tool, a placed
+/// image is another, and a struct that carried both shapes at once would let
+/// somebody construct a mark that was neither.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageSignatureMark {
+    /// PDFium's index for the annotation, which is what removes it.
+    pub index: usize,
+    pub name: String,
+    pub rect: Rect,
+    /// Straight RGBA, row-major, top row first — see [`Annotation::Image`].
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Something worth a second look, and where it sits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SensitiveOnPage {
@@ -690,6 +707,11 @@ pub trait Document: Send + Sync {
     /// Empty for a document that has none, and for one this program did not
     /// place them in — see [`SignatureMark`] for how the two are told apart.
     fn signature_marks(&self, _page_index: usize) -> Result<Vec<SignatureMark>> {
+        Ok(Vec::new())
+    }
+
+    /// The same, for a signature that is a picture — see [`ImageSignatureMark`].
+    fn image_signature_marks(&self, _page_index: usize) -> Result<Vec<ImageSignatureMark>> {
         Ok(Vec::new())
     }
 
@@ -1303,15 +1325,18 @@ pub trait DocumentMut {
         Err(PdfError::Unsupported("drawing a box on this document"))
     }
 
-    /// Record that an ink annotation is a signature rather than a drawing.
+    /// Record that an ink or image annotation is a signature rather than a
+    /// drawing or a plain picture.
     ///
     /// Written onto the annotation in the file, so the distinction survives
-    /// being closed and reopened — see [`SignatureMark`].
+    /// being closed and reopened — see [`SignatureMark`] and
+    /// [`ImageSignatureMark`].
     fn mark_as_signature(&mut self, _page_index: usize, _index: usize, _name: &str) -> Result<()> {
         Err(PdfError::Unsupported("marking a signature in this document"))
     }
 
-    /// Burn this page's placed signatures into the page itself.
+    /// Burn this page's placed signatures — ink and image alike — into the
+    /// page itself.
     ///
     /// Afterwards they are page content — the same as anything printed on the
     /// page — rather than annotations a reader can select and delete. **This is
@@ -1413,16 +1438,18 @@ impl Annotation {
     /// made every drawing on a page fail whenever a lock happened to cover that
     /// corner.
     pub fn draws_nothing(&self) -> bool {
-        let colour = match self {
+        match self {
             Annotation::Highlight { color, .. }
             | Annotation::Underline { color, .. }
             | Annotation::StrikeOut { color, .. }
             | Annotation::Squiggly { color, .. }
             | Annotation::Ink { color, .. }
             | Annotation::Note { color, .. }
-            | Annotation::Text { color, .. } => color,
-        };
-        colour.a == 0
+            | Annotation::Text { color, .. } => color.a == 0,
+            // A picture is never invisible bookkeeping — it is always the
+            // thing somebody put there.
+            Annotation::Image { .. } => false,
+        }
     }
 
     /// The rectangle this mark covers, in the same top-left space as the rest of
@@ -1477,6 +1504,7 @@ impl Annotation {
             Annotation::Text { glyphs, .. } => {
                 around(glyphs.iter().map(|g| (g.x, g.y)))
             }
+            Annotation::Image { rect, .. } => Some(*rect),
         }
     }
 }
@@ -1490,10 +1518,10 @@ impl Annotation {
 /// `text_segments` already makes, and breaking it for annotations would put every
 /// restored mark on the wrong half of its page.
 ///
-/// The set is deliberately small: these three cover every tool the reader offers,
-/// since a signature is ink with several strokes. Anything a document contains
-/// that does not map onto one of them — a form widget, a link — is left alone
-/// rather than modelled badly.
+/// The set is deliberately small: these cover every tool the reader offers — a
+/// signature is ink with several strokes, or a picture somebody placed. Anything
+/// a document contains that does not map onto one of them — a form widget, a
+/// link — is left alone rather than modelled badly.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -1581,6 +1609,41 @@ pub enum Annotation {
         /// How thick that ring is drawn, in points.
         #[serde(default)]
         frame_width: f32,
+    },
+    /// A picture placed on the page — an uploaded signature image, not a
+    /// drawn one. **Ink, exactly like [`Annotation::Ink`]**: it shows a
+    /// picture, it does not prove who put it there, and it is placed and
+    /// applied through the same signature machinery so that a person cannot
+    /// tell, from the outside, that this one arrived as a file instead of a
+    /// gesture. It is written as a `/Stamp` annotation carrying one image
+    /// page object, so a reader that is not Pagify still shows it — nothing
+    /// about a picture needs this engine's own encoding to be understood.
+    Image {
+        /// Where it sits, top-left origin, same space as everything else here.
+        rect: Rect,
+        /// RGBA, row-major, top row first — what the `image` crate decodes
+        /// any source format to. Carried as pixels rather than as the
+        /// original file's bytes so the engine never has to know PNG from
+        /// JPEG from anything else; decoding happens once, above it.
+        ///
+        /// **The alpha byte is not honoured — every picture is placed
+        /// opaque.** Tested, not assumed: `FPDFImageObj_SetBitmap` — the
+        /// PDFium call that gives a placed picture the rest of the
+        /// annotation machinery (selectable, removable, listed, read by any
+        /// PDF viewer) — drops alpha even before anything is saved; PDFium's
+        /// own `FPDFImageObj_GetBitmap` reads every alpha byte back as 255
+        /// regardless of what went in, in the same process, before a single
+        /// byte reaches disk. A real soft mask is possible in principle — a
+        /// separate DeviceGray XObject referenced by `/SMask`, built by
+        /// hand — but that is a second, byte-level image-writing path next
+        /// to this convenience one, and this field stays RGBA so that path
+        /// can be added later without moving to a new wire shape. Until
+        /// then, a caller placing an image with real transparency should
+        /// flatten it onto a background first — a transparent PNG signature
+        /// pastes as its shape on white, not as a cut-out.
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
     },
 }
 

@@ -634,6 +634,7 @@ impl Annotation {
             Annotation::Ink { .. } => "Drawing",
             Annotation::Note { .. } => "Note",
             Annotation::Text { .. } => "Text",
+            Annotation::Image { .. } => "Picture",
         }
     }
 }

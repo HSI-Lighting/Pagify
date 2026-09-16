@@ -179,6 +179,20 @@ pub struct PdfiumDocument {
     /// cleared by the save that writes the bytes, and by any edit — after
     /// which the file to write is those bytes plus a revision.
     exact_pending: bool,
+    /// Whether `written`'s **page content** — as opposed to its annotations —
+    /// still matches what PDFium currently holds.
+    ///
+    /// A narrower question than `dirty`, and found missing when placing a
+    /// signature after signing, then applying it, still rewrote the whole
+    /// file: `add_annotation` calls the general `touch()`, which clears
+    /// `exact_pending`, and a placed-but-not-yet-applied annotation has
+    /// nothing else to re-set it — so the very same signing-then-signature
+    /// flow this whole mechanism exists for defeated it. An annotation lives
+    /// in `/Annots`, not in a content stream; it makes the document `dirty`
+    /// (a save is owed) without making its content stale (nothing an
+    /// appended edit reads from `written` has changed). `touch_annotation`
+    /// is the lighter call that keeps the two apart.
+    exact_content: bool,
     /// Whether this document was opened by giving a password.
     ///
     /// Which is to say: the file it came from is already encrypted, and cannot
@@ -279,6 +293,13 @@ impl PdfiumDocument {
     fn touch(&mut self) {
         self.dirty = true;
         self.exact_pending = false;
+        self.exact_content = false;
+    }
+
+    /// Record a change to a page's annotations only — a save is owed, but
+    /// nothing an appended edit starts from has changed. See `exact_content`.
+    fn touch_annotation(&mut self) {
+        self.dirty = true;
     }
 
     /// The bytes an edit through Pagify's own writer starts from.
@@ -315,11 +336,12 @@ impl PdfiumDocument {
         }
         match (&self.written, &self.source) {
             // Signed or appended to in this process: the bytes kept then, as
-            // long as nothing has changed inside PDFium since.
-            (Some(exact), _) if !self.dirty || self.exact_pending => Some(exact.clone()),
+            // long as the page content inside PDFium has not changed since —
+            // an unapplied annotation does not count, see `exact_content`.
+            (Some(exact), _) if self.exact_content || self.exact_pending => Some(exact.clone()),
             (Some(_), _) => None,
             // Opened from disk and untouched: the file itself.
-            (None, DocumentSource::Path(path)) if !self.dirty => std::fs::read(path).ok(),
+            (None, DocumentSource::Path(path)) if self.exact_content => std::fs::read(path).ok(),
             _ => None,
         }
     }
@@ -561,6 +583,7 @@ impl PdfiumDocument {
             redacted: false,
             written: None,
             exact_pending: false,
+            exact_content: true,
             typing_fonts: Vec::new(),
             substituted: None,
         })
@@ -1894,6 +1917,51 @@ impl Document for PdfiumDocument {
                 strokes,
                 color,
                 width,
+            });
+        }
+        Ok(found)
+    }
+
+    fn image_signature_marks(
+        &self,
+        page_index: usize,
+    ) -> Result<Vec<crate::document::ImageSignatureMark>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let space = page.space()?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+
+        let mut found = Vec::new();
+        for i in 0..count.max(0) {
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, i) };
+            if annot.is_null() {
+                continue;
+            }
+            let name = read_annotation_string(annot, SIGNATURE_KEY);
+            let read = match &name {
+                Some(_) => self.read_annotation(annot, &space),
+                None => Ok(None),
+            };
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+
+            let (Some(name), Ok(Some(Annotation::Image { rect, rgba, width, height }))) =
+                (name, read)
+            else {
+                continue;
+            };
+            found.push(crate::document::ImageSignatureMark {
+                index: i as usize,
+                name,
+                rect,
+                rgba,
+                width,
+                height,
             });
         }
         Ok(found)
@@ -3288,6 +3356,7 @@ impl DocumentMut for PdfiumDocument {
         // dirty, and closing it now would lose the signature.
         self.dirty = true;
         self.exact_pending = true;
+        self.exact_content = true;
         Ok(who)
     }
 
@@ -3361,10 +3430,10 @@ impl DocumentMut for PdfiumDocument {
         // highlight as a signature would have it flattened into the page by a
         // tool the user thought was only touching their own name.
         let subtype = unsafe { bindings.FPDFAnnot_GetSubtype(annot) };
-        if subtype != ANNOT_INK {
+        if subtype != ANNOT_INK && subtype != ANNOT_STAMP {
             unsafe { bindings.FPDFPage_CloseAnnot(annot) };
             return Err(PdfError::InvalidArgument(
-                "only ink can be marked as a signature".into(),
+                "only a drawn or uploaded signature can be marked as one".into(),
             ));
         }
 
@@ -3376,13 +3445,16 @@ impl DocumentMut for PdfiumDocument {
             return Err(PdfError::Pdfium("the signature could not be marked".into()));
         }
 
-        self.touch();
+        // A string on an existing annotation, not page content.
+        self.touch_annotation();
         Ok(())
     }
 
     fn apply_signatures(&mut self, page_index: usize) -> Result<usize> {
-        let marks = self.signature_marks(page_index)?;
-        if marks.is_empty() {
+        let ink_marks = self.signature_marks(page_index)?;
+        let image_marks = self.image_signature_marks(page_index)?;
+        let total = ink_marks.len() + image_marks.len();
+        if total == 0 {
             return Ok(0);
         }
         let height = self.page_size(page_index)?.height_pt;
@@ -3390,20 +3462,178 @@ impl DocumentMut for PdfiumDocument {
         // One append for the whole page rather than one per signature: each
         // append writes the document out and parses it again, which on a large
         // file is the expensive part and has nothing to do with how many
-        // signatures are on the page.
+        // signatures are on the page. A picture needs more than an append —
+        // it needs its own XObject in the file and a name for it in the
+        // page's `/Resources` — so this does not go through `append_to_page`,
+        // which has nowhere to put that. Built here instead, in the same
+        // `edit_base`/`write_edit`/`adopt_edit` shape, so a signed document's
+        // bytes still move only by appending. See `fill_image_annotation`'s
+        // doc for why *placing* a picture does not need this and *applying*
+        // one does.
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let mut base = self.edit_base()?;
+
+        // **An annotation this is about to consume is not the only thing
+        // that might be live and unsaved.** `base.bytes`, when exact, is
+        // frozen at the last sign or real save — it never gained an
+        // `/Annots` entry for anything placed since, on any page, because
+        // nothing here ever serialises one into `written`. Reopening onto it
+        // (in `adopt_edit`) therefore shows only what was there *then* — the
+        // marks about to be applied included, which is exactly why the
+        // removal loop below must not run against that reopened document by
+        // index: those indices describe the *live* document, not it. If
+        // anything besides these marks is also pending — another page's
+        // drawing not yet saved, say — reopening onto the exact base would
+        // silently drop it too. So this is checked, page by page, before the
+        // exact base is trusted; a mismatch anywhere falls back to a real
+        // rewrite, correct and merely not appended, rather than risk losing
+        // somebody's unsaved mark.
+        if base.exact {
+            let file = crate::pdf::File::parse(&base.bytes)?;
+            let counted = annots_counts(&file)?;
+            let mut safe = counted.len() == self.page_count;
+            for (p, from_base) in counted.into_iter().enumerate() {
+                if !safe {
+                    break;
+                }
+                let expected = from_base + if p == page_index { total } else { 0 };
+                safe = self.annotation_count(p)? == expected;
+            }
+            if !safe {
+                base = EditBase { bytes: self.readable_bytes()?, exact: false };
+            }
+        }
+
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(bytes)?;
+        let page = self.page_object(&file, page_index)?;
+
         let mut painted = Vec::new();
-        for mark in &marks {
+        for mark in &ink_marks {
             painted.extend_from_slice(&ink_operators(&mark.strokes, mark.color, mark.width, height));
         }
-        self.append_to_page(page_index, &painted)?;
 
-        // From the back: removing by index renumbers everything after it.
-        let mut indices: Vec<usize> = marks.iter().map(|m| m.index).collect();
-        indices.sort_unstable();
-        for index in indices.into_iter().rev() {
-            self.remove_annotation(page_index, index)?;
+        let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut next_number = file.numbers().max().unwrap_or(0) + 1;
+
+        // A picture's own object, and its own name in the page's Resources —
+        // on the page itself, not whatever it inherits, for the same reason
+        // `embed_font` does this: the ancestor may be shared with other pages,
+        // and this name must mean something only here.
+        let mut page_dict: Option<crate::pdf::Dict> = None;
+        if !image_marks.is_empty() {
+            let mut resources = self
+                .inherited(&file, &page, b"Resources")?
+                .and_then(|r| r.as_dict().cloned())
+                .unwrap_or(crate::pdf::Dict(Vec::new()));
+            let mut xobjects = resources
+                .get(b"XObject")
+                .and_then(|x| file.resolve(x).ok())
+                .and_then(|x| x.as_dict().cloned())
+                .unwrap_or(crate::pdf::Dict(Vec::new()));
+
+            for mark in &image_marks {
+                let mut resource = b"PagifyImage1".to_vec();
+                for suffix in 1..=64u32 {
+                    let candidate = format!("PagifyImage{suffix}").into_bytes();
+                    if xobjects.get(&candidate).is_none() {
+                        resource = candidate;
+                        break;
+                    }
+                }
+                let number = next_number;
+                next_number += 1;
+                extra.push((number, image_xobject(&mark.rgba, mark.width, mark.height)?));
+                xobjects.set(&resource, crate::pdf::Object::Reference(number, 0));
+                painted.extend_from_slice(&place_image_operators(&resource, mark.rect, height));
+            }
+
+            resources.set(b"XObject", crate::pdf::Object::Dict(xobjects));
+            let mut dict = page
+                .as_dict()
+                .cloned()
+                .ok_or(PdfError::Unsupported("that page cannot be read"))?;
+            dict.set(b"Resources", crate::pdf::Object::Dict(resources));
+            page_dict = Some(dict);
         }
-        Ok(marks.len())
+
+        let mut replacements = Vec::new();
+        match self.page_content(&file, &page) {
+            Ok((mut stream, streams)) => {
+                stream.extend_from_slice(&painted);
+                for (index, (number, dict)) in streams.iter().enumerate() {
+                    let data = if index == 0 { stream.clone() } else { Vec::new() };
+                    let packed = crate::pdf::content::encode(&data)?;
+                    let mut dict = dict.clone();
+                    dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+                    dict.remove(b"DecodeParms");
+                    replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+                }
+                if let Some(dict) = page_dict {
+                    let page_number = self.page_object_number(&file, page_index)?;
+                    let mut body = Vec::new();
+                    crate::pdf::write_object(&mut body, &crate::pdf::Object::Dict(dict));
+                    replacements.push((page_number, body));
+                }
+            }
+            Err(_) => {
+                // No content stream: make one, exactly as `append_to_page`
+                // does — and, if a picture already needs the page dict
+                // rewritten for its Resources, set `/Contents` on that same
+                // dict rather than writing the page twice.
+                let number = next_number;
+                next_number += 1;
+                let packed = crate::pdf::content::encode(&painted)?;
+                let mut dict = crate::pdf::Dict(Vec::new());
+                dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+                extra.push((number, crate::pdf::write_stream(&dict, &packed)));
+
+                let page_number = self.page_object_number(&file, page_index)?;
+                let mut dict = match page_dict {
+                    Some(dict) => dict,
+                    None => {
+                        let crate::pdf::Object::Dict(dict) = file.object(page_number)? else {
+                            return Err(PdfError::InvalidArgument("that page cannot be written".into()));
+                        };
+                        dict
+                    }
+                };
+                dict.set(b"Contents", crate::pdf::Object::Reference(number, 0));
+                let mut body = Vec::new();
+                crate::pdf::write_object(&mut body, &crate::pdf::Object::Dict(dict));
+                replacements.push((page_number, body));
+            }
+        }
+        let _ = next_number;
+
+        let base_was_exact = base.exact;
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)?;
+
+        if base_was_exact {
+            // The reopen above already shows the document without these
+            // marks: an exact base never had them, by construction — see the
+            // check that put us on this path. There is nothing left to
+            // remove, and calling `remove_annotation` against indices that
+            // described the *pre-reopen* live document would either remove
+            // the wrong thing or find nothing at that index at all.
+        } else {
+            // From the back: removing by index renumbers everything after it.
+            // Ink and image marks share one index space — PDFium's own count
+            // of annotations on the page — so their indices are merged first.
+            let mut indices: Vec<usize> = ink_marks
+                .iter()
+                .map(|m| m.index)
+                .chain(image_marks.iter().map(|m| m.index))
+                .collect();
+            indices.sort_unstable();
+            for index in indices.into_iter().rev() {
+                self.remove_annotation(page_index, index)?;
+            }
+        }
+        Ok(total)
     }
 
     fn stamp_mark(
@@ -3706,7 +3936,8 @@ impl DocumentMut for PdfiumDocument {
             ));
         }
 
-        self.touch();
+        // An `/Annots` entry, not page content — see `exact_content`.
+        self.touch_annotation();
         Ok((count - 1) as usize)
     }
 
@@ -3731,7 +3962,8 @@ impl DocumentMut for PdfiumDocument {
             )));
         }
 
-        self.touch();
+        // See `exact_content`: removing an annotation is not a content edit.
+        self.touch_annotation();
         Ok(())
     }
 
@@ -4022,6 +4254,10 @@ impl DocumentMut for PdfiumDocument {
         let bytes = close_trailing_xref_object(self.save_with_flags(FPDF_INCREMENTAL)?);
         dest.write_all(&bytes)?;
         self.dirty = false;
+        // What PDFium just wrote is, by construction, exactly its current
+        // page content — including any annotation that was only placed, not
+        // yet applied, a moment ago.
+        self.exact_content = true;
         // These are the file that now exists, and an incremental save is the
         // one that keeps a signature intact — so they are worth keeping, for
         // exactly the documents where a later check has something to check.
@@ -4183,6 +4419,7 @@ const ANNOT_UNDERLINE: FPDF_ANNOTATION_SUBTYPE = 10;
 const ANNOT_SQUIGGLY: FPDF_ANNOTATION_SUBTYPE = 11;
 const ANNOT_STRIKEOUT: FPDF_ANNOTATION_SUBTYPE = 12;
 const ANNOT_INK: FPDF_ANNOTATION_SUBTYPE = 15;
+const ANNOT_STAMP: FPDF_ANNOTATION_SUBTYPE = 13;
 
 /// `FPDFANNOT_COLORTYPE_Color` — the stroke/foreground colour.
 const COLORTYPE_COLOR: FPDFANNOT_COLORTYPE = 0;
@@ -6870,6 +7107,63 @@ fn identify_outlined_glyphs(
 /// Four bytes a pixel, blue first — the layout `FPDFBitmap_CreateEx` expects
 /// when it is told this format.
 const BITMAP_BGRA: c_int = 4;
+/// `FPDFBitmap_Gray`: one byte a pixel.
+const BITMAP_GRAY: c_int = 1;
+/// `FPDFBitmap_BGR`: three bytes a pixel, blue first, no alpha.
+const BITMAP_BGR: c_int = 2;
+/// `FPDFBitmap_BGRx`: four bytes a pixel, blue first, the fourth unused.
+const BITMAP_BGRX: c_int = 3;
+
+/// A PDFium bitmap's pixels, whatever format it came back in, as straight
+/// (not premultiplied) RGBA, tightly packed, top row first.
+///
+/// A bitmap PDFium hands back is padded to `stride` bytes a row — never
+/// assumed equal to `width * bytes_per_pixel` — and may be any of the four
+/// formats a page can hold, not only the BGRA this engine always writes:
+/// **the file itself** decides that when it is saved, and a fully opaque
+/// picture is free to come back as plain BGR with no alpha channel at all.
+/// `None` for a format this does not know, or a stride too small for the
+/// width it claims.
+fn straight_rgba(buffer: &[u8], width: usize, height: usize, stride: usize, format: c_int) -> Option<Vec<u8>> {
+    let bytes_per_pixel = match format {
+        f if f == BITMAP_GRAY => 1,
+        f if f == BITMAP_BGR => 3,
+        f if f == BITMAP_BGRX || f == BITMAP_BGRA => 4,
+        _ => return None,
+    };
+    if stride < width.checked_mul(bytes_per_pixel)? || buffer.len() < stride.checked_mul(height)? {
+        return None;
+    }
+
+    let mut rgba = vec![0u8; width.checked_mul(height)?.checked_mul(4)?];
+    for y in 0..height {
+        let row = &buffer[y * stride..y * stride + width * bytes_per_pixel];
+        let out = &mut rgba[y * width * 4..(y + 1) * width * 4];
+        match bytes_per_pixel {
+            1 => {
+                for (px, &g) in out.chunks_exact_mut(4).zip(row) {
+                    px.copy_from_slice(&[g, g, g, 255]);
+                }
+            }
+            3 => {
+                for (px, bgr) in out.chunks_exact_mut(4).zip(row.chunks_exact(3)) {
+                    px.copy_from_slice(&[bgr[2], bgr[1], bgr[0], 255]);
+                }
+            }
+            // BGRx and BGRA read alike here: `x` is unused padding PDFium
+            // never draws with, so treating it as alpha 255 either way is
+            // exactly what an opaque BGRx pixel already means.
+            4 => {
+                for (px, bgra) in out.chunks_exact_mut(4).zip(row.chunks_exact(4)) {
+                    let alpha = if format == BITMAP_BGRX { 255 } else { bgra[3] };
+                    px.copy_from_slice(&[bgra[2], bgra[1], bgra[0], alpha]);
+                }
+            }
+            _ => unreachable!("matched above"),
+        }
+    }
+    Some(rgba)
+}
 
 /// A slice of bytes, as the reader `FPDFImageObj_LoadJpegFileInline` wants.
 ///
@@ -7236,6 +7530,57 @@ fn ink_operators(
         f32::from(colour.b) / 255.0,
     );
     format!("\nq\n{r} {g} {b} RG\n{} w\n1 J\n1 j\n{body}Q\n", width.max(0.1)).into_bytes()
+}
+
+/// The operators that draw a placed picture: position it with `cm`, then
+/// `Do` the XObject named `resource` — which the caller has already put in
+/// the page's own `/Resources/XObject`.
+///
+/// Same coordinate convention as [`ink_operators`] and [`mark`]: the plain
+/// `page_height - y` flip, no crop-box offset — this is content-stream space,
+/// which every other painter in this file already treats as the media box.
+///
+/// Not `image_operators` — that name is taken, by the unrelated function
+/// below that reads `Do` operators back *out* of a content stream to find
+/// which images a page already draws.
+fn place_image_operators(resource: &[u8], rect: Rect, page_height: f32) -> Vec<u8> {
+    let (x, y) = (rect.left, page_height - rect.bottom);
+    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+    let mut out = format!("
+q
+{w} 0 0 {h} {x} {y} cm
+/").into_bytes();
+    out.extend_from_slice(resource);
+    out.extend_from_slice(b" Do
+Q
+");
+    out
+}
+
+/// A picture as an opaque Image XObject: `/DeviceRGB`, one filter,
+/// FlateDecode-compressed.
+///
+/// **Opaque, on purpose.** `Annotation::Image`'s own doc explains why: the
+/// convenience PDFium object API this engine places a picture through does
+/// not carry alpha even in memory, so a burnt-in picture that *did* carry a
+/// soft mask would look different from the annotation somebody placed and
+/// reviewed — worse than staying opaque throughout. The alpha byte in `rgba`
+/// is dropped here, not read.
+fn image_xobject(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>> {
+    let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
+    for pixel in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&pixel[..3]);
+    }
+    let packed = crate::pdf::content::encode(&rgb)?;
+    let mut dict = crate::pdf::Dict(Vec::new());
+    dict.set(b"Type", crate::pdf::Object::Name(b"XObject".to_vec()));
+    dict.set(b"Subtype", crate::pdf::Object::Name(b"Image".to_vec()));
+    dict.set(b"Width", crate::pdf::Object::Number(width.to_string().into_bytes()));
+    dict.set(b"Height", crate::pdf::Object::Number(height.to_string().into_bytes()));
+    dict.set(b"ColorSpace", crate::pdf::Object::Name(b"DeviceRGB".to_vec()));
+    dict.set(b"BitsPerComponent", crate::pdf::Object::Number(b"8".to_vec()));
+    dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+    Ok(crate::pdf::write_stream(&dict, &packed))
 }
 
 /// The operators that draw a tick, a cross or a dot.
@@ -8052,6 +8397,37 @@ fn blank_image_object() -> Vec<u8> {
     // Every bit set: with the default `/Decode`, a 1 in a mask leaves the page
     // unchanged.
     crate::pdf::write_stream(&dict, &[0xFF])
+}
+
+/// How many entries are in each page's own `/Annots` array, as the file
+/// itself says — 0 where a page has none. **Not inherited**: unlike
+/// `/Resources` or `/MediaBox`, `/Annots` is a page's own; there is nothing
+/// to walk up to. One pass over the page tree for every page's count, rather
+/// than one walk of it per page — the difference between this and quadratic
+/// on the hundred-and-forty-nine-page catalogue this engine is measured
+/// against elsewhere.
+fn annots_counts(file: &crate::pdf::File<'_>) -> Result<Vec<usize>> {
+    let root = file.resolve(
+        file.trailer()
+            .get(b"Root")
+            .ok_or_else(|| PdfError::InvalidArgument("the file has no catalogue".into()))?,
+    )?;
+    let pages = file.resolve(
+        root.as_dict()
+            .and_then(|d| d.get(b"Pages"))
+            .ok_or_else(|| PdfError::InvalidArgument("the file has no page tree".into()))?,
+    )?;
+    let mut flat = Vec::new();
+    collect_pages(file, &pages, &mut flat, 0)?;
+    Ok(flat
+        .iter()
+        .map(|page| {
+            match page.as_dict().and_then(|d| d.get(b"Annots")).map(|a| file.resolve(a)) {
+                Some(Ok(crate::pdf::Object::Array(items))) => items.len(),
+                _ => 0,
+            }
+        })
+        .collect())
 }
 
 /// Every page in a page tree, in order.
@@ -9943,6 +10319,12 @@ fn bounding_box(annotation: &Annotation) -> Option<Rect> {
                 grow(g.x - size, g.y - size, g.x + size, g.y + size);
             }
         }
+        Annotation::Image { rect, .. } => grow(
+            rect.left.min(rect.right),
+            rect.top.min(rect.bottom),
+            rect.left.max(rect.right),
+            rect.top.max(rect.bottom),
+        ),
     }
     bounds
 }
@@ -10150,6 +10532,7 @@ impl PdfiumDocument {
             Annotation::Squiggly { .. } => ANNOT_SQUIGGLY,
             Annotation::Ink { .. } => ANNOT_INK,
             Annotation::Note { .. } => ANNOT_TEXT,
+            Annotation::Image { .. } => ANNOT_STAMP,
             // Routed away in `add_annotation`: text is page content, not an
             // annotation, and there is no subtype that would make it one.
             Annotation::Text { .. } => {
@@ -10185,6 +10568,14 @@ impl PdfiumDocument {
         let rect = to_pdf_rect(space, &bounds);
         unsafe { bindings.FPDFAnnot_SetRect(annot, &rect) };
 
+        // A picture carries no `/C` colour at all — it is pixels, not ink —
+        // and is built entirely differently: an image page object, appended
+        // to the (Stamp) annotation PDFium just created, rather than anything
+        // `FPDFAnnot_SetColor` or the ink/text-markup calls below know about.
+        if let Annotation::Image { rgba, width, height, .. } = annotation {
+            return self.fill_image_annotation(annot, &rect, rgba, *width, *height);
+        }
+
         let colour = match annotation {
             Annotation::Highlight { color, .. }
             | Annotation::Underline { color, .. }
@@ -10193,6 +10584,7 @@ impl PdfiumDocument {
             | Annotation::Ink { color, .. }
             | Annotation::Note { color, .. }
             | Annotation::Text { color, .. } => *color,
+            Annotation::Image { .. } => unreachable!("returned above"),
         };
         unsafe {
             bindings.FPDFAnnot_SetColor(
@@ -10222,6 +10614,8 @@ impl PdfiumDocument {
             // Unreachable: routed away in `add_annotation`, which sends text to
             // `write_text` before this function is ever reached.
             Annotation::Text { .. } => {}
+            // Unreachable: handled above and returned before this match.
+            Annotation::Image { .. } => unreachable!("returned above"),
             Annotation::Highlight { rects, .. }
             | Annotation::Underline { rects, .. }
             | Annotation::StrikeOut { rects, .. }
@@ -10270,6 +10664,98 @@ impl PdfiumDocument {
             Annotation::Note { contents, .. } => {
                 unsafe { bindings.FPDFAnnot_SetStringValue_str(annot, "Contents", contents) };
             }
+        }
+
+        Ok(())
+    }
+
+    /// Build a picture into a `/Stamp` annotation PDFium has just created:
+    /// one image page object, its pixels, positioned to fill `rect`.
+    ///
+    /// **Built through PDFium's own object API, not the byte-safe writer.**
+    /// Every other page-content edit in this engine goes through
+    /// `crate::pdf` so a signed document's bytes move only by appending — see
+    /// `EditBase`. A placed-but-not-applied signature is different: it lives
+    /// in `/Annots`, which PDFium already owns and re-serialises freely, so
+    /// there is nothing here for that discipline to protect yet. It starts
+    /// to matter the moment a signature is *applied* — see
+    /// [`PdfiumDocument::apply_signatures`], which does go through the
+    /// byte-safe writer, for exactly that reason.
+    fn fill_image_annotation(
+        &self,
+        annot: FPDF_ANNOTATION,
+        rect: &FS_RECTF,
+        rgba: &[u8],
+        width: u32,
+        height: u32,
+    ) -> Result<()> {
+        let bindings = pdfium()?.bindings();
+        if width == 0 || height == 0 {
+            return Err(PdfError::InvalidArgument("that picture has no size".into()));
+        }
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4));
+        if expected != Some(rgba.len()) {
+            return Err(PdfError::InvalidArgument(
+                "that picture's pixels do not match its width and height".into(),
+            ));
+        }
+
+        // BGRA, blue first — see `BITMAP_BGRA`. The `image` crate, and every
+        // caller above this one, works in RGBA; swapped once here rather than
+        // asked of all of them.
+        let mut bgra = rgba.to_vec();
+        for pixel in bgra.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+
+        let bitmap = unsafe {
+            bindings.FPDFBitmap_CreateEx(
+                width as c_int,
+                height as c_int,
+                BITMAP_BGRA,
+                bgra.as_mut_ptr() as *mut c_void,
+                (width as c_int) * 4,
+            )
+        };
+        if bitmap.is_null() {
+            return Err(PdfError::Pdfium("the picture could not be prepared".into()));
+        }
+
+        let object = unsafe { bindings.FPDFPageObj_NewImageObj(self.document.handle()) };
+        if object.is_null() {
+            unsafe { bindings.FPDFBitmap_Destroy(bitmap) };
+            return Err(PdfError::Pdfium("could not create a picture object".into()));
+        }
+
+        // No page yet — the object is not on one until `FPDFAnnot_AppendObject`
+        // below gives it to the annotation, and the bitmap call's own doc says
+        // the page list "may be NULL" / "may be 0" for exactly this case.
+        let set =
+            unsafe { bindings.FPDFImageObj_SetBitmap(std::ptr::null_mut(), 0, object, bitmap) };
+        unsafe { bindings.FPDFBitmap_Destroy(bitmap) };
+        if set == 0 {
+            return Err(PdfError::Pdfium("the picture could not be placed".into()));
+        }
+
+        // An image object draws into the unit square; the matrix stretches
+        // and moves that square to `rect`, exactly as `space.to_pdf` already
+        // put `rect` into PDF's y-up space.
+        let matrix = FS_MATRIX {
+            a: rect.right - rect.left,
+            b: 0.0,
+            c: 0.0,
+            d: rect.top - rect.bottom,
+            e: rect.left,
+            f: rect.bottom,
+        };
+        if unsafe { bindings.FPDFPageObj_SetMatrix(object, &matrix) } == 0 {
+            return Err(PdfError::Pdfium("the picture could not be positioned".into()));
+        }
+
+        if unsafe { bindings.FPDFAnnot_AppendObject(annot, object) } == 0 {
+            return Err(PdfError::Pdfium("the picture could not be attached".into()));
         }
 
         Ok(())
@@ -10567,11 +11053,72 @@ impl PdfiumDocument {
                 }
             }
 
-            // Widgets, links, stamps, everything else: left exactly as they are.
+            ANNOT_STAMP => match self.read_image_annotation(annot, space) {
+                Some(image) => image,
+                // Not one this engine placed — some other stamp, or a shape
+                // this cannot read back. Left exactly as it is, like every
+                // other kind below.
+                None => return Ok(None),
+            },
+
+            // Widgets, links, everything else: left exactly as they are.
             _ => return Ok(None),
         };
 
         Ok(Some(annotation))
+    }
+
+    /// A `/Stamp` annotation's picture, read back — the inverse of
+    /// [`PdfiumDocument::fill_image_annotation`]. `None` for a stamp that is
+    /// not exactly one image object, which is not one this engine placed.
+    fn read_image_annotation(&self, annot: FPDF_ANNOTATION, space: &PageSpace) -> Option<Annotation> {
+        let bindings = pdfium().ok()?.bindings();
+        if unsafe { bindings.FPDFAnnot_GetObjectCount(annot) } != 1 {
+            return None;
+        }
+        let object = unsafe { bindings.FPDFAnnot_GetObject(annot, 0) };
+        if object.is_null()
+            || unsafe { bindings.FPDFPageObj_GetType(object) }
+                != pdfium_render::prelude::FPDF_PAGEOBJ_IMAGE as i32
+        {
+            return None;
+        }
+
+        let bitmap = unsafe { bindings.FPDFImageObj_GetBitmap(object) };
+        if bitmap.is_null() {
+            return None;
+        }
+        let width = unsafe { bindings.FPDFBitmap_GetWidth(bitmap) };
+        let height = unsafe { bindings.FPDFBitmap_GetHeight(bitmap) };
+        let stride = unsafe { bindings.FPDFBitmap_GetStride(bitmap) };
+        let format = unsafe { bindings.FPDFBitmap_GetFormat(bitmap) };
+        let rgba = if width > 0 && height > 0 && stride > 0 {
+            let buffer = unsafe { bindings.FPDFBitmap_GetBuffer_as_vec(bitmap) };
+            straight_rgba(&buffer, width as usize, height as usize, stride as usize, format)
+        } else {
+            None
+        };
+        unsafe { bindings.FPDFBitmap_Destroy(bitmap) };
+        let rgba = rgba?;
+
+        let mut rect = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+        if unsafe { bindings.FPDFAnnot_GetRect(annot, &mut rect) } == 0 {
+            return None;
+        }
+        let (left, top) = space.to_top_left(rect.left, rect.top);
+        let (right, bottom) = space.to_top_left(rect.right, rect.bottom);
+
+        Some(Annotation::Image {
+            rect: Rect {
+                left: left.min(right),
+                top: top.min(bottom),
+                right: left.max(right),
+                bottom: top.max(bottom),
+            },
+            rgba,
+            width: width as u32,
+            height: height as u32,
+        })
     }
 
     fn read_colour(&self, annot: FPDF_ANNOTATION) -> Color {

@@ -1143,6 +1143,17 @@ mod tests {
                 contents: "check this".into(),
                 color: yellow(),
             },
+            Annotation::Image {
+                rect: Rect {
+                    left: 5.0,
+                    top: 5.0,
+                    right: 25.0,
+                    bottom: 25.0,
+                },
+                rgba: vec![10, 20, 30, 255, 40, 50, 60, 255],
+                width: 2,
+                height: 1,
+            },
         ];
 
         for mark in marks {
