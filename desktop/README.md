@@ -290,7 +290,10 @@ one commit per finding, each with a test built from the audit's own input;
   is what counts. The green tick needs unaltered *and* pinned; an appended
   document still names who signed the earlier revision, without the tick.
   The pin is empty until HSI's root exists, so today every signature is
-  unrecognised — the truth, not a placeholder. **A document signed in another
+  unrecognised — the truth, not a placeholder. The status readout and
+  `validate` say both answers in one line, apart, and put a tick in front only
+  when both are the good one: `✓ signed by CN=…: unchanged since it was
+  signed …; issued by a root Pagify trusts`. **A document signed in another
   application is not judged at all**: its signature is reported as not verified, naming the scheme in words
   (`RSA-PKCS#1v1.5 / SHA-256`, `ECDSA P-256 / SHA-256`, the number for one
   without a name), before the range or the digest is looked at — so "not
@@ -350,8 +353,7 @@ one commit per finding, each with a test built from the audit's own input;
   `create_new`, the target's own permissions kept, renamed over it whole.
 
 Still open, and said plainly: HSI's root is not yet minted, so nothing is
-pinned yet (the issuing tool is the next step, `docs/SM2_SPIKE.md`); the
-signature panel does not yet show trust beside the verdict; the unmaintained font parsers
+pinned yet (the issuing tool is the next step, `docs/SM2_SPIKE.md`); the unmaintained font parsers
 (`rustybuzz`, `ttf-parser`) await a migration; words that are pixels are not
 redacted (the picture is reported). The `rsa` upgrade that was owed is not:
 the crate is gone, and `tools/audit.sh` passes with nothing ignored.

@@ -739,6 +739,34 @@ fn signer_label(signature: &pdf_core::pdf::validate::Signature) -> String {
     }
 }
 
+/// One signature, in one line: what it is called here, who signed, the
+/// verdict about the bytes — and, when a signer was verified at all, what the
+/// pinned roots say about the signer, kept apart from the verdict with a
+/// semicolon because they are different questions. The tick comes only when
+/// both answers are the good one: unchanged, and issued by a root Pagify
+/// trusts. A signature Pagify does not verify — another scheme, another
+/// application — gets the verdict alone, which says "not verified" and never
+/// "changed".
+fn signature_line(what: &str, signature: &pdf_core::pdf::validate::Signature) -> String {
+    let tick = if signature.is_good() { "✓ " } else { "" };
+    let trust = match signature.trust {
+        Some(trust) => format!("; {}", trust.describe()),
+        None => String::new(),
+    };
+    format!(
+        "{tick}{what}{}: {}{trust}",
+        signer_label(signature),
+        signature.verdict.describe()
+    )
+}
+
+/// Whether a signature's line is news or a warning: anything but unchanged
+/// is a warning, and so is a signer since revoked, however unchanged.
+fn signature_is_a_warning(signature: &pdf_core::pdf::validate::Signature) -> bool {
+    signature.verdict != pdf_core::pdf::validate::Verdict::Unaltered
+        || signature.trust == Some(pdf_core::pdf::trust::Trust::Revoked)
+}
+
 /// The rectangle two dragged corners describe, or `None` if it has no area.
 ///
 /// Shared by the two tools that draw one, so that a lock and a redaction cannot
@@ -2494,8 +2522,7 @@ impl PagifyApp {
             Ok(found) if found.is_empty() => lines.push("signed: no".into()),
             Ok(found) => {
                 for signature in &found {
-                    let who = signer_label(signature);
-                    lines.push(format!("signed{who}: {}", signature.verdict.describe()));
+                    lines.push(signature_line("signed", signature));
                 }
             }
             // Not fatal to the readout: everything else about the document is
@@ -3994,15 +4021,10 @@ impl PagifyApp {
                         self.say_info("this document carries no signatures.");
                     }
                     Ok(found) => {
-                        let said: Vec<String> = found
-                            .iter()
-                            .map(|s| format!("signature{}: {}", signer_label(s), s.verdict.describe()))
-                            .collect();
-                        // Anything other than unaltered is a warning, not news.
-                        let all_well = found
-                            .iter()
-                            .all(|s| s.verdict == pdf_core::pdf::validate::Verdict::Unaltered);
-                        let line = said.join("; ");
+                        let said: Vec<String> =
+                            found.iter().map(|s| signature_line("signature", s)).collect();
+                        let all_well = !found.iter().any(signature_is_a_warning);
+                        let line = said.join(" | ");
                         if all_well {
                             self.say_info(line);
                         } else {
@@ -14412,7 +14434,7 @@ mod lock_wiring_tests {
     /// and the check will say the document changed after it was signed. That
     /// belongs in the line somebody reads when it works, not in a manual.
     #[test]
-    fn signing_says_that_a_later_edit_breaks_it() {
+    fn signing_says_that_a_later_edit_is_outside_it() {
         let certificate = std::path::Path::new(
             concat!(env!("CARGO_MANIFEST_DIR"), "/../../../rust/pdf_core/fixtures/test-signer-sm2.p12"),
         );
@@ -15630,8 +15652,27 @@ mod lock_wiring_tests {
         let lines = app.document_status().join("\n");
         assert!(lines.contains("signed by CN=Pagify SM2 Test Signer,O=Pagify"), "{lines}");
         assert!(lines.contains("unchanged since it was signed"), "{lines}");
-        // The limit travels with the claim here too.
-        assert!(lines.contains("whether to trust that certificate is said separately"), "{lines}");
+        // The second answer travels with the first, apart from it: the test
+        // signer is self-signed, and no root Pagify ships vouches for it — so
+        // the line says so, and there is no tick.
+        assert!(lines.contains("; not issued by a root Pagify trusts"), "{lines}");
+        assert!(!lines.contains("✓"), "a signer nobody vouches for earned the tick: {lines}");
+    }
+
+    /// **A third-party document looks as it always did**: its signature is
+    /// reported as not verified — the scheme named — never as changed, never
+    /// as tampered, and with no trust said about a signer nobody checked.
+    #[test]
+    fn the_status_of_a_document_signed_elsewhere_says_not_verified_never_tampered() {
+        let app = app("rsa-signed.pdf");
+        let lines = app.document_status().join("\n");
+        assert!(lines.contains("could not be checked"), "{lines}");
+        assert!(lines.contains("RSA-PKCS#1v1.5 / SHA-256"), "{lines}");
+        assert!(lines.contains("does not verify"), "{lines}");
+        assert!(!lines.contains("CHANGED"), "{lines}");
+        assert!(!lines.contains("NOT VALID"), "{lines}");
+        assert!(!lines.contains("root Pagify trusts"), "trust was said of a signer nobody checked: {lines}");
+        assert!(!lines.contains("✓"), "{lines}");
     }
 
     /// **A signature placed but not applied is reported as what it still is.**
@@ -15848,12 +15889,13 @@ mod lock_wiring_tests {
         let told = said(&app);
         assert!(told.contains("unchanged since it was signed"), "{told}");
         // The signer named is the certificate's subject — evidence — and the
-        // line still says what it cannot tell you: whether to trust it.
+        // second answer follows, apart from the first: nobody vouches for it.
         assert!(told.contains("by CN=Pagify SM2 Test Signer,O=Pagify"), "it did not name the certificate: {told}");
         assert!(
-            told.contains("whether to trust that certificate is said separately"),
-            "it did not say what it cannot tell you: {told}"
+            told.contains("; not issued by a root Pagify trusts"),
+            "it did not say who vouches for the signer: {told}"
         );
+        assert!(!told.contains("✓"), "{told}");
     }
 
     /// A certificate that is not there is said so before a password is asked
