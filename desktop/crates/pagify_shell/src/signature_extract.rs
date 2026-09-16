@@ -50,9 +50,9 @@ use std::collections::VecDeque;
 /// **Why alpha, when the picture ends up opaque while merely placed.** The
 /// mechanism a picture is *placed* through — see `pdf_core`'s
 /// `Annotation::Image` — genuinely cannot carry alpha, so while a signature
-/// sits there unapplied, it is composited onto a background colour sampled
-/// from the page (`Session::place_image_signature`, at the moment the
-/// destination is known — not here). But applying goes through a different,
+/// sits there unapplied, it is composited pixel for pixel against this
+/// page's own rendered pixels (`Session::place_image_signature`, at the
+/// moment the destination is known — not here). But applying goes through a different,
 /// lower-level path that hand-writes the PDF bytes and is not bound by that
 /// limit — see `pdf_core`'s `DocumentMut::remember_image_alpha` — so the
 /// real alpha extracted here does eventually reach the page as a genuine

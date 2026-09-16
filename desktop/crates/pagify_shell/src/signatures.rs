@@ -86,25 +86,77 @@ pub struct StoredImage {
     pub height: u32,
 }
 
+/// One pixel, blended toward `background` by its own alpha — alpha 255
+/// gives back the pixel unchanged, alpha 0 gives back `background`, and
+/// everything between blends the two. Always fully opaque out: this is what
+/// every compositor in this module bottoms out to.
+fn blend_pixel(pixel: &[u8], background: [u8; 3]) -> [u8; 4] {
+    let a = pixel[3] as f32 / 255.0;
+    let blend = |channel: u8, bg: u8| (channel as f32 * a + bg as f32 * (1.0 - a)).round() as u8;
+    [blend(pixel[0], background[0]), blend(pixel[1], background[1]), blend(pixel[2], background[2]), 255]
+}
+
 /// Flatten `rgba` (row-major RGBA) onto a solid `background` colour,
-/// producing an opaque buffer of the same dimensions — alpha 255 gives back
-/// the pixel unchanged, alpha 0 gives back `background`, and everything
-/// between blends the two.
+/// producing an opaque buffer of the same dimensions.
 ///
 /// This is where a signature's alpha — real, from
 /// [`crate::signature_extract`], or uniformly opaque, from anything made
 /// before that existed — actually gets used: the page a signature is placed
 /// on is not known until placement, so this cannot run any earlier than
-/// that.
+/// that. Prefer [`composite_onto_image`] where an actual picture of the
+/// destination is available — a single flat colour is a coarse stand-in for
+/// it, only as good as the destination is close to one colour itself.
 pub fn composite_onto(rgba: &[u8], background: [u8; 3]) -> Vec<u8> {
+    rgba.chunks_exact(4).flat_map(|pixel| blend_pixel(pixel, background)).collect()
+}
+
+/// Flatten `rgba` (row-major, `width`×`height`) onto `background` (row-major
+/// RGB or RGBA, `bg_width`×`bg_height`) — sampled once per **source** pixel,
+/// nearest-neighbour, rather than averaged into one flat colour first.
+///
+/// **Why this, and not [`composite_onto`].** A signature placed over
+/// anything that is not one uniform colour — a photo, a patterned card, a
+/// gradient — has no single colour that matches it; a flat average lands
+/// somewhere between everything nearby and next to nothing, which reads as
+/// a visible box rather than a matched background. Copying each
+/// destination pixel's own colour in behind the signature's own alpha,
+/// pixel for pixel, is indistinguishable from real transparency for as long
+/// as the page underneath does not change — which, for a rectangle just
+/// placed there this same moment, it has not.
+///
+/// `background`'s pixel stride is inferred from its length against
+/// `bg_width`×`bg_height`: 3 bytes per pixel or 4 are both accepted, so a
+/// caller holding a plain RGB crop need not pad it to RGBA first.
+pub fn composite_onto_image(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    background: &[u8],
+    bg_width: u32,
+    bg_height: u32,
+) -> Vec<u8> {
+    let stride = if bg_width == 0 || bg_height == 0 {
+        return composite_onto(rgba, [255, 255, 255]);
+    } else {
+        background.len() / (bg_width as usize * bg_height as usize)
+    };
+    if stride < 3 {
+        return composite_onto(rgba, [255, 255, 255]);
+    }
     let mut out = Vec::with_capacity(rgba.len());
-    for pixel in rgba.chunks_exact(4) {
-        let a = pixel[3] as f32 / 255.0;
-        let blend = |channel: u8, bg: u8| (channel as f32 * a + bg as f32 * (1.0 - a)).round() as u8;
-        out.push(blend(pixel[0], background[0]));
-        out.push(blend(pixel[1], background[1]));
-        out.push(blend(pixel[2], background[2]));
-        out.push(255);
+    for y in 0..height {
+        // Nearest-neighbour from source pixel space into background pixel
+        // space — the two are almost never the same resolution (a photo
+        // crop placed at a few dozen points across), and nothing here needs
+        // to be smoother than that: alpha's own edge already anti-aliases.
+        let by = ((y as u64 * bg_height as u64) / height.max(1) as u64).min(bg_height as u64 - 1) as u32;
+        for x in 0..width {
+            let bx = ((x as u64 * bg_width as u64) / width.max(1) as u64).min(bg_width as u64 - 1) as u32;
+            let bi = (by as usize * bg_width as usize + bx as usize) * stride;
+            let bg = [background[bi], background[bi + 1], background[bi + 2]];
+            let i = ((y * width + x) * 4) as usize;
+            out.extend_from_slice(&blend_pixel(&rgba[i..i + 4], bg));
+        }
     }
     out
 }
@@ -588,5 +640,54 @@ mod tests {
         let out = composite_onto(&rgba, [200, 200, 200]);
         assert!((145..=155).contains(&(out[0] as i32)), "expected roughly halfway, got {out:?}");
         assert_eq!(out[3], 255, "a composited picture is always opaque");
+    }
+
+    /// **A transparent pixel picks up its *own* corresponding background
+    /// pixel, not one averaged across the whole destination** — the entire
+    /// reason this function exists instead of always using
+    /// [`composite_onto`]: two transparent pixels over two differently
+    /// coloured parts of the background must come back two different
+    /// colours.
+    #[test]
+    fn each_transparent_pixel_takes_the_background_pixel_behind_it() {
+        // A 2x1 picture, both pixels fully transparent.
+        let rgba = vec![0, 0, 0, 0, 0, 0, 0, 0];
+        // A 2x1 background: left red, right blue.
+        let background = vec![255, 0, 0, 255, 0, 0, 255, 255];
+        let out = composite_onto_image(&rgba, 2, 1, &background, 2, 1);
+        assert_eq!(&out[0..4], &[255, 0, 0, 255], "the left pixel should be red, not blended");
+        assert_eq!(&out[4..8], &[0, 0, 255, 255], "the right pixel should be blue, not blended");
+    }
+
+    /// A background at a different resolution than the picture is sampled
+    /// nearest-neighbour, not stretched incorrectly or panicking on the
+    /// size mismatch — the ordinary case, since a photographed signature
+    /// crop is almost never the same pixel size as the page region it is
+    /// placed into.
+    #[test]
+    fn a_differently_sized_background_is_sampled_not_mismatched() {
+        let rgba = vec![0u8; 10 * 10 * 4]; // 10x10, fully transparent
+        let background = vec![80, 90, 100, 255].repeat(4); // 2x2, one flat colour
+        let out = composite_onto_image(&rgba, 10, 10, &background, 2, 2);
+        assert_eq!(out.len(), 10 * 10 * 4);
+        assert!(out.chunks_exact(4).all(|p| p == [80, 90, 100, 255]));
+    }
+
+    /// An opaque pixel ignores the background entirely, regardless of which
+    /// background pixel it would have mapped to.
+    #[test]
+    fn an_opaque_pixel_in_composite_onto_image_ignores_the_background() {
+        let rgba = vec![9, 8, 7, 255];
+        let background = vec![1, 2, 3, 255];
+        assert_eq!(composite_onto_image(&rgba, 1, 1, &background, 1, 1), vec![9, 8, 7, 255]);
+    }
+
+    /// An empty or dimensionless background falls back to white rather than
+    /// dividing by zero or panicking — the same safe default the caller had
+    /// before backgrounds were sampled at all.
+    #[test]
+    fn an_empty_background_falls_back_to_white() {
+        let rgba = vec![10, 20, 30, 0];
+        assert_eq!(composite_onto_image(&rgba, 1, 1, &[], 0, 0), vec![255, 255, 255, 255]);
     }
 }

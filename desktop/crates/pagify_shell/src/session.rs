@@ -209,42 +209,33 @@ impl PageRaster {
             .count()
     }
 
-    /// A representative background colour, averaged from the *perimeter* of
-    /// the pixel rectangle `(left, top)`–`(right, bottom)` rather than its
-    /// interior — a signature is placed on an otherwise blank line, and the
-    /// border around where it goes is a better sample of the page than
-    /// pixels the signature's own bulk is about to cover. White if the
-    /// rectangle is degenerate or entirely off this raster: the safe
-    /// default a picture already looked like before backgrounds were
-    /// sampled at all.
-    pub fn sample_background(&self, left: u32, top: u32, right: u32, bottom: u32) -> [u8; 3] {
-        let (left, top) = (left.min(self.width.saturating_sub(1)), top.min(self.height.saturating_sub(1)));
+    /// This raster's own pixels within `(left, top)`–`(right, bottom)`,
+    /// clamped to what the raster actually has rather than out of bounds —
+    /// narrower, shorter, or empty at an edge or a corner. RGBA, the same
+    /// layout as [`Self::pixels`]; the returned `(width, height)` go
+    /// alongside it since a clipped rectangle can come back smaller than
+    /// asked for, and an empty one comes back as `(Vec::new(), 0, 0)`.
+    ///
+    /// **What this is for.** A picture composited against this crop —
+    /// [`crate::signatures::composite_onto_image`] — looks exactly like the
+    /// page underneath it wherever the picture is transparent, because it
+    /// *is* the page underneath it, copied pixel for pixel rather than
+    /// approximated as one flat colour. The one thing it cannot survive is
+    /// the page changing after the crop was taken.
+    pub fn crop(&self, left: u32, top: u32, right: u32, bottom: u32) -> (Vec<u8>, u32, u32) {
+        let (left, top) = (left.min(self.width), top.min(self.height));
         let (right, bottom) =
             (right.min(self.width.saturating_sub(1)), bottom.min(self.height.saturating_sub(1)));
         if self.width == 0 || self.height == 0 || left > right || top > bottom {
-            return [255, 255, 255];
+            return (Vec::new(), 0, 0);
         }
-        let mut sum = [0u64; 3];
-        let mut count = 0u64;
-        let mut sample = |x: u32, y: u32| {
-            let i = ((y * self.width + x) * 4) as usize;
-            sum[0] += self.pixels[i] as u64;
-            sum[1] += self.pixels[i + 1] as u64;
-            sum[2] += self.pixels[i + 2] as u64;
-            count += 1;
-        };
-        for x in left..=right {
-            sample(x, top);
-            sample(x, bottom);
-        }
+        let (w, h) = (right - left + 1, bottom - top + 1);
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
         for y in top..=bottom {
-            sample(left, y);
-            sample(right, y);
+            let row_start = ((y * self.width + left) * 4) as usize;
+            out.extend_from_slice(&self.pixels[row_start..row_start + (w * 4) as usize]);
         }
-        if count == 0 {
-            return [255, 255, 255];
-        }
-        [(sum[0] / count) as u8, (sum[1] / count) as u8, (sum[2] / count) as u8]
+        (out, w, h)
     }
 }
 
@@ -271,29 +262,38 @@ mod raster_tests {
         PageRaster { width, height, pixels, from_cache: false }
     }
 
-    /// **The perimeter, not the interior, is what gets sampled** — a
-    /// rectangle whose own edge sits on the raster's uniform border reads
-    /// that border colour even though its interior is a completely
-    /// different colour.
+    /// **The crop holds the interior's own pixels, not the border's** —
+    /// unlike an averaged sample, a crop taken from inside the ring must
+    /// come back as the fill colour throughout, never touched by the border
+    /// a few pixels further out.
     #[test]
-    fn the_perimeter_of_the_rectangle_is_sampled_not_its_interior() {
+    fn a_crop_holds_the_interior_pixels_exactly() {
         let raster = ringed(100, 100, [10, 20, 30], [200, 200, 200]);
-        let sampled = raster.sample_background(0, 0, 99, 99);
-        assert_eq!(sampled, [10, 20, 30]);
+        let (pixels, w, h) = raster.crop(10, 10, 89, 89);
+        assert_eq!((w, h), (80, 80));
+        assert!(
+            pixels.chunks_exact(4).all(|p| p[0..3] == [200, 200, 200]),
+            "the crop should be entirely the fill colour, found border pixels leaking in"
+        );
     }
 
-    /// A rectangle entirely off the raster, or inverted, is refused —
-    /// falling back to white rather than sampling nothing or panicking.
+    /// A rectangle only partly on the raster comes back narrower or
+    /// shorter than asked for, clamped rather than reading out of bounds;
+    /// one entirely off the raster, or inverted, comes back empty rather
+    /// than panicking.
     #[test]
-    fn a_degenerate_or_out_of_range_rectangle_falls_back_to_white() {
-        let raster = ringed(50, 50, [0, 0, 0], [0, 0, 0]);
-        assert_eq!(raster.sample_background(10, 10, 5, 5), [255, 255, 255], "inverted rectangle");
-        assert_eq!(
-            PageRaster { width: 0, height: 0, pixels: Vec::new(), from_cache: false }
-                .sample_background(0, 0, 10, 10),
-            [255, 255, 255],
-            "empty raster"
-        );
+    fn a_partly_or_wholly_out_of_range_rectangle_is_clamped_not_read_out_of_bounds() {
+        let raster = ringed(50, 50, [0, 0, 0], [220, 220, 220]);
+        let (pixels, w, h) = raster.crop(40, 40, 100, 100);
+        assert_eq!((w, h), (10, 10), "should have clamped to the raster's own edge");
+        assert_eq!(pixels.len(), (10 * 10 * 4) as usize);
+
+        let (pixels, w, h) = raster.crop(10, 10, 5, 5);
+        assert_eq!((w, h, pixels.len()), (0, 0, 0), "an inverted rectangle should come back empty");
+
+        let (pixels, w, h) =
+            PageRaster { width: 0, height: 0, pixels: Vec::new(), from_cache: false }.crop(0, 0, 10, 10);
+        assert_eq!((w, h, pixels.len()), (0, 0, 0), "an empty raster should come back empty");
     }
 }
 
@@ -912,14 +912,18 @@ impl Session {
     ///
     /// - The annotation itself — what is actually placed, and what PDFium's
     ///   own picture object shows while it sits there unapplied — gets a
-    ///   *flattened* copy, composited against a background sampled from this
-    ///   page at `rect` (see [`crate::signatures::composite_onto`]), because
-    ///   the mechanism a picture is placed through cannot carry alpha itself
+    ///   *flattened* copy, composited pixel for pixel against this page's
+    ///   own rendered pixels at `rect` (see
+    ///   [`crate::signatures::composite_onto_image`]), because the
+    ///   mechanism a picture is placed through cannot carry alpha itself
     ///   and the page underneath is not known any earlier than this call.
+    ///   Indistinguishable from real transparency for as long as the page
+    ///   does not change after this moment.
     /// - The *original*, still carrying real alpha, is kept alongside it —
     ///   see [`pdf_core::document::DocumentMut::remember_image_alpha`] — so
     ///   that applying this signature later, in this same session, can burn
-    ///   in a real soft mask instead of the flattened approximation.
+    ///   in a real soft mask instead of the flattened approximation, which
+    ///   then holds even if the page changes afterward.
     pub fn place_image_signature(
         &self,
         page: usize,
@@ -934,18 +938,18 @@ impl Session {
         // not a conversion. Rendering fails open to white: a signature that
         // cannot sample its destination looks exactly as it did before
         // backgrounds were sampled at all, not worse.
-        let background = self
-            .render_page(page, 1.0)
-            .map(|raster| {
-                raster.sample_background(
+        let flattened = match self.render_page(page, 1.0) {
+            Ok(raster) => {
+                let (crop, cw, ch) = raster.crop(
                     rect.left.round() as u32,
                     rect.top.round() as u32,
                     rect.right.round() as u32,
                     rect.bottom.round() as u32,
-                )
-            })
-            .unwrap_or([255, 255, 255]);
-        let flattened = crate::signatures::composite_onto(&rgba, background);
+                );
+                crate::signatures::composite_onto_image(&rgba, width, height, &crop, cw, ch)
+            }
+            Err(_) => crate::signatures::composite_onto(&rgba, [255, 255, 255]),
+        };
 
         registry::with_session(self.handle, |s| {
             let doc = s
