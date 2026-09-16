@@ -512,3 +512,194 @@ fn set_image_signature_rect_on_a_missing_annotation_is_refused() {
         .expect_err("there is nothing at that index");
     assert!(format!("{err}").contains("no annotation"), "{err}");
 }
+
+/// **A square picture, marked only in its top-left corner, rendered with
+/// no rotation.** The baseline the rotation tests below compare against —
+/// confirms the mark starts where it is expected to, so a later "it moved"
+/// or "it didn't move" means what it says.
+fn square_with_marked_corner(size: u32) -> Vec<u8> {
+    let mut rgba = vec![255u8; (size * size * 4) as usize];
+    let mark = (size / 3).max(1);
+    for y in 0..mark {
+        for x in 0..mark {
+            let i = ((y * size + x) * 4) as usize;
+            rgba[i..i + 4].copy_from_slice(&[10, 10, 10, 255]);
+        }
+    }
+    rgba
+}
+
+/// **Rotating turns the picture clockwise on screen** — checked by where a
+/// mark ends up, not by trusting the matrix arithmetic. A square placed
+/// with its dark corner top-left, turned 90 degrees, must show that corner
+/// at the top-*right*: a clockwise quarter turn carries top-left to where
+/// top-right was. Getting the sign of the angle wrong is exactly the kind
+/// of bug that compiles, and reads back as whatever was written, and is
+/// only ever visible in a render.
+#[test]
+fn rotating_turns_the_picture_clockwise_on_screen() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let size = 12;
+    let rect = Rect { left: 100.0, top: 100.0, right: 200.0, bottom: 200.0 };
+    let index = place(&mut doc, 0, rect, square_with_marked_corner(size), size, size, "Rotate Me");
+    doc.rotate_image_signature(0, index, 90.0).expect("rotate");
+
+    let scale = 2.0;
+    let bitmap = doc
+        .render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() })
+        .expect("render");
+    let sample = |x_pt: f32, y_pt: f32| {
+        let at = (y_pt * scale) as usize * bitmap.stride + (x_pt * scale) as usize * 4;
+        (bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2])
+    };
+    let is_dark = |s: (u8, u8, u8)| s.0 < 60 && s.1 < 60 && s.2 < 60;
+
+    let near_top_right = sample(rect.right - 15.0, rect.top + 15.0);
+    let near_top_left = sample(rect.left + 15.0, rect.top + 15.0);
+    let near_bottom_left = sample(rect.left + 15.0, rect.bottom - 15.0);
+    assert!(
+        is_dark(near_top_right),
+        "a 90-degree clockwise turn should carry the top-left mark to the top-right, got {near_top_right:?}"
+    );
+    assert!(!is_dark(near_top_left), "the original top-left corner should no longer be dark, got {near_top_left:?}");
+    assert!(!is_dark(near_bottom_left), "a clockwise turn should not have put the mark at the bottom-left, got {near_bottom_left:?}");
+}
+
+/// **A full turn is the same as no turn**, and a half turn puts the mark
+/// diagonally opposite — two more fixed points to be sure the direction
+/// found above is not a coincidence of exactly one angle.
+#[test]
+fn rotating_by_360_is_rotating_by_0_and_180_is_the_opposite_corner() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let size = 12;
+    let rect = Rect { left: 100.0, top: 100.0, right: 200.0, bottom: 200.0 };
+    let scale = 2.0;
+    let is_dark = |s: (u8, u8, u8)| s.0 < 60 && s.1 < 60 && s.2 < 60;
+
+    let mut full_turn = open("two-column.pdf");
+    let index = place(&mut full_turn, 0, rect, square_with_marked_corner(size), size, size, "Full Turn");
+    full_turn.rotate_image_signature(0, index, 360.0).expect("rotate");
+    let bitmap = full_turn.render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() }).expect("render");
+    let sample = |bitmap: &pdf_core::Bitmap, x_pt: f32, y_pt: f32| {
+        let at = (y_pt * scale) as usize * bitmap.stride + (x_pt * scale) as usize * 4;
+        (bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2])
+    };
+    assert!(
+        is_dark(sample(&bitmap, rect.left + 15.0, rect.top + 15.0)),
+        "360 degrees should look exactly like 0 — the mark should still be top-left"
+    );
+
+    let mut half_turn = open("two-column.pdf");
+    let index = place(&mut half_turn, 0, rect, square_with_marked_corner(size), size, size, "Half Turn");
+    half_turn.rotate_image_signature(0, index, 180.0).expect("rotate");
+    let bitmap = half_turn.render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() }).expect("render");
+    assert!(
+        is_dark(sample(&bitmap, rect.right - 15.0, rect.bottom - 15.0)),
+        "180 degrees should carry the top-left mark to the diagonally opposite corner"
+    );
+}
+
+/// **Rotating is read back through `image_signature_marks`**, and moving or
+/// resizing afterward does not silently reset it to 0 — the angle and the
+/// rect are two independent things that must not clobber each other.
+#[test]
+fn rotation_is_read_back_and_survives_a_later_move() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let rect = Rect { left: 40.0, top: 40.0, right: 100.0, bottom: 90.0 };
+    let index = place(&mut doc, 0, rect, solid(4, 4, [80, 80, 200]), 4, 4, "Turned");
+
+    let before = &doc.image_signature_marks(0).expect("marks")[0];
+    assert_eq!(before.rotation, 0.0, "a freshly placed picture should start unrotated");
+
+    doc.rotate_image_signature(0, index, 33.0).expect("rotate");
+    let turned = doc.image_signature_marks(0).expect("marks").remove(0);
+    assert!((turned.rotation - 33.0).abs() < 0.01, "rotation was not read back: {}", turned.rotation);
+    assert_eq!(turned.rect, rect, "rotating must not move the picture's own rect");
+
+    let moved_to = Rect { left: 300.0, top: 300.0, right: 360.0, bottom: 350.0 };
+    doc.set_image_signature_rect(0, index, moved_to).expect("move");
+    let after_move = doc.image_signature_marks(0).expect("marks").remove(0);
+    assert_eq!(after_move.rect, moved_to, "the move did not take");
+    assert!(
+        (after_move.rotation - 33.0).abs() < 0.01,
+        "moving should not have reset the rotation, got {}",
+        after_move.rotation
+    );
+}
+
+/// **Applying a rotated signature burns in the turn, not the unrotated
+/// picture** — the same clockwise check as the placed-annotation test,
+/// this time after `apply_signatures` has rewritten it into page content.
+#[test]
+fn applying_a_rotated_signature_paints_it_turned() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let size = 12;
+    let rect = Rect { left: 100.0, top: 100.0, right: 200.0, bottom: 200.0 };
+    let index = place(&mut doc, 0, rect, square_with_marked_corner(size), size, size, "Applied Turn");
+    doc.rotate_image_signature(0, index, 90.0).expect("rotate");
+    doc.apply_signatures(0).expect("apply");
+
+    let scale = 2.0;
+    let bitmap = doc
+        .render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() })
+        .expect("render");
+    let sample = |x_pt: f32, y_pt: f32| {
+        let at = (y_pt * scale) as usize * bitmap.stride + (x_pt * scale) as usize * 4;
+        (bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2])
+    };
+    let is_dark = |s: (u8, u8, u8)| s.0 < 60 && s.1 < 60 && s.2 < 60;
+    let near_top_right = sample(rect.right - 15.0, rect.top + 15.0);
+    assert!(is_dark(near_top_right), "the applied picture should still show the clockwise turn, got {near_top_right:?}");
+}
+
+/// A rotation can only be set on a placed picture that actually exists.
+#[test]
+fn rotate_image_signature_on_a_missing_annotation_is_refused() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let err = doc.rotate_image_signature(0, 99, 45.0).expect_err("there is nothing at that index");
+    assert!(format!("{err}").contains("no annotation"), "{err}");
+}
+
+/// **Unlike the alpha side-table, rotation is a real annotation string —
+/// it survives a save and reopen**, not just this session. Worth checking
+/// explicitly rather than assumed just because `remember_image_alpha`'s
+/// own id does not: the two look similar (both custom keys written the
+/// same way `SIGNATURE_KEY` is) but only one of them is backed by
+/// in-process state that a save cannot carry.
+#[test]
+fn rotation_survives_a_save_and_reopen() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let rect = Rect { left: 60.0, top: 60.0, right: 140.0, bottom: 110.0 };
+    let index = place(&mut doc, 0, rect, solid(4, 4, [90, 40, 160]), 4, 4, "Saved Turn");
+    doc.rotate_image_signature(0, index, 47.0).expect("rotate");
+
+    let mut saved = Vec::new();
+    doc.save_full_copy(&mut saved).expect("save");
+    let reopened = PdfiumDocument::open_bytes(saved, None).expect("reopen");
+
+    let marks = reopened.image_signature_marks(0).expect("marks");
+    assert_eq!(marks.len(), 1);
+    assert!(
+        (marks[0].rotation - 47.0).abs() < 0.01,
+        "rotation did not survive the round trip: {}",
+        marks[0].rotation
+    );
+    assert_eq!(marks[0].rect, rect, "the rect should also be exactly what it was");
+}

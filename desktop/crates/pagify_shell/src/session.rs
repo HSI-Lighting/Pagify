@@ -982,6 +982,18 @@ impl Session {
         })
     }
 
+    /// Turn a placed picture signature, before it is applied — see
+    /// [`pdf_core::document::DocumentMut::rotate_image_signature`].
+    pub fn rotate_image_signature(&self, page: usize, index: usize, degrees: f32) -> Result<()> {
+        registry::with_session(self.handle, |s| {
+            let doc = s
+                .document
+                .as_document_mut()
+                .ok_or(pdf_core::PdfError::Unsupported("editing this document"))?;
+            doc.rotate_image_signature(page, index, degrees)
+        })
+    }
+
     /// The picture signatures placed on a page, as opposed to any other
     /// picture on it — see [`pdf_core::document::ImageSignatureMark`].
     pub fn image_signature_marks(

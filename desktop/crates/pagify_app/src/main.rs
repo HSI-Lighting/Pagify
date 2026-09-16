@@ -999,6 +999,10 @@ struct SignatureSelected {
     page: usize,
     index: usize,
     rect: pdf_core::document::Rect,
+    /// How far clockwise it is turned about its own centre, in degrees, as
+    /// of the moment it was (re)selected — the base a rotate-drag's angle
+    /// is added onto, not recomputed from scratch on every frame.
+    rotation: f32,
 }
 
 /// One of the eight places on a selection's outline that resizes it.
@@ -1016,6 +1020,14 @@ enum Handle {
     TopRight,
     BottomLeft,
     BottomRight,
+    /// A ninth handle, for a signature's selection alone — see
+    /// [`PagifyApp::signature_handle_at`]. Deliberately left out of
+    /// [`Handle::ALL`], `at`, `anchor` and `scale`: those four are the
+    /// object tool's own resize geometry, proven and in wide use, and this
+    /// handle does not resize anything — turning is a different transform,
+    /// computed from where the drag is relative to the rect's centre
+    /// (`PagifyApp::angle_from_drag`), not from a fixed corner or edge.
+    Rotate,
 }
 
 impl Handle {
@@ -1030,7 +1042,10 @@ impl Handle {
         Handle::Left,
     ];
 
-    /// Where this handle sits on a rectangle.
+    /// Where this handle sits on a rectangle. Never called with `Rotate` —
+    /// its position depends on the view's scale (a fixed screen-space
+    /// offset, not a page-space one), which this method is not given; see
+    /// [`PagifyApp::rotate_handle_screen_pos`].
     fn at(&self, r: &pdf_core::document::Rect) -> (f32, f32) {
         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
         match self {
@@ -1042,10 +1057,13 @@ impl Handle {
             Handle::TopRight => (r.right, r.top),
             Handle::BottomLeft => (r.left, r.bottom),
             Handle::BottomRight => (r.right, r.bottom),
+            Handle::Rotate => unreachable!("the rotate handle's position is screen-space, not page-space"),
         }
     }
 
-    /// The point that does not move when this handle is dragged.
+    /// The point that does not move when this handle is dragged. Never
+    /// called with `Rotate` — turning has no anchor point, it has a centre
+    /// (see [`PagifyApp::angle_from_drag`]).
     fn anchor(&self, r: &pdf_core::document::Rect) -> (f32, f32) {
         let (cx, cy) = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
         match self {
@@ -1057,6 +1075,7 @@ impl Handle {
             Handle::TopRight => (r.left, r.bottom),
             Handle::BottomLeft => (r.right, r.top),
             Handle::BottomRight => (r.left, r.top),
+            Handle::Rotate => unreachable!("the rotate handle has no anchor corner"),
         }
     }
 
@@ -1082,6 +1101,10 @@ impl Handle {
             Handle::Top | Handle::Bottom => egui::CursorIcon::ResizeVertical,
             Handle::TopLeft | Handle::BottomRight => egui::CursorIcon::ResizeNwSe,
             Handle::TopRight | Handle::BottomLeft => egui::CursorIcon::ResizeNeSw,
+            // No dedicated rotate cursor exists in egui; crosshair reads as
+            // "precise work happening here" without implying a direction
+            // that would be wrong half the time.
+            Handle::Rotate => egui::CursorIcon::Crosshair,
         }
     }
 }
@@ -1654,6 +1677,13 @@ fn tool_button(
 /// them reads as a grid rather than as a ragged line.
 /// Half the side of a resize handle, in screen pixels.
 const HANDLE_PX: f32 = 4.0;
+
+/// How far above a signature's own top edge the rotate handle floats, in
+/// screen pixels — far enough that a finger or a cursor does not fight with
+/// the resize handle right below it.
+const ROTATE_HANDLE_OFFSET_PX: f32 = 26.0;
+/// The rotate handle's own drawn (and hit-tested) radius, in screen pixels.
+const ROTATE_HANDLE_PX: f32 = 5.0;
 
 /// How wide a placed signature is, in page points — a signature on a form
 /// is around two inches across; wider looks like a banner and narrower like
@@ -3270,7 +3300,7 @@ impl PagifyApp {
     /// The placed-but-unapplied picture signature under `at` on `page`, if
     /// any — the smallest one, where more than one overlaps, the same
     /// tie-break [`Self::thing_at`] uses.
-    fn signature_at(&self, page: usize, at: AppPoint) -> Option<(usize, pdf_core::document::Rect)> {
+    fn signature_at(&self, page: usize, at: AppPoint) -> Option<(usize, pdf_core::document::Rect, f32)> {
         let near = HIT_TOLERANCE_PT as f32;
         let (x, y) = (at.x as f32, at.y as f32);
         let doc = self.doc.as_ref()?;
@@ -3288,7 +3318,7 @@ impl PagifyApp {
                 let area = |r: &pdf_core::document::Rect| ((r.right - r.left) * (r.bottom - r.top)).abs();
                 area(&a.rect).total_cmp(&area(&b.rect))
             })
-            .map(|m| (m.index, m.rect))
+            .map(|m| (m.index, m.rect, m.rotation))
     }
 
     /// Whether `at` falls within `rect` — no tolerance, unlike hit-testing
@@ -3304,14 +3334,48 @@ impl PagifyApp {
     /// The handle under a point on the current signature selection, if any
     /// — the same reach-allowing-for-screen-size math as [`Self::handle_at`],
     /// kept separate because it reads [`Self::signature_selected`] rather
-    /// than [`Self::selected`].
+    /// than [`Self::selected`]. Also checks the rotate handle, which
+    /// `Handle::ALL` does not include (see [`Handle::Rotate`]).
     fn signature_handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
         let sel = self.signature_selected.as_ref()?;
+        let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
+        if (view.to_screen(at) - rotate_screen).length() <= ROTATE_HANDLE_PX + 2.0 {
+            return Some(Handle::Rotate);
+        }
         let reach = (HANDLE_PX / view.scale as f32).max(2.0);
         Handle::ALL.iter().copied().find(|h| {
             let (hx, hy) = h.at(&sel.rect);
             (at.x as f32 - hx).abs() <= reach && (at.y as f32 - hy).abs() <= reach
         })
+    }
+
+    /// Where the rotate handle is drawn and hit-tested — a fixed distance
+    /// above the rect's top-centre **in screen space**, whatever the zoom,
+    /// the same way every app that has one places it. Unlike the eight
+    /// resize handles (proportional to the rect, so they sit exactly on
+    /// its own corners and edges at any zoom), this one has no page-space
+    /// equivalent: "24 pixels" is not a page distance.
+    fn rotate_handle_screen_pos(rect: &pdf_core::document::Rect, view: PageView) -> egui::Pos2 {
+        let top_centre = view.to_screen(AppPoint::new(((rect.left + rect.right) / 2.0) as f64, rect.top as f64));
+        top_centre - egui::vec2(0.0, ROTATE_HANDLE_OFFSET_PX)
+    }
+
+    /// The angle a rotate-drag means: `base_rotation` (the signature's own
+    /// rotation when the drag started) plus how far the pointer has swept
+    /// clockwise around `rect`'s centre between `from` and `from + by`.
+    ///
+    /// **Why raw `atan2`, with no sign flip.** [`image_placement_matrix`]
+    /// (`pdf_core`) needs one, because PDF space is y-up and a clockwise
+    /// screen turn is counterclockwise there. App space — what `rect`,
+    /// `from` and `by` are all already in — is y-down, the same sense a
+    /// clock face is normally drawn in, so `atan2(dy, dx)` already increases
+    /// clockwise on its own; negating it here would turn the picture the
+    /// wrong way when dragged.
+    fn angle_from_drag(rect: &pdf_core::document::Rect, base_rotation: f32, from: AppPoint, by: (f32, f32)) -> f32 {
+        let centre = ((rect.left + rect.right) as f64 / 2.0, (rect.top + rect.bottom) as f64 / 2.0);
+        let start = (from.y - centre.1).atan2(from.x - centre.0);
+        let now = ((from.y + by.1 as f64) - centre.1).atan2((from.x + by.0 as f64) - centre.0);
+        base_rotation + (now - start).to_degrees() as f32
     }
 
     /// A placed signature's own pointer handling, with **no tool armed** —
@@ -3359,8 +3423,8 @@ impl PagifyApp {
             // A drag starting fresh on an unselected signature selects it
             // and carries the gesture on — the object tool's own rule for
             // the same reason: one gesture, not two.
-            if let Some((index, rect)) = self.signature_at(page, at) {
-                self.signature_selected = Some(SignatureSelected { page, index, rect });
+            if let Some((index, rect, rotation)) = self.signature_at(page, at) {
+                self.signature_selected = Some(SignatureSelected { page, index, rect, rotation });
                 self.signature_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
                 return true;
             }
@@ -3387,9 +3451,9 @@ impl PagifyApp {
         }
 
         if response.clicked() {
-            if let Some((index, rect)) = self.signature_at(page, at) {
-                self.signature_selected = Some(SignatureSelected { page, index, rect });
-                self.say_info("signature selected — drag to move, drag a handle to resize.");
+            if let Some((index, rect, rotation)) = self.signature_at(page, at) {
+                self.signature_selected = Some(SignatureSelected { page, index, rect, rotation });
+                self.say_info("signature selected — drag to move, drag a handle to resize, drag the ring above it to turn.");
                 return true;
             }
             // Clicked elsewhere: deselect, but do not swallow the click —
@@ -3402,12 +3466,35 @@ impl PagifyApp {
     }
 
     /// Apply what a drag on a signature asked for, once — the same shape as
-    /// [`Self::finish_grab`], writing through
-    /// `Session::set_image_signature_rect` instead of `move_thing`/
-    /// `scale_thing` since a signature's rect is the whole of what moving
-    /// or resizing it means; there is no content-stream object underneath
-    /// to transform.
+    /// [`Self::finish_grab`]. A rotate-handle drag writes through
+    /// `Session::rotate_image_signature`; body and resize-handle drags
+    /// write through `Session::set_image_signature_rect`, as before — never
+    /// `move_thing`/`scale_thing`, since a signature's rect (and now angle)
+    /// is the whole of what moving, resizing or turning it means; there is
+    /// no content-stream object underneath to transform.
     fn finish_signature_grab(&mut self, sel: SignatureSelected, grab: Grab) {
+        if grab.handle == Some(Handle::Rotate) {
+            let wanted = Self::angle_from_drag(&sel.rect, sel.rotation, grab.from, grab.by);
+            if (wanted - sel.rotation).abs() < 0.5 {
+                return;
+            }
+            let Some(doc) = &self.doc else { return };
+            match doc.session.rotate_image_signature(sel.page, sel.index, wanted) {
+                Ok(()) => {
+                    if let Some(doc) = &mut self.doc {
+                        doc.rendered_is_stale();
+                    }
+                    self.signature_selected =
+                        Some(SignatureSelected { rotation: wanted, ..sel });
+                }
+                Err(e) => {
+                    self.say_error(e.to_string());
+                    self.signature_selected = Some(sel);
+                }
+            }
+            return;
+        }
+
         let (dx, dy) = grab.by;
         let wanted = match grab.handle {
             None => {
@@ -3441,7 +3528,7 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.doc {
                     doc.rendered_is_stale();
                 }
-                self.signature_selected = Some(SignatureSelected { page: sel.page, index: sel.index, rect: wanted });
+                self.signature_selected = Some(SignatureSelected { rect: wanted, ..sel });
             }
             Err(e) => {
                 self.say_error(e.to_string());
@@ -3558,6 +3645,30 @@ impl PagifyApp {
         );
 
         if let Some(grab) = &self.signature_grab {
+            // Turning does not move `sel.rect` at all — see `SignatureSelected`
+            // and `Annotation::Image`'s own doc for why rotation is a
+            // separate transform, not a change to the rect move and resize
+            // share. The outline above already shows the (unrotated)
+            // footprint correctly; what a turn-in-progress needs is the
+            // angle itself, shown as a line from the centre out to the
+            // pointer and the number of degrees it now stands at.
+            if grab.handle == Some(Handle::Rotate) {
+                let degrees = Self::angle_from_drag(&sel.rect, sel.rotation, grab.from, grab.by);
+                let centre = to_screen(&sel.rect).center();
+                let pointer = view.to_screen(AppPoint::new(
+                    grab.from.x + grab.by.0 as f64,
+                    grab.from.y + grab.by.1 as f64,
+                ));
+                painter.line_segment([centre, pointer], egui::Stroke::new(1.5, theme::VIOLET_BRIGHT));
+                painter.text(
+                    pointer + egui::vec2(10.0, -10.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!("{:.0}°", degrees.rem_euclid(360.0)),
+                    egui::FontId::monospace(13.0),
+                    theme::VIOLET_BRIGHT,
+                );
+                return;
+            }
             let (dx, dy) = grab.by;
             let going = match grab.handle {
                 None => pdf_core::document::Rect {
@@ -3600,6 +3711,18 @@ impl PagifyApp {
                 egui::StrokeKind::Inside,
             );
         }
+
+        // The rotate handle: a ring above the top edge, joined to it by a
+        // short stem — the standard shape for "drag to turn" wherever it
+        // shows up, and clearly not one of the eight resize handles.
+        let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
+        let stem_from = view.to_screen(AppPoint::new(
+            ((sel.rect.left + sel.rect.right) / 2.0) as f64,
+            sel.rect.top as f64,
+        ));
+        painter.line_segment([stem_from, rotate_screen], egui::Stroke::new(1.0, theme::VIOLET));
+        painter.circle_filled(rotate_screen, ROTATE_HANDLE_PX, egui::Color32::WHITE);
+        painter.circle_stroke(rotate_screen, ROTATE_HANDLE_PX, egui::Stroke::new(1.0, theme::VIOLET));
     }
 
     /// Pick something up and put it down somewhere else.
@@ -15246,7 +15369,7 @@ mod lock_wiring_tests {
             y: ((mark.rect.top + mark.rect.bottom) / 2.0) as f64,
         };
         let found = app.signature_at(0, middle);
-        assert_eq!(found, Some((mark.index, mark.rect)), "not found at its own middle");
+        assert_eq!(found, Some((mark.index, mark.rect, mark.rotation)), "not found at its own middle");
 
         let far_away = AppPoint { x: (mark.rect.right + 200.0) as f64, y: (mark.rect.bottom + 200.0) as f64 };
         assert_eq!(app.signature_at(0, far_away), None, "found somewhere it was never placed");
@@ -15267,7 +15390,7 @@ mod lock_wiring_tests {
         app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
 
         let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
-        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect };
+        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
         let grab = Grab { handle: None, from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 }, by: (30.0, -15.0) };
         app.finish_signature_grab(sel, grab);
 
@@ -15277,7 +15400,7 @@ mod lock_wiring_tests {
         let (w0, h0) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
         let (w1, h1) = (moved.rect.right - moved.rect.left, moved.rect.bottom - moved.rect.top);
         assert!((w0 - w1).abs() < 0.5 && (h0 - h1).abs() < 0.5, "a move changed the size");
-        assert_eq!(app.signature_selected, Some(SignatureSelected { page: 0, index: moved.index, rect: moved.rect }), "the selection did not follow the move");
+        assert_eq!(app.signature_selected, Some(SignatureSelected { page: 0, index: moved.index, rect: moved.rect, rotation: moved.rotation }), "the selection did not follow the move");
 
         let _ = std::fs::remove_file(&path);
     }
@@ -15294,7 +15417,7 @@ mod lock_wiring_tests {
 
         let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
         let (w, h) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
-        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect };
+        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
         let grab = Grab {
             handle: Some(Handle::BottomRight),
             from: AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 },
@@ -15322,7 +15445,7 @@ mod lock_wiring_tests {
         app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
 
         let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
-        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect };
+        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
         app.signature_selected = Some(sel.clone());
         let grab = Grab { handle: None, from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 }, by: (0.1, -0.1) };
         app.finish_signature_grab(sel.clone(), grab);
@@ -15345,10 +15468,127 @@ mod lock_wiring_tests {
         app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
 
         let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
-        app.signature_selected = Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect });
+        app.signature_selected = Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
         app.submit("applysignatures");
         assert!(app.signature_selected.is_none(), "a stale selection survived applying");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **`angle_from_drag` measures a clockwise sweep from the rect's own
+    /// centre** — pure geometry, no document or pointer event involved, so
+    /// this checks the arithmetic directly at angles a render-based test
+    /// only ever samples near. Dragging from "3 o'clock" to "6 o'clock"
+    /// relative to the centre is a quarter turn clockwise: +90 degrees.
+    /// Dragging back the other way is the same amount, negative.
+    #[test]
+    fn angle_from_drag_measures_a_clockwise_sweep_from_the_centre() {
+        let rect = pdf_core::document::Rect { left: 0.0, top: 0.0, right: 100.0, bottom: 100.0 };
+        // Centre is (50, 50). "3 o'clock" is directly right of centre, at
+        // (90, 50); "6 o'clock" is directly below it, at (50, 90) — the
+        // drag from one to the other is (-40, +40).
+        let three_oclock = AppPoint { x: 90.0, y: 50.0 };
+        let to_six_oclock = (-40.0, 40.0);
+
+        let degrees = PagifyApp::angle_from_drag(&rect, 0.0, three_oclock, to_six_oclock);
+        assert!((degrees - 90.0).abs() < 1.0, "expected a quarter turn clockwise, got {degrees}");
+
+        // From 6 o'clock (50, 90) back to 3 o'clock (90, 50): (+40, -40).
+        let back = PagifyApp::angle_from_drag(&rect, 90.0, AppPoint { x: 50.0, y: 90.0 }, (40.0, -40.0));
+        assert!(back.abs() < 1.0, "turning back the same amount should return to 0, got {back}");
+    }
+
+    /// **Dragging the rotate handle turns the signature, committed through
+    /// `rotate_image_signature`** — the same shape as the move and resize
+    /// tests above, this time with `Grab.handle == Some(Handle::Rotate)`.
+    #[test]
+    fn dragging_the_rotate_handle_turns_the_signature() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "signature-rotate");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+
+        let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        assert_eq!(mark.rotation, 0.0, "a freshly placed signature should start unrotated");
+        let centre = (
+            (mark.rect.left + mark.rect.right) as f64 / 2.0,
+            (mark.rect.top + mark.rect.bottom) as f64 / 2.0,
+        );
+        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
+        // From directly right of centre to directly below it: +90 degrees.
+        let grab = Grab {
+            handle: Some(Handle::Rotate),
+            from: AppPoint { x: centre.0 + 20.0, y: centre.1 },
+            by: (-20.0, 20.0),
+        };
+        app.finish_signature_grab(sel, grab);
+
+        let turned = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        assert!((turned.rotation - 90.0).abs() < 1.0, "expected roughly a 90-degree turn, got {}", turned.rotation);
+        assert_eq!(turned.rect, mark.rect, "rotating must not move the picture's own rect");
+        assert_eq!(
+            app.signature_selected,
+            Some(SignatureSelected { page: 0, index: turned.index, rect: turned.rect, rotation: turned.rotation }),
+            "the selection should carry the new rotation forward"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A rotate-drag too small to mean anything commits nothing, the same
+    /// noise floor the move and resize paths already have.
+    #[test]
+    fn a_negligible_rotate_drag_changes_nothing() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "signature-rotate-noop");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+
+        let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
+        app.signature_selected = Some(sel.clone());
+        let centre_ish = AppPoint {
+            x: ((mark.rect.left + mark.rect.right) / 2.0) as f64 + 20.0,
+            y: ((mark.rect.top + mark.rect.bottom) / 2.0) as f64,
+        };
+        // A drag of a fraction of a degree — nowhere near the 0.5-degree floor.
+        let grab = Grab { handle: Some(Handle::Rotate), from: centre_ish, by: (0.0, 0.01) };
+        app.finish_signature_grab(sel.clone(), grab);
+
+        let still = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        assert_eq!(still.rotation, 0.0, "a negligible drag should not have rotated the signature");
+        assert_eq!(app.signature_selected, Some(sel), "the selection should be untouched");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **The rotate handle is found where it is drawn** — a fixed distance
+    /// above the rect's top-centre in screen space, not one of the eight
+    /// resize handles `Handle::ALL` already covers.
+    #[test]
+    fn signature_handle_at_finds_the_rotate_handle() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "signature-rotate-handle");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+
+        let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        app.signature_selected =
+            Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
+
+        // A simple 1:1 view with the page's own origin at the screen origin.
+        let view = PageView { origin: egui::Pos2::new(0.0, 0.0), scale: 1.0 };
+        let handle_screen = PagifyApp::rotate_handle_screen_pos(&mark.rect, view);
+        let at_handle = view.to_page(handle_screen);
+        assert_eq!(app.signature_handle_at(at_handle, view), Some(Handle::Rotate));
+
+        // Well inside the body, away from every handle: none of them.
+        let middle = AppPoint {
+            x: ((mark.rect.left + mark.rect.right) / 2.0) as f64,
+            y: ((mark.rect.top + mark.rect.bottom) / 2.0) as f64,
+        };
+        assert_eq!(app.signature_handle_at(middle, view), None);
 
         let _ = std::fs::remove_file(&path);
     }

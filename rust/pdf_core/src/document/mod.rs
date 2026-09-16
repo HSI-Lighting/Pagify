@@ -126,6 +126,12 @@ pub struct ImageSignatureMark {
     /// pixels — see `PdfiumDocument::image_alpha`. Kept so a caller that
     /// consumes this mark (applying it) can also retire the entry.
     pub alpha_id: Option<u64>,
+    /// How far clockwise this picture is turned about its own centre, in
+    /// degrees — 0.0 for every picture never rotated, which by count is
+    /// almost all of them. `rect` stays the picture's own unrotated
+    /// footprint throughout; this is a separate transform applied about
+    /// its middle, not a change to `rect` itself.
+    pub rotation: f32,
 }
 
 /// Something worth a second look, and where it sits.
@@ -1371,6 +1377,19 @@ pub trait DocumentMut {
     /// one of the two was updated.
     fn set_image_signature_rect(&mut self, _page_index: usize, _index: usize, _rect: Rect) -> Result<()> {
         Err(PdfError::Unsupported("moving a signature on this document"))
+    }
+
+    /// Turn a placed picture signature `degrees` clockwise about its own
+    /// centre, before it is applied — the picture and where its (unrotated)
+    /// footprint sits are both untouched, only the angle it is drawn at.
+    ///
+    /// Like [`Self::set_image_signature_rect`], this moves the annotation's
+    /// own placement together with the image object's matrix inside it, and
+    /// for the same reason: a picture whose annotation and whose drawn
+    /// pixels disagree about the angle is wrong in one of two ways
+    /// depending which a caller happens to read.
+    fn rotate_image_signature(&mut self, _page_index: usize, _index: usize, _degrees: f32) -> Result<()> {
+        Err(PdfError::Unsupported("rotating a signature on this document"))
     }
 
     /// Burn this page's placed signatures — ink and image alike — into the

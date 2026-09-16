@@ -1985,6 +1985,7 @@ impl Document for PdfiumDocument {
             // pixels (what `read` just produced) are a fallback, not the
             // first choice.
             let alpha_id = read_annotation_string(annot, ALPHA_ID_KEY).and_then(|s| s.parse::<u64>().ok());
+            let rotation = read_rotation(annot);
             unsafe { bindings.FPDFPage_CloseAnnot(annot) };
 
             let (Some(name), Ok(Some(Annotation::Image { rect, rgba, width, height }))) =
@@ -2006,6 +2007,7 @@ impl Document for PdfiumDocument {
                 width,
                 height,
                 alpha_id: resolved_alpha_id,
+                rotation,
             });
         }
         Ok(found)
@@ -3557,6 +3559,11 @@ impl DocumentMut for PdfiumDocument {
             )));
         }
 
+        // Moving or resizing must not silently un-rotate a picture that was
+        // already turned — the angle lives only in `ROTATION_KEY`, so it has
+        // to be read back here and carried into the new matrix, not assumed
+        // to be zero.
+        let rotation = read_rotation(annot);
         let pdf_rect = to_pdf_rect(&space, &rect);
         let set_rect = unsafe { bindings.FPDFAnnot_SetRect(annot, &pdf_rect) };
         // The annotation's own `/Rect` is what a click hits and what any
@@ -3567,12 +3574,63 @@ impl DocumentMut for PdfiumDocument {
         let set_matrix = if object.is_null() {
             0
         } else {
-            let matrix = image_placement_matrix(&pdf_rect);
+            let matrix = image_placement_matrix(&pdf_rect, rotation);
             unsafe { bindings.FPDFPageObj_SetMatrix(object, &matrix) }
         };
         unsafe { bindings.FPDFPage_CloseAnnot(annot) };
         if set_rect == 0 || set_matrix == 0 {
             return Err(PdfError::Pdfium("the signature could not be moved".into()));
+        }
+
+        self.touch_annotation();
+        Ok(())
+    }
+
+    fn rotate_image_signature(&mut self, page_index: usize, index: usize, degrees: f32) -> Result<()> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let annot_index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument(format!("annotation index {index} is out of range"))
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, annot_index) };
+        if annot.is_null() {
+            return Err(PdfError::Pdfium(format!(
+                "page {page_index} has no annotation at index {index}"
+            )));
+        }
+
+        // The rect itself never changes here — only the angle the picture
+        // is drawn at within it, about its own centre. Read back rather
+        // than assumed, for the same reason `set_image_signature_rect`
+        // reads the rotation back: rotating must not silently undo a move
+        // or a resize that happened first.
+        let mut pdf_rect = FS_RECTF { left: 0.0, bottom: 0.0, right: 0.0, top: 0.0 };
+        let got_rect = unsafe { bindings.FPDFAnnot_GetRect(annot, &mut pdf_rect) };
+        if got_rect == 0 {
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            return Err(PdfError::Pdfium("the signature's own position could not be read".into()));
+        }
+
+        let mut value: Vec<u16> = degrees.to_string().encode_utf16().collect();
+        value.push(0);
+        let set_key = unsafe { bindings.FPDFAnnot_SetStringValue(annot, ROTATION_KEY, value.as_ptr()) };
+
+        let object = unsafe { bindings.FPDFAnnot_GetObject(annot, 0) };
+        let set_matrix = if object.is_null() {
+            0
+        } else {
+            let matrix = image_placement_matrix(&pdf_rect, degrees);
+            unsafe { bindings.FPDFPageObj_SetMatrix(object, &matrix) }
+        };
+        unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+        if set_key == 0 || set_matrix == 0 {
+            return Err(PdfError::Pdfium("the signature could not be rotated".into()));
         }
 
         self.touch_annotation();
@@ -3688,7 +3746,7 @@ impl DocumentMut for PdfiumDocument {
                 next_number += 1;
                 extra.push((number, image_xobject(&mark.rgba, mark.width, mark.height, smask)?));
                 xobjects.set(&resource, crate::pdf::Object::Reference(number, 0));
-                painted.extend_from_slice(&place_image_operators(&resource, mark.rect, height));
+                painted.extend_from_slice(&place_image_operators(&resource, mark.rect, height, mark.rotation));
             }
 
             resources.set(b"XObject", crate::pdf::Object::Dict(xobjects));
@@ -7693,13 +7751,23 @@ fn ink_operators(
 /// Not `image_operators` — that name is taken, by the unrelated function
 /// below that reads `Do` operators back *out* of a content stream to find
 /// which images a page already draws.
-fn place_image_operators(resource: &[u8], rect: Rect, page_height: f32) -> Vec<u8> {
-    let (x, y) = (rect.left, page_height - rect.bottom);
-    let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+///
+/// `rotation_degrees` reuses [`image_placement_matrix`]'s own formula — the
+/// same matrix a placed, unrotated-or-not signature is shown at while it is
+/// still an annotation is what gets burnt into the page here, not a second,
+/// independently-derived one that could drift from it.
+fn place_image_operators(resource: &[u8], rect: Rect, page_height: f32, rotation_degrees: f32) -> Vec<u8> {
+    let pdf_rect = FS_RECTF {
+        left: rect.left,
+        right: rect.right,
+        top: page_height - rect.top,
+        bottom: page_height - rect.bottom,
+    };
+    let m = image_placement_matrix(&pdf_rect, rotation_degrees);
     let mut out = format!("
 q
-{w} 0 0 {h} {x} {y} cm
-/").into_bytes();
+{} {} {} {} {} {} cm
+/", m.a, m.b, m.c, m.d, m.e, m.f).into_bytes();
     out.extend_from_slice(resource);
     out.extend_from_slice(b" Do
 Q
@@ -10439,18 +10507,38 @@ fn to_pdf_rect(space: &PageSpace, rect: &Rect) -> FS_RECTF {
 }
 
 /// The matrix that places an image object — which draws into the unit
-/// square — onto `rect` (already in PDF's y-up space, via [`to_pdf_rect`]):
-/// stretch the unit square to `rect`'s own width and height, then move it
-/// to `rect`'s corner. Used both when a picture is first placed and when it
-/// is later moved or resized without changing its pixels.
-fn image_placement_matrix(rect: &FS_RECTF) -> FS_MATRIX {
+/// square — onto `rect` (already in PDF's y-up space, via [`to_pdf_rect`]),
+/// turned `rotation_degrees` clockwise about `rect`'s own centre: stretch
+/// the unit square to `rect`'s width and height, rotate about the middle of
+/// that (so turning a signature spins it in place rather than flinging it
+/// away from where it was clicked), then move it to `rect`'s position. Used
+/// whenever a picture's placement changes without changing its pixels —
+/// first placed, later moved, resized, or rotated.
+///
+/// **Clockwise, to match app space, not PDF space.** Angles everywhere
+/// above this engine are clockwise with y increasing downward (see
+/// `page_space` module doc) — the same sense a person turning a picture on
+/// screen expects. PDF space is y-up, where the ordinary rotation matrix
+/// turns counterclockwise for a positive angle; negating the angle here is
+/// what keeps "turn it clockwise" meaning the same thing in both spaces,
+/// checked in `rotating_turns_the_picture_clockwise_on_screen` by rendering
+/// an asymmetric picture and finding its dark corner where a clockwise turn
+/// puts it, not by trusting the arithmetic.
+fn image_placement_matrix(rect: &FS_RECTF, rotation_degrees: f32) -> FS_MATRIX {
+    let (w, h) = (rect.right - rect.left, rect.top - rect.bottom);
+    if rotation_degrees == 0.0 {
+        return FS_MATRIX { a: w, b: 0.0, c: 0.0, d: h, e: rect.left, f: rect.bottom };
+    }
+    let (cx, cy) = ((rect.left + rect.right) / 2.0, (rect.bottom + rect.top) / 2.0);
+    let theta = -rotation_degrees.to_radians();
+    let (s, c) = theta.sin_cos();
     FS_MATRIX {
-        a: rect.right - rect.left,
-        b: 0.0,
-        c: 0.0,
-        d: rect.top - rect.bottom,
-        e: rect.left,
-        f: rect.bottom,
+        a: w * c,
+        b: w * s,
+        c: -h * s,
+        d: h * c,
+        e: cx - (w / 2.0) * c + (h / 2.0) * s,
+        f: cy - (w / 2.0) * s - (h / 2.0) * c,
     }
 }
 
@@ -10935,7 +11023,9 @@ impl PdfiumDocument {
             return Err(PdfError::Pdfium("the picture could not be placed".into()));
         }
 
-        let matrix = image_placement_matrix(rect);
+        // A freshly placed picture is never rotated — turning it is
+        // something a person does afterward, through `rotate_image_signature`.
+        let matrix = image_placement_matrix(rect, 0.0);
         if unsafe { bindings.FPDFPageObj_SetMatrix(object, &matrix) } == 0 {
             return Err(PdfError::Pdfium("the picture could not be positioned".into()));
         }
@@ -11410,6 +11500,23 @@ const SIGNATURE_KEY: &str = "PagifySignature";
 /// [`SIGNATURE_KEY`] is, but the value only ever means anything within the
 /// session that wrote it; nothing reads this key back across a save.
 const ALPHA_ID_KEY: &str = "PagifyAlphaId";
+
+/// The angle a placed picture signature is rotated by, clockwise in
+/// degrees, written the same way [`SIGNATURE_KEY`] is — but unlike that
+/// key, this one is entirely this engine's own: no PDF viewer reads it, and
+/// nothing about the annotation's own `/Rect` or the image object's own
+/// bounds says it is there. It exists because `Annotation::Image` (the
+/// wire shape shared with Kotlin and Swift) has no rotation field, and does
+/// not need one just for this engine to remember an angle between one call
+/// and the next — see [`image_placement_matrix`] for where the angle
+/// actually takes effect. Absent (read back as 0.0) for every picture
+/// placed before rotation existed, and for every one never rotated since.
+const ROTATION_KEY: &str = "PagifyRotation";
+
+/// Read [`ROTATION_KEY`] off an annotation, or 0.0 if it was never set.
+fn read_rotation(annot: FPDF_ANNOTATION) -> f32 {
+    read_annotation_string(annot, ROTATION_KEY).and_then(|s| s.parse::<f32>().ok()).unwrap_or(0.0)
+}
 
 /// Read a UTF-16LE string value off an annotation.
 fn read_annotation_string(annot: FPDF_ANNOTATION, key: &str) -> Option<String> {
