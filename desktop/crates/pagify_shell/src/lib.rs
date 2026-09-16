@@ -24,6 +24,7 @@ pub mod pdfium;
 pub mod reader;
 pub mod recent;
 pub mod session;
+pub mod signature_extract;
 pub mod signatures;
 pub mod state;
 pub mod tools;

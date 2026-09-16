@@ -2759,6 +2759,15 @@ impl PagifyApp {
     /// somebody who uploads a signature is exactly as capable of confusing it
     /// with a certificate as somebody who draws one, so the warning belongs
     /// here too, not only on the drawing pad.
+    ///
+    /// **A phone photo of a signed line, not just a pre-cropped picture.**
+    /// Most people do not own a scanner; what they have is a photo of the
+    /// page they signed, which carries the whole page — ruled lines, the
+    /// table it sat on, whatever bled through from the sheet beneath. This
+    /// finds the pen ink in that photo and keeps a tight, whitened crop
+    /// around it — see [`pagify_shell::signature_extract`] — falling back
+    /// to the picture as given when nothing plausible enough is found,
+    /// which also covers a picture that was already just the signature.
     fn upload_signature(&mut self, path: &std::path::Path) {
         let bytes = match std::fs::read(path) {
             Ok(bytes) => bytes,
@@ -2767,20 +2776,48 @@ impl PagifyApp {
                 return;
             }
         };
-        let decoded = match image::load_from_memory(&bytes) {
-            Ok(decoded) => decoded,
+        let not_a_picture = |e: image::ImageError| {
+            format!("{} is not a picture this reads (PNG or JPEG): {e}", path.display())
+        };
+        let reader = match image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
+            Ok(reader) => reader,
             Err(e) => {
-                self.say_error(format!(
-                    "{} is not a picture this reads (PNG or JPEG): {e}",
-                    path.display()
-                ));
+                self.say_error(not_a_picture(e.into()));
                 return;
             }
         };
-        let rgba = decoded.to_rgba8();
-        let (width, height) = rgba.dimensions();
+        let mut decoder = match reader.into_decoder() {
+            Ok(decoder) => decoder,
+            Err(e) => {
+                self.say_error(not_a_picture(e));
+                return;
+            }
+        };
+        // A phone photo taken in portrait is very often stored as landscape
+        // pixels plus an EXIF tag saying how to rotate it for display —
+        // decoding without applying that tag would hand the extraction
+        // below a sideways page to search.
+        let orientation = image::ImageDecoder::orientation(&mut decoder)
+            .unwrap_or(image::metadata::Orientation::NoTransforms);
+        let mut decoded = match image::DynamicImage::from_decoder(decoder) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                self.say_error(not_a_picture(e));
+                return;
+            }
+        };
+        decoded.apply_orientation(orientation);
+        let photo = decoded.to_rgba8();
+        let (photo_width, photo_height) = photo.dimensions();
+
+        let (rgba, width, height) =
+            match pagify_shell::signature_extract::extract_signature(&photo, photo_width, photo_height) {
+                Some(extracted) => (extracted.rgba, extracted.width, extracted.height),
+                None => (photo.into_raw(), photo_width, photo_height),
+            };
+
         let name = self.signature_name_for(path);
-        match self.save_uploaded_signature(&name, rgba.into_raw(), width, height) {
+        match self.save_uploaded_signature(&name, rgba, width, height) {
             Ok(said) => self.say_info(format!(
                 "{said} This is a picture — it shows a name, it does not prove one. \
                  `certify` is what signs with a certificate."
