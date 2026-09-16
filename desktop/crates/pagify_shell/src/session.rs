@@ -965,6 +965,32 @@ impl Session {
         })
     }
 
+    /// Move or resize a placed picture signature, before it is applied —
+    /// see [`pdf_core::document::DocumentMut::set_image_signature_rect`].
+    pub fn set_image_signature_rect(
+        &self,
+        page: usize,
+        index: usize,
+        rect: pdf_core::document::Rect,
+    ) -> Result<()> {
+        registry::with_session(self.handle, |s| {
+            let doc = s
+                .document
+                .as_document_mut()
+                .ok_or(pdf_core::PdfError::Unsupported("editing this document"))?;
+            doc.set_image_signature_rect(page, index, rect)
+        })
+    }
+
+    /// The picture signatures placed on a page, as opposed to any other
+    /// picture on it — see [`pdf_core::document::ImageSignatureMark`].
+    pub fn image_signature_marks(
+        &self,
+        page: usize,
+    ) -> Result<Vec<pdf_core::document::ImageSignatureMark>> {
+        registry::with_session(self.handle, |s| s.document.image_signature_marks(page))
+    }
+
     /// The signatures placed on a page, as opposed to any other ink on it.
     pub fn signature_marks(
         &self,

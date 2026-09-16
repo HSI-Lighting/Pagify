@@ -1359,6 +1359,20 @@ pub trait DocumentMut {
         Ok(())
     }
 
+    /// Move or resize a placed picture signature to `rect`, before it is
+    /// applied — the picture itself is untouched, only where it sits.
+    ///
+    /// Sets both the annotation's own `/Rect` (what a click hit-tests
+    /// against, what any other reader shows) and the image object's
+    /// placement matrix inside it (what actually draws the pixels) — the
+    /// two are separate things PDFium tracks separately, and a caller that
+    /// only meant to move a signature and instead sees it resize, or drawn
+    /// in one place while selectable in another, almost always means only
+    /// one of the two was updated.
+    fn set_image_signature_rect(&mut self, _page_index: usize, _index: usize, _rect: Rect) -> Result<()> {
+        Err(PdfError::Unsupported("moving a signature on this document"))
+    }
+
     /// Burn this page's placed signatures — ink and image alike — into the
     /// page itself.
     ///

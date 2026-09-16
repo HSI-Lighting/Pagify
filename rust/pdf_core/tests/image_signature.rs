@@ -453,3 +453,62 @@ fn applying_a_picture_signature_with_no_remembered_alpha_stays_opaque() {
         "without a remembered original this must stay opaque, got {pixel:?}"
     );
 }
+
+/// **Moving or resizing a placed picture signature changes where it reads
+/// back and where it renders — both, in step.** The annotation's own
+/// `/Rect` and the image object's placement matrix inside it are two
+/// separate things PDFium tracks; a bug that only updates one would show a
+/// picture selectable in one place and drawn in another.
+#[test]
+fn set_image_signature_rect_moves_both_the_annotation_and_the_drawn_picture() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let original = Rect { left: 40.0, top: 40.0, right: 80.0, bottom: 70.0 };
+    let index = place(&mut doc, 0, original, solid(6, 6, [50, 160, 90]), 6, 6, "Moved");
+
+    let moved = Rect { left: 300.0, top: 500.0, right: 380.0, bottom: 550.0 };
+    doc.set_image_signature_rect(0, index, moved).expect("move");
+
+    let marks = doc.image_signature_marks(0).expect("marks");
+    assert_eq!(marks.len(), 1);
+    assert_eq!(marks[0].rect, moved, "the annotation's own rect did not move");
+
+    // And it actually renders there now, not at the original spot.
+    let scale = 2.0;
+    let bitmap = doc
+        .render_page_to_bitmap(0, &RenderRequest { scale, ..Default::default() })
+        .expect("render");
+    let sample = |x_pt: f32, y_pt: f32| {
+        let at = (y_pt * scale) as usize * bitmap.stride + (x_pt * scale) as usize * 4;
+        (bitmap.data[at], bitmap.data[at + 1], bitmap.data[at + 2])
+    };
+    let close = |s: u8, e: u8| s.abs_diff(e) <= 12;
+
+    let at_new_spot = sample((moved.left + moved.right) / 2.0, (moved.top + moved.bottom) / 2.0);
+    assert!(
+        close(at_new_spot.0, 50) && close(at_new_spot.1, 160) && close(at_new_spot.2, 90),
+        "the picture should now render at its moved rect, got {at_new_spot:?}"
+    );
+
+    let at_old_spot = sample((original.left + original.right) / 2.0, (original.top + original.bottom) / 2.0);
+    assert!(
+        !(close(at_old_spot.0, 50) && close(at_old_spot.1, 160) && close(at_old_spot.2, 90)),
+        "the picture should no longer render at its original rect, got {at_old_spot:?}"
+    );
+}
+
+/// A rect can only be set on a placed picture that actually exists —
+/// refused, not silently accepted, for an index nothing is at.
+#[test]
+fn set_image_signature_rect_on_a_missing_annotation_is_refused() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("two-column.pdf");
+    let err = doc
+        .set_image_signature_rect(0, 99, Rect { left: 0.0, top: 0.0, right: 10.0, bottom: 10.0 })
+        .expect_err("there is nothing at that index");
+    assert!(format!("{err}").contains("no annotation"), "{err}");
+}

@@ -3537,6 +3537,48 @@ impl DocumentMut for PdfiumDocument {
         Ok(())
     }
 
+    fn set_image_signature_rect(&mut self, page_index: usize, index: usize, rect: Rect) -> Result<()> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let annot_index = i32::try_from(index).map_err(|_| {
+            PdfError::InvalidArgument(format!("annotation index {index} is out of range"))
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let space = page.space()?;
+        let bindings = pdfium()?.bindings();
+        let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, annot_index) };
+        if annot.is_null() {
+            return Err(PdfError::Pdfium(format!(
+                "page {page_index} has no annotation at index {index}"
+            )));
+        }
+
+        let pdf_rect = to_pdf_rect(&space, &rect);
+        let set_rect = unsafe { bindings.FPDFAnnot_SetRect(annot, &pdf_rect) };
+        // The annotation's own `/Rect` is what a click hits and what any
+        // other reader shows the picture at; the image object's matrix,
+        // fetched separately, is what actually draws the pixels — both have
+        // to move together or the two disagree about where the picture is.
+        let object = unsafe { bindings.FPDFAnnot_GetObject(annot, 0) };
+        let set_matrix = if object.is_null() {
+            0
+        } else {
+            let matrix = image_placement_matrix(&pdf_rect);
+            unsafe { bindings.FPDFPageObj_SetMatrix(object, &matrix) }
+        };
+        unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+        if set_rect == 0 || set_matrix == 0 {
+            return Err(PdfError::Pdfium("the signature could not be moved".into()));
+        }
+
+        self.touch_annotation();
+        Ok(())
+    }
+
     fn apply_signatures(&mut self, page_index: usize) -> Result<usize> {
         let ink_marks = self.signature_marks(page_index)?;
         let image_marks = self.image_signature_marks(page_index)?;
@@ -10396,6 +10438,22 @@ fn to_pdf_rect(space: &PageSpace, rect: &Rect) -> FS_RECTF {
     }
 }
 
+/// The matrix that places an image object — which draws into the unit
+/// square — onto `rect` (already in PDF's y-up space, via [`to_pdf_rect`]):
+/// stretch the unit square to `rect`'s own width and height, then move it
+/// to `rect`'s corner. Used both when a picture is first placed and when it
+/// is later moved or resized without changing its pixels.
+fn image_placement_matrix(rect: &FS_RECTF) -> FS_MATRIX {
+    FS_MATRIX {
+        a: rect.right - rect.left,
+        b: 0.0,
+        c: 0.0,
+        d: rect.top - rect.bottom,
+        e: rect.left,
+        f: rect.bottom,
+    }
+}
+
 /// The smallest rect containing every part of a mark.
 ///
 /// Every annotation needs a `/Rect`, and PDFium will not compute one: a highlight
@@ -10877,17 +10935,7 @@ impl PdfiumDocument {
             return Err(PdfError::Pdfium("the picture could not be placed".into()));
         }
 
-        // An image object draws into the unit square; the matrix stretches
-        // and moves that square to `rect`, exactly as `space.to_pdf` already
-        // put `rect` into PDF's y-up space.
-        let matrix = FS_MATRIX {
-            a: rect.right - rect.left,
-            b: 0.0,
-            c: 0.0,
-            d: rect.top - rect.bottom,
-            e: rect.left,
-            f: rect.bottom,
-        };
+        let matrix = image_placement_matrix(rect);
         if unsafe { bindings.FPDFPageObj_SetMatrix(object, &matrix) } == 0 {
             return Err(PdfError::Pdfium("the picture could not be positioned".into()));
         }

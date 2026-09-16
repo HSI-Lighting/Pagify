@@ -583,6 +583,16 @@ struct PagifyApp {
     /// A drag in progress on the selection — where it started, what part of
     /// the selection was grabbed, and how far it has come.
     grab: Option<Grab>,
+    /// A placed-but-unapplied picture signature, picked with no tool
+    /// armed — a click on the signature itself, not the object tool, which
+    /// only ever sees page *content* and a signature is deliberately not
+    /// that until it is applied. Move and resize share `Handle`/`Grab` with
+    /// the object tool's own selection; nothing else does.
+    signature_selected: Option<SignatureSelected>,
+    /// A drag in progress on [`Self::signature_selected`] — same shape and
+    /// same meaning as [`Self::grab`], kept separate because the two
+    /// selections are independent and a signature is never page content.
+    signature_grab: Option<Grab>,
     /// The opacity slider's value while it is being dragged, before it is
     /// applied on release.
     opacity_draft: Option<f32>,
@@ -978,6 +988,17 @@ struct Selected {
     object: usize,
     rect: pdf_core::document::Rect,
     what: &'static str,
+}
+
+/// A placed-but-unapplied picture signature, picked with no tool armed.
+/// `index` is the annotation's PDFium index — [`pdf_core::document::
+/// ImageSignatureMark::index`] — not a page-content object number, so it is
+/// never confused with [`Selected::object`] even though both are `usize`.
+#[derive(Debug, Clone, PartialEq)]
+struct SignatureSelected {
+    page: usize,
+    index: usize,
+    rect: pdf_core::document::Rect,
 }
 
 /// One of the eight places on a selection's outline that resizes it.
@@ -1634,6 +1655,13 @@ fn tool_button(
 /// Half the side of a resize handle, in screen pixels.
 const HANDLE_PX: f32 = 4.0;
 
+/// How wide a placed signature is, in page points — a signature on a form
+/// is around two inches across; wider looks like a banner and narrower like
+/// initials. Shared by [`PagifyApp::place_signature`] (what actually gets
+/// placed) and [`PagifyApp::draw_signature_preview`] (what it looks like
+/// before that), so the two cannot silently drift apart.
+const SIGNATURE_WIDTH_PT: f32 = 144.0;
+
 const TOOL_WIDTH: f32 = 82.0;
 const TOOL_HEIGHT: f32 = 58.0;
 
@@ -1697,6 +1725,8 @@ impl PagifyApp {
             object_tool: None,
             selected: None,
             grab: None,
+            signature_selected: None,
+            signature_grab: None,
             opacity_draft: None,
             command_open: false,
             ribbon: Tab::Home,
@@ -2270,7 +2300,16 @@ impl PagifyApp {
         }
         self.cmd.input_mut().clear();
 
-        match self.awaiting_password.take().expect("checked above") {
+        // `take()`, not `.expect()` on it: the check above and this line are
+        // not the same instant, and egui can re-run the widget that reads
+        // this within one logical update — found live, not in review, when
+        // typing an ordinary command crashed here. Nothing left to take
+        // means nothing was actually being asked for any more; fall through
+        // exactly as if this function had never been called.
+        let Some(awaiting) = self.awaiting_password.take() else {
+            return false;
+        };
+        match awaiting {
             Awaiting::Open(path) => self.open_with(&path, Some(&typed)),
             Awaiting::Lock { page, shapes, require_complete } => {
                 match self.lock_shapes(page, &shapes, typed.as_bytes(), require_complete) {
@@ -2828,9 +2867,7 @@ impl PagifyApp {
 
     /// Put the drawn or uploaded signature on the line somebody clicked.
     fn place_signature(&mut self, page: usize, at: AppPoint) -> Result<String, String> {
-        // A signature on a form is around two inches across; wider looks like
-        // a banner and narrower like initials.
-        const WIDTH: f32 = 144.0;
+        const WIDTH: f32 = SIGNATURE_WIDTH_PT;
         let Some(signature) = self.signatures.current().cloned() else {
             return Err("no signature has been drawn or uploaded yet — `signature draw` makes \
                         one, `signature upload` adds a picture.".into());
@@ -3030,6 +3067,8 @@ impl PagifyApp {
         self.object_tool = Some(pictures_first);
         self.selected = None;
         self.grab = None;
+        self.signature_selected = None;
+        self.signature_grab = None;
         let _ = page;
         self.say_info(if pictures_first {
             "edit object: click a picture or shape to select it, or words where there is nothing \
@@ -3228,6 +3267,193 @@ impl PagifyApp {
         ))
     }
 
+    /// The placed-but-unapplied picture signature under `at` on `page`, if
+    /// any — the smallest one, where more than one overlaps, the same
+    /// tie-break [`Self::thing_at`] uses.
+    fn signature_at(&self, page: usize, at: AppPoint) -> Option<(usize, pdf_core::document::Rect)> {
+        let near = HIT_TOLERANCE_PT as f32;
+        let (x, y) = (at.x as f32, at.y as f32);
+        let doc = self.doc.as_ref()?;
+        doc.session
+            .image_signature_marks(page)
+            .ok()?
+            .into_iter()
+            .filter(|m| {
+                x >= m.rect.left.min(m.rect.right) - near
+                    && x <= m.rect.left.max(m.rect.right) + near
+                    && y >= m.rect.top.min(m.rect.bottom) - near
+                    && y <= m.rect.top.max(m.rect.bottom) + near
+            })
+            .min_by(|a, b| {
+                let area = |r: &pdf_core::document::Rect| ((r.right - r.left) * (r.bottom - r.top)).abs();
+                area(&a.rect).total_cmp(&area(&b.rect))
+            })
+            .map(|m| (m.index, m.rect))
+    }
+
+    /// Whether `at` falls within `rect` — no tolerance, unlike hit-testing
+    /// for a pick: this is "is the pointer over the already-selected body",
+    /// asked every frame for the cursor and the drag-start decision alike.
+    fn point_in_rect(at: AppPoint, rect: &pdf_core::document::Rect) -> bool {
+        at.x >= rect.left.min(rect.right) as f64
+            && at.x <= rect.left.max(rect.right) as f64
+            && at.y >= rect.top.min(rect.bottom) as f64
+            && at.y <= rect.top.max(rect.bottom) as f64
+    }
+
+    /// The handle under a point on the current signature selection, if any
+    /// — the same reach-allowing-for-screen-size math as [`Self::handle_at`],
+    /// kept separate because it reads [`Self::signature_selected`] rather
+    /// than [`Self::selected`].
+    fn signature_handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
+        let sel = self.signature_selected.as_ref()?;
+        let reach = (HANDLE_PX / view.scale as f32).max(2.0);
+        Handle::ALL.iter().copied().find(|h| {
+            let (hx, hy) = h.at(&sel.rect);
+            (at.x as f32 - hx).abs() <= reach && (at.y as f32 - hy).abs() <= reach
+        })
+    }
+
+    /// A placed signature's own pointer handling, with **no tool armed** —
+    /// click to select, drag the body to move, drag a handle to resize.
+    /// Mirrors [`Self::interact_objects`] in shape, but a signature is
+    /// never page content (see [`SignatureSelected`]), so it cannot reuse
+    /// that function's `move_thing`/`scale_thing` underneath, and — unlike
+    /// the object tool, which owns the pointer outright once armed — must
+    /// say whether it actually did anything: `true` means the caller stops
+    /// here, `false` means nothing here was relevant and normal handling
+    /// (text selection, in practice) should carry on as if this had never
+    /// been called.
+    fn interact_signatures(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        page: usize,
+        at: AppPoint,
+        view: PageView,
+    ) -> bool {
+        if self.signature_grab.is_none() {
+            if let Some(sel) = self.signature_selected.as_ref().filter(|s| s.page == page) {
+                if let Some(handle) = self.signature_handle_at(at, view) {
+                    ui.output_mut(|o| o.cursor_icon = handle.cursor());
+                } else if Self::point_in_rect(at, &sel.rect) {
+                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+                }
+            }
+        }
+
+        if response.drag_started() {
+            let on_handle = self
+                .signature_selected
+                .as_ref()
+                .filter(|s| s.page == page)
+                .and_then(|_| self.signature_handle_at(at, view));
+            let on_body = self
+                .signature_selected
+                .as_ref()
+                .is_some_and(|s| s.page == page && Self::point_in_rect(at, &s.rect));
+            if on_handle.is_some() || on_body {
+                self.signature_grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
+                return true;
+            }
+            // A drag starting fresh on an unselected signature selects it
+            // and carries the gesture on — the object tool's own rule for
+            // the same reason: one gesture, not two.
+            if let Some((index, rect)) = self.signature_at(page, at) {
+                self.signature_selected = Some(SignatureSelected { page, index, rect });
+                self.signature_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
+                return true;
+            }
+        }
+
+        if response.dragged() {
+            if let Some(grab) = self.signature_grab.as_mut() {
+                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                ui.output_mut(|o| {
+                    o.cursor_icon = match grab.handle {
+                        Some(h) => h.cursor(),
+                        None => egui::CursorIcon::Grabbing,
+                    }
+                });
+                return true;
+            }
+        }
+
+        if response.drag_stopped() {
+            if let (Some(grab), Some(sel)) = (self.signature_grab.take(), self.signature_selected.clone()) {
+                self.finish_signature_grab(sel, grab);
+                return true;
+            }
+        }
+
+        if response.clicked() {
+            if let Some((index, rect)) = self.signature_at(page, at) {
+                self.signature_selected = Some(SignatureSelected { page, index, rect });
+                self.say_info("signature selected — drag to move, drag a handle to resize.");
+                return true;
+            }
+            // Clicked elsewhere: deselect, but do not swallow the click —
+            // it may still be a text cursor or a click somewhere else meant
+            // for it, and the caller finds out by getting `false` back.
+            self.signature_selected = None;
+        }
+
+        false
+    }
+
+    /// Apply what a drag on a signature asked for, once — the same shape as
+    /// [`Self::finish_grab`], writing through
+    /// `Session::set_image_signature_rect` instead of `move_thing`/
+    /// `scale_thing` since a signature's rect is the whole of what moving
+    /// or resizing it means; there is no content-stream object underneath
+    /// to transform.
+    fn finish_signature_grab(&mut self, sel: SignatureSelected, grab: Grab) {
+        let (dx, dy) = grab.by;
+        let wanted = match grab.handle {
+            None => {
+                if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                    return;
+                }
+                pdf_core::document::Rect {
+                    left: sel.rect.left + dx,
+                    top: sel.rect.top + dy,
+                    right: sel.rect.right + dx,
+                    bottom: sel.rect.bottom + dy,
+                }
+            }
+            Some(handle) => {
+                let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                if (sx - 1.0).abs() < 0.005 && (sy - 1.0).abs() < 0.005 {
+                    return;
+                }
+                let (ax, ay) = handle.anchor(&sel.rect);
+                pdf_core::document::Rect {
+                    left: ax + (sel.rect.left - ax) * sx,
+                    top: ay + (sel.rect.top - ay) * sy,
+                    right: ax + (sel.rect.right - ax) * sx,
+                    bottom: ay + (sel.rect.bottom - ay) * sy,
+                }
+            }
+        };
+        let Some(doc) = &self.doc else { return };
+        match doc.session.set_image_signature_rect(sel.page, sel.index, wanted) {
+            Ok(()) => {
+                if let Some(doc) = &mut self.doc {
+                    doc.rendered_is_stale();
+                }
+                self.signature_selected = Some(SignatureSelected { page: sel.page, index: sel.index, rect: wanted });
+            }
+            Err(e) => {
+                self.say_error(e.to_string());
+                // Left where it was rather than guessed at — the annotation
+                // itself did not move if the call failed partway, and a
+                // selection rect that disagreed with it would make the next
+                // drag start from the wrong place.
+                self.signature_selected = Some(sel);
+            }
+        }
+    }
+
     /// Make the selected thing more or less see-through.
     fn set_opacity_of(&mut self, page: usize, object: usize, opacity: f32) -> Result<String, String> {
         let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
@@ -3293,6 +3519,75 @@ impl PagifyApp {
         }
 
         // The handles, at a fixed size on screen whatever the zoom.
+        for handle in Handle::ALL {
+            let (hx, hy) = handle.at(&sel.rect);
+            let centre = view.to_screen(AppPoint::new(hx as f64, hy as f64));
+            let square = egui::Rect::from_center_size(centre, egui::Vec2::splat(HANDLE_PX * 2.0));
+            painter.rect_filled(square, egui::CornerRadius::same(1), egui::Color32::WHITE);
+            painter.rect_stroke(
+                square,
+                egui::CornerRadius::same(1),
+                egui::Stroke::new(1.0, theme::VIOLET),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
+    /// The signature selection's outline and handles — the same drawing as
+    /// [`Self::draw_object_selection`], reading [`Self::signature_selected`]
+    /// and [`Self::signature_grab`] instead. Kept as its own function rather
+    /// than a parameter on that one: the two selections are independent by
+    /// design (see [`SignatureSelected`]), and a shared draw call would be
+    /// the one place that quietly assumed otherwise.
+    fn draw_signature_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let Some(sel) = self.signature_selected.clone().filter(|s| s.page == page) else { return };
+        let to_screen = |r: &pdf_core::document::Rect| {
+            egui::Rect::from_min_max(
+                view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
+                view.to_screen(AppPoint::new(r.right as f64, r.bottom as f64)),
+            )
+        };
+        let painter = ui.painter();
+        let outline = to_screen(&sel.rect);
+
+        painter.rect_stroke(
+            outline,
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(1.5, theme::VIOLET),
+            egui::StrokeKind::Outside,
+        );
+
+        if let Some(grab) = &self.signature_grab {
+            let (dx, dy) = grab.by;
+            let going = match grab.handle {
+                None => pdf_core::document::Rect {
+                    left: sel.rect.left + dx,
+                    top: sel.rect.top + dy,
+                    right: sel.rect.right + dx,
+                    bottom: sel.rect.bottom + dy,
+                },
+                Some(handle) => {
+                    let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                    let (ax, ay) = handle.anchor(&sel.rect);
+                    pdf_core::document::Rect {
+                        left: ax + (sel.rect.left - ax) * sx,
+                        top: ay + (sel.rect.top - ay) * sy,
+                        right: ax + (sel.rect.right - ax) * sx,
+                        bottom: ay + (sel.rect.bottom - ay) * sy,
+                    }
+                }
+            };
+            let ghost = to_screen(&going);
+            painter.rect_filled(ghost, egui::CornerRadius::ZERO, theme::VIOLET.gamma_multiply(0.10));
+            painter.rect_stroke(
+                ghost,
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.5, theme::VIOLET_BRIGHT),
+                egui::StrokeKind::Outside,
+            );
+            return;
+        }
+
         for handle in Handle::ALL {
             let (hx, hy) = handle.at(&sel.rect);
             let centre = view.to_screen(AppPoint::new(hx as f64, hy as f64));
@@ -4039,6 +4334,12 @@ impl PagifyApp {
                     doc.rendered_is_stale();
                 }
                 self.foreign = None;
+                // Applied signatures are page content now, not annotations —
+                // a selection naming one by its old annotation index would
+                // be pointing at nothing, or worse, at whatever else now
+                // sits at that index.
+                self.signature_selected = None;
+                self.signature_grab = None;
                 // **Says the two things that matter and are not obvious**: that
                 // they can no longer be picked up, and that the way back is to
                 // close without saving rather than to press undo.
@@ -4772,6 +5073,10 @@ impl PagifyApp {
             self.selected = None;
             self.grab = None;
             self.say_info("object tool put down.");
+        }
+        if self.signature_selected.take().is_some() {
+            self.signature_grab = None;
+            self.say_info("signature deselected.");
         }
         if self.markup_armed.take().is_some() {
             self.say_info("tool put down.");
@@ -9564,10 +9869,11 @@ impl PagifyApp {
                         self.draw_lock_badges(ui, page, view);
                         self.draw_picked_layer(ui, page, view);
                         self.draw_object_selection(ui, page, view);
+                        self.draw_signature_selection(ui, page, view);
                         // On top of the page and its badges, under the editor:
                         // a tool part-way through is the most recent thing the
                         // reader did and the thing they are aiming with.
-                        self.draw_pending_preview(ui.painter(), page, view, hover);
+                        self.draw_pending_preview(ui, page, view, hover);
                         // The editor, for the same reason, learned twice.
                         //
                         // Reported from use: "if i click somewhere else the
@@ -9628,14 +9934,14 @@ impl PagifyApp {
     /// *now*, snapping included, so the preview is the thing that would happen
     /// rather than an impression of it.
     fn draw_pending_preview(
-        &self,
-        painter: &egui::Painter,
+        &mut self,
+        ui: &mut egui::Ui,
         page: usize,
         view: PageView,
         hover: Option<egui::Pos2>,
     ) {
         let Some(pending) = &self.pending else { return };
-        if pending.page != page || pending.points.is_empty() {
+        if pending.page != page {
             return;
         }
         let Some(cursor) = hover else { return };
@@ -9647,6 +9953,20 @@ impl PagifyApp {
             .map(|snapped| snapped.at)
             .unwrap_or_else(|| view.to_page(cursor));
 
+        // A signature previews before any point is placed — placing one is
+        // a single click, unlike every other tool here, which needs at
+        // least a first point down before there is anything to draw a
+        // rubber band from. Without this, the only way to know how much of
+        // the page a signature would cover was to place it and look.
+        if matches!(pending.kind, PendingKind::Signature) {
+            self.draw_signature_preview(ui, view, at);
+            return;
+        }
+        if pending.points.is_empty() {
+            return;
+        }
+
+        let painter = ui.painter();
         let on = |p: AppPoint| view.to_screen(p);
         let stroke = egui::Stroke::new(1.0, theme::VIOLET_BRIGHT);
         let first = pending.points[0];
@@ -9707,6 +10027,66 @@ impl PagifyApp {
             painter.circle_filled(on(*point), 2.5, theme::VIOLET_BRIGHT);
         }
         let _ = last;
+    }
+
+    /// A ghost of the currently-chosen signature at `at` — the exact size
+    /// and anchor [`Self::place_signature`] would actually use (see
+    /// [`SIGNATURE_WIDTH_PT`]), so hovering the tool over the page shows how
+    /// much of it the signature would cover, and where, before it is
+    /// placed rather than after. Deliberately not [`paint_signature`],
+    /// which pads and centres within whatever box it is given for a tidy
+    /// thumbnail in the signature list — exactly what an accurate preview
+    /// must not do.
+    fn draw_signature_preview(&mut self, ui: &mut egui::Ui, view: PageView, at: AppPoint) {
+        let Some(signature) = self.signatures.current().cloned() else { return };
+        let rect = signature.placed_rect(at.x as f32, at.y as f32, SIGNATURE_WIDTH_PT);
+        let area = egui::Rect::from_min_max(
+            view.to_screen(AppPoint::new(rect.left as f64, rect.top as f64)),
+            view.to_screen(AppPoint::new(rect.right as f64, rect.bottom as f64)),
+        );
+
+        if let Some(image) = signature.image.clone() {
+            let texture = self
+                .signature_textures
+                .entry(signature.name.clone())
+                .or_insert_with(|| {
+                    ui.ctx().load_texture(
+                        format!("signature-{}", signature.name),
+                        egui::ColorImage::from_rgba_unmultiplied(
+                            [image.width as usize, image.height as usize],
+                            &image.rgba,
+                        ),
+                        egui::TextureOptions::LINEAR,
+                    )
+                })
+                .clone();
+            // Semi-transparent — a preview, not yet a mark on the page.
+            ui.painter().image(
+                texture.id(),
+                area,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::from_white_alpha(190),
+            );
+        } else {
+            let ink = theme::VIOLET.gamma_multiply(0.85);
+            for stroke in signature.placed(at.x as f32, at.y as f32, SIGNATURE_WIDTH_PT) {
+                if stroke.len() < 2 {
+                    continue;
+                }
+                let points: Vec<egui::Pos2> =
+                    stroke.iter().map(|(x, y)| view.to_screen(AppPoint::new(*x as f64, *y as f64))).collect();
+                ui.painter().add(egui::Shape::line(points, egui::Stroke::new(1.8, ink)));
+            }
+        }
+
+        // The footprint, so the size and shape read at a glance even before
+        // the ink or the picture itself does.
+        ui.painter().rect_stroke(
+            area,
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(1.0, theme::VIOLET_BRIGHT),
+            egui::StrokeKind::Outside,
+        );
     }
 
     /// The editor for a run of text, drawn over the words themselves.
@@ -10442,6 +10822,21 @@ impl PagifyApp {
 
         if let Some(snapped) = &self.last_snap {
             overlay::draw_snap(ui.painter(), view.to_screen(snapped.at), snapped.kind, theme::SNAP);
+        }
+
+        // A placed-but-unapplied signature, picked with **no tool armed** —
+        // before the object tool's own check, and gated the same way: an
+        // armed tool (the object tool, or anything pending) owns the
+        // pointer outright, and a signature sitting under it is reached the
+        // way any other page content is, not by this path. Unlike the
+        // object tool, this only takes the gesture when it actually found
+        // something to do with it — a click on bare paper or on text still
+        // reaches the ordinary handling below.
+        if self.object_tool.is_none()
+            && self.pending.is_none()
+            && self.interact_signatures(ui, &response, page, at, view)
+        {
+            return;
         }
 
         // The object tool takes the pointer whole while it is in hand — its
@@ -14830,6 +15225,130 @@ mod lock_wiring_tests {
             "the transparent pixel should have been composited against the page, not left as uploaded"
         );
         assert_eq!(placed[7], 255, "a placed picture is always opaque");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A placed-but-unapplied picture signature is found by
+    /// [`PagifyApp::signature_at`] — and only there, within its own rect —
+    /// the pick this session's move/resize is built on.
+    #[test]
+    fn a_placed_signature_is_found_at_its_own_rect_and_nowhere_else() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "signature-at");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+
+        let marks = app.doc.as_ref().expect("open").session.image_signature_marks(0).expect("marks");
+        let mark = marks.first().expect("the signature is placed");
+        let middle = AppPoint {
+            x: ((mark.rect.left + mark.rect.right) / 2.0) as f64,
+            y: ((mark.rect.top + mark.rect.bottom) / 2.0) as f64,
+        };
+        let found = app.signature_at(0, middle);
+        assert_eq!(found, Some((mark.index, mark.rect)), "not found at its own middle");
+
+        let far_away = AppPoint { x: (mark.rect.right + 200.0) as f64, y: (mark.rect.bottom + 200.0) as f64 };
+        assert_eq!(app.signature_at(0, far_away), None, "found somewhere it was never placed");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **Dragging the body of a selected signature moves it** — the same
+    /// commit shape `dragging_a_handle_resizes_about_the_opposite_corner`
+    /// already exercises for the object tool, here through
+    /// `finish_signature_grab` instead of `finish_grab`, since a signature
+    /// is an annotation, never page content.
+    #[test]
+    fn dragging_a_selected_signature_moves_it() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "signature-move");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+
+        let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect };
+        let grab = Grab { handle: None, from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 }, by: (30.0, -15.0) };
+        app.finish_signature_grab(sel, grab);
+
+        let moved = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        assert!((moved.rect.left - (mark.rect.left + 30.0)).abs() < 0.5, "left did not move");
+        assert!((moved.rect.top - (mark.rect.top - 15.0)).abs() < 0.5, "top did not move");
+        let (w0, h0) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
+        let (w1, h1) = (moved.rect.right - moved.rect.left, moved.rect.bottom - moved.rect.top);
+        assert!((w0 - w1).abs() < 0.5 && (h0 - h1).abs() < 0.5, "a move changed the size");
+        assert_eq!(app.signature_selected, Some(SignatureSelected { page: 0, index: moved.index, rect: moved.rect }), "the selection did not follow the move");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **Dragging a handle resizes about the opposite corner** — the
+    /// signature counterpart of the object tool's own handle test, again
+    /// committed through `finish_signature_grab`.
+    #[test]
+    fn dragging_a_signature_handle_resizes_about_the_opposite_corner() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "signature-resize");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+
+        let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        let (w, h) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
+        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect };
+        let grab = Grab {
+            handle: Some(Handle::BottomRight),
+            from: AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 },
+            by: (-w / 2.0, -h / 2.0),
+        };
+        app.finish_signature_grab(sel, grab);
+
+        let resized = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        assert!((resized.rect.left - mark.rect.left).abs() < 0.5 && (resized.rect.top - mark.rect.top).abs() < 0.5, "the anchored corner moved");
+        assert!(((resized.rect.right - resized.rect.left) - w / 2.0).abs() < 1.0, "width did not halve");
+        assert!(((resized.rect.bottom - resized.rect.top) - h / 2.0).abs() < 1.0, "height did not halve");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A drag too small to mean anything (egui's own click-vs-drag noise
+    /// floor) commits nothing — no call into `pdf_core` at all, and the
+    /// selection is left exactly where it was, not nudged by a fraction of
+    /// a point on every stray pixel of mouse jitter.
+    #[test]
+    fn a_negligible_drag_on_a_signature_changes_nothing() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "signature-noop");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+
+        let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect };
+        app.signature_selected = Some(sel.clone());
+        let grab = Grab { handle: None, from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 }, by: (0.1, -0.1) };
+        app.finish_signature_grab(sel.clone(), grab);
+
+        let still = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        assert_eq!(still.rect, mark.rect, "a negligible drag moved the signature");
+        assert_eq!(app.signature_selected, Some(sel), "the selection should be exactly what was passed in, untouched");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **Applying signatures clears a signature selection** — the
+    /// annotation it named is gone, burnt into the page, and a stale index
+    /// must not linger to be dragged next.
+    #[test]
+    fn applying_signatures_clears_the_signature_selection() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "signature-apply-clears");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+
+        let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        app.signature_selected = Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect });
+
+        app.submit("applysignatures");
+        assert!(app.signature_selected.is_none(), "a stale selection survived applying");
 
         let _ = std::fs::remove_file(&path);
     }
