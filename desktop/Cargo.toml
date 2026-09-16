@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members  = ["crates/pagify_shell", "crates/pagify_app"]
+members  = ["crates/pagify_shell", "crates/pagify_app", "crates/pagify_issue"]
 
 # ---------------------------------------------------------------------------
 # DO NOT DELETE. This stanza is load-bearing and its absence is silent.

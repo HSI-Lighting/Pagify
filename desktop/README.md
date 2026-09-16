@@ -313,6 +313,18 @@ one commit per finding, each with a test built from the audit's own input;
   of an appended revision: Pagify's own writer had been re-serialising the
   whole file under the edit.) A rewrite (after a redaction, or to put a
   password on) breaks it, and the save says so.
+- **`pagify-issue`** (`crates/pagify_issue`) is the only thing that touches
+  the root's private key: an offline command-line tool, run on a machine
+  that is not on the network, that mints the root, backs it up, and issues
+  signing leaves from it. It refuses to issue a leaf until
+  `root restore-check` has proven the backup actually works — restoring it,
+  issuing a throwaway leaf from the restored key, and checking that leaf
+  against the root with `pdf_core::pdf::trust` itself, the same code a
+  released Pagify runs. Passphrases are prompted (no echo) or read one line
+  from stdin when there is no terminal, never taken as an argument. See its
+  own module doc (`cargo doc -p pagify_issue --open`, or read
+  `crates/pagify_issue/src/main.rs`) for the commands; `tests/cli.rs` drives
+  the built binary end to end, including the refusal before a restore check.
 - **`smartredact`** says "gone for good" only of words proven gone. Words
   drawn through a form XObject — or a form inside one, however deep — are
   cut out of the form's own stream: in place when every form on the way is

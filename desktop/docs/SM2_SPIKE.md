@@ -7,9 +7,14 @@ which route step 2 needed — is `rust/pdf_core/fixtures/sm2-signed.pdf` and thi
 
 **The spike passed.** Phases 1–5 can be planned in detail.
 
-*Status:* phases 1 and 2 landed on 15–16 September 2026 — `git log --grep="SM signatures"`
-lists the commits. The "what it means for the phases" section below is the note as
-written at the end of the spike, kept as the record of what the spike found.
+*Status:* phases 1 through 4 landed 15–16 September 2026 — `git log --grep="SM signatures"`
+lists the commits. Phase 4's issuing tool is `crates/pagify_issue`
+(`pagify-issue`, see the README). HSI's real root has not been minted with it
+yet — that is a decision for whoever holds it, not something this branch does
+on its own — so `rust/pdf_core/trust/roots.der` stays empty and every
+signature still reads `Trust::Unrecognised`, honestly. The "what it means for
+the phases" section below is the note as written at the end of the spike, kept
+as the record of what the spike found.
 
 ## The checklist, answered
 

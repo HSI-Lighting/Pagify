@@ -1,0 +1,28 @@
+[package]
+name    = "pagify_issue"
+edition.workspace = true
+version.workspace = true
+description = "The offline issuing tool: mints HSI's SM2 root, issues signing leaves from it, and keeps the root's backup honest."
+
+[[bin]]
+name = "pagify-issue"
+path = "src/main.rs"
+
+# The engine, for the one thing that must not drift between the tool and the
+# app: `pdf_core::pdf::sm` — the distinguishing ID and the signature encoding —
+# and `pdf_core::pdf::trust`, so a leaf this issues is checked here by the
+# same code that will check it in Pagify. Nothing here touches PDFium.
+[dependencies]
+pdf_core.workspace = true
+sm2 = { version = "0.13.3", features = ["dsa", "pkcs8"] }
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+der = { version = "0.7", features = ["oid"] }
+spki = "0.7"
+const-oid = { version = "0.9", features = ["db"] }
+pkcs8 = { version = "0.10", features = ["encryption", "std"] }
+p12 = "0.6"
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = "1"
+# A passphrase typed into a terminal must not echo; this is the crate every
+# CLI uses for that, and it opens no socket.
+rpassword = "7"
