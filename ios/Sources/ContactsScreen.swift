@@ -35,6 +35,17 @@ struct ContactsScreen: View {
     @State private var calendarShowing = false
     @State private var cameraUnavailable = false
 
+    /// Picked by long press, for deleting or exporting several at once —
+    /// matches Android's `pickedContacts` exactly, including the reason it
+    /// exists at all: Android has no per-row swipe gesture on this list,
+    /// only this and the single delete icon inside a contact's own detail
+    /// view, and both are what this file now matches instead of the
+    /// SwiftUI-native `.onDelete` row swipe it started with.
+    @State private var pickedContacts: Set<PersistentIdentifier> = []
+    @State private var confirmingBulkDelete = false
+    @State private var exportingSelected: [BusinessCard]?
+    private var picking: Bool { !pickedContacts.isEmpty }
+
 
     enum ScanResult: Identifiable {
         case saved(count: Int)
@@ -63,39 +74,76 @@ struct ContactsScreen: View {
                     )
                 } else {
                     List {
+                        if picking {
+                            SelectionHeader(
+                                count: pickedContacts.count,
+                                onClose: { pickedContacts = [] },
+                                onExport: {
+                                    exportingSelected = contacts
+                                        .filter { pickedContacts.contains($0.persistentModelID) }
+                                        .map(\.asVCard)
+                                },
+                                onDelete: { confirmingBulkDelete = true }
+                            )
+                        }
                         ForEach(contacts) { contact in
-                            Button {
-                                openingContact = contact
-                            } label: {
-                                HStack(alignment: .top) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(contact.name.isEmpty ? "(no name)" : contact.name)
-                                            .font(.headline)
-                                            .foregroundStyle(.primary)
-                                        if !contact.company.isEmpty {
-                                            Text(contact.company)
-                                                .font(.subheadline)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        if let phone = contact.phones.first {
-                                            Text(phone.raw)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
+                            let isPicked = pickedContacts.contains(contact.persistentModelID)
+                            HStack(alignment: .top) {
+                                if picking {
+                                    Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(isPicked ? Color.accentColor : .secondary)
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(contact.name.isEmpty ? "(no name)" : contact.name)
+                                        .font(.headline)
+                                        .foregroundStyle(.primary)
+                                    if !contact.company.isEmpty {
+                                        Text(contact.company)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
                                     }
-                                    Spacer()
-                                    StageBadge(stage: contact.stage)
+                                    if let phone = contact.phones.first {
+                                        Text(phone.raw)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                StageBadge(stage: contact.stage)
+                            }
+                            // `.contentShape` before the gestures: without
+                            // it, only the parts of the row that already
+                            // draw something (the text, the badge) count as
+                            // "in" the row for hit-testing, and the empty
+                            // space between them silently swallows both taps
+                            // and long presses.
+                            .contentShape(Rectangle())
+                            // Plain gesture modifiers on the row itself,
+                            // deliberately not a `Button` — a `Button`'s own
+                            // gesture recogniser was found to reliably beat
+                            // an attached `.onLongPressGesture`/
+                            // `simultaneousGesture(LongPressGesture(...))`
+                            // for the touch, so the long press was silently
+                            // never firing at all; reproduced against three
+                            // separate simulated long-press mechanisms
+                            // before concluding it was this, not the
+                            // simulator.
+                            .onTapGesture {
+                                if picking {
+                                    if isPicked { pickedContacts.remove(contact.persistentModelID) }
+                                    else { pickedContacts.insert(contact.persistentModelID) }
+                                } else {
+                                    openingContact = contact
                                 }
                             }
-                            // Without this, List gives a Button-labelled row
-                            // its default interactive style, which tints the
-                            // whole label — including the `.secondary` text —
-                            // as if it were a link, `.foregroundStyle(.primary)`
-                            // on the name notwithstanding.
-                            .buttonStyle(.plain)
-                        }
-                        .onDelete { indices in
-                            for index in indices { modelContext.delete(contacts[index]) }
+                            // Disabled while already picking, matching
+                            // Android exactly — a long-press selection is
+                            // already a modal state, and a second long press
+                            // inside it has nothing new to start.
+                            .onLongPressGesture(minimumDuration: 0.5) {
+                                guard !picking else { return }
+                                pickedContacts = [contact.persistentModelID]
+                            }
                         }
                     }
                 }
@@ -125,6 +173,10 @@ struct ContactsScreen: View {
             .simultaneousGesture(
                 DragGesture(minimumDistance: 24)
                     .onEnded { value in
+                        // Matches Android: disabled while picking, since a
+                        // long-press selection is already a modal state and
+                        // a stray horizontal drag out of it would surprise.
+                        guard !picking else { return }
                         let edge: CGFloat = 24
                         let width = UIScreen.main.bounds.width
                         guard abs(value.translation.width) > 100,
@@ -168,6 +220,19 @@ struct ContactsScreen: View {
                     }
                     .pickerStyle(.segmented)
                     .fixedSize()
+                }
+                // Android reaches the calendar BOTH ways at once — a visible
+                // IconButton in its own top bar and the edge swipe — never
+                // one instead of the other. `.primaryAction` rather than
+                // `.secondaryAction` deliberately: the latter can collapse
+                // into an overflow menu, and a hidden glyph is not a glyph
+                // to tap.
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        calendarShowing = true
+                    } label: {
+                        Label("Calendar", systemImage: "calendar")
+                    }
                 }
             }
             .onAppear {
@@ -220,6 +285,26 @@ struct ContactsScreen: View {
                 // Cancel are the only two ways off this screen.
                 .interactiveDismissDisabled()
             }
+            .alert(
+                "Delete \(pickedContacts.count) \(pickedContacts.count == 1 ? "Contact" : "Contacts")?",
+                isPresented: $confirmingBulkDelete
+            ) {
+                Button("Cancel", role: .cancel) {}
+                Button("Delete", role: .destructive) {
+                    for contact in contacts where pickedContacts.contains(contact.persistentModelID) {
+                        modelContext.delete(contact)
+                    }
+                    pickedContacts = []
+                }
+            }
+            .sheet(item: Binding(
+                get: { exportingSelected.map { VCardExport(cards: $0) } },
+                set: { _ in exportingSelected = nil; pickedContacts = [] }
+            )) { export in
+                if let url = export.fileURL {
+                    ShareSheet(items: [url])
+                }
+            }
             .alert("No Camera", isPresented: $cameraUnavailable) {
                 Button("OK", role: .cancel) {}
             } message: {
@@ -236,6 +321,26 @@ struct ContactsScreen: View {
                     Alert(title: Text("Could Not Read Card"), message: Text(message))
                 }
             }
+        }
+    }
+
+    /// A group export shares one moment across every card in it — see
+    /// `VCard.write(_:exportedAt:)` — written once, here, to a real `.vcf`
+    /// file so the share sheet hands Mail, Contacts or AirDrop something
+    /// they recognise rather than a bare block of text.
+    private struct VCardExport: Identifiable {
+        let id = UUID()
+        let fileURL: URL?
+
+        init(cards: [BusinessCard]) {
+            guard let text = try? VCard.write(cards, exportedAt: .now) else {
+                fileURL = nil
+                return
+            }
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent("Contacts-\(UUID().uuidString)")
+                .appendingPathExtension("vcf")
+            fileURL = (try? text.write(to: url, atomically: true, encoding: .utf8)) != nil ? url : nil
         }
     }
 
@@ -342,5 +447,37 @@ private extension Contact {
         phones = card.phones
         emails = card.emails.map(\.value)
         urls = card.urls.map(\.value)
+    }
+}
+
+/// Long-press selection's own bar, matching Android's `SelectionHeader`: a
+/// count, a way out that is not the same gesture that got in (Close), and
+/// the two things worth doing to several contacts at once.
+private struct SelectionHeader: View {
+    let count: Int
+    let onClose: () -> Void
+    let onExport: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack {
+            Button(action: onClose) {
+                Image(systemName: "xmark")
+            }
+            Text("\(count) selected")
+                .font(.headline)
+            Spacer()
+            Button(action: onExport) {
+                Image(systemName: "square.and.arrow.up")
+            }
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .foregroundStyle(.red)
+            }
+        }
+        .buttonStyle(.plain)
+        .listRowInsets(EdgeInsets())
+        .padding()
+        .background(Color(.secondarySystemBackground))
     }
 }

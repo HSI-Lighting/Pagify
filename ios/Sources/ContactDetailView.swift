@@ -30,6 +30,7 @@ struct ContactDetailView: View {
     @State private var customFollowUpShowing = false
     @State private var customFollowUpDate = Date.now
     @State private var addingToGroup = false
+    @State private var confirmingDelete = false
 
     init(contact: Contact, isNew: Bool = false) {
         self.contact = contact
@@ -191,6 +192,18 @@ struct ContactDetailView: View {
                         }
                     }
                 } else {
+                    // Matches Android's ContactSheet trash icon exactly —
+                    // there is no separate "Edit" button next to it because
+                    // every field on this screen is already live-editable;
+                    // Delete is the one action typing into a field cannot
+                    // reach.
+                    ToolbarItem(placement: .destructiveAction) {
+                        Button(role: .destructive) {
+                            confirmingDelete = true
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                    }
                     ToolbarItem(placement: .confirmationAction) {
                         Button("Done") { dismiss() }
                     }
@@ -242,6 +255,13 @@ struct ContactDetailView: View {
             }
             .sheet(isPresented: $addingToGroup) {
                 AddToGroupSheet(contact: contact)
+            }
+            .alert("Delete \(contact.name.isEmpty ? "This Contact" : contact.name)?", isPresented: $confirmingDelete) {
+                Button("Cancel", role: .cancel) {}
+                Button("Delete", role: .destructive) {
+                    modelContext.delete(contact)
+                    dismiss()
+                }
             }
         }
     }
