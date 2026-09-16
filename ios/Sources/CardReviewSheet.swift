@@ -194,15 +194,29 @@ struct CardReviewSheet: View {
                                 .frame(width: geometry.size.width)
                             ForEach(numbered, id: \.index) { entry in
                                 if let region = fields[entry.index].region {
+                                    // Relative to the crop, not the full
+                                    // photo — the crop is what is drawn.
+                                    let left = (CGFloat(region.left) - cropRect.minX) * scale
+                                    let top = (CGFloat(region.top) - cropRect.minY) * scale
+                                    let width = (CGFloat(region.right) - CGFloat(region.left)) * scale
+                                    let height = (CGFloat(region.bottom) - CGFloat(region.top)) * scale
+
+                                    // Which detail was taken FROM the photo,
+                                    // not just which one a number points at —
+                                    // matches Android's own highlight
+                                    // (`.border` + a 22%-alpha `.background`
+                                    // over the region), drawn under the badge
+                                    // rather than instead of it.
+                                    highlightBox(width: width, height: height)
+                                        .position(x: left + width / 2, y: top + height / 2)
+
                                     badge(entry.number)
-                                        // Relative to the crop, not the full
-                                        // photo — the crop is what is drawn.
                                         // Just clear of the region's leading
                                         // edge, not on top of it — see the
                                         // type's own doc comment for why
                                         // that matters.
                                         .position(
-                                            x: (CGFloat(region.left) - cropRect.minX) * scale - 12,
+                                            x: left - 12,
                                             y: (CGFloat((region.top + region.bottom) / 2) - cropRect.minY) * scale
                                         )
                                 }
@@ -210,6 +224,13 @@ struct CardReviewSheet: View {
                         }
                     }
                     .frame(height: max(forPhoto, 0))
+                    // Matches Android's own `clipToBounds()` on this same
+                    // marker layer: a stray region from a `split_cards`
+                    // misattribution (a known, reachable failure) should be
+                    // cut off at the photo's edge rather than spill onto the
+                    // panel below and read as the transform having come
+                    // loose. Containment, not a threshold.
+                    .clipped()
 
                     List {
                     Section {
@@ -256,6 +277,16 @@ struct CardReviewSheet: View {
             .frame(width: 20, height: 20)
             .background(Circle().fill(.blue))
             .shadow(radius: 2)
+    }
+
+    /// `MaterialTheme.colorScheme.primary` on Android — `.blue` is what the
+    /// numbered badge already stands in for it with, so the highlight uses
+    /// the same colour rather than introducing a second accent.
+    private func highlightBox(width: CGFloat, height: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 3)
+            .fill(Color.blue.opacity(0.22))
+            .overlay(RoundedRectangle(cornerRadius: 3).stroke(.blue, lineWidth: 2))
+            .frame(width: max(width, 0), height: max(height, 0))
     }
 
     @ViewBuilder

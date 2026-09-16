@@ -162,35 +162,39 @@ struct ContactsScreen: View {
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                 }
             }
-            // Direction-agnostic on the calendar side once it's open (see
-            // CalendarScreen), but the two *opening* gestures here are each
-            // one specific direction on purpose, matching Android: a
-            // left-to-right drag is unambiguous shorthand for "reveal what's
-            // further left" (the calendar), a right-to-left drag for
-            // "reveal what's further right" (the camera) — the mnemonic
-            // only holds on the way in.
-            // Edge-triggered, like the system's own back-swipe — NOT a plain
-            // "any horizontal drag on the list" gesture. A first attempt at
-            // that used only distance and direction, and it fired on the
-            // same swipe as a row's native leading/trailing delete action:
-            // both a "Delete" button revealing AND this screen opening, from
-            // one drag. Starting the gesture recognition at the very edge is
-            // what a normal in-row swipe (starting wherever a finger happens
-            // to land on that row) essentially cannot reach by accident.
+            // Matches Android's own gesture exactly — anywhere on the list,
+            // not edge-triggered. An earlier version here required the
+            // touch to *start* within 24pt of the screen edge, invented
+            // specifically to dodge a collision with a per-row swipe-to-
+            // delete this file no longer has (removed when multi-select
+            // replaced it — see "Checked Android before writing this one").
+            // With that gesture gone, the edge restriction was pure
+            // regression: on a real device, iOS's own edge zones (the
+            // system back-swipe on the left, in particular) can claim a
+            // touch that starts that close to the edge before this
+            // recognizer ever sees it, which reads as "the gesture stopped
+            // working" — it never had the chance to.
+            //
+            // `swipeThreshold = 72.dp` on Android; `minimumDistance` here is
+            // the SwiftUI-idiomatic way to say "don't even start recognising
+            // until a real drag is underway," not a stand-in for it — the
+            // actual distance and direction gate is the `guard` below,
+            // matching Android's own two-part test: decided as horizontal
+            // once travelled is more than twice vertical, then measured
+            // against the threshold only at release.
             .simultaneousGesture(
-                DragGesture(minimumDistance: 24)
+                DragGesture(minimumDistance: 20)
                     .onEnded { value in
-                        // Matches Android: disabled while picking, since a
-                        // long-press selection is already a modal state and
-                        // a stray horizontal drag out of it would surprise.
+                        // Disabled while picking, matching Android: a
+                        // long-press selection is already a modal state,
+                        // and a stray horizontal drag out of it would
+                        // surprise.
                         guard !picking else { return }
-                        let edge: CGFloat = 24
-                        let width = UIScreen.main.bounds.width
-                        guard abs(value.translation.width) > 100,
+                        guard abs(value.translation.width) > 72,
                               abs(value.translation.width) > abs(value.translation.height) * 2 else { return }
-                        if value.translation.width > 0, value.startLocation.x < edge {
+                        if value.translation.width > 0 {
                             calendarShowing = true
-                        } else if value.translation.width < 0, value.startLocation.x > width - edge {
+                        } else {
                             requestCamera()
                         }
                     }
