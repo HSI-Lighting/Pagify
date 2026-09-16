@@ -1,9 +1,22 @@
 import SwiftData
 import SwiftUI
+import UIKit
 
 struct ContactsScreen: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Contact.capturedAt, order: .reverse) private var contacts: [Contact]
+    @Query private var groups: [ContactGroup]
+
+    /// Groups only once at least one exists — a first-time user with none
+    /// sees the flat list, since an empty organisational layer would just be
+    /// in the way. Set once, from the count at first appearance
+    /// (`hasSetInitialView` guards against `onAppear` re-running this on
+    /// every return to the tab and overriding a since-made manual choice);
+    /// every subsequent group creation flips it unconditionally instead,
+    /// which is the actual fix and not merely this default — see
+    /// `GroupsListView.onGroupCreated`.
+    @State private var showingGroupsView = false
+    @State private var hasSetInitialView = false
 
     @State private var pickerShowing = false
     @State private var isProcessing = false
@@ -17,6 +30,11 @@ struct ContactsScreen: View {
 
     @State private var savedCount = 0
     @State private var openingContact: Contact?
+    @State private var addingManually: Contact?
+    @State private var cameraShowing = false
+    @State private var calendarShowing = false
+    @State private var cameraUnavailable = false
+
 
     enum ScanResult: Identifiable {
         case saved(count: Int)
@@ -35,7 +53,9 @@ struct ContactsScreen: View {
     var body: some View {
         NavigationStack {
             Group {
-                if contacts.isEmpty && !isProcessing {
+                if showingGroupsView {
+                    GroupsListView(onGroupCreated: { showingGroupsView = true })
+                } else if contacts.isEmpty && !isProcessing {
                     ContentUnavailableView(
                         "No Contacts Yet",
                         systemImage: "person.crop.rectangle.badge.plus",
@@ -87,16 +107,73 @@ struct ContactsScreen: View {
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                 }
             }
+            // Direction-agnostic on the calendar side once it's open (see
+            // CalendarScreen), but the two *opening* gestures here are each
+            // one specific direction on purpose, matching Android: a
+            // left-to-right drag is unambiguous shorthand for "reveal what's
+            // further left" (the calendar), a right-to-left drag for
+            // "reveal what's further right" (the camera) — the mnemonic
+            // only holds on the way in.
+            // Edge-triggered, like the system's own back-swipe — NOT a plain
+            // "any horizontal drag on the list" gesture. A first attempt at
+            // that used only distance and direction, and it fired on the
+            // same swipe as a row's native leading/trailing delete action:
+            // both a "Delete" button revealing AND this screen opening, from
+            // one drag. Starting the gesture recognition at the very edge is
+            // what a normal in-row swipe (starting wherever a finger happens
+            // to land on that row) essentially cannot reach by accident.
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 24)
+                    .onEnded { value in
+                        let edge: CGFloat = 24
+                        let width = UIScreen.main.bounds.width
+                        guard abs(value.translation.width) > 100,
+                              abs(value.translation.width) > abs(value.translation.height) * 2 else { return }
+                        if value.translation.width > 0, value.startLocation.x < edge {
+                            calendarShowing = true
+                        } else if value.translation.width < 0, value.startLocation.x > width - edge {
+                            requestCamera()
+                        }
+                    }
+            )
             .navigationTitle("Contacts")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        pickerShowing = true
+                    Menu {
+                        Button {
+                            requestCamera()
+                        } label: {
+                            Label("Take Photo", systemImage: "camera")
+                        }
+                        Button {
+                            pickerShowing = true
+                        } label: {
+                            Label("Choose from Library", systemImage: "photo.on.rectangle")
+                        }
+                        Divider()
+                        Button {
+                            addingManually = Contact()
+                        } label: {
+                            Label("Add Manually", systemImage: "square.and.pencil")
+                        }
                     } label: {
-                        Label("Scan Card", systemImage: "plus")
+                        Label("Add Contact", systemImage: "plus")
                     }
                     .disabled(isProcessing)
                 }
+                ToolbarItem(placement: .principal) {
+                    Picker("View", selection: $showingGroupsView) {
+                        Text("All").tag(false)
+                        Text("Groups").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .fixedSize()
+                }
+            }
+            .onAppear {
+                guard !hasSetInitialView else { return }
+                hasSetInitialView = true
+                showingGroupsView = !groups.isEmpty
             }
             .sheet(isPresented: $pickerShowing) {
                 PhotoPicker { data in
@@ -104,8 +181,24 @@ struct ContactsScreen: View {
                 }
                 .ignoresSafeArea()
             }
+            .fullScreenCover(isPresented: $cameraShowing) {
+                CameraCapture(
+                    onCapture: { data in
+                        cameraShowing = false
+                        Task { await process(data) }
+                    },
+                    onCancel: { cameraShowing = false }
+                )
+                .ignoresSafeArea()
+            }
+            .fullScreenCover(isPresented: $calendarShowing) {
+                CalendarScreen()
+            }
             .sheet(item: $openingContact) { contact in
-                ProgressSheet(contact: contact)
+                ContactDetailView(contact: contact)
+            }
+            .sheet(item: $addingManually) { contact in
+                ContactDetailView(contact: contact, isNew: true)
             }
             .sheet(item: Binding(
                 get: { currentReview.map(ReviewItem.init) },
@@ -126,6 +219,11 @@ struct ContactsScreen: View {
                 // but without the review sheet's own confirmation — Save or
                 // Cancel are the only two ways off this screen.
                 .interactiveDismissDisabled()
+            }
+            .alert("No Camera", isPresented: $cameraUnavailable) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text("This device has no camera. Choose from Library instead.")
             }
             .alert(item: $lastResult) { result in
                 switch result {
@@ -149,6 +247,21 @@ struct ContactsScreen: View {
         let image: UIImage
         let card: BusinessCard
         var id: String { card.rawText }
+    }
+
+    /// `UIImagePickerController` does not fail softly when asked for a
+    /// source type the device does not have — it throws
+    /// `NSInvalidArgumentException: Source type 1 not available` and takes
+    /// the app down, confirmed against the real crash log on a simulator (no
+    /// camera hardware at all). Checked once, here, rather than left to
+    /// `CameraCapture` to discover at the moment it is too late to recover
+    /// from.
+    private func requestCamera() {
+        guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+            cameraUnavailable = true
+            return
+        }
+        cameraShowing = true
     }
 
     private func advanceQueue() {

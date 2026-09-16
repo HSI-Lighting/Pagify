@@ -32,5 +32,10 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<!-- For business-card capture (CameraCapture.swift). Photo-library import
+	     needs no entry here at all — PHPickerViewController runs out of
+	     process and never asks. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Pagify uses the camera to scan business cards into contacts.</string>
 </dict>
 </plist>

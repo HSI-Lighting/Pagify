@@ -29,7 +29,11 @@ struct RecognisedTextSegment: Codable, Equatable {
 /// code or typed by hand, per the Rust doc comment: there is nowhere on the
 /// card to point at, and pointing somewhere arbitrary is worse than not
 /// pointing at all.
-struct Field: Codable, Equatable {
+struct Field: Codable, Equatable, Identifiable {
+    /// Local to this process, for `ForEach` identity in editable lists —
+    /// never encoded, so it plays no part in the wire shape the Rust side
+    /// reads.
+    let id = UUID()
     var value: String
     /// 0.0 to 1.0.
     var confidence: Float
@@ -40,17 +44,32 @@ struct Field: Codable, Equatable {
         self.confidence = confidence
         self.region = region
     }
+
+    enum CodingKeys: String, CodingKey {
+        case value, confidence, region
+    }
 }
 
 /// Wire values are lowercase (`cell`, `work`, `fax`, `home`) via the Rust
 /// enum's own `rename_all = "camelCase"` — NOT the vCard `TYPE=CELL` token,
 /// which only the writer produces on the way out. Sending the uppercase form
 /// on this side fails the whole card, silently.
-enum PhoneKind: String, Codable {
+enum PhoneKind: String, Codable, CaseIterable, Identifiable {
     case cell, work, fax, home
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .cell: return "Mobile"
+        case .work: return "Work"
+        case .home: return "Home"
+        case .fax: return "Fax"
+        }
+    }
 }
 
-struct PhoneField: Codable, Equatable {
+struct PhoneField: Codable, Equatable, Identifiable {
+    let id = UUID()
     var raw: String
     var normalised: String
     var kind: PhoneKind
@@ -63,6 +82,10 @@ struct PhoneField: Codable, Equatable {
         self.kind = kind
         self.confidence = confidence
         self.region = region
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case raw, normalised, kind, confidence, region
     }
 }
 
