@@ -1,12 +1,6 @@
 import SwiftData
 import SwiftUI
 
-/// The minimal end of the pipeline in §B: pick a photo, read it, save what
-/// was found. **Deliberately skips the real review sheet** (§B.5 — numbered
-/// fields, swipe-to-correct, the two coordinate-space bugs) to get a
-/// genuinely working path end to end first; every card found is saved as-is.
-/// Wiring in the review step is the next slice, not a hidden requirement of
-/// this one.
 struct ContactsScreen: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \Contact.capturedAt, order: .reverse) private var contacts: [Contact]
@@ -14,6 +8,14 @@ struct ContactsScreen: View {
     @State private var pickerShowing = false
     @State private var isProcessing = false
     @State private var lastResult: ScanResult?
+
+    /// Cards still waiting for a look, one photo's worth at a time — a photo
+    /// of several cards side by side reviews them one after another rather
+    /// than all at once.
+    @State private var reviewQueue: [(image: UIImage, card: BusinessCard)] = []
+    private var currentReview: (image: UIImage, card: BusinessCard)? { reviewQueue.first }
+
+    @State private var savedCount = 0
 
     enum ScanResult: Identifiable {
         case saved(count: Int)
@@ -86,6 +88,26 @@ struct ContactsScreen: View {
                 }
                 .ignoresSafeArea()
             }
+            .sheet(item: Binding(
+                get: { currentReview.map(ReviewItem.init) },
+                set: { _ in }
+            )) { item in
+                CardReviewSheet(
+                    image: item.image,
+                    card: item.card,
+                    onSave: { edited in
+                        modelContext.insert(Contact(from: edited))
+                        savedCount += 1
+                        advanceQueue()
+                    },
+                    onCancel: { advanceQueue() }
+                )
+                // A swipe-to-dismiss that silently discarded the card would
+                // look, from the queue's point of view, identical to Cancel
+                // but without the review sheet's own confirmation — Save or
+                // Cancel are the only two ways off this screen.
+                .interactiveDismissDisabled()
+            }
             .alert(item: $lastResult) { result in
                 switch result {
                 case .saved(let count):
@@ -98,6 +120,34 @@ struct ContactsScreen: View {
                 }
             }
         }
+    }
+
+    /// Wraps the head-of-queue tuple so `.sheet(item:)` has an `Identifiable`
+    /// to key off — a plain tuple cannot be, and re-deriving one from
+    /// `reviewQueue.first` on every access keeps a single source of truth
+    /// instead of a second piece of state that could drift from it.
+    private struct ReviewItem: Identifiable {
+        let image: UIImage
+        let card: BusinessCard
+        var id: String { card.rawText }
+    }
+
+    private func advanceQueue() {
+        if !reviewQueue.isEmpty { reviewQueue.removeFirst() }
+        if reviewQueue.isEmpty && savedCount > 0 {
+            lastResult = .saved(count: savedCount)
+            savedCount = 0
+        }
+    }
+
+    /// A card with somewhere on the photo to point at goes to review; one
+    /// read entirely off a QR code has no region on any field — nowhere to
+    /// point at — and is saved straight through, matching §B.5's own rule
+    /// exactly.
+    private func needsReview(_ card: BusinessCard) -> Bool {
+        card.name?.region != nil || card.title?.region != nil || card.company?.region != nil
+            || card.address?.region != nil || card.phones.contains { $0.region != nil }
+            || card.emails.contains { $0.region != nil } || card.urls.contains { $0.region != nil }
     }
 
     private func process(_ data: Data) async {
@@ -121,10 +171,21 @@ struct ContactsScreen: View {
                 lastResult = .nothingFound
                 return
             }
+
+            var straightThroughCount = 0
             for card in worthKeeping {
-                modelContext.insert(Contact(from: card))
+                if needsReview(card) {
+                    reviewQueue.append((image: image, card: card))
+                } else {
+                    modelContext.insert(Contact(from: card))
+                    straightThroughCount += 1
+                }
             }
-            lastResult = .saved(count: worthKeeping.count)
+            if straightThroughCount > 0 && reviewQueue.isEmpty {
+                lastResult = .saved(count: straightThroughCount)
+            } else if straightThroughCount > 0 {
+                savedCount += straightThroughCount
+            }
         } catch {
             lastResult = .failed(String(describing: error))
         }
