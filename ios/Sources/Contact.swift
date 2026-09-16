@@ -113,11 +113,15 @@ final class Contact {
 
     /// Concatenates every text field, including `rawText`, specifically so a
     /// phone number the parser failed to classify correctly is still findable
-    /// by search even though no structured field holds it.
+    /// by search even though no structured field holds it. Lowercased here,
+    /// matching Android's own `searchable` exactly, so every call site can
+    /// compare it against a lowercased query with a plain `contains` rather
+    /// than each one remembering to fold case itself.
     var searchable: String {
         ([name, title, company, address, notes, rawText]
             + phones.map(\.raw) + emails + urls)
             .joined(separator: " ")
+            .lowercased()
     }
 
     /// Builds the `BusinessCard` the vCard writer expects. Every field is a

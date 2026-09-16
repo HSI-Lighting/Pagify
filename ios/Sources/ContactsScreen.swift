@@ -43,7 +43,7 @@ struct ContactsScreen: View {
     /// SwiftUI-native `.onDelete` row swipe it started with.
     @State private var pickedContacts: Set<PersistentIdentifier> = []
     @State private var confirmingBulkDelete = false
-    @State private var exportingSelected: [BusinessCard]?
+    @State private var exportingSelected: [Contact]?
     private var picking: Bool { !pickedContacts.isEmpty }
 
 
@@ -88,7 +88,6 @@ struct ContactsScreen: View {
                                 onExport: {
                                     exportingSelected = contacts
                                         .filter { pickedContacts.contains($0.persistentModelID) }
-                                        .map(\.asVCard)
                                 },
                                 onDelete: { confirmingBulkDelete = true }
                             )
@@ -309,7 +308,7 @@ struct ContactsScreen: View {
                 }
             }
             .sheet(item: Binding(
-                get: { exportingSelected.map { VCardExport(cards: $0) } },
+                get: { exportingSelected.map { VCardExport.stamping($0) } },
                 set: { _ in exportingSelected = nil; pickedContacts = [] }
             )) { export in
                 if let url = export.fileURL {
@@ -335,26 +334,6 @@ struct ContactsScreen: View {
                     Alert(title: Text("Could Not Read Card"), message: Text(message))
                 }
             }
-        }
-    }
-
-    /// A group export shares one moment across every card in it — see
-    /// `VCard.write(_:exportedAt:)` — written once, here, to a real `.vcf`
-    /// file so the share sheet hands Mail, Contacts or AirDrop something
-    /// they recognise rather than a bare block of text.
-    private struct VCardExport: Identifiable {
-        let id = UUID()
-        let fileURL: URL?
-
-        init(cards: [BusinessCard]) {
-            guard let text = try? VCard.write(cards, exportedAt: .now) else {
-                fileURL = nil
-                return
-            }
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("Contacts-\(UUID().uuidString)")
-                .appendingPathExtension("vcf")
-            fileURL = (try? text.write(to: url, atomically: true, encoding: .utf8)) != nil ? url : nil
         }
     }
 
