@@ -20,7 +20,7 @@ egui_extras = { version = "0.36", default-features = false }
 rfd    = "0.15"
 # Decodes the embedded logo. PNG only — every other decoder is dead weight in
 # the binary and attack surface with nothing asking for it.
-image  = { version = "0.25", default-features = false, features = ["png"] }
+image  = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # The Linux windowing backends are additive and only meaningful there; on macOS
 # and Windows eframe uses the platform's own and these features do not apply.

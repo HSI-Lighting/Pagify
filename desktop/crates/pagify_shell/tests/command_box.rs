@@ -5,7 +5,7 @@
 //! interface is a command box." This file is the cash value of that claim.
 
 use pagify_shell::command::{dispatch, CommandBox, Dispatch, Escaped, Kind, Mode, Submit};
-use pagify_shell::verbs::{self, PageTarget, Verb, ZoomTarget};
+use pagify_shell::verbs::{self, PageTarget, SignatureAction, Verb, ZoomTarget};
 
 fn head(line: &str) -> Dispatch {
     dispatch(line).expect("a non-blank line always dispatches")
@@ -258,7 +258,7 @@ fn the_verbs_that_were_promises_are_no_longer() {
     assert_eq!(head("redact").pagify(), Some(Verb::Redact));
     assert_eq!(head("certify").pagify(), Some(Verb::Certify(None)));
     assert_eq!(head("validate").pagify(), Some(Verb::Validate));
-    assert_eq!(head("signature").pagify(), Some(Verb::Signature { draw: false }));
+    assert_eq!(head("signature").pagify(), Some(Verb::Signature(SignatureAction::Place)));
     assert_eq!(
         head("managesignatures").pagify(),
         Some(Verb::ManageSignatures(pagify_shell::verbs::Signatures::Open))
@@ -275,21 +275,36 @@ fn the_verbs_that_were_promises_are_no_longer() {
     assert_eq!(head("editobject").pagify(), Some(Verb::EditObject));
 }
 
-/// **Drawing one and placing one are the same word, differently.**
+/// **Drawing one, uploading one and placing one are three words for three
+/// things.**
 ///
-/// `signature` is what somebody types when they want to sign; `signature draw`
-/// is what they type when they want a new mark. Anything else is refused with
-/// both, rather than guessed at.
+/// `signature` is what somebody types when they want to sign; `signature
+/// draw` is what they type when they want a new hand-drawn mark;
+/// `signature upload` is the same for a picture. Anything else is refused
+/// with all three named, rather than guessed at.
 #[test]
-fn the_signature_tool_draws_or_places() {
-    assert_eq!(head("signature").pagify(), Some(Verb::Signature { draw: false }));
-    assert_eq!(head("signature place").pagify(), Some(Verb::Signature { draw: false }));
-    assert_eq!(head("signature draw").pagify(), Some(Verb::Signature { draw: true }));
-    assert_eq!(head("signature new").pagify(), Some(Verb::Signature { draw: true }));
+fn the_signature_tool_draws_uploads_or_places() {
+    assert_eq!(head("signature").pagify(), Some(Verb::Signature(SignatureAction::Place)));
+    assert_eq!(head("signature place").pagify(), Some(Verb::Signature(SignatureAction::Place)));
+    assert_eq!(head("signature draw").pagify(), Some(Verb::Signature(SignatureAction::Draw)));
+    assert_eq!(head("signature new").pagify(), Some(Verb::Signature(SignatureAction::Draw)));
+    assert_eq!(
+        head("signature upload").pagify(),
+        Some(Verb::Signature(SignatureAction::Upload(None)))
+    );
+    assert_eq!(
+        head("signature image").pagify(),
+        Some(Verb::Signature(SignatureAction::Upload(None)))
+    );
+    assert_eq!(
+        head("signature upload alice.png").pagify(),
+        Some(Verb::Signature(SignatureAction::Upload(Some("alice.png".into()))))
+    );
 
     match head("signature sideways") {
         Dispatch::Bad(said) => {
             assert!(said.contains("signature draw"), "it did not say what does work: {said}");
+            assert!(said.contains("signature upload"), "it did not mention upload: {said}");
         }
         other => panic!("expected a refusal, got {other:?}"),
     }

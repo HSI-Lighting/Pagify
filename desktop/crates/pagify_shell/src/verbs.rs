@@ -128,6 +128,18 @@ pub enum Signatures {
     Rename(String),
 }
 
+/// What `signature` was asked to do — see [`Verb::Signature`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum SignatureAction {
+    /// Place the last signature made, drawn or uploaded.
+    Place,
+    /// Draw a new one by hand.
+    Draw,
+    /// Add one from a picture file. `None` asks for a native file picker;
+    /// `Some(path)` is one already chosen or typed.
+    Upload(Option<PathBuf>),
+}
+
 /// A Pagify verb: something that acts on the document rather than on geometry.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verb {
@@ -256,12 +268,11 @@ pub enum Verb {
     /// Place a signature you have drawn.
     ///
     /// **Ink, not a certificate.** This is the shape of a name, stamped where
-    /// somebody clicks — the mark a person writes on a form. It says nothing
-    /// about who drew it, and the tool that does is `certify`. Anything that
-    /// blurs the two is worse than no signature at all.
-    ///
-    /// `draw` makes a new one instead of placing the last.
-    Signature { draw: bool },
+    /// somebody clicks — the mark a person writes on a form, drawn with a
+    /// mouse or uploaded from a picture. It says nothing about who made it,
+    /// and the tool that does is `certify`. Anything that blurs the two is
+    /// worse than no signature at all.
+    Signature(SignatureAction),
     /// Check the signatures this document carries.
     ///
     /// Says whether the file has changed since it was signed. **Not** whether
@@ -885,14 +896,27 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
                 )),
             }
         }
-        "signature" => match tail.trim().to_ascii_lowercase().as_str() {
-            "" | "place" | "put" | "sign" => Ok(Verb::Signature { draw: false }),
-            "draw" | "new" | "create" => Ok(Verb::Signature { draw: true }),
-            other => Err(format!(
-                "signature: don't know {other:?} — `signature` places the one you \
-                 drew, `signature draw` makes a new one"
-            )),
-        },
+        "signature" => {
+            let tail = tail.trim();
+            let (head, rest) = tail.split_once(char::is_whitespace).unwrap_or((tail, ""));
+            match head.to_ascii_lowercase().as_str() {
+                "" | "place" | "put" | "sign" => Ok(Verb::Signature(SignatureAction::Place)),
+                "draw" | "new" | "create" => Ok(Verb::Signature(SignatureAction::Draw)),
+                "upload" | "image" | "file" => {
+                    let rest = rest.trim();
+                    if rest.is_empty() {
+                        Ok(Verb::Signature(SignatureAction::Upload(None)))
+                    } else {
+                        Ok(Verb::Signature(SignatureAction::Upload(Some(resolve_path(rest)))))
+                    }
+                }
+                other => Err(format!(
+                    "signature: don't know {other:?} — `signature` places the one you \
+                     have, `signature draw` makes a new one by hand, `signature upload` \
+                     adds one from a picture file"
+                )),
+            }
+        }
         "validate" => Ok(Verb::Validate),
         "certify" | "sign" => {
             let tail = tail.trim();

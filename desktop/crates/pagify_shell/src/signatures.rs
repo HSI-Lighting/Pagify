@@ -1,14 +1,17 @@
-//! The signatures somebody has drawn, kept so they are drawn once.
+//! The signatures somebody has drawn or uploaded, kept so they are made once.
 //!
 //! # What this is, and what it is not
 //!
 //! A signature here is **ink** — the shape of a name, drawn with a mouse or a
-//! trackpad and stamped onto a page. It is the mark a person writes on a form,
-//! and it proves nothing about who wrote it. The thing that does is a
+//! trackpad, or a picture of one uploaded from a file — stamped onto a page
+//! either way. It is the mark a person writes on a form, and it proves
+//! nothing about who wrote it, however it was made. The thing that does is a
 //! certificate, and it lives in [`pdf_core::pdf::sign`] under a different verb
 //! with a different name. Keeping the two apart is the whole reason this module
-//! says so in its first paragraph: a drawn signature that a reader believed was
-//! a cryptographic one would be worse than no signature at all.
+//! says so in its first paragraph: a signature that a reader believed was a
+//! cryptographic one would be worse than no signature at all — a drawn one
+//! and an uploaded one are exactly the same risk, and get exactly the same
+//! warning wherever either is offered.
 //!
 //! # Why the strokes are normalised
 //!
@@ -38,17 +41,41 @@ use serde::{Deserialize, Serialize};
 /// A point in the unit box: 0 to 1 across and down, origin top-left.
 pub type Unit = (f32, f32);
 
-/// A drawn signature.
+/// A drawn or uploaded signature.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Signature {
     /// What to call it in a list. Not a claim about who anyone is.
     pub name: String,
-    /// The shape, in the unit box.
+    /// The shape, in the unit box. Empty for an uploaded picture — see
+    /// `image` — never both: `from_drawing` and `from_image` each set
+    /// exactly one.
     pub strokes: Vec<Vec<Unit>>,
-    /// Width over height as drawn, so placing it cannot stretch it.
+    /// Width over height, so placing it cannot stretch it. Measured from the
+    /// strokes' own bounds for ink, from the picture's pixel dimensions for
+    /// an upload — either way, what `placed`/`placed_rect` scale from.
     pub aspect: f32,
     /// Seconds since the epoch, so a list can be ordered.
     pub made: u64,
+    /// The picture, when this signature is one rather than ink.
+    #[serde(default)]
+    pub image: Option<StoredImage>,
+}
+
+/// One uploaded signature's pixels, kept exactly as given.
+///
+/// **Opaque, and kept that way on purpose** — see `pdf_core`'s
+/// `Annotation::Image`, which this is placed through: the PDFium call that
+/// stamps a picture onto a page does not carry an alpha channel, even before
+/// anything is saved. Flattening a transparent source onto a background, if
+/// that is ever wanted, belongs above this — where the file was decoded —
+/// not here, which only keeps what it was handed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoredImage {
+    /// RGBA, row-major, top row first — one row of `width * 4` bytes,
+    /// `height` of them.
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// The narrowest or flattest a drawing may be before it is padded rather than
@@ -106,7 +133,36 @@ impl Signature {
             })
             .collect();
 
-        Some(Signature { name: name.into(), strokes, aspect: width / height, made: crate::recent::now() })
+        Some(Signature {
+            name: name.into(),
+            strokes,
+            aspect: width / height,
+            made: crate::recent::now(),
+            image: None,
+        })
+    }
+
+    /// Take an uploaded picture and keep it — the image counterpart of
+    /// [`Signature::from_drawing`]. `None` for one with no size, or whose
+    /// pixels do not match its claimed width and height — the same refusal
+    /// [`pdf_core::document::Annotation::Image`] makes, checked here too so
+    /// a bad upload is refused where it was chosen rather than where it is
+    /// placed.
+    pub fn from_image(name: impl Into<String>, rgba: Vec<u8>, width: u32, height: u32) -> Option<Signature> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+        if rgba.len() != expected {
+            return None;
+        }
+        Some(Signature {
+            name: name.into(),
+            strokes: Vec::new(),
+            aspect: width as f32 / height as f32,
+            made: crate::recent::now(),
+            image: Some(StoredImage { rgba, width, height }),
+        })
     }
 
     /// Where the strokes go when this is placed on a page.
@@ -128,6 +184,20 @@ impl Signature {
                     .collect()
             })
             .collect()
+    }
+
+    /// Where a picture signature's rect goes when placed — the same anchor
+    /// as [`Signature::placed`], so a picture sits exactly where ink would
+    /// for the same click: left of the baseline, sized by `width`, height
+    /// following the stored aspect ratio.
+    pub fn placed_rect(&self, left: f32, baseline: f32, width: f32) -> pdf_core::document::Rect {
+        let height = width / self.aspect.max(f32::EPSILON);
+        pdf_core::document::Rect {
+            left,
+            top: baseline - height,
+            right: left + width,
+            bottom: baseline,
+        }
     }
 
     /// How tall it will be when placed at this width.

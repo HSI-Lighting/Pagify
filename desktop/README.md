@@ -264,7 +264,7 @@ can say so. Nothing is kept beside a document or beside the executable.
 |---|---|
 | `recent.json` | the documents opened recently: path, page count, when |
 | `predefined.json` | texts saved with `predefined` for typing into forms |
-| `signatures.json` | drawn signatures, as strokes, with their names |
+| `signatures.json` | drawn or uploaded signatures — strokes, or a picture's pixels — with their names |
 | `scripts/*.json` | recordings made with `record` |
 
 All of it is plain JSON, on purpose: it is yours to read. `clearhistory`

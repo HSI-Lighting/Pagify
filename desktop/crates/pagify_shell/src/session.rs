@@ -816,6 +816,30 @@ impl Session {
         })
     }
 
+    /// The same, for a signature that is a picture — see
+    /// [`pdf_core::document::Annotation::Image`].
+    pub fn place_image_signature(
+        &self,
+        page: usize,
+        rect: pdf_core::document::Rect,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+        name: &str,
+    ) -> Result<()> {
+        registry::with_session(self.handle, |s| {
+            let doc = s
+                .document
+                .as_document_mut()
+                .ok_or(pdf_core::PdfError::Unsupported("editing this document"))?;
+            let index = doc.add_annotation(
+                page,
+                &pdf_core::document::Annotation::Image { rect, rgba, width, height },
+            )?;
+            doc.mark_as_signature(page, index, name)
+        })
+    }
+
     /// The signatures placed on a page, as opposed to any other ink on it.
     pub fn signature_marks(
         &self,

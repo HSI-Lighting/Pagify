@@ -32,7 +32,7 @@ use pagify_shell::page_space::AppPoint;
 use pagify_shell::reader::{prefetch_targets, Strip, PAGE_GAP_PT};
 use pagify_shell::recent::Recent;
 use pagify_shell::tools::{self, SnapSet};
-use pagify_shell::verbs::{self, MeasureKind, PageTarget, Verb, ZoomTarget};
+use pagify_shell::verbs::{self, MeasureKind, PageTarget, SignatureAction, Verb, ZoomTarget};
 use pagify_shell::{PageRaster, Session};
 use pdf_core::document::Color;
 use pdf_core::error::PdfError;
@@ -550,6 +550,12 @@ struct PagifyApp {
     /// Decoded on the first frame — a `Context` is needed to upload it and
     /// there is none when the app is constructed.
     mark: Option<egui::TextureHandle>,
+    /// An uploaded signature's picture, ready to paint in the Manage
+    /// Signatures list — keyed by name, built the first time that entry is
+    /// drawn. A stale entry left behind by a rename or a forgotten signature
+    /// costs a little memory and nothing else; the list is never large
+    /// enough for that to matter.
+    signature_textures: std::collections::HashMap<String, egui::TextureHandle>,
     snaps: SnapSet,
     ortho: bool,
     grid_pt: f64,
@@ -1355,6 +1361,7 @@ impl Tab {
             ],
             Tab::PagiSign => &[
                 ("\u{F603}", "Signature", "signature"),
+                ("\u{E43E}", "Upload Signature", "signature upload"),
                 ("\u{F775}", "Manage Signatures", "managesignatures"),
                 ("\u{E877}", "Apply All Signatures", "applysignatures"),
                 ("\u{EAE2}", "Add Text", "addtext"),
@@ -1449,6 +1456,7 @@ fn describe_where(annotation: &pdf_core::document::Annotation) -> String {
         | A::StrikeOut { rects, .. }
         | A::Squiggly { rects, .. } => rects.first().copied(),
         A::Note { rect, .. } => Some(*rect),
+        A::Image { rect, .. } => Some(*rect),
         A::Ink { .. } | A::Text { .. } => None,
     };
     match first {
@@ -1677,6 +1685,7 @@ impl PagifyApp {
             defaults: tools::Defaults::default(),
             saved_revision: 0,
             mark: None,
+            signature_textures: std::collections::HashMap::new(),
             snaps: SnapSet::defaults(),
             ortho: false,
             grid_pt: 0.0,
@@ -2688,32 +2697,132 @@ impl PagifyApp {
         ))
     }
 
-    /// Put the drawn signature on the line somebody clicked.
+    /// Keep an uploaded picture as a signature — the image counterpart of
+    /// [`Self::save_drawn_signature`], and the same contract: a name, the
+    /// same "kept on this computer" line, the same undo-on-failure.
+    fn save_uploaded_signature(
+        &mut self,
+        name: &str,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+    ) -> Result<String, String> {
+        let name = match name.trim() {
+            "" => "Signature".to_string(),
+            given => given.to_string(),
+        };
+        let Some(signature) = pagify_shell::signatures::Signature::from_image(&name, rgba, width, height)
+        else {
+            return Err("that picture has no size, or its pixels do not match it.".into());
+        };
+
+        self.signatures.add(signature);
+        if let Err(e) = self.keep_signatures() {
+            self.signatures.remove(&name);
+            return Err(e);
+        }
+        Ok(format!(
+            "kept \"{name}\" on this computer{}. `signature` places it.",
+            match &self.signatures_path {
+                Some(path) => format!(", in {}", path.display()),
+                None => String::new(),
+            }
+        ))
+    }
+
+    /// A name to offer for an uploaded picture: the file's own name, since
+    /// somebody who picked `alice-signature.png` chose that name on purpose
+    /// and typing it again would be busywork — falling back to the same
+    /// numbering a drawn signature gets when a file has no useful stem.
+    fn signature_name_for(&self, path: &std::path::Path) -> String {
+        match path.file_stem().and_then(|s| s.to_str()) {
+            Some(stem) if !stem.trim().is_empty() => stem.trim().to_string(),
+            _ => format!("Signature {}", self.signatures.entries().len() + 1),
+        }
+    }
+
+    /// Ask for a picture file, and keep whatever is chosen as a signature.
+    fn upload_signature_dialog(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Upload a signature")
+            .add_filter("Picture", &["png", "jpg", "jpeg"]);
+        match dialog.pick_file() {
+            Some(path) => self.upload_signature(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// Decode a picture file and keep it as a signature.
+    ///
+    /// **Ink, exactly like a drawn one, and said so at the same volume.**
+    /// This is a picture — it shows a name, it does not prove one — and
+    /// somebody who uploads a signature is exactly as capable of confusing it
+    /// with a certificate as somebody who draws one, so the warning belongs
+    /// here too, not only on the drawing pad.
+    fn upload_signature(&mut self, path: &std::path::Path) {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.say_error(format!("could not read {}: {e}", path.display()));
+                return;
+            }
+        };
+        let decoded = match image::load_from_memory(&bytes) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                self.say_error(format!(
+                    "{} is not a picture this reads (PNG or JPEG): {e}",
+                    path.display()
+                ));
+                return;
+            }
+        };
+        let rgba = decoded.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        let name = self.signature_name_for(path);
+        match self.save_uploaded_signature(&name, rgba.into_raw(), width, height) {
+            Ok(said) => self.say_info(format!(
+                "{said} This is a picture — it shows a name, it does not prove one. \
+                 `certify` is what signs with a certificate."
+            )),
+            Err(e) => self.say_error(e),
+        }
+    }
+
+    /// Put the drawn or uploaded signature on the line somebody clicked.
     fn place_signature(&mut self, page: usize, at: AppPoint) -> Result<String, String> {
         // A signature on a form is around two inches across; wider looks like
         // a banner and narrower like initials.
         const WIDTH: f32 = 144.0;
         let Some(signature) = self.signatures.current().cloned() else {
-            return Err("no signature has been drawn yet — `signature draw` makes one.".into());
+            return Err("no signature has been drawn or uploaded yet — `signature draw` makes \
+                        one, `signature upload` adds a picture.".into());
         };
-        let strokes: Vec<Vec<pdf_core::document::Point>> = signature
-            .placed(at.x as f32, at.y as f32, WIDTH)
-            .into_iter()
-            .map(|stroke| {
-                stroke
-                    .into_iter()
-                    .map(|(x, y)| pdf_core::document::Point { x, y })
-                    .collect()
-            })
-            .collect();
 
         let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
         // Placed *and* marked as a signature in one call, so `applysignatures`
-        // can tell it from a drawing later — including after the document has
-        // been closed and reopened.
-        doc.session
-            .place_signature(page, strokes, SIGNATURE_INK, 1.6, &signature.name)
-            .map_err(|e| e.to_string())?;
+        // can tell it from a drawing — or a plain picture — later, including
+        // after the document has been closed and reopened.
+        if let Some(image) = &signature.image {
+            let rect = signature.placed_rect(at.x as f32, at.y as f32, WIDTH);
+            doc.session
+                .place_image_signature(page, rect, image.rgba.clone(), image.width, image.height, &signature.name)
+                .map_err(|e| e.to_string())?;
+        } else {
+            let strokes: Vec<Vec<pdf_core::document::Point>> = signature
+                .placed(at.x as f32, at.y as f32, WIDTH)
+                .into_iter()
+                .map(|stroke| {
+                    stroke
+                        .into_iter()
+                        .map(|(x, y)| pdf_core::document::Point { x, y })
+                        .collect()
+                })
+                .collect();
+            doc.session
+                .place_signature(page, strokes, SIGNATURE_INK, 1.6, &signature.name)
+                .map_err(|e| e.to_string())?;
+        }
 
         if let Some(doc) = &mut self.doc {
             doc.rendered_is_stale();
@@ -2721,7 +2830,8 @@ impl PagifyApp {
         self.foreign = None;
         // **The sentence that keeps the two kinds of signature apart.** Somebody
         // who thinks this is the cryptographic one is worse off than somebody
-        // with no signature at all, and this is the line they will read.
+        // with no signature at all, and this is the line they will read —
+        // whichever way this signature was made.
         Ok(format!(
             "signed \"{}\" on page {}. This is ink — it shows a name, it does not \
              prove one. `certify` is what signs with a certificate.",
@@ -3979,28 +4089,45 @@ impl PagifyApp {
                     }
                 }
             }
-            Verb::Signature { draw } => {
-                // Drawing needs no document — somebody can make their
-                // signature before they have anything to sign. Placing does.
-                if draw || self.signatures.current().is_none() {
-                    let first = self.signatures.current().is_none();
+            Verb::Signature(SignatureAction::Draw) => {
+                let first = self.signatures.current().is_none();
+                self.pad = Some(SignaturePad {
+                    name: if first {
+                        "Signature".to_string()
+                    } else {
+                        format!("Signature {}", self.signatures.entries().len() + 1)
+                    },
+                    // An explicit `signature draw` is a request to draw, not
+                    // to sign — unlike bare `signature` with nothing made yet,
+                    // this does not carry on to placing it.
+                    then_place: false,
+                    ..SignaturePad::default()
+                });
+                self.say_info("draw a signature in the window.");
+            }
+            Verb::Signature(SignatureAction::Upload(path)) => {
+                match path {
+                    Some(path) => self.upload_signature(&path),
+                    None => self.upload_signature_dialog(),
+                }
+            }
+            Verb::Signature(SignatureAction::Place) => {
+                // Nothing drawn or uploaded yet needs a signature made before
+                // it can be placed. Placing does not.
+                if self.signatures.current().is_none() {
                     self.pad = Some(SignaturePad {
-                        name: if first {
-                            "Signature".to_string()
-                        } else {
-                            format!("Signature {}", self.signatures.entries().len() + 1)
-                        },
-                        // Somebody who typed `signature` wanted to sign, not to
-                        // draw; carrying on to the click is the rest of that.
-                        then_place: !draw,
+                        name: "Signature".to_string(),
+                        // Somebody who typed bare `signature` wanted to sign,
+                        // not to draw; carrying on to the click is the rest
+                        // of that.
+                        then_place: true,
                         ..SignaturePad::default()
                     });
-                    self.say_info(if first {
+                    self.say_info(
                         "draw your signature in the window — it is kept on this \
-                         computer, and nowhere else."
-                    } else {
-                        "draw a signature in the window."
-                    });
+                         computer, and nowhere else. `signature upload` adds one \
+                         from a picture instead.",
+                    );
                     return;
                 }
                 let page = self.page;
@@ -5679,6 +5806,21 @@ impl PagifyApp {
                     .inner_margin(10.0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
+                            let texture = entry.image.as_ref().map(|image| {
+                                self.signature_textures
+                                    .entry(entry.name.clone())
+                                    .or_insert_with(|| {
+                                        ctx.load_texture(
+                                            format!("signature-{}", entry.name),
+                                            egui::ColorImage::from_rgba_unmultiplied(
+                                                [image.width as usize, image.height as usize],
+                                                &image.rgba,
+                                            ),
+                                            egui::TextureOptions::LINEAR,
+                                        )
+                                    })
+                                    .clone()
+                            });
                             let (response, painter) = ui.allocate_painter(
                                 egui::vec2(220.0, 64.0),
                                 egui::Sense::hover(),
@@ -5689,7 +5831,7 @@ impl PagifyApp {
                                 4.0,
                                 egui::Color32::from_rgb(0xFA, 0xFA, 0xFC),
                             );
-                            paint_signature(&painter, area, entry);
+                            paint_signature(&painter, area, entry, texture.as_ref());
 
                             ui.vertical(|ui| {
                                 match &mut panel.renaming {
@@ -7668,6 +7810,7 @@ impl PagifyApp {
                         | A::StrikeOut { rects, .. }
                         | A::Squiggly { rects, .. } => rects.clone(),
                         A::Note { rect, .. } => vec![*rect],
+                        A::Image { rect, .. } => vec![*rect],
                         // Ink has no rectangles to hit-test against, and text is
                         // page content rather than an annotation.
                         A::Ink { .. } | A::Text { .. } => return None,
@@ -14555,6 +14698,113 @@ mod lock_wiring_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A small solid picture, as an uploaded signature file would decode to.
+    fn solid_rgba(width: u32, height: u32, rgb: [u8; 3]) -> Vec<u8> {
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+        }
+        rgba
+    }
+
+    /// **An uploaded picture places the same way a drawn signature does** —
+    /// same pad-free path once one exists, same click-to-place, same
+    /// warning line — as a picture on the page rather than ink.
+    #[test]
+    fn an_uploaded_signature_places_as_a_picture_on_the_line_that_was_clicked() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "uploaded");
+        let told = app
+            .save_uploaded_signature("mine", solid_rgba(8, 4, [30, 120, 210]), 8, 4)
+            .expect("kept");
+        assert!(told.contains("this computer"), "{told}");
+        assert!(path.is_file(), "it was not written to {}", path.display());
+
+        // The tool places rather than opening the pad, exactly as it does
+        // for a drawn signature.
+        app.submit("signature");
+        assert!(app.pad.is_none(), "it opened the pad over a signature it already had");
+        assert!(
+            matches!(app.pending.as_ref().map(|p| &p.kind), Some(PendingKind::Signature)),
+            "the tool was not armed:
+{}",
+            said(&app)
+        );
+
+        let before = app.doc.as_ref().expect("open").session.annotations(0).expect("read").len();
+        let told = app
+            .place_signature(0, AppPoint { x: 100.0, y: 400.0 })
+            .expect("placed");
+
+        let marks = app.doc.as_ref().expect("open").session.annotations(0).expect("read");
+        assert_eq!(marks.len(), before + 1, "nothing was added to the page");
+        let (rect, rgba) = marks
+            .iter()
+            .rev()
+            .find_map(|m| match &m.annotation {
+                pdf_core::document::Annotation::Image { rect, rgba, .. } => Some((*rect, rgba.clone())),
+                _ => None,
+            })
+            .expect("the signature is not a picture on the page");
+        assert_eq!(rgba, solid_rgba(8, 4, [30, 120, 210]), "the pixels do not match what was uploaded");
+
+        // It sits *on* the line, at the width a form expects — the same
+        // anchor a drawn signature uses.
+        assert!((rect.bottom - 400.0).abs() < 1.0, "it did not sit on the line: {}", rect.bottom);
+        assert!((rect.left - 100.0).abs() < 1.0, "it did not start where it was clicked: {}", rect.left);
+
+        // **And the line says the same thing a drawn signature's does.**
+        assert!(told.contains("does not prove"), "{told}");
+        assert!(told.contains("certify"), "it did not name the tool that does: {told}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **The whole upload path, not just the part that skips the file.**
+    /// A real PNG, written to a scratch file and handed to `upload_signature`
+    /// exactly as the file dialog would — decoded, named from the file, and
+    /// kept, with the same pixels that went in.
+    #[test]
+    fn a_picture_file_is_decoded_and_kept_by_its_own_name() {
+        let (mut app, sig_path) = with_signature_pad("two-column.pdf", "upload-file");
+
+        let png_path = std::env::temp_dir()
+            .join(format!("pagify-test-upload-{}.png", std::process::id()));
+        let image = image::RgbaImage::from_raw(3, 2, solid_rgba(3, 2, [90, 200, 40]))
+            .expect("a 3x2 buffer fits a 3x2 image");
+        image.save(&png_path).expect("write the scratch PNG");
+
+        app.upload_signature(&png_path);
+        assert!(said(&app).contains("this computer"), "{}", said(&app));
+        assert!(said(&app).contains("does not prove"), "{}", said(&app));
+
+        let kept = app.signatures.current().expect("a signature was kept");
+        let expected_name = png_path.file_stem().unwrap().to_string_lossy().into_owned();
+        assert_eq!(kept.name, expected_name, "it was not named from the file");
+        let stored = kept.image.as_ref().expect("it is a picture, not ink");
+        assert_eq!((stored.width, stored.height), (3, 2));
+        assert_eq!(stored.rgba, solid_rgba(3, 2, [90, 200, 40]), "the pixels changed in the round trip");
+
+        let _ = std::fs::remove_file(&png_path);
+        let _ = std::fs::remove_file(&sig_path);
+    }
+
+    /// **A file that is not a picture is refused, plainly, and nothing is
+    /// kept.**
+    #[test]
+    fn a_file_that_is_not_a_picture_is_refused() {
+        let (mut app, sig_path) = with_signature_pad("two-column.pdf", "upload-bad");
+        let bad_path = std::env::temp_dir()
+            .join(format!("pagify-test-upload-bad-{}.png", std::process::id()));
+        std::fs::write(&bad_path, b"not a picture").expect("write the scratch file");
+
+        app.upload_signature(&bad_path);
+        assert!(said(&app).contains("not a picture"), "{}", said(&app));
+        assert!(app.signatures.is_empty(), "something was kept from a file that could not decode");
+
+        let _ = std::fs::remove_file(&bad_path);
+        let _ = std::fs::remove_file(&sig_path);
+    }
+
     /// A scratch file for kept words — never the real one.
     fn with_snippets(name: &str, label: &str) -> (PagifyApp, std::path::PathBuf) {
         let mut app = app(name);
@@ -17633,6 +17883,7 @@ fn paint_signature(
     painter: &egui::Painter,
     area: egui::Rect,
     signature: &pagify_shell::signatures::Signature,
+    texture: Option<&egui::TextureHandle>,
 ) {
     const PADDING: f32 = 10.0;
     let mut width = (area.width() - PADDING * 2.0).max(1.0);
@@ -17645,6 +17896,20 @@ fn paint_signature(
     }
     let left = area.left() + (area.width() - width) / 2.0;
     let baseline = area.top() + (area.height() + height) / 2.0;
+
+    if let Some(texture) = texture {
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(left, baseline - height),
+            egui::vec2(width, height),
+        );
+        painter.image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        return;
+    }
 
     let ink = egui::Color32::from_rgb(0x14, 0x2B, 0x63);
     for stroke in signature.placed(left, baseline, width) {
