@@ -267,7 +267,10 @@ struct DrawingRibbon: View {
                                inPreview: $0.inPreview)
                 }
             },
-            armed: settings.tool,
+            // `.none` must read as nothing armed, never as the value `.none` — a
+            // non-optional enum handed straight to an `Any?` parameter is wrapped
+            // rather than converted, and the row would never see it as unarmed.
+            armed: settings.tool == .none ? nil : settings.tool,
             colour: settings.penColor,
             palette: AnnotationColors.markerPalette,
             // The weight slot is a point size while text is armed, so it has to be
@@ -407,18 +410,20 @@ struct MarkRibbon: View {
             }
             band
         }
-        // A slot that vanishes must not leave its panel behind: the line type drops
-        // out of the row the moment the highlighter is armed, the font slot only
-        // exists while something that writes words is held, and the bend goes as
-        // soon as the caption in hand grows a second line.
+        // A slot that vanishes must not leave its panel behind: colour and weight
+        // drop out the moment nothing is armed, the line type drops out the moment
+        // the highlighter is armed, the font slot only exists while something that
+        // writes words is held, and the bend goes as soon as the caption in hand
+        // grows a second line.
         .onChange(of: slotsOnOffer) { _, _ in
+            if armed == nil, open == .colour || open == .thickness { open = nil }
             if lineStyle == nil && open == .lineType { open = nil }
             if font == nil && open == .font { open = nil }
             if curve == nil && open == .curve { open = nil }
         }
     }
 
-    private var slotsOnOffer: [Bool] { [lineStyle != nil, font != nil, curve != nil] }
+    private var slotsOnOffer: [Bool] { [armed != nil, lineStyle != nil, font != nil, curve != nil] }
 
     private var shift: CGFloat {
         guard rowWidth > 0, panelWidth > 0 else { return 0 }
@@ -468,48 +473,9 @@ struct MarkRibbon: View {
 
     private var slots: some View {
         HStack(spacing: 4) {
-            RibbonSlot(label: "Colour", onOpen: { toggle(.colour, at: $0) }) {
-                ColourGlyph(colour: colour)
-            }
-
-            // The same slot asks a different question when what is armed writes
-            // words: how big, rather than how thick.
-            RibbonSlot(label: font != nil ? "Size" : "Thickness",
-                       onOpen: { toggle(.thickness, at: $0) }) {
-                if font != nil {
-                    SizeGlyph(sizePoints: width)
-                } else {
-                    ThicknessGlyph(width: width, presets: widthPresets)
-                }
-            }
-
-            if let curve = curve {
-                RibbonSlot(label: "Bend", onOpen: { toggle(.curve, at: $0) }) {
-                    CurveGlyph(degrees: curve)
-                }
-            }
-
-            if let turn = turn {
-                RibbonSlot(label: "Turn", onOpen: { toggle(.turn, at: $0) }) {
-                    Image(systemName: "rotate.right")
-                        .font(.system(size: 17, weight: .medium))
-                        .rotationEffect(.degrees(turn))
-                }
-            }
-
-            // An `else if`, not two conditions. A caption has a face where a stroke
-            // has a dash, and the slot in that position asks whichever of the two
-            // questions the armed tool can answer.
-            if let font = font {
-                RibbonSlot(label: "Font", onOpen: { toggle(.font, at: $0) }) {
-                    FontGlyph(font: font)
-                }
-            } else if let lineStyle = lineStyle {
-                RibbonSlot(label: "Line type", onOpen: { toggle(.lineType, at: $0) }) {
-                    LineTypeGlyph(style: lineStyle)
-                }
-            }
-
+            // The tool groups come first, always. Colour, weight, line and the rest
+            // are settings for whatever is armed — asking them before saying what is
+            // held is asking them of nothing.
             ForEach(Array(groups.indices), id: \.self) { index in
                 let group = groups[index]
                 if group.count == 1, let only = group.first {
@@ -543,6 +509,58 @@ struct MarkRibbon: View {
                                }) {
                         GroupGlyph(group: group, armed: armed)
                     }
+                }
+            }
+
+            // Colour, weight, bend and line-type/font only exist while something is
+            // held — a setting for a tool nobody is holding changes nothing, and
+            // showing it anyway is showing a control with no question behind it.
+            if armed != nil {
+                RibbonDivider()
+
+                RibbonSlot(label: "Colour", onOpen: { toggle(.colour, at: $0) }) {
+                    ColourGlyph(colour: colour)
+                }
+
+                // The same slot asks a different question when what is armed writes
+                // words: how big, rather than how thick.
+                RibbonSlot(label: font != nil ? "Size" : "Thickness",
+                           onOpen: { toggle(.thickness, at: $0) }) {
+                    if font != nil {
+                        SizeGlyph(sizePoints: width)
+                    } else {
+                        ThicknessGlyph(width: width, presets: widthPresets)
+                    }
+                }
+
+                if let curve = curve {
+                    RibbonSlot(label: "Bend", onOpen: { toggle(.curve, at: $0) }) {
+                        CurveGlyph(degrees: curve)
+                    }
+                }
+
+                // An `else if`, not two conditions. A caption has a face where a
+                // stroke has a dash, and the slot in that position asks whichever of
+                // the two questions the armed tool can answer.
+                if let font = font {
+                    RibbonSlot(label: "Font", onOpen: { toggle(.font, at: $0) }) {
+                        FontGlyph(font: font)
+                    }
+                } else if let lineStyle = lineStyle {
+                    RibbonSlot(label: "Line type", onOpen: { toggle(.lineType, at: $0) }) {
+                        LineTypeGlyph(style: lineStyle)
+                    }
+                }
+            }
+
+            // Independent of everything above: a turn belongs to a caption that is
+            // selected, not to a tool that is armed, so it neither waits for `armed`
+            // nor hides with it.
+            if let turn = turn {
+                RibbonSlot(label: "Turn", onOpen: { toggle(.turn, at: $0) }) {
+                    Image(systemName: "rotate.right")
+                        .font(.system(size: 17, weight: .medium))
+                        .rotationEffect(.degrees(turn))
                 }
             }
         }
@@ -700,6 +718,19 @@ private struct RibbonClose: View {
     }
 }
 
+/// Where the tool groups end and what is armed begins. Only drawn between the
+/// two, since the settings it separates from the groups do not exist without it.
+private struct RibbonDivider: View {
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        Rectangle()
+            .fill(PagifyColor.outlineVariant(scheme))
+            .frame(width: 1, height: 28)
+            .padding(.horizontal, 4)
+    }
+}
+
 /// The palette, then the way to any other colour.
 private struct ColourChoices: View {
     let colour: MarkColor
@@ -828,7 +859,7 @@ private struct FontChoices: View {
                             // the phone falls back to, which is the one thing the
                             // label was meant to show.
                             Text(option.label)
-                                .font(RibbonFontFaces.specimen(option, size: 17))
+                                .font(RibbonFontFaces.specimen(option, size: 16))
                                 .foregroundStyle(live ? PagifyColor.accentInk
                                                  : PagifyColor.onSurface(scheme))
                             Text(option.script)
