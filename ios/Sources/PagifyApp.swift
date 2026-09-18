@@ -57,6 +57,7 @@ struct RootView: View {
     /// already was, and a model or drawing never enters it at all.
     @State private var openModel: OpenedFile?
     @State private var openDrawing: OpenedFile?
+    @State private var sharingDocument: SharingDocument?
 
     /// Reader chrome, held here only until it has somewhere better to live.
     ///
@@ -75,6 +76,7 @@ struct RootView: View {
                 documents: recents.documents,
                 onOpen: { open($0) },
                 onForget: { recents.forget($0) },
+                onShare: { shareDocument($0) },
                 onPickDocument: { chooserShowing = true }
             )
             .tabItem { Label(HomeTab.library.label, systemImage: HomeTab.library.systemImage) }
@@ -128,20 +130,31 @@ struct RootView: View {
         .onOpenURL { url in
             openAny(url: url)
         }
-        .confirmationDialog("Add a document", isPresented: $chooserShowing,
-                            titleVisibility: .visible) {
-            // Both ways in — the button floating over the list and the one on the
-            // empty screen — ask this same question first, so neither of them is
-            // a shortcut past the other's answer.
-            Button("Blank pages\u{2026}") { showingBlankSheet = true }
-            Button("Open a file\u{2026}") { isPicking = true }
-            Button("Cancel", role: .cancel) {}
+        // Both ways in — the button floating over the list and the one on the
+        // empty screen — ask this same question first, so neither of them is
+        // a shortcut past the other's answer. A custom centered overlay
+        // rather than `.confirmationDialog`, matching Android's own rich
+        // AlertDialog: `.confirmationDialog` can't carry an icon or a
+        // subtitle line per button.
+        .overlay {
+            if chooserShowing {
+                NewDocumentChooser(
+                    onBlankPages: { chooserShowing = false; showingBlankSheet = true },
+                    onOpenFile: { chooserShowing = false; isPicking = true },
+                    onCancel: { chooserShowing = false }
+                )
+                .transition(.opacity)
+            }
         }
+        .animation(.default, value: chooserShowing)
         .sheet(isPresented: $isPicking) {
             DocumentPicker { url in
                 isPicking = false
                 openAny(url: url)
             }
+        }
+        .sheet(item: $sharingDocument) { sharing in
+            ShareSheet(items: [sharing.url])
         }
         .sheet(isPresented: $showingBlankSheet) {
             BlankDocumentSheet { pages, size, ruling, fill in
@@ -196,6 +209,23 @@ struct RootView: View {
         }
     }
 
+    /// Hand a library row's file to the system share sheet, matching
+    /// Android's own persistent per-row Share button.
+    ///
+    /// The security-scoped access `resolve()` starts is deliberately never
+    /// stopped here — the share sheet needs the file to stay reachable for
+    /// as long as it's up, and unlike opening a document there is no later
+    /// "close" moment to hang the matching `stop` off. The same trade a
+    /// library row already makes for reading; the OS reclaims every scope
+    /// this process holds when it backgrounds or terminates.
+    private func shareDocument(_ document: RecentDocument) {
+        guard let resolved = recents.resolve(document) else {
+            model.failure = "\(document.name) has moved or been deleted."
+            return
+        }
+        sharingDocument = SharingDocument(url: resolved.url)
+    }
+
     /// The other three ways in — the picker, `.onOpenURL`, and (PDF only)
     /// the `-openDocument` launch argument — hand over a fresh URL with no
     /// access taken yet, unlike a library row's already-resolved one, so
@@ -234,6 +264,12 @@ struct RootView: View {
 struct OpenedFile: Identifiable {
     let url: URL
     let alreadyScoped: Bool
+    var id: String { url.absoluteString }
+}
+
+/// A library row's file, on its way to the system share sheet.
+struct SharingDocument: Identifiable {
+    let url: URL
     var id: String { url.absoluteString }
 }
 

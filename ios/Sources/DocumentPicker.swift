@@ -14,14 +14,14 @@ struct DocumentPicker: UIViewControllerRepresentable {
     let onPick: (URL) -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // STEP/DXF/DWG have no system-registered UTType — `UTType(filenameExtension:)`
-        // synthesises a dynamic one conforming to `.data`, which is enough for
-        // the picker to offer files by that extension even though iOS has
-        // never heard of the format itself.
-        let modelAndDrawingTypes = ["step", "stp", "p21", "dxf", "dwg"]
-            .compactMap { UTType(filenameExtension: $0) }
+        // Unrestricted, matching Android's own picker (launched with mime
+        // filter "*/*") — a file this app doesn't recognise is routed to the
+        // PDF reader by `openAny`'s own extension switch and fails there with
+        // an ordinary error, which is the same "somebody's mistake, don't
+        // hide it" philosophy `RecentKind.of` itself already documents,
+        // rather than the picker silently refusing to offer the file at all.
         let picker = UIDocumentPickerViewController(
-            forOpeningContentTypes: [.pdf] + modelAndDrawingTypes,
+            forOpeningContentTypes: [.item],
             asCopy: false
         )
         picker.delegate = context.coordinator

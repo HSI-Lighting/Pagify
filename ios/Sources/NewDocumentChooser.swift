@@ -1,54 +1,67 @@
 import SwiftUI
 
-/// The two things `+` can mean.
-///
-/// Asked rather than assumed, because they are not variations of one action:
-/// opening a file you have and making paper you do not are different intentions
-/// that happen to start from the same button.
+/// "A document you have, or one that does not exist yet?" — the first
+/// question either way into the library asks, matching Android's own
+/// `NewDocumentChooser`: a centered card with two rich rows (icon, title, one
+/// line saying what the choice actually means), not a plain action-sheet
+/// list of labels. SwiftUI's `.confirmationDialog` cannot carry a subtitle or
+/// an icon per button, which is why this is a custom overlay rather than
+/// that.
 struct NewDocumentChooser: View {
-    let onBlankPages: () -> Void
-    let onOpenFile: () -> Void
-    let onDismiss: () -> Void
+    var onBlankPages: () -> Void
+    var onOpenFile: () -> Void
+    var onCancel: () -> Void
 
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("Add a document")
-                .font(.title3.weight(.semibold))
-                .padding(.bottom, 16)
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onCancel)
 
-            VStack(spacing: 10) {
-                Choice(icon: "doc.badge.plus",
-                       title: "Blank pages",
-                       detail: "Paper to write on: how many, what size and colour",
-                       action: onBlankPages)
-                Choice(icon: "folder",
-                       title: "Open a file",
-                       detail: "A PDF already on this phone or in your storage",
-                       action: onOpenFile)
-            }
+            VStack(spacing: 0) {
+                Text("Add a document")
+                    .font(.headline)
+                    .padding(.top, 20)
+                    .padding(.bottom, 14)
 
-            // No confirm button: both answers are in the list, and a dialog whose
-            // real choices sit above an OK invites people to press the OK.
-            HStack {
-                Spacer()
-                Button("Cancel") { onDismiss() }
+                VStack(spacing: 4) {
+                    ChooserRow(
+                        icon: "doc.badge.plus",
+                        title: "Blank pages",
+                        detail: "Paper to write on: how many, what size and colour",
+                        action: onBlankPages)
+                    ChooserRow(
+                        icon: "folder",
+                        title: "Open a file",
+                        detail: "PDF, DWG, DXF, STEP",
+                        action: onOpenFile)
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+
+                Divider()
+
+                Button("Cancel", action: onCancel)
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
             }
-            .padding(.top, 16)
+            .background(PagifyColor.surface(scheme), in: RoundedRectangle(cornerRadius: 20))
+            .frame(maxWidth: 340)
+            .padding(32)
+            .shadow(color: .black.opacity(0.25), radius: 20, y: 8)
         }
-        .padding(20)
-        .background(PagifyColor.background(scheme))
     }
 }
 
-private struct Choice: View {
+private struct ChooserRow: View {
+    @Environment(\.colorScheme) private var scheme
     let icon: String
     let title: String
     let detail: String
     let action: () -> Void
-
-    @Environment(\.colorScheme) private var scheme
 
     var body: some View {
         Button(action: action) {
@@ -56,21 +69,22 @@ private struct Choice: View {
                 Image(systemName: icon)
                     .font(.system(size: 20))
                     .foregroundStyle(PagifyColor.primary(scheme))
+                    .frame(width: 40, height: 40)
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(PagifyColor.onSurface(scheme))
+                        .foregroundStyle(.primary)
                     Text(detail)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(PagifyColor.onSurfaceVariant(scheme))
                         .multilineTextAlignment(.leading)
                 }
+
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(PagifyColor.surfaceVariant(scheme), in: RoundedRectangle(cornerRadius: 14))
+            .padding(10)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

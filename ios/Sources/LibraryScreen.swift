@@ -14,6 +14,7 @@ struct LibraryScreen: View {
     let documents: [RecentDocument]
     let onOpen: (RecentDocument) -> Void
     let onForget: (RecentDocument) -> Void
+    let onShare: (RecentDocument) -> Void
     /// Show the chooser. Both the button that floats over the list and the one
     /// on the empty screen ask this same question — "a document you have, or one
     /// that does not exist yet?" — so neither of them reaches the file picker
@@ -59,8 +60,9 @@ struct LibraryScreen: View {
                 Image(systemName: "plus")
                     .font(.system(size: 22, weight: .semibold))
                     .frame(width: 56, height: 56)
-                    .background(PagifyColor.primary(scheme),
-                                in: RoundedRectangle(cornerRadius: 17))
+                    // A circle, matching Android's own FloatingActionButton —
+                    // not the rounded square this used to be.
+                    .background(PagifyColor.primary(scheme), in: Circle())
                     .foregroundStyle(PagifyColor.onPrimary(scheme))
                     .shadow(color: .black.opacity(0.2), radius: 5, y: 2)
             }
@@ -74,23 +76,27 @@ struct LibraryScreen: View {
         ScrollView {
             LazyVStack(spacing: 10) {
                 ForEach(shown) { document in
-                    Button {
-                        onOpen(document)
-                    } label: {
-                        DocumentRow(document: document)
-                    }
-                    .buttonStyle(.plain)
-                    // Long press is the single path to forgetting a row, the way
-                    // it is on Android. A swipe action would be a second one,
-                    // and a destructive action with two doors is a destructive
-                    // action people find by accident.
-                    .contextMenu {
-                        Button(role: .destructive) {
-                            onForget(document)
-                        } label: {
-                            Label("Remove from library", systemImage: "trash")
+                    // A row is tappable to open it *and* carries its own Share
+                    // button — `.onTapGesture` on the row rather than wrapping
+                    // it in a `Button`, so the Share button underneath keeps
+                    // its own separate tap target instead of both firing at
+                    // once.
+                    DocumentRow(document: document, onShare: { onShare(document) })
+                        .contentShape(Rectangle())
+                        .onTapGesture { onOpen(document) }
+                        // Long press is the single path to forgetting a row,
+                        // the way it is on Android. A swipe action would be a
+                        // second one, and a destructive action with two doors
+                        // is a destructive action people find by accident.
+                        // Plain text, matching Android's own plain
+                        // `DropdownMenuItem` — not styled as destructive.
+                        .contextMenu {
+                            Button {
+                                onForget(document)
+                            } label: {
+                                Text("Remove from library")
+                            }
                         }
-                    }
                 }
             }
             .padding(.horizontal, 16)
@@ -164,10 +170,22 @@ struct LibraryScreen: View {
 private struct DocumentRow: View {
     @Environment(\.colorScheme) private var scheme
     let document: RecentDocument
+    let onShare: () -> Void
+
+    /// Matches Android's own per-kind glyph (`ViewInAr`/`Architecture`/
+    /// `Description`) rather than one icon for every row regardless of what
+    /// it opens.
+    private var kindIcon: String {
+        switch document.kind {
+        case .model: return "cube.fill"
+        case .drawing: return "pencil.and.ruler.fill"
+        case .document: return "doc.text"
+        }
+    }
 
     var body: some View {
         HStack(spacing: 14) {
-            Image(systemName: "doc.text")
+            Image(systemName: kindIcon)
                 .font(.system(size: 20))
                 .foregroundStyle(PagifyColor.onSurfaceVariant(scheme))
                 .frame(width: 46, height: 46)
@@ -193,6 +211,18 @@ private struct DocumentRow: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            // A persistent Share control, matching Android's own row exactly
+            // — independent of the row's own tap-to-open and long-press-to-
+            // forget, its own tap target entirely.
+            Button(action: onShare) {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.system(size: 17))
+                    .foregroundStyle(PagifyColor.onSurfaceVariant(scheme))
+                    .frame(width: 32, height: 32)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Share \(document.name)")
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)

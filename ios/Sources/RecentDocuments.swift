@@ -144,15 +144,24 @@ private let openedAtFormatter: DateFormatter = {
 /// "Oct 4, 2025  ·  12 pages  ·  2.4 MB", with any part dropped when it is not
 /// known — and the whole line dropped by the caller when nothing is.
 func recentSubtitle(_ document: RecentDocument) -> String {
-    [
-        formatOpenedAt(document.openedAtMillis),
-        // A page count means nothing for a model or a drawing — its own
-        // viewer already gives a much more specific line (face count,
-        // shape/layer count) the moment it's open — so the library row
-        // just doesn't claim a count the field was never measuring.
-        document.kind == .document && document.pageCount > 0
+    // A page count means nothing for a model or a drawing — its own viewer
+    // already gives a much more specific line (face count, shape/layer
+    // count) the moment it's open — so this middle segment names the kind
+    // instead, matching Android's own subtitle exactly rather than leaving
+    // the segment out.
+    let middle: String
+    switch document.kind {
+    case .model: middle = "3D model"
+    case .drawing: middle = "Drawing"
+    case .document:
+        middle = document.pageCount > 0
             ? "\(document.pageCount) page\(document.pageCount == 1 ? "" : "s")"
-            : "",
+            : ""
+    }
+
+    return [
+        formatOpenedAt(document.openedAtMillis),
+        middle,
         formatFileSize(document.sizeBytes),
     ]
     .filter { !$0.isEmpty }
