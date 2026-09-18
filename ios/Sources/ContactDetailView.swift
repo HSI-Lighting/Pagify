@@ -72,6 +72,10 @@ struct ContactDetailView: View {
                                 // `to_vcard` falls back to the raw text
                                 // whenever `normalised` is empty.
                                 .onChange(of: phone.raw) { _, _ in phone.normalised = "" }
+                            // Matches Android's own tap-to-call: the point of
+                            // having somebody's number in your pocket is
+                            // ringing them, not copying it into another app.
+                            callButton(phone.normalised.isEmpty ? phone.raw : phone.normalised)
                         }
                     }
                     .onDelete { contact.phones.remove(atOffsets: $0) }
@@ -84,9 +88,12 @@ struct ContactDetailView: View {
 
                 Section("Emails") {
                     ForEach($contact.emails.indices, id: \.self) { index in
-                        TextField("Email", text: $contact.emails[index])
-                            .keyboardType(.emailAddress)
-                            .textInputAutocapitalization(.never)
+                        HStack {
+                            TextField("Email", text: $contact.emails[index])
+                                .keyboardType(.emailAddress)
+                                .textInputAutocapitalization(.never)
+                            emailButton(contact.emails[index])
+                        }
                     }
                     .onDelete { contact.emails.remove(atOffsets: $0) }
                     Button {
@@ -98,9 +105,12 @@ struct ContactDetailView: View {
 
                 Section("Websites") {
                     ForEach($contact.urls.indices, id: \.self) { index in
-                        TextField("Website", text: $contact.urls[index])
-                            .keyboardType(.URL)
-                            .textInputAutocapitalization(.never)
+                        HStack {
+                            TextField("Website", text: $contact.urls[index])
+                                .keyboardType(.URL)
+                                .textInputAutocapitalization(.never)
+                            urlButton(contact.urls[index])
+                        }
                     }
                     .onDelete { contact.urls.remove(atOffsets: $0) }
                     Button {
@@ -371,6 +381,55 @@ struct ContactDetailView: View {
                     .buttonStyle(.plain)
                 }
             }
+        }
+    }
+
+    /// Nothing here is worth crashing over, or even alerting about — a
+    /// device with no dialer, no mail app or no browser is unusual but not
+    /// broken, and the contact is still on screen either way. Matches
+    /// Android's own `runCatching { context.startActivity(intent) }`.
+    private func open(_ url: URL?) {
+        guard let url, UIApplication.shared.canOpenURL(url) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    @ViewBuilder
+    private func callButton(_ number: String) -> some View {
+        if !number.isEmpty {
+            Button {
+                open(URL(string: "tel:\(number)"))
+            } label: {
+                Image(systemName: "phone.fill")
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+
+    @ViewBuilder
+    private func emailButton(_ address: String) -> some View {
+        if !address.isEmpty {
+            Button {
+                open(URL(string: "mailto:\(address)"))
+            } label: {
+                Image(systemName: "envelope.fill")
+            }
+            .buttonStyle(.borderless)
+        }
+    }
+
+    @ViewBuilder
+    private func urlButton(_ website: String) -> some View {
+        if !website.isEmpty {
+            Button {
+                // Cards print "www.example.com" far more often than they
+                // print a scheme, and a URL without one opens nothing at
+                // all — matches Android's own prepend exactly.
+                let address = website.contains("://") ? website : "https://\(website)"
+                open(URL(string: address))
+            } label: {
+                Image(systemName: "safari.fill")
+            }
+            .buttonStyle(.borderless)
         }
     }
 

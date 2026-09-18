@@ -30,6 +30,11 @@ struct GroupsListView: View {
     /// re-run `VCardExport.stamping` on every re-render the sheet is up for
     /// and bump every member's `exportCount` on its own.
     @State private var exportingGroup: VCardExport?
+    /// Renaming and deleting, matching Android's own per-row menu exactly —
+    /// both need a moment's confirmation Delete didn't have before.
+    @State private var renamingGroup: ContactGroup?
+    @State private var renamedName = ""
+    @State private var deletingGroup: ContactGroup?
 
     private var ungroupedCount: Int { allContacts.filter { $0.groups.isEmpty }.count }
 
@@ -72,12 +77,18 @@ struct GroupsListView: View {
                         // more closely than a swipe would have anyway.
                         Menu {
                             Button {
+                                renamedName = group.name
+                                renamingGroup = group
+                            } label: {
+                                Label("Rename", systemImage: "pencil")
+                            }
+                            Button {
                                 exportingGroup = .stamping(group.contacts, group: group)
                             } label: {
                                 Label("Export", systemImage: "square.and.arrow.up")
                             }
                             Button(role: .destructive) {
-                                modelContext.delete(group)
+                                deletingGroup = group
                             } label: {
                                 Label("Delete", systemImage: "trash")
                             }
@@ -117,6 +128,37 @@ struct GroupsListView: View {
                 onGroupCreated()
             }
         }
+        .alert("Rename group", isPresented: Binding(
+            get: { renamingGroup != nil },
+            set: { if !$0 { renamingGroup = nil } }
+        )) {
+            TextField("Name", text: $renamedName)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") {
+                let trimmed = renamedName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, let group = renamingGroup else { return }
+                group.name = trimmed
+            }
+        }
+        // Matches Android's `ConfirmGroupDelete` exactly — one dialog,
+        // wherever the delete was asked for, so the wording never drifts
+        // between two copies of the same confirmation.
+        .alert(
+            "Delete \(deletingGroup?.name ?? "")?",
+            isPresented: Binding(
+                get: { deletingGroup != nil },
+                set: { if !$0 { deletingGroup = nil } }
+            )
+        ) {
+            Button("Keep", role: .cancel) {}
+            Button("Delete the group") {
+                if let group = deletingGroup { modelContext.delete(group) }
+                deletingGroup = nil
+            }
+        } message: {
+            Text("The group is removed. Its contacts stay in Pagify — they keep any "
+                 + "other groups they are in, and move to Ungrouped if this was their only one.")
+        }
         .sheet(item: $exportingGroup) { export in
             if let url = export.fileURL {
                 ShareSheet(items: [url])
@@ -140,8 +182,12 @@ private extension ContactGroup {
 struct GroupDetailView: View {
     @Bindable var group: ContactGroup
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.dismiss) private var dismiss
 
     @State private var searchText = ""
+    @State private var renaming = false
+    @State private var renamedName = ""
+    @State private var confirmingDelete = false
     /// Scoped to this group's own members, not the whole store — matches
     /// Android's own `pool = openGroup?.let(inGroup) ?: contacts`.
     /// `Contact.searchable` is already lowercased, so only the query needs
@@ -176,11 +222,28 @@ struct GroupDetailView: View {
         .searchable(text: $searchText, prompt: "Search \(group.name)…")
         .navigationTitle(group.name)
         .toolbar {
+            // Matches Android's in-group `Header` icons exactly: rename,
+            // export, delete, in that order.
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    renamedName = group.name
+                    renaming = true
+                } label: {
+                    Label("Rename this group", systemImage: "pencil")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     exportingGroup = .stamping(group.contacts, group: group)
                 } label: {
                     Label("Export", systemImage: "square.and.arrow.up")
+                }
+            }
+            ToolbarItem(placement: .primaryAction) {
+                Button(role: .destructive) {
+                    confirmingDelete = true
+                } label: {
+                    Label("Delete this group", systemImage: "trash")
                 }
             }
         }
@@ -194,6 +257,25 @@ struct GroupDetailView: View {
             if let url = export.fileURL {
                 ShareSheet(items: [url])
             }
+        }
+        .alert("Rename group", isPresented: $renaming) {
+            TextField("Name", text: $renamedName)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") {
+                let trimmed = renamedName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return }
+                group.name = trimmed
+            }
+        }
+        .alert("Delete \(group.name)?", isPresented: $confirmingDelete) {
+            Button("Keep", role: .cancel) {}
+            Button("Delete the group") {
+                modelContext.delete(group)
+                dismiss()
+            }
+        } message: {
+            Text("The group is removed. Its contacts stay in Pagify — they keep any "
+                 + "other groups they are in, and move to Ungrouped if this was their only one.")
         }
     }
 }
@@ -286,7 +368,8 @@ struct ContactRow: View {
         Button {
             opening = true
         } label: {
-            HStack(alignment: .top) {
+            HStack(alignment: .top, spacing: 14) {
+                ContactAvatar(name: contact.name)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(contact.name.isEmpty ? "(no name)" : contact.name)
                         .font(.headline)
@@ -294,6 +377,10 @@ struct ContactRow: View {
                     if !contact.company.isEmpty {
                         Text(contact.company).font(.subheadline).foregroundStyle(.secondary)
                     }
+                    Text(contact.exportedAt.map { "Exported \($0.formatted(.dateTime.day().month().year()))" }
+                         ?? "Not exported")
+                        .font(.caption2)
+                        .foregroundStyle(contact.exportedAt == nil ? .secondary : Color.accentColor)
                 }
                 Spacer()
                 StageBadge(stage: contact.stage)

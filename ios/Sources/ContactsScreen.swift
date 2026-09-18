@@ -22,6 +22,15 @@ struct ContactsScreen: View {
     @State private var pickerShowing = false
     @State private var isProcessing = false
     @State private var lastResult: ScanResult?
+    /// Matches Android's `choosingSource`/`SourceChooser` — camera vs.
+    /// gallery, asked from the FAB rather than buried in a toolbar menu.
+    @State private var choosingSource = false
+    /// The "Group" chip's own creation flow on the flat list — matches
+    /// Android's `creatingGroup`, which is drawn regardless of which of
+    /// All/Groups is showing. `GroupsListView` already has its own copy of
+    /// this same alert for the Groups screen; this is the All-screen one.
+    @State private var creatingGroup = false
+    @State private var newGroupName = ""
 
     /// Cards still waiting for a look, one photo's worth at a time — a photo
     /// of several cards side by side reviews them one after another rather
@@ -108,13 +117,25 @@ struct ContactsScreen: View {
                                 onDelete: { confirmingBulkDelete = true }
                             )
                         }
+                        // Matches Android's `AssistChip` for "Group": drawn
+                        // unconditionally on the main screen, not only once
+                        // switched to the Groups view — the control that
+                        // creates the first group was otherwise unreachable
+                        // until one already existed.
+                        Button {
+                            newGroupName = ""
+                            creatingGroup = true
+                        } label: {
+                            Label("Group", systemImage: "plus")
+                        }
                         ForEach(shown) { contact in
                             let isPicked = pickedContacts.contains(contact.persistentModelID)
-                            HStack(alignment: .top) {
+                            HStack(alignment: .top, spacing: 14) {
                                 if picking {
                                     Image(systemName: isPicked ? "checkmark.circle.fill" : "circle")
                                         .foregroundStyle(isPicked ? Color.accentColor : .secondary)
                                 }
+                                ContactAvatar(name: contact.name)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(contact.name.isEmpty ? "(no name)" : contact.name)
                                         .font(.headline)
@@ -129,6 +150,14 @@ struct ContactsScreen: View {
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
                                     }
+                                    // The export date, on the row rather than
+                                    // hidden in the detail — matches Android's
+                                    // own comment: "it is the thing this
+                                    // feature is for."
+                                    Text(contact.exportedAt.map { "Exported \($0.formatted(.dateTime.day().month().year()))" }
+                                         ?? "Not exported")
+                                        .font(.caption2)
+                                        .foregroundStyle(contact.exportedAt == nil ? .secondary : Color.accentColor)
                                 }
                                 Spacer()
                                 StageBadge(stage: contact.stage)
@@ -178,6 +207,36 @@ struct ContactsScreen: View {
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
                 }
             }
+            // Matches Android's `ExtendedFloatingActionButton`: always on
+            // screen, bottom-trailing, the primary way a card gets scanned.
+            .overlay(alignment: .bottomTrailing) {
+                if !picking {
+                    Button {
+                        choosingSource = true
+                    } label: {
+                        Label("Add a card", systemImage: "person.crop.circle.badge.plus")
+                            .font(.body.weight(.semibold))
+                            .padding(.horizontal, 20)
+                            .padding(.vertical, 14)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .clipShape(Capsule())
+                    .shadow(radius: 4, y: 2)
+                    .padding(20)
+                    .disabled(isProcessing)
+                }
+            }
+            .overlay {
+                if choosingSource {
+                    SourceChooser(
+                        onCamera: { choosingSource = false; requestCamera() },
+                        onGallery: { choosingSource = false; pickerShowing = true },
+                        onCancel: { choosingSource = false }
+                    )
+                    .transition(.opacity)
+                }
+            }
+            .animation(.default, value: choosingSource)
             // Matches Android's own gesture exactly — anywhere on the list,
             // not edge-triggered. An earlier version here required the
             // touch to *start* within 24pt of the screen edge, invented
@@ -217,26 +276,18 @@ struct ContactsScreen: View {
             )
             .navigationTitle("Contacts")
             .toolbar {
+                // Take Photo/Choose from Library moved to the FAB below,
+                // matching Android's own split: its top bar has no add
+                // affordance at all, only the FAB. "Add Manually" has no
+                // Android counterpart (Android's `ContactEditor` only ever
+                // corrects an existing contact) — kept as an intentional
+                // iOS-only addition, the same call already made for
+                // Stage/Meetings/Follow-Up.
                 ToolbarItem(placement: .primaryAction) {
-                    Menu {
-                        Button {
-                            requestCamera()
-                        } label: {
-                            Label("Take Photo", systemImage: "camera")
-                        }
-                        Button {
-                            pickerShowing = true
-                        } label: {
-                            Label("Choose from Library", systemImage: "photo.on.rectangle")
-                        }
-                        Divider()
-                        Button {
-                            addingManually = Contact()
-                        } label: {
-                            Label("Add Manually", systemImage: "square.and.pencil")
-                        }
+                    Button {
+                        addingManually = Contact()
                     } label: {
-                        Label("Add Contact", systemImage: "plus")
+                        Label("Add Manually", systemImage: "square.and.pencil")
                     }
                     .disabled(isProcessing)
                 }
@@ -328,6 +379,16 @@ struct ContactsScreen: View {
             .sheet(item: $exportingSelected, onDismiss: { pickedContacts = [] }) { export in
                 if let url = export.fileURL {
                     ShareSheet(items: [url])
+                }
+            }
+            .alert("New Group", isPresented: $creatingGroup) {
+                TextField("Name", text: $newGroupName)
+                Button("Cancel", role: .cancel) {}
+                Button("Create") {
+                    let trimmed = newGroupName.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty else { return }
+                    modelContext.insert(ContactGroup(name: trimmed))
+                    showingGroupsView = true
                 }
             }
             .alert("No Camera", isPresented: $cameraUnavailable) {
@@ -487,6 +548,93 @@ private extension Contact {
         phones = card.phones
         emails = card.emails.map(\.value)
         urls = card.urls.map(\.value)
+    }
+}
+
+/// A 44pt circular initial, matching Android's own avatar exactly — the
+/// first letter of the name, uppercased, on a tinted circle. Not `private`:
+/// shared with `GroupsView.swift`'s own `ContactRow`.
+struct ContactAvatar: View {
+    let name: String
+
+    var body: some View {
+        Circle()
+            .fill(Color.accentColor.opacity(0.2))
+            .frame(width: 44, height: 44)
+            .overlay {
+                Text(name.first.map(String.init)?.uppercased() ?? "?")
+                    .font(.title3.weight(.medium))
+                    .foregroundStyle(Color.accentColor)
+            }
+    }
+}
+
+/// "Where does the photograph come from?" — matches Android's own
+/// `SourceChooser`: a centered card with icon+label rows, not a plain
+/// action-sheet list `.confirmationDialog` cannot give an icon to.
+private struct SourceChooser: View {
+    var onCamera: () -> Void
+    var onGallery: () -> Void
+    var onCancel: () -> Void
+
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+                .onTapGesture(perform: onCancel)
+
+            VStack(spacing: 0) {
+                Text("Add a business card")
+                    .font(.headline)
+                    .padding(.top, 20)
+                    .padding(.bottom, 14)
+
+                VStack(spacing: 4) {
+                    SourceRow(icon: "camera", title: "Take a photo", action: onCamera)
+                    SourceRow(icon: "photo.on.rectangle", title: "Choose an image", action: onGallery)
+                }
+                .padding(.horizontal, 8)
+                .padding(.bottom, 8)
+
+                Divider()
+
+                Button("Cancel", action: onCancel)
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+            }
+            .background(PagifyColor.surface(scheme), in: RoundedRectangle(cornerRadius: 20))
+            .frame(maxWidth: 340)
+            .padding(32)
+            .shadow(color: .black.opacity(0.25), radius: 20, y: 8)
+        }
+    }
+}
+
+private struct SourceRow: View {
+    @Environment(\.colorScheme) private var scheme
+    let icon: String
+    let title: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 14) {
+                Image(systemName: icon)
+                    .font(.system(size: 20))
+                    .foregroundStyle(PagifyColor.primary(scheme))
+                    .frame(width: 40, height: 40)
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Spacer(minLength: 0)
+            }
+            .padding(10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
