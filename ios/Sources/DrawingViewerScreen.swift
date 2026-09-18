@@ -24,9 +24,6 @@ struct DrawingViewerScreen: View {
     @State private var hasFitted = false
     @State private var fitSettleTask: Task<Void, Never>?
     @State private var lastRenderSize: CGSize = .zero
-    /// As in `ModelViewerScreen`: 1x while a finger is down, the display's
-    /// real scale once it lifts.
-    @State private var gesturing = false
 
     var body: some View {
         NavigationStack {
@@ -69,7 +66,7 @@ struct DrawingViewerScreen: View {
             GeometryReader { geo in
                 ZStack(alignment: .topLeading) {
                     if let image {
-                        Image(decorative: image, scale: image.width == Int(geo.size.width) ? 1 : UIScreen.main.scale)
+                        Image(decorative: image, scale: UIScreen.main.scale)
                             .resizable()
                             .frame(width: geo.size.width, height: geo.size.height)
                     }
@@ -81,31 +78,26 @@ struct DrawingViewerScreen: View {
                             // distinguishes finger count for a plain drag,
                             // only for the pinch that rides along with it).
                             guard let document else { return }
-                            gesturing = true
-                            let width = max(geo.size.width, 1)
-                            let height = max(geo.size.height, 1)
-                            document.pan(across: dx / width, down: dy / height,
-                                        width: Int(width), height: Int(height))
-                            render(document: document, size: geo.size, fullRes: false)
+                            let (width, height) = pixelSize(of: geo.size)
+                            document.pan(across: dx / max(geo.size.width, 1), down: dy / max(geo.size.height, 1),
+                                        width: width, height: height)
+                            render(document: document, size: geo.size)
                         },
                         onPinch: { ratio, midpoint in
                             guard let document else { return }
-                            gesturing = true
-                            document.zoom(by: ratio, atX: midpoint.x, atY: midpoint.y,
-                                         width: Int(geo.size.width), height: Int(geo.size.height))
-                            render(document: document, size: geo.size, fullRes: false)
+                            let (width, height) = pixelSize(of: geo.size)
+                            document.zoom(by: ratio, atX: midpoint.x * pixelScale, atY: midpoint.y * pixelScale,
+                                         width: width, height: height)
+                            render(document: document, size: geo.size)
                         },
                         onTap: { point in
                             guard measuring, let document else { return }
+                            let (width, height) = pixelSize(of: geo.size)
                             measurement = document.measure(
-                                atX: point.x, atY: point.y,
-                                width: Int(geo.size.width), height: Int(geo.size.height)
+                                atX: point.x * pixelScale, atY: point.y * pixelScale,
+                                width: width, height: height
                             )
-                            render(document: document, size: geo.size, fullRes: true)
-                        },
-                        onGestureEnded: {
-                            gesturing = false
-                            if let document { render(document: document, size: geo.size, fullRes: true) }
+                            render(document: document, size: geo.size)
                         }
                     )
                 }
@@ -121,7 +113,7 @@ struct DrawingViewerScreen: View {
                     // very first, settled layout gets to fit — see
                     // `scheduleInitialFit`.
                     if hasFitted {
-                        if let document { render(document: document, size: newSize, fullRes: true) }
+                        if let document { render(document: document, size: newSize) }
                     } else {
                         scheduleInitialFit(size: newSize)
                     }
@@ -165,8 +157,9 @@ struct DrawingViewerScreen: View {
                     .clipShape(Circle())
 
                     Button {
-                        document?.fit(width: Int(lastRenderSize.width), height: Int(lastRenderSize.height))
-                        if let document { render(document: document, size: lastRenderSize, fullRes: true) }
+                        let (width, height) = pixelSize(of: lastRenderSize)
+                        document?.fit(width: width, height: height)
+                        if let document { render(document: document, size: lastRenderSize) }
                     } label: {
                         Label("Fit", systemImage: "arrow.up.left.and.arrow.down.right")
                             .labelStyle(.iconOnly)
@@ -193,7 +186,7 @@ struct DrawingViewerScreen: View {
                         set: { visible in
                             layers[index] = DrawingLayer(name: layer.name, visible: visible, colour: layer.colour)
                             document?.showLayer(at: index, visible: visible)
-                            if let document { render(document: document, size: lastRenderSize, fullRes: true) }
+                            if let document { render(document: document, size: lastRenderSize) }
                         }
                     )) {
                         Text(layer.name)
@@ -227,13 +220,11 @@ struct DrawingViewerScreen: View {
         }
     }
 
-    private func render(document: DrawingDocument?, size: CGSize, fullRes: Bool) {
+    private func render(document: DrawingDocument?, size: CGSize) {
         guard let document else { return }
         lastRenderSize = size
         guard size.width > 0, size.height > 0 else { return }
-        let scale = fullRes ? UIScreen.main.scale : 1
-        let width = max(1, Int(size.width * scale))
-        let height = max(1, Int(size.height * scale))
+        let (width, height) = pixelSize(of: size)
         image = try? document.render(width: width, height: height)
     }
 
@@ -252,8 +243,31 @@ struct DrawingViewerScreen: View {
             try? await Task.sleep(nanoseconds: 200_000_000)
             guard !Task.isCancelled, !hasFitted else { return }
             hasFitted = true
-            document?.fit(width: Int(size.width), height: Int(size.height))
-            render(document: document, size: size, fullRes: true)
+            let (width, height) = pixelSize(of: size)
+            document?.fit(width: width, height: height)
+            render(document: document, size: size)
         }
+    }
+
+    /// One physical pixel per unit of `view.scale` — not one point. Every
+    /// Rust entry point here (`fit`/`pan`/`zoom_about`/`measure_at`/`draw`)
+    /// documents its `width`/`height`/`at_x`/`at_y` as **pixels**, and
+    /// `draw`'s own doc spells out why that word is load-bearing: "a sheet
+    /// does not reframe itself when the canvas grows" — its scale is a fixed
+    /// pixels-per-drawing-unit ratio, not derived from whatever buffer it is
+    /// asked to fill. Calibrating that ratio with `fit()` in SwiftUI's own
+    /// points, then rendering a `points × UIScreen.scale` bitmap through the
+    /// very same ratio, was exactly this bug: the picture that came back
+    /// showed `UIScreen.scale` times more of the drawing than `fit()` had
+    /// framed — a crop stretched to fill the screen, not a scale of it, and
+    /// on release from a gesture (full-res render, real device pixels) it
+    /// visibly jumped relative to mid-gesture (proxy render, plain points).
+    /// Every call site below converts through this one point instead, so
+    /// `fit`, `pan`, `zoom`, `measure` and `render` all calibrate and read
+    /// the identical pixels-per-unit ratio.
+    private var pixelScale: CGFloat { UIScreen.main.scale }
+
+    private func pixelSize(of size: CGSize) -> (width: Int, height: Int) {
+        (max(1, Int(size.width * pixelScale)), max(1, Int(size.height * pixelScale)))
     }
 }
