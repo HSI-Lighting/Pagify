@@ -94,7 +94,13 @@ final class DrawingDocument: @unchecked Sendable {
     /// expands a hatch's boundary and pattern into strokes at draw time,
     /// scaled to the current zoom, so there's no separate call to make for
     /// it.
-    func render(width: Int, height: Int) throws -> CGImage {
+    ///
+    /// `by` is how much larger `width`/`height` are than the view `fit`,
+    /// `pan` and `zoom` were last called with — 1.0 for the live, on-screen
+    /// frame; a capture asks for a bigger bitmap through this same call, at
+    /// a `by` matching how much bigger it is. Not optional the way it looks
+    /// — see `pagify_render_drawing_into`'s own doc.
+    func render(width: Int, height: Int, by: Double = 1) throws -> CGImage {
         let bitmapInfo = CGImageAlphaInfo.premultipliedLast.rawValue
             | CGBitmapInfo.byteOrder32Big.rawValue
 
@@ -114,6 +120,7 @@ final class DrawingDocument: @unchecked Sendable {
             handle,
             UInt32(width),
             UInt32(height),
+            Float(by),
             pixels.assumingMemoryBound(to: UInt8.self),
             context.bytesPerRow
         )

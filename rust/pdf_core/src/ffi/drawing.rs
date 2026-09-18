@@ -233,6 +233,16 @@ pub extern "C" fn pagify_clear_drawing_measure(handle: i64) -> i32 {
 /// strokes at draw time, scaled to the current zoom, so it is simply part of
 /// what this call already draws.
 ///
+/// `by` is how much larger this bitmap is than the view `fit`/`pan`/`zoom`
+/// were last called with — 1.0 for an ordinary live frame, greater for a
+/// capture rendered above screen resolution. **This is not optional the way
+/// it looks.** A sheet's `view.scale` is pixels per drawing unit and does
+/// not derive from the bitmap it is asked to fill (see
+/// `DrawingSession::draw_scaled`'s own doc) — passed 1.0 for a bitmap that
+/// is actually larger, it shows more of the drawing rather than the same
+/// part of it more sharply, which is a crop, not a capture of what was on
+/// screen.
+///
 /// # Safety
 /// `pixels` must be writable for `stride * height` bytes and stay valid for
 /// the call. `stride` must be at least `width * 4`.
@@ -241,6 +251,7 @@ pub unsafe extern "C" fn pagify_render_drawing_into(
     handle: i64,
     width: u32,
     height: u32,
+    by: f32,
     pixels: *mut u8,
     stride: usize,
 ) -> i32 {
@@ -264,7 +275,7 @@ pub unsafe extern "C" fn pagify_render_drawing_into(
         let out = unsafe { std::slice::from_raw_parts_mut(pixels, len) };
 
         with_session(handle, |session| {
-            let pixmap = session.draw(width, height);
+            let pixmap = session.draw_scaled(width, height, by as f64);
             let data = pixmap.data();
             for row in 0..height as usize {
                 let src = &data[row * row_bytes..(row + 1) * row_bytes];

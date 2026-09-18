@@ -1023,6 +1023,64 @@ pub unsafe extern "C" fn pagify_capture_viewport(
     })
 }
 
+/// Burn marks into an RGBA8 buffer that has no document behind it — a
+/// capture taken from the STEP model or DXF/DWG drawing viewers, where
+/// [`pagify_capture_region`]/[`pagify_capture_viewport`] do not apply since
+/// there is no page to re-render a region from.
+///
+/// The same [`render::markup::composite`] a page capture already uses:
+/// marks are in capture-local points, top-left origin (see that module's own
+/// doc for why they are not in pixels), scaled onto the buffer by `scale`
+/// exactly as a page capture's are. No document, no handle, no lock — pure
+/// pixels in, marks drawn on, pixels out — so this can run the moment a
+/// capture picture exists, on any thread.
+///
+/// # Safety
+/// `pixels` must be readable and writable for `stride * height` bytes for
+/// the call. `stride` must be at least `width * 4`. `markup_json` must be
+/// NUL-terminated or null.
+#[no_mangle]
+pub unsafe extern "C" fn pagify_composite_markup_into(
+    width: u32,
+    height: u32,
+    pixels: *mut u8,
+    stride: usize,
+    scale: f32,
+    markup_json: *const c_char,
+) -> i32 {
+    guard(PAGIFY_ERROR, || {
+        if pixels.is_null() {
+            return Err(PdfError::InvalidBitmap("pixels must not be null".into()));
+        }
+        let marks: Vec<Markup> = unsafe { optional_json(markup_json, "markup") }?;
+        let row_bytes = (width as usize).checked_mul(4).ok_or_else(|| {
+            PdfError::InvalidBitmap(format!("width {width} overflows a row"))
+        })?;
+        if stride < row_bytes {
+            return Err(PdfError::InvalidBitmap(format!(
+                "stride {stride} is narrower than a {width}px row"
+            )));
+        }
+        let len = stride.checked_mul(height as usize).ok_or_else(|| {
+            PdfError::InvalidBitmap(format!("{width}x{height} overflows a buffer"))
+        })?;
+        // Safety: the caller's contract above is that this many bytes are
+        // readable and writable, and the slice does not outlive the call.
+        let out = unsafe { std::slice::from_raw_parts_mut(pixels, len) };
+
+        let mut bitmap = render::Bitmap {
+            width,
+            height,
+            stride,
+            order: PixelOrder::Rgba,
+            data: out.to_vec(),
+        };
+        render::markup::composite(&mut bitmap, &marks, scale)?;
+        out.copy_from_slice(&bitmap.data);
+        Ok(PAGIFY_OK)
+    })
+}
+
 /// Turn a drawn stroke into a shape, or say it is not one.
 ///
 /// Pure geometry — no document, no handle, no lock — which is why it is safe to

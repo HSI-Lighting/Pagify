@@ -148,6 +148,17 @@ PagifyBuffer pagify_capture_viewport(int64_t handle, const char *tiles_json, flo
                                      const char *format, int32_t quality,
                                      const char *markup_json, const char *mask_json);
 
+/// Burn marks into an RGBA8 buffer with no document behind it — a capture
+/// taken from the STEP model or DXF/DWG drawing viewers, where
+/// pagify_capture_region/pagify_capture_viewport do not apply since there is
+/// no page to re-render a region from. Marks are in capture-local points,
+/// top-left origin, scaled onto the buffer by `scale` exactly as a page
+/// capture's are. Pure pixels in, marks drawn on, pixels out: no handle, no
+/// lock, safe to call on any thread the moment a capture picture exists.
+/// Same buffer contract as pagify_render_page_into. markup_json may be NULL.
+int32_t pagify_composite_markup_into(uint32_t width, uint32_t height, uint8_t *pixels,
+                                     size_t stride, float scale, const char *markup_json);
+
 char *pagify_recognise_stroke(const char *points_json);
 
 // -- cache --------------------------------------------------------------------
@@ -227,9 +238,16 @@ char *pagify_measure_drawing_at(int64_t handle, float at_x, float at_y,
                                 uint32_t width, uint32_t height);
 int32_t pagify_clear_drawing_measure(int64_t handle);
 
-/// Same contract as pagify_render_page_into/pagify_render_model_into.
+/// Same contract as pagify_render_page_into/pagify_render_model_into. `by` is
+/// how much larger this bitmap is than the view fit/pan/zoom were last called
+/// with — 1.0 for an ordinary live frame, greater for a capture rendered
+/// above screen resolution. Not optional the way it looks: a sheet's scale is
+/// pixels per drawing unit and does not derive from the bitmap it fills, so
+/// passed 1.0 for a bitmap that is actually larger this shows more of the
+/// drawing rather than the same part of it more sharply — a crop, not a
+/// capture of what was on screen.
 int32_t pagify_render_drawing_into(int64_t handle, uint32_t width, uint32_t height,
-                                   uint8_t *pixels, size_t stride);
+                                   float by, uint8_t *pixels, size_t stride);
 
 // -- contacts / vCard ----------------------------------------------------------
 

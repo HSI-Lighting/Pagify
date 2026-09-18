@@ -25,6 +25,15 @@ struct DrawingViewerScreen: View {
     @State private var fitSettleTask: Task<Void, Never>?
     @State private var lastRenderSize: CGSize = .zero
 
+    // ---- capture ------------------------------------------------------------
+    @State private var framing = false
+    @State private var lasso = false
+    @State private var captureBox: PageRect?
+    @State private var captureRing: [CGPoint] = []
+    @State private var capture: CapturePreview?
+    @State private var capturedFile: CapturedFile?
+    @State private var isCapturing = false
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -52,6 +61,22 @@ struct DrawingViewerScreen: View {
         }
         .preferredColorScheme(.dark)
         .task { open() }
+        .fullScreenCover(item: $capture) { taken in
+            if let document {
+                CaptureEditor(
+                    capture: taken,
+                    readerBackground: MarkColor(argb: drawingBackdropARGB),
+                    render: { request in await renderCapture(request, document: document) },
+                    export: { action, request, marks in
+                        await exportCapture(action, request: request, marks: marks, document: document)
+                    },
+                    onDismiss: { capture = nil }
+                )
+            }
+        }
+        .sheet(item: $capturedFile) { file in
+            ShareSheet(items: [file.url])
+        }
     }
 
     @ViewBuilder
@@ -100,6 +125,9 @@ struct DrawingViewerScreen: View {
                             render(document: document, size: geo.size)
                         }
                     )
+                    .captureOverlay(active: framing, lasso: lasso) { box, ring in
+                        takeRegion(box, ring: ring)
+                    }
                 }
                 .onAppear {
                     scheduleInitialFit(size: geo.size)
@@ -166,6 +194,36 @@ struct DrawingViewerScreen: View {
                             .padding(14)
                     }
                     .buttonStyle(.borderedProminent)
+                    .clipShape(Circle())
+
+                    // Its own slot rather than a shape hidden behind a press on
+                    // the one beside it, matching the reader's own ribbon: a
+                    // box for most things, a ring for the detail a box can't
+                    // take without its neighbours.
+                    Button {
+                        let holding = framing && !lasso
+                        lasso = false
+                        framing = !holding
+                    } label: {
+                        Label("Snapshot", systemImage: "viewfinder")
+                            .labelStyle(.iconOnly)
+                            .padding(14)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(framing && !lasso ? .orange : .accentColor)
+                    .clipShape(Circle())
+
+                    Button {
+                        let holding = framing && lasso
+                        lasso = true
+                        framing = !holding
+                    } label: {
+                        Label("Draw around", systemImage: "scribble.variable")
+                            .labelStyle(.iconOnly)
+                            .padding(14)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(framing && lasso ? .orange : .accentColor)
                     .clipShape(Circle())
                 }
                 .padding(.bottom, 24)
@@ -269,5 +327,94 @@ struct DrawingViewerScreen: View {
 
     private func pixelSize(of size: CGSize) -> (width: Int, height: Int) {
         (max(1, Int(size.width * pixelScale)), max(1, Int(size.height * pixelScale)))
+    }
+
+    // ---- capture --------------------------------------------------------------
+
+    /// The dark ground a drawing's own capture fills where the lasso left
+    /// nothing — matches `body`'s own backdrop, `#181A1E`.
+    private var drawingBackdropARGB: UInt32 { 0xFF18_1A_1E }
+
+    /// Turn a dragged box or lasso into a picture, and open the editor on it.
+    ///
+    /// The box/ring `.captureOverlay` reports are in this view's own points;
+    /// everything downstream (`viewerRegionInCapture`, `viewerCutOut`) works
+    /// in the same pixels `fit`/`pan`/`zoom`/`measure` already do, so they are
+    /// converted here, once, rather than carrying two units through the rest
+    /// of the capture path.
+    private func takeRegion(_ box: PageRect, ring: [CGPoint]) {
+        guard !isCapturing, let document else { return }
+        framing = false
+
+        let scale = pixelScale
+        captureBox = PageRect(left: box.left * scale, top: box.top * scale,
+                              right: box.right * scale, bottom: box.bottom * scale)
+        captureRing = ring.map { CGPoint(x: $0.x * scale, y: $0.y * scale) }
+
+        isCapturing = true
+        Task {
+            let request = CaptureRequest(tiles: [], width: 0, height: 0,
+                                         background: MarkColor(argb: drawingBackdropARGB),
+                                         originPage: 0, scale: .high, format: .png)
+            capture = await renderCapture(request, document: document)
+            isCapturing = false
+        }
+    }
+
+    /// Draw the region framed by `captureBox`/`captureRing`, off the main
+    /// thread, at `request.scale`/`format` — called both for the first
+    /// picture and every time the editor's own sheet asks for a different
+    /// sharpness or format, from the same remembered region.
+    private func renderCapture(_ request: CaptureRequest, document: DrawingDocument,
+                               markup: [Markup] = []) async -> CapturePreview? {
+        guard let box = captureBox else { return nil }
+        let (viewWidth, viewHeight) = pixelSize(of: lastRenderSize)
+        let (wholeWidth, wholeHeight) = viewerCaptureSize(
+            viewWidth: viewWidth, viewHeight: viewHeight, scale: Int(request.scale.factor))
+        guard let cut = viewerRegionInCapture(box: box, viewWidth: viewWidth, viewHeight: viewHeight,
+                                             wholeWidth: wholeWidth, wholeHeight: wholeHeight) else { return nil }
+        let by = Double(wholeWidth) / Double(viewWidth)
+        let ring = captureRing
+        let format = request.format
+        let name = document.name
+
+        return await Task.detached(priority: .userInitiated) { () -> CapturePreview? in
+            guard let whole = try? document.render(width: wholeWidth, height: wholeHeight, by: by) else {
+                return nil
+            }
+            var picture = viewerCutOut(whole, cut: cut, ring: ring, factor: CGFloat(by))
+            if !markup.isEmpty {
+                picture = compositeViewerMarkup(into: picture, marks: markup, scale: CGFloat(by))
+            }
+            guard let bytes = encodeViewerCapture(picture, format: format) else { return nil }
+
+            var updated = request
+            updated.width = Double(picture.width)
+            updated.height = Double(picture.height)
+            return CapturePreview(
+                request: updated,
+                bytes: bytes,
+                fileName: viewerCaptureFileName(source: name, stamp: viewerCaptureTimestamp(), format: format),
+                picture: picture)
+        }.value
+    }
+
+    /// Hand the finished picture — marks drawn in by the engine — to Files, a
+    /// share sheet or the pasteboard. Same shape as `ReaderView`'s own
+    /// `exportCapture`.
+    private func exportCapture(_ action: CaptureExportAction, request: CaptureRequest,
+                               marks: [Markup], document: DrawingDocument) async {
+        isCapturing = true
+        defer { isCapturing = false }
+        guard let preview = await renderCapture(request, document: document, markup: marks) else { return }
+
+        switch action {
+        case .copy:
+            UIPasteboard.general.setData(preview.bytes, forPasteboardType: request.format.pasteboardType)
+        case .save, .share:
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(preview.fileName)
+            try? preview.bytes.write(to: url, options: .atomic)
+            capturedFile = CapturedFile(url: url)
+        }
     }
 }
