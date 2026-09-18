@@ -501,6 +501,16 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Every text object's own bounding rect, without its words — the
+    /// hit-testing half of [`Self::text_runs`]. See
+    /// [`crate::document::pdfium_doc::PdfiumDocument::text_run_rects`] for
+    /// why this earns its own method rather than a caller just reading
+    /// `.rect` off `text_runs()`'s own answer: the whole point is not paying
+    /// for the words of every run a click did not land on.
+    fn text_run_rects(&self, _page_index: usize) -> Result<Vec<(usize, Rect)>> {
+        Ok(Vec::new())
+    }
+
     /// Every image on a page, in the order the file stores them.
     ///
     /// A read, so it sits beside [`Document::text_runs`] rather than next to
@@ -693,6 +703,18 @@ pub trait Document: Send + Sync {
 
     fn move_object(&mut self, _page_index: usize, _object: usize, _by: Point) -> Result<()> {
         Err(PdfError::Unsupported("moving an object on this page"))
+    }
+
+    /// Take one picture, shape or run of words off the page entirely — its
+    /// drawing operators removed from the content stream, not hidden under
+    /// something else. The same object-locating logic [`Self::move_object`]
+    /// and [`Self::scale_object`] use, so it refuses on exactly the pages
+    /// those do (a picture or shape drawn in a way this cannot follow) and
+    /// succeeds everywhere they succeed — deleting never needs a run's own
+    /// scope the way a geometric resize does, so it is not refused for a
+    /// shared text box the way that is.
+    fn remove_object(&mut self, _page_index: usize, _object: usize) -> Result<()> {
+        Err(PdfError::Unsupported("removing an object from this page"))
     }
 
     /// The area one page object covers.
@@ -1318,6 +1340,16 @@ pub trait DocumentMut {
     /// [`crate::pdf::embed`].
     fn set_typing_fonts(&mut self, _fonts: Vec<Vec<u8>>) {}
 
+    /// Offer one more font for typing, alongside whatever
+    /// [`Self::set_typing_fonts`] already holds, without disturbing those.
+    ///
+    /// For a font picked at the moment of editing — the system font list, say
+    /// — rather than the fonts a session started with: appended so it is
+    /// available for the rest of this session (including the automatic
+    /// fallback, once it is on the list), never written to the reader's own
+    /// permanent font settings.
+    fn add_typing_font(&mut self, _font: Vec<u8>) {}
+
     /// Rule a line, the way a form is filled in by hand.
     ///
     /// A pen stroke: for striking something out, or for the rule somebody draws
@@ -1912,7 +1944,7 @@ pub enum Stacking {
 /// silently reset what it was not asked to change is how white text came back
 /// black: `FPDFText_SetText` writes the object afresh, and everything not
 /// carried over is written as a default.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TextStyle {
     pub size: Option<f32>,
@@ -1923,6 +1955,16 @@ pub struct TextStyle {
     /// The same point [`TextRun::origin`] reports, and it must be taken from
     /// there rather than from the top of a run's box — see that field.
     pub at: Option<(f32, f32)>,
+    /// A specific font to write the run in, by the name
+    /// [`crate::pdf::embed::face_name`] gives it — `None` keeps the automatic
+    /// three-tier choice (`Self::set_run_in_stream`'s own doc): the run's own
+    /// font, then another already on the page, then whichever offered font can
+    /// spell it. Set, this skips straight to that named font, refusing rather
+    /// than silently substituting a different one if it cannot spell the text.
+    ///
+    /// Not `Copy` any more because of this field — see the call sites this
+    /// touched if that trait bound is ever wanted back.
+    pub face: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -17,6 +17,7 @@ mod focus;
 mod home;
 mod logo;
 mod overlay;
+mod system_fonts;
 mod theme;
 
 use std::collections::HashMap;
@@ -590,6 +591,16 @@ struct PagifyApp {
     /// A drag in progress on the selection — where it started, what part of
     /// the selection was grabbed, and how far it has come.
     grab: Option<Grab>,
+    /// The handle under the pointer as of the last frame it was only
+    /// *hovering* — read by [`Self::interact_objects`] when a drag starts,
+    /// instead of hit-testing the drag's own current position. Same reason
+    /// as [`Self::signature_hover_handle`]: `egui` only decides a press has
+    /// become a drag once the pointer has moved a few pixels, and by then an
+    /// eight-pixel resize handle is already behind it — a fresh hit-test at
+    /// that point reads a corner-aimed resize as a body drag instead. This
+    /// tool shared `Handle`/`Grab` with the signature one but not the fix,
+    /// so an ordinary picture's handles were exactly this bug, unfixed.
+    object_hover_handle: Option<Handle>,
     /// A placed-but-unapplied picture signature, picked with no tool
     /// armed — a click on the signature itself, not the object tool, which
     /// only ever sees page *content* and a signature is deliberately not
@@ -734,6 +745,24 @@ struct PagifyApp {
     /// A face asked for and not yet installed, handed to `install_fonts` at the
     /// top of the next frame.
     pending_face: Option<Vec<u8>>,
+    /// Every font Windows has installed, named and by file path — the run
+    /// editor's font picker reads from this rather than scanning the
+    /// filesystem itself. `None` until the picker is opened for the first
+    /// time: populated lazily because the scan reads and parses every
+    /// installed font file, a real cost worth paying once, not on every
+    /// frame a document happens to be open.
+    system_fonts: Option<Vec<system_fonts::SystemFont>>,
+    /// Whether the run editor's font-picker popup is open, and what has been
+    /// typed into its filter box.
+    font_picker_open: bool,
+    font_picker_filter: String,
+    /// This run's on-disk transcript of every command and every line the app
+    /// has said about it — see [`pagify_shell::session_log`]. Not the same
+    /// thing as [`Self::recorder`] (Automate): that keeps only what could be
+    /// typed back in and replayed; this keeps the outcomes too, almost none
+    /// of which are typeable, so a bug can be reproduced once and the file
+    /// handed over instead of described from memory.
+    session_log: pagify_shell::session_log::SessionLog,
     /// The words a page draws rather than writes, and which page they are for.
     ///
     /// Recognising them costs real work, and a pick asks for them on every
@@ -1776,6 +1805,7 @@ impl PagifyApp {
             object_tool: None,
             selected: None,
             grab: None,
+            object_hover_handle: None,
             signature_selected: None,
             signature_grab: None,
             signature_hover_handle: None,
@@ -1818,11 +1848,32 @@ impl PagifyApp {
             editor_face: None,
             editor_face_ready: false,
             pending_face: None,
+            system_fonts: None,
+            font_picker_open: false,
+            font_picker_filter: String::new(),
+            // Real disk I/O under the user's actual config directory — a test
+            // run must not litter it with hundreds of near-empty session
+            // logs, the same reason `predefined` above skips its own real
+            // load in `cfg!(test)`.
+            session_log: if cfg!(test) {
+                pagify_shell::session_log::SessionLog::default()
+            } else {
+                pagify_shell::session_log::SessionLog::start()
+            },
             pointer: Default::default(),
             drag_from: None,
             last_snap: None,
         };
         app.say_info("Pagify — type `help`, or `open <path.pdf>`.");
+        // `None` in a test run — `session_log` is a no-op there — so this
+        // never adds a line the existing tests asserting on `history()`
+        // would have to account for.
+        if let Some(log_path) = app.session_log.path() {
+            app.say_info(format!(
+                "recording this session to {} — `sessionlog` any time for this path.",
+                log_path.display()
+            ));
+        }
         if let Some(path) = path {
             app.open(path);
         }
@@ -1835,6 +1886,8 @@ impl PagifyApp {
     }
 
     fn say_info(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        self.session_log.record("info", &text);
         self.cmd.say(Kind::Info, text);
     }
     fn say_error(&mut self, text: impl Into<String>) {
@@ -1842,6 +1895,8 @@ impl PagifyApp {
         // its explanation was collapsed out of view is worse than one that
         // never ran.
         self.command_open = true;
+        let text = text.into();
+        self.session_log.record("error", &text);
         self.cmd.say(Kind::Error, text);
     }
 
@@ -3039,19 +3094,23 @@ impl PagifyApp {
         };
         let doc = self.doc.as_ref()?;
 
+        // `text_run_rects`, not `text_runs` — a hit-test only needs to know
+        // where things are, and `text_runs` pays to extract every run's
+        // words to answer that, which on a page of a few hundred runs was
+        // most of a second on every single click. See its own doc.
         let words = || {
             doc.session
-                .text_runs(page)
+                .text_run_rects(page)
                 .ok()?
                 .into_iter()
-                .filter(|run| holds(&run.rect))
-                .min_by(|a, b| {
-                    let area = |r: &pdf_core::document::TextRun| {
-                        ((r.rect.right - r.rect.left) * (r.rect.bottom - r.rect.top)).abs()
+                .filter(|(_, rect)| holds(rect))
+                .min_by(|(_, a), (_, b)| {
+                    let area = |r: &pdf_core::document::Rect| {
+                        ((r.right - r.left) * (r.bottom - r.top)).abs()
                     };
                     area(a).total_cmp(&area(b))
                 })
-                .map(|run| (run.object, run.rect, "the words"))
+                .map(|(object, rect)| (object, rect, "the words"))
         };
         let pictures = || {
             doc.session
@@ -3176,18 +3235,24 @@ impl PagifyApp {
         at: AppPoint,
         view: PageView,
     ) {
+        // Read before the hover block below can overwrite it — see
+        // `Self::object_hover_handle`'s own doc for why a drag that has just
+        // started must be classified against *that*, not against a fresh
+        // hit-test at `at`. Mirrors `Self::interact_signatures`.
+        let remembered_handle = self.object_hover_handle;
+
         // The cursor says what a press here would do.
         if self.grab.is_none() {
-            if let Some(handle) = self.selected.as_ref().filter(|s| s.page == page).and_then(|_| self.handle_at(at, view)) {
-                ui.output_mut(|o| o.cursor_icon = handle.cursor());
-            } else if self.selected.as_ref().is_some_and(|s| {
-                s.page == page
-                    && at.x >= s.rect.left as f64
-                    && at.x <= s.rect.right as f64
-                    && at.y >= s.rect.top as f64
-                    && at.y <= s.rect.bottom as f64
-            }) {
-                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+            if let Some(sel) = self.selected.as_ref().filter(|s| s.page == page) {
+                let handle = self.handle_at(at, view);
+                self.object_hover_handle = handle;
+                if let Some(handle) = handle {
+                    ui.output_mut(|o| o.cursor_icon = handle.cursor());
+                } else if Self::point_in_rect(at, &sel.rect) {
+                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+                }
+            } else {
+                self.object_hover_handle = None;
             }
         }
 
@@ -3196,7 +3261,7 @@ impl PagifyApp {
                 .selected
                 .as_ref()
                 .filter(|s| s.page == page)
-                .and_then(|_| self.handle_at(at, view));
+                .and_then(|_| remembered_handle);
             let on_body = self.selected.as_ref().is_some_and(|s| {
                 s.page == page
                     && at.x >= s.rect.left as f64
@@ -3241,17 +3306,25 @@ impl PagifyApp {
     /// now is.
     fn finish_grab(&mut self, sel: Selected, grab: Grab) {
         let (dx, dy) = grab.by;
+        // `handle: None` here is exactly the "aimed at a corner, landed on
+        // the body" failure mode `Self::object_hover_handle` exists to
+        // prevent — logged before the outcome message below, which only
+        // ever says "moved"/"resized" and cannot by itself say which one a
+        // reporter actually meant to happen.
+        self.session_log.record(
+            "drag",
+            &format!("{} handle={:?} by=({dx:.1},{dy:.1}) rect={:?}", sel.what, grab.handle, sel.rect),
+        );
         let told = match grab.handle {
             None => {
                 if dx.abs() < 0.5 && dy.abs() < 0.5 {
                     return;
                 }
-                self.move_thing(
-                    sel.page,
-                    grab.from,
-                    AppPoint { x: grab.from.x + dx as f64, y: grab.from.y + dy as f64 },
-                    self.object_tool.unwrap_or(true),
-                )
+                // Not `move_thing`: that re-finds the object via `thing_at`,
+                // which for a run of words means a full-page `text_runs()`
+                // scan — and `sel.object` already names exactly which one
+                // this drag picked up, back when it was selected.
+                self.move_object_by(sel.page, sel.object, sel.what, (dx, dy))
             }
             Some(handle) => {
                 let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
@@ -3517,6 +3590,10 @@ impl PagifyApp {
     /// is the whole of what moving, resizing or turning it means; there is
     /// no content-stream object underneath to transform.
     fn finish_signature_grab(&mut self, sel: SignatureSelected, grab: Grab) {
+        self.session_log.record(
+            "drag",
+            &format!("signature handle={:?} by={:?} rect={:?}", grab.handle, grab.by, sel.rect),
+        );
         if grab.handle == Some(Handle::Rotate) {
             let wanted = Self::angle_from_drag(&sel.rect, sel.rotation, grab.from, grab.by);
             if (wanted - sel.rotation).abs() < 0.5 {
@@ -3780,16 +3857,36 @@ impl PagifyApp {
         let Some((object, _, what)) = self.thing_at(page, from, pictures_first) else {
             return Err("nothing to move there — click on some words or a picture.".into());
         };
-        let by = pdf_core::document::Point {
-            x: (to.x - from.x) as f32,
-            y: (to.y - from.y) as f32,
-        };
-        if by.x.abs() < 0.1 && by.y.abs() < 0.1 {
+        let by = ((to.x - from.x) as f32, (to.y - from.y) as f32);
+        self.move_object_by(page, object, what, by)
+    }
+
+    /// The move itself, given the object already — no hit-test. `move_thing`
+    /// above is `thing_at` plus this; a caller that already knows the object
+    /// (the object tool's own drag, which has `Selected::object` before the
+    /// drag ever starts) must not be made to pay for rediscovering it.
+    ///
+    /// **Why this needed splitting out at all.** `thing_at`'s text branch
+    /// calls `text_runs()` — the full-page scan `text_run_at` exists to let
+    /// single-object callers skip — so every drag-to-move went through it a
+    /// second time on top of whatever `move_object` itself cost, even after
+    /// that was already fixed. Measured on a real page: ~800ms of a
+    /// still-slow move was this call alone, invisible in a benchmark of
+    /// `move_object` because that benchmark never called `thing_at` at all.
+    fn move_object_by(
+        &mut self,
+        page: usize,
+        object: usize,
+        what: &'static str,
+        by: (f32, f32),
+    ) -> Result<String, String> {
+        if by.0.abs() < 0.1 && by.1.abs() < 0.1 {
             return Err("move: that is where it already is.".into());
         }
+        let point = pdf_core::document::Point { x: by.0, y: by.1 };
 
         let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
-        doc.session.move_object(page, object, by).map_err(|e| e.to_string())?;
+        doc.session.move_object(page, object, point).map_err(|e| e.to_string())?;
 
         if let Some(doc) = &mut self.doc {
             doc.rendered_is_stale();
@@ -3799,8 +3896,8 @@ impl PagifyApp {
         self.find_hits.clear();
         Ok(format!(
             "moved {what} by {:.0} across and {:.0} down on page {}.",
-            by.x,
-            by.y,
+            by.0,
+            by.1,
             page + 1
         ))
     }
@@ -4244,6 +4341,7 @@ impl PagifyApp {
         if let Some(dispatch) = pagify_shell::command::dispatch(line) {
             self.cmd.say(Kind::Echo, line);
             self.recorder.observe(line);
+            self.session_log.record("command", line);
             self.run(dispatch);
         }
     }
@@ -4466,6 +4564,15 @@ impl PagifyApp {
                     self.say_info(line);
                 }
             }
+            Verb::SessionLog => match self.session_log.path() {
+                Some(path) => self.say_info(format!(
+                    "recording every command and outcome to {} — send it along with a bug report.",
+                    path.display()
+                )),
+                None => self.say_info(
+                    "no session log this run — the config directory could not be written to.",
+                ),
+            },
             Verb::ApplySignatures => {
                 let Some(doc) = &self.doc else {
                     self.say_error("nothing open.");
@@ -7481,11 +7588,13 @@ impl PagifyApp {
                 size: Some(run.size),
                 color: Some(run.color),
                 at: Some((run.origin.x, run.origin.y)),
+                face: None,
             },
             was: pdf_core::document::TextStyle {
                 size: Some(run.size),
                 color: Some(run.color),
                 at: Some((run.origin.x, run.origin.y)),
+                face: None,
             },
             background: self.page_behind(page, run.rect),
             drag_by: (0.0, 0.0),
@@ -7653,6 +7762,7 @@ impl PagifyApp {
                 size: Some(placed.size),
                 color: Some(pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 }),
                 at: Some((placed.left, placed.baseline)),
+                face: None,
             },
             was: pdf_core::document::TextStyle::default(),
             background: self.page_behind(page, found.rect),
@@ -7720,8 +7830,19 @@ impl PagifyApp {
             self.say_info("left as it was.");
             return;
         }
-        let changed_look = edit.style != edit.was;
-        if typed == edit.original.trim() && !changed_look {
+        // **A font pick is judged on its own, not lumped in with size, colour
+        // and position.** Those three go through PDFium's own text-object
+        // rewrite when any of them changes (see the `style:` sent below); a
+        // font pick instead travels the byte-safe path `set_run_in_stream`
+        // already uses for the words themselves — see
+        // `set_text_run_styled`'s fast-path gate in pdf_core, which checks
+        // for exactly this shape (`face` set, everything else left alone).
+        // Comparing the *whole* style here would send a font-only pick down
+        // the slow path instead, where nothing reads `face` at all.
+        let changed_look = pdf_core::document::TextStyle { face: None, ..edit.style.clone() }
+            != pdf_core::document::TextStyle { face: None, ..edit.was.clone() };
+        let picked_font = edit.style.face.is_some();
+        if typed == edit.original.trim() && !changed_look && !picked_font {
             self.say_info("unchanged.");
             return;
         }
@@ -7759,11 +7880,17 @@ impl PagifyApp {
             //
             // Reported from use twice, with a screenshot: one line of a
             // paragraph drawn over the line above it in a different font, its
-            // own place left empty. This is why.
-            style: if changed_look {
-                edit.style
-            } else {
-                pdf_core::document::TextStyle::default()
+            // own place left empty. This is why. A requested font rides
+            // along regardless — it is not one of the three properties that
+            // gate the slow path, see `changed_look` above.
+            style: {
+                let mut style = if changed_look {
+                    edit.style.clone()
+                } else {
+                    pdf_core::document::TextStyle::default()
+                };
+                style.face = edit.style.face.clone();
+                style
             },
         }) {
             Ok(_) => {
@@ -7781,13 +7908,22 @@ impl PagifyApp {
                 self.text_selection = None;
                 self.find_hits.clear();
 
-                match face {
-                    Some(face) => self.say_info(format!(
+                // A pick made through the font button is not a surprise
+                // fallback — say it as the choice it was, not as the
+                // "does not match its neighbours" warning an *automatic*
+                // substitution earns. Checked first: `substituted_face()`
+                // reports a face either way, since both go through the same
+                // swap machinery underneath.
+                match (&edit.style.face, face) {
+                    (Some(picked), _) => self.say_info(format!(
+                        "changed to \"{typed}\", written in {picked}. `undo` puts it back."
+                    )),
+                    (None, Some(face)) => self.say_info(format!(
                         "changed to \"{typed}\", written in {face} — the document's own \
                          font here has only the letters it already uses, so this will \
                          not match its neighbours. `undo` puts it back."
                     )),
-                    None => {
+                    (None, None) => {
                         self.say_info(format!("changed to \"{typed}\" — `undo` puts it back."))
                     }
                 }
@@ -9094,7 +9230,30 @@ impl eframe::App for PagifyApp {
             }
             if keys.delete {
                 let page = self.page;
-                if let Some(layer) = self.markup.existing_mut(page) {
+                // The object tool's own selection first — a picture, shape or
+                // run of words picked with `editobject`, not the drawing
+                // layer `erase_selection` below reaches. Only one of the two
+                // selections is ever live at once (see `Selected` and
+                // `Markup`'s own doc), so falling through when there is no
+                // object selected keeps today's behaviour for the drawing
+                // tools exactly as it was.
+                if let Some(sel) = self.selected.clone() {
+                    let result = match &self.doc {
+                        Some(doc) => doc.session.remove_object(sel.page, sel.object).map_err(|e| e.to_string()),
+                        None => Err("nothing open.".into()),
+                    };
+                    match result {
+                        Ok(()) => {
+                            if let Some(doc) = &mut self.doc {
+                                doc.rendered_is_stale();
+                            }
+                            self.selected = None;
+                            self.layers = None;
+                            self.say_info(format!("{} removed from page {}.", sel.what, sel.page + 1));
+                        }
+                        Err(e) => self.say_error(e),
+                    }
+                } else if let Some(layer) = self.markup.existing_mut(page) {
                     layer.begin("erase");
                     let n = layer.erase_selection();
                     layer.end();
@@ -9763,6 +9922,7 @@ impl eframe::App for PagifyApp {
                 .map(|e| e.text.clone())
                 .unwrap_or_default();
             self.recorder.observe(&line);
+            self.session_log.record("command", &line);
             self.run(dispatch);
         }
     }
@@ -10491,12 +10651,25 @@ impl PagifyApp {
                             edit.style.at = Some((x, y));
                         }
 
+                        ui.label(egui::RichText::new("font").color(theme::INK_DIM).size(11.0));
+                        let label = edit.style.face.clone().unwrap_or_else(|| "(automatic)".into());
+                        if ui.button(egui::RichText::new(label).size(11.0)).clicked() {
+                            self.font_picker_open = !self.font_picker_open;
+                            if self.font_picker_open && self.system_fonts.is_none() {
+                                self.system_fonts = Some(system_fonts::list());
+                            }
+                        }
+
                         if ui.button("Apply").clicked() {
                             apply_now = true;
                         }
                     });
                     });
             });
+
+        if self.font_picker_open {
+            self.draw_font_picker(ui, page);
+        }
 
         // Let go: the words go where they were dragged, once.
         if dropped {
@@ -10550,6 +10723,83 @@ impl PagifyApp {
 
         if done || apply_now {
             self.apply_edited_run();
+        }
+    }
+
+    /// The run editor's font picker: every font Windows has installed,
+    /// filtered as you type, chosen to write the run in.
+    ///
+    /// A plain list rather than an `egui::ComboBox` — a system can easily
+    /// have several hundred fonts installed, and a combo box holding all of
+    /// them open at once is not a picker, it is a wall of text. Populated
+    /// once into `self.system_fonts` (see that field's own doc) and read
+    /// from here on every frame the picker is open, not rescanned.
+    fn draw_font_picker(&mut self, ui: &mut egui::Ui, page: usize) {
+        let mut close = false;
+        let mut chosen: Option<Option<String>> = None;
+
+        egui::Window::new("Font")
+            .id(egui::Id::new(("font-picker", page)))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(280.0)
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("filter");
+                    ui.text_edit_singleline(&mut self.font_picker_filter);
+                    if ui.small_button("×").clicked() {
+                        close = true;
+                    }
+                });
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    if ui.selectable_label(false, "(automatic)").clicked() {
+                        chosen = Some(None);
+                    }
+                    let filter = self.font_picker_filter.to_ascii_lowercase();
+                    for font in self.system_fonts.iter().flatten() {
+                        if !filter.is_empty() && !font.name.to_ascii_lowercase().contains(&filter) {
+                            continue;
+                        }
+                        if ui.selectable_label(false, &font.name).clicked() {
+                            chosen = Some(Some(font.name.clone()));
+                        }
+                    }
+                });
+            });
+
+        if let Some(face) = chosen {
+            // The file this picks a font by is read once, here, rather than
+            // every font on the machine being loaded up front — see
+            // `system_fonts::list`, which reads only enough of each file to
+            // find its name.
+            if let Some(name) = &face {
+                if let Some(path) = self
+                    .system_fonts
+                    .iter()
+                    .flatten()
+                    .find(|f| &f.name == name)
+                    .map(|f| f.path.clone())
+                {
+                    match std::fs::read(&path) {
+                        Ok(bytes) => {
+                            if let Some(doc) = &self.doc {
+                                let _ = doc.session.add_typing_font(bytes);
+                            }
+                        }
+                        Err(e) => self.say_error(format!("could not read {}: {e}", path.display())),
+                    }
+                }
+            }
+            if let Some(edit) = &mut self.editing_run {
+                edit.style.face = face;
+            }
+            close = true;
+        }
+
+        if close {
+            self.font_picker_open = false;
+            self.font_picker_filter.clear();
         }
     }
 
@@ -13100,6 +13350,54 @@ mod ui_tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// **The object tool's own resize handles, through the real pointer
+    /// path.** The signature tool got this exact fix
+    /// (`Self::signature_hover_handle`) after a corner-aimed resize was
+    /// silently read as a body move, because `egui` only recognises a drag
+    /// once the pointer has moved a few pixels — by which point it has
+    /// already slid off an eight-pixel handle. The generic object tool
+    /// shared `Handle`/`Grab` with the signature one but not the fix, so an
+    /// ordinary picture's resize handles had the identical bug. This proves
+    /// the parallel fix (`Self::object_hover_handle`) the same way the
+    /// signature one above is proven: a real click to select, then a real
+    /// drag starting exactly on the bottom-right handle.
+    #[test]
+    fn dragging_an_object_handle_through_the_real_pointer_path_resizes_it() {
+        let mut h = harness("pictures.pdf");
+        let view = h.state().last_view.expect("the page was never drawn");
+
+        h.state_mut().submit("editobject");
+        h.run_steps(1);
+
+        let image = h.state().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        let middle = view.to_screen(AppPoint {
+            x: ((image.rect.left + image.rect.right) / 2.0) as f64,
+            y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
+        });
+        click(&mut h, middle);
+        assert!(
+            h.state().selected.is_some(),
+            "clicking the picture through a real pointer event did not select it"
+        );
+
+        let corner = view.to_screen(AppPoint { x: image.rect.right as f64, y: image.rect.bottom as f64 });
+        let (w, ht) = (image.rect.right - image.rect.left, image.rect.bottom - image.rect.top);
+        let target = view.to_screen(AppPoint {
+            x: (image.rect.right - w / 2.0) as f64,
+            y: (image.rect.bottom - ht / 2.0) as f64,
+        });
+        drag(&mut h, corner, target);
+
+        let resized = h.state().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        assert!(
+            (resized.rect.right - resized.rect.left) < w - 1.0,
+            "dragging the bottom-right handle through a real pointer event did not resize the \
+             picture: before {:?}, after {:?}",
+            image.rect,
+            resized.rect
+        );
     }
 
     /// The Home screen with nothing open — where the fonts panel lives — full
@@ -16097,6 +16395,140 @@ mod lock_wiring_tests {
                 "it did not say the look changed: {told}"
             );
         }
+    }
+
+    /// **Picking a font from the font picker actually writes the run in it —
+    /// end to end through the real `pdf_core` path, not a mock.**
+    ///
+    /// Distinct from the test above in the one way that matters: that one
+    /// exercises the *automatic* fallback (no font asked for, one chosen
+    /// because the current one cannot spell the words), which reports "does
+    /// not match its neighbours" — a warning about an unasked-for
+    /// substitution. An explicit pick is not a surprise, so it must say the
+    /// choice as a choice, not as a warning — see the message match in
+    /// `apply_edited_run`. Also checks a picked font that *cannot* spell the
+    /// words is refused by name, not silently substituted for something else.
+    #[test]
+    fn picking_a_font_writes_the_run_in_it() {
+        let mut app = app("text-lines.pdf");
+        let runs = app.doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        let target = runs
+            .iter()
+            .find(|r| r.text.trim().chars().count() > 4)
+            .cloned()
+            .expect("a run with words in it");
+
+        // Every opened document is handed the bundled fonts as typing fonts
+        // (see `open_with`), so a bundled face is already available to pick
+        // without adding anything — the same list `writing_faces` surfaces
+        // for the outline matcher.
+        let picked = app
+            .writing_faces()
+            .into_iter()
+            .find(|n| n.to_ascii_lowercase().contains("montserrat"))
+            .expect("Montserrat is bundled");
+
+        app.pick_text_run(
+            0,
+            AppPoint {
+                x: ((target.rect.left + target.rect.right) / 2.0) as f64,
+                y: ((target.rect.top + target.rect.bottom) / 2.0) as f64,
+            },
+        )
+        .expect("picked");
+
+        // Picking a font alone, the text unchanged — still a real edit, not
+        // "unchanged", and it must not be judged against `was` the way a
+        // size/colour/position tweak is (see `changed_look` in
+        // `apply_edited_run`).
+        app.editing_run.as_mut().expect("editing").style.face = Some(picked.clone());
+        app.apply_edited_run();
+
+        let told = said(&app);
+        assert!(!told.contains("unchanged"), "a font pick alone was reported as no edit: {told}");
+        assert!(told.contains(&picked), "it did not name the picked face: {told}");
+        assert!(
+            !told.contains("not match its neighbours"),
+            "an explicit pick was reported as an unasked-for substitution: {told}"
+        );
+
+        // The real signal, not just the message: `substituted_face()` is what
+        // `apply_edited_run` itself reads to decide what to say, so this is
+        // the document actually reporting which face it swapped to.
+        let substituted = app.doc.as_ref().unwrap().session.substituted_face();
+        assert_eq!(
+            substituted.as_deref(),
+            Some(picked.as_str()),
+            "the document did not record the picked face as what it wrote the run in"
+        );
+
+        // And the words themselves are still really on the page, at the run
+        // this all started from.
+        let after = app.doc.as_ref().unwrap().session.text_runs(0).unwrap();
+        assert!(
+            after.iter().any(|r| r.text.trim() == target.text.trim()),
+            "the words are not on the page after the font-only edit: {after:?}"
+        );
+
+        // A font that plainly cannot spell the word (only ever ASCII words in
+        // Latin fixtures) is refused by name — proven with a request that
+        // asks for a face nothing on the list is, so the lookup itself must
+        // fail rather than silently fall back.
+        app.pick_text_run(
+            0,
+            AppPoint {
+                x: ((target.rect.left + target.rect.right) / 2.0) as f64,
+                y: ((target.rect.top + target.rect.bottom) / 2.0) as f64,
+            },
+        )
+        .expect("picked again");
+        app.editing_run.as_mut().expect("editing").style.face = Some("NotARealFontName".into());
+        app.apply_edited_run();
+        let refused = said(&app);
+        assert!(
+            refused.contains("NotARealFontName") && refused.contains("not one of the fonts"),
+            "an unknown requested face was not refused by name: {refused}"
+        );
+    }
+
+    /// **The session log actually receives what the app does, not just what
+    /// `SessionLog` itself can be made to record in isolation.**
+    ///
+    /// `session_log.rs`'s own tests prove the file format; this proves the
+    /// three call sites in this file (`PagifyApp::submit`, the ribbon/typed
+    /// dispatch in `ui`, and `say_info`/`say_error`) actually reach it — the
+    /// wiring a unit test of the module alone cannot see. `PagifyApp::new`
+    /// gives every test build a no-op logger (see its own comment on
+    /// `session_log`), so this swaps in a real one pointed at a temp
+    /// directory before doing anything.
+    #[test]
+    fn commands_and_outcomes_both_reach_the_session_log() {
+        let mut app = app("two-column.pdf");
+        let dir = std::env::temp_dir()
+            .join(format!("pagify-test-session-log-wiring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+        let log_path = app.session_log.path().expect("the temp dir is writable").to_path_buf();
+
+        app.submit("zoom fit");
+        app.say_error("a deliberate test error");
+
+        let text = std::fs::read_to_string(&log_path).expect("the log file exists");
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("valid json"))
+            .collect();
+
+        assert!(
+            lines.iter().any(|l| l["kind"] == "command" && l["text"] == "zoom fit"),
+            "the submitted command was not logged: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l["kind"] == "error" && l["text"] == "a deliberate test error"),
+            "the error message was not logged: {lines:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **A word replaced by itself leaves the page looking the same.**

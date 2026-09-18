@@ -145,6 +145,111 @@ fn a_shape_resizes_and_the_words_do_not() {
     }
 }
 
+/// **A run resizes by font size, not geometry** — the same field Edit
+/// Text's own size control writes, so a handle works on a run a geometric
+/// `cm` would refuse (one sharing a text box with others, see
+/// `object_wrap_site`), and does not distort its shape as a `cm` scale
+/// would (test would need care aspect ratio does not skew glyphs).
+#[test]
+fn a_text_run_resizes_by_font_size() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("covered.pdf");
+    let run = doc.text_runs(0).expect("runs").into_iter().next().expect("a run");
+
+    doc.scale_object(0, run.object, Point { x: run.rect.left, y: run.rect.top }, 2.0, 2.0)
+        .expect("resize the run");
+
+    let after = doc
+        .text_runs(0)
+        .expect("runs")
+        .into_iter()
+        .find(|r| r.object == run.object)
+        .expect("still there");
+    assert!(
+        (after.size - run.size * 2.0).abs() < 0.05,
+        "size should have doubled: was {}, now {}",
+        run.size,
+        after.size
+    );
+    assert_eq!(after.text, run.text, "resizing must not change the words");
+}
+
+/// **A side handle stretches width alone — a top/bottom handle changes size
+/// alone.** `Handle::scale` already computes `sy = 1.0` for a side handle and
+/// `sx = 1.0` for a top/bottom one; this proves `resize_run_in_stream` keeps
+/// that distinction instead of collapsing both into one factor, which was
+/// why every handle used to look like the same uniform resize regardless of
+/// which one was dragged.
+#[test]
+fn a_side_handle_widens_a_run_without_changing_its_size() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let mut doc = open("covered.pdf");
+    let run = doc.text_runs(0).expect("runs").into_iter().next().expect("a run");
+    let width_before = run.rect.right - run.rect.left;
+
+    // sx = 2.0, sy = 1.0 — exactly what `Handle::Left`/`Handle::Right` computes.
+    doc.scale_object(0, run.object, Point { x: run.rect.left, y: run.rect.top }, 2.0, 1.0)
+        .expect("widen the run");
+
+    let after = doc
+        .text_runs(0)
+        .expect("runs")
+        .into_iter()
+        .find(|r| r.object == run.object)
+        .expect("still there");
+    let width_after = after.rect.right - after.rect.left;
+
+    assert!(
+        (after.size - run.size).abs() < 0.05,
+        "a side handle changed the font size: was {}, now {}",
+        run.size,
+        after.size
+    );
+    assert!(
+        width_after > width_before * 1.5,
+        "the run should be much wider: was {width_before}, now {width_after}"
+    );
+}
+
+/// **Deleting a picture takes it off the page and leaves everything else
+/// exactly where it was** — reuses the same object-locating logic move and
+/// resize do, so this is really a test that deletion is wired to it
+/// correctly, not a re-test of that logic itself.
+#[test]
+fn removing_a_picture_takes_it_off_and_leaves_the_words() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let doc = open("framed.pdf");
+    let picture = doc
+        .drawn_objects(0)
+        .expect("objects")
+        .into_iter()
+        .find(|d| d.kind == DrawnKind::Picture)
+        .expect("the picture");
+    let words_before: Vec<String> =
+        doc.text_runs(0).expect("runs").into_iter().map(|r| r.text).collect();
+    drop(doc);
+
+    let mut doc = open("framed.pdf");
+    doc.remove_object(0, picture.object).expect("remove");
+
+    let still = doc
+        .drawn_objects(0)
+        .expect("objects")
+        .into_iter()
+        .any(|d| d.kind == DrawnKind::Picture);
+    assert!(!still, "the picture should be gone");
+
+    let words_after: Vec<String> =
+        doc.text_runs(0).expect("runs").into_iter().map(|r| r.text).collect();
+    assert_eq!(words_before, words_after, "deleting the picture must not touch the words");
+}
+
 /// **Opacity is absolute.** Set twice, it is set twice — not multiplied.
 #[test]
 fn opacity_fades_one_thing_and_setting_it_again_does_not_compound() {

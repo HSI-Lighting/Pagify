@@ -29,6 +29,10 @@ eframe = { version = "0.36", default-features = false, features = ["default_font
 
 [dev-dependencies]
 egui_kittest = "0.36"
+# Reads the session log's own JSON lines back out in its wiring test —
+# already resolved via pagify_shell/pdf_core, so this adds an edge, not a
+# new crate.
+serde_json = "1"
 
 # Finder hands a double-clicked document to an application through an Apple
 # Event, never through `argv`. Without a handler for it macOS answers for the
@@ -38,3 +42,10 @@ egui_kittest = "0.36"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
+
+# Embeds pagify-logo.ico as the .exe's own icon resource (build.rs) — without
+# this, Explorer/Start Menu/taskbar/shortcuts all show the generic exe icon,
+# since egui::IconData only sets the *window* icon at runtime, not the PE
+# resource a shortcut reads before the process ever starts.
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"

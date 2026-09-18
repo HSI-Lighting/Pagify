@@ -788,6 +788,12 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.scale_object(page, object, anchor, sx, sy))
     }
 
+    /// Take one thing off the page entirely — see
+    /// [`pdf_core::document::DocumentMut::remove_object`].
+    pub fn remove_object(&self, page: usize, object: usize) -> Result<()> {
+        registry::with_session(self.handle, |s| s.document.remove_object(page, object))
+    }
+
     /// Make one thing more or less see-through — see
     /// [`pdf_core::document::DocumentMut::set_opacity`].
     pub fn set_opacity(&self, page: usize, object: usize, opacity: f32) -> Result<()> {
@@ -835,6 +841,19 @@ impl Session {
         registry::with_session(self.handle, |s| {
             if let Some(doc) = s.document.as_document_mut() {
                 doc.set_typing_fonts(fonts);
+            }
+            Ok(())
+        })
+    }
+
+    /// Offer one more font for typing — a font picked at the moment of
+    /// editing, kept alongside whatever [`Self::set_typing_fonts`] already
+    /// holds rather than replacing it. See
+    /// [`pdf_core::document::DocumentMut::add_typing_font`].
+    pub fn add_typing_font(&self, font: Vec<u8>) -> Result<()> {
+        registry::with_session(self.handle, |s| {
+            if let Some(doc) = s.document.as_document_mut() {
+                doc.add_typing_font(font);
             }
             Ok(())
         })
@@ -1336,6 +1355,12 @@ impl Session {
     /// Every run of text on a page, in the order the file stores them.
     pub fn text_runs(&self, page: usize) -> Result<Vec<pdf_core::document::TextRun>> {
         registry::with_session(self.handle, |s| s.document.text_runs(page))
+    }
+
+    /// Every text object's bounding rect, without its words — see
+    /// [`pdf_core::document::Document::text_run_rects`].
+    pub fn text_run_rects(&self, page: usize) -> Result<Vec<(usize, pdf_core::document::Rect)>> {
+        registry::with_session(self.handle, |s| s.document.text_run_rects(page))
     }
 
     /// A page's crop box, in page points with a top-left origin.

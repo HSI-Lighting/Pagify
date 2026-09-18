@@ -253,6 +253,11 @@ pub enum Verb {
     /// permits, the signatures and whether they still hold, the marks placed
     /// but not applied, what is locked, and how it must be saved.
     DocumentStatus,
+    /// Where this run's session log is being written — see
+    /// [`crate::session_log`]. A running transcript of every command and
+    /// every line the app has said about it, kept so a bug can be reproduced
+    /// once and the file handed over, rather than described from memory.
+    SessionLog,
     /// Burn every placed signature into the page it sits on.
     ///
     /// After this they are page content rather than annotations: nobody can
@@ -866,6 +871,7 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         "signcross" => Ok(Verb::FillSign(Some("cross".into()))),
         "signdot" => Ok(Verb::FillSign(Some("dot".into()))),
         "documentstatus" | "status" => Ok(Verb::DocumentStatus),
+        "sessionlog" => Ok(Verb::SessionLog),
         "applysignatures" => Ok(Verb::ApplySignatures),
         "managesignatures" => {
             let tail = tail.trim();
@@ -1332,7 +1338,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "find", "findnext", "fn", "findprev", "fp", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
-        "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject",
+        "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));

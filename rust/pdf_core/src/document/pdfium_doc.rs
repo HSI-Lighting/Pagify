@@ -1028,6 +1028,52 @@ impl Document for PdfiumDocument {
         Ok(runs)
     }
 
+    /// Every text object's own bounding rect, without extracting its words —
+    /// the hit-testing half of [`Self::text_runs`], for a caller (a click,
+    /// most often) that only needs to know *where* things are, not what they
+    /// say.
+    ///
+    /// **Why this exists.** `text_runs()`'s per-object cost is almost
+    /// entirely `PdfPageTextObject::text()` — real PDFium work extracting
+    /// Unicode from every run, not a loop this crate could make faster — and
+    /// a hit-test throws that work away for every object except the one
+    /// under the pointer. On a page with a few hundred runs, clicking to
+    /// select one was paying to extract the words of all the others too.
+    fn text_run_rects(&self, page_index: usize) -> Result<Vec<(usize, Rect)>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+        let page = self
+            .document
+            .pages()
+            .get(page_number)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        let space = {
+            let raw = RawPage::open(self.document.handle(), page_number)?;
+            raw.space()?
+        };
+
+        let mut out = Vec::new();
+        for (index, object) in page.objects().iter().enumerate() {
+            if object.as_text_object().is_none() {
+                continue;
+            }
+            // Same area filter as `text_runs()` — nothing to have clicked on
+            // otherwise.
+            let Ok(bounds) = object.bounds() else { continue };
+            let wide = (bounds.right().value - bounds.left().value).abs() > 0.5;
+            let tall = (bounds.top().value - bounds.bottom().value).abs() > 0.5;
+            if !wide || !tall {
+                continue;
+            }
+            let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+            let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
+            out.push((index, Rect { left, top, right, bottom }));
+        }
+        Ok(out)
+    }
+
     fn annotations(&self, page_index: usize) -> Result<Vec<IndexedAnnotation>> {
         self.validate_page_index(page_index)?;
         let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
@@ -1113,7 +1159,15 @@ impl Document for PdfiumDocument {
         // operators it inserts and the cases it declines. What it declines
         // falls through to the guarded path below, which still works and still
         // refuses on a page it would rewrite.
-        if self.text_runs(page_index)?.iter().any(|r| r.object == object) {
+        //
+        // **`text_run_at`, not `text_runs().iter().any(...)`.** The full scan
+        // was exactly the cost `text_run_at` exists to avoid — asking "is
+        // this object a run of text" the expensive way, then answering the
+        // real question the cheap way right after, on a page with a few
+        // hundred runs paid for the whole list twice for no reason. Measured
+        // on a real page: this gate alone was ~800ms of what looked like a
+        // "move" taking a few seconds.
+        if self.text_run_at(page_index, object)?.is_some() {
             match self.move_run_in_stream(page_index, object, by) {
                 Ok(()) => return Ok(()),
                 Err(PdfError::Unsupported(_)) => {}
@@ -1223,6 +1277,113 @@ impl Document for PdfiumDocument {
 
         self.touch();
         Ok(())
+    }
+
+    /// Take one picture, shape or run of words off the page — its own
+    /// drawing operators spliced out, not covered by anything. Reuses
+    /// exactly the object-locating logic [`Self::object_wrap_site`] does for
+    /// move/resize (same picture-frame/placeholder handling, same path and
+    /// run lookups), but never needs a *wrapping* scope the way a geometric
+    /// transform does, so it is not refused for a run sharing a text box —
+    /// deleting the run's own operators does not touch its neighbours either
+    /// way.
+    fn remove_object(&mut self, page_index: usize, object: usize) -> Result<()> {
+        use crate::pdf::content;
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+
+        let span: std::ops::Range<usize> = 'span: {
+            let pictures = self.images_on(page_index)?;
+            if let Some(which) = pictures.iter().position(|i| i.object == object) {
+                let names = self.image_names(&file, &page)?;
+                let drawn = image_operators(&operations, &names);
+                if drawn.len() != pictures.len() {
+                    return Err(PdfError::Unsupported(
+                        "this page draws its pictures in a way this cannot follow",
+                    ));
+                }
+                let at = drawn[which];
+                break 'span match frame_scope(&operations, at..at + 1) {
+                    Some((open, close)) => match placeholder_before(&operations, open) {
+                        Some(first) => first..close + 1,
+                        None => open..close + 1,
+                    },
+                    None => at..at + 1,
+                };
+            }
+
+            if let Some((which, paths)) = self.path_ordinal(page_index, object)? {
+                let painted = path_operators(&operations);
+                if painted.len() != paths {
+                    return Err(PdfError::Unsupported(
+                        "this page paints its shapes in a way this cannot follow",
+                    ));
+                }
+                let (pspan, clips) = painted
+                    .get(which)
+                    .cloned()
+                    .ok_or(PdfError::Unsupported("that shape is not painted on this page"))?;
+                if clips {
+                    return Err(PdfError::Unsupported(
+                        "this shape also sets a clipping path, which cannot be removed alone",
+                    ));
+                }
+                break 'span match frame_scope(&operations, pspan.clone()) {
+                    Some((open, close)) => open..close + 1,
+                    None => pspan,
+                };
+            }
+
+            if let Some(run) = self.text_run_at(page_index, object)? {
+                let height = self.page_size(page_index)?.height_pt;
+                let fonts = self.page_fonts(&file, &page);
+                let codes_in = |p: &content::Placed| -> usize {
+                    let width = p
+                        .font
+                        .as_ref()
+                        .zip(fonts.as_ref())
+                        .and_then(|(name, dict)| code_width(&file, dict, name))
+                        .unwrap_or(1)
+                        .max(1);
+                    content::pieces(&operations[p.origin.operation])
+                        .iter()
+                        .map(|piece| match piece {
+                            content::Piece::Codes(bytes) => bytes.len() / width,
+                            content::Piece::Kern(_) => 0,
+                        })
+                        .sum()
+                };
+                let (first, last, _) = run_operators(&run, height, &placed, &operations, &codes_in)?;
+                break 'span first..last + 1;
+            }
+
+            return Err(PdfError::Unsupported("that is not something this can remove"));
+        };
+
+        let from = operations[span.start].span.start;
+        let to = operations[span.end - 1].span.end;
+        let edited = content::splice(&stream, &[(from..to, Vec::new())]);
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
     fn drawn_objects(&self, page_index: usize) -> Result<Vec<crate::document::DrawnObject>> {
@@ -1451,6 +1612,24 @@ impl Document for PdfiumDocument {
     ) -> Result<()> {
         if !(sx.is_finite() && sy.is_finite()) || sx.abs() < 1e-3 || sy.abs() < 1e-3 {
             return Err(PdfError::InvalidArgument("that would resize it to nothing".into()));
+        }
+        // Text resizes by font size and horizontal scale, not a geometric
+        // `cm` — a shared text box refuses that (see `object_wrap_site`) and
+        // it is the wrong lever for text anyway ("their size is a font
+        // size"). `sx` and `sy` kept separate, not collapsed to one factor,
+        // so a side handle stretches width alone and a top/bottom handle
+        // changes size alone — a uniform factor made every handle resize
+        // the same way regardless of which one was dragged. Byte-safe, like
+        // the move path below: a `Tf`/`Tz` splice, not
+        // `FPDFPage_GenerateContent` — that one needs a full before/after
+        // text_runs() comparison to prove it did not scramble the rest of
+        // the page (see `set_text_run_styled`), which on a page with a few
+        // hundred runs was most of a resize's cost and, on some pages,
+        // refused the resize outright because the regeneration really did
+        // scramble something. This can't scramble anything to check for: it
+        // touches only the operators it writes around this one run.
+        if let Some(run) = self.text_run_at(page_index, object)? {
+            return self.resize_run_in_stream(page_index, &run, sx, sy);
         }
         // The anchor arrives top-left down; page space is bottom-left up.
         let height = self.page_size(page_index)?.height_pt;
@@ -2646,9 +2825,17 @@ impl DocumentMut for PdfiumDocument {
         // phrase was locked. Swapping the codes in place touches nothing else.
         //
         // Only when the words are all that is changing: a new colour, size or
-        // position is PDFium's to apply, and it does that well.
-        if *style == crate::document::TextStyle::default() {
-            match self.set_run_in_stream(page_index, object, text) {
+        // position is PDFium's to apply, and it does that well. A requested
+        // font is a byte-safe swap of the same shape as the words themselves
+        // (see `Self::set_run_in_stream`), so it travels with this fast path
+        // rather than gating it — checked with `face` zeroed out on both
+        // sides so a font choice alone does not fall through to the slower
+        // path below, which does not know how to honour it.
+        let only_words_or_face =
+            crate::document::TextStyle { face: None, ..style.clone() }
+                == crate::document::TextStyle::default();
+        if only_words_or_face {
+            match self.set_run_in_stream(page_index, object, text, style.face.as_deref()) {
                 Ok(previous) => {
                     return Ok((previous, crate::document::TextStyle::default()))
                 }
@@ -2784,6 +2971,7 @@ impl DocumentMut for PdfiumDocument {
                     a: a as u8,
                 }),
                 at: Some((x, y)),
+                face: None,
             }
         };
 
@@ -2854,9 +3042,15 @@ impl DocumentMut for PdfiumDocument {
             if let Ok(mut cached) = self.vault.lock() {
                 *cached = None;
             }
+            // Same `Unsupported` suffix trap as the handle-resize message
+            // above: worded so "is not implemented yet" lands on the specific
+            // thing that refused, not on editing in general (the words
+            // themselves are still editable — retyping them does not hit
+            // this guard, only a size/colour/position change does).
             return Err(PdfError::Unsupported(
-                "changing how these words look rewrites the rest of the page, so \
-                 nothing was changed — the words themselves can still be edited",
+                "changing how these words look rewrites the rest of the page here, so \
+                 nothing was changed. Retyping the words themselves does not hit this \
+                 guard, only their size, colour or position; doing that on this page",
             ));
         }
 
@@ -3432,6 +3626,10 @@ impl DocumentMut for PdfiumDocument {
 
     fn set_typing_fonts(&mut self, fonts: Vec<Vec<u8>>) {
         self.typing_fonts = fonts;
+    }
+
+    fn add_typing_font(&mut self, font: Vec<u8>) {
+        self.typing_fonts.push(font);
     }
 
     fn stamp_line(&mut self, page_index: usize, from: Point, to: Point) -> Result<()> {
@@ -5179,27 +5377,60 @@ fn font_to_unicode(
         page: &crate::pdf::Object,
         wanted: &str,
         reverse: &std::collections::BTreeMap<String, u32>,
+        requested: Option<&str>,
     ) -> Result<(Swapped, Vec<u8>)> {
         use crate::pdf::{embed, Object};
 
-        let Some(font_bytes) = self
-            .typing_fonts
-            .iter()
-            .find(|candidate| embed::can_spell(candidate, wanted))
-        else {
-            // The message that was there before, plus the way out of it. A
-            // reader who has the document's own typeface can add it.
-            let offending = wanted
-                .chars()
-                .find(|c| !reverse.contains_key(&c.to_string()))
-                .unwrap_or(' ');
-            return Err(PdfError::InvalidArgument(format!(
-                "{offending:?} is not in this text's font. This document embeds only \
-                 the characters it already uses, so what can be typed here is: {}. \
-                 Add a font with `outlinedfont add <file.ttf>` and it can be written \
-                 into the document instead.",
-                typeable(reverse)
-            )));
+        let font_bytes = match requested {
+            // A specific font was asked for by name — found or not, spelling
+            // or not, that is answered directly rather than falling through
+            // to "whichever offered font happens to work".
+            Some(face) => {
+                let found = self
+                    .typing_fonts
+                    .iter()
+                    .find(|candidate| embed::face_name(candidate).as_deref() == Some(face));
+                match found {
+                    Some(bytes) if embed::can_spell(bytes, wanted) => bytes,
+                    Some(_) => {
+                        let offending = wanted
+                            .chars()
+                            .find(|c| !reverse.contains_key(&c.to_string()))
+                            .unwrap_or(' ');
+                        return Err(PdfError::InvalidArgument(format!(
+                            "{face} cannot spell {offending:?} — pick a different font, or \
+                             stay with this one."
+                        )));
+                    }
+                    None => {
+                        return Err(PdfError::InvalidArgument(format!(
+                            "{face} is not one of the fonts available to write with."
+                        )))
+                    }
+                }
+            }
+            None => {
+                let Some(font_bytes) = self
+                    .typing_fonts
+                    .iter()
+                    .find(|candidate| embed::can_spell(candidate, wanted))
+                else {
+                    // The message that was there before, plus the way out of it. A
+                    // reader who has the document's own typeface can add it.
+                    let offending = wanted
+                        .chars()
+                        .find(|c| !reverse.contains_key(&c.to_string()))
+                        .unwrap_or(' ');
+                    return Err(PdfError::InvalidArgument(format!(
+                        "{offending:?} is not in this text's font. This document embeds only \
+                         the characters it already uses, so what can be typed here is: {}. \
+                         Add a font with `outlinedfont add <file.ttf>` and it can be written \
+                         into the document instead.",
+                        typeable(reverse)
+                    )));
+                };
+                font_bytes
+            }
         };
 
         let first = file.numbers().max().unwrap_or(0) + 1;
@@ -5444,11 +5675,8 @@ fn font_to_unicode(
     fn move_run_in_stream(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
         use crate::pdf::content;
 
-        let runs = self.text_runs(page_index)?;
-        let run = runs
-            .iter()
-            .find(|r| r.object == object)
-            .cloned()
+        let run = self
+            .text_run_at(page_index, object)?
             .ok_or_else(|| PdfError::InvalidArgument("that is not a run of text".into()))?;
         let height = self.page_size(page_index)?.height_pt;
 
@@ -5562,6 +5790,212 @@ fn font_to_unicode(
             replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
         }
 
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+    }
+
+    /// One run, by its object number — the same fields [`Self::text_runs`]
+    /// computes for every text object on the page, computed for just this
+    /// one instead.
+    ///
+    /// **Why this exists at all.** `text_runs()` calls PDFium's own
+    /// `PdfPageTextObject::text()` once per text object on the page — real,
+    /// unavoidable PDFium work, not a loop this crate could make faster —
+    /// and on a page of a few hundred runs that is most of a second, every
+    /// single time it is asked for. A caller that already knows *which*
+    /// object it wants (a click already resolved to one, a resize already
+    /// has one selected) has no use for the other few hundred answers, so it
+    /// should not have to wait for them. `Option`, not an error, for the
+    /// object existing but not being a run of real text — a picture, a
+    /// shape, an index past the end — since none of those are a caller
+    /// mistake worth a distinct message; `text_runs()` treats them the same
+    /// way, by leaving them out of the list.
+    fn text_run_at(&self, page_index: usize, object: usize) -> Result<Option<crate::document::TextRun>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+
+        let page = self
+            .document
+            .pages()
+            .get(page_number)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        // Same "read the matrix, then drop the raw handle" shape as
+        // `text_runs()`, for the same reason — see its own comment.
+        let (space, origin) = {
+            let raw = RawPage::open(self.document.handle(), page_number)?;
+            let space = raw.space()?;
+            let bindings = pdfium()?.bindings();
+            let index = i32::try_from(object).unwrap_or(-1);
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if handle.is_null() {
+                return Ok(None);
+            }
+            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+            let read = unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) } != 0;
+            (space, read.then(|| space.to_top_left(m.e, m.f)))
+        };
+
+        let Ok(object_ref) = page.objects().get(object) else { return Ok(None) };
+        let Some(text_object) = object_ref.as_text_object() else { return Ok(None) };
+        // The same machinery `text_runs()` reads a run's words with — see
+        // its own comment on why this is kept even when it reports none.
+        let text_page = page.text().map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        let words = text_object.text();
+        drop(text_page);
+
+        let Ok(bounds) = object_ref.bounds() else { return Ok(None) };
+        let wide = (bounds.right().value - bounds.left().value).abs() > 0.5;
+        let tall = (bounds.top().value - bounds.bottom().value).abs() > 0.5;
+        if !wide || !tall {
+            return Ok(None);
+        }
+        let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+        let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
+
+        let colour = object_ref
+            .fill_color()
+            .map(|c| Color { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() })
+            .unwrap_or(Color { r: 0, g: 0, b: 0, a: 255 });
+        let origin = match origin {
+            Some((x, y)) => Point { x, y },
+            None => Point { x: left, y: bottom },
+        };
+
+        Ok(Some(crate::document::TextRun {
+            object,
+            text: words,
+            rect: Rect { left, top, right, bottom },
+            origin,
+            size: text_object.unscaled_font_size().value,
+            color: colour,
+        }))
+    }
+
+    /// Resize a run along one or both axes independently: `sy` as a `Tf`
+    /// (font size — height, in effect) and `sx` as a `Tz` (horizontal
+    /// scale — width, leaving glyph height alone), each written just before
+    /// the run's own operators and restored just after — the same "borrow
+    /// the state, hand it back" shape [`Self::set_run_in_stream`]'s font
+    /// substitution already uses.
+    ///
+    /// **Why two operators, not one factor.** A single `sqrt(sx·sy)` factor
+    /// answered every handle the same way regardless of which one was
+    /// dragged — a side handle (`sy` fixed at 1.0) and a corner handle both
+    /// changed size, and a top/bottom handle (`sx` fixed at 1.0) changed
+    /// size too, when it should have left width alone. Kept separate, a side
+    /// handle now stretches width only and a top/bottom handle changes size
+    /// only, matching what `Handle::scale` already computes — the bug was
+    /// only ever in throwing that distinction away here.
+    ///
+    /// **The one thing this assumes rather than reads: `Tz` starts at its
+    /// PDF default, 100.** `content::placed` does not currently track a
+    /// run's horizontal scale the way it tracks font size, so a run whose
+    /// producer already set a custom `Tz` gets that value multiplied by
+    /// `sx` from a wrong starting point. Reversible with `undo` either way,
+    /// and the overwhelming majority of PDFs never touch `Tz` at all.
+    ///
+    /// **Why this exists next to [`Self::set_text_run_styled`], which also
+    /// changes size.** That path goes through PDFium's own
+    /// `FPDFPage_GenerateContent` — a full page re-emission — so it has to
+    /// re-read every run on the page before and after to prove nothing else
+    /// moved, which on a page of a few hundred runs was most of a resize's
+    /// wall-clock cost, and on some pages the re-emission really did
+    /// scramble something and the whole edit was refused. This splice
+    /// cannot scramble anything to check for: everywhere else on the page is
+    /// bytes this never touches.
+    ///
+    /// Takes the run already found, not an object number — `text_runs()`
+    /// itself is most of this edit's cost on a page of a few hundred runs
+    /// (PDFium's own per-object text extraction, not anything here), so a
+    /// caller that has already paid for one full scan for its own reasons
+    /// (finding which object was clicked, say) must not be made to pay for
+    /// a second just to hand this an index.
+    fn resize_run_in_stream(
+        &mut self,
+        page_index: usize,
+        run: &crate::document::TextRun,
+        sx: f32,
+        sy: f32,
+    ) -> Result<()> {
+        use crate::pdf::content;
+
+        let height = self.page_size(page_index)?.height_pt;
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(&bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+
+        let fonts = self.page_fonts(&file, &page);
+        let codes_in = |p: &content::Placed| -> usize {
+            let width = p
+                .font
+                .as_ref()
+                .zip(fonts.as_ref())
+                .and_then(|(name, dict)| code_width(&file, dict, name))
+                .unwrap_or(1)
+                .max(1);
+            content::pieces(&operations[p.origin.operation])
+                .iter()
+                .map(|piece| match piece {
+                    content::Piece::Codes(bytes) => bytes.len() / width,
+                    content::Piece::Kern(_) => 0,
+                })
+                .sum()
+        };
+        let (first, last, _) = run_operators(run, height, &placed, &operations, &codes_in)?;
+
+        // The font and size already in force where the run starts — written
+        // back afterward, unconditionally, because both are graphics state
+        // that outlives this run's own operators regardless of whether the
+        // very next thing on the page happens to continue the same line.
+        let governing = placed
+            .iter()
+            .find(|p| p.origin.operation == first)
+            .ok_or(PdfError::Unsupported("that text selects no font"))?;
+        let name = governing
+            .font
+            .clone()
+            .ok_or(PdfError::Unsupported("that text selects no font"))?;
+        let name = String::from_utf8_lossy(&name);
+        let was_size = governing.size;
+        let new_size = (was_size * sy).max(1.0);
+        const DEFAULT_TZ: f32 = 100.0;
+        let new_tz = (DEFAULT_TZ * sx).max(1.0);
+
+        let mut before_ops = format!("/{name} {new_size} Tf\n");
+        let mut after_ops = format!("\n/{name} {was_size} Tf");
+        if (sx - 1.0).abs() > 0.005 {
+            before_ops.push_str(&format!("{new_tz} Tz\n"));
+            after_ops.push_str(&format!("\n{DEFAULT_TZ} Tz"));
+        }
+
+        let before = operations[first].span.start;
+        let after = operations[last].span.end;
+        let edits = [
+            (before..before, before_ops.into_bytes()),
+            (after..after, after_ops.into_bytes()),
+        ];
+        let edited = content::splice(&stream, &edits);
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
         let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
@@ -6207,9 +6641,23 @@ fn font_to_unicode(
             let (first, last, _) = run_operators(run, height, placed, operations, &codes_in)?;
             return match frame_scope(operations, first..last + 1) {
                 Some((open, close)) => Ok(WrapSite { span: open..close + 1, own_scope: true, ctm: states[open].ctm }),
+                // **Worded to survive `Unsupported`'s own template.** Its
+                // `Display` always appends "is not implemented yet" — fine
+                // for a short phrase, but the previous wording here ended
+                // with "...which Edit Text changes", and with that suffix
+                // glued on read as "Edit Text changes is not implemented
+                // yet" — the opposite of true: Edit Text's own size field
+                // already does this, through a completely different,
+                // PDFium-object path that does not care whether a run has
+                // its own scope. Reported from use as "it says the fix
+                // doesn't work either". This version's last clause is about
+                // the *handle* specifically, so the suffix lands on
+                // something that really is unbuilt.
                 None => Err(PdfError::Unsupported(
-                    "these words share a text box with others, so only the box can be transformed — \
-                     their size is a font size, which Edit Text changes",
+                    "a handle cannot resize these words — they share a text box with \
+                     others, so dragging only moves the whole box. Edit Text already \
+                     changes their actual size directly; doing that by dragging a \
+                     handle here",
                 )),
             };
         }
@@ -6295,7 +6743,7 @@ fn font_to_unicode(
         object: usize,
         text: &str,
     ) -> Result<()> {
-        self.set_run_in_stream(page_index, object, text).map(|_| ())
+        self.set_run_in_stream(page_index, object, text, None).map(|_| ())
     }
 
     /// Change one run's words by editing the content stream.
@@ -6305,11 +6753,18 @@ fn font_to_unicode(
     /// operator cannot be located, a font with no `/ToUnicode` to encode the
     /// new text through, or a character that font cannot spell. The caller then
     /// falls back to PDFium, which always works and costs the page's layout.
+    ///
+    /// `requested_face` names one of `self.typing_fonts` by
+    /// [`crate::pdf::embed::face_name`] — `None` runs the automatic three-tier
+    /// fallback below; `Some` skips straight to that font (embedding it if
+    /// it is not already on the page) and refuses, rather than silently
+    /// falling back to another face, if it cannot spell the text.
     fn set_run_in_stream(
         &mut self,
         page_index: usize,
         object: usize,
         text: &str,
+        requested_face: Option<&str>,
     ) -> Result<String> {
         use crate::pdf::content;
 
@@ -6423,16 +6878,27 @@ fn font_to_unicode(
         // Only the last changes what the file contains, and both of the last
         // two change how the words look — which the caller is told about
         // rather than left to notice.
-        let (encoded, swap) = match encode_with(&reverse, &wanted, width) {
-            Some(bytes) => (bytes, None),
-            None => match self.borrow_font_on_page(&file, &bytes, &fonts, &name, &wanted) {
-                Some((swap, encoded)) => (encoded, Some(swap)),
-                None => {
-                    let (swap, encoded) =
-                        self.embed_typing_font(&file, page_index, &page, &wanted, &reverse)?;
-                    (encoded, Some(swap))
-                }
-            },
+        // **A requested face skips the fallback order entirely.** Someone who
+        // opened the font picker asked for a specific typeface, not "whatever
+        // already spells this" — keeping the current font because it happens
+        // to cover these characters, or borrowing an unrelated one already on
+        // the page, would both silently ignore the choice just made.
+        let (encoded, swap) = if let Some(face) = requested_face {
+            let (swap, encoded) =
+                self.embed_typing_font(&file, page_index, &page, &wanted, &reverse, Some(face))?;
+            (encoded, Some(swap))
+        } else {
+            match encode_with(&reverse, &wanted, width) {
+                Some(bytes) => (bytes, None),
+                None => match self.borrow_font_on_page(&file, &bytes, &fonts, &name, &wanted) {
+                    Some((swap, encoded)) => (encoded, Some(swap)),
+                    None => {
+                        let (swap, encoded) =
+                            self.embed_typing_font(&file, page_index, &page, &wanted, &reverse, None)?;
+                        (encoded, Some(swap))
+                    }
+                },
+            }
         };
 
         // Which of the operator's codes this run occupies.
