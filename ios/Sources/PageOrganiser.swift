@@ -46,6 +46,23 @@ struct PageOrganiser: View {
     @StateObject private var reorder = GridReorderState()
     @State private var open: OrganiserSheet?
 
+    /// Opens straight onto one of the organiser's own sheets, for the top bar's
+    /// direct "Export pages…" / "Import pages…" shortcuts — Android reaches the
+    /// same picker from both the overflow and this sheet's own footer, rather
+    /// than making the overflow's shortcut just a shortcut to this sheet itself.
+    init(document: PagifyDocument, revision: Int, model: ReaderModel,
+         unsavedMarks: Int = 0, isSaving: Bool = false, message: String? = nil,
+         onMessageShown: (() -> Void)? = nil, initialSheet: OrganiserSheet? = nil) {
+        self.document = document
+        self.revision = revision
+        self.model = model
+        self.unsavedMarks = unsavedMarks
+        self.isSaving = isSaving
+        self.message = message
+        self.onMessageShown = onMessageShown
+        _open = State(initialValue: initialSheet)
+    }
+
     /// The file pages are being taken from.
     ///
     /// Held open only while its picker is on screen — the thumbnails render from
@@ -420,7 +437,10 @@ struct PageOrganiser: View {
 /// One value rather than a flag per sheet: SwiftUI honours a single `sheet`
 /// modifier per view, and five of them stacked on the same stack leaves
 /// whichever it prefers unopenable.
-private enum OrganiserSheet: Identifiable, Equatable {
+///
+/// Internal, not private: the reader's top bar hands in a starting case for its
+/// own "Export pages…" / "Import pages…" shortcuts.
+enum OrganiserSheet: Identifiable, Equatable {
     case blankPage
     case pagesToExport
     /// Carries the scratch file so that dismissing the picker — by any route —

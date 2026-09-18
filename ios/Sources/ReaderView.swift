@@ -8,7 +8,13 @@ struct ReaderView: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.dismiss) private var dismiss
     @State private var showingOrganiser = false
+    /// Which of the organiser's own sheets to open straight onto, when the
+    /// overflow's "Export pages…" / "Import pages…" reach it rather than its
+    /// own "Organise pages". Cleared before a plain open, or a stale export
+    /// picker would appear the next time the sheet is opened the ordinary way.
+    @State private var organiserInitialSheet: OrganiserSheet?
     @State private var showingMetadata = false
+    @State private var sharingDocument = false
 
     /// Page width as a multiple of the viewport's. Zooming resizes the pages
     /// rather than transforming them, so the engine re-renders at the new scale
@@ -229,7 +235,8 @@ struct ReaderView: View {
         }
         .sheet(isPresented: $showingOrganiser) {
             if let document = model.document {
-                PageOrganiser(document: document, revision: model.pageContentRevision, model: model)
+                PageOrganiser(document: document, revision: model.pageContentRevision, model: model,
+                              initialSheet: organiserInitialSheet)
             }
         }
         .sheet(item: Binding(get: { model.recordingToShare.map(ShareableFile.init) },
@@ -272,6 +279,11 @@ struct ReaderView: View {
         .sheet(isPresented: $showingMetadata) {
             if let document = model.document {
                 MetadataSheet(document: document)
+            }
+        }
+        .sheet(isPresented: $sharingDocument) {
+            if let url = model.shareURL {
+                ShareSheet(items: [url])
             }
         }
         .onReceive(NotificationCenter.default.publisher(
@@ -1217,8 +1229,10 @@ struct ReaderViewportKey: PreferenceKey {
             barButton("square.and.arrow.down.on.square", "Save a copy",
                       enabled: model.document != nil, action: model.saveCopy)
 
-            // The eight reader actions. Zoom is not among them: it is gesture
-            // only, and the three menu items that were here were invented.
+            // The reader actions. Zoom is not among them: it is gesture only.
+            // Share sits here too, in Android's own order, rather than beside
+            // Save — a button of its own for something reached for this rarely
+            // would outrank the actions used every session.
             Menu {
                 // Shown as a stop, tinted with the error colour, while it runs —
                 // a recorder left on by accident should be visible.
@@ -1237,13 +1251,39 @@ struct ReaderViewportKey: PreferenceKey {
                 Button { model.rotatePage(model.currentPage) } label: {
                     Label("Rotate", systemImage: "arrow.clockwise")
                 }
-                Button { showingOrganiser = true } label: {
+                // From the overflow it already has, the way Android's own
+                // report says its own Share was placed, rather than a button
+                // of its own beside Save.
+                Button { sharingDocument = true } label: {
+                    Label("Share this document", systemImage: "square.and.arrow.up")
+                }
+                .disabled(model.shareURL == nil)
+                Button {
+                    organiserInitialSheet = nil
+                    showingOrganiser = true
+                } label: {
                     Label(model.editState.dirty
                             ? "Organise pages \u{2014} unsaved changes" : "Organise pages",
                           systemImage: "square.grid.2x2")
                 }
                 Button { model.insertBlankPage(after: model.currentPage) } label: {
                     Label("Add a blank page", systemImage: "photo.badge.plus")
+                }
+                // Both reach the organiser's own pickers directly, the way
+                // Android's overflow reaches them without a stop at "Organise
+                // pages" first — that sheet still has its own Export/Import too.
+                Button {
+                    organiserInitialSheet = .pagesToExport
+                    showingOrganiser = true
+                } label: {
+                    Label("Export pages\u{2026}", systemImage: "doc.badge.arrow.up")
+                }
+                .disabled((model.document?.pageCount ?? 0) == 0)
+                Button {
+                    organiserInitialSheet = .fileToImportFrom
+                    showingOrganiser = true
+                } label: {
+                    Label("Import pages\u{2026}", systemImage: "doc.badge.arrow.down")
                 }
                 Button(role: .destructive) { model.deletePage(model.currentPage) } label: {
                     Label("Delete this page", systemImage: "trash")

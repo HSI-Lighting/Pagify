@@ -171,25 +171,18 @@ struct ToolRibbon: View {
                        // by an armed eraser under your finger.
                        onLongPress: { showClearMenu = true })
 
-            ToolButton(icon: .system("viewfinder"), label: "Snapshot",
-                       selected: settings.tool == .snapshot && !settings.captureLasso,
-                       onClick: {
-                           let holding = settings.tool == .snapshot && !settings.captureLasso
-                           settings.captureLasso = false
-                           select(holding ? .none : .snapshot)
-                       })
-
-            // Its own slot rather than a shape hidden behind a press on the one
-            // beside it. They are two tools by the time you are choosing: a box for
-            // most things, a ring for the detail a box cannot take without its
-            // neighbours.
-            ToolButton(icon: .system("scribble.variable"), label: "Draw around",
-                       selected: settings.tool == .snapshot && settings.captureLasso,
-                       onClick: {
-                           let holding = settings.tool == .snapshot && settings.captureLasso
-                           settings.captureLasso = true
-                           select(holding ? .none : .snapshot)
-                       })
+            // One slot, not two. Android puts "box" and "draw around" behind a
+            // single Snapshot button that always opens a menu — tapping it while
+            // already armed reopens the menu rather than putting the tool down,
+            // and putting it down means tapping the checked item a second time.
+            // A slot per shape read as two tools where the ribbon otherwise reads
+            // as five, and cost the row the seventh slot it had no room for.
+            SnapshotMenu(tool: settings.tool, lasso: settings.captureLasso,
+                         onPick: { lasso in
+                             let holding = settings.tool == .snapshot && settings.captureLasso == lasso
+                             settings.captureLasso = lasso
+                             select(holding ? .none : .snapshot)
+                         })
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 6)
@@ -1028,6 +1021,48 @@ private struct ToolButton: View {
                     guard !didLongPress else { didLongPress = false; return }
                     onClick()
                 }
+    }
+}
+
+/// The Snapshot slot: one button, not two. Android's `AnnotationToolbar.kt`
+/// puts "box" and "draw around" behind a single button that always opens a
+/// menu — the tap chooses nothing by itself, so two taps that both look like
+/// "pick a shape" (box vs. lasso) do not have to also mean two different
+/// places on the row.
+///
+/// The button itself never disarms on a tap, matching Android: putting the
+/// tool down means opening the menu and choosing the already-checked shape a
+/// second time, not tapping the row.
+private struct SnapshotMenu: View {
+    let tool: AnnotationTool
+    let lasso: Bool
+    /// Which shape was chosen — box (`false`) or draw-around (`true`).
+    let onPick: (Bool) -> Void
+
+    @Environment(\.colorScheme) private var scheme
+
+    private var armed: Bool { tool == .snapshot }
+
+    var body: some View {
+        Menu {
+            // Box first, then draw around — Android's own order in the
+            // dropdown, and a checkmark on whichever is currently armed.
+            Button { onPick(false) } label: {
+                Label("Box", systemImage: armed && !lasso ? "checkmark" : "viewfinder")
+            }
+            Button { onPick(true) } label: {
+                Label("Draw around", systemImage: armed && lasso ? "checkmark" : "scribble.variable")
+            }
+        } label: {
+            RibbonGlyphView(icon: .system(armed && lasso ? "scribble.variable" : "viewfinder"),
+                             size: 22)
+                .foregroundStyle(armed ? PagifyColor.onPrimary(scheme)
+                                 : PagifyColor.onSurfaceVariant(scheme))
+                .frame(width: slotSize, height: slotSize)
+                .background(Circle().fill(armed ? PagifyColor.primary(scheme) : .clear))
+                .contentShape(Circle())
+        }
+        .accessibilityLabel("Snapshot")
     }
 }
 

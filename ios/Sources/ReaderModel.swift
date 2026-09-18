@@ -373,6 +373,11 @@ final class ReaderModel: ObservableObject {
     var canSave: Bool { hasUnsavedWork && source != nil }
     var isEditable: Bool { editState.editable }
 
+    /// Where the open file lives, for the overflow's "Share" action. Android's
+    /// own Share reaches for the same file already on disk rather than a fresh
+    /// export — sharing is handing over what is there, not making something new.
+    var shareURL: URL? { source }
+
     // ----------------------------------------------------------- lifecycle --
 
     func start(recents: RecentDocumentsStore) {
