@@ -22,6 +22,7 @@ struct DrawingViewerScreen: View {
     @State private var measuring = false
     @State private var measurement: DrawingMeasurement?
     @State private var hasFitted = false
+    @State private var fitSettleTask: Task<Void, Never>?
     @State private var lastRenderSize: CGSize = .zero
     /// As in `ModelViewerScreen`: 1x while a finger is down, the display's
     /// real scale once it lifts.
@@ -109,10 +110,7 @@ struct DrawingViewerScreen: View {
                     )
                 }
                 .onAppear {
-                    guard !hasFitted else { return }
-                    hasFitted = true
-                    document?.fit(width: Int(geo.size.width), height: Int(geo.size.height))
-                    render(document: document, size: geo.size, fullRes: true)
+                    scheduleInitialFit(size: geo.size)
                 }
                 .onChange(of: geo.size) { _, newSize in
                     // Re-fitting here, like `ModelViewerScreen` never does,
@@ -120,8 +118,13 @@ struct DrawingViewerScreen: View {
                     // canvas resizes for a reason that has nothing to do with
                     // them — the layers button appearing once `layers` loads
                     // shifts the nav bar, same as a rotation would. Only the
-                    // very first layout (`onAppear`, above) gets to fit.
-                    if let document { render(document: document, size: newSize, fullRes: true) }
+                    // very first, settled layout gets to fit — see
+                    // `scheduleInitialFit`.
+                    if hasFitted {
+                        if let document { render(document: document, size: newSize, fullRes: true) }
+                    } else {
+                        scheduleInitialFit(size: newSize)
+                    }
                 }
             }
 
@@ -232,5 +235,25 @@ struct DrawingViewerScreen: View {
         let width = max(1, Int(size.width * scale))
         let height = max(1, Int(size.height * scale))
         image = try? document.render(width: width, height: height)
+    }
+
+    /// The very first size `GeometryReader` reports here is sometimes a
+    /// mid-transition sliver of the real canvas — a `.fullScreenCover`
+    /// settles into place over a couple of layout passes, not instantly —
+    /// and fitting against that sliver locks in a scale for a viewport that
+    /// never actually existed on screen. Debouncing past a short quiet
+    /// window means whichever size arrives last (the real, settled one) is
+    /// the only one `fit()` ever sees, and — same as the guard already on
+    /// every call site — it still only ever runs once.
+    private func scheduleInitialFit(size: CGSize) {
+        guard !hasFitted else { return }
+        fitSettleTask?.cancel()
+        fitSettleTask = Task {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled, !hasFitted else { return }
+            hasFitted = true
+            document?.fit(width: Int(size.width), height: Int(size.height))
+            render(document: document, size: size, fullRes: true)
+        }
     }
 }
