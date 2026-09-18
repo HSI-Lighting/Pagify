@@ -59,6 +59,10 @@ private struct ReviewableField: Identifiable {
 struct CardReviewSheet: View {
     let image: UIImage
     let card: BusinessCard
+    /// Matches Android's own `textScale`: a multiplier from the "Card review
+    /// text" setting, since this panel is read at arm's length, often in
+    /// poor light, by somebody holding the card in their other hand.
+    let textScale: CGFloat
     let onSave: (BusinessCard) -> Void
     let onCancel: () -> Void
 
@@ -86,9 +90,10 @@ struct CardReviewSheet: View {
     /// The panel never shrinks below this, however tall the cropped card is.
     private static let panelMinHeight: CGFloat = 200
 
-    init(image: UIImage, card: BusinessCard, onSave: @escaping (BusinessCard) -> Void, onCancel: @escaping () -> Void) {
+    init(image: UIImage, card: BusinessCard, textScale: CGFloat, onSave: @escaping (BusinessCard) -> Void, onCancel: @escaping () -> Void) {
         self.image = image
         self.card = card
+        self.textScale = textScale
         self.onSave = onSave
         self.onCancel = onCancel
         let fields = Self.flatten(card)
@@ -272,9 +277,9 @@ struct CardReviewSheet: View {
 
     private func badge(_ number: Int) -> some View {
         Text("\(number)")
-            .font(.caption2.bold())
+            .font(.system(size: 12 * textScale, weight: .bold))
             .foregroundStyle(.white)
-            .frame(width: 20, height: 20)
+            .frame(width: 20 * textScale, height: 20 * textScale)
             .background(Circle().fill(.blue))
             .shadow(radius: 2)
     }
@@ -294,17 +299,18 @@ struct CardReviewSheet: View {
         HStack(alignment: .top) {
             if let number {
                 Text("\(number)")
-                    .font(.caption2.bold())
+                    .font(.system(size: 12 * textScale, weight: .bold))
                     .foregroundStyle(.white)
-                    .frame(width: 18, height: 18)
+                    .frame(width: 18 * textScale, height: 18 * textScale)
                     .background(Circle().fill(.blue))
                     .padding(.top, 4)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(field.wrappedValue.label)
-                    .font(.caption)
+                    .font(.system(size: 13 * textScale))
                     .foregroundStyle(.secondary)
                 TextField(field.wrappedValue.label, text: field.value)
+                    .font(.system(size: 17 * textScale))
                     // A hand-corrected phone number no longer matches what
                     // was originally parsed — exporting it inconsistent with
                     // its own displayed text would be worse than exporting

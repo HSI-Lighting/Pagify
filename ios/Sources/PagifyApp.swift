@@ -91,6 +91,9 @@ struct RootView: View {
                 onThemeChange: { choice in
                     appSettings.update { var updated = $0; updated.theme = choice; return updated }
                 },
+                onCardTextScale: { scale in
+                    appSettings.update { var updated = $0; updated.cardTextScale = scale; return updated }
+                },
                 onShowViewfinder: { showing in
                     appSettings.update {
                         var updated = $0

@@ -4,6 +4,7 @@ import UIKit
 
 struct ContactsScreen: View {
     @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var appSettings: AppSettingsStore
     @Query(sort: \Contact.capturedAt, order: .reverse) private var contacts: [Contact]
     @Query private var groups: [ContactGroup]
 
@@ -298,6 +299,7 @@ struct ContactsScreen: View {
                 CardReviewSheet(
                     image: item.image,
                     card: item.card,
+                    textScale: appSettings.settings.cardTextScale,
                     onSave: { edited in
                         modelContext.insert(Contact(from: edited))
                         savedCount += 1

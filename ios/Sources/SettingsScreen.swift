@@ -11,6 +11,7 @@ import SwiftUI
 struct SettingsScreen: View {
     let settings: AppSettings
     let onThemeChange: (ThemeChoice) -> Void
+    let onCardTextScale: (CGFloat) -> Void
     let onShowViewfinder: (Bool) -> Void
     let showThumbnails: Bool
     let onShowThumbnails: (Bool) -> Void
@@ -50,6 +51,29 @@ struct SettingsScreen: View {
                         )) {
                             ForEach(ThemeChoice.allCases) { choice in
                                 Text(choice.label).tag(choice)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    .padding(16)
+                }
+                SettingCard {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("Card review text")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer().frame(height: 2)
+                        Text("How large the details are on the panel shown after "
+                             + "photographing a card. It is read at arm's length, "
+                             + "often in poor light and while holding the card.")
+                            .font(.caption)
+                            .foregroundStyle(PagifyColor.onSurfaceVariant(scheme))
+                        Spacer().frame(height: 12)
+                        Picker("Card review text", selection: Binding(
+                            get: { CardTextSize.nearest(to: settings.cardTextScale) },
+                            set: { onCardTextScale($0.scale) }
+                        )) {
+                            ForEach(CardTextSize.allCases) { size in
+                                Text(size.label).tag(size)
                             }
                         }
                         .pickerStyle(.segmented)
@@ -119,7 +143,9 @@ struct SettingsScreen: View {
         }
         .background(PagifyColor.background(scheme))
         .alert("Clear the library?", isPresented: $confirmingClear) {
-            Button("Clear", role: .destructive) { onClearLibrary() }
+            // Plain, not `.destructive` — matches Android's own confirm button,
+            // a bare `TextButton` with no error colour.
+            Button("Clear") { onClearLibrary() }
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This forgets which documents you have opened. "
@@ -352,6 +378,48 @@ enum CaptureFill: String, CaseIterable, Identifiable {
     }
 }
 
+/// The sizes the card-review panel offers.
+///
+/// Named steps rather than a slider: this is chosen once and then lived with,
+/// and a slider invites fiddling with a number nobody can name. The values
+/// stay inside `cardTextScaleRange`, which is what a stored file is clamped to.
+enum CardTextSize: String, CaseIterable, Identifiable {
+    case small = "SMALL"
+    case normal = "NORMAL"
+    case large = "LARGE"
+    case largest = "LARGEST"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .small: return "Small"
+        case .normal: return "Normal"
+        case .large: return "Large"
+        case .largest: return "Largest"
+        }
+    }
+
+    var scale: CGFloat {
+        switch self {
+        case .small: return 0.85
+        case .normal: return 1
+        case .large: return 1.25
+        case .largest: return 1.5
+        }
+    }
+
+    /// The stored value is a float read back from JSON, so it is compared
+    /// with a tolerance rather than by equality — a stored 1.0 that returns
+    /// as 0.99999 must still land on `.normal`, not read as unselected.
+    static func nearest(to scale: CGFloat) -> CardTextSize {
+        allCases.first { abs($0.scale - scale) < 0.01 } ?? .normal
+    }
+}
+
+/// The range a stored `cardTextScale` is clamped to.
+let cardTextScaleRange: ClosedRange<CGFloat> = 0.8...1.6
+
 /// The settings that outlive a document.
 ///
 /// One value rather than a property per key, so reading and writing them is one
@@ -384,6 +452,10 @@ struct AppSettings: Equatable {
     var captureScale: CaptureScale = .high
     var captureFormat: CaptureFormat = .png
     var captureFill: CaptureFill = .page
+    /// How large the text is on the card-review panel. A multiplier rather
+    /// than a point size, so the labels, the values and the badges keep
+    /// their proportions to each other at every setting.
+    var cardTextScale: CGFloat = 1
 }
 
 /// The settings as the file holds them: one flat object, keys in this order.
@@ -397,6 +469,7 @@ func settingsJSON(_ settings: AppSettings) -> String {
         "\"captureScale\":\"\(settings.captureScale.rawValue)\"",
         "\"captureFormat\":\"\(settings.captureFormat.rawValue)\"",
         "\"captureFill\":\"\(settings.captureFill.rawValue)\"",
+        "\"cardTextScale\":\(Double(settings.cardTextScale))",
     ]
     return "{\(fields.joined(separator: ","))}"
 }
@@ -433,7 +506,13 @@ func settingsFrom(json data: Data) -> AppSettings {
         viewfinderHandleY: fraction("viewfinderHandleY", defaults.viewfinderHandleY),
         captureScale: named("captureScale", defaults.captureScale),
         captureFormat: named("captureFormat", defaults.captureFormat),
-        captureFill: named("captureFill", defaults.captureFill))
+        captureFill: named("captureFill", defaults.captureFill),
+        cardTextScale: {
+            guard let value = (stored["cardTextScale"] as? NSNumber)?.doubleValue else {
+                return defaults.cardTextScale
+            }
+            return min(max(CGFloat(value), cardTextScaleRange.lowerBound), cardTextScaleRange.upperBound)
+        }())
 }
 
 /// The settings that outlive a document, kept across launches.
