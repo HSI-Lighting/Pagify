@@ -151,21 +151,10 @@ struct ModelViewerScreen: View {
                         .padding(.bottom, 8)
                 }
                 HStack(spacing: 16) {
-                    Button {
-                        document?.fit()
-                        if let document { render(document: document, size: lastRenderSize, fullRes: true) }
-                    } label: {
-                        Label("Fit", systemImage: "arrow.up.left.and.arrow.down.right")
-                            .labelStyle(.iconOnly)
-                            .padding(14)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .clipShape(Circle())
-
-                    // Its own slot rather than a shape hidden behind a press
-                    // on the one beside it, matching the reader's own ribbon:
-                    // a box for most things, a ring for the detail a box
-                    // can't take without its neighbours.
+                    // Matches Android's own `ModelRibbon` order exactly:
+                    // Snapshot (its box/ring choice split into its own slot
+                    // apiece, the reader's own convention, rather than
+                    // Android's single button plus dropdown) then Fit.
                     Button {
                         let holding = framing && !lasso
                         lasso = false
@@ -190,6 +179,17 @@ struct ModelViewerScreen: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(framing && lasso ? .orange : .accentColor)
+                    .clipShape(Circle())
+
+                    Button {
+                        document?.fit()
+                        if let document { render(document: document, size: lastRenderSize, fullRes: true) }
+                    } label: {
+                        Label("Fit", systemImage: "arrow.up.left.and.arrow.down.right")
+                            .labelStyle(.iconOnly)
+                            .padding(14)
+                    }
+                    .buttonStyle(.borderedProminent)
                     .clipShape(Circle())
                 }
                 .padding(.bottom, 24)

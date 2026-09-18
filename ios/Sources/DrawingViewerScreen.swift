@@ -169,37 +169,13 @@ struct DrawingViewerScreen: View {
                         .padding(.bottom, 8)
                 }
                 HStack(spacing: 16) {
-                    Button {
-                        measuring.toggle()
-                        if !measuring {
-                            document?.clearMeasure()
-                            measurement = nil
-                        }
-                    } label: {
-                        Label("Measure", systemImage: "ruler")
-                            .labelStyle(.iconOnly)
-                            .padding(14)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(measuring ? .orange : .accentColor)
-                    .clipShape(Circle())
-
-                    Button {
-                        let (width, height) = pixelSize(of: lastRenderSize)
-                        document?.fit(width: width, height: height)
-                        if let document { render(document: document, size: lastRenderSize) }
-                    } label: {
-                        Label("Fit", systemImage: "arrow.up.left.and.arrow.down.right")
-                            .labelStyle(.iconOnly)
-                            .padding(14)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .clipShape(Circle())
-
-                    // Its own slot rather than a shape hidden behind a press on
-                    // the one beside it, matching the reader's own ribbon: a
-                    // box for most things, a ring for the detail a box can't
-                    // take without its neighbours.
+                    // Matches Android's own `ModelRibbon` order exactly:
+                    // Snapshot (its box/ring choice split into its own slot
+                    // apiece, the reader's own convention, rather than
+                    // Android's single button plus dropdown) then Fit, then
+                    // the drawing's own extra tool — Measure — last, in the
+                    // slot Android's `extra` parameter fills only for this
+                    // viewer.
                     Button {
                         let holding = framing && !lasso
                         lasso = false
@@ -224,6 +200,33 @@ struct DrawingViewerScreen: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(framing && lasso ? .orange : .accentColor)
+                    .clipShape(Circle())
+
+                    Button {
+                        let (width, height) = pixelSize(of: lastRenderSize)
+                        document?.fit(width: width, height: height)
+                        if let document { render(document: document, size: lastRenderSize) }
+                    } label: {
+                        Label("Fit", systemImage: "arrow.up.left.and.arrow.down.right")
+                            .labelStyle(.iconOnly)
+                            .padding(14)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .clipShape(Circle())
+
+                    Button {
+                        measuring.toggle()
+                        if !measuring {
+                            document?.clearMeasure()
+                            measurement = nil
+                        }
+                    } label: {
+                        Label("Measure", systemImage: "ruler")
+                            .labelStyle(.iconOnly)
+                            .padding(14)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(measuring ? .orange : .accentColor)
                     .clipShape(Circle())
                 }
                 .padding(.bottom, 24)
