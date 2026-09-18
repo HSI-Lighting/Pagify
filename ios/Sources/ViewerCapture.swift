@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import SwiftUI
 import UIKit
 
 /// Taking a picture of a STEP model or a DXF/DWG drawing — the iOS twin of
@@ -16,6 +17,59 @@ import UIKit
 ///
 /// It also means the picture need not be the size of the screen: `scale`
 /// asks for it larger, up to `mostPixels`.
+
+/// The ribbon's capture tool. Matches Android's own `ModelRibbon` exactly —
+/// one "Snapshot" button whose tap opens a menu choosing Box or Ring, not two
+/// separately armed tools — reused by both viewers the same way `ModelRibbon`
+/// itself is. Android's own doc explains the shape: "the button means
+/// 'snapshot' and the menu means 'which shape', exactly as on a page: the
+/// shape is only ever chosen after deciding to take one, never before."
+///
+/// The button's own icon follows whichever shape is currently armed (a ring
+/// once Ring is chosen, a box otherwise) and a checkmark marks the armed
+/// choice in the menu, the same as Android's `DropdownMenuItem` trailing
+/// icon.
+struct SnapshotMenuButton: View {
+    @Binding var framing: Bool
+    @Binding var lasso: Bool
+
+    var body: some View {
+        Menu {
+            Button {
+                // Choosing the shape already armed puts the tool away, so
+                // this stays a toggle rather than a one-way switch — matches
+                // Android's own `onFrame(!(framing && !lasso))`.
+                let holding = framing && !lasso
+                lasso = false
+                framing = !holding
+            } label: {
+                if framing && !lasso {
+                    Label("Box", systemImage: "checkmark")
+                } else {
+                    Text("Box")
+                }
+            }
+            Button {
+                let holding = framing && lasso
+                lasso = true
+                framing = !holding
+            } label: {
+                if framing && lasso {
+                    Label("Ring", systemImage: "checkmark")
+                } else {
+                    Text("Ring")
+                }
+            }
+        } label: {
+            Label("Snapshot", systemImage: framing && lasso ? "scribble.variable" : "viewfinder")
+                .labelStyle(.iconOnly)
+                .padding(14)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(framing ? .orange : .accentColor)
+        .clipShape(Circle())
+    }
+}
 
 /// Twelve megapixels: a 48 MB bitmap, held briefly while it is encoded.
 /// Matches Android's own `MOST_CAPTURE_PIXELS` exactly — chosen so it does

@@ -170,37 +170,10 @@ struct DrawingViewerScreen: View {
                 }
                 HStack(spacing: 16) {
                     // Matches Android's own `ModelRibbon` order exactly:
-                    // Snapshot (its box/ring choice split into its own slot
-                    // apiece, the reader's own convention, rather than
-                    // Android's single button plus dropdown) then Fit, then
-                    // the drawing's own extra tool — Measure — last, in the
-                    // slot Android's `extra` parameter fills only for this
-                    // viewer.
-                    Button {
-                        let holding = framing && !lasso
-                        lasso = false
-                        framing = !holding
-                    } label: {
-                        Label("Snapshot", systemImage: "viewfinder")
-                            .labelStyle(.iconOnly)
-                            .padding(14)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(framing && !lasso ? .orange : .accentColor)
-                    .clipShape(Circle())
-
-                    Button {
-                        let holding = framing && lasso
-                        lasso = true
-                        framing = !holding
-                    } label: {
-                        Label("Draw around", systemImage: "scribble.variable")
-                            .labelStyle(.iconOnly)
-                            .padding(14)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(framing && lasso ? .orange : .accentColor)
-                    .clipShape(Circle())
+                    // Snapshot then Fit, then the drawing's own extra tool —
+                    // Measure — last, in the slot Android's `extra`
+                    // parameter fills only for this viewer.
+                    SnapshotMenuButton(framing: $framing, lasso: $lasso)
 
                     Button {
                         let (width, height) = pixelSize(of: lastRenderSize)

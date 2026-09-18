@@ -152,34 +152,8 @@ struct ModelViewerScreen: View {
                 }
                 HStack(spacing: 16) {
                     // Matches Android's own `ModelRibbon` order exactly:
-                    // Snapshot (its box/ring choice split into its own slot
-                    // apiece, the reader's own convention, rather than
-                    // Android's single button plus dropdown) then Fit.
-                    Button {
-                        let holding = framing && !lasso
-                        lasso = false
-                        framing = !holding
-                    } label: {
-                        Label("Snapshot", systemImage: "viewfinder")
-                            .labelStyle(.iconOnly)
-                            .padding(14)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(framing && !lasso ? .orange : .accentColor)
-                    .clipShape(Circle())
-
-                    Button {
-                        let holding = framing && lasso
-                        lasso = true
-                        framing = !holding
-                    } label: {
-                        Label("Draw around", systemImage: "scribble.variable")
-                            .labelStyle(.iconOnly)
-                            .padding(14)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(framing && lasso ? .orange : .accentColor)
-                    .clipShape(Circle())
+                    // Snapshot then Fit.
+                    SnapshotMenuButton(framing: $framing, lasso: $lasso)
 
                     Button {
                         document?.fit()
