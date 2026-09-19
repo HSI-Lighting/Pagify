@@ -198,7 +198,13 @@ pub fn secure(file: &File<'_>, plus: &SecurePlus) -> Result<Vec<u8>> {
         replacements.push((*number, body));
     }
 
-    let encrypt_number = numbers.iter().copied().max().unwrap_or(0) + 1;
+    // Checked: the highest number is the file's to choose, and adding past
+    // `u32::MAX` used to wrap. Found by audit.
+    let Some(encrypt_number) = numbers.iter().copied().max().unwrap_or(0).checked_add(1) else {
+        return Err(PdfError::InvalidArgument(
+            "the document's object numbers are exhausted".into(),
+        ));
+    };
     let mut encrypt_body = Vec::new();
     write_object(&mut encrypt_body, &Object::Dict(plus.dictionary()?));
 

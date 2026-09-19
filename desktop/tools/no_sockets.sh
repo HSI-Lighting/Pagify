@@ -43,7 +43,22 @@ fi
 DENY='^(reqwest|ureq|hyper|hyper-util|hyper-rustls|hyper-tls|h2|h3|curl|curl-sys|isahc|attohttpc|minreq|surf|ehttp|ewebsock|tungstenite|tokio-tungstenite|websocket|quinn|tokio|async-std|smol|mio|socket2|native-tls|rustls|rustls-native-certs|openssl|openssl-sys|webpki|webpki-roots|http|httparse|http-body|trust-dns-resolver|hickory-resolver)$'
 echo "==> no network crate in the graph"
 for tree in "$ROOT" "$ENGINE"; do
-  found="$( (cd "$tree" && cargo tree -e normal --prefix none 2>/dev/null) \
+  # cargo tree's exit status is checked explicitly. Found by audit: when it
+  # failed (bad lockfile, missing manifest, network-less index) the pipeline
+  # saw empty output, found nothing, and printed success — a gate that fails
+  # open is worse than no gate.
+  err="$(mktemp)"
+  if ! tree_out="$( (cd "$tree" && cargo tree -e normal --prefix none) 2>"$err" )"; then
+    echo "in $tree:" >&2
+    echo "cargo tree failed - the dependency graph could not be read, so nothing here" >&2
+    echo "was checked and this gate cannot pass:" >&2
+    sed 's/^/  /' "$err" >&2
+    rm -f "$err"
+    failed=1
+    continue
+  fi
+  rm -f "$err"
+  found="$(printf '%s\n' "$tree_out" \
     | awk '{print $1}' | sort -u | grep -E "$DENY" || true)"
   if [ -n "$found" ]; then
     echo "in $tree:" >&2

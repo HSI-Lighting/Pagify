@@ -1,5 +1,7 @@
 //! Finding the objects in a file, and writing one back changed.
 
+use std::collections::BTreeSet;
+
 use super::object::{Dict, Lexer, Object, Offsets};
 use crate::error::{PdfError, Result};
 
@@ -33,17 +35,19 @@ impl<'a> File<'a> {
         let mut offsets = Offsets::new();
         let mut trailer: Option<Dict> = None;
         let mut at = Some(start);
-        let mut seen = Vec::new();
+        // A set rather than a list: each section parses an object's worth of
+        // bytes, and a file with hundreds of thousands of ` /Prev` sections
+        // made the membership test quadratic. Found by audit.
+        let mut seen = BTreeSet::new();
 
         while let Some(section) = at {
             // A `/Prev` pointing back into a section already read is a loop, and
             // a file that walks one forever is a file that never opens.
-            if seen.contains(&section) {
+            if !seen.insert(section) {
                 return Err(PdfError::InvalidArgument(
                     "the cross-reference table points at itself".into(),
                 ));
             }
-            seen.push(section);
             if section >= bytes.len() {
                 return Err(PdfError::InvalidArgument(
                     "the cross-reference table is past the end of the file".into(),
@@ -143,7 +147,14 @@ impl<'a> File<'a> {
                 // wrote object 9 that way — where taking it at its word made
                 // the whole file unreadable to us over a single bad row.
                 if kind == b"n" && offset != 0 {
-                    offsets.insert(first + index, offset);
+                    // The numbers are the file's: a subsection that starts at
+                    // the top of the range used to add past it. Found by audit.
+                    let Some(number) = first.checked_add(index) else {
+                        return Err(PdfError::InvalidArgument(
+                            "a cross-reference subsection runs past the object numbers".into(),
+                        ));
+                    };
+                    offsets.insert(number, offset);
                 }
             }
         }
@@ -289,25 +300,35 @@ impl<'a> File<'a> {
             out.extend_from_slice(b"\nendobj\n");
         }
 
-        // One subsection covering everything, which is legal and simpler than
-        // reproducing however many the original happened to have.
-        let highest = written.keys().copied().max().unwrap_or(0);
+        // **One subsection per run of consecutive numbers**, and never one
+        // subsection from zero to the highest. The highest number is the
+        // file's to choose, and a table with four billion free rows in it
+        // turns a four-hundred-byte document into gigabytes of rewrite — or,
+        // when the number is `u32::MAX`, wraps and loops forever. Object zero
+        // is always the free head, and numbers nobody wrote are simply absent
+        // from the table, which every reader treats as free. Found by audit.
+        let mut numbers: Vec<u32> = written.keys().copied().filter(|number| *number != 0).collect();
+        numbers.sort_unstable();
+        let highest = numbers.last().copied().unwrap_or(0);
         let xref_at = out.len();
-        out.extend_from_slice(format!("xref\n0 {}\n", highest + 1).as_bytes());
-        out.extend_from_slice(b"0000000000 65535 f \n");
-        for number in 1..=highest {
-            match written.get(&number) {
-                Some(offset) => {
-                    out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes())
-                }
-                // A number the original never used stays free, so nothing can
-                // follow it to an offset that means nothing.
-                None => out.extend_from_slice(b"0000000000 65535 f \n"),
+        out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n");
+        let mut from = 0;
+        while from < numbers.len() {
+            let mut to = from;
+            while to + 1 < numbers.len() && numbers[to + 1] == numbers[to].saturating_add(1) {
+                to += 1;
             }
+            out.extend_from_slice(format!("{} {}\n", numbers[from], to - from + 1).as_bytes());
+            for number in &numbers[from..=to] {
+                out.extend_from_slice(format!("{:010} 00000 n \n", written[number]).as_bytes());
+            }
+            from = to + 1;
         }
 
         let mut trailer = self.trailer.clone();
-        trailer.set(b"Size", Object::Number(format!("{}", highest + 1).into_bytes()));
+        // A `u64`, because the highest number the file may name is `u32::MAX`
+        // and its size is one past that.
+        trailer.set(b"Size", Object::Number(format!("{}", u64::from(highest) + 1).into_bytes()));
         // `/Prev` named a table in the file this was read from, and there is
         // only one table now. Left in, it would send a reader to an offset that
         // means nothing here.
@@ -371,7 +392,7 @@ impl<'a> File<'a> {
         let mut from = 0;
         while from < numbers.len() {
             let mut to = from;
-            while to + 1 < numbers.len() && numbers[to + 1] == numbers[to] + 1 {
+            while to + 1 < numbers.len() && numbers[to + 1] == numbers[to].saturating_add(1) {
                 to += 1;
             }
             out.extend_from_slice(format!("{} {}\n", numbers[from], to - from + 1).as_bytes());
@@ -382,15 +403,17 @@ impl<'a> File<'a> {
         }
 
         // The trailer carries what the last one carried and says where that
-        // one is; `/Size` grows if a new object went past it.
+        // one is; `/Size` grows if a new object went past it. A `u64`,
+        // because the highest number a file may name is `u32::MAX` and its
+        // size is one past that. Found by audit.
         let highest = numbers.last().copied().unwrap_or(0);
         let size = self
             .trailer
             .get(b"Size")
             .and_then(Object::as_i64)
-            .map_or(0, |n| n.max(0) as u32)
-            .max(highest + 1)
-            .max(self.numbers().max().unwrap_or(0) + 1);
+            .map_or(0u64, |n| n.max(0) as u64)
+            .max(u64::from(highest) + 1)
+            .max(u64::from(self.numbers().max().unwrap_or(0)) + 1);
         let mut trailer = Dict(Vec::new());
         for key in [&b"Root"[..], b"Info", b"ID"] {
             if let Some(value) = self.trailer.get(key) {
@@ -803,6 +826,54 @@ mod tests {
             &marker,
             "the binary marker was dropped, so the file now sniffs as text"
         );
+    }
+
+    /// **The cost of a rewrite is the objects in it, not the highest number
+    /// it names.** The cross-reference table used to be one subsection from
+    /// zero to the highest number, so a tiny document naming object four
+    /// thousand million wrote eighty gigabytes — and one naming `u32::MAX`
+    /// wrapped and looped for ever. Found by audit.
+    #[test]
+    fn a_document_naming_a_huge_object_number_rewrites_in_proportion_to_its_objects() {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let body_at = bytes.len();
+        bytes.extend_from_slice(b"4000000000 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        let xref_at = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n4000000000 1\n");
+        bytes.extend_from_slice(format!("{body_at:010} 00000 n \n").as_bytes());
+        bytes.extend_from_slice(
+            b"trailer\n<< /Size 4000000001 /Root 4000000000 0 R >>\nstartxref\n",
+        );
+        bytes.extend_from_slice(format!("{xref_at}\n%%EOF").as_bytes());
+
+        let file = File::parse(&bytes).expect("parse");
+        let rewritten = file.rewrite(&[]).expect("rewrite");
+        assert!(
+            rewritten.len() < 4096,
+            "the rewrite is {} bytes for a {} byte file",
+            rewritten.len(),
+            bytes.len()
+        );
+        let after = File::parse(&rewritten).expect("the rewritten file parses");
+        assert_eq!(after.numbers().collect::<Vec<_>>(), vec![4_000_000_000]);
+        after.object(4_000_000_000).expect("the object is still findable");
+    }
+
+    /// **A subsection that starts at the top of the range is refused, not
+    /// wrapped.** `first + index` ran past `u32::MAX` one entry at a time.
+    /// Found by audit.
+    #[test]
+    fn an_xref_subsection_that_runs_past_the_object_numbers_is_refused() {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let xref_at = bytes.len();
+        bytes.extend_from_slice(
+            b"xref\n0 1\n0000000000 65535 f \n4294967295 2\n0000000009 00000 n \n0000000018 00000 n \n\
+              trailer\n<< /Size 1 >>\nstartxref\n",
+        );
+        bytes.extend_from_slice(format!("{xref_at}\n%%EOF").as_bytes());
+
+        let problem = File::parse(&bytes).expect_err("should refuse");
+        assert!(format!("{problem}").contains("past the object numbers"), "{problem}");
     }
 
     /// A `/Prev` chain that loops must stop rather than spin.

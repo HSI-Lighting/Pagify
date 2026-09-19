@@ -162,6 +162,135 @@ fn what_is_still_there_is_said_before_what_was_removed() {
     assert!(!done.removed().javascript, "it counted the script as removed");
 }
 
+// ---------------------------------------------------------------------------
+// A form is hidden data too. The audit found `/AcroForm /XFA` and filled-in
+// field values surviving a clean the UI reported as complete; these use bytes
+// written here rather than a committed fixture, because the point is the two
+// keys and the stream between them.
+// ---------------------------------------------------------------------------
+
+/// An uncompressed one-page PDF with the objects given, at real xref offsets.
+fn hand_written(objects: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n");
+    let mut offsets = std::collections::BTreeMap::new();
+    for (number, body) in objects {
+        offsets.insert(*number, out.len());
+        out.extend_from_slice(format!("{number} 0 obj\n").as_bytes());
+        out.extend_from_slice(body);
+        out.extend_from_slice(b"\nendobj\n");
+    }
+    let xref_at = out.len();
+    let top = objects.iter().map(|(number, _)| *number).max().unwrap_or(0) + 1;
+    out.extend_from_slice(format!("xref\n0 {top}\n").as_bytes());
+    out.extend_from_slice(b"0000000000 65535 f \n");
+    for number in 1..top {
+        match offsets.get(&number) {
+            Some(at) => out.extend_from_slice(format!("{at:010} 00000 n \n").as_bytes()),
+            None => out.extend_from_slice(b"0000000000 65535 f \n"),
+        }
+    }
+    out.extend_from_slice(
+        format!("trailer\n<< /Size {top} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n")
+            .as_bytes(),
+    );
+    out
+}
+
+/// A stream object whose data is `body`.
+fn stream(dict: &str, body: &[u8]) -> Vec<u8> {
+    let mut out = format!("<< {dict} /Length {} >>\nstream\n", body.len()).into_bytes();
+    out.extend_from_slice(body);
+    out.extend_from_slice(b"\nendstream");
+    out
+}
+
+/// **The clean takes XFA and field values out, and the file it writes is what
+/// it says it removed.** Both were left in place and the document reported
+/// clean. Found by audit.
+///
+/// One value is written inline in its field and one is an object of its own,
+/// because those are the two places a value lives and only the second can be
+/// dropped from the file rather than edited.
+#[test]
+fn cleaning_takes_xfa_and_field_values_out_and_says_so() {
+    const XFA: &[u8] = b"XFA-SECRET-STREAM";
+    let bytes = hand_written(&[
+        (1, b"<< /Type /Catalog /Pages 2 0 R /AcroForm 5 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>".to_vec()),
+        (4, stream("", b"BT ET")),
+        (5, b"<< /XFA 6 0 R /Fields [7 0 R 8 0 R] >>".to_vec()),
+        (6, stream("", XFA)),
+        (7, b"<< /FT /Tx /T (secret-field) /V (FIELD-SECRET-VALUE) >>".to_vec()),
+        (8, b"<< /FT /Tx /T (second-field) /V 9 0 R >>".to_vec()),
+        (9, b"(SECOND-FIELD-SECRET)".to_vec()),
+    ]);
+
+    let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+    let found = pdf_core::pdf::hidden::survey(&file, &bytes).expect("survey");
+    assert!(found.xfa, "the XFA entry was not reported: {found:?}");
+    assert_eq!(found.form_values, 2, "the field values were not reported: {found:?}");
+    assert!(!found.is_empty(), "a file with form data read as clean");
+    let said = found.describe();
+    assert!(said.contains("XFA") && said.contains("form field"), "{said}");
+
+    let (cleaned, done) = pdf_core::pdf::hidden::strip(&file, &bytes).expect("clean");
+    assert!(done.is_clean(), "the clean left something behind: {}", done.describe());
+    let said = done.describe();
+    assert!(said.contains("XFA") && said.contains("form field"), "{said}");
+
+    assert!(!contains(&cleaned, XFA), "the XFA stream is still in the file");
+    for gone in [&b"FIELD-SECRET-VALUE"[..], b"SECOND-FIELD-SECRET"] {
+        assert!(
+            !contains(&cleaned, gone),
+            "{} is still in the file",
+            String::from_utf8_lossy(gone)
+        );
+    }
+    for kept in [&b"secret-field"[..], b"second-field"] {
+        assert!(
+            contains(&cleaned, kept),
+            "the field {:?} was taken out with its value",
+            String::from_utf8_lossy(kept)
+        );
+    }
+}
+
+/// **A changed stream keeps its bytes.** A sanitised replacement is printed
+/// from its object; a stream printed that way dropped the data and left the
+/// page it drew blank while the clean reported it clean. Found by audit.
+#[test]
+fn a_script_carrying_stream_keeps_its_bytes() {
+    const CONTENT: &[u8] = b"STREAM-BYTES-SURVIVE";
+    let bytes = hand_written(&[
+        (1, b"<< /Type /Catalog /Pages 2 0 R >>".to_vec()),
+        (2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_vec()),
+        (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Contents 4 0 R >>".to_vec()),
+        (4, stream("/AA << /O 5 0 R >>", CONTENT)),
+        (5, b"<< /S /JavaScript /JS (app.alert\\(\"stream\"\\);) >>".to_vec()),
+    ]);
+
+    let file = pdf_core::pdf::File::parse(&bytes).expect("parse");
+    let found = pdf_core::pdf::hidden::survey(&file, &bytes).expect("survey");
+    assert!(found.javascript, "the stream's action was not reported: {found:?}");
+
+    let (cleaned, _) = pdf_core::pdf::hidden::strip(&file, &bytes).expect("clean");
+    assert!(!contains(&cleaned, b"/AA"), "the action's dictionary entry survived");
+    assert!(contains(&cleaned, CONTENT), "the stream's bytes were dropped");
+
+    // Read back the way a reader would: the same stream object, with the same
+    // data and without the action.
+    let reread = pdf_core::pdf::File::parse(&cleaned).expect("parse cleaned");
+    match reread.object(4).expect("the stream object") {
+        pdf_core::pdf::Object::Stream(dict, range) => {
+            assert_eq!(&cleaned[range], CONTENT, "the stream came back different");
+            assert!(dict.get(b"AA").is_none(), "the action is still on the stream");
+        }
+        other => panic!("the stream came back as {other:?}"),
+    }
+}
+
 /// **A sanitised document must be saved whole.**
 ///
 /// Appending to it would start the problem over: the cleaned revision, with an

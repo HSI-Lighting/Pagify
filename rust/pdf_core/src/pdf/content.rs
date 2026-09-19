@@ -786,6 +786,24 @@ pub fn splice(bytes: &[u8], edits: &[(std::ops::Range<usize>, Vec<u8>)]) -> Vec<
 /// comes back as `None` rather than as a guess, and the caller leaves that
 /// page alone.
 pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
+    // Every refusal reads as "cannot decode" here, and the caller leaves the
+    // page alone. What the reason was is [`decode_checked`]'s to say.
+    decode_checked(dict, raw).ok()
+}
+
+/// The same read as [`decode`], with the reason for a refusal rather than
+/// `None` for every one of them.
+///
+/// The reasons are a `/Filter` this cannot read, a chain longer than
+/// [`MAX_FILTER_STAGES`], and a chain whose stages together inflate past
+/// [`INFLATED_LIMIT`]. Found by audit.
+pub fn decode_checked(dict: &super::Dict, raw: &[u8]) -> Result<Vec<u8>> {
+    decode_bounded(dict, raw, INFLATED_LIMIT)
+}
+
+/// [`decode_checked`] against a stated budget, so the chain accounting can be
+/// tested without inflating a real limit's worth of bytes.
+fn decode_bounded(dict: &super::Dict, raw: &[u8], limit: u64) -> Result<Vec<u8>> {
     let filters: Vec<Vec<u8>> = match dict.get(b"Filter") {
         None => Vec::new(),
         Some(Object::Name(name)) => vec![name.clone()],
@@ -795,16 +813,37 @@ pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
                 Object::Name(name) => Some(name.clone()),
                 _ => None,
             })
-            .collect::<Option<Vec<_>>>()?,
-        _ => return None,
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| {
+                PdfError::InvalidArgument("a /Filter array entry is not a name".into())
+            })?,
+        _ => {
+            return Err(PdfError::InvalidArgument(
+                "/Filter is neither a name nor an array".into(),
+            ))
+        }
     };
+
+    // One decode per stage, one stage per entry. A file naming a thousand
+    // filters asks for a thousand decodes from however small it is, and each
+    // stage used to be allowed its own full `INFLATED_LIMIT`. Real producers
+    // write one to three. Found by audit.
+    if filters.len() > MAX_FILTER_STAGES {
+        return Err(PdfError::InvalidArgument(format!(
+            "the stream names {} filters; at most {MAX_FILTER_STAGES} are read",
+            filters.len()
+        )));
+    }
+
     let parms: Vec<Option<super::Dict>> = match dict.get(b"DecodeParms") {
         None | Some(Object::Null) => vec![None; filters.len()],
         Some(Object::Dict(d)) => {
             // One dictionary is the one-filter form; beside several filters
             // it is not well formed, and is not guessed at.
             if filters.len() != 1 {
-                return None;
+                return Err(PdfError::InvalidArgument(
+                    "one /DecodeParms dictionary beside several filters is not well formed".into(),
+                ));
             }
             vec![Some(d.clone())]
         }
@@ -816,27 +855,47 @@ pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
                     Object::Null => Some(None),
                     _ => None,
                 })
-                .collect::<Option<Vec<_>>>()?;
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    PdfError::InvalidArgument(
+                        "a /DecodeParms array entry is neither a dictionary nor null".into(),
+                    )
+                })?;
             out.resize(filters.len(), None);
             out
         }
-        _ => return None,
+        _ => {
+            return Err(PdfError::InvalidArgument(
+                "/DecodeParms is neither a dictionary nor an array".into(),
+            ))
+        }
     };
 
     let mut data = raw.to_vec();
+    // **Bounded over the whole chain, not at every stage.** Stage *n*'s
+    // output feeds stage *n+1*, so a chain of N stages each under the limit
+    // still costs N × that limit of work from a small file; the sum of what
+    // the stages produce is what is counted. Deflate manages about a thousand
+    // to one on the right input, so a megabyte of stream became a gigabyte of
+    // content on the first edit; fonts and `/ToUnicode` come through here
+    // too. Over the limit reads as "cannot decode", and the caller leaves the
+    // page alone — the same as for a filter it does not know. Found by audit.
+    let mut produced: u64 = 0;
     for (filter, parm) in filters.iter().zip(parms) {
-        data = apply_filter(filter, parm.as_ref(), &data)?;
-        // Bounded at every stage. Deflate manages about a thousand to one on
-        // the right input, so a megabyte of stream became a gigabyte of
-        // content on the first edit; fonts and `/ToUnicode` come through
-        // here too. Found by audit. Over the limit reads as "cannot decode",
-        // and the caller leaves the page alone — the same as for a filter it
-        // does not know.
-        if data.len() as u64 > INFLATED_LIMIT {
-            return None;
+        data = apply_filter(filter, parm.as_ref(), &data).ok_or_else(|| {
+            PdfError::InvalidArgument(format!(
+                "the stream's {} filter could not be read",
+                String::from_utf8_lossy(filter)
+            ))
+        })?;
+        produced = produced.saturating_add(data.len() as u64);
+        if produced > limit {
+            return Err(PdfError::InvalidArgument(
+                "the stream's filter chain inflates past the limit".into(),
+            ));
         }
     }
-    Some(data)
+    Ok(data)
 }
 
 /// One filter undone, with its own parameters.
@@ -1226,6 +1285,13 @@ fn lzw_decode(data: &[u8], early_change: bool, limit: u64) -> Option<Vec<u8>> {
 /// stopped a long way short of the memory it was aiming for.
 pub const INFLATED_LIMIT: u64 = 128 * 1024 * 1024;
 
+/// The most filter stages a stream may name.
+///
+/// Real chains are one to three — a deflate with a hex or ASCII85 wrapper is
+/// the longest this has seen. Eight is generous, and stops one small file
+/// from asking for an unbounded number of decodes. Found by audit.
+pub const MAX_FILTER_STAGES: usize = 8;
+
 /// Deflate a stream back, at the default level.
 pub fn encode(data: &[u8]) -> Result<Vec<u8>> {
     use std::io::Write;
@@ -1485,6 +1551,72 @@ mod tests {
         small.write_all(&block).expect("deflate");
         let small = small.finish().expect("deflate");
         assert_eq!(decode(&dict, &small).map(|d| d.len()), Some(block.len()));
+    }
+
+    /// **A chain longer than any real one is refused.** One decode per stage
+    /// per entry; a file naming a thousand filters asks for a thousand
+    /// decodes. Found by audit.
+    #[test]
+    fn a_filter_chain_longer_than_the_stage_ceiling_is_refused() {
+        let hex = Object::Name(b"ASCIIHexDecode".to_vec());
+        let flate = Object::Name(b"FlateDecode".to_vec());
+
+        // A chain at the ceiling, built by hex-encoding seven times and
+        // deflating the result: eight stages, and it reads back.
+        let mut raw = b"X".to_vec();
+        for _ in 0..MAX_FILTER_STAGES - 1 {
+            raw = raw.iter().flat_map(|b| format!("{b:02X}").into_bytes()).collect();
+        }
+        raw = encode(&raw).expect("deflate");
+        let mut at_ceiling = vec![flate.clone()];
+        at_ceiling.extend((0..MAX_FILTER_STAGES - 1).map(|_| hex.clone()));
+
+        let mut dict = super::super::Dict::default();
+        dict.set(b"Filter", Object::Array(at_ceiling));
+        assert_eq!(decode(&dict, &raw).as_deref(), Some(&b"X"[..]));
+
+        let mut too_many = dict.get(b"Filter").cloned().unwrap_or(Object::Null);
+        if let Object::Array(filters) = &mut too_many {
+            filters.push(hex);
+        }
+        dict.set(b"Filter", too_many);
+        assert!(decode(&dict, &raw).is_none(), "the long chain was followed");
+        match decode_checked(&dict, &raw) {
+            Err(PdfError::InvalidArgument(said)) => {
+                assert!(said.contains("9 filters"), "unhelpful refusal: {said}");
+            }
+            other => panic!("a nine-stage chain was not refused: {other:?}"),
+        }
+    }
+
+    /// **The budget is the chain's, not each stage's.** Stage *n*'s output
+    /// feeds stage *n+1*, so every stage can sit under the limit and the sum
+    /// still exceed it — N times the work from one small file. Found by
+    /// audit.
+    #[test]
+    fn a_chain_that_costs_more_than_its_budget_is_refused() {
+        let mut dict = super::super::Dict::default();
+        dict.set(
+            b"Filter",
+            Object::Array(vec![
+                Object::Name(b"FlateDecode".to_vec()),
+                Object::Name(b"ASCIIHexDecode".to_vec()),
+            ]),
+        );
+        let packed = encode(b"AAAA").expect("deflate");
+
+        // Four bytes out of the deflate, then two out of the hex: six.
+        assert_eq!(
+            decode_bounded(&dict, &packed, 6).expect("six is the whole cost"),
+            vec![0xAA, 0xAA]
+        );
+        // Five allows each stage on its own and refuses the two together.
+        match decode_bounded(&dict, &packed, 5) {
+            Err(PdfError::InvalidArgument(said)) => {
+                assert!(said.contains("filter chain"), "unhelpful refusal: {said}");
+            }
+            other => panic!("the chain's sum was not counted: {other:?}"),
+        }
     }
 
     fn ops(bytes: &[u8]) -> Vec<Operation> {

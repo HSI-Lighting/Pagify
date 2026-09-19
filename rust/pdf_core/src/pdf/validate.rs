@@ -157,16 +157,75 @@ pub fn check_with(file: &File<'_>, bytes: &[u8], anchors: &Anchors) -> Result<Ve
             continue;
         }
 
-        let Checked { verdict, signer, trust } = verdict_for(dict, bytes, anchors);
-        out.push(Signature {
-            name: text_of(dict.get(b"Name")),
-            when: text_of(dict.get(b"M")),
-            verdict,
-            signer,
-            trust,
-        });
+        // Where this signature dictionary sits in the file is part of what
+        // the check needs: the hole in `/ByteRange` must be this object's own
+        // `/Contents`, or the range says nothing about the document that was
+        // signed. An object whose position cannot be established is not
+        // judged — a signature dictionary stored where no hole can live is
+        // already not one this can check.
+        let name = text_of(dict.get(b"Name"));
+        let when = text_of(dict.get(b"M"));
+        let binding = match file.span_of(number) {
+            Ok(span) => HoleBinding { span },
+            Err(_) => {
+                out.push(Signature {
+                    name,
+                    when,
+                    verdict: Verdict::Unreadable(
+                        "its position in the file cannot be established".into(),
+                    ),
+                    signer: None,
+                    trust: None,
+                });
+                continue;
+            }
+        };
+
+        let Checked { verdict, signer, trust } = verdict_for(dict, bytes, anchors, Some(&binding));
+        out.push(Signature { name, when, verdict, signer, trust });
     }
     Ok(out)
+}
+
+/// Where the signature dictionary itself sits in the file, so the hole its
+/// `/ByteRange` names can be tied to its own `/Contents`.
+///
+/// **Without this, the signature verifies over bytes that are not the
+/// document.** An attacker can take a validly signed file, split it at the
+/// Contents hole, insert a region carrying a shadow signature dictionary and
+/// a new cross-reference table, and leave the covered bytes byte-identical —
+/// the digest and the signature still verify, while the parsed document is
+/// attacker-chosen. The range therefore has to skip *this* dictionary's own
+/// Contents token and nothing else, which is the rule ISO 32000-2 states and
+/// the one `sign.rs` writes.
+#[derive(Clone)]
+struct HoleBinding {
+    span: std::ops::Range<usize>,
+}
+
+impl HoleBinding {
+    /// Whether `[first, second_at)` is exactly the `/Contents` value of the
+    /// dictionary that owns this span.
+    ///
+    /// The object must have covered bytes on both sides of the hole — the
+    /// header and trailer that make it an object — so a dictionary that lives
+    /// entirely inside the hole (which is how the splice is built) fails even
+    /// if its Contents happen to sit there too.
+    fn holds(&self, bytes: &[u8], first: usize, second_at: usize, contents: &Object) -> bool {
+        // Strictly inside: at least one byte of the object is covered before
+        // the hole, and at least one after it.
+        if first <= self.span.start || second_at >= self.span.end {
+            return false;
+        }
+        if bytes.get(first) != Some(&b'<') || bytes.get(second_at - 1) != Some(&b'>') {
+            return false;
+        }
+        let hole = Object::HexString(bytes[first + 1..second_at - 1].to_vec());
+        match (hex_of(Some(&hole)), hex_of(Some(contents))) {
+            (Some(hole), Some(contents)) => hole == contents,
+            _ => false,
+        }
+    }
 }
 
 /// What was learned about one signature.
@@ -199,20 +258,66 @@ const ID_CT_TST_INFO: const_oid::ObjectIdentifier =
     const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.1.4");
 
 /// What became of one signature dictionary.
-fn verdict_for(dict: &super::Dict, bytes: &[u8], anchors: &Anchors) -> Checked {
+///
+/// `hole` is where the dictionary sits in the file, when the caller knows.
+/// `None` skips the structural check that the `/ByteRange` hole is this
+/// dictionary's own `/Contents` — which the product path never does, and
+/// which the pure-crypto tests use to feed detached blobs.
+fn verdict_for(
+    dict: &super::Dict,
+    bytes: &[u8],
+    anchors: &Anchors,
+    hole: Option<&HoleBinding>,
+) -> Checked {
     use der::Decode;
 
     // -- the blob, and whether it is one this checks at all -------------------
+    let Some(blob) = hex_of(dict.get(b"Contents")) else {
+        return Checked::failed(Verdict::Unreadable("it holds no signature".into()));
+    };
+
+    // -- the range, and the hole it describes ---------------------------------
     //
-    // Before the range, before the digest: a signature in a scheme this does
+    // Checked before the CMS is read, because the hole is what the signature
+    // is *about*: the digest below is taken over the ranges the numbers name,
+    // and those numbers have to describe the whole file except this
+    // dictionary's own Contents value. Otherwise an attacker can splice the
+    // covered bytes back together around an inserted region carrying a shadow
+    // signature dictionary and a fresh cross-reference table — the digest
+    // still matches, and "unchanged since it was signed" is said about a
+    // document that was changed. Found by audit.
+    let Some(numbers) = range_numbers(dict) else {
+        return Checked::failed(Verdict::Unreadable("it declares no byte range".into()));
+    };
+    let [_, first, second_at, second_len] = numbers;
+    // Checked, because the numbers are the file's: `[0 0 1e308 n]` wrapped
+    // past the guard below and panicked on the slice. Found by audit.
+    let Some(reaches) = second_at.checked_add(second_len) else {
+        return Checked::failed(Verdict::Unreadable("its byte range does not add up".into()));
+    };
+    if reaches > bytes.len() || first > bytes.len() || first > second_at {
+        return Checked::failed(Verdict::Unreadable("its byte range runs past the file".into()));
+    }
+    if let Some(binding) = hole {
+        let Some(contents) = dict.get(b"Contents") else {
+            return Checked::failed(Verdict::Unreadable("it holds no signature".into()));
+        };
+        if !binding.holds(bytes, first, second_at, contents) {
+            return Checked::failed(Verdict::Unreadable(
+                "its byte range does not skip its own /Contents value".into(),
+            ));
+        }
+    }
+    let signed_bytes = [&bytes[..first], &bytes[second_at..second_at + second_len]];
+
+    // -- whether it is a signature this checks at all ------------------------
+    //
+    // After the range, before the digest: a signature in a scheme this does
     // not verify is declined here with nothing computed about the document,
     // so that "not verified by Pagify" can never come out as "altered" or
     // "only partly covered". Those verdicts are earned by a signature this
     // *can* check; for any other they would be a judgement made with no
     // evidence, in either direction.
-    let Some(blob) = hex_of(dict.get(b"Contents")) else {
-        return Checked::failed(Verdict::Unreadable("it holds no signature".into()));
-    };
     let Ok(info) = cms::content_info::ContentInfo::from_der(&blob) else {
         return Checked::failed(Verdict::Unreadable("its signature is not a CMS structure".into()));
     };
@@ -255,21 +360,6 @@ fn verdict_for(dict: &super::Dict, bytes: &[u8], anchors: &Anchors) -> Checked {
     let Some(committed) = committed else {
         return Checked::failed(Verdict::Unreadable("its signer committed to no digest".into()));
     };
-
-    // -- the range ------------------------------------------------------------
-    let Some(numbers) = range_numbers(dict) else {
-        return Checked::failed(Verdict::Unreadable("it declares no byte range".into()));
-    };
-    let [_, first, second_at, second_len] = numbers;
-    // Checked, because the numbers are the file's: `[0 0 1e308 n]` wrapped
-    // past the guard below and panicked on the slice. Found by audit.
-    let Some(reaches) = second_at.checked_add(second_len) else {
-        return Checked::failed(Verdict::Unreadable("its byte range does not add up".into()));
-    };
-    if reaches > bytes.len() || first > bytes.len() || first > second_at {
-        return Checked::failed(Verdict::Unreadable("its byte range runs past the file".into()));
-    }
-    let signed_bytes = [&bytes[..first], &bytes[second_at..second_at + second_len]];
 
     // -- what the signer committed to, against the file ----------------------
     if sm3_over(&signed_bytes) != committed {
@@ -645,13 +735,81 @@ mod tests {
                 Object::Array(range.iter().map(|n| Object::Number(n.as_bytes().to_vec())).collect()),
             );
             dict.set(b"Contents", Object::HexString(b"00".to_vec()));
-            let checked = verdict_for(&dict, &bytes, &Anchors::none());
+            let checked = verdict_for(&dict, &bytes, &Anchors::none(), None);
             assert!(
                 matches!(checked.verdict, Verdict::Unreadable(_) | Verdict::Incomplete { .. }),
                 "{range:?} gave {:?}",
                 checked.verdict
             );
         }
+    }
+
+    /// **The hole must be this dictionary's own `/Contents`.** The splice
+    /// attack re-joins the covered bytes around an inserted region carrying a
+    /// shadow signature dictionary, so the digest stays valid while the
+    /// document is attacker-chosen; tying the hole to the dictionary's own
+    /// Contents value is what makes the verdict be about this file. Found by
+    /// audit.
+    #[test]
+    fn a_byte_range_that_skips_something_other_than_its_contents_is_refused() {
+        let body = b"<</Type /Sig /Contents <AABB> /Other <CCDD> /ByteRange [0 30 38 20]>>";
+        let mut bytes = b"1 0 obj\n".to_vec();
+        let start = bytes.len();
+        bytes.extend_from_slice(body);
+        let end = bytes.len();
+        bytes.extend_from_slice(b"\nendobj\n");
+        let binding = HoleBinding { span: start..end };
+        let at = |needle: &[u8]| start + body.windows(needle.len()).position(|w| w == needle).unwrap();
+
+        let contents_at = at(b"<AABB>");
+        let other_at = at(b"<CCDD>");
+        assert!(binding.holds(
+            &bytes,
+            contents_at,
+            contents_at + 6,
+            &Object::HexString(b"AABB".to_vec())
+        ));
+        // A hex string inside the same object, but not the one /Contents
+        // names: refused.
+        assert!(!binding.holds(
+            &bytes,
+            other_at,
+            other_at + 6,
+            &Object::HexString(b"AABB".to_vec())
+        ));
+        // And the same hole through the real entry point below the crypto
+        // gates: an Unreadable that names the problem, never Unaltered.
+        let mut dict = super::super::Dict(Vec::new());
+        dict.set(b"Type", Object::Name(b"Sig".to_vec()));
+        dict.set(b"Contents", Object::HexString(b"AABB".to_vec()));
+        let numbers = [
+            "0".to_string(),
+            other_at.to_string(),
+            (other_at + 6).to_string(),
+            (bytes.len() - other_at - 6).to_string(),
+        ];
+        dict.set(
+            b"ByteRange",
+            Object::Array(numbers.iter().map(|n| Object::Number(n.as_bytes().to_vec())).collect()),
+        );
+        let checked = verdict_for(&dict, &bytes, &Anchors::none(), Some(&binding));
+        match &checked.verdict {
+            Verdict::Unreadable(why) => assert!(why.contains("/Contents"), "{why}"),
+            other => panic!("a hole over another hex string gave {other:?}"),
+        }
+    }
+
+    /// A dictionary that lives entirely inside the hole — how the splice is
+    /// built — has no covered bytes of its own, and is refused.
+    #[test]
+    fn an_object_inside_the_hole_is_not_a_signature_that_covers_anything() {
+        let bytes = b"1 0 obj\n<</Contents <AABB>>>\nendobj\n".to_vec();
+        let at = bytes.windows(6).position(|w| w == b"<AABB>").expect("the token");
+        let inner = HoleBinding { span: at..at + 6 };
+        assert!(!inner.holds(&bytes, at, at + 6, &Object::HexString(b"AABB".to_vec())));
+
+        let whole = HoleBinding { span: 0..bytes.len() };
+        assert!(whole.holds(&bytes, at, at + 6, &Object::HexString(b"AABB".to_vec())));
     }
 
     /// **A SignerInfo another implementation built verifies here.** The
@@ -684,7 +842,9 @@ mod tests {
         );
         dict.set(b"Contents", Object::HexString(hex));
 
-        let checked = verdict_for(&dict, &bytes, &Anchors::none());
+        // No hole: this is a detached blob judged against bytes that are not
+        // a file, which is exactly what the pure-crypto tests need.
+        let checked = verdict_for(&dict, &bytes, &Anchors::none(), None);
         assert_eq!(checked.verdict, Verdict::Unaltered, "{}", checked.verdict.describe());
         assert_eq!(checked.signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
         assert_eq!(checked.trust, Some(Trust::Unrecognised), "nobody pinned that signer");
@@ -692,7 +852,7 @@ mod tests {
         // And not over other bytes, which is the digest check under SM3.
         let mut other = bytes.clone();
         other[0] = b'H';
-        assert_eq!(verdict_for(&dict, &other, &Anchors::none()).verdict, Verdict::Altered);
+        assert_eq!(verdict_for(&dict, &other, &Anchors::none(), None).verdict, Verdict::Altered);
     }
 
     /// **Identifiers become words**, so that "not verified" names what the

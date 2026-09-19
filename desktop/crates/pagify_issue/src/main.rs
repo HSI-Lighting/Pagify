@@ -403,7 +403,7 @@ fn next_serial(dir: &Path) -> Outcome<Vec<u8>> {
     let text = std::fs::read_to_string(&path)?;
     let current = u64::from_str_radix(text.trim(), 16)
         .map_err(|_| format!("{} does not hold a hex serial", path.display()))?;
-    std::fs::write(&path, format!("{:X}\n", current + 1))?;
+    write_private(&path, format!("{:X}\n", current + 1).as_bytes(), false)?;
     let mut bytes = current.to_be_bytes().to_vec();
     while bytes.len() > 1 && bytes[0] == 0 {
         bytes.remove(0);
@@ -444,21 +444,53 @@ fn prompt_twice(what: &str) -> Outcome<Zeroizing<String>> {
     Ok(first)
 }
 
+/// Write `bytes` at `path` with the narrowest mode the platform has, and get
+/// them onto the disk before returning.
+///
+/// **The root key, an issued identity and the serial are private from the
+/// moment the file exists.** `create_new` alone leaves the mode to the umask —
+/// 0644 under the usual one — and `std::fs::write` was no better, so a key
+/// written on a shared machine was readable while the tool still had it open.
+/// `sync_all` matters for the same reason the backup reads itself back: a copy
+/// that is only in the page cache has not been proven, and `root backup` says
+/// it has. Found by audit.
+fn write_private(path: &Path, bytes: &[u8], create_new: bool) -> Outcome<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true);
+    if create_new {
+        options.create_new(true);
+    } else {
+        options.create(true).truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 /// Written only where nothing is: a key or an identity is never overwritten.
 fn write_new(path: &Path, bytes: &[u8]) -> Outcome<()> {
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
-    file.write_all(bytes)?;
-    Ok(())
+    write_private(path, bytes, true)
 }
 
 fn append(path: &Path, bytes: &[u8]) -> Outcome<()> {
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().append(true).create(true).open(path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.append(true).create(true);
+    // The ledger names every leaf issued, so it is kept as private as the
+    // identities themselves. Found by audit.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
     file.write_all(bytes)?;
     Ok(())
 }
@@ -585,5 +617,39 @@ mod tests {
         assert!(Options::parse(&["--dir"]).is_err());
         assert!(Options::parse(&["dir", "/x"]).is_err());
         assert!(Options::parse(&["--years", "five"]).unwrap().years(20).is_err());
+    }
+
+    /// **A key, an identity and the ledger are readable by their owner
+    /// alone.** Found by audit: `create_new` without a mode left them at the
+    /// umask's 0644. Unix-only, because the mode is.
+    #[cfg(unix)]
+    #[test]
+    fn keys_identities_and_the_ledger_are_readable_by_their_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pagify-issue-modes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mode_of =
+            |path: &Path| std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+
+        for name in ["root.key", "leaf.p12", "issued.txt"] {
+            let path = dir.join(name);
+            write_new(&path, b"x").unwrap();
+            assert_eq!(mode_of(&path), 0o600, "{name} was written at {:o}", mode_of(&path));
+        }
+
+        // The ledger is appended to after it exists; that must not widen it.
+        let ledger = dir.join("issued.txt");
+        append(&ledger, b"line\n").unwrap();
+        assert_eq!(mode_of(&ledger), 0o600);
+
+        // The serial exists already when it is advanced; that must not widen
+        // it either.
+        let serial = dir.join("serial");
+        write_new(&serial, b"1001\n").unwrap();
+        assert_eq!(next_serial(&dir).unwrap(), vec![0x10, 0x01]);
+        assert_eq!(mode_of(&serial), 0o600, "advancing the serial widened it");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

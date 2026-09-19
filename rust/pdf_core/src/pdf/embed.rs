@@ -144,7 +144,19 @@ pub fn truetype(bytes: &[u8], first: u32) -> Result<Embedded> {
         .collect();
     let pdf_name = if pdf_name.is_empty() { "PagifyTyping".to_string() } else { pdf_name };
 
-    let (font, descriptor, file) = (first, first + 1, first + 2);
+    // Checked: the numbers are the document's, and the top of the range has
+    // no room above it. Found by audit.
+    let Some(descriptor) = first.checked_add(1) else {
+        return Err(PdfError::InvalidArgument(
+            "the document's object numbers are exhausted".into(),
+        ));
+    };
+    let Some(file) = first.checked_add(2) else {
+        return Err(PdfError::InvalidArgument(
+            "the document's object numbers are exhausted".into(),
+        ));
+    };
+    let font = first;
 
     // Widths for every code the encoding can carry, in 1000ths of an em. A code
     // the face has no glyph for is zero, which is what a reader expects for a

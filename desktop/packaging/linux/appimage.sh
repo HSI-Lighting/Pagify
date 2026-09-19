@@ -14,7 +14,21 @@ DYLIB="$ROOT/third_party/pdfium/pdfium-linux-x64/lib/libpdfium.so"
 
 [ -f "$DYLIB" ] || { echo "no Linux PDFium — run tools/fetch_pdfium.sh" >&2; exit 1; }
 
-cargo build --release -p pagify_app
+# What goes into the AppImage is what the checksums say it is, the
+# dependencies are clear of known advisories, and nothing in the binary opens
+# a socket. The macOS bundle has always run these (see
+# packaging/macos/bundle.sh); Linux releases did not, and the audit found it
+# (M-6). Each script fails closed, so a non-zero exit stops the build here.
+echo "==> verify third_party"
+"$ROOT/tools/verify_third_party.sh"
+
+echo "==> audit dependencies"
+"$ROOT/tools/audit.sh"
+
+echo "==> no sockets"
+"$ROOT/tools/no_sockets.sh"
+
+cargo build --release --locked -p pagify_app
 
 rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin"

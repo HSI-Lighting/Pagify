@@ -136,6 +136,24 @@ pub struct Security {
     file_key: [u8; 32],
 }
 
+/// Wipe the key material when the security settings go.
+///
+/// A file key left in a freed allocation is recoverable from a core dump, and
+/// every string and stream in the secured file is decryptable with it. The
+/// password hashes and wrapped keys go too: they are what a passcode attack
+/// runs against. Found by audit.
+impl Drop for Security {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.file_key.zeroize();
+        self.ue.zeroize();
+        self.oe.zeroize();
+        self.u.zeroize();
+        self.o.zeroize();
+        self.perms.zeroize();
+    }
+}
+
 impl Security {
     /// Set up encryption for a document.
     ///
@@ -488,8 +506,14 @@ pub fn secure(file: &File<'_>, security: &Security, random: impl Fn(&mut [u8]) +
         replacements.push((*number, body));
     }
 
-    // The `/Encrypt` dictionary, as a new object at the end.
-    let encrypt_number = numbers.iter().copied().max().unwrap_or(0) + 1;
+    // The `/Encrypt` dictionary, as a new object at the end. Checked: the
+    // highest number is the file's to choose, and adding past `u32::MAX` used
+    // to wrap. Found by audit.
+    let Some(encrypt_number) = numbers.iter().copied().max().unwrap_or(0).checked_add(1) else {
+        return Err(PdfError::InvalidArgument(
+            "the document's object numbers are exhausted".into(),
+        ));
+    };
     let mut dict = Dict(Vec::new());
     dict.set(b"Filter", Object::Name(b"Standard".to_vec()));
     dict.set(b"V", Object::Number(b"5".to_vec()));

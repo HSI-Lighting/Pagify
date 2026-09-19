@@ -79,17 +79,12 @@ impl OutlinedFonts {
 
     // -- persistence, same shape as `Recent` ---------------------------------
 
+    /// Where the list lives: beside the other state files, under the one
+    /// folder [`crate::state::state_dir`] names. This used to build the path
+    /// again for itself, which is how `outlined_fonts.json` came to be missed
+    /// by `clearhistory` and by the 0600 rule. Found by audit.
     pub fn path() -> Option<PathBuf> {
-        let base = if cfg!(target_os = "macos") {
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
-        } else if cfg!(target_os = "windows") {
-            std::env::var_os("APPDATA").map(PathBuf::from)
-        } else {
-            std::env::var_os("XDG_CONFIG_HOME")
-                .map(PathBuf::from)
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        };
-        base.map(|b| b.join("Pagify").join("outlined_fonts.json"))
+        crate::state::state_dir().map(|dir| dir.join("outlined_fonts.json"))
     }
 
     /// A missing or unreadable file is an empty list, never an error — a
@@ -100,13 +95,19 @@ impl OutlinedFonts {
         serde_json::from_str(&text).unwrap_or_default()
     }
 
+    /// Written the way every other state file is: through
+    /// [`crate::state::write_own`], which creates it 0600 on Unix. A bare
+    /// `std::fs::write` here left it at the umask's 0644. Found by audit.
     pub fn save(&self) {
         let Some(path) = OutlinedFonts::path() else { return };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
+        self.save_to(&path);
+    }
+
+    /// The write itself, so a test can aim it at a file it owns rather than
+    /// at the reader's real settings directory.
+    fn save_to(&self, path: &Path) {
         if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
+            let _ = crate::state::write_own(path, text.as_bytes());
         }
     }
 }
@@ -211,5 +212,37 @@ mod tests {
         // would have.
         let loaded: OutlinedFonts = serde_json::from_str("{}").expect("defaults should fill in");
         assert!(loaded.paths.is_empty());
+    }
+
+    /// **The list is a state file like the others.** It sits where they do,
+    /// and is readable by its owner alone from the moment it exists. Found by
+    /// audit: a bare `fs::write` into a path function of its own left it 0644
+    /// and outside `clearhistory`.
+    #[cfg(unix)]
+    #[test]
+    fn what_is_saved_is_private_and_sits_with_the_other_state_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("pagify-outlined-fonts-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("outlined_fonts.json");
+
+        let mut fonts = OutlinedFonts::default();
+        fonts.paths.push(PathBuf::from("/tmp/Some Font.ttf"));
+        fonts.save_to(&path);
+
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "outlined_fonts.json was written at {mode:o}");
+        let text = std::fs::read_to_string(&path).expect("read");
+        let back: OutlinedFonts = serde_json::from_str(&text).expect("parse");
+        assert_eq!(back.paths, fonts.paths);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_list_is_kept_beside_the_other_state_files() {
+        if let (Some(here), Some(dir)) = (OutlinedFonts::path(), crate::state::state_dir()) {
+            assert_eq!(here, dir.join("outlined_fonts.json"));
+        }
     }
 }

@@ -436,6 +436,11 @@ struct PagifyApp {
     markup: Markup,
     calibration: Calibration,
     recorder: Recorder,
+    /// Whether a `replay` is running, so a script cannot replay another
+    /// script — itself included. A `replay` step dispatched straight back
+    /// into `replay` recursed until the stack ran out; this flag is what
+    /// refuses the nested call. Found by audit.
+    replaying: bool,
     pending: Option<Pending>,
 
     page: usize,
@@ -922,6 +927,35 @@ enum Decision {
     Cancel,
 }
 
+/// A passcode held briefly in a confirmation state: wiped when dropped, and
+/// never printed.
+///
+/// `zeroize::Zeroizing` does the wiping, but its own `Debug` prints what it
+/// holds — verified against zeroize 1.9, which derives `Debug` on it — and
+/// [`Awaiting`] derives `Debug` in turn, so a bare `Zeroizing` would put the
+/// password into whatever log, panic or test message formatted the state.
+/// Wrapping it with a redacting `Debug` is what keeps that from being the one
+/// place a password escapes. Found by audit.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct SecretText(zeroize::Zeroizing<String>);
+
+impl SecretText {
+    fn new(text: String) -> Self {
+        SecretText(zeroize::Zeroizing::new(text))
+    }
+
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl std::fmt::Debug for SecretText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The one thing worth saying about it.
+        f.write_str("\"…\"")
+    }
+}
+
 /// What is waiting for a passcode to be typed.
 ///
 /// The variants exist so that one interception path covers every secret the
@@ -971,7 +1005,11 @@ enum Awaiting {
     /// Only on the **first** lock in a document. After that the passcode
     /// already exists and is being *used* rather than chosen, so asking twice
     /// would be asking somebody to confirm a fact.
-    LockAgain { first: String, then: Box<Awaiting> },
+    ///
+    /// The first passcode is held as a [`SecretText`] — wiped on drop and
+    /// redacted in `Debug` — because it is a secret and this struct derives
+    /// `Debug`. Found by audit.
+    LockAgain { first: SecretText, then: Box<Awaiting> },
     /// The same password again.
     ///
     /// **Asked because a mistyped password here cannot be discovered later.**
@@ -979,7 +1017,7 @@ enum Awaiting {
     /// still contains; this one *is* the document. Somebody who mistypes it
     /// finds out when they next open the file, by which time nothing can be
     /// done — reported from use exactly that way.
-    SecureAgain { first: String, options: pagify_shell::verbs::SecureOptions },
+    SecureAgain { first: SecretText, options: pagify_shell::verbs::SecureOptions },
     /// One image to hide, once there is a passcode to seal it under.
     LockImage { page: usize, object: usize },
     /// One sealed object to bring back — what clicking a lock badge asks for.
@@ -1724,6 +1762,7 @@ impl PagifyApp {
             markup: Markup::default(),
             calibration: Calibration::default(),
             recorder: Recorder::default(),
+            replaying: false,
             pending: None,
             page: 0,
             zoom: ZoomMode::Fit,
@@ -2351,7 +2390,10 @@ impl PagifyApp {
         if self.awaiting_password.is_none() {
             return false;
         }
-        let typed = self.cmd.input_mut().trim().to_string();
+        // Wiped when it goes, not merely moved out of the box: this is a
+        // password, and the buffer it was typed into should not outlive the
+        // question. Found by audit.
+        let typed = zeroize::Zeroizing::new(self.cmd.input_mut().trim().to_string());
         if typed.is_empty() {
             return false;
         }
@@ -2367,7 +2409,7 @@ impl PagifyApp {
             return false;
         };
         match awaiting {
-            Awaiting::Open(path) => self.open_with(&path, Some(&typed)),
+            Awaiting::Open(path) => self.open_with(&path, Some(typed.as_str())),
             Awaiting::Lock { page, shapes, require_complete } => {
                 match self.lock_shapes(page, &shapes, typed.as_bytes(), require_complete) {
                     Ok(said) => self.say_info(said),
@@ -2379,7 +2421,7 @@ impl PagifyApp {
                 Err(e) => self.say_error(e),
             },
             Awaiting::LockAgain { first, then } => {
-                if typed != first {
+                if typed.as_str() != first.as_str() {
                     self.say_error("those did not match — nothing was locked. Try again.");
                 } else {
                     self.awaiting_password = Some(*then);
@@ -2397,12 +2439,14 @@ impl PagifyApp {
                 self.awaiting_password = Some(Awaiting::Certificate(path));
             }
             Awaiting::Secure(options) => {
-                self.awaiting_password =
-                    Some(Awaiting::SecureAgain { first: typed.clone(), options });
+                self.awaiting_password = Some(Awaiting::SecureAgain {
+                    first: SecretText::new(typed.to_string()),
+                    options,
+                });
                 self.say_info("type the same password again, so a slip cannot lock you out.");
             }
             Awaiting::SecureAgain { first, options } => {
-                if typed != first {
+                if typed.as_str() != first.as_str() {
                     self.say_error(
                         "those did not match — nothing was set. Run `secure` again.",
                     );
@@ -2875,13 +2919,26 @@ impl PagifyApp {
         let not_a_picture = |e: image::ImageError| {
             format!("{} is not a picture this reads (PNG or JPEG): {e}", path.display())
         };
-        let reader = match image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
-            Ok(reader) => reader,
-            Err(e) => {
-                self.say_error(not_a_picture(e.into()));
-                return;
-            }
-        };
+        let mut reader =
+            match image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
+                Ok(reader) => reader,
+                Err(e) => {
+                    self.say_error(not_a_picture(e.into()));
+                    return;
+                }
+            };
+        // **A picture from anywhere, decoded under ceilings.** Without limits
+        // the decoder allocates whatever the file's own header asks for, and
+        // a few hundred bytes naming 60,000 × 60,000 pixels is a
+        // decompression bomb whose failure is the allocator aborting — not an
+        // error this could report. 16,384 a side is far beyond any camera or
+        // scanner, and 256 MB is more than an RGBA image that size could
+        // want. Found by audit.
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(16_384);
+        limits.max_image_height = Some(16_384);
+        limits.max_alloc = Some(256 * 1024 * 1024);
+        reader.limits(limits);
         let mut decoder = match reader.into_decoder() {
             Ok(decoder) => decoder,
             Err(e) => {
@@ -6855,18 +6912,17 @@ impl PagifyApp {
                 return;
             }
             let Some(then) = self.awaiting_password.take() else { return };
+            let held = SecretText::new(typed.to_string());
             self.awaiting_password = Some(match then {
-                Awaiting::Secure(options) => {
-                    Awaiting::SecureAgain { first: typed.to_string(), options }
-                }
-                other => Awaiting::LockAgain { first: typed.to_string(), then: Box::new(other) },
+                Awaiting::Secure(options) => Awaiting::SecureAgain { first: held, options },
+                other => Awaiting::LockAgain { first: held, then: Box::new(other) },
             });
             return;
         }
 
         match self.awaiting_password.clone() {
             Some(Awaiting::LockAgain { first, then }) => {
-                if typed != first {
+                if typed != first.as_str() {
                     self.awaiting_password = None;
                     self.say_error("those did not match — nothing was locked. Try again.");
                     return;
@@ -6875,7 +6931,7 @@ impl PagifyApp {
                 self.answer_lock_passcode(typed);
             }
             Some(Awaiting::SecureAgain { first, options }) => {
-                if typed != first {
+                if typed != first.as_str() {
                     self.awaiting_password = None;
                     self.say_error("those did not match — nothing was set. Run `secure` again.");
                     return;
@@ -8579,6 +8635,17 @@ self.foreign = None;
     }
 
     fn replay(&mut self, path: &std::path::Path) {
+        // **A script cannot replay another script, itself included.** The
+        // step would be a second `replay` on top of this one — a script
+        // naming its own path used to recurse until the stack ran out. The
+        // loop below catches a `replay` step where it can name the step; this
+        // catches any other route into `replay` while one is running.
+        if self.replaying {
+            self.say_error(
+                "a script cannot replay another script — the one already running carries on.",
+            );
+            return;
+        }
         let script = match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| Script::from_json(&t)) {
             Ok(script) => script,
             Err(e) => {
@@ -8593,6 +8660,7 @@ self.foreign = None;
         let steps = script.steps.clone();
         let mut ran = 0;
         let mut stopped = None;
+        self.replaying = true;
         for (index, line) in steps.iter().enumerate() {
             // A replay stops at the first step that cannot run. Carrying on
             // would apply the rest of the script to a document in a state it
@@ -8611,6 +8679,16 @@ self.foreign = None;
                     stopped = Some((index + 1, line.clone(), format!("{token} — {why}")));
                     break;
                 }
+                // Caught here rather than dispatched, so the step is named
+                // and the script stops like any other step that cannot run.
+                Some(Dispatch::Pagify(Verb::Replay(_))) => {
+                    stopped = Some((
+                        index + 1,
+                        line.clone(),
+                        "a script cannot replay another script".into(),
+                    ));
+                    break;
+                }
                 Some(dispatch) => {
                     self.run(dispatch);
                     ran += 1;
@@ -8618,6 +8696,7 @@ self.foreign = None;
                 None => {}
             }
         }
+        self.replaying = false;
         match stopped {
             None => self.say_info(format!("replayed {ran} step(s).")),
             Some((step, line, why)) => {
@@ -17509,6 +17588,31 @@ mod lock_wiring_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// **A script cannot replay another script — itself included.** Found by
+    /// audit: `replay` dispatched a `replay` step straight back into itself,
+    /// so a script naming its own path recursed until the stack ran out.
+    #[test]
+    fn a_script_that_replays_itself_is_refused_rather_than_recursing() {
+        let mut app = app("two-column.pdf");
+        let dir = std::env::temp_dir().join(format!("pagify-replay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let itself = dir.join("itself.json");
+        let mut script = Script::new("itself");
+        script.steps = vec![format!("replay {}", itself.display()), "rotate 90".into()];
+        std::fs::write(&itself, script.to_json()).expect("write the script");
+
+        app.submit(&format!("replay {}", itself.display()));
+
+        let told = said(&app);
+        assert!(told.contains("cannot replay another script"), "it did not refuse: {told}");
+        assert!(
+            told.contains("stopped at step 1") && told.contains("0 ran first"),
+            "it did not stop at the offending step: {told}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// **What Pagify keeps about somebody can be cleared, and they are told
     /// where the rest is.** Found by audit: the recent list, texts and
     /// signatures were kept in plaintext with no way to clear them from
@@ -18979,6 +19083,28 @@ mod lock_wiring_tests {
         let locked = page_text(&app, 0);
         assert!(app.lock_pages(&[0], b"the wrong one").is_err());
         assert_eq!(page_text(&app, 0), locked, "a wrong passcode still changed the page");
+    }
+
+    /// **A passcode waiting to be confirmed never prints itself.** `Awaiting`
+    /// derives `Debug`, and a bare `zeroize::Zeroizing` would print exactly
+    /// what it holds — verified against zeroize 1.9, which derives `Debug` —
+    /// so the confirmation states carry a wrapper whose `Debug` says nothing.
+    /// Found by audit.
+    #[test]
+    fn a_passcode_waiting_to_be_confirmed_does_not_print_itself() {
+        let secure = Awaiting::SecureAgain {
+            first: SecretText::new("hunter2".into()),
+            options: pagify_shell::verbs::SecureOptions::default(),
+        };
+        let shown = format!("{secure:?}");
+        assert!(!shown.contains("hunter2"), "a passcode was printed: {shown}");
+        assert!(shown.contains('…'), "the redaction is not visible: {shown}");
+
+        let locked = Awaiting::LockAgain {
+            first: SecretText::new("hunter2".into()),
+            then: Box::new(Awaiting::Unlock),
+        };
+        assert!(!format!("{locked:?}").contains("hunter2"));
     }
 }
 
