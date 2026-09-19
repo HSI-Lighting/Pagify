@@ -21,6 +21,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::error::{PdfError, Result};
+
 use super::object::{Lexer, Object};
 
 /// What each character code spells.
@@ -31,6 +33,21 @@ pub type ToUnicode = BTreeMap<u32, String>;
 /// Unmapped codes are simply absent — a caller must treat that as "unknown",
 /// not as "produces nothing".
 pub fn parse(bytes: &[u8]) -> ToUnicode {
+    // A reading that had to refuse something comes back empty rather than
+    // half-true. A mapping that would wrap is exactly that case, and the
+    // caller's fallback for an unknown code is the safe answer to it. Found
+    // by audit.
+    parse_checked(bytes).unwrap_or_default()
+}
+
+/// [`parse`], refusing rather than skipping what it cannot read honestly.
+///
+/// The one refusal here is arithmetic: a `bfrange` target list whose codes
+/// would run past the end of the `u32` code space. `low` may be eight hex
+/// digits, and `low + offset` used to wrap in release and panic in debug,
+/// putting an entry at a code below the range it came from — an alignment
+/// skew dressed up as a mapping. Found by audit.
+pub fn parse_checked(bytes: &[u8]) -> Result<ToUnicode> {
     let mut out = ToUnicode::new();
     let mut lexer = Lexer::new(bytes, 0);
     // Operands accumulate before their operator, exactly as in a content
@@ -40,7 +57,7 @@ pub fn parse(bytes: &[u8]) -> ToUnicode {
     loop {
         lexer.skip_space();
         if lexer.at >= bytes.len() {
-            return out;
+            return Ok(out);
         }
         match bytes[lexer.at] {
             b'<' | b'[' | b'(' | b'/' | b'0'..=b'9' | b'+' | b'-' | b'.' => {
@@ -48,13 +65,13 @@ pub fn parse(bytes: &[u8]) -> ToUnicode {
                     Ok(object) => pending.push(object),
                     // A malformed value ends the read rather than derailing it;
                     // what was gathered so far is still true.
-                    Err(_) => return out,
+                    Err(_) => return Ok(out),
                 }
             }
             _ => {
                 let keyword = lexer.token().to_vec();
                 if keyword.is_empty() {
-                    return out;
+                    return Ok(out);
                 }
                 match keyword.as_slice() {
                     b"beginbfchar" => pending.clear(),
@@ -86,7 +103,19 @@ pub fn parse(bytes: &[u8]) -> ToUnicode {
                                 Object::Array(items) => {
                                     for (offset, item) in items.iter().enumerate() {
                                         let Some(text) = text_of(item) else { continue };
-                                        out.insert(low + offset as u32, text);
+                                        // The list is not bounded by the range,
+                                        // and `low` may sit at the top of the
+                                        // code space: this add used to wrap in
+                                        // release and panic in debug. Found by
+                                        // audit.
+                                        let Some(code) = low.checked_add(offset as u32) else {
+                                            return Err(PdfError::InvalidArgument(
+                                                "a bfrange list runs past the end of the code \
+                                                 space"
+                                                    .into(),
+                                            ));
+                                        };
+                                        out.insert(code, text);
                                     }
                                 }
                                 other => {
@@ -103,7 +132,17 @@ pub fn parse(bytes: &[u8]) -> ToUnicode {
                                         let mut all = units.clone();
                                         all.push(unit);
                                         if let Ok(text) = String::from_utf16(&all) {
-                                            out.insert(low + step, text);
+                                            // `step` never carries past
+                                            // `high`, but checked means it
+                                            // cannot wrap if that changes.
+                                            let Some(code) = low.checked_add(step) else {
+                                                return Err(PdfError::InvalidArgument(
+                                                    "a bfrange runs past the end of the code \
+                                                     space"
+                                                        .into(),
+                                                ));
+                                            };
+                                            out.insert(code, text);
                                         }
                                     }
                                 }
@@ -222,6 +261,24 @@ mod tests {
         // What came before the damage is still true.
         let map = parse(b"1 beginbfchar\n<0003> <0020>\nendbfchar\n<unclosed");
         assert_eq!(map.get(&0x0003).map(String::as_str), Some(" "));
+    }
+
+    /// **A range whose list runs past the end of the code space.** `low` may
+    /// be eight hex digits and the list is not bounded by the range, so
+    /// `low + offset` used to wrap in release and panic in debug — a mapping
+    /// at a code below the range it came from, which would put every later
+    /// alignment out by however far it wrapped. Found by audit.
+    #[test]
+    fn a_bfrange_list_that_would_wrap_is_refused() {
+        let bytes = b"1 beginbfrange\n<FFFFFFFE> <FFFFFFFF> [<0041> <0042> <0043> <0044>]\n\
+                      endbfrange\n";
+        assert!(matches!(
+            parse_checked(bytes),
+            Err(PdfError::InvalidArgument(_))
+        ));
+        // And the unchecked read refuses the whole map rather than keeping a
+        // wrapped entry in it.
+        assert!(parse(bytes).is_empty(), "a wrapped mapping was kept");
     }
 
     #[test]

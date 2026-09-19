@@ -60,6 +60,25 @@ fn staging_path(target: &Path) -> PathBuf {
     target.with_file_name(name)
 }
 
+/// The permission bits of a file, where the platform has them.
+///
+/// Used to give a **new** destination the mode of the document it came from,
+/// rather than the umask's 0644. `None` where the file cannot be read or the
+/// platform has no such notion.
+#[cfg(unix)]
+fn mode_of(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    // `0o7777`, the ordinary bits plus set-uid/set-gid/sticky, because a
+    // destination that already exists kept all of those before this change
+    // and its mode is copied through unchanged.
+    std::fs::metadata(path).ok().map(|m| m.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn mode_of(_path: &Path) -> Option<u32> {
+    None
+}
+
 /// Write a file beside its target and rename it over the target.
 ///
 /// What this guarantees, and every caller relies on:
@@ -67,17 +86,23 @@ fn staging_path(target: &Path) -> PathBuf {
 /// - **Nothing at the staging path is ever opened.** `create_new` refuses an
 ///   existing file, a symlink included, so a path somebody else planted is
 ///   an error rather than a write through it.
-/// - **A target that exists keeps its own permissions.** A document kept at
-///   0600 was coming back 0644 after a save, because the staging file had
-///   the process's default mode. Found by audit.
+/// - **Permissions never pass through the umask.** The staging file is
+///   created 0600 on Unix, so a large write in flight is private, and its
+///   final mode is set before the rename: a target that exists keeps its own,
+///   a new destination inherits `source_mode` — the mode of the document
+///   being saved or extracted from — and with neither it stays 0600. A
+///   document kept at 0600 was coming back 0644 after a save to a new path,
+///   because permissions were copied only when the destination existed.
+///   Found by audit.
 /// - **A failure leaves the target exactly as it was**, and nothing beside
 ///   it: the staging file is removed on any error, before or during the
 ///   rename.
 fn write_then_rename(
     target: &Path,
+    source_mode: Option<u32>,
     write: impl FnOnce(&mut std::fs::File) -> Result<()>,
 ) -> Result<()> {
-    write_then_rename_via(target, &staging_path(target), write)
+    write_then_rename_via(target, &staging_path(target), source_mode, write)
 }
 
 /// [`write_then_rename`] with the staging path chosen by the caller — which
@@ -85,17 +110,43 @@ fn write_then_rename(
 fn write_then_rename_via(
     target: &Path,
     staging: &Path,
+    source_mode: Option<u32>,
     write: impl FnOnce(&mut std::fs::File) -> Result<()>,
 ) -> Result<()> {
     let outcome = (|| -> Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staging)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // **Private from the first byte.** The staging file used to take
+            // the process's default mode, 0644 under the usual umask, and a
+            // large document takes real time to write — so it was readable
+            // by anyone for the length of the save. Found by audit.
+            options.mode(0o600);
+        }
+        let mut file = options.open(&staging)?;
         write(&mut file)?;
         file.sync_all()?;
-        if let Ok(existing) = std::fs::metadata(target) {
-            std::fs::set_permissions(&staging, existing.permissions())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = match std::fs::metadata(target) {
+                Ok(existing) => Some(existing.permissions().mode() & 0o7777),
+                Err(_) => source_mode,
+            };
+            if let Some(mode) = mode {
+                std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(mode))?;
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // No modes to inherit here; only a destination that already
+            // exists has permissions of its own to carry over.
+            let _ = source_mode;
+            if let Ok(existing) = std::fs::metadata(target) {
+                std::fs::set_permissions(&staging, existing.permissions())?;
+            }
         }
         Ok(())
     })();
@@ -146,7 +197,7 @@ mod staging_tests {
         let planted = dir.join("doc.pdf.pagify-save-planted");
         std::fs::write(&planted, b"planted").expect("plant");
 
-        let outcome = write_then_rename_via(&target, &planted, |f| {
+        let outcome = write_then_rename_via(&target, &planted, None, |f| {
             use std::io::Write;
             f.write_all(b"new contents").map_err(pdf_core::PdfError::Io)
         });
@@ -160,7 +211,7 @@ mod staging_tests {
             std::fs::write(&victim, b"untouched").expect("victim");
             let link = dir.join("doc.pdf.pagify-save-link");
             std::os::unix::fs::symlink(&victim, &link).expect("symlink");
-            let outcome = write_then_rename_via(&target, &link, |f| {
+            let outcome = write_then_rename_via(&target, &link, None, |f| {
                 use std::io::Write;
                 f.write_all(b"through the link").map_err(pdf_core::PdfError::Io)
             });
@@ -168,6 +219,74 @@ mod staging_tests {
             assert_eq!(std::fs::read(&victim).expect("read"), b"untouched");
             assert!(link.symlink_metadata().is_ok(), "the symlink was removed as if it were ours");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The staging file is private while the write is in flight**, not
+    /// merely after the rename: a large save used to be world-readable for
+    /// as long as it took. Found by audit.
+    #[cfg(unix)]
+    #[test]
+    fn the_staging_file_is_private_while_it_is_being_written() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("staging-mode");
+        let target = dir.join("doc.pdf");
+        let staging = dir.join("doc.pdf.pagify-save-mode");
+
+        write_then_rename_via(&target, &staging, None, |f| {
+            let mode =
+                std::fs::metadata(&staging).expect("staging exists").permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "the staging file was written at {mode:o}");
+            use std::io::Write;
+            f.write_all(b"new contents").map_err(pdf_core::PdfError::Io)
+        })
+        .expect("write");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **A private source is not widened by a save to a new path.** Found by
+    /// audit: permissions were copied only from a destination that already
+    /// existed, so a 0600 document came back 0644 after `saveas`. An
+    /// existing destination still keeps its own mode, and with no source at
+    /// all a new destination is 0600.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_destination_inherits_the_sources_mode_and_existing_ones_keep_their_own() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("new-mode");
+        let mode_of_path =
+            |path: &Path| std::fs::metadata(path).expect("metadata").permissions().mode() & 0o777;
+
+        let source = dir.join("private.pdf");
+        std::fs::write(&source, b"the source").expect("source");
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        assert_eq!(mode_of(&source), Some(0o600));
+
+        let target = dir.join("saved.pdf");
+        write_then_rename(&target, mode_of(&source), |f| {
+            use std::io::Write;
+            f.write_all(b"saved").map_err(pdf_core::PdfError::Io)
+        })
+        .expect("write");
+        assert_eq!(mode_of_path(&target), 0o600, "a private source was saved wider");
+
+        let fresh = dir.join("fresh.pdf");
+        write_then_rename(&fresh, None, |f| {
+            use std::io::Write;
+            f.write_all(b"fresh").map_err(pdf_core::PdfError::Io)
+        })
+        .expect("write");
+        assert_eq!(mode_of_path(&fresh), 0o600, "a destination with no source was not private");
+
+        let existing = dir.join("existing.pdf");
+        std::fs::write(&existing, b"old").expect("existing");
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        write_then_rename(&existing, mode_of(&source), |f| {
+            use std::io::Write;
+            f.write_all(b"new").map_err(pdf_core::PdfError::Io)
+        })
+        .expect("write");
+        assert_eq!(mode_of_path(&existing), 0o644, "an existing destination lost its own mode");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -316,6 +435,39 @@ pub struct Session {
     path: PathBuf,
 }
 
+/// A password on its way to PDFium, wiped when it is dropped.
+///
+/// The password is used once by [`Session::open_with_password`] and never
+/// stored on the session, but a plain `String` is released still holding it —
+/// residual plaintext the audit flagged. Overwriting the bytes before they go
+/// is what closes that. A local wrapper rather than `zeroize::Zeroizing`
+/// because the shell's manifest carries no `zeroize` dependency and this is the
+/// one place it would be needed.
+struct WipedPassword(Vec<u8>);
+
+impl WipedPassword {
+    fn new(text: String) -> Self {
+        // The allocation the `String` already held, moved rather than copied.
+        Self(text.into_bytes())
+    }
+}
+
+impl std::ops::Deref for WipedPassword {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        // Only ever built from a `String`, so it is valid UTF-8 by
+        // construction.
+        std::str::from_utf8(&self.0).expect("a password from a &str is UTF-8")
+    }
+}
+
+impl Drop for WipedPassword {
+    fn drop(&mut self) {
+        self.0.iter_mut().for_each(|byte| *byte = 0);
+    }
+}
+
 impl Session {
     /// Open a PDF from disk, binding PDFium first if nothing has yet.
     ///
@@ -332,13 +484,13 @@ impl Session {
     /// Separate from [`Session::open`] rather than folded into it, because a
     /// password is not part of a path and must not be handled like one: it is
     /// never stored on the session, never written to the recent list, and never
-    /// recorded. It is used once, here, and dropped.
+    /// recorded. It is used once, here, and wiped.
     pub fn open_with_password(path: impl AsRef<Path>, password: Option<&str>) -> Result<Self> {
         pdfium::ensure_bound();
 
         let path = path.as_ref().to_path_buf();
         let for_open = path.clone();
-        let password = password.map(str::to_owned);
+        let password = password.map(|p| WipedPassword::new(p.to_owned()));
         let handle = registry::insert_with(move || {
             let document =
                 PdfiumDocument::open_path(&for_open.to_string_lossy(), password.as_deref())?;
@@ -499,7 +651,9 @@ impl Session {
     /// leaves the original document exactly as it was, rather than half of a
     /// new one.
     pub fn save_to(&self, path: &Path, incremental: bool) -> Result<()> {
-        write_then_rename(path, |file| {
+        // A destination that already exists keeps its own mode; a new one
+        // inherits this document's, falling back to private. Found by audit.
+        write_then_rename(path, mode_of(&self.path), |file| {
             registry::with_session(self.handle, |s| pdf_core::engine::save(s, file, incremental))
         })
     }
@@ -1316,7 +1470,9 @@ impl Session {
     /// an empty file where a document may have been. Found by audit.
     pub fn extract_to(&self, pages: &[usize], dest: &Path) -> Result<usize> {
         let mut count = 0;
-        write_then_rename(dest, |file| {
+        // The same mode rule as a save: an existing destination keeps its
+        // own, a new one inherits this document's. Found by audit.
+        write_then_rename(dest, mode_of(&self.path), |file| {
             registry::with_session(self.handle, |s| {
                 let mut extracted = s
                     .document

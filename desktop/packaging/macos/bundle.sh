@@ -64,7 +64,10 @@ if [ -z "$IDENTITY" ] && [ "$LOCAL_ONLY" != "1" ]; then
 fi
 
 echo "==> build"
-cargo build --release -p pagify_app
+# --locked: the audit above checked this Cargo.lock, so the build must use it.
+# Without it a manifest drift can update the lock between the gate and the
+# compile, and the audited graph is not the shipped one (security audit M-6).
+cargo build --release --locked -p pagify_app
 
 echo "==> bundle"
 rm -rf "$APP"

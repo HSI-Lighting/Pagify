@@ -53,7 +53,22 @@ pub fn write_own(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, contents)?;
+    // **0600 from the first byte, not after the write.** `fs::write` then
+    // chmod left the file at the umask's 0644 for as long as the write took —
+    // and `signatures.json` holds signature pixels. Found by audit. The mode
+    // below applies when the file is created, which is the window that
+    // matters; the chmod after narrows one that already existed wider.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    use std::io::Write as _;
+    file.write_all(contents)?;
+    drop(file);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -92,6 +107,26 @@ mod tests {
         write_own(&path, b"{}").expect("write");
         let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **An own file that already existed wider is narrowed.** The mode given
+    /// to `open` applies only when the file is created, and a settings file
+    /// written by an older build — or by hand — may already be there at 0644.
+    #[cfg(unix)]
+    #[test]
+    fn an_own_file_that_already_existed_wider_is_narrowed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("pagify-own-existing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch");
+        let path = dir.join("thing.json");
+        std::fs::write(&path, b"old").expect("seed");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        write_own(&path, b"new").expect("rewrite");
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "an existing file was left at {mode:o}");
+        assert_eq!(std::fs::read(&path).expect("read"), b"new");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

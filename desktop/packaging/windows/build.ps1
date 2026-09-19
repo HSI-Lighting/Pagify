@@ -4,17 +4,58 @@
 # pagify_shell::pdfium looks — and is signed before the installer that wraps
 # it, for the same reason the macOS script signs the nested dylib first: a
 # signature over a container is a hash of its contents.
+#
+# What is copied in is hashed against third_party/CHECKSUMS.sha256 first.
+# Windows releases used to check only that the file existed, while only
+# macOS's bundle.sh ran the gates at all (security audit M-6).
 $ErrorActionPreference = "Stop"
 
 $Root = Resolve-Path "$PSScriptRoot\..\.."
 $Dll  = Join-Path $Root "third_party\pdfium\pdfium-win-x64\bin\pdfium.dll"
 $Out  = Join-Path $Root "target\Pagify"
+$Checksums = Join-Path $Root "third_party\CHECKSUMS.sha256"
 
 if (-not (Test-Path $Dll)) {
     throw "No Windows PDFium at $Dll - run tools/fetch_pdfium.sh (or the .ps1) first."
 }
 
-cargo build --release -p pagify_app
+if (-not (Test-Path $Checksums)) {
+    throw "No checksum file at $Checksums - cannot verify what this build packages."
+}
+
+# The SHA-256 equivalent of tools/verify_third_party.sh, which is bash and
+# cannot be assumed present. Fails closed: an asset with no line in
+# CHECKSUMS.sha256, or one that hashes to something else, stops the build
+# before anything is packaged. Add every third_party asset copied below.
+function Test-Checksum {
+    param([string]$RelativePath, [string]$Path)
+    $expected = $null
+    foreach ($line in Get-Content -LiteralPath $Checksums -Encoding UTF8) {
+        if ($line -match '^\s*#' -or $line -notmatch '\S') { continue }
+        $fields = $line.Trim() -split '\s+'
+        if ($fields.Count -ge 2 -and $fields[1] -eq $RelativePath) { $expected = $fields[0] }
+    }
+    if (-not $expected) {
+        throw "No checksum for $RelativePath in $Checksums"
+    }
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+    if ($actual -ne $expected.ToLowerInvariant()) {
+        throw "$RelativePath hashes to $actual, expected $expected - refusing to package it."
+    }
+    Write-Host "    verified $RelativePath"
+}
+
+$Assets = @{
+    "pdfium/pdfium-win-x64/bin/pdfium.dll" = $Dll
+}
+foreach ($asset in $Assets.GetEnumerator()) {
+    Test-Checksum $asset.Key $asset.Value
+}
+
+# --locked: the lockfile is what was reviewed; without it a manifest drift
+# can update the lock during the build, and the shipped graph is not the
+# audited one (security audit M-6).
+cargo build --release --locked -p pagify_app
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
 Remove-Item -Recurse -Force $Out -ErrorAction SilentlyContinue

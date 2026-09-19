@@ -323,12 +323,24 @@ impl PdfiumDocument {
         self.dirty = true;
         self.exact_pending = false;
         self.exact_content = false;
+        // **The kept bytes describe the document before this change.** Left in
+        // place they would let a signature check report on a file the document
+        // no longer matches — a verdict on an earlier revision, presented as
+        // this document's. Dropped, so the check either uses bytes that are
+        // still the document or says it cannot. Found by audit.
+        self.written = None;
     }
 
     /// Record a change to a page's annotations only — a save is owed, but
     /// nothing an appended edit starts from has changed. See `exact_content`.
     fn touch_annotation(&mut self) {
         self.dirty = true;
+        // The kept bytes stay — an annotation lives in `/Annots`, outside the
+        // page content an appended edit reads from them, so they are still the
+        // base. What cannot stay is the verbatim save: `written` does not hold
+        // the annotation, so writing it out unchanged would drop the mark
+        // without a word. Found by audit.
+        self.exact_pending = false;
     }
 
     /// The bytes an edit through Pagify's own writer starts from.
@@ -1498,7 +1510,13 @@ impl Document for PdfiumDocument {
                 break;
             }
         }
-        let number = file.numbers().max().unwrap_or(0) + 1;
+        // Checked: the numbers are the document's to choose, and the top of
+        // the range has no room above it. Found by audit.
+        let Some(number) = file.numbers().max().unwrap_or(0).checked_add(1) else {
+            return Err(PdfError::InvalidArgument(
+                "the document's object numbers are exhausted".into(),
+            ));
+        };
         let alpha = format!("{opacity:.4}");
         let alpha = alpha.trim_end_matches('0').trim_end_matches('.').to_string();
         let mut state = crate::pdf::Dict(Vec::new());
@@ -3415,16 +3433,30 @@ impl DocumentMut for PdfiumDocument {
         // file, and asking PDFium to write this document out produces a
         // different one — which reads as a signature covering a fraction of
         // the file, rather than as the correctly signed document it is.
-        let bytes = match (&self.written, &self.source) {
-            (Some(exact), _) => exact.clone(),
-            (None, DocumentSource::Path(path)) => std::fs::read(path)?,
-            // No file to read and no bytes kept — say that rather than check
-            // something else and present the answer as being about this.
-            (None, _) => {
-                return Err(PdfError::Unsupported(
-                    "checking signatures on a document that has never been written",
-                ))
+        //
+        // Which bytes are the document's own, and whether they are known at
+        // all. `exact_pending` is the one moment a changed document is still
+        // exactly its bytes: a signature made a moment ago and not yet
+        // written. After anything else the kept bytes are a revision of the
+        // document and the file on disk is older still, so the honest answer
+        // is that there is nothing to check. Found by audit: the check used
+        // to hand back a verdict on whatever was kept, however long ago that
+        // had stopped being the document.
+        let bytes = if self.exact_pending {
+            self.written.clone()
+        } else if !self.dirty {
+            match (&self.written, &self.source) {
+                (Some(exact), _) => Some(exact.clone()),
+                (None, DocumentSource::Path(path)) => Some(std::fs::read(path)?),
+                (None, _) => None,
             }
+        } else {
+            None
+        };
+        let Some(bytes) = bytes else {
+            return Err(PdfError::Unsupported(
+                "checking signatures on a document with unsaved changes",
+            ));
         };
         let file = crate::pdf::File::parse(&bytes)?;
         crate::pdf::validate::check(&file, &bytes)
@@ -3703,7 +3735,13 @@ impl DocumentMut for PdfiumDocument {
         }
 
         let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
-        let mut next_number = file.numbers().max().unwrap_or(0) + 1;
+        // Checked: the numbers are the document's to choose, and the top of
+        // the range has no room above it. Found by audit.
+        let Some(mut next_number) = file.numbers().max().unwrap_or(0).checked_add(1) else {
+            return Err(PdfError::InvalidArgument(
+                "the document's object numbers are exhausted".into(),
+            ));
+        };
 
         // A picture's own object, and its own name in the page's Resources —
         // on the page itself, not whatever it inherits, for the same reason
@@ -5202,7 +5240,13 @@ fn font_to_unicode(
             )));
         };
 
-        let first = file.numbers().max().unwrap_or(0) + 1;
+        // Checked: the numbers are the document's to choose, and the top of
+        // the range has no room above it. Found by audit.
+        let Some(first) = file.numbers().max().unwrap_or(0).checked_add(1) else {
+            return Err(PdfError::InvalidArgument(
+                "the document's object numbers are exhausted".into(),
+            ));
+        };
         let embedded = embed::truetype(font_bytes, first)?;
         let encoded = embed::win_ansi(wanted).ok_or_else(|| {
             PdfError::InvalidArgument(
@@ -6671,7 +6715,13 @@ fn font_to_unicode(
             }
             Err(_) => {
                 // No content stream: make one, and point the page at it.
-                let number = file.numbers().max().unwrap_or(0) + 1;
+                // Checked: the numbers are the document's to choose, and the
+                // top of the range has no room above it. Found by audit.
+                let Some(number) = file.numbers().max().unwrap_or(0).checked_add(1) else {
+                    return Err(PdfError::InvalidArgument(
+                        "the document's object numbers are exhausted".into(),
+                    ));
+                };
                 let packed = crate::pdf::content::encode(operators)?;
                 let mut dict = crate::pdf::Dict(Vec::new());
                 dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
@@ -6983,7 +7033,7 @@ fn font_to_unicode(
         )?;
 
         let mut flat = Vec::new();
-        collect_pages(file, &pages, &mut flat, 0)?;
+        collect_pages(file, &pages, &mut flat, 0, &mut HashSet::new())?;
         flat.into_iter().nth(page_index).ok_or_else(|| {
             PdfError::InvalidArgument(format!("the file has no page {}", page_index + 1))
         })
@@ -7000,34 +7050,6 @@ fn font_to_unicode(
         file: &crate::pdf::File<'_>,
         page_index: usize,
     ) -> Result<u32> {
-        fn walk(
-            file: &crate::pdf::File<'_>,
-            node: &crate::pdf::Object,
-            out: &mut Vec<u32>,
-            depth: usize,
-        ) {
-            if depth > 64 {
-                return;
-            }
-            let Some(dict) = node.as_dict() else { return };
-            let Some(kids) = dict.get(b"Kids") else { return };
-            let Ok(crate::pdf::Object::Array(items)) = file.resolve(kids) else { return };
-            for kid in items {
-                let crate::pdf::Object::Reference(number, _) = kid else { continue };
-                let Ok(resolved) = file.object(number) else { continue };
-                let is_page = resolved
-                    .as_dict()
-                    .and_then(|d| d.get(b"Type"))
-                    .and_then(crate::pdf::Object::as_name)
-                    == Some(&b"Page"[..]);
-                if is_page {
-                    out.push(number);
-                } else {
-                    walk(file, &resolved, out, depth + 1);
-                }
-            }
-        }
-
         let root = file.resolve(
             file.trailer()
                 .get(b"Root")
@@ -7039,7 +7061,7 @@ fn font_to_unicode(
                 .ok_or_else(|| PdfError::InvalidArgument("the file has no page tree".into()))?,
         )?;
         let mut numbers = Vec::new();
-        walk(file, &pages, &mut numbers, 0);
+        collect_page_numbers(file, &pages, &mut numbers, 0, &mut HashSet::new());
         numbers.into_iter().nth(page_index).ok_or_else(|| {
             PdfError::InvalidArgument(format!("the file has no page {}", page_index + 1))
         })
@@ -8666,7 +8688,7 @@ fn annots_counts(file: &crate::pdf::File<'_>) -> Result<Vec<usize>> {
             .ok_or_else(|| PdfError::InvalidArgument("the file has no page tree".into()))?,
     )?;
     let mut flat = Vec::new();
-    collect_pages(file, &pages, &mut flat, 0)?;
+    collect_pages(file, &pages, &mut flat, 0, &mut HashSet::new())?;
     Ok(flat
         .iter()
         .map(|page| {
@@ -8687,6 +8709,7 @@ fn collect_pages(
     node: &crate::pdf::Object,
     out: &mut Vec<crate::pdf::Object>,
     depth: usize,
+    seen: &mut HashSet<u32>,
 ) -> Result<()> {
     use crate::pdf::Object;
 
@@ -8703,11 +8726,62 @@ fn collect_pages(
     let Some(kids) = dict.get(b"Kids") else { return Ok(()) };
     if let Object::Array(items) = file.resolve(kids)? {
         for kid in items {
+            // **Each object once.** A node that lists the same child twice at
+            // every level costs two visits per level — 2^64 of them under the
+            // depth cap, rather than the one chain it is. Only references are
+            // tracked: a direct dictionary has no identity to key a set by, and
+            // the depth cap already bounds those. Found by audit.
+            if let Object::Reference(number, _) = &kid {
+                if !seen.insert(*number) {
+                    continue;
+                }
+            }
             let kid = file.resolve(&kid)?;
-            collect_pages(file, &kid, out, depth + 1)?;
+            collect_pages(file, &kid, out, depth + 1, seen)?;
         }
     }
     Ok(())
+}
+
+/// Which object numbers a page tree's pages are, in order.
+///
+/// The same walk [`collect_pages`] makes, kept apart because replacing a page
+/// needs its number while every other caller wants the dictionary. The visited
+/// set is what keeps a `/Kids` entry listed twice from doubling the walk at
+/// every level. Found by audit.
+fn collect_page_numbers(
+    file: &crate::pdf::File<'_>,
+    node: &crate::pdf::Object,
+    out: &mut Vec<u32>,
+    depth: usize,
+    seen: &mut HashSet<u32>,
+) {
+    use crate::pdf::Object;
+
+    if depth > 64 {
+        return;
+    }
+    let Some(dict) = node.as_dict() else { return };
+    let Some(kids) = dict.get(b"Kids") else { return };
+    let Ok(Object::Array(items)) = file.resolve(kids) else { return };
+    for kid in items {
+        let Object::Reference(number, _) = kid else { continue };
+        // **Each object once**, for the reason [`collect_pages`] gives.
+        if !seen.insert(number) {
+            continue;
+        }
+        let Ok(resolved) = file.object(number) else { continue };
+        let is_page = resolved
+            .as_dict()
+            .and_then(|d| d.get(b"Type"))
+            .and_then(Object::as_name)
+            == Some(&b"Page"[..]);
+        if is_page {
+            out.push(number);
+        } else {
+            collect_page_numbers(file, &resolved, out, depth + 1, seen);
+        }
+    }
 }
 
 /// An attachment's name, or an empty string if it has none that can be read.
@@ -9370,6 +9444,18 @@ impl PdfiumDocument {
 
         // ------------------------------------------------------------- apply --
 
+        // **Any attempt to apply forces the full-copy requirement, before the
+        // first object is removed.** Objects go one at a time and a later step
+        // can fail — a page PDFium will not rewrite, a form cut that will not
+        // plan — and whether the file is still safe to append to is not a
+        // judgement to make from how far the loop got. The command layer drops
+        // its pre-redaction snapshot when this returns an error, so a partial
+        // removal with an incremental save still allowed would leave the words
+        // that were taken out in the file's earlier revision — the one outcome
+        // redaction exists to prevent. Found by audit.
+        self.redacted = true;
+        self.touch();
+
         for (position, act) in &plan {
             let handle = objects[*position];
             match act {
@@ -9875,7 +9961,13 @@ impl PdfiumDocument {
             .ok_or_else(|| PdfError::InvalidArgument("the page is not a dictionary".into()))?;
         let mut replacements: Vec<(u32, Vec<u8>)> = Vec::new();
         let mut extras: Vec<(u32, Vec<u8>)> = Vec::new();
-        let mut next = file.numbers().max().unwrap_or(0) + 1;
+        // Checked: the numbers are the document's to choose, and the top of
+        // the range has no room above it. Found by audit.
+        let Some(mut next) = file.numbers().max().unwrap_or(0).checked_add(1) else {
+            return Err(PdfError::InvalidArgument(
+                "the document's object numbers are exhausted".into(),
+            ));
+        };
         let mut page_changed = false;
         // The page's stream, spliced where a drawing is given a name of its
         // own; written back only if something was.
@@ -12304,5 +12396,101 @@ mod vault_cache_tests {
             assert!(started.elapsed() < std::time::Duration::from_millis(5), "it read the file again");
             assert_eq!(first.to_string(), second.to_string());
         });
+    }
+}
+
+#[cfg(test)]
+mod page_tree_tests {
+    use super::*;
+
+    /// A whole small file, written by hand so the cross-reference table is
+    /// exactly where it says it is.
+    fn a_file(objects: &[(u32, String)]) -> Vec<u8> {
+        let mut bytes = b"%PDF-1.7\n".to_vec();
+        let mut offsets: Vec<(u32, usize)> = Vec::new();
+        for (number, body) in objects {
+            offsets.push((*number, bytes.len()));
+            bytes.extend_from_slice(format!("{number} 0 obj\n<< {body} >>\nendobj\n").as_bytes());
+        }
+        let size = objects.iter().map(|(number, _)| number + 1).max().unwrap_or(1);
+        let xref_at = bytes.len();
+        bytes.extend_from_slice(format!("xref\n0 {size}\n0000000000 65535 f \n").as_bytes());
+        for (_, offset) in &offsets {
+            bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        bytes.extend_from_slice(
+            format!("trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF")
+                .as_bytes(),
+        );
+        bytes
+    }
+
+    /// The root of `bytes`' page tree, resolved.
+    fn page_tree(bytes: &[u8]) -> (crate::pdf::File<'_>, crate::pdf::Object) {
+        let file = crate::pdf::File::parse(bytes).expect("parse");
+        let root = file
+            .resolve(file.trailer().get(b"Root").expect("catalogue"))
+            .expect("catalogue object");
+        let pages = file
+            .resolve(
+                root.as_dict().and_then(|d| d.get(b"Pages")).expect("page tree"),
+            )
+            .expect("page tree object");
+        (file, pages)
+    }
+
+    /// **Each object once.** A node listing the same child twice at every
+    /// level used to be two visits per level — 2^n, not a walk — and the tree
+    /// below is 41 levels deep. Found by audit.
+    #[test]
+    fn a_page_tree_that_doubles_at_every_level_is_walked_once() {
+        let levels = 40u32;
+        let mut objects = vec![(1, "/Type /Catalog /Pages 2 0 R".to_string())];
+        for number in 2..=levels + 1 {
+            let child = number + 1;
+            objects.push((
+                number,
+                format!("/Type /Pages /Kids [{child} 0 R {child} 0 R] /Count 1"),
+            ));
+        }
+        objects.push((levels + 2, format!("/Type /Page /Parent {} 0 R", levels + 1)));
+
+        let bytes = a_file(&objects);
+        let (file, pages) = page_tree(&bytes);
+
+        let mut flat = Vec::new();
+        collect_pages(&file, &pages, &mut flat, 0, &mut HashSet::new()).expect("walk");
+        assert_eq!(flat.len(), 1, "the one page was collected more than once");
+
+        let mut numbers = Vec::new();
+        collect_page_numbers(&file, &pages, &mut numbers, 0, &mut HashSet::new());
+        assert_eq!(numbers, vec![levels + 2], "the page's number was not reported once");
+    }
+
+    /// A tree that is a genuine DAG, not a chain: one node reached by two
+    /// different parents. The pages under it are pages of the document once,
+    /// not once per route to them.
+    #[test]
+    fn a_shared_subtree_is_walked_once() {
+        let objects = vec![
+            (1, "/Type /Catalog /Pages 2 0 R".to_string()),
+            (2, "/Type /Pages /Kids [3 0 R 4 0 R] /Count 2".to_string()),
+            (3, "/Type /Pages /Kids [5 0 R] /Count 2".to_string()),
+            (4, "/Type /Pages /Kids [5 0 R] /Count 2".to_string()),
+            (5, "/Type /Pages /Kids [6 0 R 7 0 R] /Count 2".to_string()),
+            (6, "/Type /Page /Parent 5 0 R".to_string()),
+            (7, "/Type /Page /Parent 5 0 R".to_string()),
+        ];
+
+        let bytes = a_file(&objects);
+        let (file, pages) = page_tree(&bytes);
+
+        let mut numbers = Vec::new();
+        collect_page_numbers(&file, &pages, &mut numbers, 0, &mut HashSet::new());
+        assert_eq!(numbers, vec![6, 7], "a page under a shared node was reported twice");
+
+        let mut flat = Vec::new();
+        collect_pages(&file, &pages, &mut flat, 0, &mut HashSet::new()).expect("walk");
+        assert_eq!(flat.len(), 2, "the same page was collected more than once");
     }
 }

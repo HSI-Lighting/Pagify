@@ -746,6 +746,172 @@ fn the_committed_sm2_fixture_verifies() {
     assert_eq!(found[0].signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
 }
 
+/// **A decoy placeholder earlier in the document must not capture the
+/// signature.** The blob's hole and the `/ByteRange` were both found by
+/// scanning the whole prepared file; a `/Type /Sig` dictionary planted
+/// earlier — with a long zero run and a zeroed range — took both, while
+/// Pagify's own signature object was left empty and the person was told the
+/// document was signed. Found by audit.
+#[test]
+fn a_decoy_signature_dictionary_does_not_capture_the_signature() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    use pdf_core::pdf::{write_object, Dict, Object};
+
+    let identity = identity();
+    let source = std::fs::read(harness::fixture_path("two-column.pdf")).expect("fixture");
+    let file = File::parse(&source).expect("parse");
+
+    // The decoy, numbered before the real signature will be: a signature
+    // dictionary with a 2 KiB zero run and a ten-digit-wide `/ByteRange` so
+    // the old scanner would have patched it as happily as its own.
+    let mut decoy = Dict(Vec::new());
+    decoy.set(b"Type", Object::Name(b"Sig".to_vec()));
+    decoy.set(b"Filter", Object::Name(b"Adobe.PPKLite".to_vec()));
+    decoy.set(b"SubFilter", Object::Name(b"adbe.pkcs7.detached".to_vec()));
+    decoy.set(
+        b"ByteRange",
+        Object::Array((0..4).map(|_| Object::Number(b"0000000000".to_vec())).collect()),
+    );
+    decoy.set(b"Contents", Object::HexString(vec![b'0'; 4096]));
+    let mut decoy_body = Vec::new();
+    write_object(&mut decoy_body, &Object::Dict(decoy));
+    let with_decoy = file
+        .rewrite_adding(&[], &[(99, decoy_body)], &Dict(Vec::new()))
+        .expect("add the decoy");
+
+    let file = File::parse(&with_decoy).expect("parse");
+    let signed_bytes = sign::sign(&file, &identity, &sign::Reason::default()).expect("sign");
+    let signed = File::parse(&signed_bytes).expect("the signed file parses");
+
+    let contents = |number: u32| -> Vec<u8> {
+        let object = signed.object(number).expect("object");
+        match object.as_dict().and_then(|d| d.get(b"Contents")) {
+            Some(Object::HexString(raw)) => raw.clone(),
+            other => panic!("object {number} holds no hex Contents: {other:?}"),
+        }
+    };
+    let is_signature = |number: u32| -> bool {
+        let Ok(object) = signed.object(number) else { return false };
+        let Some(dict) = object.as_dict() else { return false };
+        matches!(dict.get(b"Type").and_then(Object::as_name), Some(name) if name == b"Sig".as_slice())
+    };
+    let signature_number = signed
+        .numbers()
+        .filter(|number| is_signature(*number))
+        .max()
+        .expect("a signature dictionary");
+    assert!(signature_number > 99, "the real signature was not appended after the decoy");
+
+    assert!(
+        contents(99).iter().all(|b| *b == b'0'),
+        "the decoy captured the signature"
+    );
+    assert!(
+        contents(signature_number).iter().any(|b| *b != b'0'),
+        "the real signature object is still empty"
+    );
+
+    // And a checker that reads the file agrees about which one is a signature.
+    let found = validate::check_with(&signed, &signed_bytes, &pdf_core::pdf::trust::Anchors::none())
+        .expect("check");
+    assert_eq!(found.len(), 2);
+    assert!(
+        matches!(found[0].verdict, Verdict::Unreadable(_)),
+        "the decoy was judged: {:?}",
+        found[0].verdict
+    );
+    assert_eq!(found[1].verdict, Verdict::Unaltered, "{}", found[1].verdict.describe());
+    assert_eq!(found[1].signer.as_deref(), Some("CN=Pagify SM2 Test Signer,O=Pagify"));
+}
+
+/// **The splice.** A signature is about a stretch of one exact file. Take a
+/// genuinely signed file, split it at the Contents hole, and insert a region
+/// carrying a shadow signature dictionary plus a cross-reference table at the
+/// offset the unchanged final `startxref` still names: the covered bytes are
+/// byte-identical to the original, so the digest and the signature still
+/// verify, while the parsed object graph is attacker-chosen. The hole must
+/// therefore be this dictionary's own `/Contents` and nothing else — with the
+/// binding removed, this test reports `Unaltered` over a document that was
+/// changed. Found by audit.
+#[test]
+fn a_signature_spliced_around_an_inserted_region_is_refused() {
+    let (bytes, _) = signed("two-column.pdf");
+    let range = declared_range(&bytes).expect("range");
+    let (a, b) = (range.hole_at, range.hole_at + range.hole_len);
+
+    // The blob the shadow dictionary will carry, exactly as the original
+    // signature carries it.
+    let blob = blob_in(&bytes, &range);
+    let hex: String = blob.iter().map(|byte| format!("{byte:02X}")).collect();
+
+    // The parser reads the last `startxref` in the file, which lives in the
+    // covered tail and cannot be changed. That is what makes the splice work:
+    // the offset value is fixed, so the attacker builds to it.
+    let at = bytes.windows(9).rposition(|w| w == b"startxref").expect("startxref");
+    let target: usize = String::from_utf8_lossy(&bytes[at + 9..])
+        .split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("the startxref offset");
+
+    // The inserted region: object 8 (the shadow signature) at its start, a
+    // minimal catalogue, padding, then the fake cross-reference table at the
+    // absolute offset the trailer still names.
+    let catalog = "1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n";
+    // The catalogue sits after the signature object; its offset depends on
+    // that object's length, which depends on the digits of the hole length,
+    // which is fixed by where the xref has to land. One settling pass is
+    // enough; a loop keeps it honest if the decimal width ever changes.
+    let mut hole_len = (target - a) + 200;
+    let mut forged = Vec::new();
+    for _ in 0..8 {
+        let range_text = format!("[0 {a} {} {}]", a + hole_len, bytes.len() - b);
+        let signature_object = format!(
+            "8 0 obj\n<</Type /Sig /Contents <{hex}>\n/ByteRange {range_text}>>\nendobj\n"
+        );
+        let catalog_at = a + signature_object.len();
+        let xref = format!(
+            "xref\n1 1\n{catalog_at:010} 00000 n \n8 1\n{a:010} 00000 n \n\
+             trailer\n<< /Size 9 /Root 1 0 R >>\n"
+        );
+        let pad = (target - a)
+            .checked_sub(signature_object.len() + catalog.len())
+            .expect("the fixture's xref table is too close to the hole");
+        let length = signature_object.len() + catalog.len() + pad + xref.len();
+        if length == hole_len {
+            forged.clear();
+            forged.extend_from_slice(&bytes[..a]); // C1, untouched
+            forged.extend_from_slice(signature_object.as_bytes());
+            forged.extend_from_slice(catalog.as_bytes());
+            forged.extend(std::iter::repeat_n(b' ', pad));
+            forged.extend_from_slice(xref.as_bytes()); // at the named offset
+            forged.extend_from_slice(&bytes[b..]); // C2, untouched
+            break;
+        }
+        hole_len = length;
+    }
+    // The forged file is the original plus the inserted region, which is the
+    // hole the shadow dictionary declares — the original Contents hole having
+    // been closed up around it.
+    assert_eq!(
+        forged.len(),
+        bytes.len() + hole_len - (b - a),
+        "the splice did not settle"
+    );
+
+    // The parser follows the attacker's table and finds the shadow signature.
+    let parsed = File::parse(&forged).expect("the spliced file parses");
+    let found = validate::check_with(&parsed, &forged, &pdf_core::pdf::trust::Anchors::none())
+        .expect("check");
+    assert_eq!(found.len(), 1, "the shadow signature was not found");
+    match &found[0].verdict {
+        Verdict::Unreadable(why) => assert!(why.contains("/Contents"), "{why}"),
+        other => panic!("a spliced signature was judged: {other:?}"),
+    }
+}
+
 /// **The fail-closed guard — the test that protects a person from reading
 /// "not verified by Pagify" as "forged".** `rsa-signed.pdf` was signed by the
 /// RSA path on its last day, and stands in for every document signed in

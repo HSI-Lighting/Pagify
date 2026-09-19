@@ -102,6 +102,15 @@ pub trait KeyDerivation {
     fn derive(&self, passcode: &[u8], salt: &[u8], params: &KdfParams) -> Result<Secret>;
 }
 
+/// The longest salt this will hash, in bytes.
+///
+/// **The salt comes out of the file and is hashed whole.** Only a lower bound
+/// used to be checked, so a lock attachment naming a multi-megabyte salt made
+/// every unlock hash all of it — work the file chose, before the passcode
+/// could be judged. 1024 is far beyond the 16 bytes this engine writes and
+/// generous for anything else. Found by audit.
+pub const MAX_SALT_LEN: usize = 1024;
+
 /// The only implementation, and the default.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Argon2id;
@@ -114,6 +123,12 @@ impl KeyDerivation for Argon2id {
     fn derive(&self, passcode: &[u8], salt: &[u8], params: &KdfParams) -> Result<Secret> {
         if salt.len() < 8 {
             return Err(PdfError::InvalidArgument("the salt is too short".into()));
+        }
+        if salt.len() > MAX_SALT_LEN {
+            return Err(PdfError::InvalidArgument(format!(
+                "the salt is longer than the {MAX_SALT_LEN} bytes allowed here ({} bytes)",
+                salt.len()
+            )));
         }
         // Here, so every path that reads a cost out of a file — the Secure
         // Plus dictionary, the lock's envelope, the ledger — is covered by
@@ -229,6 +244,30 @@ mod tests {
     #[test]
     fn a_salt_too_short_to_be_useful_is_refused() {
         assert!(Argon2id.derive(b"x", b"1234", &quick()).is_err());
+    }
+
+    /// **A salt the file names is hashed whole, so it has a ceiling too.**
+    /// Found by audit: only a lower bound was checked, and a lock attachment
+    /// naming a multi-megabyte salt set Argon2 hashing all of it on every
+    /// unlock.
+    #[test]
+    fn a_salt_longer_than_the_ceiling_is_refused_before_deriving() {
+        let long = vec![7u8; MAX_SALT_LEN + 1];
+        let started = std::time::Instant::now();
+        let outcome = Argon2id.derive(b"anything", &long, &quick());
+        assert!(outcome.is_err(), "an oversized salt was accepted");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the refusal took {:?}",
+            started.elapsed()
+        );
+        let why = outcome.unwrap_err().to_string();
+        assert!(why.contains("longer"), "the refusal does not say why: {why}");
+
+        // A salt at the ceiling is still ordinary, and so is one of the 16
+        // bytes this engine writes.
+        assert!(Argon2id.derive(b"x", &vec![7u8; MAX_SALT_LEN], &quick()).is_ok());
+        assert!(Argon2id.derive(b"x", &[7u8; 16], &quick()).is_ok());
     }
 
     /// **The name in the envelope is the contract.** If it ever changes, every

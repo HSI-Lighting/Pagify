@@ -192,31 +192,59 @@ impl ByteRange {
     }
 }
 
-/// Find the placeholder in a prepared file.
+/// Find the placeholder in a prepared file, scanning the whole buffer.
+///
+/// For the unit tests that hand-build files. The signing path uses
+/// [`find_placeholder_in_object`], so a document's own text cannot be
+/// mistaken for the hole it reserved.
+fn find_placeholder(bytes: &[u8]) -> Result<ByteRange> {
+    find_placeholder_between(bytes, 0..bytes.len())
+}
+
+/// Find the placeholder **inside one object**, and nowhere else.
 ///
 /// Located by scanning rather than remembered from writing it, because the
 /// number that matters is where it ended up — after whatever the writer did to
-/// the bytes — not where it was meant to go.
-pub fn find_placeholder(bytes: &[u8]) -> Result<ByteRange> {
+/// the bytes — not where it was meant to go. Constrained to the object,
+/// because a document may carry a zero run of its own: a decoy `/Type /Sig`
+/// dictionary earlier in the file would otherwise capture the signature, its
+/// `/ByteRange` and its finished blob. Found by audit.
+fn find_placeholder_in_object(bytes: &[u8], number: u32) -> Result<ByteRange> {
+    let span = object_span(bytes, number)?;
+    find_placeholder_between(bytes, span)
+}
+
+/// The byte span of one object, as the file's own cross-reference locates it.
+///
+/// The same source `validate.rs` uses to tie a `/ByteRange` hole to its
+/// dictionary, so signer and checker agree on where an object is.
+fn object_span(bytes: &[u8], number: u32) -> Result<std::ops::Range<usize>> {
+    let file = File::parse(bytes)?;
+    file.span_of(number).map_err(|e| {
+        PdfError::Internal(format!("the signature object {number} cannot be located: {e}"))
+    })
+}
+
+fn find_placeholder_between(bytes: &[u8], span: std::ops::Range<usize>) -> Result<ByteRange> {
     // **Found by its shape, not by the key in front of it.** Every page in a
     // document has a `/Contents` of its own — `/Contents 9 0 R` — and looking
     // for that word first found a page's, then took the next `<` in the file as
     // the hole. What is unmistakable is the run of zeros: nothing else in a PDF
     // is a hex string of a thousand noughts.
     const LEAST: usize = 1024;
+    let window = bytes
+        .get(span.clone())
+        .ok_or_else(|| PdfError::Internal("the signature object's span runs past the file".into()))?;
 
     let mut at = 0usize;
-    while at < bytes.len() {
-        let Some(open) = bytes[at..].iter().position(|b| *b == b'<').map(|n| at + n) else {
+    while at < window.len() {
+        let Some(open) = window[at..].iter().position(|b| *b == b'<').map(|n| at + n) else {
             break;
         };
-        let zeros = bytes[open + 1..]
-            .iter()
-            .take_while(|b| **b == b'0')
-            .count();
-        if zeros >= LEAST && bytes.get(open + 1 + zeros) == Some(&b'>') {
+        let zeros = window[open + 1..].iter().take_while(|b| **b == b'0').count();
+        if zeros >= LEAST && window.get(open + 1 + zeros) == Some(&b'>') {
             return Ok(ByteRange {
-                hole_at: open,
+                hole_at: span.start + open,
                 hole_len: zeros + 2,
                 total: bytes.len(),
             });
@@ -734,9 +762,8 @@ pub fn sign(file: &File<'_>, identity: &Identity, about: &Reason) -> Result<Vec<
     } else {
         about.name.clone()
     };
-    let mut prepared = prepare(file, &name, about)?;
-    let range = find_placeholder(&prepared)?;
-    write_byte_range(&mut prepared, &range)?;
+    let (mut prepared, signature_number, range) = prepare(file, &name, about)?;
+    write_byte_range(&mut prepared, signature_number, &range)?;
     let digest = digest_of(&prepared, &range)?;
     let blob = detached_signature(identity, &digest)?;
     fill_placeholder(&mut prepared, &range, &blob)?;
@@ -751,12 +778,30 @@ pub fn sign(file: &File<'_>, identity: &Identity, about: &Reason) -> Result<Vec<
 /// came back was signed by somebody else's key in somebody else's scheme —
 /// two things this program has decided not to have. The time a signature
 /// carries is the signer's own clock, and says so by being in `/M`.
-fn prepare(file: &File<'_>, name: &str, about: &Reason) -> Result<Vec<u8>> {
+fn prepare(file: &File<'_>, name: &str, about: &Reason) -> Result<(Vec<u8>, u32, ByteRange)> {
 
     // -- the signature dictionary, with room reserved ---------------------
+    //
+    // Checked, because the highest number is the file's to choose: a document
+    // naming `u32::MAX` has no room for one more, and adding past it used to
+    // wrap. Found by audit.
     let numbers: Vec<u32> = file.numbers().collect();
-    let signature_number = numbers.iter().copied().max().unwrap_or(0) + 1;
-    let field_number = signature_number + 1;
+    let Some(signature_number) = numbers
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+    else {
+        return Err(PdfError::InvalidArgument(
+            "the document's object numbers are exhausted".into(),
+        ));
+    };
+    let Some(field_number) = signature_number.checked_add(1) else {
+        return Err(PdfError::InvalidArgument(
+            "the document's object numbers are exhausted".into(),
+        ));
+    };
 
     let mut signature = Dict(Vec::new());
     signature.set(b"Type", Object::Name(b"Sig".to_vec()));
@@ -859,13 +904,13 @@ fn prepare(file: &File<'_>, name: &str, about: &Reason) -> Result<Vec<u8>> {
         &Dict(Vec::new()),
     )?;
 
-    let range = find_placeholder(&prepared)?;
+    let range = find_placeholder_in_object(&prepared, signature_number)?;
     if !range.covers_everything() {
         return Err(PdfError::Internal(
             "the prepared file's byte range does not cover it".into(),
         ));
     }
-    Ok(prepared)
+    Ok((prepared, signature_number, range))
 }
 
 /// Digits per number in `/ByteRange`.
@@ -877,27 +922,41 @@ fn prepare(file: &File<'_>, name: &str, about: &Reason) -> Result<Vec<u8>> {
 /// part of.
 const RANGE_DIGITS: usize = 10;
 
-/// Patch the four numbers in, in place.
-fn write_byte_range(bytes: &mut [u8], range: &ByteRange) -> Result<()> {
-    let at = bytes
+/// Patch the four numbers in, in place, inside the signature's own object.
+///
+/// The search is confined to the object the placeholder was written into: a
+/// `/ByteRange` sitting in the document before it — a decoy signature
+/// dictionary — must not receive the numbers. Found by audit.
+fn write_byte_range(bytes: &mut [u8], number: u32, range: &ByteRange) -> Result<()> {
+    let span = object_span(bytes, number)?;
+    // Copied before anything is written: the scan borrows the buffer and the
+    // patch below needs it mutably, and the object is a few kilobytes.
+    let window = bytes
+        .get(span.clone())
+        .ok_or_else(|| PdfError::Internal("the signature object's span runs past the file".into()))?
+        .to_vec();
+
+    let at = window
         .windows(10)
         .position(|w| w == b"/ByteRange")
         .ok_or_else(|| PdfError::Internal("the byte range went missing".into()))?;
-    let open = bytes[at..]
+    let open = window[at..]
         .iter()
         .position(|b| *b == b'[')
         .map(|n| at + n)
         .ok_or_else(|| PdfError::Internal("the byte range has no array".into()))?;
 
     let values = range.numbers();
+    // Where each number was found, before a byte is written.
+    let mut spans = Vec::with_capacity(4);
     let mut cursor = open + 1;
-    for value in values {
+    for _ in values {
         // Past whatever separates them.
-        while cursor < bytes.len() && !bytes[cursor].is_ascii_digit() {
+        while cursor < window.len() && !window[cursor].is_ascii_digit() {
             cursor += 1;
         }
         let start = cursor;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+        while cursor < window.len() && window[cursor].is_ascii_digit() {
             cursor += 1;
         }
         if cursor - start != RANGE_DIGITS {
@@ -905,8 +964,12 @@ fn write_byte_range(bytes: &mut [u8], range: &ByteRange) -> Result<()> {
                 "the byte range is not the width it was written at".into(),
             ));
         }
+        spans.push(span.start + start..span.start + cursor);
+    }
+
+    for (value, at) in values.into_iter().zip(spans) {
         let written = format!("{value:0RANGE_DIGITS$}", RANGE_DIGITS = RANGE_DIGITS);
-        bytes[start..cursor].copy_from_slice(written.as_bytes());
+        bytes[at].copy_from_slice(written.as_bytes());
     }
     Ok(())
 }

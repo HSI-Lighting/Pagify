@@ -26,6 +26,7 @@ use crate::document::{Page, Rect, RenderRequest};
 use crate::error::{PdfError, Result};
 use crate::ocr::geometry::PageImage;
 use crate::ocr::{preprocess, tiling, GreyImage, LineBox, RecognisedWord, Recogniser, Script};
+use crate::render::bitmap::validate_dimensions;
 use crate::render::{bitmap::PixelOrder, RenderTarget};
 
 /// How to read a page.
@@ -110,9 +111,13 @@ pub struct PageReading {
 pub fn rasterise(page: &dyn Page, dpi: f32) -> Result<GreyImage> {
     let scale = dpi / 72.0;
     let (width, height) = page.size().pixel_size(scale);
-    if width == 0 || height == 0 {
-        return Err(PdfError::InvalidArgument("ocr: page has no area".into()));
-    }
+    // **Before the allocation, not inside `RenderTarget::new`.** The page's
+    // size comes from the file, and a crafted `/MediaBox` of a few thousand
+    // points asks for tens of gigabytes at 300 dpi — an allocation failure is
+    // an abort, not a panic, so nothing above this can contain it. The
+    // renderer's own guard rails are the right size for OCR too.
+    validate_dimensions(width, height)
+        .map_err(|_| PdfError::RenderTooLarge { width, height })?;
 
     let mut pixels = vec![0u8; width as usize * height as usize * 4];
     {
@@ -423,6 +428,35 @@ mod tests {
                 boxed(x, top, x + 7.6, top + 12.0)
             })
             .collect()
+    }
+
+    /// **The page's own size must not decide how much memory OCR asks for.**
+    /// A crafted `/MediaBox` of a few thousand points asks for tens of
+    /// gigabytes at 300 dpi; the allocation happened before the renderer's own
+    /// guard could refuse, and an allocation failure is an abort nothing can
+    /// catch. Found by audit.
+    #[test]
+    fn a_page_too_large_to_rasterise_is_refused_before_anything_is_allocated() {
+        struct Enormous;
+
+        impl Page for Enormous {
+            fn size(&self) -> crate::document::PageSize {
+                crate::document::PageSize { width_pt: 20_000.0, height_pt: 20_000.0 }
+            }
+            fn render_into(
+                &self,
+                _request: &RenderRequest,
+                _target: &mut RenderTarget<'_>,
+            ) -> Result<()> {
+                panic!("nothing should be rendered for a page this size");
+            }
+            fn text(&self) -> Result<String> {
+                Ok(String::new())
+            }
+        }
+
+        let problem = rasterise(&Enormous, 300.0).expect_err("should refuse");
+        assert!(matches!(problem, PdfError::RenderTooLarge { .. }), "{problem}");
     }
 
     /// The defect: on a page that carries both real text and text drawn as

@@ -1,0 +1,79 @@
+# Desktop security gates.
+#
+# Before this workflow the gates below existed only as scripts that the macOS
+# release ran by hand (packaging/macos/bundle.sh): third_party checksums,
+# cargo-audit over the lockfile, and a socket search over the source and the
+# dependency graph. Windows and Linux releases ran none of them, and there was
+# no CI anywhere in the repository, so a pull request could pass without a
+# single gate (security audit M-6).
+#
+# The PDFium slices are not committed (third_party/pdfium is ignored), so CI
+# fetches them the same way a developer does: `fetch_pdfium.sh` refuses any
+# release but the pinned one and hashes every library against the committed
+# third_party/CHECKSUMS.sha256, deleting a slice that does not match. The
+# checksum file is the root of trust, not the network: the strict whole-tree
+# verification below runs after the fetch and fails on anything missing or
+# substituted.
+name: desktop-security
+
+on:
+  push:
+    paths:
+      - "desktop/**"
+      - "rust/**"
+      - ".github/workflows/desktop-security.yml"
+  pull_request:
+    paths:
+      - "desktop/**"
+      - "rust/**"
+      - ".github/workflows/desktop-security.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out
+        # v4.4.0, pinned by commit: a tag can be moved under a workflow, a
+        # commit cannot.
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      # Keyed on the checksum file: the cache holds exactly the artifacts the
+      # committed pins describe, and any change to a pin misses the cache.
+      - name: Cache the pinned PDFium slices
+        # actions/cache@v4, pinned by commit: a tag can be moved under a
+        # workflow, a commit cannot.
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: desktop/third_party/pdfium
+          key: pdfium-${{ hashFiles('desktop/third_party/CHECKSUMS.sha256') }}
+
+      - name: Fetch the pinned PDFium slices
+        run: desktop/tools/fetch_pdfium.sh
+
+      - name: Verify third_party checksums
+        run: desktop/tools/verify_third_party.sh
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit the dependency lockfiles
+        run: desktop/tools/audit.sh
+
+      - name: Check that nothing opens a socket
+        run: desktop/tools/no_sockets.sh
+
+      # Library tests only. They exercise the pure-logic modules and do not
+      # load PDFium, so no slice and no PDFium-backed integration suite runs
+      # here.
+      - name: pdf_core unit tests
+        working-directory: rust/pdf_core
+        run: cargo test -p pdf_core --lib
+
+      - name: pagify_shell unit tests
+        working-directory: desktop
+        run: cargo test --locked -p pagify_shell --lib

@@ -49,26 +49,40 @@ library_in() {
   esac
 }
 
+# Delete a slice this script owns, and only that slice: it is the path the
+# extraction above wrote to. Never a repository copy, never $DEST itself.
+refuse_slice() {
+  rm -rf "$DEST/$1"
+}
+
 # Check a slice's library against its pinned checksum; delete the slice on a
-# mismatch so nothing unverified is left where the loader looks.
+# mismatch so nothing unverified is left where the loader looks. The file
+# hashed is the one under $DEST — the one that was actually extracted and the
+# one the loader will find — not some other copy that happens to sit at
+# $ROOT/third_party. Found by audit: this used to hash the repository copy,
+# so a custom $DEST was reported "verified" with tampered files left in it.
 verify_slice() {
-  local slice="$1" rel expected actual
+  local slice="$1" rel expected actual lib
   rel="$(library_in "$slice")"
+  # CHECKSUMS names the library relative to third_party (`pdfium/<slice>/...`),
+  # while $DEST *is* the pdfium root, so the prefix comes off: a custom DEST
+  # then hashes the copy that was extracted into it.
+  lib="$DEST/${rel#pdfium/}"
   expected="$(grep -E "  ${rel}\$" "$CHECKSUMS" | cut -d' ' -f1 || true)"
   if [ -z "$expected" ]; then
     echo "        REFUSED — no checksum for $rel in $CHECKSUMS" >&2
-    rm -rf "$DEST/$slice"
+    refuse_slice "$slice"
     return 1
   fi
-  if [ ! -f "$ROOT/third_party/$rel" ]; then
-    echo "        REFUSED — $rel is not in the archive" >&2
-    rm -rf "$DEST/$slice"
+  if [ ! -f "$lib" ]; then
+    echo "        REFUSED — $rel was not extracted to $DEST" >&2
+    refuse_slice "$slice"
     return 1
   fi
-  actual="$(sha256_of "$ROOT/third_party/$rel")"
+  actual="$(sha256_of "$lib")"
   if [ "$actual" != "$expected" ]; then
     echo "        REFUSED — $rel hashes to $actual, expected $expected" >&2
-    rm -rf "$DEST/$slice"
+    refuse_slice "$slice"
     return 1
   fi
   echo "        verified $rel"
@@ -89,6 +103,9 @@ for entry in "${SLICES[@]}"; do
 
   if [ -d "$DEST/$slice/lib" ] || [ -d "$DEST/$slice/bin" ]; then
     echo "have    $slice"
+    # An existing slice is verified, not trusted: a truncated or replaced
+    # download from an earlier run used to be skipped entirely.
+    verify_slice "$slice"
     continue
   fi
 

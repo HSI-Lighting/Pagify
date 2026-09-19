@@ -34,12 +34,12 @@
 //! destroy the only copy of what somebody was promised they could get back.
 //! It is named explicitly and always kept.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::error::Result;
+use crate::error::{PdfError, Result};
 
 use super::object::Dict;
-use super::{write_object, File, Object};
+use super::{write_object, write_stream, File, Object};
 
 /// The lock's attachment, which is hidden data that must survive sanitising.
 const KEEP: &str = "pagify-lock.json";
@@ -58,6 +58,12 @@ pub struct Hidden {
     pub embedded_files: usize,
     /// Script that runs when the document is opened or acted on.
     pub javascript: bool,
+    /// An `/AcroForm /XFA` entry: a whole form document, script and all,
+    /// carried beside the fields a reader would show.
+    pub xfa: bool,
+    /// How many fields under the catalogue's `/AcroForm` carry a `/V`: what
+    /// somebody filled in.
+    pub form_values: usize,
     /// Objects nothing reaches from the catalogue: content taken off the pages
     /// but never taken out of the file.
     pub unreachable: usize,
@@ -74,6 +80,8 @@ impl Hidden {
             && !self.xmp
             && self.embedded_files == 0
             && !self.javascript
+            && !self.xfa
+            && self.form_values == 0
             && self.unreachable == 0
     }
 
@@ -99,6 +107,16 @@ impl Hidden {
         if self.javascript {
             found.push("JavaScript".into());
         }
+        if self.xfa {
+            found.push("an XFA form".into());
+        }
+        if self.form_values > 0 {
+            found.push(format!(
+                "{} form field value{}",
+                self.form_values,
+                if self.form_values == 1 { "" } else { "s" }
+            ));
+        }
         if self.unreachable > 0 {
             found.push(format!("{} unreachable object(s)", self.unreachable));
         }
@@ -123,6 +141,8 @@ impl Hidden {
             xmp: self.xmp && !remaining.xmp,
             embedded_files: self.embedded_files.saturating_sub(remaining.embedded_files),
             javascript: self.javascript && !remaining.javascript,
+            xfa: self.xfa && !remaining.xfa,
+            form_values: self.form_values.saturating_sub(remaining.form_values),
             unreachable: self.unreachable.saturating_sub(remaining.unreachable),
             keeps_lock: self.keeps_lock,
         }
@@ -197,6 +217,18 @@ pub fn survey(file: &File<'_>, bytes: &[u8]) -> Result<Hidden> {
     if let Some(root) = &root {
         found.xmp = root.get(b"Metadata").is_some();
 
+        // **A form is hidden data too.** `/XFA` is a whole document of its
+        // own, script and all, carried beside the pages; a field's `/V` is
+        // what somebody filled in. Both survive a clean that does not look
+        // for them, and a survey that does not look reports the file clean.
+        // Found by audit.
+        if let Some((_, form)) = acroform(file, root) {
+            found.xfa = form.get(b"XFA").is_some();
+            found.form_values = form
+                .get(b"Fields")
+                .map_or(0, |fields| count_field_values(file, fields, 0));
+        }
+
         let names = root
             .get(b"Names")
             .and_then(|n| file.resolve(n).ok())
@@ -224,6 +256,48 @@ pub fn survey(file: &File<'_>, bytes: &[u8]) -> Result<Hidden> {
             .filter_map(|n| file.object(*n).ok())
             .any(|object| holds_script(file, &object, 0));
     Ok(found)
+}
+
+/// The catalogue's `/AcroForm`: the object number when it is indirect, and a
+/// copy of the dictionary either way.
+fn acroform(file: &File<'_>, root: &Dict) -> Option<(Option<u32>, Dict)> {
+    match root.get(b"AcroForm")? {
+        Object::Reference(number, _) => {
+            let object = file.object(*number).ok()?;
+            let dict = object.as_dict()?.clone();
+            Some((Some(*number), dict))
+        }
+        other => other.as_dict().cloned().map(|dict| (None, dict)),
+    }
+}
+
+/// How many fields under a `/Fields` entry carry a `/V`, following `/Kids`.
+///
+/// `/V` that is `null` is not a value, and is not counted.
+fn count_field_values(file: &File<'_>, fields: &Object, depth: usize) -> usize {
+    if depth > 32 {
+        return 0;
+    }
+    match fields {
+        Object::Array(items) => items
+            .iter()
+            .map(|item| count_field_values(file, item, depth + 1))
+            .sum(),
+        Object::Reference(..) => file
+            .resolve(fields)
+            .ok()
+            .map_or(0, |object| count_field_values(file, &object, depth + 1)),
+        Object::Dict(dict) => {
+            let here = usize::from(
+                dict.get(b"V").is_some_and(|value| !matches!(value, Object::Null)),
+            );
+            let kids = dict
+                .get(b"Kids")
+                .map_or(0, |kids| count_field_values(file, kids, depth + 1));
+            here + kids
+        }
+        _ => 0,
+    }
 }
 
 /// Whether an action runs script: `/S /JavaScript`, or a `/JS` entry, which
@@ -448,9 +522,35 @@ pub fn strip(file: &File<'_>, bytes: &[u8]) -> Result<(Vec<u8>, Sanitised)> {
             rewritten.insert(number, object);
         }
     }
+
+    // **A form is hidden data too.** The `/XFA` entry is a whole document of
+    // its own, script and all, and a field's `/V` is what somebody filled in.
+    // The fields themselves stay, so the form still exists to be filled
+    // again. Found by audit.
+    if let Some(number) = root_number {
+        if let Some(Object::Dict(mut root)) = rewritten.remove(&number) {
+            strip_acroform(file, &mut root, &mut rewritten);
+            rewritten.insert(number, Object::Dict(root));
+        }
+    }
+
     for (number, object) in &rewritten {
         let mut body = Vec::new();
-        write_object(&mut body, object);
+        match object {
+            // **A changed stream keeps its bytes.** Printing the object would
+            // emit its dictionary and drop the stream data, so a sanitised
+            // content stream came out empty and the page it drew came out
+            // blank — while the clean reported it clean. The range is into
+            // the original file; the bytes are copied into the body before
+            // anything is written. Found by audit.
+            Object::Stream(dict, range) => {
+                let data = file.bytes().get(range.clone()).ok_or_else(|| {
+                    PdfError::InvalidArgument(format!("object {number} runs past the file"))
+                })?;
+                body = write_stream(dict, data);
+            }
+            other => write_object(&mut body, other),
+        }
         replacements.push((*number, body));
     }
 
@@ -478,6 +578,116 @@ pub fn strip(file: &File<'_>, bytes: &[u8]) -> Result<(Vec<u8>, Sanitised)> {
     // Measured on the result, not assumed from the intent.
     let after = File::parse(&cleaned).and_then(|f| survey(&f, &cleaned))?;
     Ok((cleaned, Sanitised { before, after }))
+}
+
+/// Take the hidden data out of the catalogue's `/AcroForm`: the `/XFA` entry,
+/// which is a script-bearing document of its own, and every field's `/V`,
+/// which is what somebody typed. The fields stay.
+///
+/// Bodies reached through references are put in `rewritten`, the same as
+/// anything else this clean changes. Whether anything was actually taken out
+/// is measured by surveying the written bytes, not assumed here.
+fn strip_acroform(file: &File<'_>, root: &mut Dict, rewritten: &mut BTreeMap<u32, Object>) {
+    match root.get(b"AcroForm").cloned() {
+        Some(Object::Reference(number, _)) => {
+            let mut form =
+                match rewritten.remove(&number).or_else(|| file.object(number).ok()) {
+                    Some(form) => form,
+                    None => return,
+                };
+            let changed = match &mut form {
+                Object::Dict(dict) | Object::Stream(dict, _) => {
+                    strip_form_dict(file, dict, rewritten)
+                }
+                _ => false,
+            };
+            if changed {
+                rewritten.insert(number, form);
+            }
+        }
+        Some(Object::Dict(mut form)) => {
+            if strip_form_dict(file, &mut form, rewritten) {
+                root.set(b"AcroForm", Object::Dict(form));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// What one form dictionary loses: `/XFA`, and `/V` from every field under
+/// `/Fields`. Whether anything changed.
+fn strip_form_dict(
+    file: &File<'_>,
+    form: &mut Dict,
+    rewritten: &mut BTreeMap<u32, Object>,
+) -> bool {
+    let mut changed = form.get(b"XFA").is_some();
+    form.remove(b"XFA");
+    if let Some(mut fields) = form.get(b"Fields").cloned() {
+        if strip_field_values(file, &mut fields, rewritten, 0) {
+            form.set(b"Fields", fields);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Take `/V` out of every field reachable from a `/Fields` entry, following
+/// `/Kids`. Whether anything in this object changed — a reference is not
+/// changed by taking something out of what it points at, and says so, so its
+/// holder does not have to be rewritten.
+fn strip_field_values(
+    file: &File<'_>,
+    object: &mut Object,
+    rewritten: &mut BTreeMap<u32, Object>,
+    depth: usize,
+) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    match object {
+        Object::Array(items) => items.iter_mut().fold(false, |changed, item| {
+            strip_field_values(file, item, rewritten, depth + 1) || changed
+        }),
+        Object::Reference(number, _) => {
+            let current = rewritten
+                .get(number)
+                .cloned()
+                .or_else(|| file.object(*number).ok());
+            let Some(mut field) = current else { return false };
+            let changed = match &mut field {
+                Object::Dict(dict) | Object::Stream(dict, _) => {
+                    strip_field_dict(file, dict, rewritten, depth + 1)
+                }
+                _ => false,
+            };
+            if changed {
+                rewritten.insert(*number, field);
+            }
+            false
+        }
+        Object::Dict(dict) => strip_field_dict(file, dict, rewritten, depth + 1),
+        Object::Stream(dict, _) => strip_field_dict(file, dict, rewritten, depth + 1),
+        _ => false,
+    }
+}
+
+/// One field dictionary: lose its `/V`, then do the same for its `/Kids`.
+fn strip_field_dict(
+    file: &File<'_>,
+    dict: &mut Dict,
+    rewritten: &mut BTreeMap<u32, Object>,
+    depth: usize,
+) -> bool {
+    let mut changed = dict.get(b"V").is_some();
+    dict.remove(b"V");
+    if let Some(mut kids) = dict.get(b"Kids").cloned() {
+        if strip_field_values(file, &mut kids, rewritten, depth + 1) {
+            dict.set(b"Kids", kids);
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// [`walk`], reading rewritten objects where there are any.
@@ -611,11 +821,22 @@ mod tests {
             xmp: true,
             embedded_files: 1,
             javascript: true,
+            xfa: true,
+            form_values: 2,
             unreachable: 8,
             keeps_lock: false,
         };
         let said = found.describe();
-        for expected in ["earlier version", "Author", "XMP", "embedded", "JavaScript", "8 unreachable"] {
+        for expected in [
+            "earlier version",
+            "Author",
+            "XMP",
+            "embedded",
+            "JavaScript",
+            "XFA",
+            "2 form field values",
+            "8 unreachable",
+        ] {
             assert!(said.contains(expected), "{expected:?} was not reported: {said}");
         }
         assert!(!found.is_empty());
