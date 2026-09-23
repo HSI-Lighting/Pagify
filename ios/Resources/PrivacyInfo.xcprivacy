@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Pagify tracks nobody and talks to nothing. There is no URLSession in the
+	     target, no analytics SDK, and no ad framework, so both tracking keys are
+	     empty by fact rather than by policy. -->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+
+	<!-- Nothing leaves the device, so nothing is "collected" in Apple's sense.
+	     Business-card contacts live in the app's own SwiftData store and are
+	     shared only when the reader hands a .vcf to the share sheet. -->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<!-- stat(2)/fstat(2)/fstatat(2)/lstat(2) are imported by the app
+			     binary (RecentDocuments.attributesOfItem, PageOrganiser's
+			     .fileSizeKey, and the Rust engine's file I/O) and by the
+			     embedded libpdfium.dylib, which ships no manifest of its own. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<!-- Files inside the app container: the recents JSON in
+				     Application Support and the export scratch file in tmp. -->
+				<string>C617.1</string>
+				<!-- Files the reader specifically granted access to through
+				     UIDocumentPickerViewController — the size shown on a
+				     Library row is read from the picked PDF. -->
+				<string>3B52.1</string>
+			</array>
+		</dict>
+		<dict>
+			<!-- DispatchTime.now().uptimeNanoseconds in SessionRecorder,
+			     ReaderView and ZoomedPage, used only to time a render and log
+			     the duration locally. -->
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>35F9.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

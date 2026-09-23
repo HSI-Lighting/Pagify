@@ -40,9 +40,14 @@ enum PagifyEngine {
         guard !started else { return }
         pagify_init()
 
-        let url = Bundle.main.bundleURL.appendingPathComponent("Frameworks/libpdfium.dylib")
+        // Inside a framework bundle rather than loose in Frameworks/: the App
+        // Store refuses a standalone .dylib at processing, after archive and
+        // export have both succeeded. `Scripts/embed-pdfium.sh` builds the
+        // wrapper; this path has to agree with it.
+        let url = Bundle.main.bundleURL
+            .appendingPathComponent("Frameworks/PDFium.framework/PDFium")
         guard FileManager.default.fileExists(atPath: url.path) else {
-            throw PagifyError.engine("libpdfium.dylib is missing from the bundle (\(url.path))")
+            throw PagifyError.engine("PDFium is missing from the bundle (\(url.path))")
         }
         guard pagify_set_pdfium_library_path(url.path) == PAGIFY_OK else {
             throw failure("could not point the engine at PDFium")
