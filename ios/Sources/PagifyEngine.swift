@@ -34,7 +34,7 @@ enum PagifyError: LocalizedError {
 /// published either — so the app embeds `libpdfium.dylib` and hands the engine
 /// the bundle path, which it only learns at runtime.
 enum PagifyEngine {
-    private static var started = false
+    private nonisolated(unsafe) static var started = false
 
     static func start() throws {
         guard !started else { return }

@@ -314,12 +314,12 @@ struct ShapedRun {
 /// sixteen megabytes each, and loading twenty-two files to write one caption in
 /// one of them is most of a second nobody asked for.
 enum PagifyFonts {
-    private static var registered = Set<String>()
+    private nonisolated(unsafe) static var registered = Set<String>()
 
     /// Where to find the font files, when it is not the app bundle. The host
     /// probe has no bundle, and a text path only tested inside the app is a text
     /// path only tested where it is hardest to look at.
-    static var directoryOverride: URL?
+    nonisolated(unsafe) static var directoryOverride: URL?
 
     /// Hand the engine a font file, under the name the wire format uses for it.
     @discardableResult
@@ -377,7 +377,7 @@ enum PagifyFonts {
     ///
     /// Cached: `CTFontManager` refuses a second registration of the same file,
     /// and building a `UIFont` per glyph per frame is not free.
-    private static var uiFonts: [String: String] = [:]
+    private nonisolated(unsafe) static var uiFonts: [String: String] = [:]
 
     static func registeredUIFont(asset: String, size: CGFloat) -> UIFont? {
         if let name = uiFonts[asset] { return UIFont(name: name, size: size) }

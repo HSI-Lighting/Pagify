@@ -135,7 +135,7 @@ actor RenderGate {
     init(limit: Int) { self.limit = limit }
 
     /// Run `body` once there is room, and make room again afterwards.
-    nonisolated func run<T>(_ body: () async -> T) async -> T {
+    nonisolated func run<T: Sendable>(_ body: @Sendable () async -> T) async -> T {
         await enter()
         let result = await body()
         await leave()

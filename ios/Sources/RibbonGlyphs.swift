@@ -434,7 +434,7 @@ private let hintInset: CGFloat = 8
 /// drawn by the font it names. Falling back to the system sans would show tofu for
 /// half the list — which is the one thing the label was meant to avoid.
 enum RibbonFontFaces {
-    private static var resolved: [String: String?] = [:]
+    private nonisolated(unsafe) static var resolved: [String: String?] = [:]
 
     static func specimen(_ font: PagifyFont, size: CGFloat) -> Font {
         if let name = postScriptName(font) {

@@ -120,6 +120,7 @@ final class WindowBox {
 /// which is why choosing a thumbnail deep in a document showed a different page
 /// than the one tapped. Every page's position is known arithmetically, so the
 /// offset can simply be set.
+@MainActor
 final class ScrollCommander {
     weak var scrollView: UIScrollView?
 

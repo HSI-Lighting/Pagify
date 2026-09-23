@@ -222,4 +222,4 @@ final class ReminderCenterDelegate: NSObject, UNUserNotificationCenterDelegate {
     }
 }
 
-let reminderCenterDelegate = ReminderCenterDelegate()
+nonisolated(unsafe) let reminderCenterDelegate = ReminderCenterDelegate()
