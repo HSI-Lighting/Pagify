@@ -18,6 +18,15 @@ pub struct CommandHistory {
     /// produces a new undo record against the document's current state.
     redo_stack: Vec<Command>,
     depth: usize,
+    /// How many times this history has changed — a command applied, undone or
+    /// redone. Compared against the markup layer's own [`edits`](
+    /// crate's sibling counter in `pagify_shell::markup::Layer`) by a caller
+    /// juggling two separate undo stacks, so the more recently touched one is
+    /// the one a plain "undo" actually reverses. Bumped on every one of the
+    /// three, not just `execute`, for the same reason the layer's own counter
+    /// is: an undo or a redo is itself the most recent thing that happened,
+    /// and has to read that way to whichever stack was not just used.
+    generation: u64,
 }
 
 impl Default for CommandHistory {
@@ -32,7 +41,13 @@ impl CommandHistory {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             depth: depth.max(1),
+            generation: 0,
         }
+    }
+
+    /// How many times this history has changed. See the field's own doc.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Run a command and record it, returning the pages whose cached rasters it
@@ -52,6 +67,7 @@ impl CommandHistory {
         if self.undo_stack.len() > self.depth {
             self.undo_stack.remove(0);
         }
+        self.generation += 1;
         Ok(affected)
     }
 
@@ -70,6 +86,7 @@ impl CommandHistory {
         undo.revert(doc)?;
 
         self.redo_stack.push(command);
+        self.generation += 1;
         Ok(Some(affected))
     }
 
@@ -82,6 +99,7 @@ impl CommandHistory {
             Ok(undo) => {
                 let affected = command.affected_pages();
                 self.undo_stack.push((command, undo));
+                self.generation += 1;
                 Ok(Some(affected))
             }
             Err(e) => {

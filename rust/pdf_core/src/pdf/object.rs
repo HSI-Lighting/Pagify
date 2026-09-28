@@ -369,6 +369,36 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// The exact byte span of one key's value inside a dictionary whose `<<`
+/// sits at `open_at` — found by walking the dictionary's own bytes, never by
+/// trusting anything a parsed [`Dict`] says about itself, which is precisely
+/// what a forged dictionary controls. What lets both a signature check and
+/// signing itself find `/Contents` (or `/ByteRange`) without scanning.
+pub(crate) fn dict_value_span(bytes: &[u8], open_at: usize, key: &[u8]) -> Option<std::ops::Range<usize>> {
+    let mut lexer = Lexer::new(bytes, open_at);
+    if !lexer.bytes[lexer.at..].starts_with(b"<<") {
+        return None;
+    }
+    lexer.at += 2;
+    loop {
+        lexer.skip_space();
+        match lexer.bytes.get(lexer.at) {
+            Some(b'>') if lexer.bytes.get(lexer.at + 1) == Some(&b'>') => return None,
+            Some(b'/') => {
+                let Object::Name(found) = lexer.object().ok()? else { return None };
+                lexer.skip_space();
+                let start = lexer.at;
+                lexer.object().ok()?;
+                let end = lexer.at;
+                if found == key {
+                    return Some(start..end);
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -39,7 +39,7 @@ use std::collections::BTreeSet;
 use crate::error::Result;
 
 use super::object::Dict;
-use super::{write_object, File, Object};
+use super::{write_object, write_stream, File, Object};
 
 /// The lock's attachment, which is hidden data that must survive sanitising.
 const KEEP: &str = "pagify-lock.json";
@@ -61,6 +61,12 @@ pub struct Hidden {
     /// Objects nothing reaches from the catalogue: content taken off the pages
     /// but never taken out of the file.
     pub unreachable: usize,
+    /// Interactive form fields that still carry a value — something somebody
+    /// typed in, not the field's own definition.
+    pub form_fields: usize,
+    /// An XFA dynamic-form description, which duplicates and can override the
+    /// AcroForm fields beside it.
+    pub xfa: bool,
     /// Whether a lock's sealed copy is present, which is kept whatever else
     /// goes.
     pub keeps_lock: bool,
@@ -75,6 +81,8 @@ impl Hidden {
             && self.embedded_files == 0
             && !self.javascript
             && self.unreachable == 0
+            && self.form_fields == 0
+            && !self.xfa
     }
 
     /// What was found, in words.
@@ -102,6 +110,15 @@ impl Hidden {
         if self.unreachable > 0 {
             found.push(format!("{} unreachable object(s)", self.unreachable));
         }
+        if self.form_fields > 0 {
+            found.push(format!(
+                "{} form field value(s)",
+                self.form_fields
+            ));
+        }
+        if self.xfa {
+            found.push("an XFA dynamic form".into());
+        }
         if found.is_empty() {
             return "nothing hidden beyond the pages themselves".into();
         }
@@ -124,6 +141,8 @@ impl Hidden {
             embedded_files: self.embedded_files.saturating_sub(remaining.embedded_files),
             javascript: self.javascript && !remaining.javascript,
             unreachable: self.unreachable.saturating_sub(remaining.unreachable),
+            form_fields: self.form_fields.saturating_sub(remaining.form_fields),
+            xfa: self.xfa && !remaining.xfa,
             keeps_lock: self.keeps_lock,
         }
     }
@@ -223,6 +242,21 @@ pub fn survey(file: &File<'_>, bytes: &[u8]) -> Result<Hidden> {
             .iter()
             .filter_map(|n| file.object(*n).ok())
             .any(|object| holds_script(file, &object, 0));
+
+    // A field's own `/V` is what somebody typed in — the same secrecy a
+    // filled-in text box or checkbox on the page would deserve, but held in
+    // the form's data model rather than drawn. `/FT` marks a field (or a
+    // field merged with its widget annotation) and appears nowhere else, so
+    // it names exactly the dictionaries this looks at. Found by audit.
+    for object in reachable.iter().filter_map(|n| file.object(*n).ok()) {
+        let Some(dict) = object.as_dict() else { continue };
+        if dict.get(b"FT").is_some() && dict.get(b"V").is_some() {
+            found.form_fields += 1;
+        }
+        if dict.get(b"XFA").is_some() {
+            found.xfa = true;
+        }
+    }
     Ok(found)
 }
 
@@ -292,7 +326,22 @@ fn scrubbed(file: &File<'_>, object: &Object, depth: usize) -> (Object, bool) {
 fn scrubbed_dict(file: &File<'_>, dict: &Dict, depth: usize) -> (Dict, bool) {
     let mut out = Vec::with_capacity(dict.0.len());
     let mut changed = false;
+    // `/FT` marks an interactive form field, or a field merged with its own
+    // widget annotation, and appears nowhere else — the same signal
+    // `survey` counts by. Its `/V` and `/DV` are what somebody typed in and
+    // what it resets to, not the field's own definition.
+    let is_field = dict.get(b"FT").is_some();
     for (key, value) in &dict.0 {
+        if key == b"XFA" {
+            // The whole dynamic-form description, which duplicates and can
+            // override the AcroForm fields beside it. Found by audit.
+            changed = true;
+            continue;
+        }
+        if is_field && (key == b"V" || key == b"DV") {
+            changed = true;
+            continue;
+        }
         if key == b"AA" {
             // One action per trigger: keep the triggers whose action is not
             // script, drop the entry when none are.
@@ -449,8 +498,28 @@ pub fn strip(file: &File<'_>, bytes: &[u8]) -> Result<(Vec<u8>, Sanitised)> {
         }
     }
     for (number, object) in &rewritten {
-        let mut body = Vec::new();
-        write_object(&mut body, object);
+        // `write_object` cannot write a stream's bytes — its second field is
+        // a range into *this* file, and the generic writer has no bytes to
+        // read that range from, so it silently fell through to writing the
+        // dictionary alone: a content stream, an image, a font program with
+        // a script action scrubbed from its own dictionary came back with
+        // its actual data gone. Sanitising a script off a stream must not
+        // sanitise the stream out of existence. Found by audit.
+        // `write_object` cannot write a stream's bytes — its second field is
+        // a range into *this* file, and the generic writer has no bytes to
+        // read that range from, so it silently fell through to writing the
+        // dictionary alone: a content stream, an image, a font program with
+        // a script action scrubbed from its own dictionary came back with
+        // its actual data gone. Sanitising a script off a stream must not
+        // sanitise the stream out of existence. Found by audit.
+        let body = match object {
+            Object::Stream(dict, range) => write_stream(dict, &bytes[range.clone()]),
+            other => {
+                let mut body = Vec::new();
+                write_object(&mut body, other);
+                body
+            }
+        };
         replacements.push((*number, body));
     }
 
@@ -612,10 +681,21 @@ mod tests {
             embedded_files: 1,
             javascript: true,
             unreachable: 8,
+            form_fields: 3,
+            xfa: true,
             keeps_lock: false,
         };
         let said = found.describe();
-        for expected in ["earlier version", "Author", "XMP", "embedded", "JavaScript", "8 unreachable"] {
+        for expected in [
+            "earlier version",
+            "Author",
+            "XMP",
+            "embedded",
+            "JavaScript",
+            "8 unreachable",
+            "3 form field",
+            "XFA",
+        ] {
             assert!(said.contains(expected), "{expected:?} was not reported: {said}");
         }
         assert!(!found.is_empty());
@@ -627,5 +707,109 @@ mod tests {
     fn a_lock_alone_is_not_hidden_data_to_remove() {
         let found = Hidden { revisions: 1, keeps_lock: true, ..Hidden::default() };
         assert!(found.is_empty(), "it offered to remove a lock's own copy");
+    }
+
+    /// A file with one AcroForm text field carrying a value, and an XFA
+    /// stream beside it. **Found by audit**: neither used to be looked at by
+    /// `survey` or `strip` at all — a filled-in field's value, and the whole
+    /// dynamic-form description that can override it, both survived a
+    /// "clean" document unmentioned and untouched.
+    #[test]
+    fn a_survey_finds_form_field_values_and_xfa_and_strip_removes_them() {
+        let mut out = Vec::new();
+        let mut offsets = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /AcroForm 4 0 R >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(b"4 0 obj\n<< /Fields [5 0 R] /XFA 6 0 R >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(b"5 0 obj\n<< /FT /Tx /T (secret) /V (TopSecretValue123) >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(b"6 0 obj\n<< /Length 4 >>\nstream\nXFA!\nendstream\nendobj\n");
+
+        let xref_at = out.len();
+        out.extend_from_slice(b"xref\n0 7\n0000000000 65535 f \n");
+        for offset in &offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(b"trailer\n<< /Size 7 /Root 1 0 R >>\nstartxref\n");
+        out.extend_from_slice(format!("{xref_at}\n%%EOF").as_bytes());
+
+        let file = File::parse(&out).expect("parse");
+        let found = survey(&file, &out).expect("survey");
+        assert_eq!(found.form_fields, 1, "{found:?}");
+        assert!(found.xfa, "{found:?}");
+        assert!(!found.is_empty());
+
+        let (cleaned, report) = strip(&file, &out).expect("strip");
+        assert_eq!(report.after.form_fields, 0, "{:?}", report.after);
+        assert!(!report.after.xfa, "{:?}", report.after);
+
+        let needle: &[u8] = b"TopSecretValue123";
+        assert!(
+            !cleaned.windows(needle.len()).any(|w| w == needle),
+            "the field's value survived the clean"
+        );
+    }
+
+    /// **Found by audit.** `write_object` cannot write a stream's bytes — a
+    /// stream's second field is a range into the file, meaningless without
+    /// the bytes to read it from — so a stream whose *dictionary* needed a
+    /// script action scrubbed out of it came back rewritten as a bare
+    /// dictionary, its actual data gone. Sanitising a script off a stream
+    /// must not sanitise the stream's content out of existence.
+    #[test]
+    fn a_script_carrying_stream_keeps_its_bytes_after_cleaning() {
+        let mut out = Vec::new();
+        let mut offsets = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+        offsets.push(out.len());
+        out.extend_from_slice(b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
+
+        offsets.push(out.len());
+        let payload = b"BT (Hello World) Tj ET";
+        out.extend_from_slice(
+            format!("4 0 obj\n<< /AA << /O 5 0 R >> /Length {} >>\nstream\n", payload.len())
+                .as_bytes(),
+        );
+        out.extend_from_slice(payload);
+        out.extend_from_slice(b"\nendstream\nendobj\n");
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"5 0 obj\n<< /S /JavaScript /JS (evil) >>\nendobj\n");
+
+        let xref_at = out.len();
+        out.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+        for offset in &offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n");
+        out.extend_from_slice(format!("{xref_at}\n%%EOF").as_bytes());
+
+        let file = File::parse(&out).expect("parse");
+        let found = survey(&file, &out).expect("survey");
+        assert!(found.javascript, "{found:?}");
+
+        let (cleaned, report) = strip(&file, &out).expect("strip");
+        assert!(!report.after.javascript, "{:?}", report.after);
+
+        let again = File::parse(&cleaned).expect("parse the cleaned file");
+        let stream_object = again.object(4).expect("object 4 (the stream) must still exist");
+        let Object::Stream(dict, range) = &stream_object else {
+            panic!("object 4 came back as something other than a stream: {stream_object:?}");
+        };
+        assert!(dict.get(b"AA").is_none(), "the script action survived");
+        assert_eq!(&cleaned[range.clone()], payload, "the stream's own bytes were dropped");
     }
 }

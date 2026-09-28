@@ -496,6 +496,50 @@ fn a_drawn_stroke_survives_a_save() {
     assert_eq!(1, reopened.annotation_count(0).expect("count"));
 }
 
+/// A filled shape survives a save with its interior intact — not just its
+/// outline. Built through PDFium's path API rather than `/Vertices`, since
+/// the embedder API has no writer for that; this is the round trip that
+/// proves the workaround actually persists.
+#[test]
+fn a_filled_shape_survives_a_save() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "single-page.pdf");
+    let outline = vec![
+        Point { x: 100.0, y: 100.0 },
+        Point { x: 200.0, y: 100.0 },
+        Point { x: 200.0, y: 180.0 },
+        Point { x: 100.0, y: 180.0 },
+    ];
+    let fill_color = Color { r: 0, g: 200, b: 0, a: 255 };
+    let stroke_color = Color { r: 0, g: 0, b: 0, a: 255 };
+
+    doc.as_document_mut()
+        .expect("mutable")
+        .add_annotation(
+            0,
+            &Annotation::Fill { outline, fill_color, stroke_color, width: 1.5 },
+        )
+        .expect("add fill");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    assert_eq!(1, reopened.annotation_count(0).expect("count"));
+
+    let annotations = reopened.annotations(0).expect("annotations");
+    let fill = annotations
+        .iter()
+        .find_map(|a| match &a.annotation {
+            Annotation::Fill { outline, fill_color, .. } => Some((outline.clone(), *fill_color)),
+            _ => None,
+        })
+        .expect("a fill annotation came back");
+    assert!(fill.0.len() >= 3, "the interior's boundary did not come back: {:?}", fill.0);
+    assert_eq!(fill.1, fill_color, "the fill colour did not survive the save");
+}
+
 /// Undoing a mark before saving leaves the file with nothing in it.
 ///
 /// The counterpart to the page-tree version of this test: an edit that was undone
@@ -1207,4 +1251,154 @@ fn a_markup_over_three_lines_is_one_annotation() {
         Annotation::StrikeOut { rects, .. } => assert_eq!(3, rects.len()),
         other => panic!("came back as {}", other.describe()),
     }
+}
+
+/// **The primary defence for `add_bookmark`'s own raw catalogue writing.**
+/// A page's `/Annots` array is read back through the same object model that
+/// wrote it; a document's `/Outlines` tree is not — this is the one test
+/// that proves the bytes this hand-writes are shaped the way a real PDF
+/// reader (PDFium's own `FPDFBookmark_*` calls, underneath `bookmarks()`)
+/// expects, rather than merely the way this crate itself expects.
+#[test]
+fn a_bookmark_survives_a_save_and_reopen() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+    assert!(
+        doc.bookmarks().expect("read").is_empty(),
+        "the fixture must start with none or this test proves nothing",
+    );
+
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::AddBookmark { title: "Second page".into(), page_index: 1 },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("add the bookmark");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    let found = reopened.bookmarks().expect("read back");
+    assert_eq!(
+        found,
+        vec![("Second page".to_string(), 1)],
+        "the bookmark did not survive the save"
+    );
+}
+
+/// Bookmarks chain through `/First`, `/Last`, `/Next` and `/Prev` — this is
+/// the test that would fail if any one of those four were wrong, since a
+/// broken chain either loses the second entry or loops forever.
+#[test]
+fn two_bookmarks_keep_their_own_order_after_a_save() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::AddBookmark { title: "First".into(), page_index: 0 },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("add the first");
+    history
+        .execute(
+            Command::AddBookmark { title: "Second".into(), page_index: 1 },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("add the second");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    let found = reopened.bookmarks().expect("read back");
+    assert_eq!(
+        found,
+        vec![("First".to_string(), 0), ("Second".to_string(), 1)],
+        "the chain did not survive in order"
+    );
+}
+
+/// Undoing the only bookmark must leave the document exactly as it was
+/// found — not an empty `/Outlines` dict sitting unused in the catalogue —
+/// and a bookmark added afterwards must chain correctly from a clean start
+/// rather than from whatever the reverted add left behind.
+#[test]
+fn undoing_a_bookmark_leaves_room_for_a_fresh_one() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::AddBookmark { title: "Undone".into(), page_index: 0 },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("add");
+    history.undo(doc.as_document_mut().expect("mutable")).expect("undo").expect("something to undo");
+
+    assert!(
+        doc.bookmarks().expect("read").is_empty(),
+        "the bookmark should be gone after undo"
+    );
+
+    history
+        .execute(
+            Command::AddBookmark { title: "Kept".into(), page_index: 1 },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("add a second, after the undo");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    assert_eq!(
+        reopened.bookmarks().expect("read back"),
+        vec![("Kept".to_string(), 1)],
+        "the earlier undone bookmark should not have come back, and the new one should be alone"
+    );
+}
+
+/// A `/Link`'s address lives inside its own `/A` action dict, not a plain
+/// key on the annotation itself the way a highlight's colour or a note's
+/// contents do — this is the round trip that proves `FPDFAnnot_SetURI`
+/// (write) and `FPDFAction_GetURIPath` (read) agree on what was written,
+/// not just that creating the annotation succeeded.
+#[test]
+fn a_web_link_survives_a_save_and_reopen() {
+    let Some(pdfium) = skip_without_pdfium() else {
+        return;
+    };
+    let _serial = harness::serial();
+
+    let mut doc = open_fixture(&pdfium, "pages-ladder.pdf");
+    assert_eq!(0, doc.annotation_count(1).expect("count"), "fixture must start clean");
+
+    let mut history = CommandHistory::default();
+    history
+        .execute(
+            Command::AddAnnotation {
+                page_index: 1,
+                annotation: Annotation::Link {
+                    rect: Rect { left: 20.0, top: 30.0, right: 180.0, bottom: 44.0 },
+                    uri: "https://example.com/pagify".into(),
+                },
+            },
+            doc.as_document_mut().expect("mutable"),
+        )
+        .expect("add the link");
+
+    let reopened = save_and_reopen(&pdfium, &mut doc);
+    let marks = reopened.annotations(1).expect("read back");
+    assert_eq!(1, marks.len(), "the link did not survive the save");
+    match &marks[0].annotation {
+        Annotation::Link { uri, .. } => assert_eq!(uri, "https://example.com/pagify"),
+        other => panic!("came back as {}", other.describe()),
+    }
+    assert_eq!(0, reopened.annotation_count(0).expect("count"), "landed on the wrong page");
 }

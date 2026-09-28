@@ -18,7 +18,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use cad_kernel::{DObject, Document, Geom, Line, UniformGrid, Vec2};
+use cad_kernel::{Color, DObject, Document, Geom, Handle, Line, UniformGrid, Vec2};
 
 use crate::page_space::{AppPoint, PageSpace};
 
@@ -79,6 +79,19 @@ pub struct Layer {
     /// Nesting depth of the operation in progress, so a fillet — which replaces
     /// two objects and adds a third — is one undo step and not three.
     open: u32,
+    /// Which end(s) of a line-shaped object carry an arrowhead, keyed by
+    /// the object's own stable handle rather than its index — the same
+    /// reason `Geom::Hatch::boundary_handles` does, and every other
+    /// index-shifts-on-removal concern in this file.
+    ///
+    /// Not a paired `Geom`, unlike a fill: an arrowhead is not a shape of
+    /// its own to hit-test or select, only a decoration `overlay::draw_
+    /// geom` computes from the line's own two endpoints at paint time — so
+    /// a plain style flag beside the line is all the arrow needs, the same
+    /// shape a colour or a line weight already is. Handles are not stable
+    /// across a save and reopen; see `commit.rs`'s own round trip for how
+    /// this is reconstructed against a fresh one.
+    arrow_ends: HashMap<Handle, (bool, bool)>,
 }
 
 /// A state to return to, and the name of what moved on from it.
@@ -99,6 +112,7 @@ impl Layer {
             past: Vec::new(),
             future: Vec::new(),
             open: 0,
+            arrow_ends: HashMap::new(),
         }
     }
 
@@ -244,6 +258,130 @@ impl Layer {
             }
             None => false,
         }
+    }
+
+    // -- style ----------------------------------------------------------
+
+    /// The colour a shape is actually drawn in, resolved through the
+    /// ByLayer/ByBlock/ACI/true-colour chain a plain `Style::color` field
+    /// cannot answer on its own. `None` for an index that does not exist.
+    pub fn resolved_color(&self, index: usize) -> Option<(u8, u8, u8)> {
+        let object = self.doc.dobjects.get(index)?;
+        Some(cad_kernel::resolve_color(
+            object.style.color,
+            object.style.layer,
+            &self.doc.layers,
+            &self.doc.truecolors,
+        ))
+    }
+
+    /// Give one shape its own colour, no longer following its layer's.
+    pub fn set_color(&mut self, index: usize, rgb: (u8, u8, u8)) -> bool {
+        let Some(object) = self.doc.dobjects.get(index) else { return false };
+        let packed = ((rgb.0 as u32) << 16) | ((rgb.1 as u32) << 8) | rgb.2 as u32;
+        let idx = self.doc.truecolors.intern(packed);
+        let mut updated = object.clone();
+        updated.style.color = Color::TrueColorRef(idx);
+        self.replace(index, updated)
+    }
+
+    /// A shape's own explicit line thickness, in millimetres — `None` when
+    /// it has never been given one and is still following the page's own
+    /// default weight, the same "nothing chosen yet" meaning `resolved_
+    /// color` gives a caller for `ByLayer` by resolving it anyway; this
+    /// returns `None` instead because the *drawn* default (a couple of
+    /// screen pixels) is a UI choice this crate has no opinion on, not a
+    /// kernel-resolvable value the caller would want substituted in.
+    pub fn resolved_lineweight_mm(&self, index: usize) -> Option<f32> {
+        let object = self.doc.dobjects.get(index)?;
+        if matches!(object.style.lineweight, cad_kernel::Lineweight::ByLayer) {
+            return None;
+        }
+        Some(cad_kernel::resolve_lineweight(
+            object.style.lineweight,
+            object.style.layer,
+            &self.doc.layers,
+        ))
+    }
+
+    /// Give one shape its own line thickness, in millimetres.
+    pub fn set_lineweight_mm(&mut self, index: usize, mm: f32) -> bool {
+        let Some(object) = self.doc.dobjects.get(index) else { return false };
+        let mut updated = object.clone();
+        updated.style.lineweight = cad_kernel::Lineweight::Custom(mm);
+        self.replace(index, updated)
+    }
+
+    /// Which end(s) of a line carry an arrowhead — see [`Self::arrow_ends`]'s
+    /// own field doc. `(false, false)` for an index that does not exist, or
+    /// that has never been given one.
+    pub fn arrow_ends(&self, index: usize) -> (bool, bool) {
+        let Some(object) = self.doc.dobjects.get(index) else { return (false, false) };
+        self.arrow_ends.get(&object.handle).copied().unwrap_or((false, false))
+    }
+
+    /// Give a line one or both ends an arrowhead, or take them off. `false`
+    /// for an index that does not exist.
+    pub fn set_arrow_ends(&mut self, index: usize, start: bool, end: bool) -> bool {
+        let Some(object) = self.doc.dobjects.get(index) else { return false };
+        let handle = object.handle;
+        if start || end {
+            self.arrow_ends.insert(handle, (start, end));
+        } else {
+            self.arrow_ends.remove(&handle);
+        }
+        self.edits += 1;
+        true
+    }
+
+    /// The handle a `Geom::Hatch` pairs with an object to mean "this is
+    /// filled" — see [`Self::set_filled`]. `None` for a `Geom` that is not
+    /// a hatch.
+    fn hatch_boundary(geom: &Geom) -> Option<Handle> {
+        match geom {
+            Geom::Hatch(h) => h.boundary_handles.first().copied(),
+            _ => None,
+        }
+    }
+
+    /// Whether a shape is paired with a solid fill — see [`Self::set_filled`].
+    pub fn is_filled(&self, index: usize) -> bool {
+        let Some(object) = self.doc.dobjects.get(index) else { return false };
+        self.doc
+            .dobjects
+            .iter()
+            .any(|o| Self::hatch_boundary(&o.geom) == Some(object.handle))
+    }
+
+    /// Fill a shape solid, or take its fill off — a `Geom::Hatch` pointed at
+    /// the shape's own handle, added or removed. The same pairing the Draw
+    /// tab's fill toggle creates before a shape is even finished being
+    /// drawn; this is the same choice, made afterward, from a shape already
+    /// on the page. `false` for an index that does not exist.
+    pub fn set_filled(&mut self, index: usize, filled: bool) -> bool {
+        let Some(object) = self.doc.dobjects.get(index) else { return false };
+        let handle = object.handle;
+        let existing = self
+            .doc
+            .dobjects
+            .iter()
+            .position(|o| Self::hatch_boundary(&o.geom) == Some(handle));
+        match (filled, existing) {
+            (true, None) => {
+                self.add(Geom::Hatch(cad_kernel::Hatch {
+                    boundary_handles: vec![handle],
+                    pattern: cad_kernel::HatchPattern::Solid,
+                }));
+            }
+            (false, Some(hatch_index)) => {
+                let mut doomed = BTreeSet::new();
+                doomed.insert(hatch_index);
+                self.remove(&doomed);
+            }
+            // Already in the wanted state.
+            (true, Some(_)) | (false, None) => {}
+        }
+        true
     }
 
     fn reindex(&mut self) {
@@ -664,6 +802,99 @@ mod tests {
             markup.existing(1).unwrap().hit(AppPoint::new(50.0, 300.0), HIT_TOLERANCE_PT),
             Some(0)
         );
+    }
+
+    #[test]
+    fn a_shape_given_its_own_colour_resolves_to_it() {
+        let mut layer = layer_with_a_horizontal_line();
+        assert_ne!(
+            layer.resolved_color(0),
+            Some((10, 200, 90)),
+            "it already resolved to the colour before it was ever set"
+        );
+
+        assert!(layer.set_color(0, (10, 200, 90)));
+        assert_eq!(layer.resolved_color(0), Some((10, 200, 90)));
+    }
+
+    #[test]
+    fn a_shape_starts_unfilled_and_can_be_filled_and_unfilled() {
+        let mut layer = layer_with_a_horizontal_line();
+        assert!(!layer.is_filled(0));
+
+        assert!(layer.set_filled(0, true));
+        assert!(layer.is_filled(0));
+        assert_eq!(layer.len(), 2, "filling should pair a hatch, not replace the shape");
+
+        assert!(layer.set_filled(0, false));
+        assert!(!layer.is_filled(0));
+        assert_eq!(layer.len(), 1, "unfilling should remove the hatch and nothing else");
+    }
+
+    #[test]
+    fn filling_twice_does_not_pair_two_hatches() {
+        let mut layer = layer_with_a_horizontal_line();
+        layer.set_filled(0, true);
+        layer.set_filled(0, true);
+        assert_eq!(layer.len(), 2, "a second fill should be a no-op, not a second hatch");
+    }
+
+    #[test]
+    fn set_color_and_set_filled_report_false_for_an_index_that_does_not_exist() {
+        let mut layer = layer_with_a_horizontal_line();
+        assert!(!layer.set_color(99, (1, 2, 3)));
+        assert!(!layer.set_filled(99, true));
+        assert_eq!(layer.resolved_color(99), None);
+    }
+
+    #[test]
+    fn a_shape_starts_with_no_explicit_lineweight_and_can_be_given_one() {
+        let mut layer = layer_with_a_horizontal_line();
+        assert_eq!(layer.resolved_lineweight_mm(0), None, "nothing chosen yet");
+
+        assert!(layer.set_lineweight_mm(0, 0.5));
+        assert_eq!(layer.resolved_lineweight_mm(0), Some(0.5));
+    }
+
+    #[test]
+    fn set_lineweight_mm_reports_false_for_an_index_that_does_not_exist() {
+        let mut layer = layer_with_a_horizontal_line();
+        assert!(!layer.set_lineweight_mm(99, 0.5));
+        assert_eq!(layer.resolved_lineweight_mm(99), None);
+    }
+
+    #[test]
+    fn a_line_starts_with_no_arrowheads_and_can_be_given_either_or_both() {
+        let mut layer = layer_with_a_horizontal_line();
+        assert_eq!(layer.arrow_ends(0), (false, false));
+
+        assert!(layer.set_arrow_ends(0, false, true));
+        assert_eq!(layer.arrow_ends(0), (false, true));
+
+        assert!(layer.set_arrow_ends(0, true, true));
+        assert_eq!(layer.arrow_ends(0), (true, true));
+
+        assert!(layer.set_arrow_ends(0, false, false));
+        assert_eq!(layer.arrow_ends(0), (false, false), "turning both off should clear it, not just report false");
+    }
+
+    /// A moved object keeps its own handle — `replace` never reassigns one
+    /// — so an arrowhead survives the same drag a colour or a fill would.
+    #[test]
+    fn an_arrowhead_survives_the_shape_moving() {
+        let mut layer = layer_with_a_horizontal_line();
+        layer.set_arrow_ends(0, true, false);
+
+        let moved = layer.objects()[0].translated(Vec2::new(10.0, 0.0));
+        layer.replace(0, moved);
+
+        assert_eq!(layer.arrow_ends(0), (true, false), "moving the line should not lose its arrowhead");
+    }
+
+    #[test]
+    fn set_arrow_ends_reports_false_for_an_index_that_does_not_exist() {
+        let mut layer = layer_with_a_horizontal_line();
+        assert!(!layer.set_arrow_ends(99, true, true));
     }
 }
 

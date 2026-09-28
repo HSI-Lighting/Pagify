@@ -136,6 +136,18 @@ pub struct Security {
     file_key: [u8; 32],
 }
 
+impl Drop for Security {
+    /// Wipes `file_key`, the one field here that never gets written into the
+    /// file itself — `u`/`o`/`ue`/`oe`/`perms` all end up in the `/Encrypt`
+    /// dictionary in the clear, but the raw key every stream and string was
+    /// actually encrypted with has no reason to still be in memory once this
+    /// is dropped. Found by audit.
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.file_key.zeroize();
+    }
+}
+
 impl Security {
     /// Set up encryption for a document.
     ///
@@ -489,7 +501,7 @@ pub fn secure(file: &File<'_>, security: &Security, random: impl Fn(&mut [u8]) +
     }
 
     // The `/Encrypt` dictionary, as a new object at the end.
-    let encrypt_number = numbers.iter().copied().max().unwrap_or(0) + 1;
+    let encrypt_number = file.next_object_number()?;
     let mut dict = Dict(Vec::new());
     dict.set(b"Filter", Object::Name(b"Standard".to_vec()));
     dict.set(b"V", Object::Number(b"5".to_vec()));

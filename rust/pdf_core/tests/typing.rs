@@ -163,3 +163,22 @@ fn with_no_font_to_type_with_it_says_how_to_provide_one() {
         Ok(()) => panic!("it typed characters no font on the page has"),
     }
 }
+
+/// **The run editor's "which font is this" field, at the source.** Reported
+/// from use: it always showed "(automatic)", even for a run whose font the
+/// document names perfectly well.
+#[test]
+fn a_runs_own_font_name_can_be_read_back() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let doc = open("text-lines.pdf");
+    let runs = doc.text_runs(0).expect("runs");
+    let target = runs.first().expect("the fixture has at least one run");
+
+    let name = doc.run_font_name(0, target.object).expect("read the font name");
+    assert!(
+        name.as_deref().is_some_and(|n| !n.trim().is_empty()),
+        "no font name came back for a real run: {name:?}"
+    );
+}

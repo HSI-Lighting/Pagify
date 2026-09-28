@@ -240,9 +240,9 @@ fn a_named_but_unbuilt_verb_says_so_rather_than_pretending_not_to_know_it() {
     // has quietly become real announces itself. A planned verb that stayed
     // planned in the table after it worked would tell every user who reached
     // for it that the program cannot do the thing it can do.
-    match head("bookmark") {
+    match head("add3d") {
         Dispatch::Pagify(Verb::Planned { verb, phase }) => {
-            assert_eq!(verb, "bookmark");
+            assert_eq!(verb, "add3d");
             assert!(!phase.is_empty());
         }
         other => panic!("expected Planned, got {other:?}"),
@@ -273,6 +273,12 @@ fn the_verbs_that_were_promises_are_no_longer() {
     assert_eq!(head("predefinedtext").pagify(), Some(Verb::PredefinedText(None)));
     assert_eq!(head("moveobject").pagify(), Some(Verb::MoveThing));
     assert_eq!(head("editobject").pagify(), Some(Verb::EditObject));
+    assert_eq!(head("replace").pagify(), Some(Verb::Replace));
+    assert_eq!(head("spelling").pagify(), Some(Verb::Spelling));
+    assert_eq!(head("bookmark").pagify(), Some(Verb::Bookmark));
+    assert_eq!(head("articlebox").pagify(), Some(Verb::ArticleBox));
+    assert_eq!(head("weblinks").pagify(), Some(Verb::Weblinks));
+    assert_eq!(head("jointext").pagify(), Some(Verb::JoinText));
 }
 
 /// **Drawing one, uploading one and placing one are three words for three
@@ -695,6 +701,26 @@ fn a_tilde_is_expanded_because_nothing_else_will_expand_it() {
 #[test]
 fn open_with_no_path_asks_for_a_file_rather_than_complaining() {
     assert!(matches!(head("open"), Dispatch::Pagify(Verb::OpenDialog)));
+}
+
+/// **Reported from use: there is no Save As button.** `saveas` with a path
+/// still means exactly what it always did; bare `saveas` used to refuse
+/// ("usage: saveas <path.pdf>") rather than asking for one, the one thing
+/// standing between it and a ribbon button — see `open`'s identical fix
+/// just above.
+#[test]
+fn saveas_with_no_path_asks_for_a_file_rather_than_complaining() {
+    assert!(matches!(head("saveas"), Dispatch::Pagify(Verb::SaveAsDialog)));
+}
+
+#[test]
+fn saveas_with_a_path_still_means_that_exact_path() {
+    match head("saveas /tmp/copy.pdf") {
+        Dispatch::Pagify(Verb::SaveAs(path)) => {
+            assert_eq!(path, std::path::PathBuf::from("/tmp/copy.pdf"));
+        }
+        other => panic!("expected SaveAs, got {other:?}"),
+    }
 }
 
 #[test]

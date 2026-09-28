@@ -88,10 +88,20 @@ fn write_then_rename_via(
     write: impl FnOnce(&mut std::fs::File) -> Result<()>,
 ) -> Result<()> {
     let outcome = (|| -> Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staging)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Owner-only from the moment it exists — the default a brand new
+        // destination gets when there is no existing file's mode to inherit
+        // below. Without this a "Save As" to a path that never existed
+        // landed at `0666 & ~umask` (0644 under a typical umask) even when
+        // the document being saved was 0600, because the inheritance a few
+        // lines down only ever fires for an *overwrite*. Found by audit.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&staging)?;
         write(&mut file)?;
         file.sync_all()?;
         if let Ok(existing) = std::fs::metadata(target) {
@@ -338,10 +348,15 @@ impl Session {
 
         let path = path.as_ref().to_path_buf();
         let for_open = path.clone();
-        let password = password.map(str::to_owned);
+        // A plain `String` copy, made because the `move` closure below needs
+        // one it owns — wiped on drop rather than left for whatever reuses
+        // that memory next. Found by audit.
+        let password = password.map(|p| zeroize::Zeroizing::new(p.to_owned()));
         let handle = registry::insert_with(move || {
-            let document =
-                PdfiumDocument::open_path(&for_open.to_string_lossy(), password.as_deref())?;
+            let document = PdfiumDocument::open_path(
+                &for_open.to_string_lossy(),
+                password.as_deref().map(String::as_str),
+            )?;
             Ok(Box::new(document) as Box<dyn Document>)
         })?;
 
@@ -579,6 +594,25 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.run_font_data(page, object))
     }
 
+    /// The name of a run's own font — its `/BaseFont` — for showing which
+    /// font a run is written in, whether or not that font is embedded.
+    pub fn run_font_name(&self, page: usize, object: usize) -> Result<Option<String>> {
+        registry::with_session(self.handle, |s| s.document.run_font_name(page, object))
+    }
+
+    /// Every text run's own font name on a page, in one pass — see
+    /// `Document::run_font_names`'s own doc for why this exists alongside
+    /// `run_font_name` rather than instead of it.
+    pub fn run_font_names(&self, page: usize) -> Result<std::collections::HashMap<usize, String>> {
+        registry::with_session(self.handle, |s| s.document.run_font_names(page))
+    }
+
+    /// Whether a run's font is embedded in the document rather than
+    /// substituted by whatever reader opened it.
+    pub fn run_font_is_embedded(&self, page: usize, object: usize) -> Result<bool> {
+        registry::with_session(self.handle, |s| s.document.run_font_is_embedded(page, object))
+    }
+
     /// Shift one page object by a distance, in page points.
     pub fn move_object(
         &self,
@@ -661,6 +695,15 @@ impl Session {
 
     pub fn redo(&self) -> Result<(bool, pdf_core::engine::EditState)> {
         registry::with_session(self.handle, pdf_core::engine::redo)
+    }
+
+    /// How many times the document's own command history has changed — a
+    /// command applied, undone or redone. `0` once the handle is gone rather
+    /// than an error: this is read to *compare* recency against a separate
+    /// undo stack (the markup layer's own edit counter), and a session that
+    /// no longer exists cannot be the more recently changed one.
+    pub fn undo_generation(&self) -> u64 {
+        registry::with_session(self.handle, |s| Ok(s.history.generation())).unwrap_or(0)
     }
 
     /// What a redaction of this rectangle would destroy, and what it could not.
@@ -749,10 +792,20 @@ impl Session {
             .ok_or(pdf_core::PdfError::InvalidArgument("nothing to lock".into()))?;
         let request = pdf_core::document::Redaction { require_complete, ..request };
         registry::with_session(self.handle, |s| {
-            s.document
+            let report = s
+                .document
                 .as_document_mut()
                 .ok_or(pdf_core::PdfError::Unsupported("locking this document"))?
-                .lock_area(&request, passcode, catalogue.as_ref())
+                .lock_area(&request, passcode, catalogue.as_ref())?;
+            // Edits the page's own bytes directly rather than through
+            // `execute`, which is what normally invalidates this cache after
+            // a change — see `engine::invalidate`. `lock_pages`, `lock_image`
+            // and `unlock_item` all edit the page the same way outside
+            // `execute`, so each clears the cache itself rather than leaving
+            // a stale raster for whatever next asks this session to render
+            // this page at a scale it already rendered once before.
+            s.cache.clear();
+            Ok(report)
         })
     }
 
@@ -1022,6 +1075,15 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.image_signature_marks(page))
     }
 
+    /// The plain pictures placed on a page — see [`pdf_core::document::
+    /// PlacedImageMark`].
+    pub fn placed_image_marks(
+        &self,
+        page: usize,
+    ) -> Result<Vec<pdf_core::document::PlacedImageMark>> {
+        registry::with_session(self.handle, |s| s.document.placed_image_marks(page))
+    }
+
     /// The signatures placed on a page, as opposed to any other ink on it.
     pub fn signature_marks(
         &self,
@@ -1243,10 +1305,15 @@ impl Session {
 
     pub fn lock_pages(&self, pages: &[usize], passcode: &[u8]) -> Result<usize> {
         registry::with_session(self.handle, |s| {
-            s.document
+            let newly = s
+                .document
                 .as_document_mut()
                 .ok_or(pdf_core::PdfError::Unsupported("locking this document"))?
-                .lock_pages(pages, passcode)
+                .lock_pages(pages, passcode)?;
+            // See `lock_shapes`'s own note on why this bypasses `execute`'s
+            // usual cache invalidation and has to clear it directly.
+            s.cache.clear();
+            Ok(newly)
         })
     }
 
@@ -1258,10 +1325,14 @@ impl Session {
     /// Take one image off its page and seal it. Returns the id naming the seal.
     pub fn lock_image(&self, page_index: usize, object: usize, passcode: &[u8]) -> Result<String> {
         registry::with_session(self.handle, |s| {
-            s.document
+            let id = s
+                .document
                 .as_document_mut()
                 .ok_or(pdf_core::PdfError::Unsupported("locking this document"))?
-                .lock_image(page_index, object, passcode)
+                .lock_image(page_index, object, passcode)?;
+            // See `lock_shapes`'s own note.
+            s.cache.clear();
+            Ok(id)
         })
     }
 
@@ -1271,7 +1342,10 @@ impl Session {
             s.document
                 .as_document_mut()
                 .ok_or(pdf_core::PdfError::Unsupported("unlocking this document"))?
-                .unlock_item(id, passcode)
+                .unlock_item(id, passcode)?;
+            // See `lock_shapes`'s own note.
+            s.cache.clear();
+            Ok(())
         })
     }
 
@@ -1363,6 +1437,12 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.text_run_rects(page))
     }
 
+    /// One object per character, in place of a run of them — see
+    /// [`pdf_core::document::Document::split_run_into_characters`].
+    pub fn split_run_into_characters(&self, page: usize, object: usize) -> Result<()> {
+        registry::with_session(self.handle, |s| s.document.split_run_into_characters(page, object))
+    }
+
     /// A page's crop box, in page points with a top-left origin.
     pub fn page_crop(&self, index: usize) -> Result<pdf_core::document::Rect> {
         registry::with_session(self.handle, |s| {
@@ -1451,6 +1531,23 @@ impl Session {
         })
     }
 
+    /// Make one rectangle of the page a clickable link to `uri`.
+    ///
+    /// One call per line — see [`pdf_core::document::Annotation::Link`]'s own
+    /// doc for why a link over wrapped text is several of these rather than
+    /// one annotation with several rects.
+    pub fn add_link(
+        &self,
+        page: usize,
+        rect: pdf_core::document::Rect,
+        uri: String,
+    ) -> Result<pdf_core::engine::EditState> {
+        self.execute(pdf_core::command::Command::AddAnnotation {
+            page_index: page,
+            annotation: pdf_core::document::Annotation::Link { rect, uri },
+        })
+    }
+
     /// What kind of text, if any, a page has.
     pub fn classify(&self, page: usize) -> Result<pdf_core::document::PageClassification> {
         registry::with_session(self.handle, |s| s.document.page(page)?.classify())
@@ -1469,6 +1566,13 @@ impl Session {
         registry::with_session(self.handle, |s| {
             (0..s.document.page_count()).map(|i| s.document.page_size(i)).collect()
         })
+    }
+
+    /// Every bookmark in the document's own outline, title and the page it
+    /// goes to, top level only — see [`pdf_core::document::Document::
+    /// bookmarks`]'s own doc for why nesting is not modelled.
+    pub fn bookmarks(&self) -> Result<Vec<(String, usize)>> {
+        registry::with_session(self.handle, |s| s.document.bookmarks())
     }
 
     /// Run `f` against the engine session, with the registry lock held.

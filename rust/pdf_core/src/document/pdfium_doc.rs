@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
-use std::os::raw::{c_int, c_uint, c_ulong};
+use std::os::raw::{c_char, c_int, c_uint, c_ulong};
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::{
@@ -29,7 +29,7 @@ use crate::document::{
     Redaction, RedactionReport, Uncleared,
 };
 use crate::crypto::vault::{self, Vault};
-use crate::crypto::KdfParams;
+use crate::crypto::{KdfParams, Secret};
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
 use crate::render::bitmap::{self, Bitmap, PixelOrder};
 use crate::render::{RegionPixels, RenderTarget};
@@ -934,6 +934,84 @@ impl Document for PdfiumDocument {
         Ok(embedded)
     }
 
+    fn run_font_name(&self, page_index: usize, object: usize) -> Result<Option<String>> {
+        let Some((raw, handle)) = self.text_object_at(page_index, object)? else {
+            return Ok(None);
+        };
+        let bindings = pdfium()?.bindings();
+        let font = unsafe { bindings.FPDFTextObj_GetFont(handle) };
+        if font.is_null() {
+            drop(raw);
+            return Ok(None);
+        }
+        // Asked for the length first, as every sized PDFium read here is.
+        let needed = unsafe { bindings.FPDFFont_GetBaseFontName(font, std::ptr::null_mut(), 0) };
+        if needed == 0 {
+            drop(raw);
+            return Ok(None);
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        let written = unsafe {
+            bindings.FPDFFont_GetBaseFontName(font, buffer.as_mut_ptr() as *mut c_char, needed)
+        };
+        drop(raw);
+        if written == 0 {
+            return Ok(None);
+        }
+        buffer.truncate(written as usize);
+        // The count PDFium returns includes the trailing NUL.
+        if buffer.last() == Some(&0) {
+            buffer.pop();
+        }
+        let name = String::from_utf8_lossy(&buffer).into_owned();
+        Ok((!name.is_empty()).then_some(name))
+    }
+
+    fn run_font_names(&self, page_index: usize) -> Result<std::collections::HashMap<usize, String>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
+
+        let mut names = std::collections::HashMap::new();
+        for index in 0..count.max(0) {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if handle.is_null()
+                || unsafe { bindings.FPDFPageObj_GetType(handle) }
+                    != pdfium_render::prelude::FPDF_PAGEOBJ_TEXT as i32
+            {
+                continue;
+            }
+            let font = unsafe { bindings.FPDFTextObj_GetFont(handle) };
+            if font.is_null() {
+                continue;
+            }
+            let needed = unsafe { bindings.FPDFFont_GetBaseFontName(font, std::ptr::null_mut(), 0) };
+            if needed == 0 {
+                continue;
+            }
+            let mut buffer = vec![0u8; needed as usize];
+            let written = unsafe {
+                bindings.FPDFFont_GetBaseFontName(font, buffer.as_mut_ptr() as *mut c_char, needed)
+            };
+            if written == 0 {
+                continue;
+            }
+            buffer.truncate(written as usize);
+            if buffer.last() == Some(&0) {
+                buffer.pop();
+            }
+            let name = String::from_utf8_lossy(&buffer).into_owned();
+            if !name.is_empty() {
+                names.insert(index as usize, name);
+            }
+        }
+        Ok(names)
+    }
+
     /// Uses `FPDF_GetPageSizeByIndexF`, which reads the page tree without
     /// loading the page itself.
     fn text_runs(&self, page_index: usize) -> Result<Vec<crate::document::TextRun>> {
@@ -1020,7 +1098,12 @@ impl Document for PdfiumDocument {
                 text: words,
                 rect: Rect { left, top, right, bottom },
                 origin,
-                size: text_object.unscaled_font_size().value,
+                // The *effective* size, folding in whatever vertical stretch
+                // the text matrix carries — see `set_text_run_styled`'s own
+                // `vertical_scale` doc for the producer that makes this
+                // matter: `1 Tf` with the real size baked into the matrix,
+                // which `unscaled_font_size` alone would report as "1pt".
+                size: text_object.scaled_font_size().value,
                 color: colour,
             });
         }
@@ -1106,6 +1189,32 @@ impl Document for PdfiumDocument {
             }
         }
         Ok(marks)
+    }
+
+    fn bookmarks(&self) -> Result<Vec<(String, usize)>> {
+        let mut out = Vec::new();
+        // `root()` is not a synthetic container — PDFium's own
+        // `FPDFBookmark_GetFirstChild(doc, NULL)` is what a NULL parent
+        // means, so this already *is* the first top-level bookmark, and its
+        // siblings are the rest. `iter()`/`iter_all_descendants()` would
+        // also walk into children, which `add_bookmark` never creates but a
+        // document imported from elsewhere might have — this method's own
+        // doc promises top level only.
+        let Some(mut current) = self.document.bookmarks().root() else {
+            return Ok(out);
+        };
+        loop {
+            if let (Some(title), Some(destination)) = (current.title(), current.destination()) {
+                if let Ok(page_index) = destination.page_index() {
+                    out.push((title, page_index as usize));
+                }
+            }
+            match current.next_sibling() {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+        Ok(out)
     }
 
     fn permissions(&self) -> Option<crate::pdf::encrypt::Permissions> {
@@ -1386,6 +1495,204 @@ impl Document for PdfiumDocument {
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
+    /// See [`crate::document::Document::split_run_into_characters`].
+    ///
+    /// Each character keeps the run's own font, size and rotation — only
+    /// its own `Tm` translation changes, taken from PDFium's own
+    /// `FPDFText_GetCharOrigin` for that exact character rather than
+    /// anything computed here, so no font's metrics need reimplementing to
+    /// get this right. A `Tm` restoring the line matrix afterward — the same
+    /// reason [`Self::move_run_in_stream`]'s non-continuing branch writes
+    /// one — is what keeps whatever repositions itself after this run (a
+    /// `Td` starting the next line) computing from where that line always
+    /// started, not from wherever the last character landed.
+    fn split_run_into_characters(&mut self, page_index: usize, object: usize) -> Result<()> {
+        use crate::pdf::content;
+
+        let run = self
+            .text_run_at(page_index, object)?
+            .ok_or_else(|| PdfError::InvalidArgument("that is not a run of text".into()))?;
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+        let states = content::states(&operations);
+        let height = self.page_size(page_index)?.height_pt;
+
+        let fonts = self.page_fonts(&file, &page);
+        let codes_in = |p: &content::Placed| -> usize {
+            let width = p
+                .font
+                .as_ref()
+                .zip(fonts.as_ref())
+                .and_then(|(name, dict)| code_width(&file, dict, name))
+                .unwrap_or(1)
+                .max(1);
+            content::pieces(&operations[p.origin.operation])
+                .iter()
+                .map(|piece| match piece {
+                    content::Piece::Codes(bytes) => bytes.len() / width,
+                    content::Piece::Kern(_) => 0,
+                })
+                .sum()
+        };
+        let (first, last, continues) = run_operators(&run, height, &placed, &operations, &codes_in)?;
+        if continues {
+            return Err(PdfError::Unsupported(
+                "more text is drawn right after these words on the same line with nothing \
+                 repositioning in between, so splitting these into characters",
+            ));
+        }
+
+        let governing = placed
+            .iter()
+            .find(|p| p.origin.operation == first)
+            .ok_or(PdfError::Unsupported("that text selects no font"))?;
+        let font_name =
+            governing.font.clone().ok_or(PdfError::Unsupported("that text selects no font"))?;
+        let width = fonts
+            .as_ref()
+            .and_then(|dict| code_width(&file, dict, &font_name))
+            .unwrap_or(1)
+            .max(1);
+
+        let mut code_bytes = Vec::new();
+        for index in first..=last {
+            for piece in content::pieces(&operations[index]) {
+                if let content::Piece::Codes(b) = piece {
+                    code_bytes.extend_from_slice(&b);
+                }
+            }
+        }
+        let n = code_bytes.len() / width;
+        if n <= 1 {
+            // Already one character, or nothing drawn — nothing to split.
+            return Ok(());
+        }
+
+        let ctm = states[first].ctm;
+        let Some(inv) = inverse(ctm) else {
+            return Err(PdfError::Unsupported(
+                "these words are placed by a transform this cannot invert",
+            ));
+        };
+        let rotation = states[first].text;
+
+        let page_number = i32::try_from(page_index)
+            .map_err(|_| PdfError::PageOutOfRange { index: page_index, count: self.page_count })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let text_page = unsafe { bindings.FPDFText_LoadPage(raw.handle) };
+        if text_page.is_null() {
+            return Err(PdfError::Unsupported("this page's text cannot be read to split it"));
+        }
+        let total_chars = unsafe { bindings.FPDFText_CountChars(text_page) };
+
+        // Which of PDFium's own characters are this run's: by who drew
+        // them, not by counting up to them. Its own text extraction quietly
+        // inserts a synthetic space between many separate runs
+        // (`FPDFText_IsGenerated`) that is not a byte anywhere in the
+        // content stream, so counting content-stream codes up to this run's
+        // first operator drifts further out of step with PDFium's own
+        // numbering the more such runs sit earlier on the page — on a busy
+        // page, by enough to land on someone else's characters entirely.
+        // Asking PDFium which page object drew each one instead cannot
+        // drift, because it is the same answer PDFium already gave `object`
+        // itself.
+        //
+        // **Only the show-text operators in `first..=last` get their own
+        // page object** — a `Tf` or a colour change in between does not —
+        // so counting the whole span, not just those, once named the wrong
+        // objects entirely on a run whose own operators were not the only
+        // ones in it.
+        let operator_count = operations[first..=last].iter().filter(|op| op.shows_text()).count();
+        let mut owners = Vec::with_capacity(operator_count);
+        for k in 0..operator_count {
+            let index = i32::try_from(object + k)
+                .map_err(|_| PdfError::InvalidArgument(format!("object {object} is out of range")))?;
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if handle.is_null() {
+                unsafe { bindings.FPDFText_ClosePage(text_page) };
+                return Err(PdfError::Unsupported(
+                    "this run's own objects could not all be found to split",
+                ));
+            }
+            owners.push(handle);
+        }
+        let mut char_indices = Vec::with_capacity(n);
+        for index in 0..total_chars {
+            if unsafe { bindings.FPDFText_IsGenerated(text_page, index) } == 1 {
+                continue;
+            }
+            let owner = unsafe { bindings.FPDFText_GetTextObject(text_page, index) };
+            if owners.contains(&owner) {
+                char_indices.push(index);
+            }
+        }
+        if char_indices.len() != n {
+            unsafe { bindings.FPDFText_ClosePage(text_page) };
+            return Err(PdfError::Unsupported(
+                "this run's characters could not all be matched to split",
+            ));
+        }
+
+        let mut written = Vec::new();
+        for (i, &index) in char_indices.iter().enumerate() {
+            let (mut x, mut y) = (0.0f64, 0.0f64);
+            let ok = unsafe { bindings.FPDFText_GetCharOrigin(text_page, index, &mut x, &mut y) } != 0;
+            if !ok {
+                unsafe { bindings.FPDFText_ClosePage(text_page) };
+                return Err(PdfError::Unsupported(
+                    "one of these characters could not be found to split",
+                ));
+            }
+            // The local translation that puts this character's own `Tm` at
+            // exactly the absolute page position PDFium reports for it — the
+            // same inverse-CTM step `move_run_in_stream` takes for a move,
+            // just landing on this character's own spot instead of a
+            // shifted one.
+            let (ax, ay) = (x as f32, y as f32);
+            let local = (inv[0] * ax + inv[2] * ay + inv[4], inv[1] * ax + inv[3] * ay + inv[5]);
+            let mut tm = rotation;
+            tm[4] = local.0;
+            tm[5] = local.1;
+
+            let code = &code_bytes[i * width..(i + 1) * width];
+            written.extend_from_slice(&text_matrix(&tm)?);
+            written.push(b'\n');
+            written.extend_from_slice(&hex_string_operand(code));
+            written.extend_from_slice(b" Tj\n");
+        }
+        unsafe { bindings.FPDFText_ClosePage(text_page) };
+
+        // Whatever comes after this run finds the line exactly where it
+        // would have without the split.
+        written.extend_from_slice(&text_matrix(&states[last].line)?);
+
+        let from = operations[first].span.start;
+        let to = operations[last].span.end;
+        let edited = content::splice(&stream, &[(from..to, written)]);
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+    }
+
     fn drawn_objects(&self, page_index: usize) -> Result<Vec<crate::document::DrawnObject>> {
         use crate::document::{DrawnKind, DrawnObject};
         use pdfium_render::prelude::{
@@ -1629,7 +1936,26 @@ impl Document for PdfiumDocument {
         // scramble something. This can't scramble anything to check for: it
         // touches only the operators it writes around this one run.
         if let Some(run) = self.text_run_at(page_index, object)? {
-            return self.resize_run_in_stream(page_index, &run, sx, sy);
+            let before = run.rect;
+            self.resize_run_in_stream(page_index, &run, sx, sy)?;
+            // Changing size grows the glyphs about the run's own baseline,
+            // not about whichever corner the caller's handle anchored on —
+            // a font's ascent so outweighs its descent that growing it
+            // mostly pushes the *top* up, so a bottom handle dragged
+            // downward, expecting the top to hold still, instead grew the
+            // run upward. `resize_run_in_stream` already made it the right
+            // *size*; this nudges it to where a geometric scale about
+            // `anchor` (the branch below) would have left it, the same
+            // move `move_run_in_stream` already knows how to make.
+            if let Some(after) = self.text_run_at(page_index, object)? {
+                let want_left = anchor.x + (before.left - anchor.x) * sx;
+                let want_top = anchor.y + (before.top - anchor.y) * sy;
+                let shift = Point { x: want_left - after.rect.left, y: want_top - after.rect.top };
+                if shift.x.abs() > 0.01 || shift.y.abs() > 0.01 {
+                    self.move_run_in_stream(page_index, object, shift)?;
+                }
+            }
+            return Ok(());
         }
         // The anchor arrives top-left down; page space is bottom-left up.
         let height = self.page_size(page_index)?.height_pt;
@@ -1677,7 +2003,7 @@ impl Document for PdfiumDocument {
                 break;
             }
         }
-        let number = file.numbers().max().unwrap_or(0) + 1;
+        let number = file.next_object_number()?;
         let alpha = format!("{opacity:.4}");
         let alpha = alpha.trim_end_matches('0').trim_end_matches('.').to_string();
         let mut state = crate::pdf::Dict(Vec::new());
@@ -2192,6 +2518,56 @@ impl Document for PdfiumDocument {
         Ok(found)
     }
 
+    /// The complement of `image_signature_marks`: every image annotation
+    /// that is *not* named as a signature. Two scans over the same
+    /// annotation list rather than one split afterward, so the disjoint
+    /// gate lives in one obvious place per function instead of a filter a
+    /// caller could accidentally invert.
+    fn placed_image_marks(
+        &self,
+        page_index: usize,
+    ) -> Result<Vec<crate::document::PlacedImageMark>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let space = page.space()?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+
+        let mut found = Vec::new();
+        for i in 0..count.max(0) {
+            let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, i) };
+            if annot.is_null() {
+                continue;
+            }
+            // A signature's own mark — leave it to `image_signature_marks`.
+            if read_annotation_string(annot, SIGNATURE_KEY).is_some() {
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                continue;
+            }
+            let read = self.read_annotation(annot, &space);
+            let rotation = read_rotation(annot);
+            unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+
+            let Ok(Some(Annotation::Image { rect, rgba, width, height })) = read else {
+                continue;
+            };
+            found.push(crate::document::PlacedImageMark {
+                index: i as usize,
+                rect,
+                rgba,
+                width,
+                height,
+                rotation,
+            });
+        }
+        Ok(found)
+    }
+
     fn annotation_count(&self, page_index: usize) -> Result<usize> {
         self.validate_page_index(page_index)?;
         let index = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
@@ -2636,6 +3012,26 @@ fn build_render_config(request: &RenderRequest, width: u32, height: u32) -> PdfR
         .limit_render_image_cache_size(true)
 }
 
+/// A PDF hex string for user-facing text such as a bookmark's title: UTF-16BE
+/// with the byte-order mark real readers look for before they will render
+/// anything past plain ASCII, hex-digit-encoded because that is the form
+/// [`crate::pdf::write_object`] writes an [`crate::pdf::Object::HexString`]'s
+/// bytes back out **verbatim** between the angle brackets — see that
+/// function's own handling of the variant. A `LiteralString` would need its
+/// own escaping for parentheses and backslashes; a title typed by hand is
+/// exactly where those show up.
+fn utf16be_hex(text: &str) -> Vec<u8> {
+    let mut units = vec![0xFEu8, 0xFF];
+    for unit in text.encode_utf16() {
+        units.extend_from_slice(&unit.to_be_bytes());
+    }
+    let mut hex = Vec::with_capacity(units.len() * 2);
+    for byte in units {
+        hex.extend_from_slice(format!("{byte:02X}").as_bytes());
+    }
+    hex
+}
+
 /// The page-tree half of the write path.
 ///
 /// Three operations are missing, and all three fail for the *same* reason rather
@@ -2824,20 +3220,66 @@ impl DocumentMut for PdfiumDocument {
         // the whole page — the same thing that was rewriting paragraphs when a
         // phrase was locked. Swapping the codes in place touches nothing else.
         //
-        // Only when the words are all that is changing: a new colour, size or
-        // position is PDFium's to apply, and it does that well. A requested
-        // font is a byte-safe swap of the same shape as the words themselves
-        // (see `Self::set_run_in_stream`), so it travels with this fast path
-        // rather than gating it — checked with `face` zeroed out on both
-        // sides so a font choice alone does not fall through to the slower
-        // path below, which does not know how to honour it.
-        let only_words_or_face =
-            crate::document::TextStyle { face: None, ..style.clone() }
+        // Only when a colour or a position is what's changing does this fall
+        // through to PDFium: those still need it. A requested font is a
+        // byte-safe swap of the same shape as the words themselves (see
+        // `Self::set_run_in_stream`), and a new size is the same `Tf` that
+        // already has to be written in front of this run's own text to
+        // select its font — changing the number in it costs nothing extra —
+        // so both travel with this fast path rather than gating it, checked
+        // with `face`/`size` zeroed out on both sides so neither falls
+        // through to the slower path below on its own.
+        //
+        // **Reported from use: a run's size could not be increased at all**
+        // on a page where PDFium's whole-page regeneration corrupts other
+        // text — the same defect words-only editing was already routed
+        // around. Sizing a run is no different a change to make than
+        // retyping it: both rewrite the one `Tf [...] TJ` this run already
+        // draws with and nothing else in the stream.
+        // **A colour-only change, retyping nothing, is narrower still.** The
+        // codes drawing this run do not change at all, so nothing needs
+        // matching against a font's encoding — checked first because it is
+        // strictly safer than the fast path below, which still has to prove
+        // the (possibly new) words can be spelled in *some* font. A colour
+        // change alongside a retype falls through to the checks below
+        // unchanged, exactly as it already did.
+        if style.face.is_none() && style.size.is_none() && style.at.is_none() {
+            if let Some(color) = style.color {
+                let current = self
+                    .text_runs(page_index)?
+                    .into_iter()
+                    .find(|r| r.object == object)
+                    .ok_or_else(|| PdfError::InvalidArgument("that is not a text run".into()))?;
+                if current.text == text {
+                    return match self.set_run_color_in_stream(page_index, object, color) {
+                        Ok(previous) => Ok((
+                            current.text,
+                            crate::document::TextStyle { color: Some(previous), ..Default::default() },
+                        )),
+                        // Refused, not quietly handed to PDFium — see the
+                        // fast path's own `Err(why)` just below for why.
+                        Err(why) => Err(match why {
+                            PdfError::Unsupported(_) | PdfError::InvalidArgument(_) => why,
+                            _ => PdfError::Unsupported(
+                                "this run's colour cannot be changed without rewriting \
+                                 the page around it, so it has been left alone",
+                            ),
+                        }),
+                    };
+                }
+            }
+        }
+
+        let only_words_face_or_size =
+            crate::document::TextStyle { face: None, size: None, ..style.clone() }
                 == crate::document::TextStyle::default();
-        if only_words_or_face {
-            match self.set_run_in_stream(page_index, object, text, style.face.as_deref()) {
-                Ok(previous) => {
-                    return Ok((previous, crate::document::TextStyle::default()))
+        if only_words_face_or_size {
+            match self.set_run_in_stream(page_index, object, text, style.face.as_deref(), style.size) {
+                Ok((previous, was_size)) => {
+                    return Ok((
+                        previous,
+                        crate::document::TextStyle { size: Some(was_size), ..Default::default() },
+                    ))
                 }
                 // **Refused, not quietly handed to PDFium.**
                 //
@@ -2956,14 +3398,24 @@ impl DocumentMut for PdfiumDocument {
         // Everything the rewrite is about to lose, gathered before it happens
         // and handed back so undo can restore the whole appearance rather than
         // only the words.
+        //
+        // **`FPDFTextObj_GetFontSize` is the raw `Tf` value, not what the run
+        // actually draws at.** A producer that writes `1 Tf` and stretches the
+        // text matrix instead still reports "1pt" here — `m.d` is that
+        // stretch, the same one `PdfPageTextObject::scaled_font_size` folds
+        // in, and `text_runs` (this crate's other reader of a run's size)
+        // already reports the corrected value. "The size shown before this
+        // edit" and "the size a fresh read of the same run reports" have to
+        // be the same number, or undo puts back something nobody asked for.
+        let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+        unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) };
+        let vertical_scale = if m.d.abs() > 1e-6 { m.d } else { 1.0 };
         let was = {
-            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
-            unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) };
             let (x, y) = space.to_top_left(m.e, m.f);
             let mut size = 0.0f32;
             unsafe { bindings.FPDFTextObj_GetFontSize(handle, &mut size) };
             crate::document::TextStyle {
-                size: (size > 0.0).then_some(size),
+                size: (size > 0.0).then_some(size * vertical_scale),
                 color: had_colour.then_some(Color {
                     r: r as u8,
                     g: g as u8,
@@ -2998,7 +3450,11 @@ impl DocumentMut for PdfiumDocument {
         }
 
         if let Some(size) = style.size.filter(|s| *s > 0.0) {
-            unsafe { bindings.FPDFTextObj_SetFontSize(handle, size) };
+            // `size` is the effective size the caller wants drawn; `Tf` only
+            // ever holds the raw value the matrix's own stretch multiplies,
+            // so what is actually set has to be divided back down by it —
+            // see `vertical_scale`'s own doc, just above.
+            unsafe { bindings.FPDFTextObj_SetFontSize(handle, size / vertical_scale) };
         }
 
         if let Some((x, y)) = style.at {
@@ -3089,6 +3545,31 @@ impl DocumentMut for PdfiumDocument {
         Ok(())
     }
 
+    // The one real implementation of each is the `Document` impl above —
+    // these just give the command stack, which only ever sees a
+    // `&mut dyn DocumentMut`, a way to reach it.
+    fn move_object_mut(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
+        <Self as Document>::move_object(self, page_index, object, by)
+    }
+
+    fn scale_object_mut(
+        &mut self,
+        page_index: usize,
+        object: usize,
+        anchor: Point,
+        sx: f32,
+        sy: f32,
+    ) -> Result<()> {
+        <Self as Document>::scale_object(self, page_index, object, anchor, sx, sy)
+    }
+
+    fn remove_object_mut(&mut self, page_index: usize, object: usize) -> Result<()> {
+        <Self as Document>::remove_object(self, page_index, object)
+    }
+
+    fn split_run_into_characters_mut(&mut self, page_index: usize, object: usize) -> Result<()> {
+        <Self as Document>::split_run_into_characters(self, page_index, object)
+    }
 
     fn redact(
         &mut self,
@@ -3154,7 +3635,7 @@ impl DocumentMut for PdfiumDocument {
                 .map(|s| [s.left, s.top, s.right, s.bottom])
                 .collect(),
         )?;
-        self.write_vault(&vault)?;
+        self.write_vault(&mut vault, Some(&dek))?;
 
         // **The marks over the area go too.**
         //
@@ -3246,7 +3727,7 @@ impl DocumentMut for PdfiumDocument {
             }
             sizes.push((*index, size));
         }
-        self.write_vault(&vault)?;
+        self.write_vault(&mut vault, Some(&dek))?;
 
         for (index, size) in sizes {
             self.delete_page(index)?;
@@ -3287,7 +3768,7 @@ impl DocumentMut for PdfiumDocument {
 
         let rect = [found.rect.left, found.rect.top, found.rect.right, found.rect.bottom];
         let id = vault.hide_item(page_index, object, rect)?;
-        self.write_vault(&vault)?;
+        self.write_vault(&mut vault, Some(&dek))?;
 
         // Rewritten now, not at save time: see `apply_locks`.
         //
@@ -3298,7 +3779,7 @@ impl DocumentMut for PdfiumDocument {
         // was supposed to have taken away.
         if let Err(why) = self.apply_locks() {
             vault.forget_item(&id);
-            let _ = self.write_vault(&vault);
+            let _ = self.write_vault(&mut vault, Some(&dek));
             return Err(why);
         }
         Ok(id)
@@ -3323,7 +3804,7 @@ impl DocumentMut for PdfiumDocument {
         self.replace_page(item.page_index, &original)?;
 
         vault.forget_item(id);
-        self.write_vault(&vault)?;
+        self.write_vault(&mut vault, Some(&dek))?;
 
         // **Every *area* still locked on that page has to be taken off it
         // again**, and `apply_locks` cannot do it: that path knows about
@@ -3426,13 +3907,15 @@ impl DocumentMut for PdfiumDocument {
             for id in &still_stale {
                 vault.forget_item(id);
             }
-            self.write_vault(&vault)?;
+            // No passcode in hand here — this only ever drops a lock nothing
+            // can find its way back to. See `write_vault`.
+            self.write_vault(&mut vault, None)?;
         }
         Ok((completed, still_stale.len()))
     }
 
     fn open_lock(&mut self, passcode: &[u8]) -> Result<Vec<(usize, Vec<u8>)>> {
-        let Some(vault) = self.read_vault()? else {
+        let Some(mut vault) = self.read_vault()? else {
             return Err(PdfError::InvalidArgument("this document is not locked".into()));
         };
         let dek = vault.unlock(passcode)?;
@@ -3440,11 +3923,28 @@ impl DocumentMut for PdfiumDocument {
         // Every tag verified before a single page is handed back. One damaged
         // seal fails the whole call rather than restoring some pages and leaving
         // nobody able to say which are which.
-        vault
+        let pages: Vec<(usize, Vec<u8>)> = vault
             .locked_pages()
             .into_iter()
             .map(|index| vault.open_page(&dek, index).map(|bytes| (index, bytes)))
-            .collect()
+            .collect::<Result<_>>()?;
+
+        // The caller is putting every one of these pages fully back, so
+        // nothing sealed on them is still locked — every badge and every way
+        // back goes, the same as `unlock_item` drops the one item it restores.
+        // Left alone, a badge (and for a picture, the still-recorded lock
+        // itself) survived a whole-document unlock: the passage was back on
+        // the page but its padlock was not, and a locked picture whose page
+        // seal `apply_locks` could still find stayed hidden regardless.
+        for (index, _) in &pages {
+            for id in vault.items_on(*index).iter().map(|i| i.id.clone()).collect::<Vec<_>>() {
+                vault.forget_item(&id);
+            }
+            vault.forget_page(*index);
+        }
+        self.write_vault(&mut vault, Some(&dek))?;
+
+        Ok(pages)
     }
 
     fn locked_pages(&self) -> Result<Vec<usize>> {
@@ -3609,16 +4109,30 @@ impl DocumentMut for PdfiumDocument {
         // file, and asking PDFium to write this document out produces a
         // different one — which reads as a signature covering a fraction of
         // the file, rather than as the correctly signed document it is.
-        let bytes = match (&self.written, &self.source) {
-            (Some(exact), _) => exact.clone(),
-            (None, DocumentSource::Path(path)) => std::fs::read(path)?,
+        //
+        // `self.written` is trusted only while `exact_content` says nothing
+        // inside PDFium has changed since it was captured. An annotation or
+        // an edit leaves it holding a file that is no longer this document —
+        // reporting against it describes bytes nobody can see or save
+        // anymore. The file on disk, when there is one, is whatever was last
+        // genuinely saved: stale relative to an unsaved edit too, but at
+        // least a real file that still exists, rather than a snapshot that
+        // now matches neither the disk nor the document in memory. Found by
+        // audit.
+        let bytes = if let Some(exact) = self.written.as_ref().filter(|_| self.exact_content) {
+            exact.clone()
+        } else if let DocumentSource::Path(path) = &self.source {
+            std::fs::read(path)?
+        } else if let Some(exact) = &self.written {
+            // No path to fall back to — a document opened from bytes rather
+            // than a file. Stale is still better than nothing to check.
+            exact.clone()
+        } else {
             // No file to read and no bytes kept — say that rather than check
             // something else and present the answer as being about this.
-            (None, _) => {
-                return Err(PdfError::Unsupported(
-                    "checking signatures on a document that has never been written",
-                ))
-            }
+            return Err(PdfError::Unsupported(
+                "checking signatures on a document that has never been written",
+            ));
         };
         let file = crate::pdf::File::parse(&bytes)?;
         crate::pdf::validate::check(&file, &bytes)
@@ -3629,6 +4143,19 @@ impl DocumentMut for PdfiumDocument {
     }
 
     fn add_typing_font(&mut self, font: Vec<u8>) {
+        // A caller retrying several runs against the same on-page font asks
+        // for it again every time — reported from use as the app freezing
+        // solid on a large document. With no check here, `typing_fonts` grew
+        // one full duplicate copy of the font's bytes per attempt rather than
+        // per distinct font, and every later `embed_typing_font` search below
+        // re-parses every entry in it — so a selection needing many retypes
+        // got slower with each one, compounding into what looked like a
+        // hang. The same bytes arriving again is the common case (the exact
+        // data `registered_face_for_run` just re-read for the same run), so
+        // a plain equality check catches it without parsing anything.
+        if self.typing_fonts.iter().any(|existing| existing == &font) {
+            return;
+        }
         self.typing_fonts.push(font);
     }
 
@@ -3901,7 +4428,7 @@ impl DocumentMut for PdfiumDocument {
         }
 
         let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
-        let mut next_number = file.numbers().max().unwrap_or(0) + 1;
+        let mut next_number = file.next_object_number()?;
 
         // A picture's own object, and its own name in the page's Resources —
         // on the page itself, not whatever it inherits, for the same reason
@@ -4373,6 +4900,170 @@ impl DocumentMut for PdfiumDocument {
         Ok(())
     }
 
+    fn add_bookmark(&mut self, title: &str, page_index: usize) -> Result<crate::document::BookmarkAdded> {
+        use crate::document::BookmarkAdded;
+        use crate::pdf::{Dict, Object};
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(&bytes)?;
+
+        let page_number = self.page_object_number(&file, page_index)?;
+
+        let Some(Object::Reference(root_number, _)) = file.trailer().get(b"Root") else {
+            return Err(PdfError::InvalidArgument("the file has no catalogue".into()));
+        };
+        let root_number = *root_number;
+        let Ok(Object::Dict(mut root)) = file.object(root_number) else {
+            return Err(PdfError::InvalidArgument("the catalogue cannot be read".into()));
+        };
+
+        // The outline root, made fresh if this document has never had one —
+        // see `BookmarkAdded::outlines_is_new`'s own doc for why undo needs
+        // to know which of the two happened.
+        let outlines_is_new = root.get(b"Outlines").is_none();
+        let (outlines_number, mut outlines, previous_last) = if outlines_is_new {
+            (file.next_object_number()?, Dict(Vec::new()), None)
+        } else {
+            let Some(Object::Reference(number, _)) = root.get(b"Outlines") else {
+                return Err(PdfError::InvalidArgument(
+                    "the catalogue's outline entry is not a reference".into(),
+                ));
+            };
+            let number = *number;
+            let Ok(Object::Dict(existing)) = file.object(number) else {
+                return Err(PdfError::InvalidArgument("the outline root cannot be read".into()));
+            };
+            let previous_last = match existing.get(b"Last") {
+                Some(Object::Reference(n, _)) => Some(*n),
+                _ => None,
+            };
+            (number, existing, previous_last)
+        };
+        // One past the root when the root is also new (no other allocation
+        // has happened yet to collide with), or a fresh number of its own
+        // when the root already existed — never the same call twice, which
+        // would hand back the same number both times.
+        let item_number =
+            if outlines_is_new { outlines_number + 1 } else { file.next_object_number()? };
+
+        let mut item = Dict(Vec::new());
+        item.set(b"Title", Object::HexString(utf16be_hex(title)));
+        item.set(b"Parent", Object::Reference(outlines_number, 0));
+        // `/Fit` rather than a remembered scroll position: naming the page
+        // is the part a bookmark is for, and a stored zoom/offset would be
+        // one more thing to get wrong reading it back for no benefit anyone
+        // asked for.
+        item.set(
+            b"Dest",
+            Object::Array(vec![Object::Reference(page_number, 0), Object::Name(b"Fit".to_vec())]),
+        );
+        if let Some(prev) = previous_last {
+            item.set(b"Prev", Object::Reference(prev, 0));
+        }
+        let mut item_body = Vec::new();
+        crate::pdf::write_object(&mut item_body, &Object::Dict(item));
+
+        let mut replacements = Vec::new();
+        let mut extra = vec![(item_number, item_body)];
+
+        if let Some(prev) = previous_last {
+            let Ok(Object::Dict(mut prev_dict)) = file.object(prev) else {
+                return Err(PdfError::InvalidArgument("the previous bookmark cannot be read".into()));
+            };
+            prev_dict.set(b"Next", Object::Reference(item_number, 0));
+            let mut prev_body = Vec::new();
+            crate::pdf::write_object(&mut prev_body, &Object::Dict(prev_dict));
+            replacements.push((prev, prev_body));
+        } else {
+            outlines.set(b"First", Object::Reference(item_number, 0));
+        }
+        outlines.set(b"Last", Object::Reference(item_number, 0));
+        outlines.set(b"Type", Object::Name(b"Outlines".to_vec()));
+        let previous_count = outlines.get(b"Count").and_then(Object::as_i64).unwrap_or(0);
+        outlines.set(b"Count", Object::Number((previous_count + 1).to_string().into_bytes()));
+        let mut outlines_body = Vec::new();
+        crate::pdf::write_object(&mut outlines_body, &Object::Dict(outlines));
+
+        if outlines_is_new {
+            extra.push((outlines_number, outlines_body));
+            root.set(b"Outlines", Object::Reference(outlines_number, 0));
+            let mut root_body = Vec::new();
+            crate::pdf::write_object(&mut root_body, &Object::Dict(root));
+            replacements.push((root_number, root_body));
+        } else {
+            replacements.push((outlines_number, outlines_body));
+        }
+
+        let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)?;
+
+        Ok(BookmarkAdded { outlines_object: outlines_number, outlines_is_new, item_object: item_number, previous_last })
+    }
+
+    fn remove_bookmark(&mut self, added: crate::document::BookmarkAdded) -> Result<()> {
+        use crate::pdf::Object;
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(&bytes)?;
+
+        let mut replacements = Vec::new();
+
+        if let Some(prev) = added.previous_last {
+            let Ok(Object::Dict(mut prev_dict)) = file.object(prev) else {
+                return Err(PdfError::InvalidArgument("the previous bookmark cannot be read".into()));
+            };
+            prev_dict.remove(b"Next");
+            let mut prev_body = Vec::new();
+            crate::pdf::write_object(&mut prev_body, &Object::Dict(prev_dict));
+            replacements.push((prev, prev_body));
+        }
+
+        if added.outlines_is_new {
+            // This bookmark is what created the outline root — undo drops
+            // `/Outlines` from the catalogue again rather than leaving an
+            // empty one behind.
+            let Some(Object::Reference(root_number, _)) = file.trailer().get(b"Root") else {
+                return Err(PdfError::InvalidArgument("the file has no catalogue".into()));
+            };
+            let root_number = *root_number;
+            let Ok(Object::Dict(mut root)) = file.object(root_number) else {
+                return Err(PdfError::InvalidArgument("the catalogue cannot be read".into()));
+            };
+            root.remove(b"Outlines");
+            let mut root_body = Vec::new();
+            crate::pdf::write_object(&mut root_body, &Object::Dict(root));
+            replacements.push((root_number, root_body));
+        } else {
+            let Ok(Object::Dict(mut outlines)) = file.object(added.outlines_object) else {
+                return Err(PdfError::InvalidArgument("the outline root cannot be read".into()));
+            };
+            match added.previous_last {
+                Some(prev) => outlines.set(b"Last", Object::Reference(prev, 0)),
+                None => {
+                    outlines.remove(b"First");
+                    outlines.remove(b"Last");
+                }
+            }
+            let previous_count = outlines.get(b"Count").and_then(Object::as_i64).unwrap_or(1);
+            outlines
+                .set(b"Count", Object::Number((previous_count - 1).max(0).to_string().into_bytes()));
+            let mut outlines_body = Vec::new();
+            crate::pdf::write_object(&mut outlines_body, &Object::Dict(outlines));
+            replacements.push((added.outlines_object, outlines_body));
+        }
+
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+    }
+
     fn take_annotation(&mut self, page_index: usize, index: usize) -> Result<Annotation> {
         self.validate_page_index(page_index)?;
         let page_number = i32::try_from(page_index).map_err(|_| {
@@ -4434,45 +5125,104 @@ impl DocumentMut for PdfiumDocument {
         )))
     }
 
+    /// **Byte-safe, not `FPDFPage_GenerateContent`.** That call rebuilds the
+    /// whole content stream from PDFium's own object model — the same
+    /// regeneration `set_run_in_stream`'s own doc warns reorders an
+    /// untouched paragraph on a real page — and reported from use as undoing
+    /// one added text box turning an entire page's own vector artwork
+    /// grey: CAMINO's page draws most of its diagram in shapes with their
+    /// own colour, and PDFium's regeneration did not carry that colour back
+    /// through unchanged. Removing the marked objects by splicing their own
+    /// operator spans out of the stream — the same technique
+    /// `remove_object`'s own text-run branch already uses for one run at a
+    /// time — touches nothing else in the file at all.
     fn remove_text(&mut self, page_index: usize, id: i32) -> Result<()> {
+        use crate::pdf::content;
+
         self.validate_page_index(page_index)?;
         let page_number = i32::try_from(page_index).map_err(|_| {
             PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
         })?;
 
-        let page = RawPage::open(self.document.handle(), page_number)?;
-        let bindings = pdfium()?.bindings();
-        let mut taken = 0;
-
-        // Safety: the page is live for the loop; every object removed is destroyed
-        // exactly once and never touched again.
-        unsafe {
-            // Backwards, because removing an object renumbers everything after it.
-            for index in (0..bindings.FPDFPage_CountObjects(page.handle)).rev() {
-                let object = bindings.FPDFPage_GetObject(page.handle, index);
-                if object.is_null() || text_mark_id(bindings, object) != Some(id) {
-                    continue;
-                }
-                if bindings.FPDFPage_RemoveObject(page.handle, object) != 0 {
-                    bindings.FPDFPageObj_Destroy(object);
-                    taken += 1;
+        // Which of the page's own objects carry this mark — found through
+        // PDFium's own object list, the same walk the old whole-page-
+        // regenerating version used, but only to *name* them. Removing them
+        // is done byte-safely below.
+        let marked: Vec<usize> = {
+            let raw = RawPage::open(self.document.handle(), page_number)?;
+            let bindings = pdfium()?.bindings();
+            let mut found = Vec::new();
+            unsafe {
+                for index in 0..bindings.FPDFPage_CountObjects(raw.handle) {
+                    let object = bindings.FPDFPage_GetObject(raw.handle, index);
+                    if !object.is_null() && text_mark_id(bindings, object) == Some(id) {
+                        found.push(index as usize);
+                    }
                 }
             }
-
-            if taken == 0 {
-                return Err(PdfError::InvalidArgument(format!(
-                    "page {page_index} has no text mark {id}"
-                )));
-            }
-
-            if bindings.FPDFPage_GenerateContent(page.handle) == 0 {
-                return Err(PdfError::Pdfium(
-                    "text was removed but the page content was not regenerated".into(),
-                ));
-            }
+            found
+        };
+        if marked.is_empty() {
+            return Err(PdfError::InvalidArgument(format!(
+                "page {page_index} has no text mark {id}"
+            )));
         }
 
-        Ok(())
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+        let height = self.page_size(page_index)?.height_pt;
+        let fonts = self.page_fonts(&file, &page);
+        let codes_in = |p: &content::Placed| -> usize {
+            let width = p
+                .font
+                .as_ref()
+                .zip(fonts.as_ref())
+                .and_then(|(name, dict)| code_width(&file, dict, name))
+                .unwrap_or(1)
+                .max(1);
+            content::pieces(&operations[p.origin.operation])
+                .iter()
+                .map(|piece| match piece {
+                    content::Piece::Codes(bytes) => bytes.len() / width,
+                    content::Piece::Kern(_) => 0,
+                })
+                .sum()
+        };
+
+        let mut edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
+        for object in &marked {
+            let Some(run) = self.text_run_at(page_index, *object)? else { continue };
+            let (first, last, _) = run_operators(&run, height, &placed, &operations, &codes_in)?;
+            let from = operations[first].span.start;
+            let to = operations[last].span.end;
+            edits.push((from..to, Vec::new()));
+        }
+        if edits.is_empty() {
+            return Err(PdfError::Unsupported(
+                "that text mark cannot be found in the page's own content",
+            ));
+        }
+        let edited = content::splice(&stream, &edits);
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
     fn add_text_layer(&mut self, page_index: usize, words: &[RecognisedWord]) -> Result<usize> {
@@ -4820,7 +5570,12 @@ const FPDF_INCREMENTAL: u32 = 1;
 /// constants. They are PDF spec subtype numbers and do not move between PDFium
 /// releases.
 const ANNOT_TEXT: FPDF_ANNOTATION_SUBTYPE = 1;
+const ANNOT_LINK: FPDF_ANNOTATION_SUBTYPE = 2;
 const ANNOT_HIGHLIGHT: FPDF_ANNOTATION_SUBTYPE = 9;
+/// What `FPDFAction_GetType` returns for a `/URI` action — the only kind of
+/// action `read_annotation`'s own `ANNOT_LINK` arm knows how to read back,
+/// since it is the only kind `fill_annotation` ever writes.
+const PDFACTION_URI: c_ulong = 3;
 const ANNOT_UNDERLINE: FPDF_ANNOTATION_SUBTYPE = 10;
 const ANNOT_SQUIGGLY: FPDF_ANNOTATION_SUBTYPE = 11;
 const ANNOT_STRIKEOUT: FPDF_ANNOTATION_SUBTYPE = 12;
@@ -4829,6 +5584,11 @@ const ANNOT_STAMP: FPDF_ANNOTATION_SUBTYPE = 13;
 
 /// `FPDFANNOT_COLORTYPE_Color` — the stroke/foreground colour.
 const COLORTYPE_COLOR: FPDFANNOT_COLORTYPE = 0;
+/// `FPDFANNOT_COLORTYPE_InteriorColor` — the fill, on the subtypes that have one.
+const COLORTYPE_INTERIOR: FPDFANNOT_COLORTYPE = 1;
+/// `FPDF_FILLMODE_WINDING`, from `fpdf_edit.h` — not re-exported by the
+/// binding any more than the annotation subtypes above are.
+const FILLMODE_WINDING: c_int = 2;
 
 /// A page opened straight through the C API, closed when it goes out of scope.
 ///
@@ -5433,7 +6193,7 @@ fn font_to_unicode(
             }
         };
 
-        let first = file.numbers().max().unwrap_or(0) + 1;
+        let first = file.next_object_number()?;
         let embedded = embed::truetype(font_bytes, first)?;
         let encoded = embed::win_ansi(wanted).ok_or_else(|| {
             PdfError::InvalidArgument(
@@ -5969,15 +6729,19 @@ fn font_to_unicode(
         let name = String::from_utf8_lossy(&name);
         let was_size = governing.size;
         let new_size = (was_size * sy).max(1.0);
-        const DEFAULT_TZ: f32 = 100.0;
-        let new_tz = (DEFAULT_TZ * sx).max(1.0);
+        // `Tf` scales a glyph's width and height together, so raising the
+        // size to grow a run taller (sy) also grows it wider unless `Tz` is
+        // pulled back down by the same amount — this is why a Top/Bottom
+        // handle (sx == 1.0, meant to leave width untouched) used to widen
+        // the run right along with its height. Scaling from the width
+        // already in force (`governing.horizontal_scale`), not an assumed
+        // 100%, is what makes two resizes in a row compound correctly
+        // instead of the second one erasing the first's stretch.
+        let was_tz = content::states(&operations)[first].horizontal_scale * 100.0;
+        let new_tz = (was_tz * sx / sy).max(1.0);
 
-        let mut before_ops = format!("/{name} {new_size} Tf\n");
-        let mut after_ops = format!("\n/{name} {was_size} Tf");
-        if (sx - 1.0).abs() > 0.005 {
-            before_ops.push_str(&format!("{new_tz} Tz\n"));
-            after_ops.push_str(&format!("\n{DEFAULT_TZ} Tz"));
-        }
+        let before_ops = format!("/{name} {new_size} Tf\n{new_tz} Tz\n");
+        let after_ops = format!("\n{was_tz} Tz\n/{name} {was_size} Tf");
 
         let before = operations[first].span.start;
         let after = operations[last].span.end;
@@ -6743,29 +7507,43 @@ fn font_to_unicode(
         object: usize,
         text: &str,
     ) -> Result<()> {
-        self.set_run_in_stream(page_index, object, text, None).map(|_| ())
+        self.set_run_in_stream(page_index, object, text, None, None).map(|_| ())
     }
 
-    /// Change one run's words by editing the content stream.
+    /// Change one run's words, and optionally its size, by editing the
+    /// content stream.
     ///
-    /// Returns what the run said before. Refuses — leaving the page untouched —
-    /// wherever it cannot be certain: a filter it cannot read, a run whose
-    /// operator cannot be located, a font with no `/ToUnicode` to encode the
-    /// new text through, or a character that font cannot spell. The caller then
-    /// falls back to PDFium, which always works and costs the page's layout.
+    /// Returns what the run said before, and the size it was drawn at
+    /// before this call — the caller's own "was", for undo, since this never
+    /// touches anything else in the stream that would carry the old size
+    /// forward on its own the way an untouched page's own `Tf` would.
+    ///
+    /// Refuses — leaving the page untouched — wherever it cannot be certain:
+    /// a filter it cannot read, a run whose operator cannot be located, a
+    /// font with no `/ToUnicode` to encode the new text through, or a
+    /// character that font cannot spell. The caller then falls back to
+    /// PDFium, which always works and costs the page's layout.
     ///
     /// `requested_face` names one of `self.typing_fonts` by
     /// [`crate::pdf::embed::face_name`] — `None` runs the automatic three-tier
     /// fallback below; `Some` skips straight to that font (embedding it if
     /// it is not already on the page) and refuses, rather than silently
     /// falling back to another face, if it cannot spell the text.
+    ///
+    /// `new_size` — `None` keeps drawing at the size this run already used;
+    /// `Some` is written into the very `Tf` this run's own text already
+    /// needs in front of it (see [`content::replacing_codes`]), so a size
+    /// change costs nothing beyond what a words-only edit already pays and
+    /// cannot touch any other run's own `Tf` the way asking PDFium to
+    /// regenerate the whole page can.
     fn set_run_in_stream(
         &mut self,
         page_index: usize,
         object: usize,
         text: &str,
         requested_face: Option<&str>,
-    ) -> Result<String> {
+        new_size: Option<f32>,
+    ) -> Result<(String, f32)> {
         use crate::pdf::content;
 
         let run_list = self.text_runs(page_index)?;
@@ -6793,7 +7571,14 @@ fn font_to_unicode(
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
 
-        let (want_x, want_y) = (run.rect.left, height - run.rect.bottom);
+        // **The baseline origin, not the box's corner** — see `run_operators`'s
+        // own doc for the exact same fix, needed there first: the box's
+        // bottom sits a descender below the baseline, a gap that grows with
+        // the font's own size, so probing from `rect.bottom` missed the
+        // right operation entirely the moment a size change made that gap
+        // wide enough — reported from use as a size change coming back
+        // unable to be undone, on the run it had just resized.
+        let (want_x, want_y) = (run.origin.x, height - run.origin.y);
         let found = match nearest_placed(&placed, want_x, want_y) {
             Some((at, _)) => &placed[at],
             // **Where it is drawn is not always where the walk thinks.**
@@ -6918,12 +7703,30 @@ fn font_to_unicode(
         // which is what walks the operator's existing codes. The replacement
         // bytes are already encoded in whatever font is drawing them.
         let drawing = swap.as_ref().map(|s| s.resource.clone()).unwrap_or_else(|| name.clone());
+        // **`new_size`, like every size this crate hands a caller, is the
+        // effective size — `run.size`, not `found.size`.** `found.size` is
+        // the raw `Tf` value this content-stream parse itself found, which
+        // is the one thing `Tf` can actually hold; `run.size` is the same
+        // run read through `text_runs`, which folds in whatever stretch the
+        // text matrix carries (see `set_text_run_styled`'s own `vertical_
+        // scale` doc). `run.size / found.size` is that stretch, recovered
+        // without a second matrix read, and dividing the caller's request by
+        // it is what turns "draw this run at 25pt" back into the raw number
+        // `Tf` needs to actually produce 25pt.
+        let vertical_scale = if found.size.abs() > 1e-6 { run.size / found.size } else { 1.0 };
+        // Zero or negative asks nothing sensible of `Tf` and is treated the
+        // same as "unchanged" — the same guard the slower, PDFium-driven
+        // path already applies to a requested size.
+        let size = new_size
+            .filter(|s| *s > 0.0)
+            .map(|wanted| if vertical_scale.abs() > 1e-6 { wanted / vertical_scale } else { wanted })
+            .unwrap_or(found.size);
         let mut replacement = content::replacing_codes(
             operation,
             first..last + 1,
             &encoded,
             &drawing,
-            found.size,
+            size,
             width,
         );
         if swap.is_some() {
@@ -6962,6 +7765,103 @@ fn font_to_unicode(
         let face = swap.map(|s| s.face);
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)?;
         self.substituted = face;
+        // The effective size, matching every other size this crate hands a
+        // caller — not `found.size`, the raw `Tf` value, for the same reason
+        // `was.size` above is not the slower path's own raw read either.
+        Ok((previous, run.size))
+    }
+
+    /// Change a run's fill colour without letting PDFium anywhere near the
+    /// page's own content.
+    ///
+    /// Colour used to fall straight through to `set_text_run_styled`'s slow
+    /// path, since it is neither a text change nor `set_run_in_stream`'s own
+    /// font/size territory. That path's `FPDFPage_GenerateContent` rebuilds
+    /// the whole stream from PDFium's object model — the same regeneration
+    /// that reorders an untouched paragraph on at least one real page — and
+    /// its scramble guard then refuses the edit outright rather than risk
+    /// it, which meant a run's colour could not be changed on that page at
+    /// all.
+    ///
+    /// A colour is not a new glyph: the codes drawing this run do not
+    /// change, so nothing here needs `set_run_in_stream`'s font-matching or
+    /// text encoding — only the same operator lookup, and the same
+    /// restore-after trick it already uses for a swapped `Tf`.
+    fn set_run_color_in_stream(
+        &mut self,
+        page_index: usize,
+        object: usize,
+        color: crate::document::Color,
+    ) -> Result<crate::document::Color> {
+        use crate::pdf::content;
+
+        let run_list = self.text_runs(page_index)?;
+        let run = run_list
+            .iter()
+            .find(|r| r.object == object)
+            .cloned()
+            .ok_or_else(|| PdfError::InvalidArgument("that is not a text run".into()))?;
+        let previous = run.color;
+        let height = self.page_size(page_index)?.height_pt;
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(&bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+
+        // Same baseline-origin lookup `set_run_in_stream` uses, and the same
+        // ordered fallback for a second `Tj` on one line — see its own doc
+        // for why either is needed.
+        let (want_x, want_y) = (run.origin.x, height - run.origin.y);
+        let found = match nearest_placed(&placed, want_x, want_y) {
+            Some((at, _)) => &placed[at],
+            None => {
+                let index = run_list
+                    .iter()
+                    .position(|r| r.object == object)
+                    .ok_or(PdfError::Unsupported("that is not a text run"))?;
+                placed_in_order(&run_list, &placed, height, index).ok_or(PdfError::Unsupported(
+                    "that text is drawn in a way this cannot edit",
+                ))?
+            }
+        };
+
+        fn rg(c: crate::document::Color) -> String {
+            format!("{:.3} {:.3} {:.3} rg", c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0)
+        }
+
+        let operation = &operations[found.origin.operation];
+        let mut replacement = rg(color).into_bytes();
+        replacement.push(b'\n');
+        replacement.extend_from_slice(&stream[operation.span.clone()]);
+        // Put the page's own colour back. Colour is graphics state exactly
+        // like the font `set_run_in_stream` restores after a swap: it stays
+        // selected until something changes it again, so anything drawn
+        // after this in the same text object would otherwise come out in
+        // this run's new colour too.
+        replacement.extend_from_slice(format!("\n{}", rg(previous)).as_bytes());
+
+        let edited = content::splice(&stream, &[(operation.span.clone(), replacement)]);
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
+
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)?;
         Ok(previous)
     }
 
@@ -7137,7 +8037,7 @@ fn font_to_unicode(
             }
             Err(_) => {
                 // No content stream: make one, and point the page at it.
-                let number = file.numbers().max().unwrap_or(0) + 1;
+                let number = file.next_object_number()?;
                 let packed = crate::pdf::content::encode(operators)?;
                 let mut dict = crate::pdf::Dict(Vec::new());
                 dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
@@ -7449,7 +8349,7 @@ fn font_to_unicode(
         )?;
 
         let mut flat = Vec::new();
-        collect_pages(file, &pages, &mut flat, 0)?;
+        collect_pages(file, &pages, &mut flat, &mut HashSet::new(), 0)?;
         flat.into_iter().nth(page_index).ok_or_else(|| {
             PdfError::InvalidArgument(format!("the file has no page {}", page_index + 1))
         })
@@ -7470,6 +8370,7 @@ fn font_to_unicode(
             file: &crate::pdf::File<'_>,
             node: &crate::pdf::Object,
             out: &mut Vec<u32>,
+            seen: &mut HashSet<u32>,
             depth: usize,
         ) {
             if depth > 64 {
@@ -7480,6 +8381,12 @@ fn font_to_unicode(
             let Ok(crate::pdf::Object::Array(items)) = file.resolve(kids) else { return };
             for kid in items {
                 let crate::pdf::Object::Reference(number, _) = kid else { continue };
+                // A page tree that names the same child at every level is a
+                // DAG, not a tree — the depth cap alone lets that double the
+                // work at every level instead of stopping it. Found by audit.
+                if !seen.insert(number) {
+                    continue;
+                }
                 let Ok(resolved) = file.object(number) else { continue };
                 let is_page = resolved
                     .as_dict()
@@ -7489,7 +8396,7 @@ fn font_to_unicode(
                 if is_page {
                     out.push(number);
                 } else {
-                    walk(file, &resolved, out, depth + 1);
+                    walk(file, &resolved, out, seen, depth + 1);
                 }
             }
         }
@@ -7505,7 +8412,7 @@ fn font_to_unicode(
                 .ok_or_else(|| PdfError::InvalidArgument("the file has no page tree".into()))?,
         )?;
         let mut numbers = Vec::new();
-        walk(file, &pages, &mut numbers, 0);
+        walk(file, &pages, &mut numbers, &mut HashSet::new(), 0);
         numbers.into_iter().nth(page_index).ok_or_else(|| {
             PdfError::InvalidArgument(format!("the file has no page {}", page_index + 1))
         })
@@ -7590,7 +8497,19 @@ fn font_to_unicode(
     /// in an old vault was sealed under the same passcode as the new one and
     /// describes pages this document still has — and because a locked document
     /// must be saved as a full copy anyway, which is what actually compacts it.
-    fn write_vault(&mut self, vault: &Vault) -> Result<()> {
+    ///
+    /// **`dek` re-binds `pages` and `items` before anything is written** — see
+    /// `Vault::seal_structure`. `repair_locks` is the one caller with no
+    /// passcode in hand at all (it only ever drops a lock nothing can find its
+    /// way back to, never opens one); rather than write a binding that no
+    /// longer matches and have the next real unlock call that tampering, the
+    /// binding is cleared instead, and picked up again on this document's next
+    /// passcode-bearing write. Found by audit.
+    fn write_vault(&mut self, vault: &mut Vault, dek: Option<&Secret>) -> Result<()> {
+        match dek {
+            Some(dek) => vault.seal_structure(dek)?,
+            None => vault.bind = None,
+        }
         // What was cached is now what is being replaced.
         if let Ok(mut cached) = self.vault.lock() {
             *cached = Some(Ok(Some(vault.clone())));
@@ -8881,6 +9800,20 @@ fn matrix_operator(m: &[f32; 6], operator: &str) -> Result<Vec<u8>> {
     Ok(format!("{} {operator}", parts?.join(" ")).into_bytes())
 }
 
+/// A show-text operand as a hex string — safe for any byte value, unlike a
+/// literal string, which would need its parentheses and backslashes escaped
+/// and a code that happens to contain one is not this function's problem to
+/// notice.
+fn hex_string_operand(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() * 2 + 2);
+    out.push(b'<');
+    for b in bytes {
+        out.extend_from_slice(format!("{b:02X}").as_bytes());
+    }
+    out.push(b'>');
+    out
+}
+
 /// The graphics and text state set before an operation, as the bytes that set
 /// it — colour, line width, the `gs` that carries transparency, the font.
 ///
@@ -9132,7 +10065,7 @@ fn annots_counts(file: &crate::pdf::File<'_>) -> Result<Vec<usize>> {
             .ok_or_else(|| PdfError::InvalidArgument("the file has no page tree".into()))?,
     )?;
     let mut flat = Vec::new();
-    collect_pages(file, &pages, &mut flat, 0)?;
+    collect_pages(file, &pages, &mut flat, &mut HashSet::new(), 0)?;
     Ok(flat
         .iter()
         .map(|page| {
@@ -9152,6 +10085,7 @@ fn collect_pages(
     file: &crate::pdf::File<'_>,
     node: &crate::pdf::Object,
     out: &mut Vec<crate::pdf::Object>,
+    seen: &mut HashSet<u32>,
     depth: usize,
 ) -> Result<()> {
     use crate::pdf::Object;
@@ -9169,8 +10103,17 @@ fn collect_pages(
     let Some(kids) = dict.get(b"Kids") else { return Ok(()) };
     if let Object::Array(items) = file.resolve(kids)? {
         for kid in items {
+            // A page tree that names the same child at every level is a DAG,
+            // not a tree — visited by reference, not by depth alone, or the
+            // same double-per-level blowup the depth cap does not stop.
+            // Found by audit.
+            if let Object::Reference(number, _) = &kid {
+                if !seen.insert(*number) {
+                    continue;
+                }
+            }
             let kid = file.resolve(&kid)?;
-            collect_pages(file, &kid, out, depth + 1)?;
+            collect_pages(file, &kid, out, seen, depth + 1)?;
         }
     }
     Ok(())
@@ -9836,6 +10779,19 @@ impl PdfiumDocument {
 
         // ------------------------------------------------------------- apply --
 
+        // **Set before the first destructive call, not after the last one.**
+        // Removal and rewrite happen through PDFium's live object model one
+        // object at a time, and nothing here can undo an earlier one if a
+        // later one — or `FPDFPage_GenerateContent`, or the form-cut pass
+        // below — fails partway through. A failure at that point must still
+        // force a full copy on the next save: an incremental one would leave
+        // the pre-redaction revision, words included, sitting in the file
+        // right behind the one that is supposed to have removed them. Wrong
+        // in the safe direction on a redaction that fails outright and never
+        // touched a single object — an unneeded full copy — rather than the
+        // other one. Found by audit.
+        self.redacted = true;
+
         for (position, act) in &plan {
             let handle = objects[*position];
             match act {
@@ -9905,9 +10861,6 @@ impl PdfiumDocument {
         }
 
         self.touch();
-        // Set even when the rectangle matched nothing. Whether an incremental
-        // save is safe is not a judgement to make from one rectangle's yield.
-        self.redacted = true;
         Ok(report)
     }
 }
@@ -10341,7 +11294,7 @@ impl PdfiumDocument {
             .ok_or_else(|| PdfError::InvalidArgument("the page is not a dictionary".into()))?;
         let mut replacements: Vec<(u32, Vec<u8>)> = Vec::new();
         let mut extras: Vec<(u32, Vec<u8>)> = Vec::new();
-        let mut next = file.numbers().max().unwrap_or(0) + 1;
+        let mut next = file.next_object_number()?;
         let mut page_changed = false;
         // The page's stream, spliced where a drawing is given a name of its
         // own; written back only if something was.
@@ -11075,6 +12028,18 @@ fn bounding_box(annotation: &Annotation) -> Option<Rect> {
             rect.left.max(rect.right),
             rect.top.max(rect.bottom),
         ),
+        Annotation::Fill { outline, width, .. } => {
+            let pad = (width / 2.0).max(0.0);
+            for p in outline {
+                grow(p.x - pad, p.y - pad, p.x + pad, p.y + pad);
+            }
+        }
+        Annotation::Link { rect, .. } => grow(
+            rect.left.min(rect.right),
+            rect.top.min(rect.bottom),
+            rect.left.max(rect.right),
+            rect.top.max(rect.bottom),
+        ),
     }
     bounds
 }
@@ -11283,6 +12248,14 @@ impl PdfiumDocument {
             Annotation::Ink { .. } => ANNOT_INK,
             Annotation::Note { .. } => ANNOT_TEXT,
             Annotation::Image { .. } => ANNOT_STAMP,
+            // `FPDFAnnot_IsObjectSupportedSubtype` names only ink and stamp as
+            // supported for object attachment — a `/Polygon` shell built the
+            // same way as a fill path silently refuses to accept its own
+            // object. Sharing Image's subtype is exactly why `read_annotation`
+            // tries the picture reader before the fill reader below: the two
+            // are told apart by what they carry, not by which subtype they are.
+            Annotation::Fill { .. } => ANNOT_STAMP,
+            Annotation::Link { .. } => ANNOT_LINK,
             // Routed away in `add_annotation`: text is page content, not an
             // annotation, and there is no subtype that would make it one.
             Annotation::Text { .. } => {
@@ -11326,6 +12299,19 @@ impl PdfiumDocument {
             return self.fill_image_annotation(annot, &rect, rgba, *width, *height);
         }
 
+        // No colour, no border — a link is invisible ink, clickable without
+        // drawing a box around the words it covers. Handled here, before the
+        // colour match below, the same way `Image` is handled above it.
+        if let Annotation::Link { uri, .. } = annotation {
+            unsafe {
+                bindings.FPDFAnnot_SetBorder(annot, 0.0, 0.0, 0.0);
+                if bindings.FPDFAnnot_SetURI(annot, uri) == 0 {
+                    return Err(PdfError::Pdfium("could not set the link's address".into()));
+                }
+            }
+            return Ok(());
+        }
+
         let colour = match annotation {
             Annotation::Highlight { color, .. }
             | Annotation::Underline { color, .. }
@@ -11334,7 +12320,9 @@ impl PdfiumDocument {
             | Annotation::Ink { color, .. }
             | Annotation::Note { color, .. }
             | Annotation::Text { color, .. } => *color,
+            Annotation::Fill { stroke_color, .. } => *stroke_color,
             Annotation::Image { .. } => unreachable!("returned above"),
+            Annotation::Link { .. } => unreachable!("returned above"),
         };
         unsafe {
             bindings.FPDFAnnot_SetColor(
@@ -11411,11 +12399,81 @@ impl PdfiumDocument {
                     }
                 }
             }
+            Annotation::Fill { outline, fill_color, width, .. } => {
+                self.build_fill_path(annot, outline, *fill_color, colour, *width, space)?;
+            }
             Annotation::Note { contents, .. } => {
                 unsafe { bindings.FPDFAnnot_SetStringValue_str(annot, "Contents", contents) };
             }
+            Annotation::Link { .. } => unreachable!("returned above"),
         }
 
+        Ok(())
+    }
+
+    /// The interior a `Fill` annotation carries and an `Ink` one cannot: a
+    /// real filled path, given to the annotation the same way
+    /// [`PdfiumDocument::fill_image_annotation`] gives it a picture — as a
+    /// page object of its own, built through PDFium's path API rather than
+    /// anything `/Vertices`-shaped, because the embedder API can read a
+    /// polygon's vertices but never write them.
+    fn build_fill_path(
+        &self,
+        annot: FPDF_ANNOTATION,
+        outline: &[Point],
+        fill_color: Color,
+        stroke_color: Color,
+        width: f32,
+        space: &PageSpace,
+    ) -> Result<()> {
+        if outline.len() < 3 {
+            return Err(PdfError::InvalidArgument(
+                "a filled shape needs at least three points".into(),
+            ));
+        }
+        let bindings = pdfium()?.bindings();
+
+        let (x0, y0) = space.to_pdf(outline[0].x, outline[0].y);
+        let path = unsafe { bindings.FPDFPageObj_CreateNewPath(x0, y0) };
+        if path.is_null() {
+            return Err(PdfError::Pdfium("could not create a fill path".into()));
+        }
+        for p in &outline[1..] {
+            let (x, y) = space.to_pdf(p.x, p.y);
+            unsafe { bindings.FPDFPath_LineTo(path, x, y) };
+        }
+        unsafe { bindings.FPDFPath_Close(path) };
+        unsafe {
+            bindings.FPDFPageObj_SetFillColor(
+                path,
+                fill_color.r as c_uint,
+                fill_color.g as c_uint,
+                fill_color.b as c_uint,
+                fill_color.a as c_uint,
+            );
+            bindings.FPDFPageObj_SetStrokeColor(
+                path,
+                stroke_color.r as c_uint,
+                stroke_color.g as c_uint,
+                stroke_color.b as c_uint,
+                stroke_color.a as c_uint,
+            );
+            bindings.FPDFPageObj_SetStrokeWidth(path, width);
+            bindings.FPDFPath_SetDrawMode(path, FILLMODE_WINDING, 1);
+        }
+        if unsafe { bindings.FPDFAnnot_AppendObject(annot, path) } == 0 {
+            return Err(PdfError::Pdfium("the fill could not be attached".into()));
+        }
+        unsafe {
+            bindings.FPDFAnnot_SetColor(
+                annot,
+                COLORTYPE_INTERIOR,
+                fill_color.r as c_uint,
+                fill_color.g as c_uint,
+                fill_color.b as c_uint,
+                fill_color.a as c_uint,
+            )
+        };
         Ok(())
     }
 
@@ -11795,19 +12853,83 @@ impl PdfiumDocument {
                 }
             }
 
-            ANNOT_STAMP => match self.read_image_annotation(annot, space) {
-                Some(image) => image,
+            // A picture and a fill are both a `/Stamp` carrying one page
+            // object; which this is turns on whether that object is an image
+            // or a path, not on the subtype.
+            ANNOT_STAMP => match self
+                .read_image_annotation(annot, space)
+                .or_else(|| self.read_fill_annotation(annot, space))
+            {
+                Some(mark) => mark,
                 // Not one this engine placed — some other stamp, or a shape
                 // this cannot read back. Left exactly as it is, like every
                 // other kind below.
                 None => return Ok(None),
             },
 
-            // Widgets, links, everything else: left exactly as they are.
+            ANNOT_LINK => match self.read_link_annotation(annot, space) {
+                Some(mark) => mark,
+                // A `/GoTo` or anything else this engine did not write —
+                // left exactly as it is, like every other kind above.
+                None => return Ok(None),
+            },
+
+            // Widgets, everything else: left exactly as they are.
             _ => return Ok(None),
         };
 
         Ok(Some(annotation))
+    }
+
+    /// A `/Link` annotation's own address, read back — the inverse of
+    /// `fill_annotation`'s `Annotation::Link` branch. `None` for anything
+    /// but a plain `/URI` action, which is the only kind this engine ever
+    /// writes.
+    fn read_link_annotation(&self, annot: FPDF_ANNOTATION, space: &PageSpace) -> Option<Annotation> {
+        let bindings = pdfium().ok()?.bindings();
+        let link = unsafe { bindings.FPDFAnnot_GetLink(annot) };
+        if link.is_null() {
+            return None;
+        }
+        let action = unsafe { bindings.FPDFLink_GetAction(link) };
+        if action.is_null() || unsafe { bindings.FPDFAction_GetType(action) } != PDFACTION_URI {
+            return None;
+        }
+
+        let document = self.document.handle();
+        let needed =
+            unsafe { bindings.FPDFAction_GetURIPath(document, action, std::ptr::null_mut(), 0) };
+        if needed == 0 {
+            return None;
+        }
+        let mut buffer = vec![0u8; needed as usize];
+        let written = unsafe {
+            bindings.FPDFAction_GetURIPath(document, action, buffer.as_mut_ptr() as *mut c_void, needed)
+        };
+        if written == 0 {
+            return None;
+        }
+        buffer.truncate(written as usize);
+        while buffer.last() == Some(&0) {
+            buffer.pop();
+        }
+        let uri = String::from_utf8(buffer).ok()?;
+
+        let mut rect = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+        if unsafe { bindings.FPDFAnnot_GetRect(annot, &mut rect) } == 0 {
+            return None;
+        }
+        let (left, top) = space.to_top_left(rect.left, rect.top);
+        let (right, bottom) = space.to_top_left(rect.right, rect.bottom);
+        Some(Annotation::Link {
+            rect: Rect {
+                left: left.min(right),
+                top: top.min(bottom),
+                right: left.max(right),
+                bottom: top.max(bottom),
+            },
+            uri,
+        })
     }
 
     /// A `/Stamp` annotation's picture, read back — the inverse of
@@ -11861,6 +12983,72 @@ impl PdfiumDocument {
             width: width as u32,
             height: height as u32,
         })
+    }
+
+    /// A `Fill` annotation's boundary and colours, read back — the inverse of
+    /// [`PdfiumDocument::build_fill_path`]. `None` for a polygon that is not
+    /// exactly one path object, which is not one this engine placed.
+    fn read_fill_annotation(&self, annot: FPDF_ANNOTATION, space: &PageSpace) -> Option<Annotation> {
+        let bindings = pdfium().ok()?.bindings();
+        if unsafe { bindings.FPDFAnnot_GetObjectCount(annot) } != 1 {
+            return None;
+        }
+        let object = unsafe { bindings.FPDFAnnot_GetObject(annot, 0) };
+        if object.is_null()
+            || unsafe { bindings.FPDFPageObj_GetType(object) }
+                != pdfium_render::prelude::FPDF_PAGEOBJ_PATH as i32
+        {
+            return None;
+        }
+
+        let count = unsafe { bindings.FPDFPath_CountSegments(object) };
+        if count <= 0 {
+            return None;
+        }
+        let mut outline = Vec::new();
+        for i in 0..count {
+            let segment = unsafe { bindings.FPDFPath_GetPathSegment(object, i) };
+            if segment.is_null() {
+                continue;
+            }
+            let (mut x, mut y) = (0.0f32, 0.0f32);
+            if unsafe { bindings.FPDFPathSegment_GetPoint(segment, &mut x, &mut y) } == 0 {
+                continue;
+            }
+            let (px, py) = space.to_top_left(x, y);
+            outline.push(Point { x: px, y: py });
+        }
+        if outline.len() < 3 {
+            return None;
+        }
+
+        let (mut fr, mut fg, mut fb, mut fa) = (0u32, 0u32, 0u32, 0u32);
+        let fill_color = if unsafe {
+            bindings.FPDFPageObj_GetFillColor(object, &mut fr, &mut fg, &mut fb, &mut fa)
+        } != 0
+        {
+            Color { r: fr as u8, g: fg as u8, b: fb as u8, a: fa as u8 }
+        } else {
+            DEFAULT_MARK_COLOUR
+        };
+
+        let (mut sr, mut sg, mut sb, mut sa) = (0u32, 0u32, 0u32, 0u32);
+        let stroke_color = if unsafe {
+            bindings.FPDFPageObj_GetStrokeColor(object, &mut sr, &mut sg, &mut sb, &mut sa)
+        } != 0
+        {
+            Color { r: sr as u8, g: sg as u8, b: sb as u8, a: sa as u8 }
+        } else {
+            fill_color
+        };
+
+        let mut width = DEFAULT_INK_WIDTH_POINTS;
+        let mut w = 0.0f32;
+        if unsafe { bindings.FPDFPageObj_GetStrokeWidth(object, &mut w) } != 0 && w > 0.0 {
+            width = w;
+        }
+
+        Some(Annotation::Fill { outline, fill_color, stroke_color, width })
     }
 
     fn read_colour(&self, annot: FPDF_ANNOTATION) -> Color {
@@ -12770,5 +13958,85 @@ mod vault_cache_tests {
             assert!(started.elapsed() < std::time::Duration::from_millis(5), "it read the file again");
             assert_eq!(first.to_string(), second.to_string());
         });
+    }
+}
+
+#[cfg(test)]
+mod page_tree_dag_tests {
+    use super::*;
+
+    /// A page tree whose every level names the same next node twice — a DAG,
+    /// not a tree. Without a visited set, `depth` levels of that doubles the
+    /// work `depth` times over: at `depth` = 20 that is over two million
+    /// redundant resolves to reach one real page.
+    fn dag_page_tree(depth: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut offsets = Vec::new();
+        out.extend_from_slice(b"%PDF-1.7\n");
+
+        let total_objects = depth + 2; // catalog + `depth` Pages nodes + 1 Page
+        let leaf_number = total_objects;
+
+        offsets.push(out.len());
+        out.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        for level in 0..depth {
+            let number = 2 + level;
+            let child = number + 1;
+            offsets.push(out.len());
+            out.extend_from_slice(
+                format!(
+                    "{number} 0 obj\n<< /Type /Pages /Kids [{child} 0 R {child} 0 R] /Count 1 >>\nendobj\n"
+                )
+                .as_bytes(),
+            );
+        }
+
+        offsets.push(out.len());
+        out.extend_from_slice(
+            format!("{leaf_number} 0 obj\n<< /Type /Page /Parent {} 0 R >>\nendobj\n", leaf_number - 1)
+                .as_bytes(),
+        );
+
+        let xref_at = out.len();
+        out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", total_objects + 1).as_bytes());
+        for offset in &offsets {
+            out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        out.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF",
+                total_objects + 1
+            )
+            .as_bytes(),
+        );
+        out
+    }
+
+    /// **Found by audit.** The depth cap alone lets a DAG double the walk at
+    /// every level; a visited set collapses it back to one visit per node.
+    #[test]
+    fn a_page_tree_that_names_the_same_child_twice_is_walked_once_not_exponentially() {
+        const DEPTH: u32 = 20;
+        let bytes = dag_page_tree(DEPTH);
+        let file = crate::pdf::File::parse(&bytes).expect("parse");
+        let root = file
+            .resolve(file.trailer().get(b"Root").expect("root"))
+            .expect("resolve root");
+        let pages = file
+            .resolve(root.as_dict().and_then(|d| d.get(b"Pages")).expect("pages"))
+            .expect("resolve pages");
+
+        let mut out = Vec::new();
+        let started = std::time::Instant::now();
+        collect_pages(&file, &pages, &mut out, &mut HashSet::new(), 0).expect("collect");
+        let elapsed = started.elapsed();
+
+        assert_eq!(out.len(), 1, "the same page reached twice at every level must be counted once");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "collecting pages took {elapsed:?} — a DAG doubled the work at every level instead of \
+             being deduplicated"
+        );
     }
 }

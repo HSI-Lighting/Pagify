@@ -798,6 +798,9 @@ pub fn decode(dict: &super::Dict, raw: &[u8]) -> Option<Vec<u8>> {
             .collect::<Option<Vec<_>>>()?,
         _ => return None,
     };
+    if filters.len() > MAX_FILTER_CHAIN {
+        return None;
+    }
     let parms: Vec<Option<super::Dict>> = match dict.get(b"DecodeParms") {
         None | Some(Object::Null) => vec![None; filters.len()],
         Some(Object::Dict(d)) => {
@@ -1226,6 +1229,16 @@ fn lzw_decode(data: &[u8], early_change: bool, limit: u64) -> Option<Vec<u8>> {
 /// stopped a long way short of the memory it was aiming for.
 pub const INFLATED_LIMIT: u64 = 128 * 1024 * 1024;
 
+/// The longest `/Filter` chain this will run.
+///
+/// Every stage is capped at [`INFLATED_LIMIT`] on its own, but that bounds
+/// one hop, not the chain — a `/Filter` array can name as many stages as an
+/// attacker likes, and one deflated-inside-deflated-inside-deflated stream
+/// pays out close to the limit at every single one, for a total cost of
+/// stages × the limit from a small file. No real document nests more than a
+/// couple of filters; eight is generous headroom. Found by audit.
+pub const MAX_FILTER_CHAIN: usize = 8;
+
 /// Deflate a stream back, at the default level.
 pub fn encode(data: &[u8]) -> Result<Vec<u8>> {
     use std::io::Write;
@@ -1310,6 +1323,52 @@ mod tests {
         );
         dict.remove(b"DecodeParms");
         assert!(decode(&dict, &hex).is_none());
+    }
+
+    /// `RunLengthDecode`, nested `stages` deep: applying it once peels off
+    /// the outermost layer and reveals the encoding one layer in, so a chain
+    /// of exactly `stages` copies of the filter decodes it all the way down
+    /// to `payload`.
+    fn nested_run_length(stages: usize, payload: u8) -> Vec<u8> {
+        let mut bytes = vec![payload];
+        for _ in 0..stages {
+            let len = (bytes.len() - 1) as u8;
+            let mut next = vec![len];
+            next.extend_from_slice(&bytes);
+            bytes = next;
+        }
+        bytes
+    }
+
+    /// **A `/Filter` chain longer than this refuses outright.** Each stage is
+    /// bounded to [`INFLATED_LIMIT`] on its own, but that bounds one hop, not
+    /// the chain — an attacker naming enough stages pays out close to the
+    /// limit at every one of them, for a cost of stages × the limit from a
+    /// tiny file. Found by audit.
+    #[test]
+    fn a_filter_chain_longer_than_the_cap_is_refused() {
+        let mut dict = super::super::Dict(Vec::new());
+        let chain_of = |n: usize| {
+            Object::Array(std::iter::repeat(Object::Name(b"RunLengthDecode".to_vec())).take(n).collect())
+        };
+
+        // At the cap, a chain this deep is ordinary, if pointless — it still
+        // decodes all the way through.
+        dict.set(b"Filter", chain_of(MAX_FILTER_CHAIN));
+        let at_cap = nested_run_length(MAX_FILTER_CHAIN, 0x41);
+        assert_eq!(
+            decode(&dict, &at_cap).as_deref(),
+            Some(&[0x41][..]),
+            "a chain at the cap was refused"
+        );
+
+        // One filter past it refuses outright, even though the same nested
+        // encoding one layer deeper is just as decodable — the cap is on the
+        // chain's length, not on whether the chain would have worked.
+        let over = MAX_FILTER_CHAIN + 1;
+        dict.set(b"Filter", chain_of(over));
+        let past_cap = nested_run_length(over, 0x41);
+        assert!(decode(&dict, &past_cap).is_none(), "a chain past the cap was decoded anyway");
     }
 
     /// **The specification's own example** (ISO 32000, 7.4.4.2): the input

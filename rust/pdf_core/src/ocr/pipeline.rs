@@ -113,6 +113,12 @@ pub fn rasterise(page: &dyn Page, dpi: f32) -> Result<GreyImage> {
     if width == 0 || height == 0 {
         return Err(PdfError::InvalidArgument("ocr: page has no area".into()));
     }
+    // The same cap every other render path is held to — checked *before* the
+    // allocation below, not just inside `RenderTarget::new`, which only
+    // refuses a buffer already sized. A page can declare whatever `MediaBox`
+    // it likes, and at 300 dpi a hostile one would otherwise force a
+    // multi-gigabyte allocation before ever being told no. Found by audit.
+    crate::render::bitmap::validate_dimensions(width, height)?;
 
     let mut pixels = vec![0u8; width as usize * height as usize * 4];
     {
@@ -500,6 +506,37 @@ mod tests {
             }
         }
         assert!(Occupied::of(&Blank).is_empty(), "a space was treated as occupied text");
+    }
+
+    /// A page can declare whatever `MediaBox` it likes, and at 300 dpi a
+    /// hostile one asks for gigabytes before a single pixel is drawn.
+    /// `rasterise` must refuse before allocating, the same cap every other
+    /// render path is already held to. Found by audit.
+    #[test]
+    fn a_page_declaring_an_absurd_size_is_refused_before_it_is_rasterised() {
+        struct Huge;
+        impl Page for Huge {
+            fn size(&self) -> crate::document::PageSize {
+                crate::document::PageSize { width_pt: 5_000.0, height_pt: 5_000.0 }
+            }
+            fn render_into(
+                &self,
+                _: &RenderRequest,
+                _: &mut crate::render::RenderTarget<'_>,
+            ) -> Result<()> {
+                panic!("rendering must never be reached for a page this large")
+            }
+            fn text(&self) -> Result<String> {
+                Ok(String::new())
+            }
+            fn characters(&self) -> Result<crate::document::PageCharacters> {
+                Ok(crate::document::PageCharacters { text: String::new(), boxes: Vec::new() })
+            }
+        }
+        match rasterise(&Huge, 300.0) {
+            Err(PdfError::RenderTooLarge { .. }) => {}
+            other => panic!("expected RenderTooLarge, got {other:?}"),
+        }
     }
 
     /// A tile's boxes are in tile coordinates until they are moved. This is the

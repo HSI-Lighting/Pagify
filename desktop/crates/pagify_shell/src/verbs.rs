@@ -154,6 +154,9 @@ pub enum Verb {
     Close { force: bool },
     Save,
     SaveAs(PathBuf),
+    /// Ask for a destination, rather than being told one. `saveas` with no
+    /// path — see [`Verb::OpenDialog`], which is the same idea for opening.
+    SaveAsDialog,
     Page(PageTarget),
     Zoom(ZoomTarget),
     /// Rotate the *page*, in degrees clockwise. Quarter turns only — PDF stores
@@ -312,6 +315,20 @@ pub enum Verb {
     /// `redact`, because a flag that turns "destroy" into "cover" is exactly
     /// the kind of thing that gets set by accident.
     Whiteout,
+    /// Whether the Rectangle and Circle drawing tools fill the shape solid or
+    /// leave it hollow — chosen before drawing, not after.
+    ///
+    /// A toggle rather than a two-argument command (`fill on` / `fill off`):
+    /// the ribbon button that runs this has one job, to flip whatever the
+    /// state already is, and a caller who wants a specific state can just
+    /// check the reply.
+    ToggleFill,
+    /// Arm the Draw tab's Arrow tool — a line with an arrowhead pre-picked
+    /// on its end. Not a kernel word: `cad_kernel`'s own parser has no
+    /// concept of an arrow, only of a line, so this is Pagify's own rather
+    /// than a `Command::SetTool(ToolKind::_)` the kernel already recognises
+    /// the way `line`/`circle`/`pline` are.
+    DrawArrow,
     /// Find things on the pages somebody would not want to send out.
     ///
     /// `redact` is the form that acts on them. Two words rather than one for
@@ -357,6 +374,23 @@ pub enum Verb {
     Find(String),
     /// Step to the next or previous match.
     FindStep { forward: bool },
+    /// Open the Search & Replace panel.
+    Replace,
+    /// Open the Check Spelling panel.
+    Spelling,
+    /// Add a bookmark for the current page.
+    Bookmark,
+    /// Arm the Article Box tool, or (with a selection already made) mark it.
+    ArticleBox,
+    /// Arm the Web Links tool, or (with a selection already made) ask for
+    /// the address to link it to.
+    Weblinks,
+    /// Join a text selection spanning more than one line or block into one
+    /// editable paragraph, or (with nothing selected) say how to.
+    JoinText,
+    /// Arm Match Properties: the next text selection becomes the sample to
+    /// copy from, and every one after that is retyped to match it.
+    MatchProperties,
     /// Copy the current text selection.
     Copy,
     /// Rebuild this page's reading order from its geometry.
@@ -395,6 +429,14 @@ pub enum Verb {
 
     /// Write words onto the page. Click where they go, then type them.
     AddText(String),
+
+    /// Place a picture onto the page. Click where it goes.
+    ///
+    /// `None` opens a file dialog; `Some(path)` is the scripted form, exactly
+    /// as `signature upload` takes one — a picture cannot be typed the way
+    /// words can, so a button press and a written command both have to name a
+    /// file rather than carry the content itself.
+    AddImage(Option<PathBuf>),
 
     /// How pages are arranged: one per row, or two as a spread.
     SetLayout(crate::reader::Layout),
@@ -684,12 +726,10 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("accesscheck", "the accessibility phase", "the Full Check tool"),
     ("accessreport", "the accessibility phase", "the Accessibility Report tool"),
     ("add3d", "the editing phase", "the Add 3D tool"),
-    ("addimage", "the editing phase", "the Add Images tool"),
     ("addlink", "the editing phase", "the Link tool"),
     ("addshape", "the editing phase", "the Add Shapes tool"),
     ("alttext", "the accessibility phase", "the Set Alternate Text tool"),
     ("areahighlight", "the annotation phase", "the Area Highlight tool"),
-    ("articlebox", "the editing phase", "the Add Article Box tool"),
     ("assistant", "the viewing phase", "the Assistant tool"),
     ("attach", "the editing phase", "the File Attachment tool"),
     ("attachcomment", "the annotation phase", "the File tool"),
@@ -697,7 +737,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("autoscroll", "the viewing phase", "the AutoScroll tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("blankdoc", "the conversion phase", "the Blank tool"),
-    ("bookmark", "the navigation phase", "the Bookmark tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
     ("calculator", "the annotation phase", "the Accounting Calculator tool"),
     ("callout", "the annotation phase", "the Callout tool"),
@@ -740,7 +779,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("inserttext", "the annotation phase", "the Insert Text tool"),
     ("interleave", "the page phase", "the Interleaving tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
-    ("jointext", "the editing phase", "the Link & Join Text tool"),
     ("keeptool", "the annotation phase", "the Keep Tool Selected tool"),
     ("managecomments", "the annotation phase", "the Manage Comments tool"),
     ("markredact", "the protection phase", "the Mark for Redaction tool"),
@@ -756,7 +794,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("readingoptions", "the accessibility phase", "the Reading Options tool"),
     ("readingorder", "the accessibility phase", "the Reading Order tool"),
     ("rearrange", "the page phase", "the Rearrange tool"),
-    ("replace", "the editing phase", "the Search & Replace tool"),
     ("replacepage", "the page phase", "the Replace tool"),
     ("replacetext", "the annotation phase", "the Replace Text tool"),
     ("reportissue", "the documentation phase", "the Report an Issue tool"),
@@ -771,7 +808,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("shortcuts", "the documentation phase", "the Keyboard Shortcuts tool"),
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
     ("snapshot", "the capture phase", "the Snapshot tool"),
-    ("spelling", "the editing phase", "the Check Spelling tool"),
     ("split", "the page phase", "the Split tool"),
     ("stamp", "the annotation phase", "the Stamp tool"),
     ("tagspanel", "the accessibility phase", "the Tags Panel tool"),
@@ -790,7 +826,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("viewcontinuousfacing", "the viewing phase", "the Continuous Facing tool"),
     ("viewsetting", "the viewing phase", "the View Setting tool"),
     ("viewsplit", "the viewing phase", "the Split tool"),
-    ("weblinks", "the editing phase", "the Web Links tool"),
     ("wordcount", "the viewing phase", "the Word Count tool"),
 ];
 
@@ -849,6 +884,8 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         },
         "secure" => SecureOptions::parse(tail).map(Verb::Secure),
         "whiteout" => Ok(Verb::Whiteout),
+        "fill" => Ok(Verb::ToggleFill),
+        "arrow" => Ok(Verb::DrawArrow),
         "signrectangle" => Ok(Verb::SignRectangle),
         "signline" => Ok(Verb::SignLine),
         // **Not `move`.** That word belongs to the drawing kernel, where it
@@ -998,6 +1035,14 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         // box is four numbers nobody can picture.
         "edittext" => Ok(Verb::EditText),
         "addtext" | "typewriter" => Ok(Verb::AddText(tail.to_string())),
+        "addimage" => {
+            let tail = tail.trim();
+            if tail.is_empty() {
+                Ok(Verb::AddImage(None))
+            } else {
+                Ok(Verb::AddImage(Some(resolve_path(tail))))
+            }
+        }
         "viewsingle" => Ok(Verb::SetLayout(crate::reader::Layout::Single)),
         "viewfacing" => Ok(Verb::SetLayout(crate::reader::Layout::Facing)),
         "viewcover" => Ok(Verb::SetLayout(crate::reader::Layout::FacingWithCover)),
@@ -1090,7 +1135,9 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         "save" => Ok(Verb::Save),
         "saveas" => {
             if tail.is_empty() {
-                Err("usage: saveas <path.pdf>".into())
+                // No path is not an error: it is a request for the file
+                // picker, the same as bare `open` — see `Verb::OpenDialog`.
+                Ok(Verb::SaveAsDialog)
             } else {
                 Ok(Verb::SaveAs(resolve_path(tail)))
             }
@@ -1190,6 +1237,13 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         "find" => Err("usage: find <text>".into()),
         "findnext" | "fn" => Ok(Verb::FindStep { forward: true }),
         "findprev" | "fp" => Ok(Verb::FindStep { forward: false }),
+        "replace" => Ok(Verb::Replace),
+        "spelling" => Ok(Verb::Spelling),
+        "bookmark" => Ok(Verb::Bookmark),
+        "articlebox" => Ok(Verb::ArticleBox),
+        "weblinks" => Ok(Verb::Weblinks),
+        "jointext" => Ok(Verb::JoinText),
+        "matchproperties" => Ok(Verb::MatchProperties),
         "reflow" => Ok(Verb::Reflow),
         "note" => {
             let text = rest.join(" ");
@@ -1335,7 +1389,8 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         // tests/command_box.rs is what caught every one of them.
         "extract", "import", "deletepage", "delpage", "insertpage", "movepage",
         "highlight", "hl", "note", "calibrate", "cal", "pagescale", "measure",
-        "find", "findnext", "fn", "findprev", "fp", "reflow",
+        "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
+        "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",

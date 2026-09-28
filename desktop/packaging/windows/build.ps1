@@ -14,7 +14,32 @@ if (-not (Test-Path $Dll)) {
     throw "No Windows PDFium at $Dll - run tools/fetch_pdfium.sh (or the .ps1) first."
 }
 
-cargo build --release -p pagify_app
+# The same three release gates macOS runs before it will build (security
+# audit M-6) — checksums, advisories, no sockets — via Git Bash, which
+# building this workspace on Windows already requires for fetch_pdfium.sh.
+# Not always on PATH even when installed, so the well-known install location
+# is a fallback rather than a second requirement.
+$Bash = Get-Command bash -ErrorAction SilentlyContinue
+if (-not $Bash) {
+    $Fallback = "$env:ProgramFiles\Git\bin\bash.exe"
+    if (Test-Path $Fallback) { $Bash = $Fallback } else { $Bash = $null }
+}
+if (-not $Bash) {
+    throw "Git Bash is required to run the release gates (tools/*.sh) and was not found on PATH or at $env:ProgramFiles\Git\bin\bash.exe."
+}
+function Invoke-Gate($Name, $Script) {
+    Write-Host "==> $Name"
+    & $Bash $Script
+    if ($LASTEXITCODE -ne 0) { throw "$Name failed" }
+}
+Invoke-Gate "verify third_party" (Join-Path $Root "tools\verify_third_party.sh")
+Invoke-Gate "audit dependencies" (Join-Path $Root "tools\audit.sh")
+Invoke-Gate "no sockets" (Join-Path $Root "tools\no_sockets.sh")
+
+# `--locked`: the gates above just ran against `Cargo.lock` as it stands, so
+# the build has to use exactly that lock, not update it and build something
+# the gate never saw. Found by audit.
+cargo build --release -p pagify_app --locked
 if ($LASTEXITCODE -ne 0) { throw "build failed" }
 
 Remove-Item -Recurse -Force $Out -ErrorAction SilentlyContinue

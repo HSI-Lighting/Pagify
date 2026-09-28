@@ -162,6 +162,31 @@ impl<'a> File<'a> {
         self.offsets.keys().copied()
     }
 
+    /// One past the highest object number this file uses — where a new
+    /// object can go without colliding with an existing one.
+    ///
+    /// Checked, because the file is somebody else's and can declare an
+    /// object numbered right at `u32::MAX`; a plain `+ 1` there wraps to `0`
+    /// in a release build (this crate does not turn on overflow checks) and
+    /// hands the new object the number every writer reserves for the
+    /// free-list head, rather than refusing outright. Found by audit.
+    pub fn next_object_number(&self) -> Result<u32> {
+        self.numbers().max().unwrap_or(0).checked_add(1).ok_or_else(|| {
+            PdfError::Unsupported("this file already uses the highest object number a PDF can hold")
+        })
+    }
+
+    /// Where the cross-reference table says an object's own `n g obj` starts.
+    ///
+    /// For a caller that needs the *bytes* an object occupies, not just its
+    /// parsed value — signature validation locates a `/Sig` dictionary's own
+    /// `/Contents` span this way, so it can check that a `/ByteRange` hole is
+    /// exactly that value and nothing else, rather than trusting the numbers
+    /// the dictionary itself supplies.
+    pub fn offset(&self, number: u32) -> Option<usize> {
+        self.offsets.get(&number).copied()
+    }
+
     /// One object, parsed where the table says it is.
     pub fn object(&self, number: u32) -> Result<Object> {
         let at = *self
@@ -246,6 +271,28 @@ impl<'a> File<'a> {
         trailer_edits: &Dict,
         drop: &[u32],
     ) -> Result<Vec<u8>> {
+        self.rewrite_dropping_with_offsets(replacements, extra, trailer_edits, drop)
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// As [`Self::rewrite_dropping`], also handing back where every object —
+    /// `extra` included — actually landed.
+    ///
+    /// **What lets signing stop scanning for its own placeholder.** Nothing
+    /// about this file's *other* content can be trusted to contain no
+    /// decoy that looks like one — a run of zeros wide enough, or the text
+    /// `/ByteRange`, placed earlier in an otherwise ordinary document — so
+    /// the only honest way to say where the placeholder this call just
+    /// wrote actually is is to have written it and kept the offset, never
+    /// to go looking for something shaped like it afterwards. Found by
+    /// audit.
+    pub(crate) fn rewrite_dropping_with_offsets(
+        &self,
+        replacements: &[(u32, Vec<u8>)],
+        extra: &[(u32, Vec<u8>)],
+        trailer_edits: &Dict,
+        drop: &[u32],
+    ) -> Result<(Vec<u8>, Offsets)> {
         let mut out = Vec::with_capacity(self.bytes.len());
 
         // The header, and the binary comment after it that marks the file as
@@ -289,25 +336,41 @@ impl<'a> File<'a> {
             out.extend_from_slice(b"\nendobj\n");
         }
 
-        // One subsection covering everything, which is legal and simpler than
-        // reproducing however many the original happened to have.
-        let highest = written.keys().copied().max().unwrap_or(0);
+        // One subsection per run of consecutive numbers — the same shape
+        // `append_revision` below uses — rather than a single subsection
+        // spanning every number up to the highest one, with an explicit
+        // free row for every gap. A gap is just as free by never being
+        // named in any subsection, and the difference matters: a file that
+        // names one object at, say, a billion is not a sparse document, it
+        // is a bomb — the old approach built a table with a row for every
+        // number in between, gigabytes for a file of a few kilobytes.
+        // Found by audit. Object `0` is always the free-list head, never a
+        // real object, so it is filtered out here — a malformed source
+        // table that claimed one anyway would otherwise collide with the
+        // dedicated entry written for it below.
+        let mut numbers: Vec<u32> = written.keys().copied().filter(|n| *n != 0).collect();
+        numbers.sort_unstable();
+        let highest = numbers.last().copied().unwrap_or(0);
         let xref_at = out.len();
-        out.extend_from_slice(format!("xref\n0 {}\n", highest + 1).as_bytes());
-        out.extend_from_slice(b"0000000000 65535 f \n");
-        for number in 1..=highest {
-            match written.get(&number) {
-                Some(offset) => {
-                    out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes())
-                }
-                // A number the original never used stays free, so nothing can
-                // follow it to an offset that means nothing.
-                None => out.extend_from_slice(b"0000000000 65535 f \n"),
+        out.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n");
+        let mut from = 0;
+        while from < numbers.len() {
+            let mut to = from;
+            while to + 1 < numbers.len() && numbers[to + 1] == numbers[to] + 1 {
+                to += 1;
             }
+            out.extend_from_slice(format!("{} {}\n", numbers[from], to - from + 1).as_bytes());
+            for number in &numbers[from..=to] {
+                out.extend_from_slice(format!("{:010} 00000 n \n", written[number]).as_bytes());
+            }
+            from = to + 1;
         }
 
         let mut trailer = self.trailer.clone();
-        trailer.set(b"Size", Object::Number(format!("{}", highest + 1).into_bytes()));
+        let size = highest.checked_add(1).ok_or_else(|| {
+            PdfError::Unsupported("this file already uses the highest object number a PDF can hold")
+        })?;
+        trailer.set(b"Size", Object::Number(format!("{size}").into_bytes()));
         // `/Prev` named a table in the file this was read from, and there is
         // only one table now. Left in, it would send a reader to an offset that
         // means nothing here.
@@ -326,7 +389,7 @@ impl<'a> File<'a> {
         out.extend_from_slice(b"trailer\n");
         write_object(&mut out, &Object::Dict(trailer));
         out.extend_from_slice(format!("\nstartxref\n{xref_at}\n%%EOF").as_bytes());
-        Ok(out)
+        Ok((out, written))
     }
 
     /// Write the file out **with a revision appended**: the original bytes
@@ -816,5 +879,52 @@ mod tests {
 
         let problem = File::parse(&bytes).expect_err("should refuse");
         assert!(format!("{problem}").contains("itself"), "{problem}");
+    }
+
+    /// **A sparse object number is not an invitation to build a table with a
+    /// row for every gap.** A file that names one real object at a number
+    /// millions higher than every other used to make `rewrite` build an
+    /// xref subsection spanning the whole range in between — gigabytes of
+    /// free rows for a source file of a few hundred bytes. Found by audit;
+    /// the fix groups the table into subsections per run of numbers actually
+    /// used, so the output stays proportional to the real object count.
+    #[test]
+    fn a_wildly_sparse_object_number_does_not_blow_up_the_rewritten_table() {
+        const HUGE: u32 = 2_000_000;
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"%PDF-1.7\n");
+        let one = bytes.len();
+        bytes.extend_from_slice(b"1 0 obj\n<< /Type /Catalog >>\nendobj\n");
+        let far = bytes.len();
+        bytes.extend_from_slice(format!("{HUGE} 0 obj\nnull\nendobj\n").as_bytes());
+
+        let xref_at = bytes.len();
+        bytes.extend_from_slice(b"xref\n0 1\n0000000000 65535 f \n1 1\n");
+        bytes.extend_from_slice(format!("{one:010} 00000 n \n").as_bytes());
+        bytes.extend_from_slice(format!("{HUGE} 1\n{far:010} 00000 n \n").as_bytes());
+        bytes.extend_from_slice(
+            format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF", HUGE + 1)
+                .as_bytes(),
+        );
+
+        let file = File::parse(&bytes).expect("parse");
+        assert_eq!(file.numbers().collect::<Vec<_>>(), vec![1, HUGE]);
+
+        let rewritten = file.rewrite(&[]).expect("rewrite");
+        // The old approach wrote one row per number from 0 to HUGE — tens of
+        // megabytes here. Two real objects and a bit of PDF furniture is a
+        // few hundred bytes; anything under a generous margin proves the
+        // gap was never materialised.
+        assert!(
+            rewritten.len() < 10_000,
+            "the rewritten file is {} bytes — the gap was written out row by row",
+            rewritten.len()
+        );
+
+        let again = File::parse(&rewritten).expect("parse the rewritten file");
+        assert_eq!(again.numbers().collect::<Vec<_>>(), vec![1, HUGE]);
+        assert!(again.object(1).is_ok());
+        assert_eq!(again.object(HUGE).expect("the far object"), Object::Null);
     }
 }

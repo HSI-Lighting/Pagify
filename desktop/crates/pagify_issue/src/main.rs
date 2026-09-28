@@ -445,14 +445,28 @@ fn prompt_twice(what: &str) -> Outcome<Zeroizing<String>> {
 }
 
 /// Written only where nothing is: a key or an identity is never overwritten.
+///
+/// **Owner-only from the moment it exists, and flushed before this returns.**
+/// What this writes is a root key, an issued identity, or the serial and
+/// ledger that track them — narrowed at creation, on Unix, rather than
+/// written world-readable and chmod'd after, which leaves exactly the window
+/// a race is named for. And `root backup`'s whole reason to exist is proving
+/// a copy actually reached removable media before the operator walks away
+/// with it; reading a write back without ever having flushed it can pass
+/// against the OS's own cache while the media underneath holds nothing.
+/// Found by audit.
 fn write_new(path: &Path, bytes: &[u8]) -> Outcome<()> {
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     file.write_all(bytes)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -585,5 +599,22 @@ mod tests {
         assert!(Options::parse(&["--dir"]).is_err());
         assert!(Options::parse(&["dir", "/x"]).is_err());
         assert!(Options::parse(&["--years", "five"]).unwrap().years(20).is_err());
+    }
+
+    /// **Found by audit.** What `write_new` writes is a root key or an
+    /// issued identity — owner-only from the instant it exists, not written
+    /// world-readable and narrowed after, which is a window a race is named
+    /// for.
+    #[cfg(unix)]
+    #[test]
+    fn a_newly_written_file_is_readable_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir()
+            .join(format!("pagify-issue-write-new-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_file(&path);
+        write_new(&path, b"secret").expect("write");
+        let mode = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        std::fs::remove_file(&path).ok();
+        assert_eq!(mode, 0o600);
     }
 }

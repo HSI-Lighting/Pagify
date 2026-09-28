@@ -120,6 +120,43 @@ pub enum Command {
         /// What else to change. `Default` means the words only.
         style: crate::document::TextStyle,
     },
+
+    // ------------------------------------------------------------ object --
+    /// Slide one page object by `by`, geometrically.
+    MoveObject {
+        page_index: usize,
+        object: usize,
+        by: crate::document::Point,
+    },
+    /// Resize one page object about `anchor` — see
+    /// [`crate::document::Document::scale_object`].
+    ScaleObject {
+        page_index: usize,
+        object: usize,
+        anchor: crate::document::Point,
+        sx: f32,
+        sy: f32,
+    },
+    /// Take one picture, shape or run of text off a page entirely.
+    ///
+    /// Undoes by a page snapshot, the same as [`Command::Redact`], for the
+    /// same reason: the operators are gone once removed, and nothing
+    /// serialisable could carry a run's exact bytes back.
+    RemoveObject {
+        page_index: usize,
+        object: usize,
+    },
+    /// Turn one run of words into one object per character — see
+    /// [`crate::document::Document::split_run_into_characters`].
+    ///
+    /// Undoes by a page snapshot for the same reason [`Command::RemoveObject`]
+    /// does: reassembling one operator from many written ones is a second,
+    /// harder feature that a page kept from just before this ran does not need.
+    SplitRunIntoCharacters {
+        page_index: usize,
+        object: usize,
+    },
+
     /// Put pages from somewhere else into this document at `at`.
     ///
     /// Carries the pages **as their own small PDF** rather than as a reference to
@@ -235,6 +272,19 @@ pub enum Command {
         #[serde(with = "page_bytes")]
         pdf: Vec<u8>,
     },
+
+    // ------------------------------------------------------------- outline --
+    /// Add a bookmark for a page to the end of the document's outline.
+    ///
+    /// Catalogue-level, not an [`Annotation`] — an outline entry can name any
+    /// page in the document and lives outside any one page's own `/Annots`,
+    /// so it needs a command of its own rather than riding on
+    /// `AddAnnotation`. See [`crate::document::DocumentMut::add_bookmark`]'s
+    /// own doc for how it is written.
+    AddBookmark {
+        title: String,
+        page_index: usize,
+    },
 }
 
 /// An optional font's bytes, the same way [`page_bytes`] carries a page's —
@@ -322,6 +372,20 @@ pub enum UndoRecord {
         text: String,
         style: crate::document::TextStyle,
     },
+    /// The exact opposite slide.
+    MoveObject {
+        page_index: usize,
+        object: usize,
+        by: crate::document::Point,
+    },
+    /// The reciprocal scale, about the same anchor.
+    ScaleObject {
+        page_index: usize,
+        object: usize,
+        anchor: crate::document::Point,
+        sx: f32,
+        sy: f32,
+    },
     /// Put a resized page back exactly as it was.
     ///
     /// The **inverse matrix**, not the previous size. Re-deriving a scale from
@@ -357,6 +421,10 @@ pub enum UndoRecord {
     RestoreAnnotation {
         page_index: usize,
         annotation: Annotation,
+    },
+    /// Takes back an `AddBookmark`, from exactly what adding it returned.
+    RemoveBookmark {
+        added: crate::document::BookmarkAdded,
     },
 }
 
@@ -462,6 +530,36 @@ impl Command {
                     style: appearance,
                 })
             }
+            Command::MoveObject { page_index, object, by } => {
+                doc.move_object_mut(*page_index, *object, *by)?;
+                Ok(UndoRecord::MoveObject {
+                    page_index: *page_index,
+                    object: *object,
+                    by: crate::document::Point { x: -by.x, y: -by.y },
+                })
+            }
+            Command::ScaleObject { page_index, object, anchor, sx, sy } => {
+                doc.scale_object_mut(*page_index, *object, *anchor, *sx, *sy)?;
+                Ok(UndoRecord::ScaleObject {
+                    page_index: *page_index,
+                    object: *object,
+                    anchor: *anchor,
+                    sx: 1.0 / *sx,
+                    sy: 1.0 / *sy,
+                })
+            }
+            Command::RemoveObject { page_index, object } => {
+                // Copied before the removal, same as `Redact` — there is
+                // nothing left to copy once the operators are gone.
+                let page = doc.snapshot_page(*page_index)?;
+                doc.remove_object_mut(*page_index, *object)?;
+                Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
+            }
+            Command::SplitRunIntoCharacters { page_index, object } => {
+                let page = doc.snapshot_page(*page_index)?;
+                doc.split_run_into_characters_mut(*page_index, *object)?;
+                Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
+            }
             Command::AddAnnotation {
                 page_index,
                 annotation,
@@ -552,6 +650,10 @@ impl Command {
                     annotation,
                 })
             }
+            Command::AddBookmark { title, page_index } => {
+                let added = doc.add_bookmark(title, *page_index)?;
+                Ok(UndoRecord::RemoveBookmark { added })
+            }
         }
     }
 
@@ -568,6 +670,12 @@ impl Command {
                 format!("Edit text on page {}", page_index + 1)
             }
             Command::SetPageSize { index, .. } => format!("Resize page {}", index + 1),
+            Command::MoveObject { page_index, .. } => format!("Move on page {}", page_index + 1),
+            Command::ScaleObject { page_index, .. } => format!("Resize on page {}", page_index + 1),
+            Command::RemoveObject { page_index, .. } => format!("Delete on page {}", page_index + 1),
+            Command::SplitRunIntoCharacters { page_index, .. } => {
+                format!("Split into characters on page {}", page_index + 1)
+            }
             // Named by what the user drew, not by "annotation" — the label goes
             // straight onto an undo button, and "Undo add annotation" tells nobody
             // which of their marks is about to vanish.
@@ -586,6 +694,7 @@ impl Command {
             }
             Command::Redact { page_index, .. } => format!("Redact on page {}", page_index + 1),
             Command::ReplacePage { index, .. } => format!("Restore page {}", index + 1),
+            Command::AddBookmark { title, .. } => format!("Bookmark \"{title}\""),
         }
     }
 
@@ -611,6 +720,10 @@ impl Command {
             Command::AddAnnotation { page_index, .. }
             | Command::RemoveAnnotation { page_index, .. }
             | Command::RemoveText { page_index, .. }
+            | Command::MoveObject { page_index, .. }
+            | Command::ScaleObject { page_index, .. }
+            | Command::RemoveObject { page_index, .. }
+            | Command::SplitRunIntoCharacters { page_index, .. }
             // Invisible text changes no pixels, but the cache is not only for
             // pixels: a raster kept from before the layer existed would hand
             // back a page whose text and image disagree.
@@ -619,6 +732,12 @@ impl Command {
             // wrong either way round.
             | Command::Redact { page_index, .. } => vec![*page_index],
             Command::ReplacePage { index, .. } => vec![*index],
+            // Catalogue-level — no page's own drawn content changes. Named
+            // as its own page rather than truly empty, which this type
+            // reads as "every page" (see this method's own doc); one page
+            // costs far less to re-render than all of them for a change
+            // that in truth invalidates none.
+            Command::AddBookmark { page_index, .. } => vec![*page_index],
         }
     }
 }
@@ -635,6 +754,8 @@ impl Annotation {
             Annotation::Note { .. } => "Note",
             Annotation::Text { .. } => "Text",
             Annotation::Image { .. } => "Picture",
+            Annotation::Fill { .. } => "Fill",
+            Annotation::Link { .. } => "Link",
         }
     }
 }
@@ -671,6 +792,12 @@ impl UndoRecord {
             UndoRecord::SetTextRun { page_index, object, text, style } => {
                 doc.set_text_run_styled(page_index, object, &text, &style).map(|_| ())
             }
+            UndoRecord::MoveObject { page_index, object, by } => {
+                doc.move_object_mut(page_index, object, by)
+            }
+            UndoRecord::ScaleObject { page_index, object, anchor, sx, sy } => {
+                doc.scale_object_mut(page_index, object, anchor, sx, sy)
+            }
             UndoRecord::RestorePageSize { index, matrix, width_pt, height_pt } => {
                 // The sheet first, then the content: transforming into a page
                 // that is still the new size would clip against the wrong
@@ -686,6 +813,7 @@ impl UndoRecord {
                 page_index,
                 annotation,
             } => doc.add_annotation(page_index, &annotation).map(|_| ()),
+            UndoRecord::RemoveBookmark { added } => doc.remove_bookmark(added),
         }
     }
 }

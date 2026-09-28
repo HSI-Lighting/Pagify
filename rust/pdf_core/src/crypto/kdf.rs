@@ -102,6 +102,11 @@ pub trait KeyDerivation {
     fn derive(&self, passcode: &[u8], salt: &[u8], params: &KdfParams) -> Result<Secret>;
 }
 
+/// The longest salt this reads. Generous over the 16 bytes every salt this
+/// writes actually is — a real KDF salt is never much longer than a block of
+/// the hash it feeds.
+const MAX_SALT_LEN: usize = 64;
+
 /// The only implementation, and the default.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Argon2id;
@@ -114,6 +119,13 @@ impl KeyDerivation for Argon2id {
     fn derive(&self, passcode: &[u8], salt: &[u8], params: &KdfParams) -> Result<Secret> {
         if salt.len() < 8 {
             return Err(PdfError::InvalidArgument("the salt is too short".into()));
+        }
+        // Every salt this ever writes is 16 bytes; a bound only on the low
+        // side left a file's own (unauthenticated-until-this-point) salt
+        // free to be megabytes long, hashed in full on every unlock attempt
+        // for no benefit over a normal one. Found by audit.
+        if salt.len() > MAX_SALT_LEN {
+            return Err(PdfError::InvalidArgument("the salt is too long".into()));
         }
         // Here, so every path that reads a cost out of a file — the Secure
         // Plus dictionary, the lock's envelope, the ledger — is covered by
@@ -229,6 +241,16 @@ mod tests {
     #[test]
     fn a_salt_too_short_to_be_useful_is_refused() {
         assert!(Argon2id.derive(b"x", b"1234", &quick()).is_err());
+    }
+
+    /// **Found by audit.** Nothing bounded the salt from above, so a file's
+    /// own (at this point unauthenticated) salt could be megabytes long and
+    /// get hashed in full on every unlock attempt for no benefit over a
+    /// normal one.
+    #[test]
+    fn a_salt_far_longer_than_any_real_one_is_refused() {
+        let huge = vec![0u8; MAX_SALT_LEN + 1];
+        assert!(Argon2id.derive(b"x", &huge, &quick()).is_err());
     }
 
     /// **The name in the envelope is the contract.** If it ever changes, every

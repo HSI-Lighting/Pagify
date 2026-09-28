@@ -95,6 +95,19 @@ pub struct Ledger {
     #[serde(with = "super::envelope::hex_bytes")]
     pub document_id: Vec<u8>,
     pub fields: Vec<ObfuscatedField>,
+    /// A digest over `document_id` and `fields`, sealed under the data key.
+    ///
+    /// Every field here is plaintext bookkeeping — `written` is what
+    /// `reverse` actually decrypts, and `page_index`/`object`/`kind`/
+    /// `alphabet` all feed the tweak that has to match what encrypted it —
+    /// with nothing but this binding to stop a file-write attacker (no
+    /// passcode needed) editing one, or deleting it outright, and a right
+    /// passcode afterwards reading as a normal unlock over a ledger that no
+    /// longer describes what was actually done. Checked by [`Ledger::unlock`].
+    /// `None` for a ledger written before this existed — still opens, and
+    /// gains one the next time anything about it is saved. Found by audit.
+    #[serde(default)]
+    pub bind: Option<String>,
 }
 
 impl Ledger {
@@ -108,6 +121,7 @@ impl Ledger {
                 envelope,
                 document_id: cipher::random::<16>()?.to_vec(),
                 fields: Vec::new(),
+                bind: None,
             },
             dek,
         ))
@@ -143,9 +157,44 @@ impl Ledger {
         })
     }
 
-    /// The data key, or an error if the passcode is wrong.
+    /// The data key, or an error if the passcode is wrong — or if
+    /// `document_id` or `fields` have been tampered with since the ledger was
+    /// last saved.
+    ///
+    /// Checked here, once, before anything else trusts either: `reverse` only
+    /// checks that a field's own `written` still matches the page, which says
+    /// nothing about whether `written` itself, or `alphabet`, or `kind`, has
+    /// been edited to something that still opens under the real key but is
+    /// not what was actually encrypted.
     pub fn unlock(&self, passcode: &[u8]) -> Result<Secret> {
-        self.envelope.unwrap_dek(passcode)
+        let dek = self.envelope.unwrap_dek(passcode)?;
+        if let Some(bind) = &self.bind {
+            let sealed = unhex(bind).ok_or_else(|| {
+                PdfError::InvalidArgument("this record's binding is not readable".into())
+            })?;
+            let digest = cipher::open(&dek, &sealed, BIND).map_err(|_| {
+                PdfError::InvalidArgument(
+                    "this record's binding does not open — it has been altered".into(),
+                )
+            })?;
+            if digest.as_slice() != structure_digest(&self.document_id, &self.fields) {
+                return Err(PdfError::InvalidArgument(
+                    "this record has been altered since it was made".into(),
+                ));
+            }
+        }
+        Ok(dek)
+    }
+
+    /// Recompute and seal the binding over the current `document_id` and
+    /// `fields`.
+    ///
+    /// The caller's job to run before the ledger is written anywhere — see
+    /// [`super::vault::Vault::seal_structure`], which this mirrors exactly.
+    pub fn seal_structure(&mut self, dek: &Secret) -> Result<()> {
+        let digest = structure_digest(&self.document_id, &self.fields);
+        self.bind = Some(hex(&cipher::seal(dek, &digest, BIND)?));
+        Ok(())
     }
 
     /// Encrypt one value and record where it went.
@@ -252,6 +301,62 @@ impl Ledger {
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
     }
+}
+
+/// What [`Ledger::seal_structure`] binds against, so it cannot be mistaken
+/// for anything else sealed under the same key.
+const BIND: &[u8] = b"pagify obfuscation bind";
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The inverse of [`hex`]. `None` for anything that is not an even run of hex
+/// digits, rather than silently taking what it can.
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    let digits = text.as_bytes();
+    if digits.len() % 2 != 0 || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    Some(
+        digits
+            .chunks(2)
+            .map(|pair| {
+                let nibble = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+                nibble(pair[0]) << 4 | nibble(pair[1])
+            })
+            .collect(),
+    )
+}
+
+/// A digest over `document_id` and every field — the plaintext bookkeeping
+/// nothing else authenticates. `written` is what `reverse` actually decrypts,
+/// and `page_index`/`object`/`kind`/`alphabet` all feed the tweak that has to
+/// match what encrypted it, so every one of them has to be in here for any of
+/// them to be protected.
+fn structure_digest(document_id: &[u8], fields: &[ObfuscatedField]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update((document_id.len() as u64).to_le_bytes());
+    hasher.update(document_id);
+    hasher.update((fields.len() as u64).to_le_bytes());
+    for field in fields {
+        hasher.update((field.page_index as u64).to_le_bytes());
+        hasher.update((field.object as u64).to_le_bytes());
+        hasher.update((field.kind.id.len() as u64).to_le_bytes());
+        hasher.update(field.kind.id.as_bytes());
+        hasher.update([match field.kind.source {
+            tweak::Source::TextRun => 0u8,
+            tweak::Source::FormField => 1,
+            tweak::Source::Annotation => 2,
+        }]);
+        hasher.update([u8::from(field.kind.deterministic)]);
+        hasher.update((field.alphabet.len() as u64).to_le_bytes());
+        hasher.update(field.alphabet.as_bytes());
+        hasher.update((field.written.len() as u64).to_le_bytes());
+        hasher.update(field.written.as_bytes());
+    }
+    hasher.finalize().into()
 }
 
 #[cfg(test)]
@@ -547,5 +652,83 @@ mod tests {
         ledger.v = FORMAT_VERSION + 1;
         let problem = Ledger::parse(&ledger.to_bytes().expect("write")).expect_err("refuse");
         assert!(format!("{problem}").contains("newer version"), "{problem}");
+    }
+
+    // -- the binding — L-7, found by audit ----------------------------------
+
+    /// **A right passcode over an edited field must not read as a normal
+    /// unlock.** Editing `written` (or `alphabet`, or `kind`) needs no
+    /// passcode at all — it is a plain JSON edit — and `reverse` only checks
+    /// that it still matches the page, which says nothing about whether it is
+    /// still the value that was actually encrypted.
+    #[test]
+    fn editing_a_fields_written_value_is_noticed_on_unlock() {
+        let (mut ledger, dek) = ledger();
+        ledger.obfuscate(&dek, 0, 7, part_number(), Alphabet::DIGITS, "4821000734").expect("obfuscate");
+        ledger.seal_structure(&dek).expect("bind");
+        assert!(ledger.unlock(b"open sesame").is_ok(), "a freshly bound ledger did not unlock");
+
+        ledger.fields[0].written = "0000000000".into();
+        assert!(
+            ledger.unlock(b"open sesame").is_err(),
+            "an edited `written` value went unnoticed"
+        );
+    }
+
+    /// Deleting a field entirely is just as much an edit as changing one.
+    #[test]
+    fn deleting_a_field_is_noticed_on_unlock() {
+        let (mut ledger, dek) = ledger();
+        ledger.obfuscate(&dek, 0, 7, part_number(), Alphabet::DIGITS, "4821000734").expect("obfuscate");
+        ledger.seal_structure(&dek).expect("bind");
+
+        ledger.fields.clear();
+        assert!(
+            ledger.unlock(b"open sesame").is_err(),
+            "a right passcode unlocked a ledger with its fields wiped"
+        );
+    }
+
+    /// A ledger written before the binding existed still opens.
+    #[test]
+    fn a_ledger_with_no_binding_still_unlocks() {
+        let (ledger, _) = ledger();
+        assert!(ledger.bind.is_none(), "the fixture already has a binding");
+        assert!(ledger.unlock(b"open sesame").is_ok(), "a legacy ledger was refused");
+    }
+
+    /// Sealing the structure again after a legitimate change still leaves the
+    /// ledger openable, and every recorded value still reverses.
+    #[test]
+    fn resealing_after_a_real_change_still_unlocks() {
+        let (mut ledger, dek) = ledger();
+        ledger.obfuscate(&dek, 0, 7, part_number(), Alphabet::DIGITS, "4821000734").expect("first");
+        ledger.seal_structure(&dek).expect("bind");
+
+        let written = ledger
+            .obfuscate(&dek, 0, 9, part_number(), Alphabet::DIGITS, "1234567890")
+            .expect("second");
+        ledger.seal_structure(&dek).expect("bind again");
+
+        assert!(ledger.unlock(b"open sesame").is_ok(), "a legitimately grown ledger was refused");
+        let field = ledger.field_at(0, 9).expect("recorded");
+        assert_eq!(ledger.reverse(&dek, field, &written).expect("reverse"), "1234567890");
+    }
+
+    /// The binding survives being written to JSON and read back.
+    #[test]
+    fn the_binding_survives_a_round_trip_and_still_catches_tampering() {
+        let (mut ledger, dek) = ledger();
+        ledger.obfuscate(&dek, 0, 7, part_number(), Alphabet::DIGITS, "4821000734").expect("obfuscate");
+        ledger.seal_structure(&dek).expect("bind");
+
+        let mut back = Ledger::parse(&ledger.to_bytes().expect("write")).expect("read");
+        assert!(back.unlock(b"open sesame").is_ok(), "a bound ledger did not survive a round trip");
+
+        back.fields[0].alphabet = "letters".into();
+        assert!(
+            back.unlock(b"open sesame").is_err(),
+            "an edited alphabet after a round trip went unnoticed"
+        );
     }
 }

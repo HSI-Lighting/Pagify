@@ -57,6 +57,7 @@
 
 use crate::error::Result;
 
+use super::object::Lexer;
 use super::trust::{self, Anchors, Trust};
 use super::{File, Object};
 
@@ -157,7 +158,21 @@ pub fn check_with(file: &File<'_>, bytes: &[u8], anchors: &Anchors) -> Result<Ve
             continue;
         }
 
-        let Checked { verdict, signer, trust } = verdict_for(dict, bytes, anchors);
+        // **The hole must be this dictionary's own `/Contents` and nothing
+        // else**, checked before any of `verdict_for`'s crypto — see
+        // [`contents_span`]. Kept out of `verdict_for` itself, which stays
+        // pure crypto over a byte range with no file to locate anything in
+        // (its own unit tests hand it a `Dict` and a slice with no
+        // cross-reference table behind either).
+        let Checked { verdict, signer, trust } = match range_numbers(dict) {
+            Some([_, first, second_at, _]) if contents_span(file, number, bytes) == Some(first..second_at) => {
+                verdict_for(dict, bytes, anchors)
+            }
+            Some(_) => Checked::failed(Verdict::Unreadable(
+                "its byte range does not point at this signature's own contents".into(),
+            )),
+            None => Checked::failed(Verdict::Unreadable("it declares no byte range".into())),
+        };
         out.push(Signature {
             name: text_of(dict.get(b"Name")),
             when: text_of(dict.get(b"M")),
@@ -295,6 +310,33 @@ fn verdict_for(dict: &super::Dict, bytes: &[u8], anchors: &Anchors) -> Checked {
         return Checked { verdict, signer, trust };
     }
     Checked { verdict: Verdict::Unaltered, signer, trust }
+}
+
+/// The exact byte span of one object's `/Contents` value, found by walking
+/// from the cross-reference table's own offset for it — never by trusting
+/// anything the parsed dictionary says about itself, which is precisely
+/// what a forged dictionary controls.
+///
+/// Re-lexes rather than reusing the already-parsed [`super::Dict`]: a
+/// [`super::Object`] carries no byte position once parsed, so getting one
+/// means walking the bytes again, the same way [`File::object`] does for
+/// its own header check — just keeping the span of the one value this
+/// needs instead of throwing it away.
+fn contents_span(file: &File<'_>, number: u32, bytes: &[u8]) -> Option<std::ops::Range<usize>> {
+    let at = file.offset(number)?;
+    let mut lexer = Lexer::new(bytes, at);
+
+    // `n g obj` — refused rather than assumed, so a table entry that has
+    // drifted is caught here instead of misreading whatever sits at `at` as
+    // this object's dictionary.
+    let found: u32 = std::str::from_utf8(lexer.token()).ok()?.parse().ok()?;
+    if found != number {
+        return None;
+    }
+    let _generation = lexer.token();
+    lexer.expect(b"obj").ok()?;
+    lexer.skip_space();
+    super::object::dict_value_span(bytes, lexer.at, b"Contents")
 }
 
 /// SM3 over several stretches of bytes taken as one.

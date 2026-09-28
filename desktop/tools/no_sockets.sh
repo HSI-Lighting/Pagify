@@ -43,8 +43,19 @@ fi
 DENY='^(reqwest|ureq|hyper|hyper-util|hyper-rustls|hyper-tls|h2|h3|curl|curl-sys|isahc|attohttpc|minreq|surf|ehttp|ewebsock|tungstenite|tokio-tungstenite|websocket|quinn|tokio|async-std|smol|mio|socket2|native-tls|rustls|rustls-native-certs|openssl|openssl-sys|webpki|webpki-roots|http|httparse|http-body|trust-dns-resolver|hickory-resolver)$'
 echo "==> no network crate in the graph"
 for tree in "$ROOT" "$ENGINE"; do
-  found="$( (cd "$tree" && cargo tree -e normal --prefix none 2>/dev/null) \
-    | awk '{print $1}' | sort -u | grep -E "$DENY" || true)"
+  # `cargo tree` failing outright (a broken manifest, cargo not on PATH) is
+  # not the same thing as it running and finding nothing — the old version
+  # sent both down the same `2>/dev/null ... || true` pipe, so a check that
+  # could not run reported "no network crate" instead of refusing to say.
+  # Found by audit.
+  if ! output="$(cd "$tree" && cargo tree -e normal --prefix none 2>&1)"; then
+    echo "in $tree:" >&2
+    echo "$output" | sed 's/^/  /' >&2
+    echo "cargo tree could not be run — this check cannot say the graph is clean" >&2
+    failed=1
+    continue
+  fi
+  found="$(echo "$output" | awk '{print $1}' | sort -u | grep -E "$DENY" || true)"
   if [ -n "$found" ]; then
     echo "in $tree:" >&2
     echo "$found" | sed 's/^/  /' >&2

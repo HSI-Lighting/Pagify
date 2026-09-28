@@ -33,7 +33,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use cad_kernel::{Arc, Circle, DObject, Geom, Line, Point, PolyVertex, Polyline, Vec2};
+use std::collections::HashSet;
+
+use cad_kernel::{
+    Arc, Circle, DObject, Geom, Handle, Hatch, HatchPattern, Line, Point, PolyVertex, Polyline,
+    Vec2, EPS,
+};
 use pdf_core::document::{Annotation, Color, Glyph, Point as PdfPoint};
 use pdf_core::registry::DocumentSession;
 use pdf_core::Result;
@@ -77,50 +82,185 @@ pub struct StoredLayer {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "k", rename_all = "lowercase")]
 pub enum StoredGeom {
-    Line { a: [f64; 2], b: [f64; 2] },
-    Circle { c: [f64; 2], r: f64 },
-    Arc { c: [f64; 2], r: f64, start: f64, sweep: f64 },
-    Polyline { v: Vec<[f64; 3]>, closed: bool },
+    Line {
+        a: [f64; 2],
+        b: [f64; 2],
+        /// Not on `cad_kernel::Line` — an arrowhead is a decoration
+        /// `overlay::draw_geom` paints from the line's own two endpoints,
+        /// not a shape the kernel needs to know about. See
+        /// `Layer::arrow_ends`.
+        #[serde(default)]
+        start_arrow: bool,
+        #[serde(default)]
+        end_arrow: bool,
+        #[serde(default)]
+        lineweight_mm: Option<f32>,
+    },
+    /// `filled` is not on `cad_kernel::Circle` — it lives here, on the boundary
+    /// itself, so that whether the fill survives a save does not depend on
+    /// remembering a second, paired object. See [`StoredGeom::filled`].
+    Circle {
+        c: [f64; 2],
+        r: f64,
+        #[serde(default)]
+        filled: bool,
+        #[serde(default)]
+        lineweight_mm: Option<f32>,
+    },
+    Arc {
+        c: [f64; 2],
+        r: f64,
+        start: f64,
+        sweep: f64,
+        #[serde(default)]
+        lineweight_mm: Option<f32>,
+    },
+    /// A drawn rectangle is stored as a closed polyline — see `filled`, above.
+    Polyline {
+        v: Vec<[f64; 3]>,
+        closed: bool,
+        #[serde(default)]
+        filled: bool,
+        #[serde(default)]
+        lineweight_mm: Option<f32>,
+    },
     Point { p: [f64; 2] },
+    /// A NURBS spline — see `cad_kernel::Spline`'s own doc for what the
+    /// three fields mean. All weights `1.0` is the plain (non-rational)
+    /// case the Draw tab's own Spline tool always produces; distinct
+    /// weights are carried through unchanged for a curve read from
+    /// somewhere else that used them.
+    Spline {
+        degree: usize,
+        control_points: Vec<[f64; 2]>,
+        weights: Vec<f64>,
+        #[serde(default)]
+        lineweight_mm: Option<f32>,
+    },
 }
 
 impl StoredGeom {
     pub fn of(geom: &Geom) -> Option<StoredGeom> {
         Some(match geom {
-            Geom::Line(l) => StoredGeom::Line { a: [l.a.x, l.a.y], b: [l.b.x, l.b.y] },
-            Geom::Circle(c) => StoredGeom::Circle { c: [c.center.x, c.center.y], r: c.radius },
+            Geom::Line(l) => StoredGeom::Line {
+                a: [l.a.x, l.a.y],
+                b: [l.b.x, l.b.y],
+                start_arrow: false,
+                end_arrow: false,
+                lineweight_mm: None,
+            },
+            Geom::Circle(c) => StoredGeom::Circle {
+                c: [c.center.x, c.center.y],
+                r: c.radius,
+                filled: false,
+                lineweight_mm: None,
+            },
             Geom::Arc(a) => StoredGeom::Arc {
                 c: [a.center.x, a.center.y],
                 r: a.radius,
                 start: a.start_angle,
                 sweep: a.sweep_angle,
+                lineweight_mm: None,
             },
             Geom::Polyline(p) => StoredGeom::Polyline {
                 v: p.vertices.iter().map(|v| [v.pos.x, v.pos.y, v.bulge]).collect(),
                 closed: p.closed,
+                filled: false,
+                lineweight_mm: None,
             },
             Geom::Point(p) => StoredGeom::Point { p: [p.location.x, p.location.y] },
+            Geom::Spline(s) => StoredGeom::Spline {
+                degree: s.degree,
+                control_points: s.control_points.iter().map(|v| [v.x, v.y]).collect(),
+                weights: s.weights.clone(),
+                lineweight_mm: None,
+            },
             _ => return None,
         })
     }
 
+    /// Whether this boundary carries a fill, per the `cad_kernel::Geom::Hatch`
+    /// object that pointed at it in the live layer. `false` for a shape kind
+    /// that cannot be filled — a line, an arc, a point.
+    pub fn filled(&self) -> bool {
+        match self {
+            StoredGeom::Circle { filled, .. } | StoredGeom::Polyline { filled, .. } => *filled,
+            _ => false,
+        }
+    }
+
+    /// Set whether this boundary is filled. A no-op on a shape kind that
+    /// cannot carry one.
+    pub fn set_filled(&mut self, fill: bool) {
+        match self {
+            StoredGeom::Circle { filled, .. } | StoredGeom::Polyline { filled, .. } => {
+                *filled = fill
+            }
+            _ => {}
+        }
+    }
+
+    /// Which end(s) of a line carry an arrowhead. `(false, false)` for
+    /// every other shape kind, which cannot have one.
+    pub fn arrow_ends(&self) -> (bool, bool) {
+        match self {
+            StoredGeom::Line { start_arrow, end_arrow, .. } => (*start_arrow, *end_arrow),
+            _ => (false, false),
+        }
+    }
+
+    /// Set which end(s) of a line carry an arrowhead. A no-op on any other
+    /// shape kind.
+    pub fn set_arrow_ends(&mut self, start: bool, end: bool) {
+        if let StoredGeom::Line { start_arrow, end_arrow, .. } = self {
+            *start_arrow = start;
+            *end_arrow = end;
+        }
+    }
+
+    /// This shape's own explicit line thickness in millimetres, if it was
+    /// ever given one — see `Layer::resolved_lineweight_mm`.
+    pub fn lineweight_mm(&self) -> Option<f32> {
+        match self {
+            StoredGeom::Line { lineweight_mm, .. }
+            | StoredGeom::Circle { lineweight_mm, .. }
+            | StoredGeom::Arc { lineweight_mm, .. }
+            | StoredGeom::Polyline { lineweight_mm, .. }
+            | StoredGeom::Spline { lineweight_mm, .. } => *lineweight_mm,
+            StoredGeom::Point { .. } => None,
+        }
+    }
+
+    /// Set this shape's own explicit line thickness. A no-op on a point,
+    /// which has no stroke to thicken.
+    pub fn set_lineweight_mm(&mut self, mm: Option<f32>) {
+        match self {
+            StoredGeom::Line { lineweight_mm, .. }
+            | StoredGeom::Circle { lineweight_mm, .. }
+            | StoredGeom::Arc { lineweight_mm, .. }
+            | StoredGeom::Polyline { lineweight_mm, .. }
+            | StoredGeom::Spline { lineweight_mm, .. } => *lineweight_mm = mm,
+            StoredGeom::Point { .. } => {}
+        }
+    }
+
     pub fn to_geom(&self) -> Geom {
         match self {
-            StoredGeom::Line { a, b } => Geom::Line(Line {
+            StoredGeom::Line { a, b, .. } => Geom::Line(Line {
                 a: Vec2::new(a[0], a[1]),
                 b: Vec2::new(b[0], b[1]),
             }),
-            StoredGeom::Circle { c, r } => Geom::Circle(Circle {
+            StoredGeom::Circle { c, r, .. } => Geom::Circle(Circle {
                 center: Vec2::new(c[0], c[1]),
                 radius: *r,
             }),
-            StoredGeom::Arc { c, r, start, sweep } => Geom::Arc(Arc {
+            StoredGeom::Arc { c, r, start, sweep, .. } => Geom::Arc(Arc {
                 center: Vec2::new(c[0], c[1]),
                 radius: *r,
                 start_angle: *start,
                 sweep_angle: *sweep,
             }),
-            StoredGeom::Polyline { v, closed } => Geom::Polyline(Polyline {
+            StoredGeom::Polyline { v, closed, .. } => Geom::Polyline(Polyline {
                 vertices: v
                     .iter()
                     .map(|p| PolyVertex { pos: Vec2::new(p[0], p[1]), bulge: p[2] })
@@ -133,6 +273,13 @@ impl StoredGeom {
                 style: 0,
                 size: 0.0,
             }),
+            StoredGeom::Spline { degree, control_points, weights, .. } => {
+                Geom::Spline(cad_kernel::Spline::new(
+                    *degree,
+                    control_points.iter().map(|p| Vec2::new(p[0], p[1])).collect(),
+                    weights.clone(),
+                ))
+            }
         }
     }
 }
@@ -151,7 +298,6 @@ fn describe(geom: &Geom) -> &'static str {
     match geom {
         Geom::Ellipse(_) => "an ellipse",
         Geom::EllipseArc(_) => "an elliptical arc",
-        Geom::Spline(_) => "a spline",
         Geom::Hatch(_) => "a hatch",
         Geom::Text(_) => "text",
         Geom::Dimension(_) => "a dimension",
@@ -161,14 +307,42 @@ fn describe(geom: &Geom) -> &'static str {
     }
 }
 
+/// Which boundary handles a `Geom::Hatch` in this layer points at — the live
+/// representation of "this shape is filled", kept as its own paired object
+/// rather than a field on `cad_kernel`'s own `Circle`/`Polyline`, which this
+/// crate does not own. One hole per boundary, matching the Rectangle/Circle
+/// fill this app draws — see build plan's Draw tab fill toggle.
+fn filled_handles(layer: &Layer) -> HashSet<Handle> {
+    layer
+        .objects()
+        .iter()
+        .filter_map(|o| match &o.geom {
+            Geom::Hatch(h) => h.boundary_handles.first().copied(),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Turn a layer into the blob that will be written.
 pub fn to_blob(layer: &Layer) -> (String, Vec<Unstorable>) {
+    let filled = filled_handles(layer);
     let mut objects = Vec::new();
     let mut skipped = Vec::new();
 
     for (index, object) in layer.objects().iter().enumerate() {
+        // Not stored as its own object — folded into its boundary's `filled`
+        // flag below, so a hatch never needs its handle to survive a reload.
+        if matches!(object.geom, Geom::Hatch(_)) {
+            continue;
+        }
         match StoredGeom::of(&object.geom) {
-            Some(stored) => objects.push(stored),
+            Some(mut stored) => {
+                stored.set_filled(filled.contains(&object.handle));
+                let (start, end) = layer.arrow_ends(index);
+                stored.set_arrow_ends(start, end);
+                stored.set_lineweight_mm(layer.resolved_lineweight_mm(index));
+                objects.push(stored);
+            }
             None => skipped.push(Unstorable { index, what: describe(&object.geom) }),
         }
     }
@@ -213,7 +387,26 @@ pub fn from_blob(blob: &str) -> std::result::Result<Option<StoredLayer>, String>
 pub fn to_layer(stored: &StoredLayer) -> Layer {
     let mut layer = Layer::new(stored.page_height_pt);
     for geom in &stored.objects {
-        layer.add_object(DObject::new(geom.to_geom()));
+        let filled = geom.filled();
+        let (start_arrow, end_arrow) = geom.arrow_ends();
+        let lineweight_mm = geom.lineweight_mm();
+        let index = layer.add_object(DObject::new(geom.to_geom()));
+        // The paired Hatch this boundary had when it was stored, rebuilt
+        // against its freshly allocated handle — a stored handle would not
+        // resolve to anything, since every reload starts the counter fresh.
+        if filled {
+            let handle = layer.objects()[index].handle;
+            layer.add_object(DObject::new(Geom::Hatch(Hatch {
+                boundary_handles: vec![handle],
+                pattern: HatchPattern::Solid,
+            })));
+        }
+        if start_arrow || end_arrow {
+            layer.set_arrow_ends(index, start_arrow, end_arrow);
+        }
+        if let Some(mm) = lineweight_mm {
+            layer.set_lineweight_mm(index, mm);
+        }
     }
     layer
 }
@@ -275,8 +468,41 @@ pub fn flatten(geom: &Geom, space: PageSpace) -> Vec<Vec<PdfPoint>> {
                 vec![to_app(Vec2::new(c.x, c.y - size)), to_app(Vec2::new(c.x, c.y + size))],
             ]
         }
+        // Tessellated, not flattened exactly — the same trade the arcs
+        // above make. 64 samples is dense enough that the ink shows no
+        // facets at any zoom a reader without Pagify would print at; the
+        // live geometry (what `to_layer` reconstructs) keeps the exact
+        // control points regardless of how coarse this is.
+        Geom::Spline(s) => vec![s.tessellate(64).into_iter().map(to_app).collect()],
         _ => Vec::new(),
     }
+}
+
+/// The solid triangle of an arrowhead pointing from `from` toward `to`, in
+/// kernel space — `[tip, back+side, back-side]`.
+///
+/// **Filled, not stroked.** An open "V" drawn with `line_width` was tried
+/// first and its tip visibly receded as the line got thicker — two strokes
+/// butt-capped at a shared, narrow-angle vertex cut a flat notch into the
+/// point instead of meeting at it, worse the wider the pen. A filled
+/// triangle's apex is exact at any pen width because nothing strokes it: it
+/// is drawn with [`Annotation::Fill`], the pen only shading a thin, harmless
+/// border on top. Reported from use as "the arrow's tip gets moved in when
+/// thickness is increased".
+pub fn arrowhead_triangle(from: Vec2, to: Vec2) -> Option<[Vec2; 3]> {
+    let dir = to - from;
+    let len = dir.len();
+    if len < EPS {
+        return None;
+    }
+    let unit = dir / len;
+    // A wide, short head — proportioned like a typical CAD arrowhead
+    // rather than a thin dart, and small enough not to swallow a short
+    // line's own length.
+    let head_len = (len * 0.25).min(10.0).max(2.0);
+    let back = to - unit * head_len;
+    let side = Vec2::new(-unit.y, unit.x) * (head_len * 0.4);
+    Some([to, back + side, back - side])
 }
 
 /// What a commit did.
@@ -310,8 +536,9 @@ pub fn commit_page(
         doc.text_mark_restore(page, CARRIER_ID).ok()
     };
 
-    let doomed = previous_ink_indices(&*session.document, page, layer.space(), previous_blob)?;
+    let doomed = previous_markup_indices(&*session.document, page, layer.space(), previous_blob)?;
     let (blob, skipped) = to_blob(layer);
+    let filled = filled_handles(layer);
 
     let doc = session
         .document
@@ -328,16 +555,86 @@ pub fn commit_page(
     }
 
     let mut strokes_written = 0;
-    for object in layer.objects() {
-        let strokes = flatten(&object.geom, layer.space());
-        if strokes.is_empty() {
+    for (index, object) in layer.objects().iter().enumerate() {
+        // Not appearance of its own — it says a *boundary* is filled, handled
+        // below when that boundary is reached.
+        if matches!(object.geom, Geom::Hatch(_)) {
             continue;
         }
-        strokes_written += strokes.len();
-        doc.add_annotation(
-            page,
-            &Annotation::Ink { strokes, color: colour, width },
-        )?;
+
+        let mut outline = flatten(&object.geom, layer.space());
+        if outline.is_empty() {
+            continue;
+        }
+
+        // A line's own arrowhead(s) — each a filled triangle written as its
+        // own `Annotation::Fill`, below, once `pen`/`pen_width` are known.
+        // Not part of `flatten` itself: an arrowhead is `Layer::arrow_ends`'
+        // own side table, not something a bare `Geom` carries, and `flatten`
+        // only ever sees the geometry.
+        let mut arrow_fills: Vec<[Vec2; 3]> = Vec::new();
+        if let Geom::Line(l) = &object.geom {
+            let (start_arrow, end_arrow) = layer.arrow_ends(index);
+            if start_arrow {
+                arrow_fills.extend(arrowhead_triangle(l.b, l.a));
+            }
+            if end_arrow {
+                arrow_fills.extend(arrowhead_triangle(l.a, l.b));
+            }
+        }
+
+        // An object nobody gave its own colour follows this page's pen —
+        // see the matching comment in `overlay::draw_layer`, which paints
+        // the same rule live.
+        let pen = if matches!(object.style.color, cad_kernel::Color::ByLayer) {
+            colour
+        } else {
+            layer
+                .resolved_color(index)
+                .map(|(r, g, b)| Color { r, g, b, a: 255 })
+                .unwrap_or(colour)
+        };
+
+        // Likewise for thickness: a shape with no explicit weight of its
+        // own follows the page's, exactly as `overlay::draw_layer` falls
+        // back to `plain`/`chosen` rather than a kernel-resolved value —
+        // see `Layer::resolved_lineweight_mm`'s own doc for why `None`
+        // rather than a resolved default is the "nothing chosen" answer.
+        let pen_width =
+            layer.resolved_lineweight_mm(index).map(|mm| mm * 72.0 / 25.4).unwrap_or(width);
+
+        // Written before its own outline, so the crisp stroke ends up on top
+        // of the solid interior rather than lost beneath it.
+        if filled.contains(&object.handle) {
+            if let Some(ring) = outline.first().cloned() {
+                doc.add_annotation(
+                    page,
+                    &Annotation::Fill {
+                        outline: ring,
+                        fill_color: pen,
+                        stroke_color: pen,
+                        width: pen_width,
+                    },
+                )?;
+            }
+        }
+
+        strokes_written += outline.len();
+        doc.add_annotation(page, &Annotation::Ink { strokes: outline, color: pen, width: pen_width })?;
+
+        for tri in &arrow_fills {
+            let ring: Vec<PdfPoint> = tri
+                .iter()
+                .map(|&v| {
+                    let p = layer.space().from_kernel(v);
+                    PdfPoint { x: p.x as f32, y: p.y as f32 }
+                })
+                .collect();
+            doc.add_annotation(
+                page,
+                &Annotation::Fill { outline: ring, fill_color: pen, stroke_color: pen, width: pen_width },
+            )?;
+        }
     }
 
     // The carrier: one fully transparent space, which writes the marked-content
@@ -365,14 +662,16 @@ pub fn commit_page(
     })
 }
 
-/// Which annotations on this page are ink a previous commit wrote.
+/// Which annotations on this page are markup a previous commit wrote — both
+/// the ink outlines and the fills a filled shape carries alongside its own.
 ///
 /// Identified by geometry rather than by index: indices shift as a document is
 /// edited, and removing by a remembered index deletes whatever has since moved
 /// into that slot — someone else's highlight. Anything that is not an exact
-/// match for a stroke the previous blob describes is left alone, because
-/// leaving a duplicate is recoverable and deleting a reviewer's mark is not.
-fn previous_ink_indices(
+/// match for a stroke or a fill the previous blob describes is left alone,
+/// because leaving a duplicate is recoverable and deleting a reviewer's mark
+/// is not.
+fn previous_markup_indices(
     doc: &dyn pdf_core::document::Document,
     page: usize,
     space: PageSpace,
@@ -382,20 +681,60 @@ fn previous_ink_indices(
     let Ok(Some(stored)) = from_blob(&previous) else {
         return Ok(Vec::new());
     };
+    let old_layer = to_layer(&stored);
+    let old_filled = filled_handles(&old_layer);
+
+    let to_app = |v: Vec2| {
+        let p = space.from_kernel(v);
+        PdfPoint { x: p.x as f32, y: p.y as f32 }
+    };
 
     let mut ours: Vec<Vec<PdfPoint>> = Vec::new();
-    for geom in &stored.objects {
-        ours.extend(flatten(&geom.to_geom(), space));
+    let mut our_fills: Vec<Vec<PdfPoint>> = Vec::new();
+    for (index, object) in old_layer.objects().iter().enumerate() {
+        if matches!(object.geom, Geom::Hatch(_)) {
+            continue;
+        }
+        let outline = flatten(&object.geom, space);
+        if old_filled.contains(&object.handle) {
+            our_fills.extend(outline.iter().cloned());
+        }
+        ours.extend(outline);
+        // The same arrowhead fill the write loop above adds, matched here
+        // too — otherwise a re-commit would never recognise a line's own
+        // arrowhead as its own and would leave last time's beside this
+        // time's rather than replacing it.
+        if let Geom::Line(l) = &object.geom {
+            let (start_arrow, end_arrow) = old_layer.arrow_ends(index);
+            if start_arrow {
+                our_fills.extend(
+                    arrowhead_triangle(l.b, l.a).map(|tri| tri.into_iter().map(to_app).collect()),
+                );
+            }
+            if end_arrow {
+                our_fills.extend(
+                    arrowhead_triangle(l.a, l.b).map(|tri| tri.into_iter().map(to_app).collect()),
+                );
+            }
+        }
     }
 
     let mut doomed = Vec::new();
     for indexed in doc.annotations(page)? {
-        if let Annotation::Ink { strokes, .. } = &indexed.annotation {
-            if !strokes.is_empty()
-                && strokes.iter().all(|s| ours.iter().any(|o| same_stroke(s, o)))
+        match &indexed.annotation {
+            Annotation::Ink { strokes, .. }
+                if !strokes.is_empty()
+                    && strokes.iter().all(|s| ours.iter().any(|o| same_stroke(s, o))) =>
             {
                 doomed.push(indexed.index);
             }
+            Annotation::Fill { outline, .. }
+                if !outline.is_empty()
+                    && our_fills.iter().any(|o| same_stroke(outline, o)) =>
+            {
+                doomed.push(indexed.index);
+            }
+            _ => {}
         }
     }
     doomed.sort_unstable();
@@ -489,6 +828,112 @@ mod tests {
                 assert_eq!(c.radius, 41.125);
             }
             other => panic!("a circle came back as {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_filled_boundarys_fill_survives_the_blob() {
+        // A fill is not its own `Geom` in the blob — it is the boundary's own
+        // `filled` flag, restored as a fresh `Geom::Hatch` pointed at whatever
+        // handle that boundary gets on this reload. Prove the flag itself
+        // round-trips, not any particular handle.
+        let mut layer = Layer::new(800.0);
+        let rect = layer.add(Geom::Polyline(Polyline {
+            vertices: vec![
+                PolyVertex { pos: Vec2::new(0.0, 0.0), bulge: 0.0 },
+                PolyVertex { pos: Vec2::new(10.0, 0.0), bulge: 0.0 },
+                PolyVertex { pos: Vec2::new(10.0, 10.0), bulge: 0.0 },
+                PolyVertex { pos: Vec2::new(0.0, 10.0), bulge: 0.0 },
+            ],
+            closed: true,
+            widths: Vec::new(),
+        }));
+        let handle = layer.objects()[rect].handle;
+        layer.add(Geom::Hatch(Hatch { boundary_handles: vec![handle], pattern: HatchPattern::Solid }));
+        // A hollow shape alongside it, so the flag is proven per-object and
+        // not just "the layer has a fill in it somewhere".
+        layer.add(Geom::Circle(Circle { center: Vec2::new(50.0, 50.0), radius: 5.0 }));
+
+        assert_eq!(filled_handles(&layer).len(), 1);
+
+        let (blob, skipped) = to_blob(&layer);
+        assert!(skipped.is_empty(), "the hatch pairing should not itself be unstorable: {skipped:?}");
+
+        let rebuilt = to_layer(&from_blob(&blob).unwrap().unwrap());
+        let rebuilt_filled = filled_handles(&rebuilt);
+        assert_eq!(rebuilt_filled.len(), 1, "the fill did not survive the blob");
+
+        let refilled_boundary = rebuilt
+            .objects()
+            .iter()
+            .find(|o| rebuilt_filled.contains(&o.handle))
+            .expect("the filled boundary itself");
+        assert!(
+            matches!(refilled_boundary.geom, Geom::Polyline(_)),
+            "the fill attached to the wrong shape: {:?}",
+            refilled_boundary.geom
+        );
+    }
+
+    /// A line's own arrowhead(s), like a fill, are not part of `cad_kernel`'s
+    /// `Line` — they live in `Layer::arrow_ends`, keyed by handle, and must
+    /// be reconstructed against the fresh handle a reload gives the line.
+    #[test]
+    fn a_lines_arrowheads_survive_the_blob() {
+        let mut layer = Layer::new(800.0);
+        let arrow = layer.add(Geom::Line(Line { a: Vec2::new(0.0, 0.0), b: Vec2::new(100.0, 0.0) }));
+        layer.set_arrow_ends(arrow, false, true);
+        // A plain line beside it, so the flag is proven per-object.
+        layer.add(Geom::Line(Line { a: Vec2::new(0.0, 50.0), b: Vec2::new(100.0, 50.0) }));
+
+        let (blob, skipped) = to_blob(&layer);
+        assert!(skipped.is_empty());
+
+        let rebuilt = to_layer(&from_blob(&blob).unwrap().unwrap());
+        assert_eq!(rebuilt.arrow_ends(0), (false, true), "the arrowhead did not survive the blob");
+        assert_eq!(rebuilt.arrow_ends(1), (false, false), "the plain line gained an arrowhead");
+    }
+
+    /// A shape's own explicit line thickness round-trips the same way a
+    /// colour does — `StoredGeom`'s own field, not a kernel one.
+    #[test]
+    fn a_shapes_lineweight_survives_the_blob() {
+        let mut layer = Layer::new(800.0);
+        layer.add(Geom::Circle(Circle { center: Vec2::new(0.0, 0.0), radius: 10.0 }));
+        layer.set_lineweight_mm(0, 0.7);
+
+        let (blob, _) = to_blob(&layer);
+        let rebuilt = to_layer(&from_blob(&blob).unwrap().unwrap());
+
+        assert_eq!(rebuilt.resolved_lineweight_mm(0), Some(0.7));
+    }
+
+    /// A spline's own control points and weights, not a tessellated
+    /// approximation of them — the same "live geometry, not the ink"
+    /// distinction `a_curve_keeps_its_exact_centre_and_radius_rather_than_
+    /// being_flattened` proves for a circle.
+    #[test]
+    fn a_splines_control_points_survive_the_blob_exactly() {
+        let mut layer = Layer::new(800.0);
+        let points = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(10.0, 40.0),
+            Vec2::new(40.0, 40.0),
+            Vec2::new(50.0, 0.0),
+        ];
+        layer.add(Geom::Spline(cad_kernel::Spline::new_bspline(3, points.clone())));
+
+        let (blob, skipped) = to_blob(&layer);
+        assert!(skipped.is_empty(), "a spline should be storable now: {skipped:?}");
+
+        let rebuilt = to_layer(&from_blob(&blob).unwrap().unwrap());
+        match &rebuilt.objects()[0].geom {
+            Geom::Spline(s) => {
+                assert_eq!(s.degree, 3);
+                assert_eq!(s.control_points, points);
+                assert_eq!(s.weights, vec![1.0; 4]);
+            }
+            other => panic!("a spline came back as {other:?}"),
         }
     }
 

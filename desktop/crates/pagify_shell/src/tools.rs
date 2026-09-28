@@ -423,10 +423,18 @@ pub fn move_selection(layer: &mut Layer, by: Vec2) -> usize {
 /// Copy leaves the originals in place and appends the copies, then selects
 /// them — so a second move acts on what was just made, which is what AutoCAD
 /// does and what hands expect.
+///
+/// Each copy gets a fresh handle: `translated()` deliberately keeps the
+/// original's (a move is still the same object), but a copy is a new object
+/// and two `DObject`s sharing a handle would leave anything that looks one up
+/// by it — a filled boundary's paired `Geom::Hatch`, chiefly — unable to say
+/// which of the two it means. The kernel's own `offset()` makes the same
+/// call, for the same reason (see its doc comment).
 pub fn copy_selection(layer: &mut Layer, by: Vec2) -> usize {
     let copies: Vec<DObject> = selected(layer)
         .iter()
         .filter_map(|i| layer.objects().get(*i).map(|o| o.translated(by)))
+        .map(|o| DObject { handle: cad_kernel::next_handle(), ..o })
         .collect();
 
     let count = copies.len();
@@ -835,6 +843,31 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(defaults.fillet_radius, 25.0);
+    }
+
+    /// A copy must get its own handle. `translated()` deliberately keeps the
+    /// original's — right for a move, wrong for a copy — and a first version
+    /// of this function used it unchanged, which would leave the original and
+    /// its copy sharing one identity. Anything that looks a `DObject` up by
+    /// handle, a filled boundary's paired `Geom::Hatch` chiefly, could then
+    /// no longer say which of the two it meant.
+    #[test]
+    fn copying_a_selection_gives_the_copy_its_own_handle() {
+        let mut layer = Layer::new(H);
+        layer.add(line(0.0, 0.0, 10.0, 0.0));
+        layer.select_box_index(0);
+        let original_handle = layer.objects()[0].handle;
+
+        let made = copy_selection(&mut layer, Vec2::new(5.0, 5.0));
+
+        assert_eq!(made, 1);
+        assert_eq!(layer.len(), 2, "the original should stay, with a copy added");
+        assert_eq!(layer.objects()[0].handle, original_handle, "the original's own handle moved");
+        assert_ne!(
+            layer.objects()[1].handle, original_handle,
+            "the copy must not share the original's handle"
+        );
+        assert_eq!(layer.selection().iter().copied().collect::<Vec<_>>(), vec![1], "the copy should end up selected, not the original");
     }
 
     #[test]

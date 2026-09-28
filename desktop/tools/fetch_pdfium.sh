@@ -40,38 +40,50 @@ sha256_of() {
   fi
 }
 
-# The library file inside a slice, as CHECKSUMS names it (relative to third_party).
-library_in() {
+# The library file's path *within* a slice's own directory.
+library_suffix() {
   case "$1" in
-    pdfium-win-x64) echo "pdfium/$1/bin/pdfium.dll" ;;
-    pdfium-linux-x64) echo "pdfium/$1/lib/libpdfium.so" ;;
-    *) echo "pdfium/$1/lib/libpdfium.dylib" ;;
+    pdfium-win-x64) echo "bin/pdfium.dll" ;;
+    pdfium-linux-x64) echo "lib/libpdfium.so" ;;
+    *) echo "lib/libpdfium.dylib" ;;
   esac
 }
 
 # Check a slice's library against its pinned checksum; delete the slice on a
 # mismatch so nothing unverified is left where the loader looks.
+#
+# The checksum-file key is always `pdfium/$slice/...` — the tree the
+# checksums were taken from — but the file to hash is looked for under
+# `$DEST/$slice/...`, which is not necessarily the same tree: a caller can
+# name its own destination. Found by audit: this used to look for the
+# extracted file under `$ROOT/third_party` regardless of `$DEST`, so a
+# custom-destination fetch either refused a slice that really was there, or
+# — worse — if a stale copy from an earlier default-destination fetch
+# happened to exist, "verified" a file that was never the one just
+# extracted, while the real one sat unchecked at `$DEST`.
 verify_slice() {
-  local slice="$1" rel expected actual
-  rel="$(library_in "$slice")"
-  expected="$(grep -E "  ${rel}\$" "$CHECKSUMS" | cut -d' ' -f1 || true)"
+  local slice="$1" suffix key path expected actual
+  suffix="$(library_suffix "$slice")"
+  key="pdfium/$slice/$suffix"
+  path="$DEST/$slice/$suffix"
+  expected="$(grep -E "  ${key}\$" "$CHECKSUMS" | cut -d' ' -f1 || true)"
   if [ -z "$expected" ]; then
-    echo "        REFUSED — no checksum for $rel in $CHECKSUMS" >&2
+    echo "        REFUSED — no checksum for $key in $CHECKSUMS" >&2
     rm -rf "$DEST/$slice"
     return 1
   fi
-  if [ ! -f "$ROOT/third_party/$rel" ]; then
-    echo "        REFUSED — $rel is not in the archive" >&2
+  if [ ! -f "$path" ]; then
+    echo "        REFUSED — $path is not in the archive" >&2
     rm -rf "$DEST/$slice"
     return 1
   fi
-  actual="$(sha256_of "$ROOT/third_party/$rel")"
+  actual="$(sha256_of "$path")"
   if [ "$actual" != "$expected" ]; then
-    echo "        REFUSED — $rel hashes to $actual, expected $expected" >&2
+    echo "        REFUSED — $path hashes to $actual, expected $expected" >&2
     rm -rf "$DEST/$slice"
     return 1
   fi
-  echo "        verified $rel"
+  echo "        verified $path"
 }
 
 # slice directory : release asset
@@ -88,7 +100,10 @@ for entry in "${SLICES[@]}"; do
   asset="${entry##*:}"
 
   if [ -d "$DEST/$slice/lib" ] || [ -d "$DEST/$slice/bin" ]; then
-    echo "have    $slice"
+    # Already fetched is not already verified — re-checked every run, not
+    # taken on trust from whenever it first arrived. Found by audit.
+    echo "have    $slice — re-verifying"
+    verify_slice "$slice"
     continue
   fi
 

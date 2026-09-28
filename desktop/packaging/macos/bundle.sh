@@ -64,7 +64,10 @@ if [ -z "$IDENTITY" ] && [ "$LOCAL_ONLY" != "1" ]; then
 fi
 
 echo "==> build"
-cargo build --release -p pagify_app
+# `--locked`: the audit just above ran against `Cargo.lock` as it stands, so
+# the build has to use exactly that lock, not update it and build something
+# the gate never saw. Found by audit.
+cargo build --release -p pagify_app --locked
 
 echo "==> bundle"
 rm -rf "$APP"

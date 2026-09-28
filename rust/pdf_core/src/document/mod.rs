@@ -134,6 +134,28 @@ pub struct ImageSignatureMark {
     pub rotation: f32,
 }
 
+/// A plain picture placed on a page — [`Document::add_annotation`] with an
+/// [`Annotation::Image`] that was never named a signature.
+///
+/// **Not [`ImageSignatureMark`].** The two are read from disjoint sets of the
+/// same annotation kind — this one skips anything carrying a signature's
+/// name — on purpose: `apply_signatures` burns in every `ImageSignatureMark`
+/// it finds, and a decorative picture caught in that net would be applied,
+/// listed and removed as though somebody had signed with it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedImageMark {
+    /// PDFium's index for the annotation, which is what removes it.
+    pub index: usize,
+    pub rect: Rect,
+    /// Straight RGBA, row-major, top row first — see [`Annotation::Image`].
+    pub rgba: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// How far clockwise this picture is turned about its own centre, in
+    /// degrees — see [`ImageSignatureMark::rotation`].
+    pub rotation: f32,
+}
+
 /// Something worth a second look, and where it sits.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SensitiveOnPage {
@@ -493,6 +515,19 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Every bookmark in the document's own outline tree, top level only, in
+    /// the order they appear: its title and which page it goes to.
+    ///
+    /// Empty by default, the same reasoning as [`Document::annotations`] —
+    /// a document with no outline, or a backend that cannot read one, simply
+    /// has nothing to list. Nesting is not modelled: a bookmark with
+    /// children is reported alongside its siblings with none of its own,
+    /// which is the whole tree PDFium's own read API hands back for the one
+    /// thing this app ever writes — a flat list, appended to.
+    fn bookmarks(&self) -> Result<Vec<(String, usize)>> {
+        Ok(Vec::new())
+    }
+
     /// Every run of text on a page, in the order the file stores them.
     ///
     /// A read, so it lives on `Document` rather than beside the write: showing
@@ -590,6 +625,35 @@ pub trait Document: Send + Sync {
     /// nothing about what a third party will see.
     fn run_font_is_embedded(&self, _page_index: usize, _object: usize) -> Result<bool> {
         Ok(false)
+    }
+
+    /// The name this run's own font goes by — its `/BaseFont`, as the reader
+    /// already knows it, whether or not the font is embedded.
+    ///
+    /// Unlike [`Document::run_font_data`], which has nothing to answer with
+    /// for a document's own standard font (Helvetica, Times) with no font
+    /// program to read, a name always exists: it is what the run editor
+    /// shows for "which font is this written in", so a run in an unembedded
+    /// standard face must not read as "no font" any more than one whose
+    /// program is right there in the file.
+    fn run_font_name(&self, _page_index: usize, _object: usize) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Every text run's own font name, for the whole page in one pass.
+    ///
+    /// **What [`Document::run_font_name`] costs when asked once per run on a
+    /// real, busy page.** Reported from use as the app freezing solid:
+    /// matching one run's properties to every mismatched run elsewhere on
+    /// the page used to call `run_font_name` once per run to find them, and
+    /// each of those calls opens the page fresh to answer one question — a
+    /// few hundred runs meant a few hundred page-opens for what one walk of
+    /// the page already open here answers for all of them at once. Missing
+    /// only for objects `run_font_name` itself would answer `None` for (not
+    /// text, or no font at all), so a caller can still tell "no font" apart
+    /// from "never asked".
+    fn run_font_names(&self, _page_index: usize) -> Result<std::collections::HashMap<usize, String>> {
+        Ok(std::collections::HashMap::new())
     }
 
     /// Every text mark on a page, as the blobs the app stored beside them.
@@ -717,6 +781,21 @@ pub trait Document: Send + Sync {
         Err(PdfError::Unsupported("removing an object from this page"))
     }
 
+    /// Turn one run of words into one object per character — the same run,
+    /// drawn the same way, just no longer as a single object a click can
+    /// only take or leave whole.
+    ///
+    /// Idempotent-ish: a run already down to one character is left alone
+    /// rather than treated as an error, so a caller does not have to check
+    /// first. Declines a run something else's drawing continues right after
+    /// with no positioning operator between them — splitting that one would
+    /// need to shift what follows character by character too, which
+    /// [`Self::move_object`] itself declines for the same shared-line
+    /// reason (see `object_wrap_site`).
+    fn split_run_into_characters(&mut self, _page_index: usize, _object: usize) -> Result<()> {
+        Err(PdfError::Unsupported("splitting this into characters"))
+    }
+
     /// The area one page object covers.
     ///
     /// **For the case where a drawn word is part of something bigger.** A
@@ -747,6 +826,11 @@ pub trait Document: Send + Sync {
 
     /// The same, for a signature that is a picture — see [`ImageSignatureMark`].
     fn image_signature_marks(&self, _page_index: usize) -> Result<Vec<ImageSignatureMark>> {
+        Ok(Vec::new())
+    }
+
+    /// The plain pictures placed on a page — see [`PlacedImageMark`].
+    fn placed_image_marks(&self, _page_index: usize) -> Result<Vec<PlacedImageMark>> {
         Ok(Vec::new())
     }
 
@@ -919,6 +1003,47 @@ pub trait DocumentMut {
         text: &str,
         style: &TextStyle,
     ) -> Result<(String, TextStyle)>;
+
+    // ------------------------------------------------------------- object --
+    // Named again here, `_mut`-suffixed, rather than reached through
+    // `Document` alone: [`Command::execute`] only ever holds a
+    // `&mut dyn DocumentMut` — the one door every mutation goes through so
+    // undo, redo and scripting do not each need their own — and a type
+    // implementing both traits under the *same* method name make an
+    // ordinary `doc.move_object(...)` call ambiguous the moment both are in
+    // scope, on every caller that ever holds the concrete type rather than
+    // a trait object, existing ones included.
+    // [`PdfiumDocument`](crate::document::pdfium_doc::PdfiumDocument)
+    // implements these by calling straight through to its own [`Document`]
+    // methods, so there is exactly one real implementation of each; this is
+    // only the second name for it that the command stack can see.
+
+    /// See [`Document::move_object`].
+    fn move_object_mut(&mut self, _page_index: usize, _object: usize, _by: Point) -> Result<()> {
+        Err(PdfError::Unsupported("moving an object on this page"))
+    }
+
+    /// See [`Document::scale_object`].
+    fn scale_object_mut(
+        &mut self,
+        _page_index: usize,
+        _object: usize,
+        _anchor: Point,
+        _sx: f32,
+        _sy: f32,
+    ) -> Result<()> {
+        Err(PdfError::Unsupported("resizing an object on this page"))
+    }
+
+    /// See [`Document::remove_object`].
+    fn remove_object_mut(&mut self, _page_index: usize, _object: usize) -> Result<()> {
+        Err(PdfError::Unsupported("removing an object from this page"))
+    }
+
+    /// See [`Document::split_run_into_characters`].
+    fn split_run_into_characters_mut(&mut self, _page_index: usize, _object: usize) -> Result<()> {
+        Err(PdfError::Unsupported("splitting this into characters"))
+    }
 
     /// Destroy every piece of content inside a rectangle.
     ///
@@ -1146,6 +1271,29 @@ pub trait DocumentMut {
     fn add_text_layer(&mut self, page_index: usize, words: &[RecognisedWord]) -> Result<usize> {
         let _ = (page_index, words);
         Err(PdfError::Unsupported("writing a text layer to this document"))
+    }
+
+    // -------------------------------------------------------------- outline --
+    // Catalogue-level, not page content and not a page's own `/Annots` — an
+    // outline entry can point at any page in the document, so it needs its
+    // own command rather than piggy-backing on `AddAnnotation`. Default
+    // implementations refuse, the same way `snapshot_page` does, so the two
+    // lightweight `DocumentMut` test doubles elsewhere in this crate need no
+    // changes to keep compiling.
+
+    /// Add a bookmark for `page_index` to the end of the document's outline,
+    /// after whatever is there already.
+    ///
+    /// Returns what [`DocumentMut::remove_bookmark`] needs to take back
+    /// exactly this one addition and no other — see [`BookmarkAdded`]'s own
+    /// doc for why that is more than just the new item's object number.
+    fn add_bookmark(&mut self, _title: &str, _page_index: usize) -> Result<BookmarkAdded> {
+        Err(PdfError::Unsupported("adding a bookmark to this document"))
+    }
+
+    /// Undo an [`DocumentMut::add_bookmark`], from exactly what it returned.
+    fn remove_bookmark(&mut self, _added: BookmarkAdded) -> Result<()> {
+        Err(PdfError::Unsupported("removing a bookmark from this document"))
     }
 
     /// A new document holding copies of the given pages. Does not mutate self.
@@ -1538,6 +1686,12 @@ impl Annotation {
             // A picture is never invisible bookkeeping — it is always the
             // thing somebody put there.
             Annotation::Image { .. } => false,
+            Annotation::Fill { fill_color, stroke_color, .. } => {
+                fill_color.a == 0 && stroke_color.a == 0
+            }
+            // Borderless by design (see the variant's own doc), not absent —
+            // a link with nothing to click would not be a link.
+            Annotation::Link { .. } => false,
         }
     }
 
@@ -1594,6 +1748,15 @@ impl Annotation {
                 around(glyphs.iter().map(|g| (g.x, g.y)))
             }
             Annotation::Image { rect, .. } => Some(*rect),
+            Annotation::Fill { outline, width, .. } => {
+                around(outline.iter().map(|p| (p.x, p.y))).map(|r| Rect {
+                    left: r.left - width / 2.0,
+                    top: r.top - width / 2.0,
+                    right: r.right + width / 2.0,
+                    bottom: r.bottom + width / 2.0,
+                })
+            }
+            Annotation::Link { rect, .. } => Some(*rect),
         }
     }
 }
@@ -1738,6 +1901,35 @@ pub enum Annotation {
         rgba: Vec<u8>,
         width: u32,
         height: u32,
+    },
+    /// A closed shape — a rectangle or circle — drawn filled rather than
+    /// hollow. Its outline is written again, separately, as an
+    /// [`Annotation::Ink`]; this variant carries only the solid interior an
+    /// ink stroke has no way to hold, since a fill is a face and a stroke is
+    /// just its edge.
+    Fill {
+        /// The boundary, in drawing order, closed. One ring — a fill with a
+        /// hole in it is not modelled.
+        outline: Vec<Point>,
+        fill_color: Color,
+        stroke_color: Color,
+        width: f32,
+    },
+    /// A clickable web link over one rectangular area of the page.
+    ///
+    /// **One rect, not several — unlike [`Annotation::Highlight`].**
+    /// `/QuadPoints` is a text-markup construct; a `/Link` annotation's own
+    /// geometry is the one `/Rect` it has, so a link over text spanning more
+    /// than one line is several of these, one per line, each carrying the
+    /// same `uri`. The caller (whoever turns a text selection into a link)
+    /// is what already has the per-line rects — see `Characters::line_rects`
+    /// — so it is the natural place to issue one `AddAnnotation` per line.
+    ///
+    /// Borderless on purpose: `fill_annotation` sets a zero-width border, so
+    /// the link works without drawing a box around the words it covers.
+    Link {
+        rect: Rect,
+        uri: String,
     },
 }
 
@@ -1973,6 +2165,32 @@ pub struct IndexedAnnotation {
     pub index: usize,
     #[serde(flatten)]
     pub annotation: Annotation,
+}
+
+/// What [`DocumentMut::add_bookmark`] needs remembered, so
+/// [`DocumentMut::remove_bookmark`] can take back exactly this one addition
+/// and no other.
+///
+/// Not serialisable, deliberately — like every [`crate::command::UndoRecord`]
+/// this ends up inside: it names *these particular objects*, in *this
+/// particular file*, and replaying it against a different document (or the
+/// same one saved and reopened, where a rewrite may have renumbered
+/// everything) would patch whatever now happens to hold these numbers.
+#[derive(Debug, Clone, Copy)]
+pub struct BookmarkAdded {
+    /// The outline root's own object number — whether this call created it
+    /// or it already existed.
+    pub outlines_object: u32,
+    /// Whether this call is what created the outline root. Undo drops
+    /// `/Outlines` from the catalogue again only when this is true — an
+    /// outline root that already existed is not this command's to remove.
+    pub outlines_is_new: bool,
+    /// The new item's own object number.
+    pub item_object: u32,
+    /// The item that was the outline's own `/Last` before this one, if
+    /// there was one — undo restores it as `/Last` again and drops the
+    /// `/Next` this addition pointed it to.
+    pub previous_last: Option<u32>,
 }
 
 #[derive(Debug, Clone)]

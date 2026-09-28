@@ -49,15 +49,34 @@ pub fn file_name_only(name: &str) -> Result<String, String> {
 
 /// Write a file that is Pagify's own: created with the directory it needs,
 /// readable by the user alone where the platform can say so.
+///
+/// **Owner-only from the moment it exists.** A plain write followed by
+/// `set_permissions` leaves the file at the process default — typically
+/// 0644 — for however long the write itself takes; a signature's pixels or a
+/// recorded script sitting briefly at a world-readable mode is exactly the
+/// window a narrower mode is meant to close. Found by audit.
 pub fn write_own(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, contents)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    // A file that already existed keeps whatever mode it had — `create`
+    // rather than `create_new` means this can overwrite one made before this
+    // fix, at 0644, and `mode()` on `open` only ever applies to a file this
+    // call itself creates.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }

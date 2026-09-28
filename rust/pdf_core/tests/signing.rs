@@ -343,6 +343,56 @@ fn signing_and_validating_through_the_document_agree() {
     );
 }
 
+/// **Found by audit.** After signing, an edit inside PDFium — an annotation,
+/// a mark — leaves the cached "exact bytes just signed" no longer matching
+/// the live document, but nothing cleared it: `validate_signatures` kept
+/// reporting the old, already-superseded snapshot as if it were still
+/// current. It must fall back to the file on disk instead — stale relative
+/// to the unsaved edit too, but at least a real file, not one that matches
+/// neither the disk nor the document in memory.
+#[test]
+fn an_edit_after_signing_makes_validation_read_the_disk_not_the_stale_snapshot() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let certificate =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/test-signer-sm2.p12");
+    let pkcs12 = std::fs::read(certificate).expect("the SM2 identity is committed");
+    let mut doc = pdf_core::document::pdfium_doc::PdfiumDocument::open_path(
+        harness::fixture_path("two-column.pdf").to_str().expect("path"),
+        None,
+    )
+    .expect("open");
+
+    use pdf_core::document::DocumentMut;
+    doc.sign_document(&pkcs12, "pagify", &sign::Reason::default()).expect("sign");
+    assert_eq!(doc.validate_signatures().expect("validate").len(), 1, "sign did not take");
+
+    // Sanitising rewrites the live document (reopening it from the cleaned
+    // bytes) without updating the cached "exact bytes just signed" — the
+    // same shape a redaction takes, and exactly the gap the audit named:
+    // an operation that changes the document, cheaply, in a way the
+    // signing snapshot cannot possibly reflect.
+    doc.remove_hidden_data().expect("sanitise");
+
+    // The file on disk is still the original, unsigned fixture, so an
+    // honest read of it must not still say `Unaltered` — whether that comes
+    // back as no signatures at all, or (as it does for this particular
+    // fixture, which this crate's own byte-level reader cannot parse from
+    // its on-disk cross-reference *stream* — a separate, pre-existing
+    // limitation, not this fix) as a refusal to read it at all. Either is
+    // honest; continuing to report the stale pre-edit signature is not.
+    let after = doc.validate_signatures();
+    let still_says_unaltered = matches!(
+        &after,
+        Ok(found) if found.iter().any(|s| s.verdict == Verdict::Unaltered)
+    );
+    assert!(
+        !still_says_unaltered,
+        "validation kept reporting the stale pre-edit signature instead of the file on disk: {after:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // What the blob says about itself is not evidence. Found by audit: the check
 // used to compare the file's digest with the digest *inside* the signature
@@ -593,6 +643,153 @@ fn a_signed_document_saved_is_the_signed_bytes() {
     let mut copy = Vec::new();
     doc.save_full_copy(&mut copy).expect("copy");
     assert_eq!(copy, saved, "a copy of a signed document was re-serialised");
+}
+
+/// The trailing `startxref <n>` a reader actually follows — the last one in
+/// the file, same as [`File`]'s own [`File::parse`] looks for.
+fn trailing_startxref(bytes: &[u8]) -> usize {
+    let tail_from = bytes.len().saturating_sub(2048);
+    let tail = &bytes[tail_from..];
+    let at = tail.windows(9).rposition(|w| w == b"startxref").expect("startxref");
+    std::str::from_utf8(&tail[at + 9..])
+        .expect("ascii")
+        .trim_start()
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .and_then(|s| s.parse().ok())
+        .expect("a number after startxref")
+}
+
+/// **C-1, found by audit.** A shadow `/Sig` dictionary planted *inside* the
+/// hole, together with a complete cross-reference table and trailer of its
+/// own, also inside the hole, positioned so the file's own unchanged
+/// trailing `startxref n` — still the same bytes, still the same number —
+/// lands on *it* instead of the real table the insertion pushed further
+/// out. `sm3_over([C1, C2])` is unchanged, because C1 and C2 are
+/// byte-identical to the honest file either way; only what `n` now points
+/// at has changed. The only thing that can catch it is checking that the
+/// hole is *this dictionary's own* `/Contents`, found from the
+/// cross-reference table rather than trusted from the dictionary's own
+/// numbers: the shadow's own dictionary syntax, and now a whole xref table
+/// and trailer besides, all have to fit inside the hole too, so its
+/// `/Contents` value can never be the *whole* hole the way a real
+/// signature's is.
+#[test]
+fn a_shadow_signature_dictionary_inside_the_hole_is_not_unaltered() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    use pdf_core::document::DocumentMut;
+    use pdf_core::pdf::Object;
+
+    let mut doc = open_document("two-column.pdf");
+    if !certify(&mut doc) {
+        return;
+    }
+    let mut signed = Vec::new();
+    doc.save_incremental(&mut signed).expect("save");
+    assert_eq!(
+        verdicts_in(&signed),
+        vec![Verdict::Unaltered],
+        "control: the real file has to validate before it is worth attacking"
+    );
+
+    let range = declared_range(&signed).expect("range");
+    let [_, first, second_at, second_len] = range.numbers();
+    let blob = blob_in(&signed, &range);
+    let n = trailing_startxref(&signed);
+
+    // The real dictionary's own object number and the `/Root` reference —
+    // read the way a reader would, not assumed from writing it.
+    let file = File::parse(&signed).expect("parse");
+    let sig_number = file
+        .numbers()
+        .find(|&num| {
+            file.object(num)
+                .ok()
+                .and_then(|o| o.as_dict().cloned())
+                .is_some_and(|d| d.get(b"Type").and_then(Object::as_name) == Some(&b"Sig"[..]))
+        })
+        .expect("a Sig object in the freshly signed file");
+    let root = match file.trailer().get(b"Root") {
+        Some(Object::Reference(num, gen)) => format!("{num} {gen} R"),
+        other => panic!("expected the trailer to name /Root by reference: {other:?}"),
+    };
+    drop(file);
+    assert!(n > second_at, "expected the real table to sit after the signed hole");
+
+    // The shadow's own xref table and trailer: one entry, naming only
+    // `sig_number`, at the shadow's own offset — everything else falls
+    // through `/Prev` to the real table, wherever inserting this hole's new
+    // content ends up pushing it. Every number is ten digits so this whole
+    // block's length does not depend on what they turn out to be, which is
+    // what lets it be sized before the one number (`/Prev`) that depends on
+    // the size of everything before it.
+    let xref_tail = |prev: usize, shadow_offset: usize| -> Vec<u8> {
+        format!(
+            "xref\n{sig_number} 1\n{shadow_offset:010} 00000 n \ntrailer\n\
+             << /Size {size} /Root {root} /Prev {prev:010} >>\n",
+            size = sig_number + 1,
+        )
+        .into_bytes()
+    };
+    let xref_tail_len = xref_tail(0, 0).len();
+    // Where C2 has to start for `second_len` more bytes to be exactly the
+    // original C2 — the shadow's own `/ByteRange` end, and so the point
+    // this dictionary's declared bytes stop and the file's own xref tail
+    // begins is free to be anything, since none of it is covered.
+    let shadow_second_at = n + xref_tail_len;
+
+    let hex: String = blob.iter().map(|b| format!("{b:02X}")).collect();
+    let shadow = format!(
+        "{sig_number} 0 obj\n<< /Type /Sig /ByteRange [0 {first} {shadow_second_at} {second_len}] \
+         /Contents <{hex}> >>\nendobj\n"
+    )
+    .into_bytes();
+
+    // Padding between the shadow dictionary and the xref tail, so the tail
+    // lands at exactly `n` — a PDF comment, which is whitespace to the
+    // lexer and nothing to anyone reading dictionaries either side of it.
+    let pad_len = n
+        .checked_sub(first + shadow.len())
+        .expect("room between the shadow dictionary and the real xref table");
+    assert!(pad_len >= 2, "not enough room to pad — the fixture would need to grow");
+    let mut padding = vec![b'X'; pad_len];
+    padding[0] = b'%';
+    padding[pad_len - 1] = b'\n';
+
+    let h_len = shadow.len() + padding.len() + xref_tail_len;
+    let shift = h_len as isize - (second_at - first) as isize;
+    let prev = (n as isize + shift) as usize;
+    let xref_tail_bytes = xref_tail(prev, first);
+    assert_eq!(xref_tail_bytes.len(), xref_tail_len, "the /Prev number changed the tail's own length");
+
+    let mut forged = Vec::with_capacity(signed.len() + h_len);
+    forged.extend_from_slice(&signed[..first]);
+    forged.extend_from_slice(&shadow);
+    forged.extend_from_slice(&padding);
+    forged.extend_from_slice(&xref_tail_bytes);
+    forged.extend_from_slice(&signed[second_at..]);
+
+    // The premise of the attack, confirmed: C1 and C2 are untouched, and
+    // the file's own trailing `startxref n` — part of C2 — now lands
+    // exactly on the shadow's own table instead of the real one.
+    assert_eq!(&forged[..first], &signed[..first], "C1 must be untouched");
+    assert_eq!(&forged[first + h_len..], &signed[second_at..], "C2 must be untouched");
+    assert_eq!(trailing_startxref(&forged), n, "the file's own startxref number must be unchanged");
+    assert_eq!(
+        &forged[n..n + 4],
+        b"xref",
+        "startxref should now land on the planted table, not the real one"
+    );
+
+    let forged_file = File::parse(&forged).expect("parse the forged file");
+    let found = validate::check(&forged_file, &forged).expect("check");
+    assert_eq!(found.len(), 1, "expected exactly one signature dictionary: {found:?}");
+    assert_ne!(
+        found[0].verdict,
+        Verdict::Unaltered,
+        "a shadow dictionary inside the hole earned Unaltered — C-1 is back"
+    );
 }
 
 /// An edit after signing is saved as a later revision: the signature still

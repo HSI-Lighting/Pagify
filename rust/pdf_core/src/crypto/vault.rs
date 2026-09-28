@@ -133,6 +133,19 @@ pub struct Vault {
     /// changes an older build could not survive, and an absent list is not one.
     #[serde(default)]
     pub items: Vec<SealedItem>,
+    /// A digest over `pages` and `items`, sealed under the data key.
+    ///
+    /// Each page and item is individually sound — a tampered `sealed` blob
+    /// fails its own tag — but nothing stopped a file-write attacker (no
+    /// passcode needed) from deleting one wholesale, or editing an item's own
+    /// plaintext fields (which page or object it names, its `rect`), and a
+    /// right passcode afterwards opened what was left and called it a normal
+    /// unlock. This is checked by [`Vault::unlock`] before anything else is
+    /// trusted. `None` for a vault written before this existed — still opens,
+    /// and gains one the next time anything about it is saved. Found by
+    /// audit.
+    #[serde(default)]
+    pub bind: Option<String>,
 }
 
 impl Vault {
@@ -146,6 +159,7 @@ impl Vault {
                 envelope,
                 pages: Vec::new(),
                 items: Vec::new(),
+                bind: None,
             },
             dek,
         ))
@@ -179,9 +193,43 @@ impl Vault {
             .map_err(|e| PdfError::Pdfium(format!("the lock could not be written: {e}")))
     }
 
-    /// The data key, or an error if the passcode is wrong.
+    /// The data key, or an error if the passcode is wrong — or if `pages` or
+    /// `items` have been tampered with since the vault was last saved.
+    ///
+    /// Checked here, once, before anything else trusts either list: `open_page`
+    /// and `items_on` have no way of their own to tell a deleted or edited
+    /// entry from a normal one, and a right passcode over an altered vault
+    /// must not read as a normal unlock.
     pub fn unlock(&self, passcode: &[u8]) -> Result<Secret> {
-        self.envelope.unwrap_dek(passcode)
+        let dek = self.envelope.unwrap_dek(passcode)?;
+        if let Some(bind) = &self.bind {
+            let sealed = unhex(bind).ok_or_else(|| {
+                PdfError::InvalidArgument("this lock's binding is not readable".into())
+            })?;
+            let digest = cipher::open(&dek, &sealed, BIND).map_err(|_| {
+                PdfError::InvalidArgument(
+                    "this lock's binding does not open — it has been altered".into(),
+                )
+            })?;
+            if digest.as_slice() != structure_digest(&self.pages, &self.items) {
+                return Err(PdfError::InvalidArgument(
+                    "this lock has been altered since it was made".into(),
+                ));
+            }
+        }
+        Ok(dek)
+    }
+
+    /// Recompute and seal the binding over the current `pages` and `items`.
+    ///
+    /// The caller's job to run before the vault is written anywhere — nothing
+    /// here calls it automatically, because a vault mutated through several
+    /// calls in a row (sealing a page, then hiding an item on it) only needs
+    /// one binding over the end result, not one after every step.
+    pub fn seal_structure(&mut self, dek: &Secret) -> Result<()> {
+        let digest = structure_digest(&self.pages, &self.items);
+        self.bind = Some(hex(&cipher::seal(dek, &digest, BIND)?));
+        Ok(())
     }
 
     /// Seal a page into the vault, if it is not already sealed.
@@ -315,6 +363,63 @@ fn binding(v: u32, page_index: usize) -> Vec<u8> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The inverse of [`hex`]. `None` for anything that is not an even run of hex
+/// digits, rather than silently taking what it can.
+fn unhex(text: &str) -> Option<Vec<u8>> {
+    let digits = text.as_bytes();
+    if digits.len() % 2 != 0 || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    Some(
+        digits
+            .chunks(2)
+            .map(|pair| {
+                let nibble = |b: u8| (b as char).to_digit(16).unwrap_or(0) as u8;
+                nibble(pair[0]) << 4 | nibble(pair[1])
+            })
+            .collect(),
+    )
+}
+
+/// What [`Vault::seal_structure`] binds against, so it cannot be mistaken for
+/// a page or item seal.
+const BIND: &[u8] = b"pagify lock bind";
+
+/// A digest over every page and item — the fields nothing else authenticates.
+///
+/// A page's own bytes are sealed already; this adds them anyway, so that
+/// deleting one, or swapping which `page_index` it claims to be sealed for,
+/// changes the digest too. An item holds no ciphertext of its own at all — see
+/// [`SealedItem`] — so every one of its fields has to be in here for any of
+/// them to be protected.
+fn structure_digest(pages: &[SealedPage], items: &[SealedItem]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update((pages.len() as u64).to_le_bytes());
+    for page in pages {
+        hasher.update((page.page_index as u64).to_le_bytes());
+        hasher.update((page.sealed.len() as u64).to_le_bytes());
+        hasher.update(&page.sealed);
+    }
+    hasher.update((items.len() as u64).to_le_bytes());
+    for item in items {
+        hasher.update((item.id.len() as u64).to_le_bytes());
+        hasher.update(item.id.as_bytes());
+        hasher.update((item.page_index as u64).to_le_bytes());
+        hasher.update((item.object as u64).to_le_bytes());
+        for v in item.rect {
+            hasher.update(v.to_le_bytes());
+        }
+        hasher.update((item.parts.len() as u64).to_le_bytes());
+        for part in &item.parts {
+            for v in part {
+                hasher.update(v.to_le_bytes());
+            }
+        }
+    }
+    hasher.finalize().into()
 }
 
 /// Bytes as base64 in the JSON.
@@ -633,5 +738,89 @@ mod tests {
                 "a {len}-byte page did not survive"
             );
         }
+    }
+
+    // -- the binding — L-7, found by audit ----------------------------------
+
+    /// **A right passcode over a decimated vault must not read as a normal
+    /// unlock.** Deleting a page's own recovery copy needs no passcode at all
+    /// — it is a plain JSON edit — and nothing about the *remaining* pages
+    /// notices one is gone.
+    #[test]
+    fn deleting_a_page_is_noticed_on_unlock() {
+        let (mut vault, dek) = vault();
+        vault.seal_page(&dek, 0, b"page zero").expect("seal");
+        vault.seal_page(&dek, 1, b"page one").expect("seal");
+        vault.seal_structure(&dek).expect("bind");
+        assert!(vault.unlock(b"open sesame").is_ok(), "a freshly bound vault did not unlock");
+
+        vault.pages.remove(1);
+        assert!(
+            vault.unlock(b"open sesame").is_err(),
+            "a right passcode unlocked a vault missing a recovery copy"
+        );
+    }
+
+    /// An item holds no ciphertext of its own — see [`SealedItem`] — so its
+    /// `rect`, `object` and `page_index` are ordinary plaintext with nothing
+    /// but the binding to stop them being edited to point somewhere else.
+    #[test]
+    fn tampering_with_an_items_own_fields_is_noticed_on_unlock() {
+        let (mut vault, dek) = vault();
+        vault.seal_page(&dek, 0, b"the page").expect("seal");
+        vault.hide_item(0, 3, RECT).expect("hide");
+        vault.seal_structure(&dek).expect("bind");
+        assert!(vault.unlock(b"open sesame").is_ok());
+
+        vault.items[0].object = 99;
+        assert!(
+            vault.unlock(b"open sesame").is_err(),
+            "an edited item's object index went unnoticed"
+        );
+    }
+
+    /// A vault written before the binding existed still opens — the same
+    /// legacy path every other optional field in this format takes.
+    #[test]
+    fn a_vault_with_no_binding_still_unlocks() {
+        let (mut vault, dek) = vault();
+        vault.seal_page(&dek, 0, b"a page").expect("seal");
+        assert!(vault.bind.is_none(), "the fixture already has a binding");
+        assert!(vault.unlock(b"open sesame").is_ok(), "a legacy vault was refused");
+    }
+
+    /// Sealing the structure again after a legitimate change — not an
+    /// attacker's edit — still leaves the vault openable.
+    #[test]
+    fn resealing_after_a_real_change_still_unlocks() {
+        let (mut vault, dek) = vault();
+        vault.seal_page(&dek, 0, b"page zero").expect("seal");
+        vault.seal_structure(&dek).expect("bind");
+
+        vault.seal_page(&dek, 1, b"page one").expect("seal a second page");
+        vault.seal_structure(&dek).expect("bind again");
+
+        assert!(vault.unlock(b"open sesame").is_ok(), "a legitimately grown vault was refused");
+        assert_eq!(vault.open_page(&dek, 0).expect("open").as_slice(), b"page zero");
+        assert_eq!(vault.open_page(&dek, 1).expect("open").as_slice(), b"page one");
+    }
+
+    /// The binding survives being written to JSON and read back — not just
+    /// held in memory.
+    #[test]
+    fn the_binding_survives_a_round_trip_and_still_catches_tampering() {
+        let (mut vault, dek) = vault();
+        vault.seal_page(&dek, 0, b"page zero").expect("seal");
+        vault.hide_item(0, 1, RECT).expect("hide");
+        vault.seal_structure(&dek).expect("bind");
+
+        let mut back = Vault::parse(&vault.to_bytes().expect("write")).expect("read");
+        assert!(back.unlock(b"open sesame").is_ok(), "a bound vault did not survive a round trip");
+
+        back.items.clear();
+        assert!(
+            back.unlock(b"open sesame").is_err(),
+            "deleting every item after a round trip went unnoticed"
+        );
     }
 }

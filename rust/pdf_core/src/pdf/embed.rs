@@ -144,7 +144,12 @@ pub fn truetype(bytes: &[u8], first: u32) -> Result<Embedded> {
         .collect();
     let pdf_name = if pdf_name.is_empty() { "PagifyTyping".to_string() } else { pdf_name };
 
-    let (font, descriptor, file) = (first, first + 1, first + 2);
+    let overflow = || PdfError::Unsupported("this file already uses the highest object number a PDF can hold");
+    let (font, descriptor, file) = (
+        first,
+        first.checked_add(1).ok_or_else(overflow)?,
+        first.checked_add(2).ok_or_else(overflow)?,
+    );
 
     // Widths for every code the encoding can carry, in 1000ths of an em. A code
     // the face has no glyph for is zero, which is what a reader expects for a

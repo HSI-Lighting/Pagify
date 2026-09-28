@@ -17,6 +17,7 @@ mod focus;
 mod home;
 mod logo;
 mod overlay;
+mod spelling;
 mod system_fonts;
 mod theme;
 
@@ -131,6 +132,12 @@ enum PendingKind {
     PickText,
     /// Words waiting for a point to be written at.
     Write(String),
+    /// Two corners of a box brand new text is composed into — see
+    /// [`NewTextBox`]. What bare `addtext` arms, as opposed to `Write`,
+    /// which is `addtext <words>` and still just wants the one point.
+    PlaceText,
+    /// A decoded picture waiting for a point to be centred on.
+    PlaceImage { rgba: Vec<u8>, width: u32, height: u32 },
     Draw(DrawKind),
     Modify(tools::Pick),
     Calibrate { distance: f64, unit: String },
@@ -153,6 +160,9 @@ enum PendingKind {
     Whiteout,
     /// Two corners of an area to hide, sealed under a passcode.
     Lock,
+    /// Two corners of a labelled region — see [`PendingArticleBox`] for the
+    /// title, asked for once the area is drawn.
+    ArticleBox,
 }
 
 /// A signature being drawn.
@@ -190,6 +200,116 @@ struct SnippetList {
     adding: String,
 }
 
+/// What the Search & Replace panel is set to do.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum FindReplaceMode {
+    /// Search without replacing anything — `find`/`findnext` themselves,
+    /// reached from the panel instead of the command box.
+    #[default]
+    Find,
+    /// Replace the current match and step to the next, one at a time —
+    /// so a match that should be left alone can be skipped with "Find
+    /// Next" instead of being replaced by mistake.
+    ReplaceOne,
+    /// Replace every match across the whole document at once.
+    ReplaceAll,
+}
+
+/// The Search & Replace panel, while it is open.
+#[derive(Debug, Default, Clone)]
+struct FindReplace {
+    mode: FindReplaceMode,
+    /// What to search for.
+    find: String,
+    /// What to put in its place.
+    replace: String,
+}
+
+/// One word the checker does not recognise.
+///
+/// Keeps the run's own object rather than a page-wide byte offset: applying
+/// a fix re-finds `word` inside that run's *current* text at the moment it
+/// is applied (the same thing `replace_current` already does), so an
+/// earlier fix changing that run's length never invalidates a later one.
+#[derive(Debug, Clone, PartialEq)]
+struct Misspelling {
+    page: usize,
+    object: usize,
+    word: String,
+}
+
+/// The Check Spelling panel, while it is open.
+#[derive(Debug, Default, Clone)]
+struct SpellCheck {
+    /// Every word still to review, in the order the pages were scanned.
+    found: Vec<Misspelling>,
+    /// What "Change" would write for `found[0]` — the top suggestion by
+    /// default, but a person may type something else in its place.
+    replacement: String,
+    /// Read once, when the panel opens: how many words the scan reported
+    /// found in total, kept so "3 of 12" still means something once fixes
+    /// and skips have shortened `found` down to fewer than that.
+    total_found: usize,
+}
+
+/// A drawn Article Box rectangle, waiting for the title that names it.
+#[derive(Debug, Clone)]
+struct PendingArticleBox {
+    page: usize,
+    rect: pdf_core::document::Rect,
+    title: String,
+}
+
+/// A text selection waiting for the address to link it to.
+#[derive(Debug, Clone, Default)]
+struct PendingLink {
+    page: usize,
+    /// One rect per line — see [`pdf_core::document::Annotation::Link`]'s own
+    /// doc for why applying this writes one link per entry rather than one
+    /// link covering all of them.
+    rects: Vec<pdf_core::document::Rect>,
+    url: String,
+}
+
+/// The sample "Match Properties" copies from — see
+/// [`PagifyApp::match_properties_sample`].
+///
+/// Built once, when the sample is picked, rather than re-read before every
+/// target: `alternate_objects` is one pass over the whole page, and running
+/// that again for every separate target selection would be the same
+/// per-selection page walk `compute_right_click_text_actions`'s own doc
+/// already found seconds long on a real few-hundred-run document.
+#[derive(Debug, Clone)]
+struct MatchPropertiesSample {
+    page: usize,
+    /// The sample run's own registered face name, if it has an embedded copy
+    /// at all — `None` means only size and colour can carry over.
+    face: Option<String>,
+    size: f32,
+    color: pdf_core::document::Color,
+    /// The sample's own family, subset tag stripped — see
+    /// `strip_subset_prefix`. A target already in this family is left alone
+    /// rather than retyped.
+    family: Option<String>,
+    /// One representative object per distinct on-page font name sharing
+    /// `family` — tried in turn when `face`'s own embedded copy cannot spell
+    /// a target's text. See `match_font_to_first_selected`'s own doc, which
+    /// this is ported from.
+    alternate_objects: Vec<usize>,
+}
+
+/// The Bookmarks panel — every bookmark in the document's own outline,
+/// title and page, click to jump.
+///
+/// Refreshed whenever it is opened or a bookmark is added, rather than read
+/// live every frame: the list only ever changes on those two occasions, and
+/// re-reading PDFium's own outline tree on every repaint would be work with
+/// no payoff.
+#[derive(Debug, Default, Clone)]
+struct BookmarkPanel {
+    entries: Vec<(String, usize)>,
+}
+
 /// What a press in the Manage Signatures panel asked for.
 ///
 /// Gathered while the panel is drawn and acted on afterwards: the panel holds
@@ -207,6 +327,14 @@ enum DrawKind {
     Circle,
     Rectangle,
     Polyline,
+    /// A line with an arrowhead pre-picked on its end — see `PagifyApp::
+    /// draw_shape_properties`'s "ends" control for turning one on or off
+    /// after the fact, on this or any other line.
+    Arrow,
+    /// A NURBS curve — `cad_kernel::Geom::Spline`. Picked the same way a
+    /// Polyline is (any number of points, Enter to finish); the difference
+    /// is only in what the points become.
+    Spline,
 }
 
 /// How many of each a pick still wants. `usize::MAX` means "until Enter".
@@ -215,8 +343,12 @@ impl PendingKind {
         match self {
             PendingKind::PickText => (0, 1),
             PendingKind::Write(_) => (0, 1),
-            PendingKind::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle) => (0, 2),
-            PendingKind::Draw(DrawKind::Polyline) => (0, usize::MAX),
+            PendingKind::PlaceText => (0, 2),
+            PendingKind::PlaceImage { .. } => (0, 1),
+            PendingKind::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => {
+                (0, 2)
+            }
+            PendingKind::Draw(DrawKind::Polyline | DrawKind::Spline) => (0, usize::MAX),
             PendingKind::Modify(pick) => (pick.objects, pick.points),
             PendingKind::Calibrate { .. } => (0, 2),
             PendingKind::Whiteout => (0, 2),
@@ -227,6 +359,7 @@ impl PendingKind {
             PendingKind::Measure(MeasureKind::Distance) => (0, 2),
             PendingKind::Measure(MeasureKind::Area) => (0, usize::MAX),
             PendingKind::Redact | PendingKind::Lock => (0, 2),
+            PendingKind::ArticleBox => (0, 2),
         }
     }
 
@@ -240,6 +373,11 @@ impl PendingKind {
                 )
             }
             PendingKind::PickText => "click the words to change".into(),
+            PendingKind::PlaceImage { .. } => "click where the picture goes".into(),
+            PendingKind::PlaceText => match points_done {
+                0 => "text: first corner of the box".into(),
+                _ => "text: opposite corner".into(),
+            },
             PendingKind::Redact => match points_done {
                 0 => "redact: first corner of the area to destroy".into(),
                 _ => "redact: opposite corner".into(),
@@ -270,6 +408,10 @@ impl PendingKind {
                 0 => "lock: first corner of the area to hide".into(),
                 _ => "lock: opposite corner".into(),
             },
+            PendingKind::ArticleBox => match points_done {
+                0 => "article box: first corner".into(),
+                _ => "article box: opposite corner".into(),
+            },
             PendingKind::Draw(kind) => match (kind, points_done) {
                 (DrawKind::Line, 0) => "line: from".into(),
                 (DrawKind::Line, _) => "line: to".into(),
@@ -277,8 +419,13 @@ impl PendingKind {
                 (DrawKind::Circle, _) => "circle: a point on it".into(),
                 (DrawKind::Rectangle, 0) => "rectangle: first corner".into(),
                 (DrawKind::Rectangle, _) => "rectangle: opposite corner".into(),
+                (DrawKind::Arrow, 0) => "arrow: from".into(),
+                (DrawKind::Arrow, _) => "arrow: to — the point the head lands on".into(),
                 (DrawKind::Polyline, n) => {
                     format!("polyline: point {} — Enter to finish", n + 1)
+                }
+                (DrawKind::Spline, n) => {
+                    format!("spline: point {} — Enter to finish", n + 1)
                 }
             },
             PendingKind::Modify(pick) => pick.prompt(objects_done, points_done),
@@ -318,7 +465,23 @@ impl PendingKind {
     /// instead of a pick on the first (reported from use: "the scaling and
     /// rotating isn't working" was this, not the drag math).
     fn repeats(&self) -> bool {
-        !matches!(self, PendingKind::Calibrate { .. } | PendingKind::PickText | PendingKind::Signature)
+        !matches!(
+            self,
+            PendingKind::Calibrate { .. }
+                | PendingKind::PickText
+                | PendingKind::Signature
+                // **Reported from use: placing a picture kept the tool
+                // armed, so every later click on the page stamped another
+                // copy of it.** The same reasoning as a placed signature,
+                // above: what someone wants right after placing a picture
+                // is almost always to move or resize the one just placed,
+                // not stamp a second identical one.
+                | PendingKind::PlaceImage { .. }
+                // Same reasoning again: what someone wants right after
+                // dragging out a text box is to type into the box just
+                // drawn, not immediately drag out a second one.
+                | PendingKind::PlaceText
+        )
     }
 
     /// Whether Enter can end it early.
@@ -333,6 +496,8 @@ impl PendingKind {
             PendingKind::Draw(DrawKind::Circle) => "circle",
             PendingKind::Draw(DrawKind::Polyline) => "pline",
             PendingKind::Draw(DrawKind::Rectangle) => return None,
+            PendingKind::Draw(DrawKind::Arrow) => "arrow",
+            PendingKind::Draw(DrawKind::Spline) => "spline",
             PendingKind::Redact => "redact",
             PendingKind::Whiteout => "whiteout",
             // No ribbon button lights up per mark; the tool is one word with
@@ -342,8 +507,13 @@ impl PendingKind {
             PendingKind::SignRectangle => "signrectangle",
             PendingKind::SignLine => "signline",
             PendingKind::Lock => "lock",
+            PendingKind::ArticleBox => "articlebox",
             PendingKind::PickText => "edittext",
             PendingKind::Write(_) => "addtext",
+            PendingKind::PlaceText => "addtext",
+            // No ribbon button lights up per click: it names a file, not a
+            // repeatable command, so nothing on the ribbon says "this again".
+            PendingKind::PlaceImage { .. } => return None,
             PendingKind::Measure(MeasureKind::Distance) => "measure distance",
             PendingKind::Measure(MeasureKind::Area) => "measure area",
             PendingKind::Calibrate { .. } => "calibrate",
@@ -462,6 +632,10 @@ struct PagifyApp {
     /// and looking somewhere else to do it means holding the page in your head
     /// while you type — which is exactly what an editor should not ask of you.
     editing_run: Option<EditingRun>,
+    /// A brand new run being composed — see [`NewTextBox`]. Never live at
+    /// the same time as `editing_run`: `addtext` clears the other selection
+    /// mechanisms the same way every other tool does when it is armed.
+    new_text_box: Option<NewTextBox>,
     /// The id for the next words written onto a page.
     ///
     /// Distinct per mark, because `remove_text` removes **every** object
@@ -476,6 +650,42 @@ struct PagifyApp {
     /// can only ever be applied once per selection, and reads as a button that
     /// scolds you.
     markup_armed: Option<pagify_shell::verbs::Markup>,
+    /// Waiting for a text selection to link — the same shape as
+    /// `markup_armed`, kept as its own field rather than folded into it
+    /// because linking needs an extra step (the address) `mark_selection`
+    /// has no use for, and adds one anyway.
+    link_armed: bool,
+    /// A text selection, once made, waiting for the address to link it to.
+    pending_link: Option<PendingLink>,
+    /// Waiting for a text selection to serve as Match Properties' own
+    /// sample — the same shape `link_armed` is, and for the same reason:
+    /// once the sample is in hand every further selection is matched to it
+    /// at once, which `mark_selection`'s own one-shot shape has no use for.
+    match_properties_armed: bool,
+    /// The sample Match Properties is copying from, once picked. While this
+    /// is held, completing another text selection retypes it to match
+    /// rather than arming the tool over again — the same "stays in hand"
+    /// shape `markup_armed` already has, so a whole page's worth of
+    /// mismatched runs can be fixed one selection after another without
+    /// going back to the ribbon.
+    match_properties_sample: Option<MatchPropertiesSample>,
+    /// A drawn Article Box rectangle, waiting for its title.
+    pending_article_box: Option<PendingArticleBox>,
+    /// The Bookmarks panel, while it is open.
+    bookmark_panel: Option<BookmarkPanel>,
+    /// Every page this document's own outline points at — read once and
+    /// kept current rather than re-walked every frame, so the small icon
+    /// `draw_pages` paints in a bookmarked page's corner costs a `HashSet`
+    /// lookup per visible page, not a fresh PDFium outline walk per page
+    /// per repaint.
+    bookmarked_pages: std::collections::HashSet<usize>,
+    /// Runs a person has explicitly declared one paragraph, overriding
+    /// whatever [`Self::paragraph_around`]'s own geometry would find —
+    /// `(page, object numbers, top to bottom)`. Session-only: nothing is
+    /// written to the page until an edit is actually applied through it, so
+    /// there is nothing here for a save to carry and nothing a reopen needs
+    /// to restore.
+    joined_groups: Vec<(usize, Vec<usize>)>,
     /// A foreign annotation the pointer is on, as its position in `marks`.
     ///
     /// Cached per page so hit-testing does not re-read every annotation on
@@ -552,6 +762,9 @@ struct PagifyApp {
     find_hits: Vec<(usize, std::ops::Range<usize>)>,
     find_at: usize,
     defaults: tools::Defaults,
+    /// Whether the next Rectangle or Circle is drawn filled solid rather than
+    /// hollow — chosen up front, on the Draw tab, before either tool is armed.
+    draw_fill: bool,
     /// The markup revision at the last successful save. Anything above it is
     /// work that closing would throw away.
     saved_revision: u64,
@@ -578,6 +791,21 @@ struct PagifyApp {
     layers: Option<(usize, Vec<pdf_core::document::DrawnObject>)>,
     /// Where the last right-click landed, kept for the menu built after it.
     right_clicked_at: Option<(usize, AppPoint)>,
+    /// What the right-click menu's Join/Match-font/Split actions found,
+    /// computed once at the moment of the click.
+    ///
+    /// **Not recomputed by the menu itself.** Each of these reads every run
+    /// on the page — see `compute_right_click_text_actions`. The context
+    /// menu closure runs on every repaint of an open popup —
+    /// egui keeps redrawing it while it sits there — so computing this
+    /// inline the way `link_here` does its own cheap, already-cached lookup
+    /// meant a few-hundred-run real document redid a full-page text
+    /// extraction several times over on every single frame the menu stayed
+    /// open. Reported from use as the app freezing on right-click. Filled
+    /// in alongside `right_clicked_at` and simply read from here below,
+    /// the same "compute once at the click, read many times after" shape
+    /// `selected_image` already used for the image-lock menu.
+    right_click_text_actions: Option<RightClickTextActions>,
     /// The object tool, when it is in hand: `true` picks pictures before
     /// words under the pointer, `false` the other way round.
     ///
@@ -601,6 +829,23 @@ struct PagifyApp {
     /// tool shared `Handle`/`Grab` with the signature one but not the fix,
     /// so an ordinary picture's handles were exactly this bug, unfixed.
     object_hover_handle: Option<Handle>,
+    /// More than one thing, picked up together by dragging a rectangle over
+    /// empty page area — see [`Self::interact_objects`]. Moves and deletes
+    /// as a group; resizing stays a [`Self::selected`]-only, one-thing-at-a-
+    /// time action, since "resize forty characters together" has no one
+    /// obvious meaning the way "move them all by the same amount" does.
+    /// Cleared by anything that sets [`Self::selected`], and vice versa —
+    /// the object tool always has at most one of the two.
+    group: Vec<Selected>,
+    /// A rectangle being dragged out to build [`Self::group`]: where the
+    /// drag started, and where the pointer is now. Only the two corners —
+    /// which page objects fall inside it is worked out once, when the drag
+    /// ends, not recomputed every frame while it is still being dragged.
+    marquee: Option<(AppPoint, AppPoint)>,
+    /// A drag moving every member of [`Self::group`] by the same amount —
+    /// same shape as [`Self::grab`], kept separate because a group drag has
+    /// no handle and no single anchor rect to measure against.
+    group_grab: Option<Grab>,
     /// A placed-but-unapplied picture signature, picked with no tool
     /// armed — a click on the signature itself, not the object tool, which
     /// only ever sees page *content* and a signature is deliberately not
@@ -625,6 +870,15 @@ struct PagifyApp {
     /// point had already slid past the handle and onto the rect it sits
     /// on. This is what was under the pointer just before that slide.
     signature_hover_handle: Option<Handle>,
+    /// The same mechanism as [`Self::signature_selected`], for a plain
+    /// placed picture rather than one carrying a signature's name — see
+    /// [`PlacedImageSelected`].
+    placed_image_selected: Option<PlacedImageSelected>,
+    /// A drag in progress on [`Self::placed_image_selected`] — see
+    /// [`Self::signature_grab`].
+    placed_image_grab: Option<Grab>,
+    /// See [`Self::signature_hover_handle`].
+    placed_image_hover_handle: Option<Handle>,
     /// The opacity slider's value while it is being dragged, before it is
     /// applied on release.
     opacity_draft: Option<f32>,
@@ -732,6 +986,10 @@ struct PagifyApp {
     predefined_path: Option<std::path::PathBuf>,
     /// The Predefined Text panel, while it is open.
     snippets: Option<SnippetList>,
+    /// The Search & Replace panel, while it is open.
+    find_replace: Option<FindReplace>,
+    /// The Check Spelling panel, while it is open.
+    spelling: Option<SpellCheck>,
     /// The document face installed for the editor, and whether egui has
     /// rebuilt its atlas with it yet.
     ///
@@ -742,6 +1000,12 @@ struct PagifyApp {
     /// face is asked for on one frame and used on the next.
     editor_face: Option<u64>,
     editor_face_ready: bool,
+    /// The real ascent/descent of whatever font `editor_face` names, read
+    /// once when it is loaded — see [`Self::want_document_face`]'s own doc
+    /// and [`run_editor_font_size`], which sizes the editor from this
+    /// instead of a fixed guess when a run's own reported size cannot be
+    /// trusted.
+    editor_face_metrics: Option<pdf_core::pdf::embed::Metrics>,
     /// A face asked for and not yet installed, handed to `install_fonts` at the
     /// top of the next frame.
     pending_face: Option<Vec<u8>>,
@@ -771,7 +1035,42 @@ struct PagifyApp {
     /// What a drag on the page means. Set by Hand and Select.
     pointer: pagify_shell::verbs::PointerMode,
     drag_from: Option<AppPoint>,
+    /// A drag in progress on the markup layer's own selection — see
+    /// [`Self::finish_markup_grab`]. Separate from [`Self::grab`] and
+    /// [`Self::signature_grab`]: a drawn shape is neither page content nor
+    /// an annotation, and moving one commits through `tools::move_selection`
+    /// rather than either of those two paths.
+    markup_grab: Option<Grab>,
+    /// What `copy` last took from a drawn shape or placed picture selection,
+    /// for `paste` to lay back down — see [`ObjectClipboard`]. Not the
+    /// system clipboard: these are structured page objects, not text, and
+    /// [`Self::copy_selection`] already owns ⌘C for the text case.
+    object_clipboard: Option<ObjectClipboard>,
+    /// How many times `paste` has run since the clipboard was last filled —
+    /// see [`Self::PASTE_STEP`].
+    paste_count: u32,
     last_snap: Option<tools::Snapped>,
+    /// Which of the two separate undo stacks — the current page's markup
+    /// layer, or the document's own command history — most recently changed,
+    /// tracked by polling both of their own monotonic edit counters once a
+    /// frame. See [`Self::track_undo_recency`] and [`Self::undo_redo`].
+    ///
+    /// **Reported from use: a shape drawn earlier got undone instead of a
+    /// text box just added.** `undo_redo` used to try the markup layer
+    /// first, always, regardless of which of the two had actually just
+    /// changed — right every time the layer was untouched, and wrong the
+    /// moment a page carried both a drawn shape and an edited or newly
+    /// placed piece of text.
+    prefer_layer_undo: bool,
+    last_layer_edits: u64,
+    last_doc_generation: u64,
+    /// How many `replay`s are on the stack right now.
+    ///
+    /// A script that names itself — or two that name each other — recurses
+    /// with nothing else to stop it; `replay`'s own guard against a bad step
+    /// only catches a step that fails to *dispatch*, and a further `replay`
+    /// dispatches just fine. Found by audit.
+    replay_depth: usize,
 }
 
 /// What a redaction has to add about forms the file draws elsewhere: the
@@ -850,6 +1149,40 @@ fn area_between(a: AppPoint, b: AppPoint) -> Option<pdf_core::document::Rect> {
     ((area.right - area.left) >= 1.0 && (area.bottom - area.top) >= 1.0).then_some(area)
 }
 
+/// Open `url` with whatever this platform normally opens one with — a web
+/// link is only worth adding if clicking it does the one thing a link is
+/// for.
+///
+/// **Passed as its own argument, never through a shell.** A URL is not
+/// something this program wrote — a link clicked here can come from any PDF
+/// somebody opened — and a query string's own `&` is a second command to
+/// `cmd /C`, not a character in an address. Every branch below hands the OS
+/// launcher the URL as a single `arg`, which `std::process::Command` passes
+/// straight through the platform's own process-creation call rather than
+/// interpreting it, so nothing in it is ever read as a command separator.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        // `rundll32`'s own command line syntax, not this program's choice:
+        // `<dll>,<entry point>` first, then whatever that entry point takes
+        // — here, the one URL to open. Older but steadier than shelling out
+        // to `cmd /C start`, which treats a bare URL as the window title
+        // unless it is quoted just so.
+        std::process::Command::new("rundll32")
+            .args(["url.dll,FileProtocolHandler", url])
+            .spawn()
+            .map(|_| ())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(url).spawn().map(|_| ())
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(url).spawn().map(|_| ())
+    }
+}
+
 /// One ribbon button: the glyph, the name under it, and the command it runs.
 ///
 /// A command string rather than a callback, because §7 makes the command box
@@ -873,12 +1206,34 @@ const ALWAYS: &[Tool] = &[
 #[derive(Clone)]
 struct EditingRun {
     page: usize,
+    /// The first (topmost) line's own object — always `lines[0].0`. Kept
+    /// alongside `lines` rather than derived from it at every use, since
+    /// most of what reads this field only ever cared about the one-line
+    /// case, where it is the only object there is.
     object: usize,
     /// What it said when it was picked, so undo and "unchanged" both have
-    /// something true to compare against.
+    /// something true to compare against. For a paragraph, every line's own
+    /// text joined with `\n`, in the same top-to-bottom order as `lines`.
     original: String,
-    /// Where it sits, in page points — the box the editor is drawn over.
+    /// The union of every line's own rectangle — the box the editor is
+    /// drawn over. See [`Self::lines`] for each line's own rectangle on its
+    /// own, which is what applying an edit needs to put each line back
+    /// where it was.
     rect: pdf_core::document::Rect,
+    /// Every line this edit covers, top to bottom, with the object(s) that
+    /// draw it and its own combined rectangle. One entry for an ordinary
+    /// run; more than one only when a whole paragraph was picked in Edit
+    /// Text — see [`PagifyApp::pick_paragraph`]. `apply_edited_run` splits
+    /// the typed text back across these on the way out, the same order it
+    /// was joined coming in.
+    ///
+    /// **Usually one object, sometimes more.** A producer routinely splits
+    /// one visual line across several text-showing operations — see
+    /// [`PagifyApp::paragraph_around`]'s own doc — and this line's text is
+    /// every one of them, left to right, concatenated. Retyping such a line
+    /// writes the new text to the first object and blanks the rest; see
+    /// [`PagifyApp::apply_paragraph_edit`].
+    lines: Vec<(Vec<usize>, pdf_core::document::Rect)>,
     /// What is being typed.
     buffer: String,
     /// The appearance, as it will be applied. Seeded from the run so that
@@ -887,6 +1242,20 @@ struct EditingRun {
     /// The appearance as it was, so "did anything change" is answerable
     /// without asking the document again.
     was: pdf_core::document::TextStyle,
+    /// The name of the font this run is actually drawn in right now, read
+    /// once when it was picked — for the font field's label only.
+    ///
+    /// **Not the same thing as `style.face`.** That field means "write the
+    /// run in exactly this named font instead of the automatic choice", and
+    /// setting it from the run's own current font would have silently
+    /// changed Apply's behaviour: picking a font by an exact name refuses
+    /// outright rather than substituting if that font cannot spell the
+    /// text, where leaving `style.face` at `None` (its correct default,
+    /// meaning "automatic") never would have. This field exists so the label
+    /// can stop lying and say "Montserrat-Bold" instead of "(automatic)"
+    /// without smuggling an unasked-for font change into what Apply does.
+    /// `None` for drawn (outlined) words, which have no font to name.
+    current_face: Option<String>,
     /// Focus is asked for once. Asking every frame fights anything else that
     /// wants it, including the editor itself.
     focused: bool,
@@ -913,6 +1282,44 @@ struct EditingRun {
     /// Kept from the moment of picking: what is on the page can change under an
     /// edit, and what has to happen afterwards is decided by what was picked.
     drawn: bool,
+}
+
+/// How a line sits within [`NewTextBox::rect`]'s width.
+///
+/// Only three, not four: a justified line needs its inter-word gaps
+/// stretched, which egui's own wrap has no concept of and this app has no
+/// existing machinery for — see [`PagifyApp::apply_new_text_box`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// Text being composed for a brand new spot on the page — the click-and-drag
+/// box `addtext` (bare) arms, as opposed to [`EditingRun`], which is always
+/// an *existing* run already in the page's content.
+///
+/// **Reported from use: adding text meant typing the words into the command
+/// box before knowing where they would land, "totally confusing and
+/// unintuitive."** This is the box instead: drag out the area first, type
+/// into it, and only turn it into real page content when it is confirmed —
+/// see [`PagifyApp::begin_text_box`] and [`PagifyApp::apply_new_text_box`].
+struct NewTextBox {
+    page: usize,
+    /// The dragged box, in page/app space — the width wraps the typing, and
+    /// [`Self::align`] decides where each wrapped line sits inside it.
+    rect: pdf_core::document::Rect,
+    buffer: String,
+    size: f32,
+    color: pdf_core::document::Color,
+    /// An explicit pick from the same font picker a run's own edit uses —
+    /// see [`PagifyApp::draw_font_picker`]. `None` writes in the base
+    /// Helvetica `write_text_at` already uses for a single click.
+    face: Option<String>,
+    align: TextAlign,
+    /// Focus is asked for once — see [`EditingRun::focused`].
+    focused: bool,
 }
 
 /// A page in the hands of the recogniser.
@@ -1040,6 +1447,14 @@ struct Selected {
     what: &'static str,
 }
 
+/// See [`PagifyApp::right_click_text_actions`]'s own doc for why this
+/// exists as a cache rather than being computed where it is used.
+#[derive(Debug, Clone, Copy, Default)]
+struct RightClickTextActions {
+    joinable: bool,
+    split_object: Option<usize>,
+}
+
 /// A placed-but-unapplied picture signature, picked with no tool armed.
 /// `index` is the annotation's PDFium index — [`pdf_core::document::
 /// ImageSignatureMark::index`] — not a page-content object number, so it is
@@ -1053,6 +1468,38 @@ struct SignatureSelected {
     /// of the moment it was (re)selected — the base a rotate-drag's angle
     /// is added onto, not recomputed from scratch on every frame.
     rotation: f32,
+}
+
+/// A plain placed picture, picked with no tool armed — the same shape as
+/// [`SignatureSelected`] and kept every bit as separate from it as
+/// `PlacedImageMark` is from `ImageSignatureMark`: reusing one field for
+/// both would mean a single click could only ever have selected one or the
+/// other, and would blur exactly the line `apply_signatures` depends on.
+#[derive(Debug, Clone, PartialEq)]
+struct PlacedImageSelected {
+    page: usize,
+    index: usize,
+    rect: pdf_core::document::Rect,
+    rotation: f32,
+}
+
+/// What `copy` on a selected drawn shape or placed picture carries to
+/// `paste` — see [`PagifyApp::object_clipboard`].
+///
+/// A drawn shape is kernel geometry (`Layer::add_object`); a placed picture
+/// is an annotation (`Command::AddAnnotation`). They paste through
+/// completely different engine calls, so the clipboard keeps them as two
+/// variants rather than forcing one shape on both.
+#[derive(Clone)]
+enum ObjectClipboard {
+    /// Each shape with whether it was filled — carried separately rather
+    /// than by including its paired `Geom::Hatch` in the list, because a
+    /// Hatch names its boundary by *handle*, and a copy gets a fresh one
+    /// (see `tools::copy_selection`'s doc). A cloned Hatch would still point
+    /// at the original's handle, filling the original a second time instead
+    /// of the paste.
+    Shapes(Vec<(cad_kernel::DObject, bool)>),
+    Image { rgba: Vec<u8>, width: u32, height: u32, rect: pdf_core::document::Rect },
 }
 
 /// One of the eight places on a selection's outline that resizes it.
@@ -1254,6 +1701,7 @@ impl Tab {
                 ("\u{E2C8}", "Open…", "open"),
                 ("\u{E5CD}", "Close", "close"),
                 ("\u{E161}", "Save", "save"),
+                ("\u{E161}", "Save As…", "saveas"),
                 ("\u{E8B8}", "PDFium", "pdfium"),
                 ("\u{F8C7}", "Quit", "quit"),
             ],
@@ -1275,7 +1723,6 @@ impl Tab {
                 ("\u{E882}", "Send to Back", "sendtoback"),
                 ("\u{E89F}", "Move", "moveobject"),
                 ("\u{F82B}", "Highlight", "highlight"),
-                ("\u{E312}", "Typewriter", "addtext "),
                 ("\u{E418}", "Rotate Pages", "rotatepages"),
                 ("\u{E145}", "Insert", "insertpage"),
                 ("\u{E329}", "From Scanner", "fromscanner"),
@@ -1304,21 +1751,22 @@ impl Tab {
                 ("\u{E262}", "Edit Text", "edittext"),
                 ("\u{E162}", "Edit Object", "editobject"),
                 ("\u{E236}", "Link & Join Text", "jointext"),
+                // Drag the sample text, then drag whatever needs to match it
+                // — see `begin_match_properties`'s own doc for the two-step
+                // shape and why the tool stays in hand between selections.
+                ("\u{E262}", "Match Properties", "matchproperties"),
                 ("\u{E8CE}", "Check Spelling", "spelling"),
                 ("\u{E881}", "Search & Replace", "replace"),
+                // Bare, not pre-filled: this drags out a box to type into
+                // (see `begin_text_box`), the same click-and-place shape Add
+                // Images already has, rather than asking for the words in
+                // the command line first.
                 ("\u{EAE2}", "Add Text", "addtext"),
                 ("\u{E43E}", "Add Images", "addimage"),
-                ("\u{E72C}", "Add Shapes", "addshape"),
                 ("\u{E8EC}", "Add Article Box", "articlebox"),
                 ("\u{EA07}", "Web Links", "weblinks"),
-                ("\u{E250}", "Link", "addlink"),
                 ("\u{E8E7}", "Bookmark", "bookmark"),
                 ("\u{F184}", "Cross Reference", "crossref"),
-                ("\u{E661}", "Auto Create Bookmarks", "autobookmarks"),
-                ("\u{E226}", "File Attachment", "attach"),
-                ("\u{E439}", "Image Annotation", "imageannotation"),
-                ("\u{E404}", "Audio & Video", "media"),
-                ("\u{EFC9}", "Add 3D", "add3d"),
             ],
             Tab::Organize => &[
                 ("\u{E9B0}", "Thumbnail View", "thumbnails"),
@@ -1348,7 +1796,7 @@ impl Tab {
                 ("\u{F735}", "Insert Text", "inserttext"),
                 ("\u{F1FC}", "Note", "note "),
                 ("\u{E2BC}", "File", "attachcomment"),
-                ("\u{E312}", "Typewriter", "addtext "),
+                ("\u{E312}", "Typewriter", "addtext"),
                 ("\u{E3BC}", "Textbox", "textbox"),
                 ("\u{E0CB}", "Callout", "callout"),
                 ("\u{EBBB}", "Drawing", "drawing"),
@@ -1500,7 +1948,14 @@ impl Tab {
             Tab::Draw => &[
                 ("\u{F108}", "Line", "line"),
                 ("\u{EF4A}", "Circle", "circle"),
+                ("\u{EB54}", "Rectangle", "rectangle"),
+                // Chosen before drawing: whether Rectangle and Circle come out
+                // filled solid or hollow. Lit up while on, like every other
+                // standing choice on this ribbon.
+                ("\u{F82B}", "Fill", "fill"),
                 ("\u{E922}", "Polyline", "pline"),
+                ("\u{E5C8}", "Arrow", "arrow"),
+                ("\u{F757}", "Spline", "spline"),
                 ("\u{E14E}", "Trim", "trim"),
                 ("\u{E920}", "Fillet", "fillet"),
                 ("\u{E2EC}", "Offset", "offset"),
@@ -1551,7 +2006,8 @@ fn describe_where(annotation: &pdf_core::document::Annotation) -> String {
         | A::Squiggly { rects, .. } => rects.first().copied(),
         A::Note { rect, .. } => Some(*rect),
         A::Image { rect, .. } => Some(*rect),
-        A::Ink { .. } | A::Text { .. } => None,
+        A::Link { rect, .. } => Some(*rect),
+        A::Ink { .. } | A::Text { .. } | A::Fill { .. } => None,
     };
     match first {
         Some(r) => format!(" at {:.0},{:.0}", r.left, r.top),
@@ -1762,8 +2218,17 @@ impl PagifyApp {
             scroll_offset: egui::Vec2::ZERO,
             anchor_offset: None,
             editing_run: None,
+            new_text_box: None,
             next_text_id: 0x0100_0000,
             markup_armed: None,
+            link_armed: false,
+            pending_link: None,
+            match_properties_armed: false,
+            match_properties_sample: None,
+            pending_article_box: None,
+            bookmark_panel: None,
+            bookmarked_pages: std::collections::HashSet::new(),
+            joined_groups: Vec::new(),
             foreign: None,
             selection_page: 0,
             settling: 0,
@@ -1791,6 +2256,7 @@ impl PagifyApp {
             find_hits: Vec::new(),
             find_at: 0,
             defaults: tools::Defaults::default(),
+            draw_fill: false,
             saved_revision: 0,
             mark: None,
             signature_textures: std::collections::HashMap::new(),
@@ -1802,13 +2268,20 @@ impl PagifyApp {
             layers: None,
             picked_layer: None,
             right_clicked_at: None,
+            right_click_text_actions: None,
             object_tool: None,
             selected: None,
             grab: None,
             object_hover_handle: None,
+            group: Vec::new(),
+            marquee: None,
+            group_grab: None,
             signature_selected: None,
             signature_grab: None,
             signature_hover_handle: None,
+            placed_image_selected: None,
+            placed_image_grab: None,
+            placed_image_hover_handle: None,
             opacity_draft: None,
             command_open: false,
             ribbon: Tab::Home,
@@ -1844,9 +2317,12 @@ impl PagifyApp {
             },
             predefined_path: if cfg!(test) { None } else { pagify_shell::predefined::Predefined::path() },
             snippets: None,
+            find_replace: None,
+            spelling: None,
             drawn_words: None,
             editor_face: None,
             editor_face_ready: false,
+            editor_face_metrics: None,
             pending_face: None,
             system_fonts: None,
             font_picker_open: false,
@@ -1862,7 +2338,14 @@ impl PagifyApp {
             },
             pointer: Default::default(),
             drag_from: None,
+            markup_grab: None,
+            object_clipboard: None,
+            paste_count: 0,
             last_snap: None,
+            prefer_layer_undo: false,
+            last_layer_edits: 0,
+            last_doc_generation: 0,
+            replay_depth: 0,
         };
         app.say_info("Pagify — type `help`, or `open <path.pdf>`.");
         // `None` in a test run — `session_log` is a no-op there — so this
@@ -2423,16 +2906,22 @@ impl PagifyApp {
         };
         match awaiting {
             Awaiting::Open(path) => self.open_with(&path, Some(&typed)),
-            Awaiting::Lock { page, shapes, require_complete } => {
-                match self.lock_shapes(page, &shapes, typed.as_bytes(), require_complete) {
-                    Ok(said) => self.say_info(said),
-                    Err(e) => self.say_error(e),
-                }
+            // `answer_lock_passcode` already handles every one of these — and,
+            // for `Unlock`/`UnlockItem`, remembers a passcode that worked the
+            // same way locking one already did. Reported from use: typing the
+            // one password a document was opened with, then being asked for
+            // it again for every single passage on the page it had sealed —
+            // this duplicated match once had none of that, `answer_lock_passcode`'s
+            // copy had it only for the three lock variants, and the two had
+            // quietly drifted apart. One dispatch now, not two to keep in step.
+            other @ (Awaiting::Lock { .. }
+            | Awaiting::LockPages(_)
+            | Awaiting::LockImage { .. }
+            | Awaiting::UnlockItem(_)
+            | Awaiting::Unlock) => {
+                self.awaiting_password = Some(other);
+                self.answer_lock_passcode(&typed);
             }
-            Awaiting::LockPages(pages) => match self.lock_pages(&pages, typed.as_bytes()) {
-                Ok(said) => self.say_info(said),
-                Err(e) => self.say_error(e),
-            },
             Awaiting::LockAgain { first, then } => {
                 if typed != first {
                     self.say_error("those did not match — nothing was locked. Try again.");
@@ -2468,20 +2957,6 @@ impl PagifyApp {
                     }
                 }
             }
-            Awaiting::LockImage { page, object } => {
-                match self.lock_image(page, object, typed.as_bytes()) {
-                    Ok(said) => self.say_info(said),
-                    Err(e) => self.say_error(e),
-                }
-            }
-            Awaiting::UnlockItem(id) => match self.unlock_item(&id, typed.as_bytes()) {
-                Ok(said) => self.say_info(said),
-                Err(e) => self.say_error(e),
-            },
-            Awaiting::Unlock => match self.unlock(typed.as_bytes()) {
-                Ok(said) => self.say_info(said),
-                Err(e) => self.say_error(e),
-            },
         }
         true
     }
@@ -2568,6 +3043,18 @@ impl PagifyApp {
                 // A passcode belongs to the document it was typed for, and this
                 // is a different one.
                 self.forget_passcode();
+                // **The password that opened the file locks the same file's
+                // own content too, by default.** Reported from use: having
+                // just typed the one password this document asks for, being
+                // asked for it again to lock or unlock a passage inside it
+                // read as the same password not being remembered rather than
+                // as a second, deliberately different one. `hold_or_drop`
+                // still drops it the moment it fails against an actual lock,
+                // so a document whose content really is sealed under a
+                // different passcode only ever asks once more, not every time.
+                if let Some(password) = password {
+                    self.held_passcode = Some(zeroize::Zeroizing::new(password.to_owned()));
+                }
                 self.saved_revision = self.markup.revision();
 
                 // **A badge over a picture that is still there is finished
@@ -2583,6 +3070,12 @@ impl PagifyApp {
                 self.report_text_layer(false);
                 self.scroll_pt = 0.0;
                 self.pending = None;
+                // A fresh document's own bookmarks, not whatever the last
+                // one left behind — the panel is closed already (nothing
+                // above reopens it), but the page-corner icon's cache is
+                // not tied to the panel and would otherwise still be
+                // pointing at the previous file's pages.
+                self.sync_bookmarks();
             }
             Err(e) => {
                 self.say_error(format!("{e}"));
@@ -2944,6 +3437,27 @@ impl PagifyApp {
                 return;
             }
         };
+        // Checked from the header, before a single pixel is decoded. The
+        // `image` crate caps a decoder's own allocation at 512 MB but not
+        // its dimensions, and what follows — `to_rgba8`, orientation, the
+        // signature extraction below — each make at least one more
+        // full-size copy; the same cap the rest of Pagify holds every
+        // raster to. Found by audit.
+        // Checked from the header, before a single pixel is decoded. The
+        // `image` crate caps a decoder's own allocation at 512 MB but not
+        // its dimensions, and what follows — `to_rgba8`, orientation, the
+        // signature extraction below — each make at least one more
+        // full-size copy; the same cap the rest of Pagify holds every
+        // raster to. Found by audit.
+        let (declared_width, declared_height) = image::ImageDecoder::dimensions(&decoder);
+        if pdf_core::render::bitmap::validate_dimensions(declared_width, declared_height).is_err()
+        {
+            self.say_error(format!(
+                "{} is {declared_width}x{declared_height} — too large a picture to read.",
+                path.display()
+            ));
+            return;
+        }
         // A phone photo taken in portrait is very often stored as landscape
         // pixels plus an EXIF tag saying how to rotate it for display —
         // decoding without applying that tag would hand the extraction
@@ -3172,6 +3686,123 @@ impl PagifyApp {
         }
     }
 
+    /// Every word-run, picture, and shape on a page whose rectangle overlaps
+    /// `rect` at all — what dragging a rectangle over empty page area
+    /// collects, for [`Self::group`]. Leaves out anything drawn inside
+    /// another object's group (`drawn_objects` depth > 0): a marquee is for
+    /// loose page content, and a form's own panels are reached the one-at-
+    /// a-time way [`Self::thing_at`]'s own `grouped` closure already reaches
+    /// them.
+    fn things_in(&self, page: usize, rect: pdf_core::document::Rect) -> Vec<Selected> {
+        let norm = |r: &pdf_core::document::Rect| {
+            (r.left.min(r.right), r.top.min(r.bottom), r.left.max(r.right), r.top.max(r.bottom))
+        };
+        let (ml, mt, mr, mb) = norm(&rect);
+        // **Fully inside, not merely touched.** A marquee that picked up
+        // anything its edge crossed used to sweep in a neighbour that was
+        // never meant to be part of the selection — the usual rule in every
+        // other drawing or office tool, and the one asked for here.
+        let contains = |r: &pdf_core::document::Rect| {
+            let (l, t, right, bottom) = norm(r);
+            ml <= l && mr >= right && mt <= t && mb >= bottom
+        };
+        let Some(doc) = self.doc.as_ref() else { return Vec::new() };
+        let mut out = Vec::new();
+        if let Ok(words) = doc.session.text_run_rects(page) {
+            out.extend(
+                words
+                    .into_iter()
+                    .filter(|(_, r)| contains(r))
+                    .map(|(object, rect)| Selected { page, object, rect, what: "the words" }),
+            );
+        }
+        if let Ok(images) = doc.session.images_on(page) {
+            out.extend(images.into_iter().filter(|image| contains(&image.rect)).map(|image| {
+                Selected { page, object: image.object, rect: image.rect, what: "the picture" }
+            }));
+        }
+        if let Ok(shapes) = doc.session.drawn_objects(page) {
+            out.extend(
+                shapes
+                    .into_iter()
+                    .filter(|d| {
+                        d.depth == 0 && d.kind == pdf_core::document::DrawnKind::Shape && contains(&d.rect)
+                    })
+                    .map(|d| Selected { page, object: d.object, rect: d.rect, what: "the shape" }),
+            );
+        }
+        out
+    }
+
+    /// What a marquee drag from `start` to `end` picked up. One thing (or
+    /// nothing) behaves exactly like an ordinary click there would have —
+    /// [`Self::selected`], with its own handles — so a small rectangle
+    /// dragged over a single word is not a worse way to select it than
+    /// clicking. More than one becomes [`Self::group`].
+    /// `extend`: fold onto the selection already in hand (Shift held) rather
+    /// than replace it — added members only, since [`Self::things_in`] only
+    /// ever returns what is fully inside the rectangle in the first place.
+    fn select_group_in(&mut self, page: usize, start: AppPoint, end: AppPoint, extend: bool) {
+        let rect = pdf_core::document::Rect {
+            left: start.x.min(end.x) as f32,
+            top: start.y.min(end.y) as f32,
+            right: start.x.max(end.x) as f32,
+            bottom: start.y.max(end.y) as f32,
+        };
+        let mut found = self.things_in(page, rect);
+        if extend {
+            let mut members = std::mem::take(&mut self.group);
+            if let Some(sel) = self.selected.take() {
+                members.push(sel);
+            }
+            for item in found {
+                if !members.iter().any(|s| s.page == item.page && s.object == item.object) {
+                    members.push(item);
+                }
+            }
+            found = members;
+        } else {
+            self.selected = None;
+            self.group = Vec::new();
+        }
+        if found.len() <= 1 {
+            if let Some(sel) = found.pop() {
+                self.say_info(format!("{} selected.", sel.what));
+                self.selected = Some(sel);
+            }
+            return;
+        }
+        self.say_info(format!("{} things selected.", found.len()));
+        self.group = found;
+    }
+
+    /// Shift-click: add whatever is at `at` to the current selection, or —
+    /// clicked a second time — drop it again. The usual toggle every other
+    /// multi-select gesture uses.
+    fn extend_selection_at(&mut self, page: usize, at: AppPoint) {
+        let Some(pictures_first) = self.object_tool else { return };
+        let Some((object, rect, what)) = self.thing_at(page, at, pictures_first) else { return };
+        let mut members = std::mem::take(&mut self.group);
+        if let Some(sel) = self.selected.take() {
+            members.push(sel);
+        }
+        match members.iter().position(|s| s.page == page && s.object == object) {
+            Some(index) => {
+                members.remove(index);
+                self.say_info(format!("{what} removed from the selection."));
+            }
+            None => {
+                members.push(Selected { page, object, rect, what });
+                self.say_info(format!("{what} added to the selection."));
+            }
+        }
+        if members.len() <= 1 {
+            self.selected = members.pop();
+        } else {
+            self.group = members;
+        }
+    }
+
     /// Take the object tool in hand.
     fn take_up_object_tool(&mut self, pictures_first: bool, page: usize) {
         if self.doc.is_none() {
@@ -3180,11 +3811,20 @@ impl PagifyApp {
         }
         self.pending = None;
         self.markup_armed = None;
+        self.link_armed = false;
+        self.match_properties_armed = false;
+        self.match_properties_sample = None;
+        self.put_down_page_editors();
         self.object_tool = Some(pictures_first);
         self.selected = None;
         self.grab = None;
+        self.group = Vec::new();
+        self.marquee = None;
+        self.group_grab = None;
         self.signature_selected = None;
         self.signature_grab = None;
+        self.placed_image_selected = None;
+        self.placed_image_grab = None;
         let _ = page;
         self.say_info(if pictures_first {
             "edit object: click a picture or shape to select it, or words where there is nothing \
@@ -3195,9 +3835,54 @@ impl PagifyApp {
     }
 
     /// Select whatever is drawn at a point, or clear the selection.
+    ///
+    /// A click that landed on text selects the whole **paragraph** it is
+    /// part of — see [`Self::paragraph_around`] — as a group, the same
+    /// [`Self::group`] a marquee drag builds; a paragraph of one line
+    /// collapses to a plain [`Self::selected`] exactly as a single-member
+    /// marquee already does, keeping today's click-to-a-character behaviour
+    /// for the common case of one line on its own.
     fn select_thing_at(&mut self, page: usize, at: AppPoint) -> bool {
+        self.select_thing_at_drilling(page, at, true)
+    }
+
+    /// The same as [`Self::select_thing_at`], but for a gesture that means
+    /// to pick the whole thing up — the start of a drag, or re-finding a
+    /// selection right after a move — rather than one that might mean to
+    /// look inside it. `drill = false` skips [`Self::split_if_whole_run`]
+    /// on an isolated run, leaving it as one object covering every
+    /// character rather than the single one under `at`.
+    ///
+    /// **Reported from use: dragging a line of text moved one letter of it
+    /// and left the rest exactly where it was.** `select_thing_at` is also
+    /// what a plain click uses to drill into a specific letter for editing
+    /// — genuinely wanted there, and kept — but `interact_objects` was
+    /// calling that same function to decide what a fresh drag had landed
+    /// on, so the drag picked up whichever single character the drill left
+    /// selected and moved only that one. A drag means "this, as a whole,
+    /// goes where the pointer goes"; only a plain click means "show me
+    /// what's exactly here."
+    ///
+    /// **Never groups into a paragraph.** Edit Object always answers a
+    /// click on text at word/letter granularity — that grouping belongs to
+    /// Edit Text, where retyping a whole paragraph actually means
+    /// something; see [`Self::pick_text_run`].
+    fn select_thing_at_drilling(&mut self, page: usize, at: AppPoint, drill: bool) -> bool {
         let Some(pictures_first) = self.object_tool else { return false };
         match self.thing_at(page, at, pictures_first) {
+            Some((object, rect, "the words")) => {
+                let (object, rect, what) = if drill {
+                    self.split_if_whole_run(page, at, object, rect, "the words")
+                } else {
+                    (object, rect, "the words")
+                };
+                self.selected = Some(Selected { page, object, rect, what });
+                if let Some(index) = self.layer_index_for(page, object, rect) {
+                    self.picked_layer = Some(index);
+                }
+                self.say_info(format!("{what} selected."));
+                true
+            }
             Some((object, rect, what)) => {
                 self.selected = Some(Selected { page, object, rect, what });
                 if let Some(index) = self.layer_index_for(page, object, rect) {
@@ -3213,15 +3898,405 @@ impl PagifyApp {
         }
     }
 
+    /// Every text run on `page` that reads as part of the same paragraph as
+    /// `seed_object` — itself included — found by walking outward from it a
+    /// line at a time while each next line's gap and horizontal overlap
+    /// still look like a continuation rather than a new block of text.
+    ///
+    /// `runs` is the caller's own already-fetched `text_runs(page)` — not
+    /// re-fetched here — since `pick_text_run` already paid for that
+    /// extraction to find the seed, and asking again was reported as the
+    /// paragraph editor taking "a second or two to open".
+    ///
+    /// A heuristic, not a structural fact the file states anywhere: PDF text
+    /// is drawn run by run with no paragraph markers, so "the same
+    /// paragraph" can only ever be a guess from where the ink sits. Tuned to
+    /// the common case — ordinary single-column, single-spaced prose — and
+    /// expected to under- or over-reach on a tighter multi-column layout or
+    /// unusually loose line spacing.
+    fn paragraph_around(
+        &self,
+        page: usize,
+        seed_object: usize,
+        seed_rect: pdf_core::document::Rect,
+        runs: &[pdf_core::document::TextRun],
+    ) -> Vec<Selected> {
+        let alone = || vec![Selected { page, object: seed_object, rect: seed_rect, what: "the words" }];
+        let mut runs: Vec<&pdf_core::document::TextRun> = runs.iter().collect();
+        runs.sort_by(|a, b| a.rect.top.min(a.rect.bottom).total_cmp(&b.rect.top.min(b.rect.bottom)));
+        let Some(seed_index) = runs.iter().position(|r| r.object == seed_object) else {
+            return alone();
+        };
+
+        // **A heading is not the next line of the body beneath it.** This is
+        // what stops a bold "Description:" heading merging into the
+        // ordinary paragraph under it — not a vote afterwards over which of
+        // two real styles the edit box pretends everything is, which is all
+        // `majority_look` could ever be, since `TextEdit` draws one font for
+        // the whole box. Reported from use, repeatedly, on paragraphs this
+        // had never been tested against: the bug is not particular text, it
+        // is any place a producer's own style changes line to line, which a
+        // purely geometric merge has no way to notice. Two runs on the same
+        // *line* (`same_line`, below) are left alone — that is one producer
+        // choice mid-line, not a second paragraph.
+        let size_bits_of = |object: usize| {
+            runs.iter().find(|r| r.object == object).map(|r| r.size.to_bits()).unwrap_or(0)
+        };
+        let face_of = |object: usize| {
+            self.doc.as_ref().and_then(|d| d.session.run_font_name(page, object).ok()).flatten()
+        };
+        let seed_look = (face_of(seed_object), size_bits_of(seed_object));
+        let same_look = |object: usize| (face_of(object), size_bits_of(object)) == seed_look;
+
+        let norm = |r: &pdf_core::document::Rect| {
+            (r.top.min(r.bottom), r.top.max(r.bottom), r.left.min(r.right), r.left.max(r.right))
+        };
+        let union = |a: &pdf_core::document::Rect, b: &pdf_core::document::Rect| {
+            let (a_top, a_bottom, a_left, a_right) = norm(a);
+            let (b_top, b_bottom, b_left, b_right) = norm(b);
+            pdf_core::document::Rect {
+                left: a_left.min(b_left),
+                right: a_right.max(b_right),
+                top: a_top.min(b_top),
+                bottom: a_bottom.max(b_bottom),
+            }
+        };
+        let (seed_top, seed_bottom, ..) = norm(&seed_rect);
+        // A gap smaller than this reads as the next line of the same
+        // paragraph; a bigger one — a blank line, a heading, a caption — as
+        // the start of something else. Ordinary line spacing runs well
+        // under a line's own height, so most of it is comfortable headroom.
+        // Reused below as the same-line horizontal threshold too: an
+        // ordinary word space between two runs the producer split one line
+        // across is nowhere near a whole line's own height, only an
+        // unrelated piece of the page at the same height — a dimension
+        // callout beside a technical drawing, on a real page this was
+        // reported against — is.
+        let max_gap = (seed_bottom - seed_top).max(1.0) * 0.75;
+        let close_enough = |a: &pdf_core::document::Rect, b: &pdf_core::document::Rect| {
+            let (a_top, a_bottom, a_left, a_right) = norm(a);
+            let (b_top, b_bottom, b_left, b_right) = norm(b);
+            // **Vertically separate, not merely close.** Two rects that
+            // overlap vertically are on the very same line and must never
+            // read as "the next line of the paragraph" no matter how their
+            // edges compare — `same_line`, below, is what a same-line
+            // candidate is checked against instead.
+            let (gap, vertically_separate) = if b_top >= a_bottom {
+                (b_top - a_bottom, true)
+            } else if a_top >= b_bottom {
+                (a_top - b_bottom, true)
+            } else {
+                (0.0, false)
+            };
+            // Overlapping horizontal spans, not merely close ones — the one
+            // thing standing between this and pulling in the neighbouring
+            // column of a two-column layout at the same height.
+            vertically_separate && gap <= max_gap && a_left.max(b_left) < a_right.min(b_right)
+        };
+        // **A visual line is not always one run.** A producer routinely
+        // splits one line across several text-showing operations — a font
+        // change mid-line, a hyphenated word broken at its own boundary, or
+        // simply how the file happened to be written. Reported from use,
+        // with a screenshot: a paragraph opened for editing with a chunk of
+        // its own first line missing outright, the words jumping straight
+        // from one run to the next line's continuation of a word the
+        // missing run's neighbour had been in the middle of.
+        //
+        // **Gated on more than one character** — unless the *seed* is
+        // itself a lone character, or this reopens exactly the bug
+        // `close_enough`'s own vertical-overlap rule exists to close: a run
+        // split into individual characters (`split_run_into_characters`) is
+        // also a row of same-line, near-zero-gap siblings, and gluing those
+        // back together the moment a split finishes would undo it right
+        // back. A real mid-line run boundary is a producer's own word- or
+        // phrase-sized chunk; nothing legitimate splits a line into
+        // one-letter pieces on its own.
+        //
+        // **But a seed that is already one letter changes what "undoing
+        // the split" means.** Something already split this run — Edit
+        // Object's own character-drilling, most often, from before a tool
+        // switch left it that way (see `PagifyApp::put_down_page_editors`)
+        // — and the split is not moments old any more; it is the reason
+        // Edit Text can no longer find more than one letter here at all.
+        // Refusing to re-gather it is not protecting a fresh split, it is
+        // permanently trapping the line at one character forever. Reported
+        // from use, on more than one paragraph: Edit Text opened a single
+        // letter instead of the line it belonged to.
+        let substantial = |text: &str| text.trim().chars().count() > 1;
+        let seed_text = runs
+            .iter()
+            .find(|r| r.object == seed_object)
+            .map(|r| r.text.as_str())
+            .unwrap_or("");
+        let recovering_a_split_line = !substantial(seed_text);
+        let same_line = |row: &pdf_core::document::Rect, candidate: &pdf_core::document::TextRun| {
+            if !recovering_a_split_line && !substantial(&candidate.text) {
+                return false;
+            }
+            // A rotated dimension label beside the paragraph — a "54mm"
+            // turned on its side next to a technical drawing, say — must
+            // never read as a same-line continuation just because its own
+            // narrow box happens to sit within the vertical gap this
+            // allows. See `looks_rotated`'s own doc for why rotation is
+            // inferred from the box's shape rather than read directly.
+            if looks_rotated(&candidate.rect, candidate.text.trim().chars().count()) {
+                return false;
+            }
+            let (row_top, row_bottom, row_left, row_right) = norm(row);
+            let (c_top, c_bottom, c_left, c_right) = norm(&candidate.rect);
+            let vertically_overlapping = row_top < c_bottom && c_top < row_bottom;
+            if !vertically_overlapping {
+                return false;
+            }
+            let gap = if c_left >= row_right {
+                c_left - row_right
+            } else if row_left >= c_right {
+                row_left - c_right
+            } else {
+                0.0
+            };
+            gap <= max_gap
+        };
+
+        // **A same-line continuation is found by content, not by array
+        // position.** `runs` is sorted by height so the two walks below can
+        // find the paragraph's previous and next *lines* in order — but a
+        // whole run's own bounding box is fairly uniform, while one split
+        // into individual characters (`split_run_into_characters`) is not:
+        // an ascender like "h" or "k" sits higher than an x-height letter
+        // like "e" or "c", so single-character rects on the very same line
+        // sort into a scrambled order that no longer matches reading order.
+        // Reported from use: recovering a fully character-split line
+        // stopped a few letters in, because the walk below only ever
+        // checked `same_line` against whichever candidate sat in the very
+        // next array slot — the rest of that line's letters were still
+        // out there, just not adjacent in this sort. `grow_line` instead
+        // scans every not-yet-included run each pass, so a same-line match
+        // is found wherever it sits, and repeats until a pass finds
+        // nothing new, so a chain of matches (each only in reach of the
+        // last) is still followed all the way to both ends.
+        let mut included: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        included.insert(seed_index);
+        let grow_line = |row: &mut pdf_core::document::Rect, included: &mut std::collections::HashSet<usize>| {
+            loop {
+                let mut grew = false;
+                for (i, candidate) in runs.iter().enumerate() {
+                    if included.contains(&i) {
+                        continue;
+                    }
+                    if same_line(row, candidate) {
+                        *row = union(row, &candidate.rect);
+                        included.insert(i);
+                        grew = true;
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+        };
+        let mut seed_row = seed_rect;
+        grow_line(&mut seed_row, &mut included);
+
+        // Walked as a scan, not a walk to the next array slot: two columns
+        // sorted together by height alone interleave, line for line, so a
+        // paragraph's own next line is not always the very next entry —
+        // stopping at the first mismatch missed every line after the first
+        // one from the neighbouring column at a similar height. A candidate
+        // is skipped, not treated as the end, until the list has moved on
+        // far enough vertically that nothing further could still qualify.
+        let mut row = seed_row;
+        let mut cursor = seed_index;
+        while cursor > 0 {
+            cursor -= 1;
+            if included.contains(&cursor) {
+                continue;
+            }
+            let candidate = runs[cursor];
+            let (row_top, ..) = norm(&row);
+            let (_, candidate_bottom, ..) = norm(&candidate.rect);
+            if row_top - candidate_bottom > max_gap {
+                break;
+            }
+            if close_enough(&row, &candidate.rect) && same_look(candidate.object) {
+                row = candidate.rect;
+                included.insert(cursor);
+                grow_line(&mut row, &mut included);
+            }
+        }
+        let mut row = seed_row;
+        let mut cursor = seed_index;
+        while cursor + 1 < runs.len() {
+            cursor += 1;
+            if included.contains(&cursor) {
+                continue;
+            }
+            let candidate = runs[cursor];
+            let (_, row_bottom, ..) = norm(&row);
+            let (candidate_top, ..) = norm(&candidate.rect);
+            if candidate_top - row_bottom > max_gap {
+                break;
+            }
+            if close_enough(&row, &candidate.rect) && same_look(candidate.object) {
+                row = candidate.rect;
+                included.insert(cursor);
+                grow_line(&mut row, &mut included);
+            }
+        }
+
+        let mut included: Vec<usize> = included.into_iter().collect();
+        included.sort_unstable();
+        included
+            .into_iter()
+            .map(|i| {
+                let run = runs[i];
+                Selected { page, object: run.object, rect: run.rect, what: "the words" }
+            })
+            .collect()
+    }
+
+    /// A whole run hit by a click becomes one object per character — see
+    /// `pdf_core`'s own `split_run_into_characters` — and this re-finds
+    /// whichever single character sits at the point that was clicked, since
+    /// splitting gives every character in the run a new object number.
+    /// Harmless to call on a run an earlier click already split down to one
+    /// character: it is a no-op there, so nothing here needs to remember
+    /// which runs it has already reached. Left as the whole run, silently,
+    /// wherever splitting is declined — a run sharing a line with more text
+    /// right after it, say — the same honest-decline the engine already
+    /// gives a resize or a delete in that spot.
+    fn split_if_whole_run(
+        &mut self,
+        page: usize,
+        at: AppPoint,
+        object: usize,
+        rect: pdf_core::document::Rect,
+        what: &'static str,
+    ) -> (usize, pdf_core::document::Rect, &'static str) {
+        if what != "the words" {
+            return (object, rect, what);
+        }
+        let Some(doc) = &self.doc else { return (object, rect, what) };
+        if doc.session.split_run_into_characters(page, object).is_err() {
+            return (object, rect, what);
+        }
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.layers = None;
+        // Not `thing_at`: its few points of slack exist so a click just
+        // outside a whole sentence still reaches it, and a dozen characters
+        // only a few points wide packed edge to edge — exactly what this
+        // just made — turns that same slack into "whichever neighbour
+        // happens to be smallest," not the one actually under the pointer.
+        // Reported from use as clicking a letter and a different one, or a
+        // different run entirely nearby on the page, ending up selected.
+        let Some(doc) = &self.doc else { return (object, rect, what) };
+        let area = |r: &pdf_core::document::Rect| ((r.right - r.left) * (r.bottom - r.top)).abs();
+        let rects = doc.session.text_run_rects(page).ok();
+        let hit = rects.as_ref().and_then(|rects| {
+            rects
+                .iter()
+                .filter(|(_, r)| {
+                    at.x >= r.left as f64
+                        && at.x <= r.right as f64
+                        && at.y >= r.top as f64
+                        && at.y <= r.bottom as f64
+                })
+                .min_by(|(_, a), (_, b)| area(a).total_cmp(&area(b)))
+                .copied()
+        });
+        if let Some((object, rect)) = hit {
+            return (object, rect, "the letter");
+        }
+        // **The split already happened — `object` cannot be "left as it
+        // was."** The run it named was just replaced by these characters,
+        // so returning the pre-split `(object, rect, what)` here would hand
+        // back a rect nothing on the page answers to any more, and an
+        // object index that now names some *other* character entirely — a
+        // move or resize would act on the wrong one, silently. Reported
+        // from use: dragging a freshly split run moved one letter of it and
+        // left the rest exactly where they were. The exact-bounds check
+        // above exists so a tight click cannot miss its own letter onto a
+        // packed-in neighbour (see the comment above it); once it has
+        // genuinely missed everything, though, correctness matters more
+        // than that precision, so this falls back to `thing_at`'s own
+        // wider reach rather than lie about nothing having changed.
+        let near = HIT_TOLERANCE_PT as f32;
+        let loose = rects.and_then(|rects| {
+            rects
+                .into_iter()
+                .filter(|(_, r)| {
+                    at.x as f32 >= r.left.min(r.right) - near
+                        && at.x as f32 <= r.left.max(r.right) + near
+                        && at.y as f32 >= r.top.min(r.bottom) - near
+                        && at.y as f32 <= r.top.max(r.bottom) + near
+                })
+                .min_by(|(_, a), (_, b)| area(a).total_cmp(&area(b)))
+        });
+        match loose {
+            Some((object, rect)) => (object, rect, "the letter"),
+            None => (object, rect, what),
+        }
+    }
+
     /// The handle under a point on the current selection, if any, allowing
     /// for the handles being drawn at a fixed size on screen.
     fn handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
         let sel = self.selected.as_ref()?;
+        Self::handle_near(at, view, &sel.rect)
+    }
+
+    /// As [`Self::handle_at`], against an arbitrary rectangle rather than
+    /// [`Self::selected`] — what [`Self::group_bounds`]'s own handles use,
+    /// since a group has no single object to read a rect from.
+    fn handle_near(at: AppPoint, view: PageView, rect: &pdf_core::document::Rect) -> Option<Handle> {
         let reach = (HANDLE_PX / view.scale as f32).max(2.0);
         Handle::ALL.iter().copied().find(|h| {
-            let (hx, hy) = h.at(&sel.rect);
+            let (hx, hy) = h.at(rect);
             (at.x as f32 - hx).abs() <= reach && (at.y as f32 - hy).abs() <= reach
         })
+    }
+
+    /// The union of every [`Self::group`] member's rectangle on `page` — the
+    /// box its own resize handles sit on. `None` with fewer than one member
+    /// there, same as no selection at all.
+    fn group_bounds(&self, page: usize) -> Option<pdf_core::document::Rect> {
+        let mut members = self.group.iter().filter(|m| m.page == page).map(|m| m.rect);
+        let mut bounds = members.next()?;
+        for r in members {
+            bounds.left = bounds.left.min(r.left);
+            bounds.top = bounds.top.min(r.top);
+            bounds.right = bounds.right.max(r.right);
+            bounds.bottom = bounds.bottom.max(r.bottom);
+        }
+        Some(bounds)
+    }
+
+    /// The union, in app space, of every shape the markup layer's own
+    /// selection holds on `page` — the box its rotate handle sits on. `None`
+    /// with nothing selected there, same as [`Self::group_bounds`].
+    fn markup_selection_bounds(&self, page: usize) -> Option<pdf_core::document::Rect> {
+        let layer = self.markup.existing(page)?;
+        let space = layer.space();
+        let mut corners = layer.selection().iter().flat_map(|&index| {
+            let (min, max) = layer.objects().get(index)?.bbox();
+            Some([space.from_kernel(min), space.from_kernel(max)])
+        }).flatten();
+        let first = corners.next()?;
+        let mut bounds = pdf_core::document::Rect {
+            left: first.x as f32,
+            right: first.x as f32,
+            top: first.y as f32,
+            bottom: first.y as f32,
+        };
+        for p in corners {
+            bounds.left = bounds.left.min(p.x as f32);
+            bounds.right = bounds.right.max(p.x as f32);
+            bounds.top = bounds.top.min(p.y as f32);
+            bounds.bottom = bounds.bottom.max(p.y as f32);
+        }
+        Some(bounds)
     }
 
     /// The object tool's own pointer handling: select on click, move by
@@ -3242,13 +4317,21 @@ impl PagifyApp {
         let remembered_handle = self.object_hover_handle;
 
         // The cursor says what a press here would do.
-        if self.grab.is_none() {
+        if self.grab.is_none() && self.group_grab.is_none() {
             if let Some(sel) = self.selected.as_ref().filter(|s| s.page == page) {
                 let handle = self.handle_at(at, view);
                 self.object_hover_handle = handle;
                 if let Some(handle) = handle {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &sel.rect) {
+                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+                }
+            } else if let Some(bounds) = self.group_bounds(page) {
+                let handle = Self::handle_near(at, view, &bounds);
+                self.object_hover_handle = handle;
+                if let Some(handle) = handle {
+                    ui.output_mut(|o| o.cursor_icon = handle.cursor());
+                } else if Self::point_in_rect(at, &bounds) {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
                 }
             } else {
@@ -3269,13 +4352,39 @@ impl PagifyApp {
                     && at.y >= s.rect.top as f64
                     && at.y <= s.rect.bottom as f64
             });
-            // A drag that starts on something not yet selected selects it and
-            // carries on — one gesture, not two.
-            if on_handle.is_none() && !on_body {
-                self.select_thing_at(page, at);
-            }
-            if self.selected.as_ref().is_some_and(|s| s.page == page) {
+            let group_bounds = self.group_bounds(page);
+            // A group's handles read from `remembered_handle` too — it is
+            // whichever of the two hover branches above last ran, and
+            // `self.selected`/`self.group` are never both populated at
+            // once, so it always means the right one.
+            let on_group_handle = group_bounds.is_some().then(|| remembered_handle).flatten();
+            let on_group_body = on_group_handle.is_none()
+                && group_bounds.as_ref().is_some_and(|b| Self::point_in_rect(at, b));
+            if on_group_handle.is_some() || on_group_body {
+                self.group_grab = Some(Grab { handle: on_group_handle, from: at, by: (0.0, 0.0) });
+            } else if on_handle.is_some() || on_body {
+                // A drag on the current selection's own body or a handle:
+                // move or resize it.
+                self.group = Vec::new();
                 self.grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
+            } else {
+                // **Reported from use: dragging out a marquee across
+                // several objects kept grabbing and moving whichever one
+                // the press happened to land on first**, instead of
+                // drawing the box — a drag used to select-and-move
+                // whatever was under it in one gesture, the same as a
+                // plain click. Selecting one thing is now only ever a
+                // click that releases without moving (`response.clicked()`
+                // below); a drag, wherever it starts, is always the
+                // marquee. Moving something still works — select it with a
+                // click first, then drag its own body or a handle, which
+                // the branch above this one still covers exactly as
+                // before.
+                self.selected = None;
+                if !ui.input(|i| i.modifiers.shift) {
+                    self.group = Vec::new();
+                }
+                self.marquee = Some((at, at));
             }
         }
 
@@ -3289,22 +4398,59 @@ impl PagifyApp {
                     }
                 });
             }
+            if let Some(grab) = self.group_grab.as_mut() {
+                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                ui.output_mut(|o| {
+                    o.cursor_icon = match grab.handle {
+                        Some(h) => h.cursor(),
+                        None => egui::CursorIcon::Grabbing,
+                    }
+                });
+            }
+            if let Some((_, current)) = self.marquee.as_mut() {
+                *current = at;
+            }
         }
 
         if response.drag_stopped() {
             if let (Some(grab), Some(sel)) = (self.grab.take(), self.selected.clone()) {
-                self.finish_grab(sel, grab);
+                self.finish_grab(sel, grab, view.scale);
+            }
+            if let Some(grab) = self.group_grab.take() {
+                self.finish_group_grab(grab, view.scale);
+            }
+            if let Some((start, end)) = self.marquee.take() {
+                let extend = ui.input(|i| i.modifiers.shift);
+                self.select_group_in(page, start, end, extend);
             }
         }
 
         if response.clicked() {
-            self.select_thing_at(page, at);
+            if ui.input(|i| i.modifiers.shift) {
+                self.extend_selection_at(page, at);
+            } else {
+                self.group = Vec::new();
+                self.select_thing_at(page, at);
+            }
         }
     }
 
+    /// The least a click's own press-to-release wobble has to move the
+    /// pointer, in screen pixels, before it counts as a deliberate drag
+    /// rather than an unsteady hand — see [`PagifyApp::finish_grab`].
+    const MIN_DRAG_PX: f32 = 3.0;
+
     /// Apply what a drag asked for, once, and re-find the selection where it
     /// now is.
-    fn finish_grab(&mut self, sel: Selected, grab: Grab) {
+    ///
+    /// `scale` — screen pixels per page point, [`PageView::scale`] — is what
+    /// [`Self::MIN_DRAG_PX`] is measured against, not `grab.by` itself:
+    /// `grab.by` is in page points, and the same few points of press-to-
+    /// release wobble are a fraction of a pixel at one zoom and several
+    /// pixels at another. Reported from use as a click moving whatever it
+    /// selected — invisible on a whole sentence, glaring on the single
+    /// letter a click can now pick out of one.
+    fn finish_grab(&mut self, sel: Selected, grab: Grab, scale: f32) {
         let (dx, dy) = grab.by;
         // `handle: None` here is exactly the "aimed at a corner, landed on
         // the body" failure mode `Self::object_hover_handle` exists to
@@ -3317,7 +4463,7 @@ impl PagifyApp {
         );
         let told = match grab.handle {
             None => {
-                if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                if (dx * scale).hypot(dy * scale) < Self::MIN_DRAG_PX {
                     return;
                 }
                 // Not `move_thing`: that re-finds the object via `thing_at`,
@@ -3366,8 +4512,150 @@ impl PagifyApp {
             y: ((wanted.top + wanted.bottom) / 2.0) as f64,
         };
         self.layers = None;
-        if !self.select_thing_at(sel.page, middle) {
+        // Not a drill: `sel.what` already says what kind of thing this drag
+        // moved, and re-running the letter-drill here on whatever now sits
+        // at the new centre could pick a different granularity than the one
+        // actually dragged.
+        if !self.select_thing_at_drilling(sel.page, middle, false) {
             self.selected = None;
+        }
+    }
+
+    /// Move or resize every member of [`Self::group`] together. A move is a
+    /// plain translation, so (unlike the resize branch) each member's new
+    /// rectangle is exactly the old one shifted, nothing to re-find or
+    /// correct for. A resize scales every member by the same `sx`/`sy`
+    /// about one shared anchor — [`Handle::scale`]/[`Handle::anchor`]
+    /// applied to [`Self::group_bounds`] instead of one object's own rect —
+    /// so the group keeps its shape exactly as a single object's own resize
+    /// would, just with several objects moving together instead of one.
+    /// `scale` is [`PageView::scale`] — see [`Self::finish_grab`] for why
+    /// the drag-was-negligible guard is measured in screen pixels rather
+    /// than page points.
+    fn finish_group_grab(&mut self, grab: Grab, scale: f32) {
+        let (dx, dy) = grab.by;
+        match grab.handle {
+            None => {
+                if (dx * scale).hypot(dy * scale) < Self::MIN_DRAG_PX {
+                    return;
+                }
+                let members = std::mem::take(&mut self.group);
+                let total = members.len();
+                let page = members.first().map(|m| m.page);
+                let mut moved = 0;
+                let mut last_err = None;
+                for member in &members {
+                    match self.move_object_by(member.page, member.object, member.what, (dx, dy)) {
+                        Ok(_) => moved += 1,
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                self.group = members
+                    .into_iter()
+                    .map(|mut m| {
+                        m.rect.left += dx;
+                        m.rect.right += dx;
+                        m.rect.top += dy;
+                        m.rect.bottom += dy;
+                        m
+                    })
+                    .collect();
+                self.layers = None;
+                match (last_err, page) {
+                    (Some(e), _) => self.say_error(format!("moved {moved} of {total} things; {e}")),
+                    (None, Some(page)) => self.say_info(format!(
+                        "moved {total} things by {dx:.0} across and {dy:.0} down on page {}.",
+                        page + 1
+                    )),
+                    (None, None) => {}
+                }
+            }
+            Some(handle) => {
+                let Some(page) = self.group.first().map(|m| m.page) else { return };
+                let Some(bounds) = self.group_bounds(page) else { return };
+                let (sx, sy) = handle.scale(&bounds, (dx, dy));
+                if (sx - 1.0).abs() < 0.005 && (sy - 1.0).abs() < 0.005 {
+                    return;
+                }
+                let (ax, ay) = handle.anchor(&bounds);
+                let anchor = pdf_core::document::Point { x: ax, y: ay };
+                let members = std::mem::take(&mut self.group);
+                let total = members.len();
+                let mut done = 0;
+                let mut last_err = None;
+                for member in &members {
+                    match self.scale_thing(member.page, member.object, anchor, sx, sy) {
+                        Ok(_) => done += 1,
+                        Err(e) => last_err = Some(e),
+                    }
+                }
+                self.group = members
+                    .into_iter()
+                    .map(|mut m| {
+                        m.rect = pdf_core::document::Rect {
+                            left: ax + (m.rect.left - ax) * sx,
+                            top: ay + (m.rect.top - ay) * sy,
+                            right: ax + (m.rect.right - ax) * sx,
+                            bottom: ay + (m.rect.bottom - ay) * sy,
+                        };
+                        m
+                    })
+                    .collect();
+                self.layers = None;
+                match last_err {
+                    Some(e) => self.say_error(format!("resized {done} of {total} things; {e}")),
+                    None => self.say_info(format!(
+                        "resized {total} things to {:.0}% across and {:.0}% down on page {}.",
+                        sx * 100.0,
+                        sy * 100.0,
+                        page + 1
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Delete every member of [`Self::group`], highest object index first.
+    /// A page's later objects shift down to fill a deleted one's slot, so
+    /// deleting low-to-high would have the second removal already reading a
+    /// stale index — the same reason a picture's own object number can move
+    /// after any edit, just now happening mid-batch instead of between one
+    /// drag and the next.
+    fn delete_group(&mut self) {
+        let mut members = std::mem::take(&mut self.group);
+        members.sort_by(|a, b| b.object.cmp(&a.object));
+        let total = members.len();
+        let page = members.first().map(|m| m.page);
+        let mut removed = 0;
+        let mut last_err = None;
+        for member in &members {
+            let result = match &self.doc {
+                Some(doc) => doc
+                    .session
+                    .execute(pdf_core::command::Command::RemoveObject {
+                        page_index: member.page,
+                        object: member.object,
+                    })
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+                None => Err("nothing open.".into()),
+            };
+            match result {
+                Ok(()) => removed += 1,
+                Err(e) => last_err = Some(e),
+            }
+        }
+        if removed > 0 {
+            if let Some(doc) = &mut self.doc {
+                doc.rendered_is_stale();
+            }
+        }
+        self.layers = None;
+        match (last_err, page) {
+            (Some(e), _) if removed == 0 => self.say_error(e),
+            (Some(e), _) => self.say_error(format!("removed {removed} of {total} things; {e}")),
+            (None, Some(page)) => self.say_info(format!("{removed} things removed from page {}.", page + 1)),
+            (None, None) => {}
         }
     }
 
@@ -3381,7 +4669,9 @@ impl PagifyApp {
         sy: f32,
     ) -> Result<String, String> {
         let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
-        doc.session.scale_object(page, object, anchor, sx, sy).map_err(|e| e.to_string())?;
+        doc.session
+            .execute(pdf_core::command::Command::ScaleObject { page_index: page, object, anchor, sx, sy })
+            .map_err(|e| e.to_string())?;
         if let Some(doc) = &mut self.doc {
             doc.rendered_is_stale();
         }
@@ -3421,6 +4711,28 @@ impl PagifyApp {
             .map(|m| (m.index, m.rect, m.rotation))
     }
 
+    /// The same as [`Self::signature_at`], for a plain placed picture.
+    fn placed_image_at(&self, page: usize, at: AppPoint) -> Option<(usize, pdf_core::document::Rect, f32)> {
+        let near = HIT_TOLERANCE_PT as f32;
+        let (x, y) = (at.x as f32, at.y as f32);
+        let doc = self.doc.as_ref()?;
+        doc.session
+            .placed_image_marks(page)
+            .ok()?
+            .into_iter()
+            .filter(|m| {
+                x >= m.rect.left.min(m.rect.right) - near
+                    && x <= m.rect.left.max(m.rect.right) + near
+                    && y >= m.rect.top.min(m.rect.bottom) - near
+                    && y <= m.rect.top.max(m.rect.bottom) + near
+            })
+            .min_by(|a, b| {
+                let area = |r: &pdf_core::document::Rect| ((r.right - r.left) * (r.bottom - r.top)).abs();
+                area(&a.rect).total_cmp(&area(&b.rect))
+            })
+            .map(|m| (m.index, m.rect, m.rotation))
+    }
+
     /// Whether `at` falls within `rect` — no tolerance, unlike hit-testing
     /// for a pick: this is "is the pointer over the already-selected body",
     /// asked every frame for the cursor and the drag-start decision alike.
@@ -3438,6 +4750,20 @@ impl PagifyApp {
     /// `Handle::ALL` does not include (see [`Handle::Rotate`]).
     fn signature_handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
         let sel = self.signature_selected.as_ref()?;
+        let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
+        if (view.to_screen(at) - rotate_screen).length() <= ROTATE_HANDLE_PX + 2.0 {
+            return Some(Handle::Rotate);
+        }
+        let reach = (HANDLE_PX / view.scale as f32).max(2.0);
+        Handle::ALL.iter().copied().find(|h| {
+            let (hx, hy) = h.at(&sel.rect);
+            (at.x as f32 - hx).abs() <= reach && (at.y as f32 - hy).abs() <= reach
+        })
+    }
+
+    /// The same as [`Self::signature_handle_at`], for [`Self::placed_image_selected`].
+    fn placed_image_handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
+        let sel = self.placed_image_selected.as_ref()?;
         let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
         if (view.to_screen(at) - rotate_screen).length() <= ROTATE_HANDLE_PX + 2.0 {
             return Some(Handle::Rotate);
@@ -3662,6 +4988,215 @@ impl PagifyApp {
         }
     }
 
+    /// The same as [`Self::interact_signatures`], for a plain placed
+    /// picture — see [`Self::placed_image_selected`]. Tried after
+    /// signatures and before the object tool, at the same call site, so a
+    /// placed picture and a placed signature never fight over one click.
+    fn interact_placed_images(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        page: usize,
+        at: AppPoint,
+        view: PageView,
+    ) -> bool {
+        let remembered_handle = self.placed_image_hover_handle;
+
+        if self.placed_image_grab.is_none() {
+            if let Some(sel) = self.placed_image_selected.as_ref().filter(|s| s.page == page) {
+                let handle = self.placed_image_handle_at(at, view);
+                self.placed_image_hover_handle = handle;
+                if let Some(handle) = handle {
+                    ui.output_mut(|o| o.cursor_icon = handle.cursor());
+                } else if Self::point_in_rect(at, &sel.rect) {
+                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
+                }
+            } else {
+                self.placed_image_hover_handle = None;
+            }
+        }
+
+        if response.drag_started() {
+            let on_handle = self
+                .placed_image_selected
+                .as_ref()
+                .filter(|s| s.page == page)
+                .and_then(|_| remembered_handle);
+            let on_body = self
+                .placed_image_selected
+                .as_ref()
+                .is_some_and(|s| s.page == page && Self::point_in_rect(at, &s.rect));
+            if on_handle.is_some() || on_body {
+                self.placed_image_grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
+                return true;
+            }
+            if let Some((index, rect, rotation)) = self.placed_image_at(page, at) {
+                self.placed_image_selected = Some(PlacedImageSelected { page, index, rect, rotation });
+                self.placed_image_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
+                return true;
+            }
+        }
+
+        if response.dragged() {
+            if let Some(grab) = self.placed_image_grab.as_mut() {
+                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                ui.output_mut(|o| {
+                    o.cursor_icon = match grab.handle {
+                        Some(h) => h.cursor(),
+                        None => egui::CursorIcon::Grabbing,
+                    }
+                });
+                return true;
+            }
+        }
+
+        if response.drag_stopped() {
+            if let (Some(grab), Some(sel)) = (self.placed_image_grab.take(), self.placed_image_selected.clone()) {
+                self.finish_placed_image_grab(sel, grab);
+                return true;
+            }
+        }
+
+        if response.clicked() {
+            if let Some((index, rect, rotation)) = self.placed_image_at(page, at) {
+                self.placed_image_selected = Some(PlacedImageSelected { page, index, rect, rotation });
+                self.say_info("picture selected — drag to move, drag a handle to resize, drag the ring above it to turn.");
+                return true;
+            }
+            self.placed_image_selected = None;
+        }
+
+        false
+    }
+
+    /// The same as [`Self::finish_signature_grab`], for [`Self::placed_image_selected`].
+    fn finish_placed_image_grab(&mut self, sel: PlacedImageSelected, grab: Grab) {
+        self.session_log.record(
+            "drag",
+            &format!("placed image handle={:?} by={:?} rect={:?}", grab.handle, grab.by, sel.rect),
+        );
+        if grab.handle == Some(Handle::Rotate) {
+            let wanted = Self::angle_from_drag(&sel.rect, sel.rotation, grab.from, grab.by);
+            if (wanted - sel.rotation).abs() < 0.5 {
+                return;
+            }
+            let Some(doc) = &self.doc else { return };
+            match doc.session.rotate_image_signature(sel.page, sel.index, wanted) {
+                Ok(()) => {
+                    if let Some(doc) = &mut self.doc {
+                        doc.rendered_is_stale();
+                    }
+                    self.placed_image_selected =
+                        Some(PlacedImageSelected { rotation: wanted, ..sel });
+                }
+                Err(e) => {
+                    self.say_error(e.to_string());
+                    self.placed_image_selected = Some(sel);
+                }
+            }
+            return;
+        }
+
+        let (dx, dy) = grab.by;
+        let wanted = match grab.handle {
+            None => {
+                if dx.abs() < 0.5 && dy.abs() < 0.5 {
+                    return;
+                }
+                pdf_core::document::Rect {
+                    left: sel.rect.left + dx,
+                    top: sel.rect.top + dy,
+                    right: sel.rect.right + dx,
+                    bottom: sel.rect.bottom + dy,
+                }
+            }
+            Some(handle) => {
+                let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                if (sx - 1.0).abs() < 0.005 && (sy - 1.0).abs() < 0.005 {
+                    return;
+                }
+                let (ax, ay) = handle.anchor(&sel.rect);
+                pdf_core::document::Rect {
+                    left: ax + (sel.rect.left - ax) * sx,
+                    top: ay + (sel.rect.top - ay) * sy,
+                    right: ax + (sel.rect.right - ax) * sx,
+                    bottom: ay + (sel.rect.bottom - ay) * sy,
+                }
+            }
+        };
+        let Some(doc) = &self.doc else { return };
+        match doc.session.set_image_signature_rect(sel.page, sel.index, wanted) {
+            Ok(()) => {
+                if let Some(doc) = &mut self.doc {
+                    doc.rendered_is_stale();
+                }
+                self.placed_image_selected = Some(PlacedImageSelected { rect: wanted, ..sel });
+            }
+            Err(e) => {
+                self.say_error(e.to_string());
+                self.placed_image_selected = Some(sel);
+            }
+        }
+    }
+
+    /// Apply a drag on the markup layer's own selection — the same shape as
+    /// [`Self::finish_grab`], but committed through `tools::move_selection`
+    /// rather than `Command::MoveObject`: a drawn shape is neither page
+    /// content nor an annotation, and every selected object moves together
+    /// by the same delta, the same way the typed `move` command already
+    /// works, this being the drag that reaches it instead of two picks.
+    fn finish_markup_grab(&mut self, page: usize, grab: Grab) {
+        let (dx, dy) = grab.by;
+        if dx.hypot(dy) < Self::MIN_DRAG_PX {
+            return;
+        }
+        self.session_log.record("drag", &format!("markup by=({dx:.1},{dy:.1})"));
+        let height = view_height(self, page);
+        let layer = self.markup.page(page, height);
+        layer.begin("move");
+        // App space counts downwards, kernel space upwards — see
+        // `PageSpace::to_kernel`. A pure reflection, not a rotation or a
+        // scale, so the x half of a *delta* carries over unchanged and only
+        // y flips; there is no point to convert through, only a direction.
+        let moved = tools::move_selection(layer, cad_kernel::Vec2::new(dx as f64, -dy as f64));
+        layer.end();
+        self.say_info(format!("{moved} moved."));
+    }
+
+    /// Apply a rotate-handle drag on the markup layer's own selection — the
+    /// angle comes from [`Self::angle_from_drag`], the same maths the
+    /// signature and picture rotate handles already use, but committed
+    /// through `tools::rotate_selection` since a drawn shape has no stored
+    /// `rotation` field of its own to overwrite: it is real geometry, turned
+    /// about the selection's own centre.
+    ///
+    /// **The sign flip `finish_markup_grab` does not need.** `angle_from_
+    /// drag` reports clockwise-positive in app space, which is the sense a
+    /// drag should visibly turn the shape in; `Geom::rotated`'s `angle` is
+    /// the standard counter-clockwise-positive convention of a *y-up* frame,
+    /// which — unlike a plain delta — does not survive `PageSpace`'s y-flip
+    /// unchanged. Verified with a real drag rather than derived on paper:
+    /// see `dragging_the_rotate_handle_turns_a_drawn_shape`.
+    fn finish_markup_rotate(&mut self, page: usize, grab: Grab, bounds: pdf_core::document::Rect) {
+        let degrees = Self::angle_from_drag(&bounds, 0.0, grab.from, grab.by);
+        if degrees.abs() < 1.0 {
+            return;
+        }
+        self.session_log.record("drag", &format!("markup rotate by={degrees:.1}deg"));
+        let height = view_height(self, page);
+        let layer = self.markup.page(page, height);
+        let space = layer.space();
+        let centre = AppPoint::new(
+            ((bounds.left + bounds.right) / 2.0) as f64,
+            ((bounds.top + bounds.bottom) / 2.0) as f64,
+        );
+        let pivot = space.to_kernel(centre);
+        layer.begin("rotate");
+        let n = tools::rotate_selection(layer, pivot, -(degrees as f64).to_radians());
+        layer.end();
+        self.say_info(format!("{n} rotated."));
+    }
+
     /// Make the selected thing more or less see-through.
     fn set_opacity_of(&mut self, page: usize, object: usize, opacity: f32) -> Result<String, String> {
         let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
@@ -3729,6 +5264,99 @@ impl PagifyApp {
         // The handles, at a fixed size on screen whatever the zoom.
         for handle in Handle::ALL {
             let (hx, hy) = handle.at(&sel.rect);
+            let centre = view.to_screen(AppPoint::new(hx as f64, hy as f64));
+            let square = egui::Rect::from_center_size(centre, egui::Vec2::splat(HANDLE_PX * 2.0));
+            painter.rect_filled(square, egui::CornerRadius::same(1), egui::Color32::WHITE);
+            painter.rect_stroke(
+                square,
+                egui::CornerRadius::same(1),
+                egui::Stroke::new(1.0, theme::VIOLET),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
+    /// The marquee rectangle while it is being dragged out; every member of
+    /// [`Self::group`] once one exists, moving or resizing together while a
+    /// drag is live; and, when nothing is being dragged, the group's own
+    /// bounding box and its resize handles — the same drawing
+    /// [`Self::draw_object_selection`] gives a single object, just built
+    /// from [`Self::group_bounds`] instead of one object's own rect.
+    fn draw_group_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let to_screen = |r: &pdf_core::document::Rect| {
+            egui::Rect::from_min_max(
+                view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
+                view.to_screen(AppPoint::new(r.right as f64, r.bottom as f64)),
+            )
+        };
+        let painter = ui.painter();
+
+        if let Some((start, current)) = self.marquee {
+            let rect = egui::Rect::from_two_pos(view.to_screen(start), view.to_screen(current));
+            painter.rect_filled(rect, egui::CornerRadius::ZERO, theme::VIOLET.gamma_multiply(0.08));
+            painter.rect_stroke(
+                rect,
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.0, theme::VIOLET),
+                egui::StrokeKind::Outside,
+            );
+        }
+
+        let Some(bounds) = self.group_bounds(page) else { return };
+
+        // Where a rectangle is headed, given the drag in progress — a
+        // translation for a body drag, a scale about the group's own anchor
+        // corner for a handle, same maths `Self::finish_group_grab` commits
+        // with on release.
+        let going = |r: &pdf_core::document::Rect| -> pdf_core::document::Rect {
+            let Some(grab) = &self.group_grab else { return *r };
+            let (dx, dy) = grab.by;
+            match grab.handle {
+                None => pdf_core::document::Rect {
+                    left: r.left + dx,
+                    top: r.top + dy,
+                    right: r.right + dx,
+                    bottom: r.bottom + dy,
+                },
+                Some(handle) => {
+                    let (sx, sy) = handle.scale(&bounds, (dx, dy));
+                    let (ax, ay) = handle.anchor(&bounds);
+                    pdf_core::document::Rect {
+                        left: ax + (r.left - ax) * sx,
+                        top: ay + (r.top - ay) * sy,
+                        right: ax + (r.right - ax) * sx,
+                        bottom: ay + (r.bottom - ay) * sy,
+                    }
+                }
+            }
+        };
+
+        for member in self.group.iter().filter(|m| m.page == page) {
+            let outline = to_screen(&going(&member.rect));
+            if self.group_grab.is_some() {
+                painter.rect_filled(outline, egui::CornerRadius::ZERO, theme::VIOLET.gamma_multiply(0.10));
+            }
+            painter.rect_stroke(
+                outline,
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.5, theme::VIOLET_BRIGHT),
+                egui::StrokeKind::Outside,
+            );
+        }
+
+        // The handles, at a fixed size on screen — hidden while a drag is
+        // live, same as a single object's own (see `draw_object_selection`).
+        if self.group_grab.is_some() {
+            return;
+        }
+        painter.rect_stroke(
+            to_screen(&bounds),
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(1.0, theme::VIOLET),
+            egui::StrokeKind::Outside,
+        );
+        for handle in Handle::ALL {
+            let (hx, hy) = handle.at(&bounds);
             let centre = view.to_screen(AppPoint::new(hx as f64, hy as f64));
             let square = egui::Rect::from_center_size(centre, egui::Vec2::splat(HANDLE_PX * 2.0));
             painter.rect_filled(square, egui::CornerRadius::same(1), egui::Color32::WHITE);
@@ -3846,6 +5474,144 @@ impl PagifyApp {
         painter.circle_stroke(rotate_screen, ROTATE_HANDLE_PX, egui::Stroke::new(1.0, theme::VIOLET));
     }
 
+    /// The same as [`Self::draw_signature_selection`], for
+    /// [`Self::placed_image_selected`] and [`Self::placed_image_grab`].
+    fn draw_placed_image_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let Some(sel) = self.placed_image_selected.clone().filter(|s| s.page == page) else { return };
+        let to_screen = |r: &pdf_core::document::Rect| {
+            egui::Rect::from_min_max(
+                view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
+                view.to_screen(AppPoint::new(r.right as f64, r.bottom as f64)),
+            )
+        };
+        let painter = ui.painter();
+        let outline = to_screen(&sel.rect);
+
+        painter.rect_stroke(
+            outline,
+            egui::CornerRadius::ZERO,
+            egui::Stroke::new(1.5, theme::VIOLET),
+            egui::StrokeKind::Outside,
+        );
+
+        if let Some(grab) = &self.placed_image_grab {
+            if grab.handle == Some(Handle::Rotate) {
+                let degrees = Self::angle_from_drag(&sel.rect, sel.rotation, grab.from, grab.by);
+                let centre = to_screen(&sel.rect).center();
+                let pointer = view.to_screen(AppPoint::new(
+                    grab.from.x + grab.by.0 as f64,
+                    grab.from.y + grab.by.1 as f64,
+                ));
+                painter.line_segment([centre, pointer], egui::Stroke::new(1.5, theme::VIOLET_BRIGHT));
+                painter.text(
+                    pointer + egui::vec2(10.0, -10.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!("{:.0}°", degrees.rem_euclid(360.0)),
+                    egui::FontId::monospace(13.0),
+                    theme::VIOLET_BRIGHT,
+                );
+                return;
+            }
+            let (dx, dy) = grab.by;
+            let going = match grab.handle {
+                None => pdf_core::document::Rect {
+                    left: sel.rect.left + dx,
+                    top: sel.rect.top + dy,
+                    right: sel.rect.right + dx,
+                    bottom: sel.rect.bottom + dy,
+                },
+                Some(handle) => {
+                    let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
+                    let (ax, ay) = handle.anchor(&sel.rect);
+                    pdf_core::document::Rect {
+                        left: ax + (sel.rect.left - ax) * sx,
+                        top: ay + (sel.rect.top - ay) * sy,
+                        right: ax + (sel.rect.right - ax) * sx,
+                        bottom: ay + (sel.rect.bottom - ay) * sy,
+                    }
+                }
+            };
+            let ghost = to_screen(&going);
+            painter.rect_filled(ghost, egui::CornerRadius::ZERO, theme::VIOLET.gamma_multiply(0.10));
+            painter.rect_stroke(
+                ghost,
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.5, theme::VIOLET_BRIGHT),
+                egui::StrokeKind::Outside,
+            );
+            return;
+        }
+
+        for handle in Handle::ALL {
+            let (hx, hy) = handle.at(&sel.rect);
+            let centre = view.to_screen(AppPoint::new(hx as f64, hy as f64));
+            let square = egui::Rect::from_center_size(centre, egui::Vec2::splat(HANDLE_PX * 2.0));
+            painter.rect_filled(square, egui::CornerRadius::same(1), egui::Color32::WHITE);
+            painter.rect_stroke(
+                square,
+                egui::CornerRadius::same(1),
+                egui::Stroke::new(1.0, theme::VIOLET),
+                egui::StrokeKind::Inside,
+            );
+        }
+
+        let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
+        let stem_from = view.to_screen(AppPoint::new(
+            ((sel.rect.left + sel.rect.right) / 2.0) as f64,
+            sel.rect.top as f64,
+        ));
+        painter.line_segment([stem_from, rotate_screen], egui::Stroke::new(1.0, theme::VIOLET));
+        painter.circle_filled(rotate_screen, ROTATE_HANDLE_PX, egui::Color32::WHITE);
+        painter.circle_stroke(rotate_screen, ROTATE_HANDLE_PX, egui::Stroke::new(1.0, theme::VIOLET));
+    }
+
+    /// The markup layer's own selection needs no outline of its own — a
+    /// selected shape is already the violet-highlighted stroke
+    /// `overlay::draw_layer` paints it with — so this draws only what that
+    /// does not: the rotate handle, and, mid-drag, the angle it is turning
+    /// to. The same ring-on-a-stem [`Self::draw_signature_selection`] uses,
+    /// since a drawn shape gained a rotate handle for the same reason a
+    /// signature already has one — see [`Self::finish_markup_rotate`].
+    fn draw_markup_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let Some(bounds) = self.markup_selection_bounds(page) else { return };
+        let painter = ui.painter();
+
+        if let Some(grab) = &self.markup_grab {
+            // A move in progress needs no handle in the way of watching the
+            // shape itself go; a rotate in progress shows the angle instead
+            // of the resting ring.
+            if grab.handle == Some(Handle::Rotate) {
+                let degrees = Self::angle_from_drag(&bounds, 0.0, grab.from, grab.by);
+                let centre = view.to_screen(AppPoint::new(
+                    ((bounds.left + bounds.right) / 2.0) as f64,
+                    ((bounds.top + bounds.bottom) / 2.0) as f64,
+                ));
+                let pointer = view.to_screen(AppPoint::new(
+                    grab.from.x + grab.by.0 as f64,
+                    grab.from.y + grab.by.1 as f64,
+                ));
+                painter.line_segment([centre, pointer], egui::Stroke::new(1.5, theme::VIOLET_BRIGHT));
+                painter.text(
+                    pointer + egui::vec2(10.0, -10.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!("{:.0}°", degrees.rem_euclid(360.0)),
+                    egui::FontId::monospace(13.0),
+                    theme::VIOLET_BRIGHT,
+                );
+            }
+            return;
+        }
+
+        let rotate_screen = Self::rotate_handle_screen_pos(&bounds, view);
+        let stem_from = view.to_screen(AppPoint::new(
+            ((bounds.left + bounds.right) / 2.0) as f64,
+            bounds.top as f64,
+        ));
+        painter.line_segment([stem_from, rotate_screen], egui::Stroke::new(1.0, theme::VIOLET));
+        painter.circle_filled(rotate_screen, ROTATE_HANDLE_PX, egui::Color32::WHITE);
+        painter.circle_stroke(rotate_screen, ROTATE_HANDLE_PX, egui::Stroke::new(1.0, theme::VIOLET));
+    }
+
     /// Pick something up and put it down somewhere else.
     fn move_thing(
         &mut self,
@@ -3886,7 +5652,9 @@ impl PagifyApp {
         let point = pdf_core::document::Point { x: by.0, y: by.1 };
 
         let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
-        doc.session.move_object(page, object, point).map_err(|e| e.to_string())?;
+        doc.session
+            .execute(pdf_core::command::Command::MoveObject { page_index: page, object, by: point })
+            .map_err(|e| e.to_string())?;
 
         if let Some(doc) = &mut self.doc {
             doc.rendered_is_stale();
@@ -4091,6 +5859,1133 @@ impl PagifyApp {
         self.say_info(format!("match {} of {}", index + 1, self.find_hits.len()));
     }
 
+    /// Replace every occurrence of `needle` across the whole document,
+    /// matched the same case- and shape-folded way `find` already does — so
+    /// Search & Replace never disagrees with Find about what a search term
+    /// means.
+    ///
+    /// **A run at a time, not a character at a time.** Only a run whose own
+    /// text holds a match end to end can be rewritten in place, the same
+    /// safe swap a single run's own retyping already uses — see
+    /// `Command::SetTextRun`. A word a producer drew across two runs (a
+    /// font change or a hyphen break mid-word) has no one text-showing
+    /// operation to rewrite, so it is left alone rather than guessed at;
+    /// `pick_text_run`'s own paragraph-joining logic exists for reading a
+    /// run split that way, not for editing it back together.
+    ///
+    /// Sending `TextStyle::default()` — nothing asked for — is what keeps
+    /// every replaced word in its own size, colour, font and position: see
+    /// `apply_edited_run`'s own doc for why an empty style is what sends an
+    /// edit down the byte-safe path that touches only the words themselves.
+    fn replace_all(&mut self, needle: &str, replacement: &str) -> Result<String, String> {
+        if needle.trim().is_empty() {
+            return Err("nothing to search for.".into());
+        }
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+
+        let mut replaced = 0usize;
+        let mut runs_touched = 0usize;
+        for page in 0..doc.page_count {
+            let Ok(runs) = doc.session.text_runs(page) else { continue };
+            for run in &runs {
+                let hits = pdf_core::document::search::SearchIndex::new(&run.text).find(needle);
+                if hits.is_empty() {
+                    continue;
+                }
+                let mut new_text = String::with_capacity(run.text.len());
+                let mut last = 0;
+                for hit in &hits {
+                    new_text.push_str(&run.text[last..hit.start]);
+                    new_text.push_str(replacement);
+                    last = hit.end;
+                }
+                new_text.push_str(&run.text[last..]);
+
+                if doc
+                    .session
+                    .execute(pdf_core::command::Command::SetTextRun {
+                        page_index: page,
+                        object: run.object,
+                        text: new_text,
+                        style: pdf_core::document::TextStyle::default(),
+                    })
+                    .is_ok()
+                {
+                    replaced += hits.len();
+                    runs_touched += 1;
+                }
+            }
+        }
+
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.text = None;
+        self.text_selection = None;
+        self.find_hits.clear();
+
+        if replaced == 0 {
+            return Ok(format!("\"{needle}\" was not found."));
+        }
+        Ok(format!(
+            "replaced {replaced} occurrence{} of \"{needle}\" across {runs_touched} run{}. \
+             `undo` puts them back, one at a time.",
+            if replaced == 1 { "" } else { "s" },
+            if runs_touched == 1 { "" } else { "s" },
+        ))
+    }
+
+    /// Replace just the current match — `self.find_hits[self.find_at]` —
+    /// and step to whatever is now the next one, leaving every other match
+    /// exactly as it was.
+    ///
+    /// **Searches again rather than tracking a position by hand.** Once one
+    /// match is rewritten, every later match on that page has shifted by
+    /// however many characters the replacement's length differs from the
+    /// word searched for — re-running `find` is what makes "the next
+    /// match" a fresh, correct answer instead of a stale offset.
+    ///
+    /// Finds the run the same way a click would: the smallest run whose own
+    /// rectangle contains the match's own — not `pick_text_run`, which
+    /// would grow a single word into the whole paragraph around it. Only
+    /// the one occurrence the match actually is gets replaced, by its exact
+    /// text (whatever case it was written in), not every occurrence the run
+    /// might otherwise hold.
+    fn replace_current(&mut self, needle: &str, replacement: &str) -> Result<String, String> {
+        if self.find_hits.is_empty() || self.find_needle != needle {
+            self.find(needle);
+        }
+        let Some((page, range)) = self.find_hits.get(self.find_at).cloned() else {
+            return Err(format!("\"{needle}\" was not found."));
+        };
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+
+        let chars = doc.session.characters(page).map_err(|e| e.to_string())?;
+        let matched = chars.text_of(range.clone());
+        let spot = chars
+            .line_rects(range)
+            .into_iter()
+            .next()
+            .ok_or("that match could not be placed on the page.")?;
+        let point = ((spot.left + spot.right) / 2.0, (spot.top + spot.bottom) / 2.0);
+
+        let runs = doc.session.text_runs(page).map_err(|e| e.to_string())?;
+        let area = |r: &pdf_core::document::Rect| {
+            (r.right - r.left).abs() * (r.bottom - r.top).abs()
+        };
+        let run = runs
+            .into_iter()
+            .filter(|r| {
+                let (left, right) = (r.rect.left.min(r.rect.right), r.rect.left.max(r.rect.right));
+                let (top, bottom) = (r.rect.top.min(r.rect.bottom), r.rect.top.max(r.rect.bottom));
+                point.0 >= left && point.0 <= right && point.1 >= top && point.1 <= bottom
+            })
+            .min_by(|a, b| area(&a.rect).total_cmp(&area(&b.rect)))
+            .ok_or("that match is not inside any run this can edit.")?;
+
+        let at = run
+            .text
+            .find(&matched)
+            .ok_or("that match could not be found in its own run.")?;
+        let mut new_text = run.text.clone();
+        new_text.replace_range(at..at + matched.len(), replacement);
+
+        doc.session
+            .execute(pdf_core::command::Command::SetTextRun {
+                page_index: page,
+                object: run.object,
+                text: new_text,
+                style: pdf_core::document::TextStyle::default(),
+            })
+            .map_err(|e| e.to_string())?;
+
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.text = None;
+        self.text_selection = None;
+        self.find_hits.clear();
+
+        self.find(needle);
+        if self.find_hits.is_empty() {
+            Ok(format!("replaced the last \"{needle}\" — none left."))
+        } else {
+            Ok(format!(
+                "replaced 1 occurrence of \"{needle}\" — {} left. `undo` puts it back.",
+                self.find_hits.len()
+            ))
+        }
+    }
+
+    /// The Search & Replace panel — a search bar, a replacement bar, and a
+    /// mode to pick what the two buttons below them do.
+    ///
+    /// **An ordinary floating window, not a modal.** Reported from use: the
+    /// panel should not "hide the rest of the page" — a modal dims and
+    /// blocks everything behind it, which is exactly wrong for a tool whose
+    /// whole point is watching matches highlight on the page while it stays
+    /// open. `egui::Window` neither dims nor blocks, and can be dragged
+    /// clear of whatever it would otherwise sit over.
+    ///
+    /// **Reported from use: "an option to just search and replace one by
+    /// one. and search without replacing."** The dropdown is what picks
+    /// between the three: `Find` calls the same `find`/`find_step` the
+    /// command box always could, `ReplaceOne` calls `replace_current` one
+    /// match at a time, and `ReplaceAll` is the original single-button
+    /// behaviour. A word's properties are kept by `replace_all`/
+    /// `replace_current` themselves, not by anything drawn here.
+    fn draw_find_replace(&mut self, ctx: &egui::Context) {
+        let Some(mut panel) = self.find_replace.take() else { return };
+
+        let mut open = true;
+        let mut done = false;
+        let mut find_now = false;
+        let mut step: Option<bool> = None;
+        let mut replace_one = false;
+        let mut replace_all = false;
+
+        egui::Window::new("Search & Replace")
+            .id(egui::Id::new("find-replace-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(80.0, 80.0))
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+
+                egui::ComboBox::from_id_salt("find-replace-mode")
+                    .selected_text(match panel.mode {
+                        FindReplaceMode::Find => "Find",
+                        FindReplaceMode::ReplaceOne => "Replace one at a time",
+                        FindReplaceMode::ReplaceAll => "Replace all",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut panel.mode, FindReplaceMode::Find, "Find");
+                        ui.selectable_value(
+                            &mut panel.mode,
+                            FindReplaceMode::ReplaceOne,
+                            "Replace one at a time",
+                        );
+                        ui.selectable_value(
+                            &mut panel.mode,
+                            FindReplaceMode::ReplaceAll,
+                            "Replace all",
+                        );
+                    });
+                ui.add_space(10.0);
+
+                ui.label("Find:");
+                let find_field = ui.add(
+                    egui::TextEdit::singleline(&mut panel.find)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("word to search for"),
+                );
+                let mut entered =
+                    find_field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                if panel.mode != FindReplaceMode::Find {
+                    ui.add_space(6.0);
+                    ui.label("Replace with:");
+                    let replace_field = ui.add(
+                        egui::TextEdit::singleline(&mut panel.replace)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("its replacement"),
+                    );
+                    entered |= replace_field.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                }
+
+                ui.add_space(10.0);
+                let something = !panel.find.trim().is_empty();
+                ui.horizontal(|ui| match panel.mode {
+                    FindReplaceMode::Find => {
+                        if ui.add_enabled(something, egui::Button::new("Find")).clicked()
+                            || (entered && something)
+                        {
+                            find_now = true;
+                        }
+                        if ui.button("Previous").clicked() {
+                            step = Some(false);
+                        }
+                        if ui.button("Next").clicked() {
+                            step = Some(true);
+                        }
+                    }
+                    FindReplaceMode::ReplaceOne => {
+                        if ui.button("Find Next").clicked() {
+                            step = Some(true);
+                        }
+                        if ui.add_enabled(something, egui::Button::new("Replace")).clicked()
+                            || (entered && something)
+                        {
+                            replace_one = true;
+                        }
+                    }
+                    FindReplaceMode::ReplaceAll => {
+                        if ui.add_enabled(something, egui::Button::new("Replace All")).clicked()
+                            || (entered && something)
+                        {
+                            replace_all = true;
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                if ui.button("Close").clicked() {
+                    done = true;
+                }
+            });
+
+        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            done = true;
+        }
+
+        if find_now {
+            self.find(&panel.find);
+        }
+        if let Some(forward) = step {
+            if self.find_hits.is_empty() || self.find_needle != panel.find {
+                self.find(&panel.find);
+            } else {
+                self.find_step(forward);
+            }
+        }
+        if replace_one {
+            match self.replace_current(&panel.find, &panel.replace) {
+                Ok(said) => self.say_info(said),
+                Err(e) => self.say_error(e),
+            }
+        }
+        if replace_all {
+            match self.replace_all(&panel.find, &panel.replace) {
+                Ok(said) => self.say_info(said),
+                Err(e) => self.say_error(e),
+            }
+        }
+
+        if done {
+            return;
+        }
+        self.find_replace = Some(panel);
+    }
+
+    /// Scan every page for a word the bundled dictionary does not know —
+    /// the PDF's own original text and anything typed in through the app
+    /// alike, since both are ordinary page content by the time this reads
+    /// them (`write_text_at`/`write_styled_line_at` write real text
+    /// objects, not an overlay — see `pdfium_doc.rs`'s own `TEXT_MARK_NAME`
+    /// doc for why that tag exists only to find them again, not to make
+    /// them a separate kind of thing).
+    ///
+    /// Skips a word that is a single letter (essentially always either a
+    /// real word or an initial, never worth a prompt) or written in all
+    /// capitals — an acronym or a model code such as "DALI" or "CAMINO"
+    /// that a plain English word list was never going to know, and
+    /// flagging every one of those would bury the real finds under noise.
+    fn scan_spelling(&self) -> Vec<Misspelling> {
+        let Some(doc) = &self.doc else { return Vec::new() };
+        let mut found = Vec::new();
+        for page in 0..doc.page_count {
+            let Ok(runs) = doc.session.text_runs(page) else { continue };
+            for run in &runs {
+                for (_, word) in spelling::words_in(&run.text) {
+                    if word.chars().count() < 2 {
+                        continue;
+                    }
+                    if word.chars().all(|c| c.is_uppercase()) {
+                        continue;
+                    }
+                    if spelling::is_known(word) {
+                        continue;
+                    }
+                    found.push(Misspelling { page, object: run.object, word: word.to_string() });
+                }
+            }
+        }
+        found
+    }
+
+    /// Open the panel and run the scan at once — "when user clicks it, it
+    /// should check the spelling," not open first and wait for a second
+    /// press.
+    fn open_spell_check(&mut self) {
+        if self.doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let found = self.scan_spelling();
+        let total_found = found.len();
+        if found.is_empty() {
+            self.say_info("no misspelled words found.");
+        } else {
+            self.say_info(format!(
+                "{total_found} word{} to review.",
+                if total_found == 1 { "" } else { "s" }
+            ));
+        }
+        let replacement = Self::top_suggestion(found.first());
+        self.spelling = Some(SpellCheck { found, replacement, total_found });
+    }
+
+    fn top_suggestion(word: Option<&Misspelling>) -> String {
+        word.map(|m| spelling::suggest(&m.word, 1).into_iter().next().unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// Write `replacement` over one occurrence of `word` in the run named by
+    /// `page`/`object`.
+    ///
+    /// **Finds the word in the run's own *current* text, not by a byte
+    /// offset kept from when the page was scanned.** An earlier fix to the
+    /// same run has already changed its length by however many characters
+    /// the two words differ by — the same reasoning `replace_current`
+    /// documents for why it searches again rather than tracking a
+    /// position. `TextStyle::default()` — nothing asked for — is what
+    /// keeps the fix in the word's own size, colour, font and position.
+    fn apply_spelling_change(
+        &mut self,
+        page: usize,
+        object: usize,
+        word: &str,
+        replacement: &str,
+    ) -> Result<(), String> {
+        if replacement.trim().is_empty() {
+            return Err("nothing to change it to.".into());
+        }
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        let runs = doc.session.text_runs(page).map_err(|e| e.to_string())?;
+        let run = runs
+            .iter()
+            .find(|r| r.object == object)
+            .ok_or("that run is no longer on the page.")?;
+        let at = run
+            .text
+            .find(word)
+            .ok_or("that word could not be found in its own run any more.")?;
+        let mut new_text = run.text.clone();
+        new_text.replace_range(at..at + word.len(), replacement);
+
+        doc.session
+            .execute(pdf_core::command::Command::SetTextRun {
+                page_index: page,
+                object,
+                text: new_text,
+                style: pdf_core::document::TextStyle::default(),
+            })
+            .map_err(|e| e.to_string())?;
+
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.text = None;
+        Ok(())
+    }
+
+    /// The Check Spelling panel — one word at a time, its own suggestions,
+    /// and the choice to change it, change every occurrence, or leave it
+    /// alone.
+    ///
+    /// An ordinary floating window, not a modal — the same reasoning
+    /// `draw_find_replace` documents: a spelling pass is watched against
+    /// the page as it goes, not from behind a dimmed overlay of it.
+    fn draw_spell_check(&mut self, ctx: &egui::Context) {
+        let Some(mut panel) = self.spelling.take() else { return };
+
+        let mut open = true;
+        let mut done = false;
+        let mut change = false;
+        let mut change_all = false;
+        let mut ignore = false;
+        let mut ignore_all = false;
+
+        egui::Window::new("Check Spelling")
+            .id(egui::Id::new("spell-check-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(80.0, 80.0))
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+
+                let Some(current) = panel.found.first().cloned() else {
+                    ui.label("No misspelled words found.");
+                    return;
+                };
+                ui.label(format!(
+                    "word {} of {} — page {}",
+                    panel.total_found - panel.found.len() + 1,
+                    panel.total_found,
+                    current.page + 1,
+                ));
+                ui.add_space(4.0);
+                ui.heading(&current.word);
+                ui.add_space(8.0);
+
+                let suggestions = spelling::suggest(&current.word, 5);
+                if suggestions.is_empty() {
+                    ui.label("No suggestions.");
+                } else {
+                    ui.horizontal_wrapped(|ui| {
+                        for word in &suggestions {
+                            if ui.button(word).clicked() {
+                                panel.replacement = word.clone();
+                            }
+                        }
+                    });
+                }
+                ui.add_space(8.0);
+
+                ui.label("Change to:");
+                ui.add(
+                    egui::TextEdit::singleline(&mut panel.replacement)
+                        .desired_width(f32::INFINITY),
+                );
+
+                ui.add_space(10.0);
+                let something = !panel.replacement.trim().is_empty();
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(something, egui::Button::new("Change")).clicked() {
+                        change = true;
+                    }
+                    if ui.add_enabled(something, egui::Button::new("Change All")).clicked() {
+                        change_all = true;
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Ignore").clicked() {
+                        ignore = true;
+                    }
+                    if ui.button("Ignore All").clicked() {
+                        ignore_all = true;
+                    }
+                });
+            });
+
+        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            done = true;
+        }
+
+        // **One action at a time, on `found[0]`, then a fresh top
+        // suggestion for whatever is now first.** Removing every entry for
+        // the same word (`change_all`/`ignore_all`) rather than tracking an
+        // index elsewhere in the list is what keeps this simple: the word
+        // in front is always the one being decided about.
+        if change || change_all || ignore || ignore_all {
+            if let Some(current) = panel.found.first().cloned() {
+                if change {
+                    if let Err(e) = self.apply_spelling_change(
+                        current.page,
+                        current.object,
+                        &current.word,
+                        &panel.replacement,
+                    ) {
+                        self.say_error(e);
+                    }
+                } else if change_all {
+                    if let Err(e) = self.replace_all(&current.word, &panel.replacement) {
+                        self.say_error(e);
+                    }
+                }
+                let word = current.word.to_lowercase();
+                if change_all || ignore_all {
+                    panel.found.retain(|m| m.word.to_lowercase() != word);
+                } else {
+                    panel.found.remove(0);
+                }
+                panel.replacement = Self::top_suggestion(panel.found.first());
+            }
+        }
+
+        if done {
+            return;
+        }
+        self.spelling = Some(panel);
+    }
+
+    /// Add a bookmark for the current page and show the panel it now
+    /// appears in.
+    ///
+    /// **Named from the current text selection when there is one** — the
+    /// same instinct as typing a caption from the words already picked,
+    /// rather than "Page 7" telling nobody what is actually there. Falls
+    /// back to the page number when there is nothing selected, or the
+    /// selection is empty once trimmed.
+    fn add_bookmark_here(&mut self) {
+        if self.doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let page = self.page;
+        let title = self
+            .text_selection
+            .clone()
+            .filter(|_| self.selection_page == page)
+            .and_then(|range| self.characters(page).map(|c| c.text_of(range)))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| format!("Page {}", page + 1));
+
+        let Some(doc) = &self.doc else { return };
+        match doc.session.execute(pdf_core::command::Command::AddBookmark {
+            title: title.clone(),
+            page_index: page,
+        }) {
+            Ok(_) => {
+                self.say_info(format!("bookmarked \"{title}\"."));
+                let entries = self.sync_bookmarks();
+                self.bookmark_panel = Some(BookmarkPanel { entries });
+            }
+            Err(e) => self.say_error(format!("{e}")),
+        }
+    }
+
+    /// Read the document's own bookmarks once, updating both
+    /// `bookmarked_pages` (the page-corner icon's own cache) and, only when
+    /// it is already open, the panel's own list.
+    ///
+    /// **Never opens the panel itself** — called after undo, redo and
+    /// opening a document, none of which should pop a panel open that
+    /// nobody asked to see. `add_bookmark_here` opens it explicitly, using
+    /// the same entries this returns.
+    fn sync_bookmarks(&mut self) -> Vec<(String, usize)> {
+        let entries = self.doc.as_ref().and_then(|d| d.session.bookmarks().ok()).unwrap_or_default();
+        self.bookmarked_pages = entries.iter().map(|(_, page)| *page).collect();
+        if self.bookmark_panel.is_some() {
+            self.bookmark_panel = Some(BookmarkPanel { entries: entries.clone() });
+        }
+        entries
+    }
+
+    /// The Bookmarks panel — every bookmark, click to jump.
+    fn draw_bookmark_panel(&mut self, ctx: &egui::Context) {
+        let Some(panel) = self.bookmark_panel.take() else { return };
+        let mut open = true;
+        let mut go_to_page: Option<usize> = None;
+
+        egui::Window::new("Bookmarks")
+            .id(egui::Id::new("bookmark-panel"))
+            .open(&mut open)
+            .default_size(egui::vec2(240.0, 300.0))
+            .resizable(true)
+            .collapsible(false)
+            .show(ctx, |ui| {
+                if panel.entries.is_empty() {
+                    ui.label("No bookmarks yet — click Bookmark on any page to add one.");
+                    return;
+                }
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (title, page) in &panel.entries {
+                        if ui.selectable_label(false, format!("{title}   —   p.{}", page + 1)).clicked()
+                        {
+                            go_to_page = Some(*page);
+                        }
+                    }
+                });
+            });
+
+        if let Some(page) = go_to_page {
+            self.go_to(PageTarget::Number(page + 1));
+        }
+        if !open {
+            return;
+        }
+        self.bookmark_panel = Some(panel);
+    }
+
+    /// Web Links — a text selection already made is linked at once; nothing
+    /// selected arms the tool and waits for one, the same shape
+    /// `mark_selection` uses for the highlighter and its siblings.
+    fn begin_web_link(&mut self) {
+        if self.doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        if self.text_selection.is_some() {
+            self.open_link_prompt_from_selection();
+        } else {
+            self.put_down_page_editors();
+            self.markup_armed = None;
+            self.match_properties_armed = false;
+            self.match_properties_sample = None;
+            self.link_armed = true;
+            self.say_info(
+                "web link — drag across the text to link it (typed text works too, once it \
+                 is on the page). Escape puts it down.",
+            );
+        }
+    }
+
+    /// Turn the current text selection into a pending link, waiting for the
+    /// address to send it to.
+    fn open_link_prompt_from_selection(&mut self) {
+        let Some(range) = self.text_selection.clone() else { return };
+        let page = self.selection_page;
+        let rects = self.selection_rects(page, range);
+        if rects.is_empty() {
+            self.say_error("that selection has nothing to link.");
+            return;
+        }
+        self.text_selection = None;
+        self.pending_link = Some(PendingLink { page, rects, url: String::new() });
+    }
+
+    /// A text selection's line rects, in the engine's own coordinate type —
+    /// the conversion a web link and a manual paragraph join both start
+    /// from, written once. Empty wherever the reader found nothing to box.
+    fn selection_rects(&mut self, page: usize, range: std::ops::Range<usize>) -> Vec<pdf_core::document::Rect> {
+        let Some(rects) = self.characters(page).map(|c| c.line_rects(range)) else {
+            return Vec::new();
+        };
+        // The reader's rect and the engine's are the same numbers in the
+        // same space, and two distinct types — see `mark_selection`'s own
+        // identical conversion.
+        rects
+            .into_iter()
+            .map(|r| pdf_core::document::Rect {
+                left: r.left,
+                top: r.top,
+                right: r.right,
+                bottom: r.bottom,
+            })
+            .collect()
+    }
+
+    /// A run's own embedded font, registered under its `/BaseFont` name and
+    /// ready to hand to `TextStyle::face` — the same registration
+    /// `writing_faces` does for a font read from a file, sourced from a
+    /// font already living in the page instead.
+    ///
+    /// **Registered in both of the app's two separate font pools, not
+    /// just one.** `pdf_core::text::register` is what `write_styled_line_at`
+    /// reads for laying new text out on screen; `add_typing_font` is the
+    /// entirely separate list `SetTextRun`'s own `embed_typing_font` checks
+    /// when a *requested* face is asked to redraw an existing run — the
+    /// exact path `match_font_to_first_selected` sends every style change
+    /// through. Registering only the first left every requested face
+    /// refused with "is not one of the fonts available to write with",
+    /// regardless of whether the font could actually spell the words —
+    /// the font was simply never in the one list this call path checks.
+    /// See the upload-a-font-file call site (search `add_typing_font`) for
+    /// the same two-registrations shape done for a font read from disk.
+    ///
+    /// `None` covers three different reasons a caller cannot tell apart
+    /// and does not need to: no embedded program to copy (a bare reference
+    /// to one of the standard fourteen), a program `embed::face_name`
+    /// cannot name, or no document to register it against. Either way
+    /// there is nothing to give another run.
+    fn registered_face_for_run(&self, page: usize, object: usize) -> Option<String> {
+        let bytes = self.doc.as_ref()?.session.run_font_data(page, object).ok().flatten()?;
+        let name = pdf_core::pdf::embed::face_name(&bytes)?;
+        if !pdf_core::text::is_registered(&name) {
+            pdf_core::text::register(&name, bytes.clone()).ok()?;
+        }
+        self.doc.as_ref()?.session.add_typing_font(bytes).ok()?;
+        Some(name)
+    }
+
+    /// The run currently sitting at a baseline origin, addressed by
+    /// geometry rather than by a remembered object number.
+    ///
+    /// **Object numbers are not stable across an edit that adds a page
+    /// object.** `TextRun::object` says so directly — "stable until objects
+    /// are added or removed" — and embedding a font to satisfy a requested
+    /// face (`embed_typing_font`, `set_run_in_stream`'s own last resort)
+    /// does exactly that. See `match_font_to_first_selected`'s own doc for
+    /// the real corruption this fixed.
+    ///
+    /// **The baseline origin, not the full rect.** A run's rect grows or
+    /// shrinks with its own size or with a font of different glyph widths —
+    /// changing either is exactly what this exists to do — so matching on
+    /// the *whole box* against a value read before such a change missed the
+    /// very run it was looking for and silently skipped it. Where the text
+    /// actually *starts* does not move for either reason, only for a move
+    /// nothing here ever makes. A small tolerance, not exact equality: this
+    /// is comparing PDFium's own re-measurement of the same glyphs against
+    /// a value read a moment earlier, not the same float surviving
+    /// untouched.
+    fn run_at_origin(&self, page: usize, origin: pdf_core::document::Point) -> Option<pdf_core::document::TextRun> {
+        const TOLERANCE: f32 = 1.0;
+        let runs = self.doc.as_ref()?.session.text_runs(page).ok()?;
+        runs.into_iter().find(|r| {
+            (r.origin.x - origin.x).abs() < TOLERANCE && (r.origin.y - origin.y).abs() < TOLERANCE
+        })
+    }
+
+    /// The run standing under one character of a selection — used to find
+    /// "the run the selection *starts* in", by its first character.
+    ///
+    /// **Not `runs_covered_by`.** That answers "which runs does this broad
+    /// area touch" by checking whether a run's own *centre* falls inside
+    /// the given rects — right for a selection spanning several lines,
+    /// wrong here: one character's own tiny box essentially never contains
+    /// the centre of the whole run it belongs to. This asks the opposite
+    /// question, the same way `text_run_object_at` already does for a
+    /// right-click: does *this point* fall inside a run's own rect.
+    fn run_at_selection_start(
+        &mut self,
+        page: usize,
+        start: usize,
+    ) -> Option<pdf_core::document::TextRun> {
+        let rects = self.selection_rects(page, start..start + 1);
+        let r = rects.first()?;
+        let centre = ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        let object = self.text_run_object_at(page, AppPoint { x: centre.0 as f64, y: centre.1 as f64 })?;
+        self.doc.as_ref()?.session.text_runs(page).ok()?.into_iter().find(|r| r.object == object)
+    }
+
+    /// Everything the right-click menu's Join/Split actions need to know,
+    /// computed with exactly one `text_runs` read for the whole selection —
+    /// not one per question. See [`Self::right_click_text_actions`]'s own
+    /// doc for why this is called once, at the click, rather than by the
+    /// menu itself: egui redraws an open popup's contents every frame, so a
+    /// real few-hundred-run document paid the cost of recomputing this
+    /// inline dozens of times a second for as long as the menu stayed open.
+    fn compute_right_click_text_actions(&mut self, page: usize, at: AppPoint) -> RightClickTextActions {
+        let split_object = self
+            .text_run_object_at(page, at)
+            .filter(|object| self.group_containing(page, *object).is_some());
+
+        let selection = (page == self.selection_page)
+            .then(|| self.text_selection.clone())
+            .flatten()
+            .filter(|range| !range.is_empty());
+        let Some(range) = selection else {
+            return RightClickTextActions { joinable: false, split_object };
+        };
+
+        let rects = self.selection_rects(page, range.clone());
+        let covered = self.runs_touched_by(page, &rects);
+        let joinable = covered.len() >= 2;
+
+        RightClickTextActions { joinable, split_object }
+    }
+
+    /// Write every rect of a pending link as its own `/Link` annotation, all
+    /// carrying the same address — see `Annotation::Link`'s own doc for why
+    /// one per line rather than one annotation for the whole selection.
+    fn apply_web_link(&mut self, pending: &PendingLink) -> Result<String, String> {
+        let typed = pending.url.trim();
+        if typed.is_empty() {
+            return Err("nothing to link to.".into());
+        }
+        // A bare "example.com" needs a scheme, or the address opens nowhere
+        // in most readers.
+        let url = if typed.contains("://") { typed.to_string() } else { format!("https://{typed}") };
+
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        let mut made = 0usize;
+        for rect in &pending.rects {
+            doc.session
+                .add_link(pending.page, *rect, url.clone())
+                .map_err(|e| e.to_string())?;
+            made += 1;
+        }
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        // **"there is no indication of it... show it in blue font color but
+        // dont change the font style."** An invisible, borderless `/Link`
+        // (see that variant's own doc) gives a reader nothing to see short
+        // of hovering or clicking — the colour is what a link normally
+        // says so with.
+        self.colour_linked_text(pending.page, &pending.rects);
+        Ok(format!("linked {made} line{} to {url}.", if made == 1 { "" } else { "s" }))
+    }
+
+    /// Recolour every run a link's own rects cover to a standard hyperlink
+    /// blue — colour only, never the face or size, by sending the run's own
+    /// unchanged text back through `SetTextRun` with nothing else in the
+    /// style asked for (see `apply_edited_run`'s own doc for why an empty
+    /// style is what keeps a change on the byte-safe path that touches
+    /// nothing but what was asked for).
+    ///
+    /// **A run counts as covered by its own centre point**, not by any
+    /// partial overlap — the same rule a click already uses to find "the
+    /// run at a point" elsewhere in this file. A selection that happened to
+    /// start or end mid-run leaves that one run in its original colour
+    /// rather than risk colouring text past the actual link.
+    /// Every text run on a page whose centre falls inside one of these
+    /// rects — the same "is this run part of the selection" test a link's
+    /// own recolouring and a manual paragraph join both need, written once.
+    fn runs_covered_by(
+        &self,
+        page: usize,
+        rects: &[pdf_core::document::Rect],
+    ) -> Vec<pdf_core::document::TextRun> {
+        let Some(doc) = &self.doc else { return Vec::new() };
+        let Ok(runs) = doc.session.text_runs(page) else { return Vec::new() };
+        runs.into_iter()
+            .filter(|run| {
+                let centre =
+                    ((run.rect.left + run.rect.right) / 2.0, (run.rect.top + run.rect.bottom) / 2.0);
+                rects.iter().any(|r| {
+                    let (left, right) = (r.left.min(r.right), r.left.max(r.right));
+                    let (top, bottom) = (r.top.min(r.bottom), r.top.max(r.bottom));
+                    centre.0 >= left && centre.0 <= right && centre.1 >= top && centre.1 <= bottom
+                })
+            })
+            .collect()
+    }
+
+    /// Every text run a selection genuinely touches — unlike
+    /// `runs_covered_by`'s own centre-point test, a run only partially
+    /// inside horizontally still counts, since a selection legitimately
+    /// starts or ends mid-run.
+    ///
+    /// **Vertical overlap is held to a much stricter bar than horizontal.**
+    /// Text lines sit close enough that two consecutive lines' own boxes
+    /// can overlap by a fraction of a point — an ascender or a generous
+    /// `line_rects` bound, not a real second line being selected — so a
+    /// bare "any overlap at all" test pulled in the line *above* a real
+    /// selection on a real page (`"Light output ratio 85%"`, a hair's
+    /// breadth above `"...Efficacy 11"`). Requiring most of a run's own
+    /// height to fall inside the rect keeps that line out while still
+    /// admitting a run only slightly overlapping *sideways* — which is
+    /// exactly the shape a mid-run selection has, wide and shallow rather
+    /// than narrow and deep.
+    ///
+    /// Reported from use: a selection spanning "...Efficacy 11" and
+    /// "0 lm/w" (the "0" in a visibly different font) never offered "Match
+    /// the font" — the first run's own centre sits under "Luminaire
+    /// Efficacy", far outside the narrow selection box the drag actually
+    /// made, so `runs_covered_by` dropped it and left nothing on that side
+    /// of the mismatch to compare against.
+    ///
+    /// **Wrong for `colour_linked_text`'s own use**, which keeps the
+    /// stricter centre rule on purpose — see its own doc for why recolouring
+    /// needs the opposite bias.
+    fn runs_touched_by(
+        &self,
+        page: usize,
+        rects: &[pdf_core::document::Rect],
+    ) -> Vec<pdf_core::document::TextRun> {
+        let Some(doc) = &self.doc else { return Vec::new() };
+        let Ok(runs) = doc.session.text_runs(page) else { return Vec::new() };
+        let touches = |run: &pdf_core::document::Rect, r: &pdf_core::document::Rect| {
+            let (a_left, a_right) = (run.left.min(run.right), run.left.max(run.right));
+            let (a_top, a_bottom) = (run.top.min(run.bottom), run.top.max(run.bottom));
+            let (b_left, b_right) = (r.left.min(r.right), r.left.max(r.right));
+            let (b_top, b_bottom) = (r.top.min(r.bottom), r.top.max(r.bottom));
+            let h_overlap = a_right.min(b_right) - a_left.max(b_left);
+            let v_overlap = a_bottom.min(b_bottom) - a_top.max(b_top);
+            let run_height = (a_bottom - a_top).max(1.0);
+            h_overlap > 0.0 && v_overlap >= run_height * 0.5
+        };
+        runs.into_iter().filter(|run| rects.iter().any(|r| touches(&run.rect, r))).collect()
+    }
+
+    fn colour_linked_text(&mut self, page: usize, rects: &[pdf_core::document::Rect]) -> usize {
+        const LINK_BLUE: pdf_core::document::Color =
+            pdf_core::document::Color { r: 5, g: 99, b: 193, a: 255 };
+        let runs = self.runs_covered_by(page, rects);
+        let Some(doc) = &self.doc else { return 0 };
+
+        let mut coloured = 0usize;
+        for run in &runs {
+            let recoloured = doc.session.execute(pdf_core::command::Command::SetTextRun {
+                page_index: page,
+                object: run.object,
+                text: run.text.clone(),
+                style: pdf_core::document::TextStyle { color: Some(LINK_BLUE), ..Default::default() },
+            });
+            match recoloured {
+                Ok(_) => coloured += 1,
+                // **A colour-only change now has its own byte-safe path**
+                // (see `set_run_color_in_stream`), which handles almost
+                // every run — but that path still has to *find* the run's
+                // own text-showing operator by walking the content stream,
+                // and a small minority of runs are drawn in a way that walk
+                // cannot map back precisely (the same limitation
+                // `set_run_in_stream` already has for retyping). Reported
+                // from use, on a real document, before the byte-safe path
+                // existed: every attempt was refused this way, so the link
+                // itself was always there but with no visible way to tell.
+                // An underline is the fallback that still says "this is a
+                // link" without touching a single byte of the page's own
+                // text.
+                Err(_) => {
+                    let _ = doc.session.execute(pdf_core::command::Command::AddAnnotation {
+                        page_index: page,
+                        annotation: pdf_core::document::Annotation::Underline {
+                            rects: vec![run.rect],
+                            color: LINK_BLUE,
+                        },
+                    });
+                }
+            }
+        }
+        // Unconditional: a run that could not be recoloured may still have
+        // gained an underline, which needs the same re-render the colour
+        // change would have.
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        coloured
+    }
+
+    fn draw_link_prompt(&mut self, ctx: &egui::Context) {
+        let Some(mut pending) = self.pending_link.take() else { return };
+
+        let mut open = true;
+        let mut done = false;
+        let mut add = false;
+
+        egui::Window::new("Add Web Link")
+            .id(egui::Id::new("web-link-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(80.0, 80.0))
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.label(format!(
+                    "{} line{} selected.",
+                    pending.rects.len(),
+                    if pending.rects.len() == 1 { "" } else { "s" }
+                ));
+                ui.add_space(6.0);
+                ui.label("Link to:");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut pending.url)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("https://…"),
+                );
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                ui.add_space(10.0);
+                let something = !pending.url.trim().is_empty();
+                ui.horizontal(|ui| {
+                    if ui.add_enabled(something, egui::Button::new("Add Link")).clicked()
+                        || (entered && something)
+                    {
+                        add = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        done = true;
+                    }
+                });
+            });
+
+        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            done = true;
+        }
+        if add {
+            match self.apply_web_link(&pending) {
+                Ok(said) => self.say_info(said),
+                Err(e) => self.say_error(e),
+            }
+            done = true;
+        }
+        if done {
+            return;
+        }
+        self.pending_link = Some(pending);
+    }
+
+    /// Write an Article Box as a visible bordered region, with its title
+    /// anchored at the top-left corner as an ordinary note (so it is
+    /// readable, and inspectable, without this app's own panel).
+    ///
+    /// **The simplest honest reading of an obscure Acrobat feature.** A real
+    /// PDF article thread (`/Articles`/`/Bead`) spans regions across
+    /// possibly many pages and is rendered by almost nothing but Acrobat
+    /// itself. A labelled region on the one page it was drawn on is what
+    /// every existing annotation type here can already carry, needs no new
+    /// engine code, and is the part of the feature actually visible to
+    /// opening the file anywhere else.
+    fn apply_article_box(&mut self, pending: &PendingArticleBox) -> Result<String, String> {
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        let r = pending.rect;
+        let border = pdf_core::document::Color { r: 94, g: 92, b: 230, a: 255 };
+        let outline = vec![
+            pdf_core::document::Point { x: r.left, y: r.top },
+            pdf_core::document::Point { x: r.right, y: r.top },
+            pdf_core::document::Point { x: r.right, y: r.bottom },
+            pdf_core::document::Point { x: r.left, y: r.bottom },
+            pdf_core::document::Point { x: r.left, y: r.top },
+        ];
+        doc.session
+            .execute(pdf_core::command::Command::AddAnnotation {
+                page_index: pending.page,
+                annotation: pdf_core::document::Annotation::Ink {
+                    strokes: vec![outline],
+                    color: border,
+                    width: 1.5,
+                },
+            })
+            .map_err(|e| e.to_string())?;
+
+        let title = pending.title.trim();
+        if !title.is_empty() {
+            let tag = pdf_core::document::Rect {
+                left: r.left,
+                top: r.top,
+                right: r.left + 20.0,
+                bottom: r.top + 20.0,
+            };
+            doc.session
+                .note(pending.page, tag, title.to_string(), border)
+                .map_err(|e| e.to_string())?;
+        }
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        Ok(if title.is_empty() {
+            "article box added.".to_string()
+        } else {
+            format!("article box added — \"{title}\".")
+        })
+    }
+
+    fn draw_article_box_prompt(&mut self, ctx: &egui::Context) {
+        let Some(mut pending) = self.pending_article_box.take() else { return };
+
+        let mut open = true;
+        let mut done = false;
+        let mut add = false;
+
+        egui::Window::new("Add Article Box")
+            .id(egui::Id::new("article-box-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(80.0, 80.0))
+            .show(ctx, |ui| {
+                ui.set_width(300.0);
+                ui.label("Title (optional):");
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut pending.title)
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Article"),
+                );
+                let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Add").clicked() || entered {
+                        add = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        done = true;
+                    }
+                });
+            });
+
+        if !open || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            done = true;
+        }
+        if add {
+            match self.apply_article_box(&pending) {
+                Ok(said) => self.say_info(said),
+                Err(e) => self.say_error(e),
+            }
+            done = true;
+        }
+        if done {
+            return;
+        }
+        self.pending_article_box = Some(pending);
+    }
+
     fn copy_selection(&mut self, ctx: &egui::Context) {
         // The page the selection was made on, not whichever one happens to be
         // in view now.
@@ -4107,6 +7002,139 @@ impl PagifyApp {
         let length = text.chars().count();
         ctx.copy_text(text);
         self.say_info(format!("{length} characters copied."));
+    }
+
+    /// ⌘C for a drawn shape or a placed picture — see [`ObjectClipboard`].
+    ///
+    /// Tried before [`Self::copy_selection`]'s text path, and only when
+    /// [`Focus::allows_document_keys`] says nothing has focus: the two kinds
+    /// of selection this app has (a text drag, or a shape/picture picked
+    /// with no tool armed) are never live at once, so whichever one is
+    /// active is the one ⌘C means. Returns whether it found something to
+    /// take, so the caller knows whether to fall back to the text path.
+    fn copy_object_selection(&mut self) -> bool {
+        let page = self.page;
+        if let Some(sel) = self.placed_image_selected.clone().filter(|s| s.page == page) {
+            let mark = self
+                .doc
+                .as_ref()
+                .and_then(|d| d.session.placed_image_marks(page).ok())
+                .and_then(|marks| marks.into_iter().find(|m| m.index == sel.index));
+            let Some(mark) = mark else { return false };
+            self.object_clipboard = Some(ObjectClipboard::Image {
+                rgba: mark.rgba,
+                width: mark.width,
+                height: mark.height,
+                rect: mark.rect,
+            });
+            self.paste_count = 0;
+            self.say_info("picture copied — `paste` puts a copy down.");
+            return true;
+        }
+        if let Some(layer) = self.markup.existing(page) {
+            if !layer.selection().is_empty() {
+                // A Hatch is never a shape someone meant to copy on its own —
+                // it is the fill's own bookkeeping, carried instead through
+                // `is_filled` below. Left in, a `select all` sweep (which,
+                // unlike a click or a box, does not filter to what is
+                // independently selectable) would copy it as if it were a
+                // shape and leave the paste pointing at the original's
+                // handle instead of its own.
+                let objects: Vec<(cad_kernel::DObject, bool)> = layer
+                    .selection()
+                    .iter()
+                    .filter_map(|&i| layer.objects().get(i).map(|o| (i, o)))
+                    .filter(|(_, o)| !matches!(o.geom, cad_kernel::Geom::Hatch { .. }))
+                    .map(|(i, o)| (o.clone(), layer.is_filled(i)))
+                    .collect();
+                if !objects.is_empty() {
+                    let n = objects.len();
+                    self.object_clipboard = Some(ObjectClipboard::Shapes(objects));
+                    self.paste_count = 0;
+                    self.say_info(format!(
+                        "{n} shape{} copied — `paste` puts {} down.",
+                        if n == 1 { "" } else { "s" },
+                        if n == 1 { "a copy" } else { "copies" }
+                    ));
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// How far each successive paste is offset from where it was copied —
+    /// far enough to see there are now two, close enough that it is still
+    /// obviously the paste. Stepped by [`Self::paste_count`] rather than
+    /// fixed, so pasting twice does not stack the second exactly on the
+    /// first and look like nothing happened.
+    const PASTE_STEP: f64 = 18.0;
+
+    /// ⌘V for whatever `copy` last took — see [`Self::copy_object_selection`].
+    fn paste_object_selection(&mut self) {
+        let Some(clip) = self.object_clipboard.clone() else {
+            self.say_info("nothing to paste — `copy` a shape or picture first.");
+            return;
+        };
+        self.paste_count += 1;
+        let step = Self::PASTE_STEP * self.paste_count as f64;
+        let page = self.page;
+
+        match clip {
+            ObjectClipboard::Shapes(objects) => {
+                let height = view_height(self, page);
+                let layer = self.markup.page(page, height);
+                layer.begin("paste");
+                layer.clear_selection();
+                // Kernel space counts upwards — see `finish_markup_grab` —
+                // so "down and to the right" on the page is `(+, -)` here.
+                let by = cad_kernel::Vec2::new(step, -step);
+                let mut made = Vec::new();
+                for (object, was_filled) in &objects {
+                    let copy = cad_kernel::DObject {
+                        handle: cad_kernel::next_handle(),
+                        ..object.translated(by)
+                    };
+                    made.push((layer.add_object(copy), *was_filled));
+                }
+                let n = made.len();
+                for (index, was_filled) in made {
+                    layer.select_box_index(index);
+                    if was_filled {
+                        layer.set_filled(index, true);
+                    }
+                }
+                layer.end();
+                self.say_info(format!("{n} shape{} pasted.", if n == 1 { "" } else { "s" }));
+            }
+            ObjectClipboard::Image { rgba, width, height, rect } => {
+                let Some(doc) = &self.doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                let offset = step as f32;
+                let rect = pdf_core::document::Rect {
+                    left: rect.left + offset,
+                    right: rect.right + offset,
+                    top: rect.top + offset,
+                    bottom: rect.bottom + offset,
+                };
+                let outcome = doc.session.execute(pdf_core::command::Command::AddAnnotation {
+                    page_index: page,
+                    annotation: pdf_core::document::Annotation::Image { rect, rgba, width, height },
+                });
+                match outcome {
+                    Ok(_) => {
+                        if let Some(doc) = &mut self.doc {
+                            doc.rendered_is_stale();
+                        }
+                        self.foreign = None;
+                        self.say_info("picture pasted.");
+                    }
+                    Err(e) => self.say_error(format!("{e}")),
+                }
+            }
+        }
     }
 
     fn open_dialog(&mut self) {
@@ -4126,6 +7154,36 @@ impl PagifyApp {
 
         match dialog.pick_file() {
             Some(path) => self.open(&path.to_string_lossy()),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// **Reported from use: there is no Save As button.** `saveas` already
+    /// existed as a typed command, but only with a path spelt out by hand —
+    /// nothing offered the native file picker `open`'s own ribbon button
+    /// gets, and bare `saveas` used to just refuse ("usage: saveas
+    /// <path.pdf>") rather than opening one. Mirrors `open_dialog` exactly,
+    /// suggesting the current document's own name and folder as a starting
+    /// point rather than an empty one.
+    fn save_as_dialog(&mut self) {
+        let Some(doc) = &self.doc else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let current = doc.session.path().to_path_buf();
+
+        let mut dialog = rfd::FileDialog::new().set_title("Save As").add_filter("PDF", &["pdf"]);
+        if let Some(dir) = current.parent() {
+            dialog = dialog.set_directory(dir);
+        }
+        if let Some(name) = current.file_name() {
+            dialog = dialog.set_file_name(name.to_string_lossy());
+        }
+
+        match dialog.save_file() {
+            Some(path) => {
+                self.save(Some(path));
+            }
             None => self.say_info("nothing chosen."),
         }
     }
@@ -4614,6 +7672,11 @@ impl PagifyApp {
                 // sits at that index.
                 self.signature_selected = None;
                 self.signature_grab = None;
+                // Any other annotation on the page — including a selected
+                // placed picture — just had its own index shift under it,
+                // for the same reason.
+                self.placed_image_selected = None;
+                self.placed_image_grab = None;
                 // **Says the two things that matter and are not obvious**: that
                 // they can no longer be picked up, and that the way back is to
                 // close without saving rather than to press undo.
@@ -4809,6 +7872,22 @@ impl PagifyApp {
                     let page = self.page;
                     self.arm(PendingKind::Whiteout, page);
                 }
+            }
+            Verb::DrawArrow => {
+                if self.doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.page;
+                    self.arm(PendingKind::Draw(DrawKind::Arrow), page);
+                }
+            }
+            Verb::ToggleFill => {
+                self.draw_fill = !self.draw_fill;
+                self.say_info(if self.draw_fill {
+                    "fill: on — the next rectangle or circle is drawn filled."
+                } else {
+                    "fill: off — the next rectangle or circle is drawn hollow."
+                });
             }
             Verb::Redact => {
                 if self.doc.is_none() {
@@ -5116,6 +8195,8 @@ impl PagifyApp {
                 } else if self.doc.as_ref().is_some_and(|d| d.session.locked_pages().is_empty()) {
                     self.say_error("nothing in this document is locked.");
                 } else {
+                    // Unlike locking, this always asks even when a passcode is
+                    // held — see `a_held_passcode_does_not_unlock_anything`.
                     self.awaiting_password = Some(Awaiting::Unlock);
                     self.say_info("type the passcode this was locked with, or Escape to give up.");
                 }
@@ -5142,6 +8223,10 @@ impl PagifyApp {
             Verb::CopyText => self.copy_wanted = true,
             Verb::EditText => self.edit_text(),
             Verb::AddText(text) => self.add_text(text),
+            Verb::AddImage(path) => match path {
+                Some(path) => self.add_image(&path),
+                None => self.add_image_dialog(),
+            },
             Verb::SetLayout(layout) => self.set_layout(layout),
             Verb::ReversePages => self.reverse_pages(),
             Verb::DuplicatePages(spec) => self.duplicate_pages(&spec),
@@ -5164,7 +8249,8 @@ impl PagifyApp {
                     Ok(()) => self.say_info(format!(
                         "the recent-documents list is gone. Pagify keeps its own files in \
                          {where_kept}: predefined.json (saved texts), signatures.json (drawn \
-                         signatures), and scripts/ (recordings) — delete any of them there."
+                         signatures), outlined_fonts.json (glyph shapes learned from documents), \
+                         and scripts/ (recordings) — delete any of them there."
                     )),
                     Err(e) => self.say_error(format!("could not remove the list: {e}")),
                 }
@@ -5190,6 +8276,7 @@ impl PagifyApp {
             Verb::SaveAs(path) => {
                 self.save(Some(path));
             }
+            Verb::SaveAsDialog => self.save_as_dialog(),
 
             Verb::Extract { pages, dest } => self.extract(&pages, &dest),
             Verb::Import { source, pages } => self.import(&source, &pages),
@@ -5200,6 +8287,20 @@ impl PagifyApp {
             Verb::Reflow => self.reflow(),
             Verb::Find(needle) => self.find(&needle),
             Verb::FindStep { forward } => self.find_step(forward),
+            Verb::Replace => self.find_replace = Some(FindReplace::default()),
+            Verb::Spelling => self.open_spell_check(),
+            Verb::Bookmark => self.add_bookmark_here(),
+            Verb::ArticleBox => {
+                if self.doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.page;
+                    self.arm(PendingKind::ArticleBox, page);
+                }
+            }
+            Verb::Weblinks => self.begin_web_link(),
+            Verb::JoinText => self.begin_join_text(),
+            Verb::MatchProperties => self.begin_match_properties(),
             Verb::Copy => {}
             Verb::MarkText(kind) => self.mark_selection(kind),
             Verb::ListMarks => self.list_marks(),
@@ -5284,6 +8385,7 @@ impl PagifyApp {
                     ToolKind::Circle => Some(DrawKind::Circle),
                     ToolKind::Rectangle => Some(DrawKind::Rectangle),
                     ToolKind::Polyline => Some(DrawKind::Polyline),
+                    ToolKind::Spline => Some(DrawKind::Spline),
                     _ => None,
                 };
                 match draw {
@@ -5343,16 +8445,35 @@ impl PagifyApp {
         if self.editing_run.take().is_some() {
             self.say_info("left as it was.");
         }
+        if self.new_text_box.take().is_some() {
+            self.say_info("nothing was added.");
+        }
         if self.object_tool.take().is_some() {
             self.selected = None;
             self.grab = None;
+            self.group = Vec::new();
+            self.marquee = None;
+            self.group_grab = None;
             self.say_info("object tool put down.");
         }
         if self.signature_selected.take().is_some() {
             self.signature_grab = None;
             self.say_info("signature deselected.");
         }
+        if self.placed_image_selected.take().is_some() {
+            self.placed_image_grab = None;
+            self.say_info("picture deselected.");
+        }
         if self.markup_armed.take().is_some() {
+            self.say_info("tool put down.");
+        }
+        if std::mem::take(&mut self.link_armed) {
+            self.say_info("tool put down.");
+        }
+        if std::mem::take(&mut self.match_properties_armed) {
+            self.say_info("tool put down.");
+        }
+        if self.match_properties_sample.take().is_some() {
             self.say_info("tool put down.");
         }
         if let Some(reading) = &self.reading {
@@ -6049,7 +9170,54 @@ impl PagifyApp {
         }
     }
 
+    /// Put down whatever the page itself was mid-way through — an open run
+    /// editor, or a text box being composed — the same way Escape already
+    /// does. Every place a *different* tool gets taken up calls this first.
+    ///
+    /// **Reported from use: text picked with Edit Text, still open, got its
+    /// run split into individual characters the moment Edit Object was
+    /// clicked without an Escape first.** Edit Object's own click-to-select
+    /// does that split deliberately — see `split_if_whole_run` — but nothing
+    /// had told it a different tool was already holding that exact run
+    /// open, so the very next click, meant for Edit Object, silently
+    /// fragmented the run Edit Text still thought it was editing. Once
+    /// split, Edit Text can never tell that piece apart from any other tiny
+    /// run again — every future click on it lands on a single character.
+    fn put_down_page_editors(&mut self) {
+        if self.editing_run.take().is_some() {
+            self.say_info("left as it was.");
+        }
+        if self.new_text_box.take().is_some() {
+            self.say_info("nothing was added.");
+        }
+        if self.pending_link.take().is_some() {
+            self.say_info("nothing was linked.");
+        }
+        if self.pending_article_box.take().is_some() {
+            self.say_info("nothing was added.");
+        }
+    }
+
     fn arm(&mut self, kind: PendingKind, page: usize) {
+        // The object tool and an armed pick are mutually exclusive — see
+        // `take_up_object_tool`'s own clearing of `self.pending` for the
+        // other direction. **Reported from use, with a screenshot: after
+        // using Edit Object, arming Edit Text left both ribbon buttons lit
+        // at once.** Worse than the cosmetic double-highlight: every click
+        // kept reaching the object tool's own click-to-select instead of
+        // resolving the pick this was arming, because `interact_page`
+        // checks `self.object_tool.is_some()` first and takes the pointer
+        // outright when it is — so Edit Text, or any other tool armed
+        // through here, went silently inert the moment Edit Object had
+        // ever been picked up and not explicitly put down.
+        if self.object_tool.take().is_some() {
+            self.selected = None;
+            self.grab = None;
+            self.group = Vec::new();
+            self.marquee = None;
+            self.group_grab = None;
+        }
+        self.put_down_page_editors();
         let pending = Pending { kind, page, objects: Vec::new(), points: Vec::new() };
         self.say_info(pending.prompt());
         self.pending = Some(pending);
@@ -6109,27 +9277,73 @@ impl PagifyApp {
         }
     }
 
-    fn undo_redo(&mut self, undo: bool) {
-        // The markup layer first. It is where almost every edit happens, and
-        // answering "nothing to undo" while three freshly drawn lines sit on
-        // the page is worse than not offering undo at all — it is an app
-        // telling the user something they can see is untrue.
-        let page = self.page;
-        if let Some(layer) = self.markup.existing_mut(page) {
-            let stepped = if undo { layer.undo() } else { layer.redo() };
-            if let Some(what) = stepped {
-                self.say_info(format!(
-                    "{} {what}.",
-                    if undo { "undid" } else { "redid" }
-                ));
-                return;
-            }
+    /// Poll both of the two separate undo stacks' own monotonic edit
+    /// counters and note which one has moved since the last time this ran —
+    /// called once a frame, well before anyone can press `undo`.
+    ///
+    /// **Reported from use: a shape drawn earlier got undone instead of a
+    /// text box just added a moment ago.** `undo_redo` always tried the
+    /// current page's markup layer first, regardless of which of it and the
+    /// document's own command history had actually changed more recently —
+    /// harmless on a page whose layer was never touched, wrong the moment a
+    /// page carried both a drawn shape and an edited or newly written piece
+    /// of text, since the layer would win every time whether or not it was
+    /// the more recent of the two.
+    fn track_undo_recency(&mut self) {
+        let layer_edits = self.markup.existing(self.page).map(|l| l.edits()).unwrap_or(0);
+        if layer_edits != self.last_layer_edits {
+            self.last_layer_edits = layer_edits;
+            self.prefer_layer_undo = true;
         }
+        let doc_generation = self.doc.as_ref().map(|d| d.session.undo_generation()).unwrap_or(0);
+        if doc_generation != self.last_doc_generation {
+            self.last_doc_generation = doc_generation;
+            self.prefer_layer_undo = false;
+        }
+    }
 
-        let Some(doc) = &self.doc else {
+    fn undo_redo(&mut self, undo: bool) {
+        self.track_undo_recency();
+        if self.doc.is_none() {
             self.say_error("nothing open.");
             return;
+        }
+        let tried = if self.prefer_layer_undo {
+            self.try_layer_undo_redo(undo) || self.try_doc_undo_redo(undo)
+        } else {
+            self.try_doc_undo_redo(undo) || self.try_layer_undo_redo(undo)
         };
+        if !tried {
+            self.say_info(if undo {
+                "nothing to undo — neither the marks on this page nor the document."
+            } else {
+                "nothing to redo."
+            });
+        }
+    }
+
+    /// Step the current page's markup layer back or forward one checkpoint.
+    /// `false` means there was nothing there to step — not an error, just
+    /// this stack's turn to defer to [`Self::try_doc_undo_redo`].
+    fn try_layer_undo_redo(&mut self, undo: bool) -> bool {
+        let page = self.page;
+        let Some(layer) = self.markup.existing_mut(page) else { return false };
+        let stepped = if undo { layer.undo() } else { layer.redo() };
+        match stepped {
+            Some(what) => {
+                self.say_info(format!("{} {what}.", if undo { "undid" } else { "redid" }));
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The document's own command history — the other of the two stacks
+    /// [`Self::undo_redo`] juggles. An outright failure is reported and
+    /// still counts as handled: falling through to the layer after an error
+    /// would make one press of undo report two different things.
+    fn try_doc_undo_redo(&mut self, undo: bool) -> bool {
+        let Some(doc) = &self.doc else { return false };
         let outcome = if undo { doc.session.undo() } else { doc.session.redo() };
         match outcome {
             Ok((true, state)) => {
@@ -6138,13 +9352,25 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.doc {
                     doc.rendered_is_stale();
                 }
+                // What a page draws can have changed shape entirely — an
+                // object put back, one taken away again, a run re-merged
+                // from its split characters — so the cached list this feeds
+                // the layers rail and every hit-test from is exactly as
+                // stale as the raster this already knew to drop.
+                self.layers = None;
+                // Undoing or redoing an `AddBookmark` is the one document
+                // change with nothing else here to notice it by — no page
+                // raster changes, no object list to compare — so the
+                // corner icon's own cache is refreshed unconditionally
+                // rather than only when something else already knew to.
+                self.sync_bookmarks();
+                true
             }
-            Ok((false, _)) => self.say_info(if undo {
-                "nothing to undo — neither the marks on this page nor the document."
-            } else {
-                "nothing to redo."
-            }),
-            Err(e) => self.say_error(format!("{e}")),
+            Ok((false, _)) => false,
+            Err(e) => {
+                self.say_error(format!("{e}"));
+                true
+            }
         }
     }
 
@@ -7571,12 +10797,67 @@ impl PagifyApp {
         };
 
         let unreadable = run.text.trim().is_empty();
+
+        // **Reported from use, with a screenshot: clicking near a rotated
+        // dimension label ("54mm", turned on its side next to a technical
+        // drawing) opened an editor that made no sense — a box a few points
+        // wide claiming to hold a whole word, one letter to a line.**
+        // `pdf_core::document::TextRun` carries no rotation angle at all, so
+        // this cannot be read directly; `looks_rotated` infers it from the
+        // box's own shape instead. Refused outright rather than opened
+        // wrong: every box, wrap and font-size computation from here down
+        // assumes the text reads left to right along the rect's own width,
+        // and a run turned on its side breaks that assumption at the root,
+        // not at any one place worth patching around.
+        if looks_rotated(&run.rect, run.text.trim().chars().count()) {
+            return Err(
+                "that text is rotated on the page — editing rotated text is not \
+                 supported yet."
+                    .into(),
+            );
+        }
+
+        // **A person's own join overrides the geometry.** Checked before
+        // `paragraph_around`'s automatic heuristic so a manually joined
+        // block stays joined even where its members would never qualify on
+        // their own — a different face, a gap wider than that heuristic
+        // allows, an unrelated column of a table in between.
+        if !unreadable && run.color.a != 0 {
+            if let Some(group_index) = self.group_containing(page, run.object) {
+                let objects = self.joined_groups[group_index].1.clone();
+                match self.open_joined_editor(page, &objects) {
+                    Ok(message) => return Ok(message),
+                    // The group no longer names two real runs — a page
+                    // operation moved or removed one since it was joined.
+                    // Forgotten rather than left to fail the same way
+                    // every time: falls through to the ordinary geometry
+                    // below.
+                    Err(_) => {
+                        self.joined_groups.remove(group_index);
+                    }
+                }
+            }
+        }
+
+        // **Edit Text retypes a whole paragraph at once, not one line of
+        // it.** Readable, written (not drawn) text only — a paragraph mixing
+        // in an unreadable or outlined line would have nothing sane to join
+        // its text with.
+        if !unreadable && run.color.a != 0 {
+            let paragraph = self.paragraph_around(page, run.object, run.rect, &runs);
+            if paragraph.len() > 1 {
+                return self.pick_paragraph(page, paragraph, &runs);
+            }
+        }
+
+        let readable_text = fix_extracted_text(&run.text);
         self.editing_run = Some(EditingRun {
             page,
             object: run.object,
-            original: run.text.clone(),
+            original: readable_text.clone(),
             rect: run.rect,
-            buffer: run.text.clone(),
+            lines: vec![(vec![run.object], run.rect)],
+            buffer: readable_text,
             // Seeded from the run, so leaving the controls alone changes
             // nothing about how it looks.
             //
@@ -7596,6 +10877,11 @@ impl PagifyApp {
                 at: Some((run.origin.x, run.origin.y)),
                 face: None,
             },
+            current_face: self
+                .doc
+                .as_ref()
+                .and_then(|d| d.session.run_font_name(page, run.object).ok())
+                .flatten(),
             background: self.page_behind(page, run.rect),
             drag_by: (0.0, 0.0),
             drawn: run.color.a == 0,
@@ -7636,7 +10922,614 @@ impl PagifyApp {
                        are. Type a replacement, or Escape to leave them."
                 .into());
         }
-        Ok("edit the words on the page — Enter to keep, Escape to leave them.".into())
+        Ok("edit the words on the page — Apply to keep, Escape to leave them.".into())
+    }
+
+    /// The whole-paragraph counterpart [`Self::pick_text_run`] falls
+    /// through to when the line it found turns out to share a paragraph
+    /// with others — every line's own text joined with `\n`, top to bottom,
+    /// so retyping means retyping the paragraph rather than only the one
+    /// line that happened to be clicked. `paragraph` is
+    /// [`Self::paragraph_around`]'s own output: already sorted top to
+    /// bottom, and already known to have more than one line.
+    fn pick_paragraph(
+        &mut self,
+        page: usize,
+        paragraph: Vec<Selected>,
+        runs: &[pdf_core::document::TextRun],
+    ) -> Result<String, String> {
+        // Not a second `text_runs(page)` call — `pick_text_run` already paid
+        // for one to find the seed line, and that extraction is real work
+        // on a page of any size (see that function's own doc). Asking again
+        // here is exactly the "a second or two to open" this was reported
+        // as.
+        let text_by_object: std::collections::HashMap<usize, &pdf_core::document::TextRun> =
+            runs.iter().map(|r| (r.object, r)).collect();
+
+        let union_of = |a: pdf_core::document::Rect, b: &pdf_core::document::Rect| pdf_core::document::Rect {
+            left: a.left.min(b.left),
+            top: a.top.min(b.top),
+            right: a.right.max(b.right),
+            bottom: a.bottom.max(b.bottom),
+        };
+
+        // Group into rows: `paragraph` arrives top to bottom, and a run of
+        // consecutive selections that vertically overlap is one visual line
+        // a producer split across more than one run — see
+        // `paragraph_around`'s own doc. Sorted by x within a row, since two
+        // runs sharing a line are not guaranteed to arrive in reading
+        // order, only their vertical position is.
+        let overlaps_v = |a: &pdf_core::document::Rect, b: &pdf_core::document::Rect| {
+            a.top.min(a.bottom) < b.top.max(b.bottom) && b.top.min(b.bottom) < a.top.max(a.bottom)
+        };
+        let mut rows: Vec<Vec<Selected>> = Vec::new();
+        for sel in paragraph {
+            let joins_last = rows
+                .last()
+                .is_some_and(|row: &Vec<Selected>| row.iter().any(|s| overlaps_v(&s.rect, &sel.rect)));
+            if joins_last {
+                rows.last_mut().expect("checked").push(sel);
+            } else {
+                rows.push(vec![sel]);
+            }
+        }
+        for row in &mut rows {
+            row.sort_by(|a, b| a.rect.left.min(a.rect.right).total_cmp(&b.rect.left.min(b.rect.right)));
+        }
+
+        let lines: Vec<(Vec<usize>, pdf_core::document::Rect)> = rows
+            .iter()
+            .map(|row| {
+                let objects: Vec<usize> = row.iter().map(|s| s.object).collect();
+                let rect = row
+                    .iter()
+                    .skip(1)
+                    .fold(row[0].rect, |acc, s| union_of(acc, &s.rect));
+                (objects, rect)
+            })
+            .collect();
+        let line_count = lines.len();
+        let line_texts: Vec<String> = lines
+            .iter()
+            .map(|(objects, _)| {
+                objects
+                    .iter()
+                    .map(|o| text_by_object.get(o).map(|r| r.text.as_str()).unwrap_or(""))
+                    .collect::<String>()
+            })
+            .collect();
+        // Fixed up as one whole block, after joining — not line by line
+        // before it. A hyphen that happens to fall exactly on a line wrap
+        // (see `fix_extracted_text`'s own doc) has a letter on one side and
+        // a `\n` on the other until the lines are joined; sanitising each
+        // line in isolation would see no letter following it and drop it,
+        // exactly where a real hyphen is most likely to occur.
+        let combined = fix_extracted_text(&join_paragraph_lines(&line_texts));
+
+        let union = lines
+            .iter()
+            .skip(1)
+            .fold(lines[0].1, |acc, (_, r)| union_of(acc, r));
+
+        let seed_object = *lines[0].0.first().expect("a row is never empty");
+
+        // The *look* is taken from whichever face+size most of the
+        // paragraph's runs actually use — not always the first line, and
+        // not just one vote per line: a line that is itself more than one
+        // run (see above) casts one vote per run, the same as it would if
+        // those runs happened to fall on separate lines.
+        //
+        // **Reported from use, with a screenshot**: a paragraph whose first
+        // line was a bold "Description:" heading opened with its entire
+        // multi-line body rendered in that same bold, oversized face, even
+        // though every line beneath it was ordinary body text. `TextEdit`
+        // draws in one font for the whole box, so *something* has to be
+        // outvoted — and the line that started the paragraph is not
+        // entitled to override the five lines under it just by coming
+        // first.
+        let lines_by_look: Vec<(usize, Option<String>, u32)> = lines
+            .iter()
+            .flat_map(|(objects, _)| objects.iter())
+            .map(|object| {
+                let face = self
+                    .doc
+                    .as_ref()
+                    .and_then(|d| d.session.run_font_name(page, *object).ok())
+                    .flatten();
+                let size_bits = text_by_object.get(object).map(|r| r.size.to_bits()).unwrap_or(0);
+                (*object, face, size_bits)
+            })
+            .collect();
+        let look_object = majority_look(&lines_by_look).unwrap_or(seed_object);
+
+        // Position stays anchored to the first line — where the paragraph
+        // starts, not what it mostly looks like.
+        let at = match text_by_object.get(&seed_object) {
+            Some(r) => (r.origin.x, r.origin.y),
+            None => (union.left, union.bottom),
+        };
+        let (size, color) = match text_by_object.get(&look_object) {
+            Some(r) => (r.size, r.color),
+            None => (12.0, pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 }),
+        };
+        let style = pdf_core::document::TextStyle {
+            size: Some(size),
+            color: Some(color),
+            at: Some(at),
+            face: None,
+        };
+
+        self.editing_run = Some(EditingRun {
+            page,
+            object: seed_object,
+            original: combined.clone(),
+            rect: union,
+            lines,
+            buffer: combined,
+            style: style.clone(),
+            was: style,
+            current_face: self
+                .doc
+                .as_ref()
+                .and_then(|d| d.session.run_font_name(page, look_object).ok())
+                .flatten(),
+            background: self.page_behind(page, union),
+            drag_by: (0.0, 0.0),
+            drawn: false,
+            focused: false,
+        });
+        // The same face request a single run's own pick makes — see
+        // `pick_text_run`'s matching call — but from whichever line's look
+        // won the tally above, not always the first.
+        self.want_document_face(page, look_object);
+
+        Ok(format!(
+            "editing a paragraph of {line_count} lines — Apply to keep, Escape to leave it."
+        ))
+    }
+
+    /// The joined group a run belongs to, as its index into `joined_groups`.
+    fn group_containing(&self, page: usize, object: usize) -> Option<usize> {
+        self.joined_groups
+            .iter()
+            .position(|(p, members)| *p == page && members.contains(&object))
+    }
+
+    /// Undeclare whatever join a run is part of — the whole of "Split the
+    /// joined text". Nothing on the page changes: the grouping was the
+    /// only thing there was to take back. `true` if a group was actually
+    /// found and removed.
+    fn split_group(&mut self, page: usize, object: usize) -> bool {
+        match self.group_containing(page, object) {
+            Some(index) => {
+                self.joined_groups.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The text run under a point, read-only — no fallback tolerance and no
+    /// side effects, unlike `pick_text_run`. Only what the right-click menu
+    /// needs to ask "is a joined group sitting here".
+    ///
+    /// **`text_run_rects`, not `text_runs`.** The full read extracts every
+    /// run's text, size and colour — real work across a whole page — for a
+    /// question that only ever needed rectangles. Reported from use as the
+    /// app freezing on right-click: this used the full read, called fresh
+    /// on every repaint of an open popup (see `right_click_text_actions`'s
+    /// own doc for the other half of that fix).
+    fn text_run_object_at(&self, page: usize, at: AppPoint) -> Option<usize> {
+        let doc = self.doc.as_ref()?;
+        let rects = doc.session.text_run_rects(page).ok()?;
+        let (x, y) = (at.x as f32, at.y as f32);
+        let area = |r: &pdf_core::document::Rect| ((r.right - r.left) * (r.bottom - r.top)).abs();
+        rects
+            .iter()
+            .filter(|(_, r)| {
+                x >= r.left.min(r.right)
+                    && x <= r.left.max(r.right)
+                    && y >= r.top.min(r.bottom)
+                    && y <= r.top.max(r.bottom)
+            })
+            .min_by(|(_, a), (_, b)| area(a).total_cmp(&area(b)))
+            .map(|(object, _)| *object)
+    }
+
+    /// **Declare the runs a text selection covers one paragraph**,
+    /// overriding whatever [`Self::paragraph_around`]'s own geometry would
+    /// find — for blocks the automatic heuristic keeps apart on purpose (a
+    /// different face, a gap wider than it allows, an unrelated column in
+    /// between) that a person can see belong together anyway. Opens the
+    /// same paragraph editor a click already opens automatically, so
+    /// joining and then typing is one motion.
+    ///
+    /// The grouping itself is the whole edit: nothing on the page changes
+    /// until the editor this opens is actually applied, so declaring the
+    /// wrong runs joined costs nothing to reconsider — right-click one of
+    /// them and split it back apart.
+    ///
+    /// Also reachable straight from a right-click on a multi-run
+    /// selection — see the context menu's own "Join into one paragraph" —
+    /// this is the ribbon's own "Link & Join Text" button's dispatch, the
+    /// same "act at once on a selection already made, otherwise say how"
+    /// shape `begin_web_link` already uses.
+    fn begin_join_text(&mut self) {
+        if self.doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        if self.text_selection.is_some() {
+            match self.join_selected_text() {
+                Ok(message) => self.say_info(message),
+                Err(e) => self.say_error(e),
+            }
+        } else {
+            self.say_info(
+                "join text — drag across the lines or blocks to join, then press this \
+                 again (or right-click the selection and choose Join into one paragraph).",
+            );
+        }
+    }
+
+    fn join_selected_text(&mut self) -> Result<String, String> {
+        let Some(range) = self.text_selection.clone() else {
+            return Err("select text across at least two lines or blocks first.".into());
+        };
+        let page = self.selection_page;
+        let rects = self.selection_rects(page, range);
+        if rects.is_empty() {
+            return Err("that selection has nothing to join.".into());
+        }
+        let selected_objects: Vec<usize> =
+            self.runs_touched_by(page, &rects).iter().map(|r| r.object).collect();
+        if selected_objects.len() < 2 {
+            return Err("select text across at least two lines or blocks to join them.".into());
+        }
+
+        // Absorb any group already touching one of these runs, so joining a
+        // third block onto an existing pair grows one group rather than
+        // leaving two that overlap.
+        let mut objects = selected_objects.clone();
+        self.joined_groups.retain(|(p, members)| {
+            let touches = *p == page && members.iter().any(|m| selected_objects.contains(m));
+            if touches {
+                for member in members {
+                    if !objects.contains(member) {
+                        objects.push(*member);
+                    }
+                }
+            }
+            !touches
+        });
+
+        self.text_selection = None;
+        self.joined_groups.push((page, objects.clone()));
+        self.open_joined_editor(page, &objects)
+    }
+
+    /// Open the paragraph editor for a set of runs already declared joined
+    /// — `pick_text_run`'s own automatic call, minus the geometry: the
+    /// membership was decided once, at [`Self::join_selected_text`], and
+    /// every later click just re-opens it.
+    fn open_joined_editor(&mut self, page: usize, objects: &[usize]) -> Result<String, String> {
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        let runs = doc.session.text_runs(page).map_err(|e| format!("{e}"))?;
+        let mut selected: Vec<Selected> = objects
+            .iter()
+            .filter_map(|object| {
+                runs.iter()
+                    .find(|r| r.object == *object)
+                    .map(|r| Selected { page, object: *object, rect: r.rect, what: "the words" })
+            })
+            .collect();
+        if selected.len() < 2 {
+            return Err("that joined text is no longer on this page.".into());
+        }
+        selected.sort_by(|a, b| a.rect.top.min(a.rect.bottom).total_cmp(&b.rect.top.min(b.rect.bottom)));
+        self.pick_paragraph(page, selected, &runs)
+    }
+
+    /// Match Properties: a selection already made becomes the sample if
+    /// none is held yet, or is matched to the one already held — the same
+    /// "act at once on a selection already made, otherwise arm and wait"
+    /// shape `begin_web_link` uses, except the tool stays in hand afterward
+    /// so a whole page's worth of mismatched runs can be fixed one
+    /// selection after another.
+    fn begin_match_properties(&mut self) {
+        if self.doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        if self.match_properties_sample.is_some() {
+            match self.apply_match_properties_to_current_selection() {
+                Ok(message) => self.say_info(message),
+                Err(e) => self.say_error(e),
+            }
+            return;
+        }
+        if self.text_selection.is_some() {
+            match self.match_properties_sample_from_current_selection() {
+                Ok(message) => self.say_info(message),
+                Err(e) => self.say_error(e),
+            }
+        } else {
+            self.put_down_page_editors();
+            self.markup_armed = None;
+            self.link_armed = false;
+            self.match_properties_armed = true;
+            self.say_info(
+                "match properties — drag across the sample text to copy from. Escape puts \
+                 it down.",
+            );
+        }
+    }
+
+    /// Take the current selection as Match Properties' own sample, and arm
+    /// it to match every selection made from here on — see
+    /// [`Self::match_properties_sample`].
+    fn match_properties_sample_from_current_selection(&mut self) -> Result<String, String> {
+        let Some(range) = self.text_selection.clone() else {
+            return Err("select the sample text first.".into());
+        };
+        let page = self.selection_page;
+        if range.is_empty() {
+            return Err("that selection has nothing to copy from.".into());
+        }
+        let Some(first) = self.run_at_selection_start(page, range.start) else {
+            return Err("could not tell which run the selection starts in.".into());
+        };
+        self.match_properties_armed = false;
+        self.text_selection = None;
+        self.match_properties_sample = Some(self.build_match_properties_sample(page, &first));
+        Ok(
+            "match properties — sample set. Now drag across text to change; each selection \
+             is matched right away. Escape puts the tool down."
+                .into(),
+        )
+    }
+
+    /// Everything [`Self::apply_match_properties_to_current_selection`] needs
+    /// from the sample run, gathered once rather than before every target —
+    /// see [`MatchPropertiesSample`]'s own doc for why.
+    fn build_match_properties_sample(
+        &self,
+        page: usize,
+        first: &pdf_core::document::TextRun,
+    ) -> MatchPropertiesSample {
+        // **One page-wide read, not one per run.** `run_font_name` opens the
+        // page fresh to answer a single object's question; asking it once
+        // per run on a real, busy page — a few hundred of them — was itself
+        // a few hundred page-opens, reported from use as the app freezing
+        // solid the moment "Match the font" (this is ported from) was
+        // clicked. `run_font_names` answers all of them from one open.
+        let names = self.doc.as_ref().and_then(|d| d.session.run_font_names(page).ok()).unwrap_or_default();
+
+        // **Every other run already on the page sharing the sample's own
+        // font family**, ignoring the six-letter PDF subset tag on
+        // `/BaseFont` (see `strip_subset_prefix`) — tried in turn when the
+        // sample's own exact embedded copy cannot spell a target's text. A
+        // subset is routinely cut to just the glyphs its own run used; the
+        // same family embedded a *second* time elsewhere, for different
+        // text, is often the only copy of that face on the page that
+        // actually has the glyph needed. Reported from use: a heading in
+        // "Montserrat-Light" and a lone digit run in "ArialMT" right next
+        // to it — the heading's own subset had never needed a digit, but
+        // the very same family, embedded again for a chart's axis labels
+        // elsewhere on the page, had every one.
+        //
+        // One representative object per distinct on-page font *name* —
+        // `registered_face_for_run` is idempotent (it skips re-registering
+        // a name already known), but nothing is gained by asking it to
+        // prove the same embedded copy still cannot spell a word nineteen
+        // times because nineteen runs happen to share it.
+        let family = names.get(&first.object).map(|n| strip_subset_prefix(n)).map(str::to_owned);
+        let alternate_objects: Vec<usize> = match &family {
+            Some(fam) => {
+                let mut candidates: Vec<(usize, &String)> = names
+                    .iter()
+                    .filter(|(&object, name)| {
+                        object != first.object && strip_subset_prefix(name) == fam.as_str()
+                    })
+                    .map(|(&object, name)| (object, name))
+                    .collect();
+                // Sorted so a rerun against an unchanged page tries the
+                // same alternates in the same order — a `HashMap`'s own
+                // iteration order is not that.
+                candidates.sort_by_key(|(object, _)| *object);
+                let mut seen_names: Vec<&String> = Vec::new();
+                let mut objects = Vec::new();
+                for (object, name) in candidates {
+                    if seen_names.contains(&name) {
+                        continue;
+                    }
+                    seen_names.push(name);
+                    objects.push(object);
+                }
+                objects
+            }
+            None => Vec::new(),
+        };
+        let face = self.registered_face_for_run(page, first.object);
+        MatchPropertiesSample {
+            page,
+            face,
+            size: first.size,
+            color: first.color,
+            family,
+            alternate_objects,
+        }
+    }
+
+    /// **Rewrite every run the current selection touches to match the held
+    /// sample's typeface, size and colour.**
+    ///
+    /// Two separate byte-safe edits per run, not one combined one: a face
+    /// change and a colour change land on different fast paths in
+    /// `set_text_run_styled` (see `set_run_color_in_stream`'s own doc), and
+    /// asking for both in one `TextStyle` would fall through to PDFium's
+    /// slower, riskier whole-page regeneration instead of either.
+    fn apply_match_properties_to_current_selection(&mut self) -> Result<String, String> {
+        let Some(sample) = self.match_properties_sample.clone() else {
+            return Err("select the sample text first.".into());
+        };
+        let Some(range) = self.text_selection.clone() else {
+            return Err("select the text to change.".into());
+        };
+        let page = self.selection_page;
+        if page != sample.page {
+            return Err("match properties: select text on the same page as the sample.".into());
+        }
+        if range.is_empty() {
+            return Err("that selection has nothing to change.".into());
+        }
+        let rects = self.selection_rects(page, range);
+        let targets = self.runs_touched_by(page, &rects);
+        if targets.is_empty() {
+            return Err("that selection has nothing to change.".into());
+        }
+
+        // **Re-resolved by its own origin before every edit, never
+        // addressed by a remembered object number.** Confirmed against the
+        // real CAMINO file: a single face change that has to embed a font
+        // (`embed_typing_font`, the last-resort tier `set_run_in_stream`
+        // falls to once neither the run's own font nor another already on
+        // the page can spell the text) adds a new page object and shifts
+        // every object number after it — one such swap turned a 306-object
+        // page into 305. Addressing the next edit by the object number
+        // `targets`/`runs_touched_by` reported *before* that swap risks
+        // retyping whatever now happens to sit at that stale index —
+        // reported from use as the words right after a matched run going
+        // missing. And origin, not rect: a size change (the very next edit
+        // here) or a font of different glyph widths moves a run's rect by
+        // exactly the amount being asked for, so comparing it against a
+        // value read before that change missed the run outright. The
+        // origin — where the text actually *starts* — moves for neither
+        // reason.
+        // **One page-wide read, refreshed only when a face change actually
+        // renumbers the page — not one `run_font_name` per target.** Asking
+        // per target was itself the freeze this whole tool exists to fix
+        // (see `build_match_properties_sample`'s own doc): a wide selection
+        // can easily touch a few hundred runs. `names` stays valid for
+        // every target that either already matches or fails every
+        // alternate — neither renumbers anything — and is only stale for
+        // the rest, which the loop already knows about because it just
+        // asked for a fresh `current` for the same reason.
+        let mut names = self.doc.as_ref().and_then(|d| d.session.run_font_names(page).ok()).unwrap_or_default();
+
+        let mut faced = 0usize;
+        for target in &targets {
+            let Some(mut current) = self.run_at_origin(page, target.origin) else { continue };
+
+            // **Already the same family — nothing to retype.** Skipped
+            // rather than run through `embed_typing_font` anyway: that
+            // path rewrites the run's own text-showing operator from
+            // scratch, and doing that to a run that already matches is
+            // both wasted work and, confirmed against the real CAMINO
+            // file, a real risk on its own — two adjacent runs each
+            // rewritten this way in the same pass corrupted the boundary
+            // between them (a stray control character where the space
+            // used to be), even though each rewrite alone was byte-safe.
+            // A run already in the right family never needs that risk at
+            // all.
+            let current_family = names.get(&current.object).map(|n| strip_subset_prefix(n));
+            let already_matches = current_family == sample.family.as_deref();
+            if !already_matches {
+                let mut this_one_faced = false;
+                if let Some(name) = &sample.face {
+                    let Some(doc) = &self.doc else { break };
+                    let matched_face = doc.session.execute(pdf_core::command::Command::SetTextRun {
+                        page_index: page,
+                        object: current.object,
+                        text: current.text.clone(),
+                        style: pdf_core::document::TextStyle { face: Some(name.clone()), ..Default::default() },
+                    });
+                    this_one_faced = matched_face.is_ok();
+                }
+                if !this_one_faced {
+                    for alt_object in &sample.alternate_objects {
+                        let Some(alt_name) = self.registered_face_for_run(page, *alt_object) else {
+                            continue;
+                        };
+                        let Some(doc) = &self.doc else { break };
+                        let matched_face = doc.session.execute(pdf_core::command::Command::SetTextRun {
+                            page_index: page,
+                            object: current.object,
+                            text: current.text.clone(),
+                            style: pdf_core::document::TextStyle { face: Some(alt_name), ..Default::default() },
+                        });
+                        if matched_face.is_ok() {
+                            this_one_faced = true;
+                            break;
+                        }
+                    }
+                }
+                if this_one_faced {
+                    faced += 1;
+                    // The one re-resolve this loop needs: a face change
+                    // just succeeded, which may have embedded a new font
+                    // and shifted every object number after it — `names`
+                    // included, so it is re-read here too rather than left
+                    // to answer for whatever now happens to sit at its old
+                    // keys.
+                    let Some(fresh) = self.run_at_origin(page, target.origin) else { continue };
+                    current = fresh;
+                    names = self.doc.as_ref().and_then(|d| d.session.run_font_names(page).ok()).unwrap_or_default();
+                }
+            } else {
+                faced += 1;
+            }
+
+            // **Only what is not already right.** A target selection can
+            // legitimately touch the sample's own run again (an overlapping
+            // drag, or the same span used for both in a one-off fix), and
+            // rewriting a property that already holds the sample's own
+            // value is exactly the unnecessary edit the face check above
+            // exists to avoid — confirmed against the real CAMINO file: a
+            // size edit applied to a run that already had that size still
+            // rewrote its text-showing operator, and cost the space between
+            // two adjacent numbers where nothing about the size had
+            // actually changed.
+            if current.size != sample.size {
+                let Some(doc) = &self.doc else { break };
+                let _ = doc.session.execute(pdf_core::command::Command::SetTextRun {
+                    page_index: page,
+                    object: current.object,
+                    text: current.text.clone(),
+                    style: pdf_core::document::TextStyle { size: Some(sample.size), ..Default::default() },
+                });
+            }
+            if current.color != sample.color {
+                let Some(doc) = &self.doc else { break };
+                let _ = doc.session.execute(pdf_core::command::Command::SetTextRun {
+                    page_index: page,
+                    object: current.object,
+                    text: current.text.clone(),
+                    style: pdf_core::document::TextStyle { color: Some(sample.color), ..Default::default() },
+                });
+            }
+        }
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.text_selection = None;
+
+        let count = targets.len();
+        let plural = if count == 1 { "" } else { "s" };
+        Ok(if sample.face.is_some() && faced == count {
+            format!("matched the font on {count} run{plural}.")
+        } else if sample.face.is_some() {
+            format!(
+                "matched size and colour on {count} run{plural}, and the typeface on {faced} \
+                 of them — the rest use characters no embedded copy of that font on this page \
+                 has a glyph for."
+            )
+        } else {
+            format!(
+                "matched size and colour on {count} run{plural} — the sample's own typeface \
+                 has no embedded copy to give them, so only its size and colour carried over."
+            )
+        })
     }
 
     /// Ask for the document's own face to be used in the editor.
@@ -7653,16 +11546,27 @@ impl PagifyApp {
         let Some(bytes) = bytes else {
             self.editor_face = None;
             self.editor_face_ready = false;
+            self.editor_face_metrics = None;
             return;
         };
         // **Checked before it is handed to the atlas builder.** A PDF may carry
         // a Type 1 program, or a subset cut in a way nothing else reads; egui
         // is not the place to find that out.
-        if pdf_core::pdf::embed::metrics(&bytes).is_none() {
+        //
+        // Kept, not just checked: this is the font's real ascent/descent, in
+        // its own 1000ths-of-an-em units — what `run_editor_font_size` sizes
+        // the editor from when a run's own reported size cannot be trusted,
+        // instead of a fixed guess that fits no particular face especially
+        // well. Read once here rather than in the editor's own per-frame
+        // draw, since parsing a few hundred kilobytes of font sixty times a
+        // second is not free.
+        let Some(metrics) = pdf_core::pdf::embed::metrics(&bytes) else {
             self.editor_face = None;
             self.editor_face_ready = false;
+            self.editor_face_metrics = None;
             return;
-        }
+        };
+        self.editor_face_metrics = Some(metrics);
 
         let key = {
             use std::hash::{Hash, Hasher};
@@ -7757,6 +11661,7 @@ impl PagifyApp {
             object: usize::MAX,
             original: found.text.clone(),
             rect: found.rect,
+            lines: vec![(vec![usize::MAX], found.rect)],
             buffer: found.text.clone(),
             style: pdf_core::document::TextStyle {
                 size: Some(placed.size),
@@ -7765,6 +11670,7 @@ impl PagifyApp {
                 face: None,
             },
             was: pdf_core::document::TextStyle::default(),
+            current_face: None,
             background: self.page_behind(page, found.rect),
             drag_by: (0.0, 0.0),
             focused: false,
@@ -7817,6 +11723,86 @@ impl PagifyApp {
         self.drawn_words.as_ref().map(|(_, words)| words.as_slice()).unwrap_or(&[])
     }
 
+    /// The face a new line grown out of `edit` should be written in.
+    ///
+    /// Tried in order: a face already picked or read off the run, but only
+    /// if it is one the app already has registered for typing — the case
+    /// `outlinedfont add` or an earlier font pick covers. **Reported from
+    /// use, with a screenshot: a line added under a bold heading came back
+    /// in a plain, unrelated weight** — for an ordinary embedded document
+    /// font, which almost never happens to be one of the app's own
+    /// registered faces, that first lookup fails silently and always did,
+    /// so every added line fell all the way back to plain Helvetica
+    /// regardless of what the heading actually looked like. Retyping the
+    /// run's own first line never had this problem, because that path
+    /// rewrites the existing text object in place and so simply reuses
+    /// whatever font was already there — this does the same thing by hand
+    /// for the *new* line, pulling the run's own font program straight out
+    /// of the file (see [`pdf_core::document::Document::run_font_data`])
+    /// and registering it under a name of its own, rather than asking the
+    /// app's unrelated typing-font list to happen to already have it.
+    fn registered_face_of(&self, edit: &EditingRun) -> Option<String> {
+        if let Some(name) = [edit.style.face.as_deref(), edit.current_face.as_deref()]
+            .into_iter()
+            .flatten()
+            .find(|name| pdf_core::text::is_registered(name))
+        {
+            return Some(name.to_string());
+        }
+
+        let bytes = self.doc.as_ref()?.session.run_font_data(edit.page, edit.object).ok()??;
+        // Named from its own bytes, not the run: many runs on a page share
+        // one font, and this way they share one registration too instead of
+        // piling up a copy per run edited in a session.
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            bytes.len().hash(&mut hasher);
+            bytes[..bytes.len().min(4096)].hash(&mut hasher);
+            hasher.finish()
+        };
+        let name = format!("run-own-font-{key:x}");
+        if !pdf_core::text::is_registered(&name) {
+            pdf_core::text::register(&name, bytes).ok()?;
+        }
+        Some(name)
+    }
+
+    /// Write lines added below where an edit's own text used to end, in
+    /// that edit's own size, colour and font rather than a fixed default —
+    /// so a line grown out of a heading or a paragraph looks like it
+    /// belongs with the rest of it, not like a different piece of text that
+    /// happens to sit underneath.
+    ///
+    /// Reported from use: growing a single run into two lines wrote the
+    /// second in `write_text_at`'s own flat default (Helvetica, 14pt, dark
+    /// grey) regardless of what the first line actually looked like — the
+    /// same gap this closes for a paragraph that grows past its own last
+    /// line.
+    fn write_extra_styled_lines(
+        &mut self,
+        page: usize,
+        base_x: f32,
+        mut y: f32,
+        gap: f32,
+        style: &pdf_core::document::TextStyle,
+        face: Option<&str>,
+        extra_lines: &[&str],
+    ) -> Result<(), String> {
+        let size = style.size.unwrap_or(12.0);
+        let color = style
+            .color
+            .unwrap_or(pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 });
+        for extra in extra_lines {
+            y += gap;
+            if extra.is_empty() {
+                continue;
+            }
+            self.write_styled_line_at(page, (base_x, y), extra, size, color, face)?;
+        }
+        Ok(())
+    }
+
     /// The next line submitted replaces the run that was picked.
     ///
     /// Intercepted before the command box sees it, the same way a password is:
@@ -7863,11 +11849,27 @@ impl PagifyApp {
             return;
         }
 
+        if edit.lines.len() > 1 {
+            self.apply_paragraph_edit(&edit, &typed);
+            return;
+        }
+
+        // **A single run can grow a second line of its own, the same way a
+        // paragraph already could.** Enter adds a line here now instead of
+        // submitting (see `draw_run_editor`), so the buffer this reads may
+        // hold more than the one line the run itself is. Only the first
+        // replaces the run in place; anything after it is new content,
+        // written just below in the run's own size, colour and font — not
+        // sent to `SetTextRun`, which is one run's own text, not several.
+        let mut typed_lines = typed.split('\n');
+        let first_line = typed_lines.next().unwrap_or("").to_string();
+        let extra_lines: Vec<&str> = typed_lines.collect();
+
         let Some(doc) = &self.doc else { return };
         match doc.session.execute(pdf_core::command::Command::SetTextRun {
             page_index: edit.page,
             object: edit.object,
-            text: typed.clone(),
+            text: first_line,
             // **Nothing asked for, when nothing was changed.**
             //
             // The style here is *seeded* from the run so the controls open
@@ -7883,9 +11885,26 @@ impl PagifyApp {
             // own place left empty. This is why. A requested font rides
             // along regardless — it is not one of the three properties that
             // gate the slow path, see `changed_look` above.
+            //
+            // **Sent field by field against `edit.was`, not as the whole
+            // struct.** `edit.style` is seeded with the run's *current*
+            // size, colour and position from the moment the editor opens, so
+            // all three already read `Some` before anyone touches anything —
+            // sending it whole made changing only the size also assert an
+            // unchanged colour and position right back at their own values,
+            // which is indistinguishable from asking to change all three and
+            // forces PDFium's page-wide rewrite for a plain size increase.
+            // Reported from use as "i can't increase the font sizes": the
+            // size itself has its own byte-safe path in `pdf_core` (see
+            // `set_run_in_stream`'s `new_size`) that this was never reaching.
             style: {
                 let mut style = if changed_look {
-                    edit.style.clone()
+                    pdf_core::document::TextStyle {
+                        size: (edit.style.size != edit.was.size).then_some(edit.style.size).flatten(),
+                        color: (edit.style.color != edit.was.color).then_some(edit.style.color).flatten(),
+                        at: (edit.style.at != edit.was.at).then_some(edit.style.at).flatten(),
+                        face: None,
+                    }
                 } else {
                     pdf_core::document::TextStyle::default()
                 };
@@ -7927,8 +11946,119 @@ impl PagifyApp {
                         self.say_info(format!("changed to \"{typed}\" — `undo` puts it back."))
                     }
                 }
+
+                if !extra_lines.is_empty() {
+                    let gap = (edit.rect.bottom - edit.rect.top).max(12.0);
+                    let base_x = edit.style.at.map(|(x, _)| x).unwrap_or(edit.rect.left);
+                    let face = self.registered_face_of(&edit);
+                    if let Err(e) = self.write_extra_styled_lines(
+                        edit.page,
+                        base_x,
+                        edit.rect.bottom,
+                        gap,
+                        &edit.style,
+                        face.as_deref(),
+                        &extra_lines,
+                    ) {
+                        self.say_error(format!("the new line could not be added: {e}"));
+                    }
+                }
             }
             Err(e) => self.say_error(format!("{e}")),
+        }
+    }
+
+    /// Split a paragraph's typed text back across the lines it came from.
+    ///
+    /// One `Command::SetTextRun` per line it already had — in place, own
+    /// position untouched, the same safe swap a single run's own edit uses
+    /// — and if typing added more lines than the paragraph started with,
+    /// the rest are placed below the last one, spaced by the gap the
+    /// existing lines already keep. Fewer lines than it started with blanks
+    /// the ones no longer wanted rather than truly removing the objects —
+    /// simplest, and no reader can tell the difference from an empty line.
+    ///
+    /// **A line that was more than one run** — see `paragraph_around`'s own
+    /// doc for why a producer's own line is not always one object —
+    /// receives its typed text on the *first* of those runs; the rest are
+    /// blanked the same way a shrunk paragraph's unwanted lines are. There
+    /// is no sound way to guess where, inside a retyped line, the original
+    /// mid-line run boundary should now fall, so this does not try; it only
+    /// makes sure no fragment of the old text is left stranded on the page
+    /// under what looks like a single, fully-replaced line.
+    ///
+    /// **Not `edit.style`'s position** — that describes one point on the
+    /// page, and a paragraph is several; there is no single place to move
+    /// every line to. A font pick or a new size, unlike a position, mean the
+    /// same thing said once for the whole block, so both carry across every
+    /// line uniformly — only sent when they actually changed, the same
+    /// per-field diff `apply_edited_run`'s own `style:` makes, and for the
+    /// same reason: `edit.style.size` is seeded with the paragraph's
+    /// *current* size the moment the editor opens, so sending it whenever
+    /// anything else changed would assert an unchanged size right back at
+    /// every line for no reason.
+    fn apply_paragraph_edit(&mut self, edit: &EditingRun, typed: &str) {
+        let new_lines: Vec<&str> = typed.split('\n').collect();
+        let style = pdf_core::document::TextStyle {
+            face: edit.style.face.clone(),
+            size: (edit.style.size != edit.was.size).then_some(edit.style.size).flatten(),
+            ..Default::default()
+        };
+
+        let mut failed: Option<String> = None;
+        'lines: for (i, (objects, _)) in edit.lines.iter().enumerate() {
+            let text = new_lines.get(i).copied().filter(|s| !s.is_empty()).unwrap_or(" ");
+            for (j, object) in objects.iter().enumerate() {
+                let Some(doc) = &self.doc else { break 'lines };
+                // A single space, not an empty string: `SetTextRun` reads
+                // "no text" as "nothing to replace with" and leaves the run
+                // as it was, which is the opposite of what a blanked
+                // sibling — or a shrunk paragraph's unwanted line — needs.
+                let text_for_this_run = if j == 0 { text } else { " " };
+                if let Err(e) = doc.session.execute(pdf_core::command::Command::SetTextRun {
+                    page_index: edit.page,
+                    object: *object,
+                    text: text_for_this_run.to_string(),
+                    style: style.clone(),
+                }) {
+                    failed = Some(e.to_string());
+                    break 'lines;
+                }
+            }
+        }
+
+        if failed.is_none() && new_lines.len() > edit.lines.len() {
+            let last_rect = edit.lines.last().expect("checked: len() > 1 to get here").1;
+            let gap = if edit.lines.len() >= 2 {
+                (edit.lines[1].1.top - edit.lines[0].1.top).abs().max(1.0)
+            } else {
+                (last_rect.bottom - last_rect.top).max(12.0)
+            };
+            let base_x = edit.style.at.map(|(x, _)| x).unwrap_or(last_rect.left);
+            let face = self.registered_face_of(edit);
+            if let Err(e) = self.write_extra_styled_lines(
+                edit.page,
+                base_x,
+                last_rect.bottom,
+                gap,
+                &edit.style,
+                face.as_deref(),
+                &new_lines[edit.lines.len()..],
+            ) {
+                failed = Some(e);
+            }
+        }
+
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.text = None;
+        self.text_selection = None;
+        self.find_hits.clear();
+
+        match failed {
+            Some(e) => self.say_error(e),
+            None => self.say_info("paragraph changed."),
         }
     }
 
@@ -8207,11 +12337,17 @@ impl PagifyApp {
             return;
         }
         let text = text.trim().to_string();
+        let page = self.page;
+        // **Reported from use: adding text meant typing the words into the
+        // command box before knowing where they would land** — "totally
+        // confusing and unintuitive". Bare `addtext` now drags out a box to
+        // type into instead (see `begin_text_box`); `addtext <words>` is
+        // kept exactly as it was, for a script or anyone who prefers typing
+        // the words first and placing them with one click.
         if text.is_empty() {
-            self.say_error("addtext: the words to write, as in `addtext Draft`.");
+            self.arm(PendingKind::PlaceText, page);
             return;
         }
-        let page = self.page;
         self.arm(PendingKind::Write(text), page);
     }
 
@@ -8256,7 +12392,371 @@ impl PagifyApp {
             })
             .map_err(|e| format!("{e}"))?;
 
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.foreign = None;
+
         Ok(format!("wrote \"{text}\" on page {}.", page + 1))
+    }
+
+    /// Below this, `a` and `b` are a click that barely moved before letting
+    /// go, not a box someone meant to draw — the same kind of noise floor a
+    /// negligible drag on a shape or a picture is measured against. A box
+    /// bigger than this but still small gets typed into anyway: the font
+    /// size shrinks to fit it instead of refusing (see below).
+    const MIN_TEXT_BOX_PT: f32 = 2.0;
+
+    /// Start composing brand new text in the box `a`..`b` describes.
+    ///
+    /// Nothing is written to the page yet — that happens once in
+    /// [`Self::apply_new_text_box`], when there is something to write. Until
+    /// then this only opens [`Self::new_text_box`], the same way arming any
+    /// other tool clears whatever else was selected first: a text box and a
+    /// run/shape selection are never live together.
+    fn begin_text_box(&mut self, page: usize, a: AppPoint, b: AppPoint) -> Result<String, String> {
+        if self.doc.is_none() {
+            return Err("nothing open.".into());
+        }
+        let rect = pdf_core::document::Rect {
+            left: a.x.min(b.x) as f32,
+            right: a.x.max(b.x) as f32,
+            top: a.y.min(b.y) as f32,
+            bottom: a.y.max(b.y) as f32,
+        };
+        if (rect.right - rect.left) < Self::MIN_TEXT_BOX_PT || (rect.bottom - rect.top) < Self::MIN_TEXT_BOX_PT {
+            return Err("text: that box is too small to type into.".into());
+        }
+
+        self.editing_run = None;
+        self.selected = None;
+        self.group.clear();
+        if let Some(layer) = self.markup.existing_mut(page) {
+            layer.clear_selection();
+        }
+        self.signature_selected = None;
+        self.placed_image_selected = None;
+
+        // The usual default, unless the box itself is smaller than that in
+        // either direction — then the size follows the box down instead of
+        // the box being refused for not fitting a size nobody asked for.
+        let size = (rect.right - rect.left).min(rect.bottom - rect.top).min(14.0);
+
+        self.new_text_box = Some(NewTextBox {
+            page,
+            rect,
+            buffer: String::new(),
+            size,
+            color: pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 },
+            face: None,
+            align: TextAlign::Left,
+            focused: false,
+        });
+        Ok("type into the box — the panel on the right sets its look, and Add to Page adds it to the page.".into())
+    }
+
+    /// One line of styled text, written at `origin` (the baseline, left
+    /// edge) — the primitive [`Self::apply_new_text_box`] calls once per
+    /// row its box wrapped to.
+    ///
+    /// Mirrors `replace_outlined_word`'s font-vs-no-font split: a picked
+    /// face is shaped for its own glyph advances, the same as anything else
+    /// this app writes in a font that is not one of the PDF standard 14. No
+    /// pick keeps `write_text_at`'s simple single-run `Annotation::Text` —
+    /// Helvetica's metrics are the reader's own PDF viewer's to know, so
+    /// nothing here has to compute them.
+    fn write_styled_line_at(
+        &mut self,
+        page: usize,
+        origin: (f32, f32),
+        text: &str,
+        size: f32,
+        color: pdf_core::document::Color,
+        face: Option<&str>,
+    ) -> Result<(), String> {
+        use pdf_core::document::{Annotation, Glyph};
+
+        let (font, font_asset, glyphs) = match face {
+            Some(name) => {
+                let shaped = pdf_core::text::shape(name, text)
+                    .map_err(|e| format!("{name} could not set those words — {e}"))?;
+                let mut boundaries: Vec<usize> =
+                    shaped.glyphs.iter().map(|g| g.cluster as usize).collect();
+                boundaries.sort_unstable();
+                boundaries.dedup();
+
+                let mut pen = origin.0;
+                let mut placed = Vec::with_capacity(shaped.glyphs.len());
+                for glyph in &shaped.glyphs {
+                    let from = (glyph.cluster as usize).min(text.len());
+                    let to = boundaries
+                        .iter()
+                        .find(|&&b| b > from)
+                        .copied()
+                        .unwrap_or(text.len())
+                        .min(text.len());
+                    placed.push(Glyph {
+                        ch: text.get(from..to).unwrap_or_default().to_string(),
+                        id: glyph.id,
+                        x: pen + glyph.offset_x * size,
+                        y: origin.1 - glyph.offset_y * size,
+                        radians: 0.0,
+                    });
+                    pen += glyph.advance * size;
+                }
+                (name.to_string(), Some(name.to_string()), placed)
+            }
+            None => (
+                "Helvetica".to_string(),
+                None,
+                vec![Glyph { ch: text.to_string(), id: 0, x: origin.0, y: origin.1, radians: 0.0 }],
+            ),
+        };
+
+        let id = self.next_text_id;
+        self.next_text_id += 1;
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        doc.session
+            .execute(pdf_core::command::Command::AddAnnotation {
+                page_index: page,
+                annotation: Annotation::Text {
+                    text: text.to_string(),
+                    font,
+                    font_asset,
+                    size,
+                    color,
+                    glyphs,
+                    id,
+                    restore: String::new(),
+                    frame: Vec::new(),
+                    frame_width: 0.0,
+                },
+            })
+            .map_err(|e| format!("{e}"))?;
+        Ok(())
+    }
+
+    /// Turn [`Self::new_text_box`]'s typed buffer into real page content,
+    /// one line per row it wrapped to on screen.
+    ///
+    /// The wrap is *reproduced* here rather than read back from the widget
+    /// that drew it — laying the same text out again, at the same width and
+    /// size, gives the exact rows `egui::TextEdit` showed while it was
+    /// being typed (see `LayoutJob`'s own wrapping, which is what the
+    /// widget uses internally too), so what lands on the page is what was
+    /// seen in the box.
+    fn apply_new_text_box(&mut self, ui: &egui::Ui) {
+        let Some(new_text) = self.new_text_box.take() else { return };
+        let typed = new_text.buffer.trim();
+        if typed.is_empty() {
+            self.say_info("nothing typed — the box was left empty.");
+            return;
+        }
+        let page = new_text.page;
+        // Page points per screen pixel at the moment Add to Page was
+        // pressed — the same conversion the box itself was drawn with, one
+        // frame earlier. A zoom between typing and pressing it would shift
+        // the wrap very slightly; not worth guarding against for how rare
+        // and how small a miss that is.
+        let scale = self.last_view.map(|v| v.scale).unwrap_or(1.0).max(0.01);
+        let box_width_pt = new_text.rect.right - new_text.rect.left;
+        let size_px = (new_text.size * scale).max(1.0);
+
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = (box_width_pt * scale).max(1.0);
+        job.append(
+            typed,
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::proportional(size_px),
+                color: egui::Color32::BLACK,
+                ..Default::default()
+            },
+        );
+        let galley = ui.fonts_mut(|f| f.layout_job(job));
+
+        let face = new_text.face.as_deref();
+        let mut lines_written = 0u32;
+        let mut failed: Option<String> = None;
+        for placed in &galley.rows {
+            let text = placed.row.text();
+            let trimmed = text.trim_end();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let row_width_pt = placed.row.size.x / scale;
+            let x = match new_text.align {
+                TextAlign::Left => new_text.rect.left,
+                TextAlign::Center => new_text.rect.left + (box_width_pt - row_width_pt) / 2.0,
+                TextAlign::Right => new_text.rect.right - row_width_pt,
+            };
+            // The glyph closest to the row's own top gives its ascent — the
+            // same value for every glyph in the row, since the whole box is
+            // one font and size. A blank row (skipped above, `continue`)
+            // would have none to ask.
+            let ascent_px =
+                placed.row.glyphs.first().map(|g| g.font_ascent).unwrap_or(size_px * 0.8);
+            let baseline_y = new_text.rect.top + (placed.pos.y + ascent_px) / scale;
+
+            match self.write_styled_line_at(
+                page,
+                (x, baseline_y),
+                trimmed,
+                new_text.size,
+                new_text.color,
+                face,
+            ) {
+                Ok(()) => lines_written += 1,
+                Err(e) => {
+                    failed = Some(e);
+                    break;
+                }
+            }
+        }
+
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.foreign = None;
+
+        match failed {
+            Some(e) => self.say_error(e),
+            None if lines_written == 1 => {
+                self.say_info(format!("text added to page {}.", page + 1))
+            }
+            // Each line is its own `AddAnnotation` — several steps, not
+            // one, the same as `replace_outlined_word`'s own "this took two
+            // steps" — so undoing it back off takes the same number back.
+            None if lines_written > 1 => self.say_info(format!(
+                "text added to page {} as {lines_written} lines — `undo` {lines_written} times puts it all back.",
+                page + 1
+            )),
+            None => self.say_info("nothing typed — the box was left empty."),
+        }
+    }
+
+    fn add_image_dialog(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Add an image")
+            .add_filter("Picture", &["png", "jpg", "jpeg"]);
+        match dialog.pick_file() {
+            Some(path) => self.add_image(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// Decode a picture file and arm it, waiting for a click to place it at.
+    ///
+    /// The same decode this reads a signature with — see
+    /// [`Self::upload_signature`] — minus the parts that are specific to a
+    /// signature: no search for pen ink in a photo, and no naming it into the
+    /// signature list. This is a plain picture, placed once, at whatever size
+    /// and position somebody chose on the page — not kept anywhere to place
+    /// again.
+    fn add_image(&mut self, path: &std::path::Path) {
+        if self.doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.say_error(format!("could not read {}: {e}", path.display()));
+                return;
+            }
+        };
+        let not_a_picture = |e: image::ImageError| {
+            format!("{} is not a picture this reads (PNG or JPEG): {e}", path.display())
+        };
+        let reader = match image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
+            Ok(reader) => reader,
+            Err(e) => {
+                self.say_error(not_a_picture(e.into()));
+                return;
+            }
+        };
+        let mut decoder = match reader.into_decoder() {
+            Ok(decoder) => decoder,
+            Err(e) => {
+                self.say_error(not_a_picture(e));
+                return;
+            }
+        };
+        // Checked from the header, before a single pixel is decoded — see the
+        // matching comment on `upload_signature`.
+        let (declared_width, declared_height) = image::ImageDecoder::dimensions(&decoder);
+        if pdf_core::render::bitmap::validate_dimensions(declared_width, declared_height).is_err()
+        {
+            self.say_error(format!(
+                "{} is {declared_width}x{declared_height} — too large a picture to read.",
+                path.display()
+            ));
+            return;
+        }
+        let orientation = image::ImageDecoder::orientation(&mut decoder)
+            .unwrap_or(image::metadata::Orientation::NoTransforms);
+        let mut decoded = match image::DynamicImage::from_decoder(decoder) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                self.say_error(not_a_picture(e));
+                return;
+            }
+        };
+        decoded.apply_orientation(orientation);
+        let photo = decoded.to_rgba8();
+        let (width, height) = photo.dimensions();
+
+        let page = self.page;
+        self.arm(PendingKind::PlaceImage { rgba: photo.into_raw(), width, height }, page);
+    }
+
+    /// Default width a placed picture gets on the page, in points — about two
+    /// inches, before the click point's aspect ratio sets its height.
+    const PLACED_IMAGE_WIDTH_PT: f32 = 200.0;
+
+    /// Put a picture on the page, centred on `at`.
+    ///
+    /// Centred rather than anchored by a corner: unlike a signature, which
+    /// sits *on* a line somebody clicked, a plain picture has no line to sit
+    /// on — the click is only ever "about here", and centring it is the one
+    /// choice that does not also silently pick a corner to grow from.
+    fn place_image_at(
+        &mut self,
+        page: usize,
+        at: AppPoint,
+        rgba: Vec<u8>,
+        width: u32,
+        height: u32,
+    ) -> Result<String, String> {
+        let Some(doc) = &self.doc else { return Err("nothing open.".into()) };
+        let aspect = width as f32 / (height.max(1) as f32);
+        let w = Self::PLACED_IMAGE_WIDTH_PT;
+        let h = w / aspect.max(f32::EPSILON);
+        let rect = pdf_core::document::Rect {
+            left: at.x as f32 - w / 2.0,
+            top: at.y as f32 - h / 2.0,
+            right: at.x as f32 + w / 2.0,
+            bottom: at.y as f32 + h / 2.0,
+        };
+        doc.session
+            .execute(pdf_core::command::Command::AddAnnotation {
+                page_index: page,
+                annotation: pdf_core::document::Annotation::Image { rect, rgba, width, height },
+            })
+            .map_err(|e| format!("{e}"))?;
+
+        // Without these two, a freshly placed picture drew from the stale
+        // cached page texture until something unrelated happened to clear
+        // it — showing up only several seconds later, by luck — and stayed
+        // invisible to hit-testing until the page was left and returned to,
+        // so it could not be selected, moved or resized. `place_signature`
+        // already does both; a plain picture needs exactly the same.
+        if let Some(doc) = &mut self.doc {
+            doc.rendered_is_stale();
+        }
+        self.foreign = None;
+
+        Ok(format!("picture placed on page {}.", page + 1))
     }
 
     /// One page per row, or two as a spread.
@@ -8456,9 +12956,11 @@ impl PagifyApp {
                         | A::Squiggly { rects, .. } => rects.clone(),
                         A::Note { rect, .. } => vec![*rect],
                         A::Image { rect, .. } => vec![*rect],
-                        // Ink has no rectangles to hit-test against, and text is
-                        // page content rather than an annotation.
-                        A::Ink { .. } | A::Text { .. } => return None,
+                        A::Link { rect, .. } => vec![*rect],
+                        // Ink and Fill are this engine's own markup, tracked
+                        // live in `markup::Layer` rather than hit-tested here;
+                        // text is page content rather than an annotation.
+                        A::Ink { .. } | A::Text { .. } | A::Fill { .. } => return None,
                     };
                     Some((n + 1, rects))
                 })
@@ -8482,6 +12984,44 @@ impl PagifyApp {
                 })
                 .then_some(*n)
         })
+    }
+
+    /// The address a foreign-mark number from [`Self::foreign_at`] names,
+    /// if it is a link — `None` for every other kind of mark.
+    ///
+    /// Re-reads `annotations(page)` rather than carrying the address
+    /// through `foreign_marks`'s own cache: a link's rect is all hit-testing
+    /// needs, and threading a second, mostly-unused field through a cache
+    /// keyed for painting quad points would answer a question only a click
+    /// asks.
+    fn link_uri_at(&self, page: usize, n: usize) -> Option<String> {
+        let marks = self.doc.as_ref()?.session.annotations(page).ok()?;
+        match &marks.get(n.checked_sub(1)?)?.annotation {
+            pdf_core::document::Annotation::Link { uri, .. } => Some(uri.clone()),
+            _ => None,
+        }
+    }
+
+    /// Follow a link, or say why not — shared by a plain click and the
+    /// right-click menu's own "Open" so the scheme restriction is written
+    /// once. **Only ever a web address, and only ever `http`/`https`.** This
+    /// program only ever writes those two schemes (see `apply_web_link`),
+    /// but a link on the page did not have to come from here — any PDF
+    /// somebody opens can carry a `/URI` action of its own, and handing an
+    /// unexamined scheme straight to the OS launcher is how a `file://` or a
+    /// UNC-style address ends up read by something that trusts it more than
+    /// this click did.
+    fn open_or_report_link(&mut self, n: usize, uri: &str) {
+        if uri.starts_with("http://") || uri.starts_with("https://") {
+            match open_in_browser(uri) {
+                Ok(()) => self.say_info(format!("opening {uri}")),
+                Err(e) => self.say_error(format!("could not open {uri}: {e}")),
+            }
+        } else {
+            self.say_info(format!(
+                "link {n} goes to \"{uri}\" — not a web address, so it was not opened."
+            ));
+        }
     }
 
     /// Every annotation on this page, whoever made it.
@@ -8572,6 +13112,104 @@ impl PagifyApp {
         }
     }
 
+    /// Remove one annotation by its own engine index — a placed picture or
+    /// signature, addressed the way [`Self::signature_at`]/
+    /// [`Self::placed_image_at`] name them, not the position `marks` shows a
+    /// reader. Shared by the Delete key's two annotation branches so the
+    /// `session.execute`/error-mapping is written once.
+    fn remove_annotation_at(&self, page: usize, index: usize) -> Result<(), String> {
+        let doc = self.doc.as_ref().ok_or_else(|| "nothing open.".to_string())?;
+        doc.session
+            .execute(pdf_core::command::Command::RemoveAnnotation { page_index: page, index })
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// The Delete key, for whichever of the app's selection mechanisms is
+    /// holding something right now.
+    ///
+    /// **Reported from use: a selected drawn shape or inserted picture could
+    /// not be deleted.** A placed signature or plain picture is a bare
+    /// annotation picked with no tool armed, and neither had ever been wired
+    /// to Delete — only the object tool's own selection and the markup
+    /// layer's had. Checked first here: the four selection mechanisms are
+    /// mutually exclusive (see `Selected`, `SignatureSelected`,
+    /// `PlacedImageSelected` and `Markup`'s own doc), so order between them
+    /// only matters for reading, not behaviour. A free function of its own
+    /// (rather than staying inline in `ui()`) so it can be called directly
+    /// from a test without a real frame to drive `keys.delete` through.
+    fn delete_selection(&mut self) {
+        let page = self.page;
+        if let Some(sel) = self.signature_selected.clone().filter(|s| s.page == page) {
+            match self.remove_annotation_at(sel.page, sel.index) {
+                Ok(()) => {
+                    if let Some(doc) = &mut self.doc {
+                        doc.rendered_is_stale();
+                    }
+                    self.signature_selected = None;
+                    self.signature_grab = None;
+                    self.say_info("signature removed — `undo` puts it back.");
+                }
+                Err(e) => self.say_error(e),
+            }
+            return;
+        }
+        if let Some(sel) = self.placed_image_selected.clone().filter(|s| s.page == page) {
+            match self.remove_annotation_at(sel.page, sel.index) {
+                Ok(()) => {
+                    if let Some(doc) = &mut self.doc {
+                        doc.rendered_is_stale();
+                    }
+                    self.placed_image_selected = None;
+                    self.placed_image_grab = None;
+                    self.say_info("picture removed — `undo` puts it back.");
+                }
+                Err(e) => self.say_error(e),
+            }
+            return;
+        }
+        // The object tool's own selection next — a picture, shape or run of
+        // words picked with `editobject`, not the drawing layer
+        // `erase_selection` below reaches. Falling through when there is no
+        // object selected keeps today's behaviour for the drawing tools
+        // exactly as it was.
+        if !self.group.is_empty() {
+            self.delete_group();
+        } else if let Some(sel) = self.selected.clone() {
+            let result = match &self.doc {
+                Some(doc) => doc
+                    .session
+                    .execute(pdf_core::command::Command::RemoveObject {
+                        page_index: sel.page,
+                        object: sel.object,
+                    })
+                    .map(|_| ())
+                    .map_err(|e| e.to_string()),
+                None => Err("nothing open.".into()),
+            };
+            match result {
+                Ok(()) => {
+                    if let Some(doc) = &mut self.doc {
+                        doc.rendered_is_stale();
+                    }
+                    self.selected = None;
+                    self.layers = None;
+                    self.say_info(format!("{} removed from page {}.", sel.what, sel.page + 1));
+                }
+                Err(e) => self.say_error(e),
+            }
+        } else if let Some(layer) = self.markup.existing_mut(page) {
+            layer.begin("erase");
+            let n = layer.erase_selection();
+            layer.end();
+            if n > 0 {
+                self.say_info(format!("{n} erased."));
+            } else {
+                layer.forget_last_step();
+            }
+        }
+    }
+
     /// Mark the selected text — highlight, underline, strike out, squiggle.
     ///
     /// One annotation for the whole selection, however many lines it covers.
@@ -8585,6 +13223,10 @@ impl PagifyApp {
             // Nothing selected: pick the tool up rather than refuse. It stays
             // in hand until Escape or another tool, so a run of passages can be
             // marked without going back to the ribbon between each.
+            self.put_down_page_editors();
+            self.link_armed = false;
+            self.match_properties_armed = false;
+            self.match_properties_sample = None;
             self.markup_armed = Some(kind);
             self.say_info(format!(
                 "{} — drag across the text to mark it. Escape puts it down.",
@@ -8714,7 +13356,19 @@ self.foreign = None;
         }
     }
 
+    /// Scripts nested this deep are not automation, they are a mistake — one
+    /// that names itself, or two that name each other.
+    const MAX_REPLAY_DEPTH: usize = 16;
+
     fn replay(&mut self, path: &std::path::Path) {
+        if self.replay_depth >= Self::MAX_REPLAY_DEPTH {
+            self.say_error(format!(
+                "replay: {} scripts deep — a script is replaying itself, directly or through \
+                 others. Stopped rather than recursing forever.",
+                self.replay_depth
+            ));
+            return;
+        }
         let script = match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| Script::from_json(&t)) {
             Ok(script) => script,
             Err(e) => {
@@ -8727,6 +13381,7 @@ self.foreign = None;
         // whatever is recording, and the steps must not be borrowed from a
         // script this loop could replace.
         let steps = script.steps.clone();
+        self.replay_depth += 1;
         let mut ran = 0;
         let mut stopped = None;
         for (index, line) in steps.iter().enumerate() {
@@ -8754,6 +13409,7 @@ self.foreign = None;
                 None => {}
             }
         }
+        self.replay_depth -= 1;
         match stopped {
             None => self.say_info(format!("replayed {ran} step(s).")),
             Some((step, line, why)) => {
@@ -8829,6 +13485,17 @@ self.foreign = None;
                     None => Err("nowhere to write.".into()),
                 }
             }
+            PendingKind::PlaceImage { rgba, width, height } => {
+                let (rgba, width, height) = (rgba.clone(), *width, *height);
+                match pending.points.first().copied() {
+                    Some(at) => self.place_image_at(page, at, rgba, width, height),
+                    None => Err("nowhere to place the picture.".into()),
+                }
+            }
+            PendingKind::PlaceText => match (pending.points.first(), pending.points.get(1)) {
+                (Some(a), Some(b)) => self.begin_text_box(page, *a, *b),
+                _ => Err("text: two corners are needed.".into()),
+            },
             PendingKind::Calibrate { distance, unit } => {
                 match Calibration::from_two_points(pending.points[0], pending.points[1], *distance, unit) {
                     Ok(calibration) => {
@@ -8895,6 +13562,20 @@ self.foreign = None;
                 },
                 _ => Err("lock: two corners are needed.".into()),
             },
+            PendingKind::ArticleBox => match (pending.points.first(), pending.points.get(1)) {
+                (Some(a), Some(b)) => match area_between(*a, *b) {
+                    Some(rect) => {
+                        self.pending_article_box = Some(PendingArticleBox {
+                            page,
+                            rect,
+                            title: String::new(),
+                        });
+                        Ok(String::new())
+                    }
+                    None => Err("article box: that area has no size.".into()),
+                },
+                _ => Err("article box: two corners are needed.".into()),
+            },
             PendingKind::Draw(kind) => {
                 let layer = self.markup.page(page, height);
                 layer.begin("draw");
@@ -8912,11 +13593,14 @@ self.foreign = None;
                         if radius < 1e-6 {
                             Err("circle: that radius is zero.".into())
                         } else {
-                            layer.add(cad_kernel::Geom::Circle(cad_kernel::Circle {
+                            let index = layer.add(cad_kernel::Geom::Circle(cad_kernel::Circle {
                                 center: p[0],
                                 radius,
                             }));
-                            Ok("circle added.".into())
+                            if self.draw_fill {
+                                layer.set_filled(index, true);
+                            }
+                            Ok(if self.draw_fill { "filled circle added." } else { "circle added." }.into())
                         }
                     }
                     DrawKind::Rectangle => {
@@ -8927,7 +13611,7 @@ self.foreign = None;
                             b,
                             cad_kernel::Vec2::new(a.x, b.y),
                         ];
-                        layer.add(cad_kernel::Geom::Polyline(cad_kernel::Polyline {
+                        let index = layer.add(cad_kernel::Geom::Polyline(cad_kernel::Polyline {
                             vertices: corners
                                 .iter()
                                 .map(|v| cad_kernel::PolyVertex { pos: *v, bulge: 0.0 })
@@ -8935,7 +13619,10 @@ self.foreign = None;
                             closed: true,
                             widths: Vec::new(),
                         }));
-                        Ok("rectangle added.".into())
+                        if self.draw_fill {
+                            layer.set_filled(index, true);
+                        }
+                        Ok(if self.draw_fill { "filled rectangle added." } else { "rectangle added." }.into())
                     }
                     DrawKind::Polyline => {
                         if p.len() < 2 {
@@ -8950,6 +13637,27 @@ self.foreign = None;
                                 widths: Vec::new(),
                             }));
                             Ok(format!("polyline of {} points added.", p.len()))
+                        }
+                    }
+                    DrawKind::Arrow => {
+                        let index = layer.add(cad_kernel::Geom::Line(cad_kernel::Line {
+                            a: p[0],
+                            b: p[1],
+                        }));
+                        layer.set_arrow_ends(index, false, true);
+                        Ok("arrow added.".into())
+                    }
+                    DrawKind::Spline => {
+                        // A degree-3 B-spline needs more control points than its
+                        // degree, so four is the least that makes a real curve.
+                        if p.len() < 4 {
+                            Err("spline: needs at least four points.".into())
+                        } else {
+                            let count = p.len();
+                            layer.add(cad_kernel::Geom::Spline(cad_kernel::Spline::new_bspline(
+                                3, p,
+                            )));
+                            Ok(format!("spline of {count} points added."))
                         }
                     }
                 }
@@ -9086,6 +13794,12 @@ impl eframe::App for PagifyApp {
         let ctx = ui.ctx().clone();
         let command_id = egui::Id::new(COMMAND_INPUT);
 
+        // Once a frame, so two separate actions landing between one undo
+        // press and the next are still told apart in the order they actually
+        // happened — see `track_undo_recency`'s own doc for why polling only
+        // when `undo` is pressed loses exactly that ordering.
+        self.track_undo_recency();
+
         if self.mark.is_none() {
             install_icons(&ctx);
             self.mark = logo::texture(&ctx);
@@ -9107,6 +13821,11 @@ impl eframe::App for PagifyApp {
         self.draw_signature_pad(&ctx);
         self.draw_signature_list(&ctx);
         self.draw_snippet_list(&ctx);
+        self.draw_find_replace(&ctx);
+        self.draw_spell_check(&ctx);
+        self.draw_bookmark_panel(&ctx);
+        self.draw_link_prompt(&ctx);
+        self.draw_article_box_prompt(&ctx);
 
         // The close button is how people actually quit, and it bypasses every
         // verb. Without this the whole guard is decoration: `quit` refuses
@@ -9149,6 +13868,7 @@ impl eframe::App for PagifyApp {
             zoom_out: i.key_pressed(egui::Key::Minus),
             delete: i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
             copy: i.modifiers.command && i.key_pressed(egui::Key::C),
+            paste: i.modifiers.command && i.key_pressed(egui::Key::V),
             find_next: i.key_pressed(egui::Key::Enter) && i.modifiers.command,
             open: i.modifiers.command && i.key_pressed(egui::Key::O),
             save: i.modifiers.command && i.key_pressed(egui::Key::S),
@@ -9172,7 +13892,14 @@ impl eframe::App for PagifyApp {
         // Taken once. Reading it inside a short-circuiting condition consumed
         // it before the branch that reports the empty case could see it, so
         // `copy` with nothing selected did nothing and said nothing.
-        if keys.copy || std::mem::take(&mut self.copy_wanted) {
+        //
+        // A shape or placed picture is tried first, and only while nothing
+        // has focus — a text field with focus means ⌘C is meant for it, or
+        // for `copy_selection`'s own text-selection path below, not for
+        // whatever happens to be sitting selected on the page.
+        if keys.copy && focus.allows_document_keys() && self.copy_object_selection() {
+            // handled — an object was copied, not text.
+        } else if keys.copy || std::mem::take(&mut self.copy_wanted) {
             self.copy_selection(&ctx);
         }
         if keys.find_next && !self.find_hits.is_empty() {
@@ -9229,40 +13956,10 @@ impl eframe::App for PagifyApp {
                 self.set_zoom(ZoomTarget::Out);
             }
             if keys.delete {
-                let page = self.page;
-                // The object tool's own selection first — a picture, shape or
-                // run of words picked with `editobject`, not the drawing
-                // layer `erase_selection` below reaches. Only one of the two
-                // selections is ever live at once (see `Selected` and
-                // `Markup`'s own doc), so falling through when there is no
-                // object selected keeps today's behaviour for the drawing
-                // tools exactly as it was.
-                if let Some(sel) = self.selected.clone() {
-                    let result = match &self.doc {
-                        Some(doc) => doc.session.remove_object(sel.page, sel.object).map_err(|e| e.to_string()),
-                        None => Err("nothing open.".into()),
-                    };
-                    match result {
-                        Ok(()) => {
-                            if let Some(doc) = &mut self.doc {
-                                doc.rendered_is_stale();
-                            }
-                            self.selected = None;
-                            self.layers = None;
-                            self.say_info(format!("{} removed from page {}.", sel.what, sel.page + 1));
-                        }
-                        Err(e) => self.say_error(e),
-                    }
-                } else if let Some(layer) = self.markup.existing_mut(page) {
-                    layer.begin("erase");
-                    let n = layer.erase_selection();
-                    layer.end();
-                    if n > 0 {
-                        self.say_info(format!("{n} erased."));
-                    } else {
-                        layer.forget_last_step();
-                    }
-                }
+                self.delete_selection();
+            }
+            if keys.paste {
+                self.paste_object_selection();
             }
             // Enter closes a pick that has no fixed number of points — an area
             // measurement, or a polyline. `done` is the same thing typed.
@@ -9395,6 +14092,7 @@ impl eframe::App for PagifyApp {
                     let c = command.trim();
                     in_hand == Some(c)
                         || armed.as_deref() == Some(c)
+                        || (c == "fill" && self.draw_fill)
                         || match self.pointer {
                             pagify_shell::verbs::PointerMode::Select => c == "selecttool",
                             pagify_shell::verbs::PointerMode::Pan => c == "hand",
@@ -9416,7 +14114,23 @@ impl eframe::App for PagifyApp {
                         ui.add_space(4.0);
                     }
                     for (glyph, label, command) in tab.buttons() {
-                        if tool_button(ui, glyph, label, command, live(command)).clicked() {
+                        let response = tool_button(ui, glyph, label, command, live(command));
+                        // The one button on the ribbon that is a standing
+                        // choice rather than a tool or an action: nothing
+                        // about a small icon says what it means, or which way
+                        // it is currently set, without this.
+                        let response = if *command == "fill" {
+                            response.on_hover_text(if self.draw_fill {
+                                "Fill: on — the next rectangle or circle is drawn filled. \
+                                 Click to draw hollow instead."
+                            } else {
+                                "Fill: off — the next rectangle or circle is drawn hollow. \
+                                 Click to draw it filled instead."
+                            })
+                        } else {
+                            response
+                        };
+                        if response.clicked() {
                             // Every button runs a command string — §7.
                             ribbon_command = Some((*command).to_string());
                         }
@@ -9837,6 +14551,10 @@ impl eframe::App for PagifyApp {
             self.picked_layer = kept;
         }
 
+        // Claims its space before the central panel takes the rest — same
+        // rule as the ribbon and the command bar above.
+        self.draw_properties_panel(ui);
+
         // -- the pages ---------------------------------------------------------
         let mut home_command: Option<String> = None;
         egui::CentralPanel::default_margins().show(ui, |ui| {
@@ -10163,6 +14881,30 @@ impl PagifyApp {
                                 theme::SELECTED,
                             );
                         }
+                        // **A bookmarked page said so nowhere on the page
+                        // itself.** Reported from use: adding one gave no
+                        // lasting sign that it had worked short of reopening
+                        // the panel. A fixed screen size rather than one
+                        // that scales with zoom — the same reasoning a
+                        // window's own corner badges are always the same
+                        // size regardless of how far the content under them
+                        // is zoomed.
+                        if self.bookmarked_pages.contains(&page) {
+                            let size = 22.0_f32;
+                            let inset = 6.0_f32;
+                            let badge = egui::Rect::from_min_size(
+                                egui::pos2(rect.right() - inset - size, rect.top() + inset),
+                                egui::vec2(size, size),
+                            );
+                            ui.painter().rect_filled(badge, egui::CornerRadius::same(4), theme::VIOLET);
+                            ui.painter().text(
+                                badge.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "\u{E8E7}",
+                                icon_font(size * 0.62),
+                                egui::Color32::WHITE,
+                            );
+                        }
                         if page == self.page {
                             self.last_view = Some(view);
                         }
@@ -10213,7 +14955,10 @@ impl PagifyApp {
                         self.draw_lock_badges(ui, page, view);
                         self.draw_picked_layer(ui, page, view);
                         self.draw_object_selection(ui, page, view);
+                        self.draw_group_selection(ui, page, view);
+                        self.draw_markup_selection(ui, page, view);
                         self.draw_signature_selection(ui, page, view);
+                        self.draw_placed_image_selection(ui, page, view);
                         // On top of the page and its badges, under the editor:
                         // a tool part-way through is the most recent thing the
                         // reader did and the thing they are aiming with.
@@ -10228,6 +14973,7 @@ impl PagifyApp {
                         // given once, by asking for it, and never again by
                         // clicking. Drawn last, it is simply clickable.
                         self.draw_run_editor(ui, page, view);
+                        self.draw_new_text_box(ui, page, view);
                     }
                 }
 
@@ -10324,11 +15070,23 @@ impl PagifyApp {
             PendingKind::Draw(DrawKind::Line) | PendingKind::SignLine => {
                 painter.line_segment([on(first), on(at)], stroke);
             }
+            PendingKind::Draw(DrawKind::Arrow) => {
+                let (from, to) = (on(first), on(at));
+                painter.line_segment([from, to], stroke);
+                if let Some(tri) = pagify_shell::commit::arrowhead_triangle(
+                    cad_kernel::Vec2::new(from.x as f64, from.y as f64),
+                    cad_kernel::Vec2::new(to.x as f64, to.y as f64),
+                ) {
+                    let points: Vec<egui::Pos2> =
+                        tri.iter().map(|v| egui::Pos2::new(v.x as f32, v.y as f32)).collect();
+                    painter.add(egui::Shape::convex_polygon(points, theme::VIOLET_BRIGHT, egui::Stroke::NONE));
+                }
+            }
             PendingKind::Draw(DrawKind::Circle) => {
                 let radius = (on(first) - on(at)).length();
                 painter.circle_stroke(on(first), radius, stroke);
             }
-            PendingKind::Draw(DrawKind::Rectangle) | PendingKind::SignRectangle => {
+            PendingKind::Draw(DrawKind::Rectangle) | PendingKind::SignRectangle | PendingKind::PlaceText => {
                 painter.rect_stroke(
                     box_between(first, at),
                     egui::CornerRadius::ZERO,
@@ -10337,7 +15095,11 @@ impl PagifyApp {
                 );
             }
             // A polyline keeps what is already placed and trails the last leg.
-            PendingKind::Draw(DrawKind::Polyline) | PendingKind::Measure(MeasureKind::Area) => {
+            // A spline's control polygon, not the curve itself — the curve
+            // isn't known until enough points exist to tessellate it.
+            PendingKind::Draw(DrawKind::Polyline)
+            | PendingKind::Draw(DrawKind::Spline)
+            | PendingKind::Measure(MeasureKind::Area) => {
                 let mut path: Vec<egui::Pos2> = pending.points.iter().map(|p| on(*p)).collect();
                 path.push(on(at));
                 painter.add(egui::Shape::line(path, stroke));
@@ -10354,7 +15116,7 @@ impl PagifyApp {
                     egui::StrokeKind::Inside,
                 );
             }
-            PendingKind::Whiteout | PendingKind::Lock => {
+            PendingKind::Whiteout | PendingKind::Lock | PendingKind::ArticleBox => {
                 painter.rect_stroke(
                     box_between(first, at),
                     egui::CornerRadius::ZERO,
@@ -10456,13 +15218,70 @@ impl PagifyApp {
             y: (edit.rect.top.max(edit.rect.bottom) + shift_y) as f64,
         });
 
-        // Room to grow. A replacement is rarely the same length as what it
-        // replaces, and a field cut to the old text cannot show the new.
-        let height = (bottom_right.y - top_left.y).max(14.0);
-        let rect = egui::Rect::from_min_size(
-            egui::pos2(top_left.x, top_left.y),
-            egui::vec2((bottom_right.x - top_left.x).max(120.0) + 80.0, height + 6.0),
+        // **Exactly the run's own size, not padded to leave room to grow.**
+        //
+        // This used to add a flat 80 screen pixels (and a 120px floor) to
+        // the width, reasoning that a replacement is rarely the same length
+        // as what it replaces. That made the box itself lie about how big
+        // the text actually is — reported from use as having "no idea,
+        // relative to the text I am editing, how the new one will land".
+        // `egui::TextEdit` does not clip text past its own rect; a longer
+        // replacement is still fully visible, just no longer inside a box
+        // that was pre-stretched to guess how long it might be.
+        let em_ratio = self
+            .editor_face_metrics
+            .map(|m| (m.ascent - m.descent) as f32 / 1000.0);
+
+        // **The box itself grows and shrinks with the Size slider.**
+        //
+        // Reported from use: "it locked in a text box, so i cant see the
+        // actual scale it will be once i increase the font size" — the font
+        // drawn inside already tracked `edit.style.size` live (see
+        // `on_screen` below), but the box around it stayed pinned to
+        // whatever screen rectangle the *original* run measured, so a bigger
+        // size just crowded or overflowed the same fixed frame instead of
+        // visibly growing. `grow` is how much bigger the current size draws
+        // than the size the run opened at, and both dimensions of the box
+        // scale by exactly that, so the box is always showing the real
+        // footprint of whatever is being typed right now, not what fit
+        // before the edit started.
+        //
+        // Anchored at bottom-left rather than top-left: a font's own anchor
+        // is its baseline, near the bottom of the box, so growing upward and
+        // rightward from there reads as the text getting bigger in place
+        // rather than the box drifting away from where the words actually
+        // sit.
+        //
+        // **Floored at a bare epsilon, not a readable pixel size.** This used
+        // to be `.max(14.0)` — a floor meant to guard the arithmetic below
+        // against a literally empty rect, not to keep the box a minimum
+        // *readable* size. But it did exactly the latter too: a page zoomed
+        // out enough for this run's own true on-screen height to fall under
+        // 14 pixels — an ordinary "zoomed out to see the page" level, not an
+        // extreme one — had that height propped back up while the rest of
+        // the page kept shrinking normally, so the editor visibly grew
+        // relative to the page the further out the zoom went. Reported from
+        // use, twice, as the preview's own scale changing with zoom; the
+        // same fix `run_editor_glyph_size` already needed for the font
+        // drawn inside this box, one level up, for the box itself.
+        let base_screen_height = (bottom_right.y - top_left.y).max(0.5);
+        let base_screen_width = (bottom_right.x - top_left.x).max(0.5);
+        let base_on_screen = run_editor_font_size(
+            base_screen_height,
+            edit.lines.len(),
+            edit.was.size.unwrap_or(0.0),
+            view.scale,
+            em_ratio,
         );
+        let on_screen = run_editor_font_size(
+            base_screen_height,
+            edit.lines.len(),
+            edit.style.size.unwrap_or(0.0),
+            view.scale,
+            em_ratio,
+        );
+        let grow = run_editor_box_grow(base_on_screen, on_screen);
+        let height = base_screen_height * grow;
 
         // **Edited where it sits, looking like what it is.**
         //
@@ -10485,43 +15304,117 @@ impl PagifyApp {
             .filter(|c| c.a > 0)
             .map(|c| egui::Color32::from_rgb(c.r, c.g, c.b))
             .unwrap_or(egui::Color32::BLACK);
+
+        // See `run_editor_glyph_size`'s own doc for why this is not clamped
+        // to a fixed pixel range — reported from use as the preview's own
+        // scale changing as the page was zoomed in and out.
+        let face_ready = self.editor_face.is_some() && self.editor_face_ready;
+        let glyph_size = run_editor_glyph_size(on_screen);
+        let font_id = if face_ready {
+            egui::FontId::new(glyph_size, egui::FontFamily::Name(RUN_FAMILY.into()))
+        } else {
+            egui::FontId::proportional(glyph_size)
+        };
+        let id = egui::Id::new(("run-editor", page, edit.object));
+
+        // **Wide enough for what is actually typed, not just what the run
+        // started at.** The box's width used to be a plain function of the
+        // run's own original width and how much the size grew it — correct
+        // for the words it opened with, but the editor's own substitute face
+        // does not always match the document's own glyph widths character
+        // for character, and typing further only ever made the box narrower
+        // relative to its own content, never wider. Measured every frame
+        // against the buffer's own widest line, so the box can never end up
+        // narrower than the words it is showing. Reported from use as text
+        // cut off at the box's own edge.
+        let text_width = edit
+            .buffer
+            .split('\n')
+            .map(|line| ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), font_id.clone(), ink)).size().x)
+            .fold(0.0f32, f32::max);
+        let width = (base_screen_width * grow).max(text_width + 8.0);
+        let rect = egui::Rect::from_min_size(
+            egui::pos2(top_left.x, bottom_right.y - height),
+            egui::vec2(width, height + 6.0),
+        );
         ui.painter().rect_filled(rect.expand(1.0), 0.0, paper);
 
-        // **The size the words are *drawn*, not the number in the file.**
+        // **Justified, the same as the page it came from — real
+        // justification, not left-aligned and ragged.** `egui::TextEdit`
+        // has no setting for this; a custom layouter builds the paragraph's
+        // `LayoutJob` by hand instead, one line at a time, so it can insert
+        // exactly the extra space `justify_gaps` computes for that line
+        // rather than leaving every gap at its natural width. See that
+        // function's own doc for why `LayoutJob::justify` itself is not
+        // enough here.
         //
-        // Plenty of producers write `1 Tf` and put the real size in the text
-        // matrix — this crate already knows that, and says so where `TJ`
-        // displacements are scaled. Taking the nominal size set the editor at
-        // one point and the words came out as a whisper. The box a run occupies
-        // is its ink, and ink is most of an em.
-        let drawn = (bottom_right.y - top_left.y).max(1.0);
-        let nominal = edit.style.size.unwrap_or(0.0) * view.scale as f32;
-        let on_screen = if nominal >= drawn * 0.5 { nominal } else { drawn * 0.92 };
+        // **Only for a run that already had more than one line.** A single
+        // heading growing a second line of its own (see `apply_edited_run`)
+        // is not a page's own justified paragraph reflowing — it is new
+        // words with nothing to stretch to fill, and stretching them anyway
+        // would be inventing a look the page never had.
+        //
+        // The paragraph's own last line is excluded, matching ordinary
+        // typesetting — a short closing line is not stretched to fill the
+        // column just because the lines above it were.
+        let justify = edit.lines.len() > 1;
+        let format = egui::TextFormat { font_id: font_id.clone(), color: ink, ..Default::default() };
+        let layout_font_id = font_id.clone();
+        let mut layouter = move |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+            let font_id = &layout_font_id;
+            let text = buf.as_str();
+            // No `job.wrap.max_width` here — every line break is already
+            // explicit (one object per line, joined by `\n`, or a fresh one
+            // just typed), and a justified line's own stretch is computed by
+            // hand below to land right at `wrap_width`. Wrapping at that same
+            // width risked pushing a line's last word onto a row of its own
+            // the moment the stretch rounded a pixel or two long — and for an
+            // unjustified line, auto-wrap would silently turn one typed line
+            // into two nobody asked for.
+            let mut job = egui::text::LayoutJob::default();
+            let lines: Vec<&str> = text.split('\n').collect();
+            let last = lines.len().saturating_sub(1);
+            for (li, line) in lines.iter().enumerate() {
+                if li > 0 {
+                    job.append("\n", 0.0, format.clone());
+                }
+                // `split_inclusive` keeps each word's own trailing space
+                // attached to it — the actual space character stays in the
+                // job's text untouched (cursor positions must match the
+                // buffer exactly); `leading_space` only ever adds a further,
+                // purely visual nudge on top of it.
+                let tokens: Vec<&str> = line.split_inclusive(' ').collect();
+                if !justify || li == last || tokens.len() < 2 {
+                    job.append(line, 0.0, format.clone());
+                    continue;
+                }
+                let widths: Vec<f32> = tokens
+                    .iter()
+                    .map(|t| {
+                        ui.fonts_mut(|f| f.layout_no_wrap(t.trim_end().to_string(), font_id.clone(), ink))
+                            .size()
+                            .x
+                    })
+                    .collect();
+                let gaps = justify_gaps(&widths, wrap_width);
+                for (token, extra) in tokens.iter().zip(gaps) {
+                    job.append(token, extra, format.clone());
+                }
+            }
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
 
-        let face_ready = self.editor_face.is_some() && self.editor_face_ready;
-        let id = egui::Id::new(("run-editor", page, edit.object));
         let response = {
             let style = ui.style_mut();
             style.visuals.override_text_color = Some(ink);
             style.visuals.extreme_bg_color = paper;
             style.visuals.selection.bg_fill = theme::VIOLET.gamma_multiply(0.35);
-            ui.put(
-                rect,
-                egui::TextEdit::singleline(&mut edit.buffer)
-                    .id(id)
-                    .background_color(paper)
-                    .margin(egui::Margin::ZERO)
-                    // The document's own face where it could be read and egui
-                    // has had a frame to build it; the program's own otherwise.
-                    .font(if face_ready {
-                        egui::FontId::new(
-                            on_screen.clamp(6.0, 96.0),
-                            egui::FontFamily::Name(RUN_FAMILY.into()),
-                        )
-                    } else {
-                        egui::FontId::proportional(on_screen.clamp(6.0, 96.0))
-                    }),
-            )
+            // Always multiline: a single run can grow a second line of its
+            // own exactly the way a paragraph already could (see
+            // `apply_edited_run`), so Enter has to add a line here too
+            // rather than submit — a singleline field could never do that.
+            let editor = egui::TextEdit::multiline(&mut edit.buffer).layouter(&mut layouter);
+            ui.put(rect, editor.id(id).background_color(paper).margin(egui::Margin::ZERO))
         };
         ui.style_mut().visuals.override_text_color = None;
 
@@ -10541,11 +15434,21 @@ impl PagifyApp {
         // Beside them rather than on them, so dragging it cannot be mistaken
         // for selecting the text it is next to. The page changes once, when it
         // is let go — see `drag_by`.
-        let size = (rect.height() * 0.9).clamp(12.0, 22.0);
-        let grip = egui::Rect::from_min_size(
-            egui::pos2(rect.left() - size - 4.0, rect.top()),
-            egui::vec2(size, size),
-        );
+        //
+        // **Diagonally outside the box's own top-left corner, unconditionally
+        // — never merely "to the left" or merely "above" on their own.** A
+        // grip placed only to the left still sits *inside* the box the
+        // moment there is not `size` pixels of clearance there, and the
+        // earlier fix for that — moving it above instead once a clip-rect
+        // check said there was no room on the left — depended on that check
+        // agreeing with what was actually visible, which it did not always
+        // do: reported again, twice, as the run's own first letter painted
+        // over. Offset up *and* left at once, this can never overlap `rect`
+        // at all, by simple geometry, regardless of how little margin the
+        // page around it happens to leave — worst case it runs a little off
+        // whatever is beyond the page's own edge, never over the words being
+        // edited.
+        let grip = run_editor_grip_rect(rect);
         let held = ui.interact(
             grip,
             egui::Id::new(("run-editor-grip", page, edit.object)),
@@ -10556,7 +15459,7 @@ impl PagifyApp {
             grip.center(),
             egui::Align2::CENTER_CENTER,
             "\u{E89F}",
-            icon_font(size * 0.62),
+            icon_font(grip.width() * 0.62),
             egui::Color32::WHITE,
         );
         if held.hovered() || held.dragged() {
@@ -10573,103 +15476,20 @@ impl PagifyApp {
             response.request_focus();
         }
 
-        let done = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // **Enter never submits here — only the panel's own Apply button
+        // does, for a single line exactly the same as it already does for a
+        // paragraph.** A paragraph's own multiline box already had to treat
+        // Enter as "add a line", not "submit", since a paragraph legitimately
+        // grows a line; a single line used to be the odd one out, submitting
+        // immediately, which read as a change going live before anyone
+        // pressed the button that says "apply this" — reported from use.
+        // Escape still leaves whatever was typed here alone; Apply is now the
+        // only way anything on the page actually changes.
 
-        // **The properties float; they do not sit on the page.**
-        //
-        // Laid out in the page's own `Ui`, the bar was a slab across the
-        // paragraph being edited — the lines under the one in hand disappeared
-        // behind it. It describes *this* run, so it stays near it, but on its
-        // own layer, clear of the words, and only as wide as it needs to be.
-        //
-        // Below the line where there is room, above it near the foot of the
-        // window, so it never covers what is being typed.
-        // The visible page area, which is what the bar must stay inside.
-        let visible = ui.clip_rect();
-        let below = rect.bottom() + 8.0;
-        let anchor = if below + 40.0 < visible.max.y {
-            egui::pos2(rect.left(), below)
-        } else {
-            egui::pos2(rect.left(), rect.top() - 40.0)
-        };
-        let mut apply_now = false;
-        egui::Area::new(egui::Id::new(("run-editor-controls", page, edit.object)))
-            .order(egui::Order::Foreground)
-            .fixed_pos(anchor)
-            .show(ui.ctx(), |ui| {
-                egui::Frame::new()
-                    .fill(theme::CHROME)
-                    .stroke(egui::Stroke::new(1.0, theme::LINE))
-                    .shadow(egui::epaint::Shadow {
-                        offset: [0, 2],
-                        blur: 8,
-                        spread: 0,
-                        color: egui::Color32::from_black_alpha(90),
-                    })
-                    .inner_margin(egui::Margin::symmetric(8, 4))
-                    .corner_radius(egui::CornerRadius::same(4))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                        let mut size = edit.style.size.unwrap_or(12.0);
-                        ui.label(egui::RichText::new("size").color(theme::INK_DIM).size(11.0));
-                        if ui
-                            .add(
-                                egui::DragValue::new(&mut size)
-                                    .speed(0.25)
-                                    .range(1.0..=400.0),
-                            )
-                            .changed()
-                        {
-                            edit.style.size = Some(size);
-                        }
-
-                        let c = edit.style.color.unwrap_or(pdf_core::document::Color {
-                            r: 0,
-                            g: 0,
-                            b: 0,
-                            a: 255,
-                        });
-                        let mut rgb = [c.r, c.g, c.b];
-                        ui.label(egui::RichText::new("colour").color(theme::INK_DIM).size(11.0));
-                        if ui.color_edit_button_srgb(&mut rgb).changed() {
-                            edit.style.color = Some(pdf_core::document::Color {
-                                r: rgb[0],
-                                g: rgb[1],
-                                b: rgb[2],
-                                a: c.a,
-                            });
-                        }
-
-                        let (mut x, mut y) = edit.style.at.unwrap_or((0.0, 0.0));
-                        ui.label(egui::RichText::new("at").color(theme::INK_DIM).size(11.0));
-                        let moved = ui
-                            .add(egui::DragValue::new(&mut x).speed(0.5).prefix("x "))
-                            .changed()
-                            | ui.add(egui::DragValue::new(&mut y).speed(0.5).prefix("y "))
-                                .changed();
-                        if moved {
-                            edit.style.at = Some((x, y));
-                        }
-
-                        ui.label(egui::RichText::new("font").color(theme::INK_DIM).size(11.0));
-                        let label = edit.style.face.clone().unwrap_or_else(|| "(automatic)".into());
-                        if ui.button(egui::RichText::new(label).size(11.0)).clicked() {
-                            self.font_picker_open = !self.font_picker_open;
-                            if self.font_picker_open && self.system_fonts.is_none() {
-                                self.system_fonts = Some(system_fonts::list());
-                            }
-                        }
-
-                        if ui.button("Apply").clicked() {
-                            apply_now = true;
-                        }
-                    });
-                    });
-            });
-
-        if self.font_picker_open {
-            self.draw_font_picker(ui, page);
-        }
+        // The size/colour/position/font controls live in the right-side
+        // properties panel now — see `draw_run_properties`, called at the
+        // top level alongside the ribbon, not here. What stays on the page
+        // is only the words themselves and the grip that moves them.
 
         // Let go: the words go where they were dragged, once.
         if dropped {
@@ -10685,14 +15505,14 @@ impl PagifyApp {
                     .map(|e| (e.page, e.object))
                     .expect("checked above");
                 let moved = self.doc.as_ref().map(|doc| {
-                    doc.session.move_object(
-                        page,
+                    doc.session.execute(pdf_core::command::Command::MoveObject {
+                        page_index: page,
                         object,
-                        pdf_core::document::Point { x: by_x, y: by_y },
-                    )
+                        by: pdf_core::document::Point { x: by_x, y: by_y },
+                    })
                 });
                 match moved {
-                    Some(Ok(())) => {
+                    Some(Ok(_)) => {
                         if let Some(edit) = &mut self.editing_run {
                             // The words are there now, so the box is too, and
                             // the drag starts again from nothing.
@@ -10720,9 +15540,391 @@ impl PagifyApp {
                 edit.drag_by = (0.0, 0.0);
             }
         }
+    }
 
-        if done || apply_now {
+    /// The box [`Self::begin_text_box`] opened, being typed into.
+    ///
+    /// Auto-wraps to the box's own width, unlike the run editor's paragraph
+    /// box above — this is new content with no existing lines to keep in
+    /// place, so wrapping to whatever width was dragged out is exactly what
+    /// "click and drag the area it should be in" asked for. The wrap egui
+    /// does here on screen is reproduced exactly in
+    /// [`Self::apply_new_text_box`], from the same width and font size, so
+    /// what gets written matches what was typed.
+    fn draw_new_text_box(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let Some(new_text) = &mut self.new_text_box else { return };
+        if new_text.page != page {
+            return;
+        }
+
+        let top_left = view.to_screen(AppPoint {
+            x: new_text.rect.left as f64,
+            y: new_text.rect.top as f64,
+        });
+        let bottom_right = view.to_screen(AppPoint {
+            x: new_text.rect.right as f64,
+            y: new_text.rect.bottom as f64,
+        });
+        let rect = egui::Rect::from_min_max(top_left, bottom_right);
+        let paper = egui::Color32::from_rgb(250, 250, 248);
+
+        ui.painter().rect_filled(rect.expand(1.0), 0.0, paper);
+        ui.painter().rect_stroke(
+            rect,
+            0.0,
+            egui::Stroke::new(1.0, theme::VIOLET_BRIGHT),
+            egui::StrokeKind::Outside,
+        );
+
+        let size_px = (new_text.size * view.scale).clamp(6.0, 200.0);
+        let id = egui::Id::new(("new-text-box", page));
+        let response = ui.put(
+            rect,
+            egui::TextEdit::multiline(&mut new_text.buffer)
+                .id(id)
+                .background_color(paper)
+                .margin(egui::Margin::same(2))
+                .font(egui::FontId::proportional(size_px)),
+        );
+
+        if !new_text.focused {
+            new_text.focused = true;
+            response.request_focus();
+        }
+    }
+
+    /// The right-side panel a text run or a drawn shape's properties show
+    /// in — replacing the run editor's old floating box, per the request
+    /// that selecting something open a persistent panel rather than a
+    /// ribbon that follows the selection around the page.
+    ///
+    /// A text run, a markup shape and a brand new text box are never two of
+    /// the three at once — three separate mechanisms (`EditingRun`,
+    /// `Layer::selection`, `NewTextBox`) that every tool arming itself
+    /// already clears the others for — so this shows exactly one section,
+    /// or nothing, rather than switching between tabs.
+    fn draw_properties_panel(&mut self, ui: &mut egui::Ui) {
+        let text_page = self.editing_run.as_ref().map(|e| e.page);
+        let new_text_page = self.new_text_box.as_ref().map(|b| b.page);
+        let page = text_page.or(new_text_page).unwrap_or(self.page);
+        let has_shapes = text_page.is_none()
+            && new_text_page.is_none()
+            && self.markup.existing(page).is_some_and(|l| !l.selection().is_empty());
+        if text_page.is_none() && new_text_page.is_none() && !has_shapes {
+            return;
+        }
+
+        egui::Panel::right("properties_panel")
+            .resizable(true)
+            .default_size(220.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::PAPER)
+                    .inner_margin(egui::Margin::symmetric(12, 10)),
+            )
+            .show(ui, |ui| {
+                ui.label(egui::RichText::new("Properties").strong());
+                ui.separator();
+                ui.add_space(4.0);
+                if new_text_page.is_some() {
+                    self.draw_new_text_properties(ui, page);
+                } else if text_page.is_some() {
+                    self.draw_run_properties(ui);
+                } else {
+                    self.draw_shape_properties(ui, page);
+                }
+            });
+    }
+
+    /// The size, colour, font and alignment of [`Self::new_text_box`] — the
+    /// panel `begin_text_box` opens instead of [`Self::draw_run_properties`],
+    /// since a box being composed has no existing run to seed a size or
+    /// position from.
+    fn draw_new_text_properties(&mut self, ui: &mut egui::Ui, page: usize) {
+        // Read before `new_text` borrows `self.new_text_box`, so the
+        // "align on page" buttons below need no further access to `self`.
+        let page_width = self
+            .doc
+            .as_ref()
+            .and_then(|d| d.session.page_sizes().ok())
+            .and_then(|sizes| sizes.get(page).copied())
+            .map(|size| size.width_pt);
+
+        let Some(new_text) = &mut self.new_text_box else { return };
+
+        let mut size = new_text.size;
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Size").color(theme::INK_DIM));
+            if ui.add(egui::DragValue::new(&mut size).speed(0.25).range(1.0..=400.0)).changed() {
+                new_text.size = size;
+            }
+        });
+
+        let c = new_text.color;
+        let mut rgb = [c.r, c.g, c.b];
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Colour").color(theme::INK_DIM));
+            if ui.color_edit_button_srgb(&mut rgb).changed() {
+                new_text.color = pdf_core::document::Color { r: rgb[0], g: rgb[1], b: rgb[2], a: c.a };
+            }
+        });
+
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Align in box").color(theme::INK_DIM));
+        ui.horizontal(|ui| {
+            for (label, value) in
+                [("Left", TextAlign::Left), ("Center", TextAlign::Center), ("Right", TextAlign::Right)]
+            {
+                if ui.selectable_label(new_text.align == value, label).clicked() {
+                    new_text.align = value;
+                }
+            }
+        });
+
+        // Moves the box itself, keeping its width and height — a shortcut
+        // for "put it against the left margin" or "centre it" rather than
+        // dragging by eye. Only offered once the page's own width is known.
+        if let Some(page_width) = page_width {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new("Align on page").color(theme::INK_DIM));
+            ui.horizontal(|ui| {
+                // "Page Left"/"Page Right", not the bare "Left"/"Right" the
+                // in-box row above already uses — two controls sharing a
+                // label is as unfindable for a screen reader as for a test
+                // that queries by it.
+                let width = new_text.rect.right - new_text.rect.left;
+                if ui.button("Page Left").clicked() {
+                    new_text.rect.left = 0.0;
+                    new_text.rect.right = width;
+                }
+                if ui.button("Page Center").clicked() {
+                    let left = ((page_width - width) / 2.0).max(0.0);
+                    new_text.rect.left = left;
+                    new_text.rect.right = left + width;
+                }
+                if ui.button("Page Right").clicked() {
+                    new_text.rect.left = (page_width - width).max(0.0);
+                    new_text.rect.right = new_text.rect.left + width;
+                }
+            });
+        }
+
+        let label = new_text.face.clone().unwrap_or_else(|| "(automatic)".into());
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Font").color(theme::INK_DIM));
+            if ui.button(label).clicked() {
+                self.font_picker_open = !self.font_picker_open;
+                if self.font_picker_open && self.system_fonts.is_none() {
+                    self.system_fonts = Some(system_fonts::list());
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            // Not "Insert": the ribbon already has one of those, for a
+            // page, and a test (and a reader) finding this button by its
+            // label should not also find that one.
+            if ui.button("Add to Page").clicked() {
+                self.apply_new_text_box(ui);
+            }
+            if ui.button("Cancel").clicked() {
+                self.new_text_box = None;
+            }
+        });
+
+        if self.font_picker_open {
+            self.draw_font_picker(ui, page);
+        }
+    }
+
+    /// The size, colour, position and font of the run [`Self::editing_run`]
+    /// names — what the run editor's floating box used to show next to the
+    /// words themselves. See [`Self::draw_run_editor`] for the box those
+    /// words are still typed into, which stays on the page.
+    fn draw_run_properties(&mut self, ui: &mut egui::Ui) {
+        let Some(edit) = &mut self.editing_run else { return };
+
+        let mut size = edit.style.size.unwrap_or(12.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Size").color(theme::INK_DIM));
+            if ui.add(egui::DragValue::new(&mut size).speed(0.25).range(1.0..=400.0)).changed() {
+                edit.style.size = Some(size);
+            }
+        });
+
+        let c = edit
+            .style
+            .color
+            .unwrap_or(pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 });
+        let mut rgb = [c.r, c.g, c.b];
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Colour").color(theme::INK_DIM));
+            if ui.color_edit_button_srgb(&mut rgb).changed() {
+                edit.style.color =
+                    Some(pdf_core::document::Color { r: rgb[0], g: rgb[1], b: rgb[2], a: c.a });
+            }
+        });
+
+        let (mut x, mut y) = edit.style.at.unwrap_or((0.0, 0.0));
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Position").color(theme::INK_DIM));
+            let moved = ui.add(egui::DragValue::new(&mut x).speed(0.5).prefix("x ")).changed()
+                | ui.add(egui::DragValue::new(&mut y).speed(0.5).prefix("y ")).changed();
+            if moved {
+                edit.style.at = Some((x, y));
+            }
+        });
+
+        // An explicit choice from the font picker wins; short of that, the
+        // run's own current font — read once when it was picked — beats a
+        // flat "(automatic)" that never said which font "automatic" meant.
+        let label = edit
+            .style
+            .face
+            .clone()
+            .or_else(|| edit.current_face.clone())
+            .unwrap_or_else(|| "(automatic)".into());
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Font").color(theme::INK_DIM));
+            if ui.button(label).clicked() {
+                self.font_picker_open = !self.font_picker_open;
+                if self.font_picker_open && self.system_fonts.is_none() {
+                    self.system_fonts = Some(system_fonts::list());
+                }
+            }
+        });
+
+        ui.add_space(8.0);
+        if ui.button("Apply").clicked() {
             self.apply_edited_run();
+        }
+
+        if self.font_picker_open {
+            let page = self.editing_run.as_ref().map(|e| e.page).unwrap_or(self.page);
+            self.draw_font_picker(ui, page);
+        }
+    }
+
+    /// The colour and fill of whatever is selected on the markup layer —
+    /// one or more drawn shapes. Applies a change to every selected shape
+    /// at once, the same way dragging one moves the whole selection.
+    fn draw_shape_properties(&mut self, ui: &mut egui::Ui, page: usize) {
+        let height = view_height(self, page);
+        let selection: Vec<usize> =
+            self.markup.page(page, height).selection().iter().copied().collect();
+        if selection.is_empty() {
+            return;
+        }
+
+        ui.label(format!(
+            "{} shape{} selected",
+            selection.len(),
+            if selection.len() == 1 { "" } else { "s" }
+        ));
+        ui.add_space(6.0);
+
+        let (r, g, b) = selection
+            .first()
+            .and_then(|&i| self.markup.page(page, height).resolved_color(i))
+            .unwrap_or((0, 0, 0));
+        let mut rgb = [r, g, b];
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Colour").color(theme::INK_DIM));
+            if ui.color_edit_button_srgb(&mut rgb).changed() {
+                let layer = self.markup.page(page, height);
+                for &index in &selection {
+                    layer.set_color(index, (rgb[0], rgb[1], rgb[2]));
+                }
+                self.say_info(format!(
+                    "{} shape{} recoloured.",
+                    selection.len(),
+                    if selection.len() == 1 { "" } else { "s" }
+                ));
+            }
+        });
+
+        // Only a closed shape has an inside to fill — a line or an open
+        // polyline has nothing `Layer::set_filled` could pair a hatch to
+        // that would ever be visible, so the choice is not offered for one.
+        let fillable: Vec<usize> = {
+            let layer = self.markup.page(page, height);
+            selection
+                .iter()
+                .copied()
+                .filter(|&index| {
+                    layer.objects().get(index).is_some_and(|o| {
+                        matches!(&o.geom, cad_kernel::Geom::Circle(_))
+                            || matches!(&o.geom, cad_kernel::Geom::Polyline(p) if p.closed)
+                    })
+                })
+                .collect()
+        };
+        if !fillable.is_empty() {
+            let mut filled = {
+                let layer = self.markup.page(page, height);
+                fillable.iter().all(|&index| layer.is_filled(index))
+            };
+            if ui.checkbox(&mut filled, "Filled").changed() {
+                let layer = self.markup.page(page, height);
+                for &index in &fillable {
+                    layer.set_filled(index, filled);
+                }
+                self.say_info(if filled { "filled." } else { "fill removed." });
+            }
+        }
+
+        // Every drawn shape has an outline, so thickness applies to the
+        // whole selection — not just the closed ones `fillable` picked out.
+        let mut mm = selection
+            .first()
+            .and_then(|&i| self.markup.page(page, height).resolved_lineweight_mm(i))
+            .unwrap_or(0.25);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Thickness").color(theme::INK_DIM));
+            if ui.add(egui::Slider::new(&mut mm, 0.05..=3.0).suffix(" mm")).changed() {
+                let layer = self.markup.page(page, height);
+                for &index in &selection {
+                    layer.set_lineweight_mm(index, mm);
+                }
+            }
+        });
+
+        // An arrowhead only ever means something on a straight line — see
+        // `Layer::arrow_ends` — so this is offered only when the selection
+        // has one, exactly like `fillable` gates the Filled checkbox above.
+        let lines: Vec<usize> = {
+            let layer = self.markup.page(page, height);
+            selection
+                .iter()
+                .copied()
+                .filter(|&index| {
+                    layer.objects().get(index).is_some_and(|o| matches!(&o.geom, cad_kernel::Geom::Line(_)))
+                })
+                .collect()
+        };
+        if !lines.is_empty() {
+            let (mut start, mut end) = {
+                let layer = self.markup.page(page, height);
+                (
+                    lines.iter().all(|&i| layer.arrow_ends(i).0),
+                    lines.iter().all(|&i| layer.arrow_ends(i).1),
+                )
+            };
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Arrowhead").color(theme::INK_DIM));
+                let mut changed = false;
+                changed |= ui.checkbox(&mut start, "Start").changed();
+                changed |= ui.checkbox(&mut end, "End").changed();
+                if changed {
+                    let layer = self.markup.page(page, height);
+                    for &index in &lines {
+                        layer.set_arrow_ends(index, start, end);
+                    }
+                    self.say_info("arrowheads updated.");
+                }
+            });
         }
     }
 
@@ -10746,7 +15948,18 @@ impl PagifyApp {
             .show(ui.ctx(), |ui| {
                 ui.horizontal(|ui| {
                     ui.label("filter");
-                    ui.text_edit_singleline(&mut self.font_picker_filter);
+                    // **Focus, every frame this is open.** Without it,
+                    // keyboard focus stayed wherever it was before the
+                    // button that opened this was clicked — the run
+                    // editor's own text box — so typing "to filter fonts"
+                    // silently rewrote the words being edited instead, and
+                    // whatever kept that box in view as its content changed
+                    // scrolled the page along with it. Reported from use as
+                    // "the screen moves upward while searching fonts".
+                    let filter = ui.text_edit_singleline(&mut self.font_picker_filter);
+                    if !filter.has_focus() {
+                        filter.request_focus();
+                    }
                     if ui.small_button("×").clicked() {
                         close = true;
                     }
@@ -10783,6 +15996,17 @@ impl PagifyApp {
                 {
                     match std::fs::read(&path) {
                         Ok(bytes) => {
+                            // A new text box writes with `pdf_core::text::
+                            // shape` directly (see `write_styled_line_at`),
+                            // which reads from `pdf_core::text`'s own
+                            // name-keyed registry — a different pool from
+                            // `add_typing_font`'s, which is what a run's own
+                            // restyle (`SetTextRun`) draws from instead.
+                            // Registered for both so either path can find it
+                            // by this exact name.
+                            if !pdf_core::text::is_registered(name) {
+                                let _ = pdf_core::text::register(name, bytes.clone());
+                            }
                             if let Some(doc) = &self.doc {
                                 let _ = doc.session.add_typing_font(bytes);
                             }
@@ -10793,6 +16017,8 @@ impl PagifyApp {
             }
             if let Some(edit) = &mut self.editing_run {
                 edit.style.face = face;
+            } else if let Some(new_text) = &mut self.new_text_box {
+                new_text.face = face;
             }
             close = true;
         }
@@ -11001,6 +16227,8 @@ impl PagifyApp {
         }
 
         if let Some(id) = asked {
+            // Always asks, even with a passcode held — see
+            // `a_held_passcode_does_not_unlock_anything`.
             self.awaiting_password = Some(Awaiting::UnlockItem(id));
             self.say_info("type the passcode this was locked with, or Escape to give up.");
         }
@@ -11091,6 +16319,9 @@ impl PagifyApp {
                 // Where the pointer was, kept for the menu built on a later
                 // frame — the same reason `selected_image` is kept.
                 self.right_clicked_at = Some((page, at));
+                // See `right_click_text_actions`'s own doc: computed once,
+                // here, rather than by the menu on every frame it is open.
+                self.right_click_text_actions = Some(self.compute_right_click_text_actions(page, at));
             }
         }
 
@@ -11105,9 +16336,77 @@ impl PagifyApp {
         // being there.
         if self.doc.is_some() {
             response.context_menu(|ui| {
+                // A link under the right-click gets its own two actions,
+                // ahead of everything else here — asking whether to follow
+                // it or take it off is what a link's own menu is for, and
+                // "wherever the pointer is" (see below) already means a link
+                // is reached the same way any other page content is.
+                let link_here = self
+                    .right_clicked_at
+                    .filter(|(p, _)| *p == page)
+                    .and_then(|(_, at)| self.foreign_at(page, at))
+                    .and_then(|n| self.link_uri_at(page, n).map(|uri| (n, uri)));
+                if let Some((n, uri)) = link_here {
+                    if ui.button(format!("Open {}", short(&uri))).clicked() {
+                        self.open_or_report_link(n, &uri);
+                        ui.close();
+                    }
+                    if ui.button("Remove the link").clicked() {
+                        self.remove_mark(n);
+                        ui.close();
+                    }
+                    ui.separator();
+                }
                 if over_text && ui.button("Copy").clicked() {
                     self.copy_wanted = true;
                     ui.close();
+                }
+
+                // Read from the cache the click itself filled in — see
+                // `right_click_text_actions`'s own doc for why this menu
+                // must never recompute these on its own account: it is
+                // rebuilt on every repaint of an open popup.
+                let actions_here = self
+                    .right_clicked_at
+                    .filter(|(p, _)| *p == page)
+                    .and_then(|_| self.right_click_text_actions);
+
+                // A selection spanning more than one line or block can be
+                // declared one paragraph — see `join_selected_text`'s own
+                // doc for why this exists alongside the automatic
+                // heuristic rather than instead of it.
+                //
+                // **Shown disabled, not hidden, when it does not apply** —
+                // the same "Choose one above first" shape the layer buttons
+                // below already use. Reported from use: hiding it outright
+                // whenever the selection was too small to qualify made the
+                // feature itself unfindable — a selection covering only one
+                // run never showed so much as a hint that joining needed a
+                // bigger one.
+                if over_text {
+                    let joinable = actions_here.is_some_and(|a| a.joinable);
+                    if ui.add_enabled(joinable, egui::Button::new("Join into one paragraph")).clicked() {
+                        match self.join_selected_text() {
+                            Ok(message) => self.say_info(message),
+                            Err(e) => self.say_error(e),
+                        }
+                        ui.close();
+                    }
+                    if !joinable {
+                        ui.small("Select text spanning more than one line or block first.");
+                    }
+                }
+                // The other half of the same feature: undeclaring a join,
+                // wherever the right-click landed on one of its runs —
+                // not gated on a selection, since splitting one back apart
+                // is done by pointing at it, not by selecting it first.
+                let split_here = actions_here.and_then(|a| a.split_object);
+                if let Some(object) = split_here {
+                    if ui.button("Split the joined text").clicked() {
+                        self.split_group(page, object);
+                        self.say_info("split — these lines are edited on their own again.");
+                        ui.close();
+                    }
                 }
                 // Locking is a Protect operation, so it is offered where the
                 // Protect tools are rather than on every tab — the same reason
@@ -11273,6 +16572,14 @@ impl PagifyApp {
             return;
         }
 
+        // The same, for a plain placed picture — see `interact_placed_images`.
+        if self.object_tool.is_none()
+            && self.pending.is_none()
+            && self.interact_placed_images(ui, &response, page, at, view)
+        {
+            return;
+        }
+
         // The object tool takes the pointer whole while it is in hand — its
         // clicks select and its drags move or resize, none of which is a mark
         // or a text selection.
@@ -11329,11 +16636,20 @@ impl PagifyApp {
             }
         }
 
-        // A text cursor wherever there is text under the pointer, which is the
-        // other half of the same answer: on a page whose words are drawn as
-        // outlines the cursor stays an arrow, and the reason selection does
-        // nothing is visible before the drag rather than after it.
-        if self.pending.is_none()
+        // A pointing hand over a link, the same signal every browser gives —
+        // checked ahead of the text cursor below so a link drawn over
+        // running text still reads as clickable rather than as selectable
+        // prose.
+        let hovering_link = self.pending.is_none()
+            && self.foreign_at(page, at).is_some_and(|n| self.link_uri_at(page, n).is_some());
+        if hovering_link {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+        } else if self.pending.is_none()
+            // A text cursor wherever there is text under the pointer, which is
+            // the other half of the same answer: on a page whose words are
+            // drawn as outlines the cursor stays an arrow, and the reason
+            // selection does nothing is visible before the drag rather than
+            // after it.
             && self
                 .characters(page)
                 .and_then(|chars| chars.hit(at.x as f32, at.y as f32))
@@ -11375,6 +16691,19 @@ impl PagifyApp {
         }
 
         if response.drag_started() {
+            // The rotate handle, if a markup shape is already selected here,
+            // wins over everything else a drag could mean at this point —
+            // the same priority [`Self::signature_handle_at`] gets over a
+            // fresh pick. Checked before the text/shape split below so a
+            // handle sitting just above a line of text is never mistaken
+            // for the start of a text selection.
+            let on_rotate_handle = self
+                .markup_selection_bounds(page)
+                .is_some_and(|bounds| {
+                    (view.to_screen(at) - Self::rotate_handle_screen_pos(&bounds, view)).length()
+                        <= ROTATE_HANDLE_PX + 2.0
+                });
+
             // A drag that begins **on a character** selects text; one that
             // begins on empty paper selects marks. That is the rule every PDF
             // reader already teaches, and it needs no mode switch — which
@@ -11385,12 +16714,40 @@ impl PagifyApp {
                 .and_then(|chars| chars.hit(at.x as f32, at.y as f32))
                 .is_some();
 
-            if on_text {
+            if on_rotate_handle {
+                self.markup_grab = Some(Grab { handle: Some(Handle::Rotate), from: at, by: (0.0, 0.0) });
+                self.text_drag = None;
+                self.drag_from = None;
+            } else if on_text {
                 self.text_drag = Some(at);
                 self.text_selection = None;
                 self.drag_from = None;
+                self.markup_grab = None;
             } else {
-                self.drag_from = Some(at);
+                // **Reported from use: a drawn shape could only ever be
+                // moved by typing `move` and clicking twice.** A drag
+                // starting on one of the markup layer's own shapes now
+                // picks it up the same way every other kind of object on
+                // this page already can — see `finish_markup_grab`. One
+                // starting on bare paper still opens the marquee it always
+                // has.
+                let height = view_height(self, page);
+                let hit = self.markup.page(page, height).hit(at, HIT_TOLERANCE_PT * 3.0);
+                match hit {
+                    Some(index) => {
+                        let shift = ui.input(|i| i.modifiers.shift);
+                        let layer = self.markup.page(page, height);
+                        if !layer.selection().contains(&index) {
+                            layer.select_at(at, HIT_TOLERANCE_PT * 3.0, shift);
+                        }
+                        self.markup_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
+                        self.drag_from = None;
+                    }
+                    None => {
+                        self.drag_from = Some(at);
+                        self.markup_grab = None;
+                    }
+                }
                 self.text_drag = None;
             }
         }
@@ -11409,6 +16766,13 @@ impl PagifyApp {
                     self.selection_page = page;
                 }
             }
+            if let Some(grab) = self.markup_grab.as_mut() {
+                grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
+                let handle = grab.handle;
+                ui.output_mut(|o| {
+                    o.cursor_icon = handle.map(|h| h.cursor()).unwrap_or(egui::CursorIcon::Grabbing)
+                });
+            }
         }
 
         if response.drag_stopped() {
@@ -11423,8 +16787,37 @@ impl PagifyApp {
                     self.text_selection = None;
                 }
             }
+            // Same shape as the highlighter above, but a link needs the
+            // address before it can be written — the selection becomes a
+            // pending link waiting on that, rather than a mark made at once.
+            if self.link_armed && self.text_drag.is_some() && self.text_selection.is_some() {
+                self.open_link_prompt_from_selection();
+            }
+            // Match Properties: the first selection made while armed becomes
+            // the sample; every one after that, while the sample is held, is
+            // matched to it at once and the tool stays in hand for the next.
+            if self.text_drag.is_some() && self.text_selection.is_some() {
+                if self.match_properties_armed {
+                    if let Err(e) = self.match_properties_sample_from_current_selection() {
+                        self.say_error(e);
+                    }
+                } else if self.match_properties_sample.is_some() {
+                    match self.apply_match_properties_to_current_selection() {
+                        Ok(message) => self.say_info(message),
+                        Err(e) => self.say_error(e),
+                    }
+                }
+            }
             self.text_drag = None;
-            if let Some(from) = self.drag_from.take() {
+            if let Some(grab) = self.markup_grab.take() {
+                if grab.handle == Some(Handle::Rotate) {
+                    if let Some(bounds) = self.markup_selection_bounds(page) {
+                        self.finish_markup_rotate(page, grab, bounds);
+                    }
+                } else {
+                    self.finish_markup_grab(page, grab);
+                }
+            } else if let Some(from) = self.drag_from.take() {
                 let height = view_height(self, page);
                 let layer = self.markup.page(page, height);
                 if (from.x - at.x).abs() > 2.0 || (from.y - at.y).abs() > 2.0 {
@@ -11438,6 +16831,14 @@ impl PagifyApp {
             if self.pending.is_some() {
                 self.take_pick(at);
             } else if let Some(n) = self.foreign_at(page, at) {
+                // A link is not "a mark this program did not make" the way
+                // the message below means it — clicking one is expected to
+                // do the one thing a link is for, not to name it as an
+                // annotation somebody might want off the page.
+                if let Some(uri) = self.link_uri_at(page, n) {
+                    self.open_or_report_link(n, &uri);
+                    return;
+                }
                 // A mark this program did not make. It cannot be reshaped —
                 // that would mean reconstructing geometry nobody recorded — but
                 // it can be named and taken away, which is the difference
@@ -11463,6 +16864,348 @@ fn view_height(app: &PagifyApp, page: usize) -> f64 {
         .and_then(|d| d.strip.size_of(page))
         .map(|(_, h)| h as f64)
         .unwrap_or(792.0)
+}
+
+/// The size the run editor draws its words at — the size they are *drawn*,
+/// not the number in the file. Plenty of producers write `1 Tf` and put the
+/// real size in the text matrix — `pdf_core` already knows that, and says so
+/// where `TJ` displacements are scaled — so the box a run occupies, not its
+/// nominal size, is the fallback: taking the nominal size put the editor at
+/// one point and the words came out as a whisper. Ink is most of an em.
+///
+/// **One line's worth of that box, not the whole thing.** `box_height` is
+/// the *union* of every line for a paragraph — see `EditingRun::lines` —
+/// and a font the height of eight stacked lines is not "the size the words
+/// are drawn", it is eight of them stacked and then some. Reported from
+/// use: opening a paragraph filled the screen with enormous type, wrapping
+/// mid-word because nothing that large could fit the box's own width
+/// either.
+///
+/// **`em_ratio`, when it is known, replaces the fixed `0.92` guess.** That
+/// constant fits no particular face especially well — a font with deep
+/// descenders and one with almost none do not turn a box height into a
+/// point size by the same fraction. `em_ratio` is a specific font's own
+/// `(ascent - descent) / 1000`, from [`PagifyApp::editor_face_metrics`], so
+/// the fallback divides by what this face actually is rather than an
+/// average of every face. `None` keeps the old constant — the program's own
+/// substitute font, whose metrics were never asked for.
+fn run_editor_font_size(
+    box_height: f32,
+    line_count: usize,
+    requested_size: f32,
+    view_scale: f32,
+    em_ratio: Option<f32>,
+) -> f32 {
+    // A bare epsilon, not a readable pixel size — see `draw_run_editor`'s own
+    // `base_screen_height` doc for why a floor here has to stay far below
+    // anything a real zoom level would reach: a bigger one would make the
+    // choice between `nominal` and this fallback flip at some zoom purely
+    // because the floor stopped `per_line` shrinking while `nominal` kept
+    // shrinking, not because either genuinely changed size.
+    let per_line = (box_height.max(0.5)) / line_count.max(1) as f32;
+    let nominal = requested_size * view_scale;
+    if nominal >= per_line * 0.5 {
+        return nominal;
+    }
+    match em_ratio {
+        Some(ratio) if ratio > 0.05 => per_line / ratio,
+        _ => per_line * 0.92,
+    }
+}
+
+/// How much bigger — or smaller — than the run's own opening size the run
+/// editor's box should draw itself right now, given the screen size that
+/// size drew at (`base_on_screen`) and what the *current* `Size` control
+/// draws at (`current_on_screen`). `1.0` when nothing has changed.
+///
+/// **Reported from use: "it locked in a text box, so i cant see the actual
+/// scale it will be once i increase the font size."** `draw_run_editor`
+/// already tracked the Size slider live for the font drawn *inside* the
+/// box; the box itself stayed pinned to whatever rectangle the run measured
+/// when the editor opened, so a bigger size only ever crowded or overflowed
+/// that fixed frame. This is the ratio `draw_run_editor` now scales both of
+/// the box's own screen dimensions by, so growing the size is something a
+/// person watches happen rather than discovers after applying it.
+///
+/// Clamped well short of where a screen coordinate would misbehave — a size
+/// of literally zero, or a division by a `base_on_screen` rounded to
+/// nothing, must shrink or grow the box, never collapse or explode it.
+fn run_editor_box_grow(base_on_screen: f32, current_on_screen: f32) -> f32 {
+    (current_on_screen / base_on_screen.max(1.0)).clamp(0.1, 20.0)
+}
+
+/// The screen-pixel size the run editor actually draws its glyphs at, given
+/// what [`run_editor_font_size`] computed for the current zoom.
+///
+/// **Deliberately not clamped to a fixed pixel range.** `on_screen` is
+/// already exactly proportional to `view.scale` — the same zoom that shrinks
+/// and grows everything else on the page — and a floor or a ceiling on top
+/// of that breaks exactly that proportionality the moment either end of it
+/// is reached: the rest of the page keeps scaling with the zoom and this
+/// stops, so the editor visibly grows or shrinks *relative* to the page
+/// instead of staying the one size it always was next to it. Reported from
+/// use as the preview's own scale changing as the page was zoomed in and
+/// out. A page's own text has no such floor either — at extreme zoom it
+/// gets exactly as small or as large as the arithmetic says, and this now
+/// matches it. Only a hard floor far below anything a zoom level would
+/// plausibly reach, so a literal zero can never reach `FontId`.
+fn run_editor_glyph_size(on_screen: f32) -> f32 {
+    on_screen.max(0.5)
+}
+
+/// Where the run editor's own drag grip sits, given the box it belongs to.
+///
+/// Diagonally outside the box's own top-left corner, unconditionally: offset
+/// up *and* left at once, it can never overlap `rect` at all, by simple
+/// geometry, however little margin the surrounding page happens to leave.
+///
+/// **Reported from use, twice, on two different runs: the grip painted
+/// straight over the run's own first letter.** Both times the grip was
+/// placed only to one side — to the left, or (when a clip-rect check said
+/// there was no room there) above — and either alone still sits *inside*
+/// the box the moment that one direction runs out of clearance, which the
+/// clip-rect check did not always catch. Clearing both directions at once
+/// needs no such check to get right.
+fn run_editor_grip_rect(rect: egui::Rect) -> egui::Rect {
+    let size = (rect.height() * 0.9).clamp(12.0, 22.0);
+    egui::Rect::from_min_size(
+        egui::pos2(rect.left() - size - 4.0, rect.top() - size - 4.0),
+        egui::vec2(size, size),
+    )
+}
+
+/// Which face to write a line an edit is growing in, if any.
+///
+/// **Not `EditingRun::current_face` on its own.** That is the run's own font
+/// exactly as the PDF names it — read for display, so the properties panel
+/// shows what a run is actually set in rather than a flat "(automatic)" —
+/// but nothing has ever registered *that* name with `pdf_core::text`'s own
+/// typing-font pool, which is populated only by the font picker or the
+/// outline matcher's bundled faces. Handing it to [`PagifyApp::
+/// write_styled_line_at`] regardless failed to spell anything at all,
+/// silently, the moment a run grew a line — reported from use as the new
+/// line simply not being there. An explicit pick from the font picker *is*
+/// registered by the time it reaches here; checked anyway, since a face is
+/// only ever used if `pdf_core::text::is_registered` agrees, tried in the
+/// order a person would expect it to win: what was just picked, then what
+/// the run already reads as, falling back to `None` — `write_styled_line_at`'s
+/// own Helvetica fallback — only once neither is.
+
+/// How much extra space to insert before each word of a justified line, so
+/// its natural width stretches to fill `target_width` — real justification
+/// (every gap gets an equal share of the shortfall), not an approximation.
+///
+/// `word_widths` is each word's own already-measured width, left to right,
+/// in the same units as `target_width`. A line of fewer than two words has
+/// no gap to stretch and is returned unchanged (every entry `0.0`); a line
+/// that already reaches or exceeds the target is left alone too — this
+/// only ever adds space, never removes it by compressing a word.
+///
+/// **Reported from use, twice: the run editor's own paragraph box showed a
+/// ragged right edge where the real page showed the same paragraph fully
+/// justified**, on top of everything else about the box that had already
+/// been made to match. This is the one piece of that look `egui::TextEdit`
+/// has no setting for — `LayoutJob::justify` exists, but it only stretches
+/// rows *it* wrapped, and every one of this editor's lines already ends in
+/// an explicit `\n` (one object per line, not a reflowed paragraph), which
+/// is exactly the case that built-in flag deliberately leaves alone. So the
+/// stretch is computed by hand instead, one line at a time, and applied as
+/// `leading_space` — see `draw_run_editor`'s own layouter.
+fn justify_gaps(word_widths: &[f32], target_width: f32) -> Vec<f32> {
+    if word_widths.len() < 2 {
+        return vec![0.0; word_widths.len()];
+    }
+    let natural: f32 = word_widths.iter().sum();
+    let deficit = (target_width - natural).max(0.0);
+    let extra_per_gap = deficit / (word_widths.len() - 1) as f32;
+    std::iter::once(0.0).chain(std::iter::repeat(extra_per_gap).take(word_widths.len() - 1)).collect()
+}
+
+/// Joins a paragraph's own lines back into one string, restoring the
+/// hyphen a wrapped word lost entirely rather than mangled.
+///
+/// **Reported from use, with a screenshot: the real page reads
+/// "light-\ning" and "dis-\nsipation", the editor read "light\ning" and
+/// "dis\nsipation" — no hyphen at all, not even a broken one.** Checked
+/// directly against the file: the run before the break is `"...light"`,
+/// the run after is `"ing..."`, with nothing — not a character, not a
+/// control code — between them in the extracted text. `fix_extracted_text`
+/// only ever repairs a character that is *there*; this producer draws its
+/// wrap-hyphen as its own small mark rather than a glyph, so the text layer
+/// never carried one to repair.
+///
+/// **Judged by shape, not by position.** An ordinary line wrap breaks *at*
+/// a space, so the line above ends in whitespace and the one below starts
+/// mid-word only when a real word was actually cut in half: letters
+/// touching on both sides of the break, no space on either side. That is
+/// the one shape a hyphenated wrap and nothing else leaves, which is what
+/// lets this insert a hyphen exactly where the source page draws one and
+/// nowhere else.
+fn join_paragraph_lines(lines: &[String]) -> String {
+    let mut combined = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            let cut_mid_word = combined.chars().next_back().is_some_and(char::is_alphabetic)
+                && line.chars().next().is_some_and(char::is_alphabetic);
+            if cut_mid_word {
+                combined.push('-');
+            }
+            combined.push('\n');
+        }
+        combined.push_str(line);
+    }
+    combined
+}
+
+/// Repair characters a font has no glyph for and no font ever will — real
+/// control codes, not real text — before they ever reach the run editor's
+/// buffer.
+///
+/// **Reported from use, with a screenshot: a word mid-paragraph rendered
+/// with what looked like the font suddenly changing.** It was a `\u{2}`
+/// (STX) sitting where the source page draws a hyphen — this PDF's own
+/// `ToUnicode` mapping for its hyphen glyph resolves to a control code
+/// rather than `-`, a defect in the file's own text. No installed font has
+/// a real glyph for a control character, so egui fell back to a
+/// *different* font's own placeholder box for that one character — which
+/// is exactly what "the font changed" looks like from the outside.
+///
+/// **A control character sitting between two letters is put back as a
+/// hyphen, not dropped.** Reported a second time, with a screenshot: the
+/// first fix dropped the character outright, which fixed the tofu box but
+/// silently turned "elitee-plus" into "eliteeplus" wherever that same
+/// mapping bug landed on the product name's own hyphen rather than on a
+/// line-wrap. A hyphen is overwhelmingly the most common glyph a broken
+/// `ToUnicode` table mismaps this way, and a letter on both sides is
+/// exactly the shape a real hyphen — not an en dash, not a bullet, not
+/// nothing — leaves. Anywhere else (start of a line, next to a digit,
+/// next to another control character), there is no such signal, and the
+/// character is dropped rather than guessed at.
+///
+/// **Looks past a `\n` on either side, not just the immediately adjacent
+/// character.** A hyphen can fall exactly on a line wrap — the ordinary
+/// place one occurs — where the character actually touching it is the
+/// newline itself and the letter is one further away; a paragraph's own
+/// lines are expected to already be joined into one string by the time
+/// this runs, for exactly this reason.
+fn fix_extracted_text(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            let prev = chars[..i].iter().rev().find(|p| **p != '\n');
+            let next = chars[i + 1..].iter().find(|n| **n != '\n');
+            let between_letters =
+                prev.is_some_and(|p| p.is_alphabetic()) && next.is_some_and(|n| n.is_alphabetic());
+            if between_letters {
+                out.push('-');
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Whether a run's own rect looks like text set at some rotation other
+/// than upright — several characters of ink in a box taller than it is
+/// wide, which upright text never is.
+///
+/// A heuristic, not a fact read off the file: `pdf_core::document::
+/// TextRun` carries no rotation angle at all, so this is inferred purely
+/// from the shape PDFium already reports for the run's ink — deliberately
+/// **not** from `TextRun::size`, which is exactly as unreliable here as
+/// `run_editor_font_size`'s own doc explains: some producers write a
+/// nominal `1 Tf` and put the real size in the text matrix instead, and
+/// the one real page this was checked against does exactly that.
+///
+/// Gated on at least four characters: two or three narrow letters ("Ill")
+/// at a large size can be legitimately taller than wide without being
+/// rotated at all, but no reading of four or more characters left to right
+/// is ever taller than it is wide, at any size, in any ordinary face.
+fn looks_rotated(rect: &pdf_core::document::Rect, char_count: usize) -> bool {
+    if char_count < 4 {
+        return false;
+    }
+    let width = (rect.right - rect.left).abs();
+    let height = (rect.bottom - rect.top).abs();
+    height > width * 1.2
+}
+
+/// Which of a paragraph's lines its *look* — the one font/size the run
+/// editor's single `TextEdit` renders every line in — should be taken from.
+///
+/// Each entry is `(object, face name, size as bits)`; the winner is
+/// whichever `(face, size)` pair the most lines share, ties broken by
+/// whichever appeared first. `None` only when `lines` is empty.
+///
+/// **Reported from use, with a screenshot**: a paragraph whose first line
+/// was a bold "Description:" heading opened with its entire multi-line body
+/// rendered in that same bold, oversized face, even though every line
+/// beneath it was ordinary body text. `pick_paragraph` used to seed the
+/// whole editor from `lines[0]` alone; this is what replaced it.
+fn majority_look(lines: &[(usize, Option<String>, u32)]) -> Option<usize> {
+    let mut tally: Vec<(Option<String>, u32, Vec<usize>)> = Vec::new();
+    for (object, face, size_bits) in lines {
+        match tally.iter_mut().find(|(f, s, _)| f == face && s == size_bits) {
+            Some((_, _, objects)) => objects.push(*object),
+            None => tally.push((face.clone(), *size_bits, vec![*object])),
+        }
+    }
+    // Not `Iterator::max_by_key`: on a tie it keeps the *last* maximum, and
+    // first-seen order is what makes `a_tie_resolves_to_whichever_look_
+    // appeared_first` (and, in practice, a paragraph with no real majority)
+    // deterministic in the more expected direction.
+    let mut best: Option<(usize, usize)> = None; // (tally index, count)
+    for (i, (_, _, objects)) in tally.iter().enumerate() {
+        let better = match best {
+            Some((_, count)) => objects.len() > count,
+            None => true,
+        };
+        if better {
+            best = Some((i, objects.len()));
+        }
+    }
+    best.and_then(|(i, _)| tally.into_iter().nth(i)).and_then(|(_, _, objects)| objects.into_iter().next())
+}
+
+#[cfg(test)]
+mod majority_look_tests {
+    use super::majority_look;
+
+    #[test]
+    fn a_minority_heading_does_not_outvote_the_body_beneath_it() {
+        let lines = [
+            (0, Some("Bold".to_string()), 14.0f32.to_bits()),
+            (1, Some("Regular".to_string()), 10.0f32.to_bits()),
+            (2, Some("Regular".to_string()), 10.0f32.to_bits()),
+            (3, Some("Regular".to_string()), 10.0f32.to_bits()),
+        ];
+        assert_eq!(majority_look(&lines), Some(1), "the body's look should win, not the heading's");
+    }
+
+    #[test]
+    fn a_uniform_paragraph_keeps_its_first_line() {
+        let lines = [
+            (5, Some("Regular".to_string()), 10.0f32.to_bits()),
+            (6, Some("Regular".to_string()), 10.0f32.to_bits()),
+        ];
+        assert_eq!(majority_look(&lines), Some(5));
+    }
+
+    #[test]
+    fn a_tie_resolves_to_whichever_look_appeared_first() {
+        let lines = [
+            (0, Some("A".to_string()), 10.0f32.to_bits()),
+            (1, Some("B".to_string()), 12.0f32.to_bits()),
+        ];
+        assert_eq!(majority_look(&lines), Some(0));
+    }
+
+    #[test]
+    fn an_empty_paragraph_has_no_look_to_take() {
+        assert_eq!(majority_look(&[]), None);
+    }
 }
 
 /// A ribbon tab. Drawn rather than using `selectable_label`, so the chosen one
@@ -11506,6 +17249,7 @@ struct Keys {
     zoom_out: bool,
     delete: bool,
     copy: bool,
+    paste: bool,
     find_next: bool,
     open: bool,
     save: bool,
@@ -11542,6 +17286,57 @@ mod tests {
         assert!(top_left.r() > top_left.b(), "top-left should be red, got {top_left:?}");
         assert!(top_right.g() > top_right.r(), "top-right should be green");
         assert!(bottom_left.b() > bottom_left.r(), "bottom-left should be blue");
+    }
+
+    /// **Reported from use: undoing an added text box turned a whole real
+    /// page grey.** `remove_text` — what undoing `Annotation::Text` calls —
+    /// used to take the marked object off with `FPDFPage_RemoveObject` and
+    /// then call `FPDFPage_GenerateContent` to rebuild the stream around
+    /// the gap. That rebuild does not carry every colour space back through
+    /// unchanged: the real page it was reported on draws most of its own
+    /// diagram in vector shapes with a colour space `FPDFPage_
+    /// GenerateContent` does not, confirmed only against that real file —
+    /// **`quadrants.pdf`'s own plain `rg`-filled squares survive the old,
+    /// broken implementation just as well as the fix**, so this test alone
+    /// cannot catch a regression back to it; it only guards the ordinary
+    /// case (a simple fill surviving a text removal at all) while the real
+    /// defect stays unverified by anything portable. See the fix's own doc,
+    /// on `remove_text`, for the honest state of this.
+    #[test]
+    fn undoing_an_added_text_box_does_not_disturb_a_simple_coloured_fill() {
+        use pdf_core::document::{Annotation, Glyph};
+
+        let session = Session::open(fixture("quadrants.pdf")).expect("open");
+        session
+            .execute(pdf_core::command::Command::AddAnnotation {
+                page_index: 0,
+                annotation: Annotation::Text {
+                    text: "hello".to_string(),
+                    font: "Helvetica".to_string(),
+                    font_asset: None,
+                    size: 12.0,
+                    color: pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 },
+                    glyphs: vec![Glyph { ch: "hello".to_string(), id: 0, x: 10.0, y: 20.0, radians: 0.0 }],
+                    id: 1,
+                    restore: String::new(),
+                    frame: Vec::new(),
+                    frame_width: 0.0,
+                },
+            })
+            .expect("add text");
+
+        let (undone, _) = session.undo().expect("undo");
+        assert!(undone, "there should have been something to undo");
+
+        let raster = session.render_page(0, 1.0).expect("render");
+        let image = page_to_image(&raster);
+        let (near, far) = (100, 300);
+        let top_left = image[(near, near)];
+        let top_right = image[(far, near)];
+        let bottom_left = image[(near, far)];
+        assert!(top_left.r() > top_left.b(), "top-left should still be red, got {top_left:?}");
+        assert!(top_right.g() > top_right.r(), "top-right should still be green, got {top_right:?}");
+        assert!(bottom_left.b() > bottom_left.r(), "bottom-left should still be blue, got {bottom_left:?}");
     }
 
     #[test]
@@ -11591,6 +17386,15 @@ mod tests {
                 .history()
                 .iter()
                 .filter(|e| e.kind == Kind::Error)
+                .map(|e| e.text.clone())
+                .collect()
+        }
+
+        fn infos(app: &PagifyApp) -> Vec<String> {
+            app.cmd
+                .history()
+                .iter()
+                .filter(|e| e.kind == Kind::Info)
                 .map(|e| e.text.clone())
                 .collect()
         }
@@ -11701,6 +17505,124 @@ mod tests {
             assert!(matches!(marks(&app)[0].geom, Geom::Line(_)));
         }
 
+        /// `fill` says which state it left, so the ribbon button and the box
+        /// agree about what just happened.
+        #[test]
+        fn the_fill_command_toggles_and_says_so() {
+            let mut app = app();
+            app.submit("fill");
+            assert!(app.draw_fill);
+            assert!(infos(&app).iter().any(|s| s.contains("fill: on")), "{:?}", infos(&app));
+
+            app.submit("fill");
+            assert!(!app.draw_fill);
+            assert!(infos(&app).iter().any(|s| s.contains("fill: off")), "{:?}", infos(&app));
+        }
+
+        /// A rectangle drawn with fill off — the default — is hollow: its
+        /// outline, and nothing else.
+        #[test]
+        fn a_rectangle_drawn_without_fill_is_hollow() {
+            let mut app = app();
+            app.submit("rectangle");
+            app.submit("pick 100,100");
+            app.submit("pick 200,180");
+            assert_eq!(marks(&app).len(), 1, "errors: {:?}", errors(&app));
+            assert!(matches!(marks(&app)[0].geom, Geom::Polyline(_)));
+        }
+
+        /// Turning `fill` on before drawing a rectangle pairs it with a solid
+        /// `Geom::Hatch` pointed at its own handle — the live representation a
+        /// filled shape carries per [`fill_boundary`].
+        #[test]
+        fn a_rectangle_drawn_with_fill_on_carries_a_hatch() {
+            let mut app = app();
+            app.submit("fill");
+            app.submit("rectangle");
+            app.submit("pick 100,100");
+            app.submit("pick 200,180");
+            assert_eq!(marks(&app).len(), 2, "errors: {:?}", errors(&app));
+
+            let boundary = marks(&app).iter().find(|o| matches!(o.geom, Geom::Polyline(_)))
+                .expect("the rectangle itself");
+            let hatch = marks(&app).iter().find_map(|o| match &o.geom {
+                Geom::Hatch(h) => Some(h),
+                _ => None,
+            }).expect("a hatch pairing the fill");
+            assert_eq!(hatch.boundary_handles, vec![boundary.handle]);
+        }
+
+        /// The same, for a filled circle — the other shape the user chose.
+        #[test]
+        fn a_circle_drawn_with_fill_on_carries_a_hatch() {
+            let mut app = app();
+            app.submit("fill");
+            app.submit("circle");
+            app.submit("pick 100,400");
+            app.submit("pick 140,400");
+            assert_eq!(marks(&app).len(), 2, "errors: {:?}", errors(&app));
+            assert!(marks(&app).iter().any(|o| matches!(o.geom, Geom::Hatch(_))));
+        }
+
+        /// **The end of the chain: a filled rectangle actually reaches the
+        /// document as a filled mark, not only as a paired object in the live
+        /// layer.** Every layer above this one — `to_blob`, `commit_page`,
+        /// PDFium's path API — could each be individually right and the
+        /// feature still not work; this is the one test that would catch that.
+        #[test]
+        fn a_filled_rectangle_commits_as_a_real_fill_annotation() {
+            let mut app = app();
+            app.submit("fill");
+            app.submit("rectangle");
+            app.submit("pick 100,100");
+            app.submit("pick 200,180");
+            assert_eq!(marks(&app).len(), 2, "errors: {:?}", errors(&app));
+
+            app.commit_marks_on(&[0]).expect("commit the markup");
+
+            let annotations = app.doc.as_ref().expect("doc").session.annotations(0).expect("read them back");
+            let fills = annotations
+                .iter()
+                .filter(|a| matches!(a.annotation, pdf_core::document::Annotation::Fill { .. }))
+                .count();
+            let inks = annotations
+                .iter()
+                .filter(|a| matches!(a.annotation, pdf_core::document::Annotation::Ink { .. }))
+                .count();
+            assert_eq!(fills, 1, "the fill did not reach the document: {annotations:?}");
+            assert!(inks >= 1, "the rectangle's own outline should still be there too: {annotations:?}");
+        }
+
+        /// **The same end-to-end proof, for a shape's own colour**: setting
+        /// one through `Layer::set_color` has to survive `commit_page` and
+        /// come back as the ink's own `/C`, not the page's shared pen.
+        #[test]
+        fn a_shape_given_its_own_colour_commits_with_it_not_the_pages_pen() {
+            let mut app = app();
+            app.submit("circle");
+            app.submit("pick 100,400");
+            app.submit("pick 140,400");
+            assert_eq!(marks(&app).len(), 1, "errors: {:?}", errors(&app));
+
+            assert!(app.markup.page(0, 792.0).set_color(0, (10, 200, 90)));
+
+            app.commit_marks_on(&[0]).expect("commit the markup");
+
+            let annotations = app.doc.as_ref().expect("doc").session.annotations(0).expect("read them back");
+            let colour = annotations
+                .iter()
+                .find_map(|a| match &a.annotation {
+                    pdf_core::document::Annotation::Ink { color, .. } => Some(*color),
+                    _ => None,
+                })
+                .expect("the circle's ink annotation");
+            assert_eq!(
+                (colour.r, colour.g, colour.b),
+                (10, 200, 90),
+                "it committed with the page's pen instead of its own colour: {colour:?}"
+            );
+        }
+
         #[test]
         fn a_polyline_collects_until_it_is_resolved() {
             let mut app = app();
@@ -11790,6 +17712,93 @@ mod tests {
 
             match &marks(&app)[0].geom {
                 Geom::Line(l) => assert!((l.a.y - 350.0).abs() < 1e-6, "moved to {}", l.a.y),
+                other => panic!("{other:?}"),
+            }
+        }
+
+        /// **Reported from use: a drawn shape could only be moved by typing
+        /// `move` and clicking twice — dragging it did nothing.**
+        /// `finish_markup_grab` is what a real drag now commits through
+        /// instead; this exercises it the same direct way
+        /// `dragging_a_selected_signature_moves_it` exercises
+        /// `finish_signature_grab`.
+        #[test]
+        fn dragging_a_selected_markup_shape_moves_it() {
+            let mut app = app();
+            app.submit("l 30,250 170,250");
+            app.submit("all");
+
+            let grab = Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (40.0, -25.0) };
+            app.finish_markup_grab(0, grab);
+
+            match &marks(&app)[0].geom {
+                Geom::Line(l) => {
+                    // App space counts downwards; kernel space upwards.
+                    assert!((l.a.x - 70.0).abs() < 1e-6, "x did not move: {}", l.a.x);
+                    assert!((l.a.y - 275.0).abs() < 1e-6, "y did not move: {}", l.a.y);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+
+        /// A drag too small to mean anything commits nothing — the same
+        /// noise floor [`PagifyApp::finish_grab`] and
+        /// [`PagifyApp::finish_signature_grab`] apply.
+        #[test]
+        fn a_negligible_drag_on_a_markup_shape_changes_nothing() {
+            let mut app = app();
+            app.submit("l 30,250 170,250");
+            app.submit("all");
+
+            let grab = Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (0.4, 0.2) };
+            app.finish_markup_grab(0, grab);
+
+            match &marks(&app)[0].geom {
+                Geom::Line(l) => {
+                    assert!((l.a.x - 30.0).abs() < 1e-6, "a negligible drag moved it: {}", l.a.x);
+                    assert!((l.a.y - 250.0).abs() < 1e-6, "a negligible drag moved it: {}", l.a.y);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+
+        /// **Companion ask, arriving mid-session: "once entered it can only
+        /// be moved. the user should be able to rotate too."**
+        /// `finish_markup_rotate` is the drag-driven counterpart to typing
+        /// `rotate` twice; this checks the turn lands in the direction a
+        /// real drag implies rather than merely that *something* moved —
+        /// the sign is the part a rotation this easily gets backwards
+        /// silently (see that function's own doc for the derivation this
+        /// confirms).
+        #[test]
+        fn dragging_the_rotate_handle_turns_a_drawn_shape() {
+            let mut app = app();
+            app.submit("l 100,100 200,100");
+            app.submit("all");
+
+            let bounds = app.markup_selection_bounds(0).expect("a bounds to rotate about");
+            let cx = (bounds.left + bounds.right) / 2.0;
+            let cy = (bounds.top + bounds.bottom) / 2.0;
+
+            // The drag: from "12 o'clock" of the selection's own centre to
+            // "3 o'clock" — a quarter turn the way a clock's hands actually
+            // move.
+            let from = AppPoint { x: cx as f64, y: (cy - 50.0) as f64 };
+            let by = (50.0, 50.0);
+            let grab = Grab { handle: Some(Handle::Rotate), from, by };
+            app.finish_markup_rotate(0, grab, bounds);
+
+            match &marks(&app)[0].geom {
+                Geom::Line(l) => {
+                    // Kernel space is y-up. A clockwise quarter turn about
+                    // the line's own midpoint carries its left end (9
+                    // o'clock) up to 12, and its right end (3 o'clock) down
+                    // to 6.
+                    assert!((l.a.x - 150.0).abs() < 1e-3, "a = {:?}", l.a);
+                    assert!((l.a.y - 150.0).abs() < 1e-3, "the left end should have swung up: a = {:?}", l.a);
+                    assert!((l.b.x - 150.0).abs() < 1e-3, "b = {:?}", l.b);
+                    assert!((l.b.y - 50.0).abs() < 1e-3, "the right end should have swung down: b = {:?}", l.b);
+                }
                 other => panic!("{other:?}"),
             }
         }
@@ -11939,6 +17948,31 @@ mod tests {
                         panic!("{}/{label} runs `{command}`, which Pagify refuses ({token})", tab.label())
                     }
                     _ => {}
+                }
+            }
+        }
+    }
+
+    /// **Reported from use, twice.** First: clicking "Add Text" failed
+    /// immediately with "the words to write, as in `addtext Draft`" — the
+    /// button ran bare `addtext`, which back then had no words yet to
+    /// place, so it was made to pre-fill the box with a trailing space
+    /// instead of submitting. Second: typing the words into the command box
+    /// *before* knowing where they would land turned out to be "totally
+    /// confusing and unintuitive" on its own — so bare `addtext` now drags
+    /// out a box to type into instead (see `begin_text_box`), and every Add
+    /// Text button should run it bare, submitting immediately, the same
+    /// click-and-place shape Add Images already has.
+    #[test]
+    fn add_text_buttons_submit_bare_and_arm_the_box_tool() {
+        for tab in Tab::ALL {
+            for (_glyph, label, command) in tab.leading().iter().chain(tab.buttons()) {
+                if command.trim() == "addtext" {
+                    assert_eq!(
+                        *command, "addtext",
+                        "{}/{label} runs `{command}`, not bare `addtext`",
+                        tab.label()
+                    );
                 }
             }
         }
@@ -12233,6 +18267,268 @@ mod reading_tests {
         app.submit("find");
         assert!(said(&app).contains("usage"), "no usage shown:\n{}", said(&app));
     }
+
+    /// **"when searched word is replaced with a replacement word it should
+    /// have all the same properties of the replaced word."** Checked
+    /// against the run's own size and colour, read before and after —
+    /// `replace_all` sends `TextStyle::default()`, which is what keeps the
+    /// byte-safe path from touching anything but the words themselves.
+    #[test]
+    fn replace_all_swaps_the_word_and_keeps_the_runs_own_style() {
+        let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
+        let before = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs")[0].clone();
+        assert!(before.text.contains("fox"), "fixture assumption: {:?}", before.text);
+
+        let said = app.replace_all("fox", "wolf").expect("replace failed");
+        assert!(said.contains('1'), "should have reported one replacement: {said}");
+
+        let after = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let changed = after
+            .iter()
+            .find(|r| r.object == before.object)
+            .expect("the run should still be there");
+        assert!(
+            changed.text.contains("wolf") && !changed.text.contains("fox"),
+            "the word was not swapped: {:?}",
+            changed.text
+        );
+        assert_eq!(changed.size, before.size, "the size changed");
+        assert_eq!(
+            (changed.color.r, changed.color.g, changed.color.b),
+            (before.color.r, before.color.g, before.color.b),
+            "the colour changed"
+        );
+        // The box itself is free to grow — "wolf" is wider than "fox" — but
+        // where it starts and its own line must not move.
+        assert_eq!(changed.rect.left, before.rect.left, "the run's start moved");
+        assert_eq!(changed.rect.top, before.rect.top, "the run changed line");
+        assert_eq!(changed.rect.bottom, before.rect.bottom, "the run changed line");
+    }
+
+    #[test]
+    fn replace_all_reaches_every_page_and_every_matching_run() {
+        // "the" appears in more than one of this fixture's two columns.
+        let mut app = PagifyApp::new(Some(&fixture("two-column.pdf")));
+        let before = app.doc.as_ref().unwrap().session.characters(0).expect("chars");
+        let before_hits = before.find("the").len();
+        assert!(before_hits > 2, "only {before_hits} matches — is the fixture right?");
+
+        // Not "THE": `Characters::find` case-folds, so it would still find
+        // its own replacement and the check below would prove nothing.
+        let said = app.replace_all("the", "XYZ").expect("replace failed");
+        assert!(
+            said.contains(&before_hits.to_string()),
+            "should have reported every occurrence, said: {said}"
+        );
+
+        let after = app.doc.as_ref().unwrap().session.characters(0).expect("chars");
+        assert_eq!(after.find("the").len(), 0, "some occurrences were left behind");
+    }
+
+    #[test]
+    fn replace_all_says_so_when_nothing_matches() {
+        let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
+        let before = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+
+        let said = app.replace_all("zzzznotpresent", "anything").expect("should not error");
+        assert!(said.contains("not found"), "no explanation: {said}");
+
+        let after = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        assert_eq!(before, after, "nothing should have changed");
+    }
+
+    #[test]
+    fn replace_all_needs_something_to_search_for() {
+        let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
+        assert!(app.replace_all("", "anything").is_err());
+    }
+
+    /// **"an option to just search and replace one by one."** Exactly one
+    /// occurrence changes per call — the rest of the document's own matches
+    /// are left exactly as they were, in their own size and colour.
+    #[test]
+    fn replace_current_changes_only_the_current_match() {
+        let mut app = PagifyApp::new(Some(&fixture("two-column.pdf")));
+        app.find("the");
+        let before_count = app.find_hits.len();
+        assert!(before_count > 2, "only {before_count} matches — is the fixture right?");
+        let before_style = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+
+        // Not "THE": `Characters::find` case-folds, so counting "the" left
+        // afterwards would still count this one's own replacement too.
+        let said = app.replace_current("the", "XYZ").expect("replace failed");
+        assert!(said.contains('1'), "should say one was replaced: {said}");
+
+        app.find("the");
+        assert_eq!(
+            app.find_hits.len(),
+            before_count - 1,
+            "should have changed exactly one match"
+        );
+
+        let after_style = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let mut unchanged = 0;
+        for was in &before_style {
+            if let Some(now) = after_style.iter().find(|r| r.object == was.object) {
+                if now.text == was.text {
+                    assert_eq!(now.size, was.size, "an untouched run's size changed");
+                    assert_eq!(
+                        (now.color.r, now.color.g, now.color.b),
+                        (was.color.r, was.color.g, was.color.b),
+                        "an untouched run's colour changed"
+                    );
+                    unchanged += 1;
+                }
+            }
+        }
+        assert_eq!(
+            unchanged,
+            before_style.len() - 1,
+            "more than one run's text changed"
+        );
+    }
+
+    #[test]
+    fn replace_current_says_when_none_are_left() {
+        // "fox" appears exactly once in this fixture.
+        let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
+        let said = app.replace_current("fox", "wolf").expect("replace failed");
+        assert!(said.contains("none left"), "{said}");
+        assert!(app.find_hits.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod spell_check_tests {
+    use super::*;
+
+    fn fixture(name: &str) -> String {
+        format!(
+            "{}/../../../rust/pdf_core/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    fn said(app: &PagifyApp) -> String {
+        app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn a_clean_document_reports_nothing_to_review() {
+        // Two pangrams — every word real.
+        let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
+        app.submit("spelling");
+
+        let panel = app.spelling.as_ref().expect("the panel did not open");
+        assert!(panel.found.is_empty(), "flagged real words: {:?}", panel.found);
+        assert!(said(&app).contains("no misspelled"), "{}", said(&app));
+    }
+
+    /// **"text the user might have added"** — a word typed in through the
+    /// app is ordinary page content by the time `text_runs` reads it back
+    /// (see `scan_spelling`'s own doc), so it is found exactly the way a
+    /// typo already in the file would be.
+    #[test]
+    fn a_typo_just_typed_in_is_found() {
+        let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
+        app.write_text_at(0, AppPoint { x: 40.0, y: 400.0 }, "This is a tpyo")
+            .expect("written");
+
+        app.submit("spelling");
+        let panel = app.spelling.as_ref().expect("the panel did not open");
+        assert!(
+            panel.found.iter().any(|m| m.word == "tpyo"),
+            "the typo was not found: {:?}",
+            panel.found
+        );
+    }
+
+    /// **Not "DALI" — a comprehensive dictionary is not choosy, and "dali"
+    /// happens to already be one of its 370,000 entries.** "PDF" has no such
+    /// luck, so it stands in as the acronym a plain English word list was
+    /// never going to know regardless of the all-capitals rule below.
+    #[test]
+    fn an_acronym_is_not_flagged() {
+        let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
+        app.write_text_at(0, AppPoint { x: 40.0, y: 400.0 }, "a PDF fixture")
+            .expect("written");
+
+        app.submit("spelling");
+        let panel = app.spelling.as_ref().expect("the panel did not open");
+        assert!(
+            panel.found.iter().all(|m| m.word != "PDF"),
+            "an all-capitals acronym was flagged: {:?}",
+            panel.found
+        );
+    }
+
+    /// **"it should have all the same properties of the replaced word"** —
+    /// the same guarantee `replace_current` gives, checked here for a fix
+    /// applied from the spelling panel specifically.
+    #[test]
+    fn changing_a_typo_fixes_it_and_keeps_the_runs_style() {
+        let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
+        app.write_text_at(0, AppPoint { x: 40.0, y: 400.0 }, "This is a tpyo")
+            .expect("written");
+        let before = app
+            .doc
+            .as_ref()
+            .unwrap()
+            .session
+            .text_runs(0)
+            .expect("runs")
+            .into_iter()
+            .find(|r| r.text.contains("tpyo"))
+            .expect("the written run");
+
+        app.apply_spelling_change(0, before.object, "tpyo", "typo").expect("change failed");
+
+        let after = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let changed = after
+            .iter()
+            .find(|r| r.object == before.object)
+            .expect("the run should still be there");
+        assert!(changed.text.contains("typo"), "not fixed: {:?}", changed.text);
+        assert_eq!(changed.size, before.size, "the size changed");
+        assert_eq!(
+            (changed.color.r, changed.color.g, changed.color.b),
+            (before.color.r, before.color.g, before.color.b),
+            "the colour changed"
+        );
+
+        // And a fresh scan no longer finds it.
+        app.submit("spelling");
+        let panel = app.spelling.as_ref().expect("panel");
+        assert!(!panel.found.iter().any(|m| m.word == "tpyo"), "still flagged after the fix");
+    }
+
+    #[test]
+    fn suggestions_offer_the_intended_word() {
+        let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
+        app.write_text_at(0, AppPoint { x: 40.0, y: 400.0 }, "quite definately so")
+            .expect("written");
+
+        app.submit("spelling");
+        let panel = app.spelling.as_ref().expect("panel");
+        let found = panel
+            .found
+            .iter()
+            .find(|m| m.word == "definately")
+            .expect("the typo should be found");
+        let suggestions = spelling::suggest(&found.word, 5);
+        assert!(
+            suggestions.iter().any(|s| s == "definitely"),
+            "expected \"definitely\" among {suggestions:?}"
+        );
+    }
+
+    #[test]
+    fn the_panel_needs_a_document_open() {
+        let mut app = PagifyApp::new(None);
+        app.submit("spelling");
+        assert!(app.spelling.is_none(), "opened with nothing to check");
+        assert!(said(&app).contains("nothing open"), "{}", said(&app));
+    }
 }
 
 #[cfg(test)]
@@ -12323,6 +18619,58 @@ mod undo_wiring_tests {
             _ => unreachable!(),
         };
         assert!((back - 100.0).abs() < 1e-6, "the move was not undone: y={back}");
+    }
+
+    /// **Reported from use: a shape drawn earlier got undone instead of a
+    /// text box just added a moment later.** `undo` always tried the markup
+    /// layer's own stack first, no matter which of it and the document's own
+    /// command history had actually changed most recently — wrong here,
+    /// since drawing the line happened first and adding the text happened
+    /// last. A plain "undo" has to reverse the *last* thing that happened,
+    /// whichever of the two stacks that turns out to live on.
+    #[test]
+    fn undo_reverses_whichever_stack_changed_more_recently() {
+        let mut app = app();
+        app.submit("l 10,10 100,100");
+        assert_eq!(marks(&app), 1, "the line did not draw:\n{}", said(&app));
+        // A frame's worth of polling between the two actions — see
+        // `track_undo_recency`'s own doc for why order is only told apart
+        // this way, not by comparing two raw counts at the end.
+        app.track_undo_recency();
+
+        app.write_text_at(0, AppPoint { x: 200.0, y: 200.0 }, "HELLO").expect("written");
+        let runs_before = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        assert!(runs_before.iter().any(|r| r.text.contains("HELLO")), "the text was not written");
+
+        app.submit("undo");
+
+        assert_eq!(marks(&app), 1, "the line was undone instead of the text");
+        let runs_after = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        assert!(
+            !runs_after.iter().any(|r| r.text.contains("HELLO")),
+            "the text was still there — the wrong stack was undone:\n{}",
+            said(&app)
+        );
+    }
+
+    /// The same, in the other order: text written first, a shape drawn
+    /// after it, so undo must reverse the *shape* this time.
+    #[test]
+    fn undo_still_prefers_the_layer_when_that_is_what_changed_last() {
+        let mut app = app();
+        app.write_text_at(0, AppPoint { x: 200.0, y: 200.0 }, "HELLO").expect("written");
+        app.track_undo_recency();
+        app.submit("l 10,10 100,100");
+        assert_eq!(marks(&app), 1, "the line did not draw:\n{}", said(&app));
+
+        app.submit("undo");
+
+        assert_eq!(marks(&app), 0, "the shape should have been the one undone:\n{}", said(&app));
+        let runs_after = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        assert!(
+            runs_after.iter().any(|r| r.text.contains("HELLO")),
+            "the text was undone instead of the shape"
+        );
     }
 
     #[test]
@@ -13001,6 +19349,40 @@ mod pointer_tests {
         assert!(app.doc.is_some(), "the right password did not open it:\n{}", said(&app));
     }
 
+    /// **The password that opened the file locks its own content too.**
+    ///
+    /// Reported from use: having just typed the one password this document
+    /// asks for, being asked for it again to lock a passage inside the same
+    /// file read as the program not remembering a password it was just given
+    /// — not as a second, deliberately different one. Modelled on
+    /// `a_second_lock_uses_the_passcode_the_first_one_was_given`, which pins
+    /// the same rule for two locks in a row; this pins it for the password
+    /// that opened the document in the first place.
+    #[test]
+    fn the_password_that_opened_the_file_locks_its_own_content_too() {
+        let mut app = PagifyApp::new(None);
+        app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
+        let path = app.awaiting_open().expect("it did not ask for a password");
+        app.answer_open_password(&path, "pagify");
+        assert!(app.doc.is_some(), "control: it should have opened");
+
+        app.ask_or_reuse_passcode(Awaiting::LockPages(vec![0]), "should never be shown");
+        assert!(
+            app.awaiting_password.is_none(),
+            "it asked for a passcode it was already given to open the file"
+        );
+        assert!(
+            !said(&app).contains("should never be shown"),
+            "it showed the prompt anyway:\n{}",
+            said(&app)
+        );
+        assert!(
+            app.doc.as_ref().is_some_and(|d| !d.session.locked_pages().is_empty()),
+            "the lock did not happen:\n{}",
+            said(&app)
+        );
+    }
+
     /// **The same thing, but typed into the box and submitted the way the
     /// window's own field would be** — `submit`, not `answer_open_password`
     /// directly, so this actually goes through `consume_password_line`.
@@ -13397,6 +19779,369 @@ mod ui_tests {
              picture: before {:?}, after {:?}",
             image.rect,
             resized.rect
+        );
+    }
+
+    /// **Reported from use: a drawn shape could only be moved by typing
+    /// `move` and clicking twice — a mouse drag on it did nothing but start
+    /// a marquee.** Through the real pointer path this time, not the typed
+    /// command chain `move_moves_once_something_is_selected` already covers.
+    #[test]
+    fn dragging_a_markup_shape_through_the_real_pointer_path_moves_it() {
+        let mut h = harness("pictures.pdf");
+        h.state_mut().submit("l 300,300 400,300");
+        h.state_mut().submit("all");
+        h.run_steps(3);
+
+        let view = h.state().last_view.expect("the page was never drawn");
+        let before = match &h.state().markup.existing(0).unwrap().objects()[0].geom {
+            cad_kernel::Geom::Line(l) => *l,
+            other => panic!("{other:?}"),
+        };
+        let space = h.state().markup.existing(0).unwrap().space();
+        let start_app = space.from_kernel(cad_kernel::Vec2::new(
+            (before.a.x + before.b.x) / 2.0,
+            (before.a.y + before.b.y) / 2.0,
+        ));
+        let end_app = AppPoint { x: start_app.x + 50.0, y: start_app.y - 30.0 };
+        drag(&mut h, view.to_screen(start_app), view.to_screen(end_app));
+
+        let after = match &h.state().markup.existing(0).unwrap().objects()[0].geom {
+            cad_kernel::Geom::Line(l) => *l,
+            other => panic!("{other:?}"),
+        };
+        // Not an exact delta: kittest's synthetic pointer-move sequence does
+        // not always land on the last requested position by the frame a
+        // release is processed — see `dragging_an_object_handle_through_the
+        // _real_pointer_path_resizes_it`, which checks direction and size
+        // for the same reason rather than an exact number. App space counts
+        // downwards, kernel space upwards, so a drag up the screen is a
+        // *positive* change in kernel y.
+        let (dx, dy) = (after.a.x - before.a.x, after.a.y - before.a.y);
+        assert!(dx > 20.0, "did not move right through a real drag: {before:?} then {after:?}");
+        assert!(dy > 15.0, "did not move up through a real drag: {before:?} then {after:?}");
+    }
+
+    /// **The properties panel's own "Filled" checkbox, clicked for real** —
+    /// not `Layer::set_filled` called directly, which `markup::tests`
+    /// already covers, but the actual widget the panel puts on screen when
+    /// a fillable shape is selected.
+    #[test]
+    fn the_filled_checkbox_in_the_properties_panel_fills_the_selected_shape() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut h = harness("pictures.pdf");
+        h.state_mut().submit("circle");
+        h.state_mut().submit("pick 300,300");
+        h.state_mut().submit("pick 340,300");
+        h.state_mut().submit("all");
+        h.run_steps(3);
+        assert!(
+            !h.state().markup.existing(0).unwrap().is_filled(0),
+            "the circle started out filled, so this proves nothing"
+        );
+
+        h.get_by_label_contains("Filled").click();
+        h.run_steps(2);
+
+        assert!(
+            h.state().markup.existing(0).unwrap().is_filled(0),
+            "clicking the panel's Filled checkbox did not fill the shape"
+        );
+    }
+
+    /// **Clicking Add Text arms the click-and-drag box, rather than putting
+    /// anything in the command line** — the actual click, through the real
+    /// ribbon button, not just the static check
+    /// `add_text_buttons_submit_bare_and_arm_the_box_tool` runs against the
+    /// button table.
+    #[test]
+    fn clicking_add_text_arms_the_box_tool_rather_than_filling_the_command_box() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut h = harness("two-column.pdf");
+        h.state_mut().ribbon = Tab::Edit;
+        h.run_steps(2);
+
+        h.get_by_label_contains("Add Text").click();
+        h.run_steps(2);
+
+        assert!(
+            h.state().cmd.input().is_empty(),
+            "the button left something in the command box: {:?}",
+            h.state().cmd.input()
+        );
+        assert!(
+            matches!(h.state().pending.as_ref().map(|p| &p.kind), Some(PendingKind::PlaceText)),
+            "clicking Add Text should have armed the text-box tool"
+        );
+        let history: Vec<String> =
+            h.state().cmd.history().iter().map(|e| e.text.clone()).collect();
+        assert!(
+            !history.iter().any(|s| s.contains("the words to write")),
+            "it errored instead of arming the tool: {history:?}"
+        );
+    }
+
+    /// A box smaller than a click's own jitter is refused rather than
+    /// opened — nothing typed into it could ever fit.
+    #[test]
+    fn a_text_box_too_small_to_type_into_is_refused() {
+        let mut h = harness("two-column.pdf");
+        let result = h.state_mut().begin_text_box(
+            0,
+            AppPoint { x: 50.0, y: 500.0 },
+            AppPoint { x: 52.0, y: 501.0 },
+        );
+        assert!(result.is_err(), "a two-point box should have been refused");
+        assert!(h.state().new_text_box.is_none());
+    }
+
+    /// A box smaller than the default font size is not refused — the font
+    /// size shrinks to fit the box instead, in both directions.
+    #[test]
+    fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
+        let mut h = harness("two-column.pdf");
+        h.state_mut()
+            .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 508.0 })
+            .expect("a box above the noise floor should open");
+        assert_eq!(
+            h.state().new_text_box.as_ref().map(|b| b.size),
+            Some(8.0),
+            "an 8pt-tall box should have shrunk the font to 8pt, not refused or kept the 14pt default"
+        );
+
+        h.state_mut()
+            .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 55.0, y: 540.0 })
+            .expect("a narrow box above the noise floor should open");
+        assert_eq!(
+            h.state().new_text_box.as_ref().map(|b| b.size),
+            Some(5.0),
+            "a 5pt-wide box should have shrunk the font to 5pt too, not just gone by height"
+        );
+
+        h.state_mut()
+            .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
+            .expect("a normal box should still open");
+        assert_eq!(
+            h.state().new_text_box.as_ref().map(|b| b.size),
+            Some(14.0),
+            "a box already bigger than the default should keep the usual default size"
+        );
+    }
+
+    /// **The click-and-drag box, end to end**: drag one out, type into it,
+    /// press Add to Page in the panel, and the words land on the page as a
+    /// real run — not the old flow where the words had to be typed into the
+    /// command box before anywhere to put them was known.
+    #[test]
+    fn dragging_out_a_text_box_and_inserting_writes_a_real_run() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut h = harness("two-column.pdf");
+        h.state_mut()
+            .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
+            .expect("box opened");
+        h.run_steps(2);
+        assert!(h.state().new_text_box.is_some(), "the box should be open");
+
+        h.state_mut().new_text_box.as_mut().expect("open").buffer = "Hello there".to_string();
+        h.run_steps(1);
+
+        h.get_by_label_contains("Add to Page").click();
+        h.run_steps(2);
+
+        assert!(h.state().new_text_box.is_none(), "Add to Page should have closed the box");
+        let text = h
+            .state()
+            .doc
+            .as_ref()
+            .expect("open")
+            .session
+            .characters(0)
+            .map(|c| c.text().to_string())
+            .unwrap_or_default();
+        assert!(text.contains("Hello") && text.contains("there"), "the typed words are not on the page: {text:?}");
+    }
+
+    /// Cancel discards what was typed — the box closes and nothing is
+    /// written, the same as Escape.
+    #[test]
+    fn canceling_a_new_text_box_writes_nothing() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut h = harness("two-column.pdf");
+        h.state_mut()
+            .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
+            .expect("box opened");
+        h.state_mut().new_text_box.as_mut().expect("open").buffer = "should not appear".to_string();
+        h.run_steps(2);
+
+        h.get_by_label_contains("Cancel").click();
+        h.run_steps(1);
+
+        assert!(h.state().new_text_box.is_none(), "Cancel should have closed the box");
+        let text = h
+            .state()
+            .doc
+            .as_ref()
+            .expect("open")
+            .session
+            .characters(0)
+            .map(|c| c.text().to_string())
+            .unwrap_or_default();
+        assert!(!text.contains("should not appear"), "Cancel wrote the words anyway");
+    }
+
+    /// Escape while composing a new text box discards it too, the same as
+    /// every other tool it clears when put down.
+    #[test]
+    fn escaping_a_new_text_box_discards_it() {
+        let mut h = harness("two-column.pdf");
+        h.state_mut()
+            .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
+            .expect("box opened");
+        assert!(h.state().new_text_box.is_some());
+
+        h.state_mut().escape();
+
+        assert!(h.state().new_text_box.is_none(), "Escape should have discarded the box");
+    }
+
+    /// **The alignment picked in the panel actually moves where the line
+    /// lands** — "Right" should end up near the box's right edge, not its
+    /// left, and the two must differ by most of the box's own width for a
+    /// short word in a wide box.
+    #[test]
+    fn right_aligned_text_lands_near_the_boxs_right_edge() {
+        use egui_kittest::kittest::Queryable;
+
+        let mut h = harness("two-column.pdf");
+        let (left, right) = (50.0, 400.0);
+        h.state_mut()
+            .begin_text_box(0, AppPoint { x: left, y: 500.0 }, AppPoint { x: right, y: 540.0 })
+            .expect("box opened");
+        h.run_steps(2);
+        h.state_mut().new_text_box.as_mut().expect("open").buffer = "Hi".to_string();
+        h.run_steps(1);
+
+        h.get_by_label("Right").click();
+        h.run_steps(1);
+        assert_eq!(
+            h.state().new_text_box.as_ref().map(|b| b.align),
+            Some(TextAlign::Right),
+            "clicking Right should have picked it"
+        );
+
+        h.get_by_label_contains("Add to Page").click();
+        h.run_steps(2);
+
+        let runs = h.state().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        let mine = runs.iter().find(|r| r.text.contains("Hi")).expect("the written run");
+        let midpoint = (left + right) as f32 / 2.0;
+        assert!(
+            mine.origin.x > midpoint,
+            "a right-aligned short word should sit past the middle of the box: origin.x={}, box=[{left},{right}]",
+            mine.origin.x
+        );
+    }
+
+    /// **Dragging from inside a form's own shape starts a marquee, not a
+    /// grab.** `thing_at`'s `grouped` catch-all — offered so a *click* on a
+    /// form's shape has something to land on, since `shapes()` only ever
+    /// looks at depth 0 — used to also answer a drag that started there,
+    /// which meant a drag could never begin empty-handed enough to become a
+    /// marquee anywhere the page's own forms reached. A plain click there
+    /// still reaches the group exactly as before.
+    #[test]
+    fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
+        let mut h = harness("forms.pdf");
+        let view = h.state().last_view.expect("the page was never drawn");
+        h.state_mut().submit("editobject");
+        h.run_steps(1);
+
+        // The centre of the shape `forms.pdf` draws inside its own form —
+        // found only through `grouped`, never `words`/`pictures`/`shapes`.
+        let inside_group = AppPoint { x: 142.0, y: 272.0 };
+
+        let from = view.to_screen(inside_group);
+        let to = view.to_screen(AppPoint { x: inside_group.x + 60.0, y: inside_group.y + 40.0 });
+        drag(&mut h, from, to);
+        let grabbed_the_group =
+            h.state().selected.as_ref().is_some_and(|s| s.what == "the group it is drawn in");
+        assert!(
+            !grabbed_the_group,
+            "a drag starting inside the form's shape grabbed the whole group instead of \
+             starting a marquee: {:?}",
+            h.state().selected
+        );
+
+        // The same spot, clicked rather than dragged, still reaches the
+        // group exactly as it always did — this is about what a *drag*
+        // starts, not about taking the click away from it.
+        click(&mut h, from);
+        assert_eq!(
+            h.state().selected.as_ref().map(|s| s.what),
+            Some("the group it is drawn in"),
+            "a plain click on the same spot should still select the group: {:?}",
+            h.state().selected
+        );
+    }
+
+    /// **Reported from use: dragging out a marquee across several objects
+    /// kept grabbing and moving whichever one the press happened to land
+    /// on first.** A drag starting directly on an *ordinary, unselected*
+    /// picture — not just the form-group catch-all the test above covers —
+    /// must draw a marquee too, not move it. Selecting one thing is only
+    /// ever a plain click now; a drag always means the marquee, unless it
+    /// starts on something already selected (see the test below).
+    #[test]
+    fn dragging_an_unselected_picture_starts_a_marquee_not_a_grab() {
+        let mut h = harness("pictures.pdf");
+        let view = h.state().last_view.expect("the page was never drawn");
+        h.state_mut().submit("editobject");
+        h.run_steps(1);
+
+        let image = h.state().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        assert!(h.state().selected.is_none(), "nothing should be selected yet");
+        let middle = view.to_screen(AppPoint {
+            x: ((image.rect.left + image.rect.right) / 2.0) as f64,
+            y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
+        });
+
+        drag(&mut h, middle, middle + egui::vec2(60.0, 40.0));
+
+        let after = h.state().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        assert_eq!(
+            after.rect, image.rect,
+            "the picture moved — a drag starting on it should have drawn a marquee instead"
+        );
+    }
+
+    /// The other half of the fix above: a picture already selected by a
+    /// plain click still moves on a drag starting on its own body — moving
+    /// something did not become harder, it just now takes the click first.
+    #[test]
+    fn dragging_an_already_selected_pictures_body_still_moves_it() {
+        let mut h = harness("pictures.pdf");
+        let view = h.state().last_view.expect("the page was never drawn");
+        h.state_mut().submit("editobject");
+        h.run_steps(1);
+
+        let image = h.state().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        let middle = view.to_screen(AppPoint {
+            x: ((image.rect.left + image.rect.right) / 2.0) as f64,
+            y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
+        });
+        click(&mut h, middle);
+        assert!(h.state().selected.is_some(), "the click should have selected the picture");
+
+        drag(&mut h, middle, middle + egui::vec2(60.0, 40.0));
+
+        let after = h.state().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        assert_ne!(
+            after.rect, image.rect,
+            "a drag on the already-selected picture's own body should still move it"
         );
     }
 
@@ -14321,7 +21066,7 @@ mod ui_tests {
     fn an_unbuilt_button_says_so_without_opening_the_history() {
         let mut h = harness("text-lines.pdf");
         h.state_mut().command_open = false;
-        h.state_mut().submit("spelling");
+        h.state_mut().submit("add3d");
         h.run_steps(2);
 
         let last = h
@@ -14441,11 +21186,46 @@ mod ui_tests {
         );
     }
 
+    /// **Opening the font picker takes the caret away from the run's own
+    /// text box.** Reported from use: typing to filter the font list moved
+    /// the page — because the filter field never asked for focus, so the
+    /// keystrokes kept landing in the run editor behind it, rewriting the
+    /// words being edited instead of searching anything.
+    #[test]
+    fn opening_the_font_picker_takes_focus_off_the_run_editor() {
+        let mut h = harness("text-lines.pdf");
+        h.state_mut().submit("edittext");
+        h.run_steps(1);
+        let word = a_character_on_screen(&mut h);
+        click(&mut h, word);
+        h.run_steps(2);
+
+        let run = h.state().editing_run.clone().expect("no run was picked");
+        let editor_id = egui::Id::new(("run-editor", run.page, run.object));
+        assert!(h.ctx.memory(|m| m.has_focus(editor_id)), "setup: the editor should hold the caret");
+
+        h.state_mut().font_picker_open = true;
+        h.run_steps(2);
+
+        assert!(
+            !h.ctx.memory(|m| m.has_focus(editor_id)),
+            "the run editor kept the caret once the font picker opened over it"
+        );
+    }
+
     /// **Typing in the editor and pressing Enter applies the change.**
     ///
-    /// The way anybody would try it first, before looking for a button.
+    /// **Reported from use: a change went live the moment Enter was pressed,
+    /// before the Apply button anybody could see was ever touched.** A
+    /// paragraph's own multiline box already had to treat Enter as "add a
+    /// line" rather than "submit"; a single line used to be the odd one out.
+    /// Now neither submits on Enter — only Apply does, for both, the same
+    /// way `the_run_editor_apply_button_can_be_pressed` proves it for this
+    /// exact scenario. Enter still does something, though — it adds the line
+    /// `a_single_run_can_grow_a_second_line_in_its_own_style` proves gets
+    /// written out correctly once Apply *is* pressed.
     #[test]
-    fn typing_in_the_run_editor_and_pressing_enter_applies_it() {
+    fn pressing_enter_in_the_run_editor_does_not_apply_it() {
         let mut h = harness("text-lines.pdf");
         h.state_mut().submit("edittext");
         h.run_steps(1);
@@ -14477,13 +21257,23 @@ mod ui_tests {
         }
         h.run_steps(2);
 
-        assert!(h.state().editing_run.is_none(), "Enter did not finish the edit");
+        assert!(
+            h.state().editing_run.is_some(),
+            "Enter closed the editor — it should take a click on Apply, not a keystroke"
+        );
+        // A newline, not nothing — Enter now adds a line here the same way
+        // it already did in a paragraph's own box — but still no submit.
+        assert_eq!(
+            h.state().editing_run.as_ref().unwrap().buffer,
+            "TYPED\n",
+            "Enter should have added a line, and nothing more, still unapplied"
+        );
         let app = h.state_mut();
         app.text = None;
         let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
         assert!(
-            page.contains("TYPED"),
-            "Enter changed nothing on the page:\n{page}\nwas: {original}"
+            !page.contains("TYPED"),
+            "Enter changed the page before Apply was ever pressed:\n{page}\nwas: {original}"
         );
     }
 
@@ -14789,6 +21579,51 @@ mod ui_tests {
         assert!((run.size - 22.0).abs() < 0.5, "the size was not applied: {}", run.size);
     }
 
+    /// **"i can't increase the font sizes."** `apply_edited_run` used to
+    /// send `edit.style` whole, and every field on it is seeded with the
+    /// run's own *current* colour and position from the moment the editor
+    /// opens — so a size-only change also asserted an unchanged colour and
+    /// position right back at their own values, which reads to `pdf_core`
+    /// as three things changing rather than one and sends it down the path
+    /// that regenerates the whole page. Proven here by changing only the
+    /// size and confirming the colour underneath never had a reason to move
+    /// at all.
+    #[test]
+    fn a_runs_size_can_be_changed_alone_without_touching_its_colour() {
+        let mut h = harness("text-lines.pdf");
+        h.state_mut().submit("edittext");
+        h.run_steps(1);
+        let at = a_character_on_screen(&mut h);
+        click(&mut h, at);
+        h.run_steps(2);
+
+        let (object, before_color, new_size) = {
+            let app = h.state_mut();
+            let edit = app.editing_run.as_mut().expect("no run");
+            let before_color = edit.style.color;
+            let new_size = edit.style.size.unwrap_or(12.0) + 8.0;
+            edit.style.size = Some(new_size);
+            (edit.object, before_color, new_size)
+        };
+        let words = h.state().editing_run.as_ref().unwrap().original.clone();
+        h.state_mut().submit(&words);
+        h.run_steps(2);
+
+        let run = h
+            .state()
+            .doc
+            .as_ref()
+            .unwrap()
+            .session
+            .text_runs(0)
+            .expect("runs")
+            .into_iter()
+            .find(|r| r.object == object)
+            .expect("the run");
+        assert!((run.size - new_size).abs() < 0.5, "the size was not applied: {}", run.size);
+        assert_eq!(Some(run.color), before_color, "the colour moved even though it was never touched");
+    }
+
     #[test]
     fn an_edited_run_can_be_undone() {
         let mut h = harness("text-lines.pdf");
@@ -14880,10 +21715,23 @@ mod ui_tests {
         h.state_mut().submit("addtext DRAFT");
         h.run_steps(1);
         assert!(h.state().pending.is_some(), "addtext did not ask where");
+        // A stale snapshot, from before the words landed — the state a
+        // person looking at the page already put it in.
+        let _ = h.state_mut().foreign_marks(0);
 
         let at = a_character_on_screen(&mut h) + egui::vec2(0.0, 90.0);
         click(&mut h, at);
         h.run_steps(2);
+
+        // **Reported from use: a freshly written run drew from a stale page
+        // texture, and stayed invisible to hit-testing until the page was
+        // left and returned to.** `write_text_at` has to invalidate both
+        // caches the moment the words land, the same way placing a picture
+        // or a signature already does.
+        assert!(
+            h.state().foreign.is_none(),
+            "the foreign-marks cache was not invalidated"
+        );
 
         let app = h.state_mut();
         app.text = None;
@@ -14912,12 +21760,19 @@ mod ui_tests {
         assert!(!after.contains("DRAFT"), "undo left the words on the page");
     }
 
+    /// Bare `addtext` — no words typed — arms the click-and-drag box rather
+    /// than refusing outright: see `begin_text_box` and the ribbon buttons,
+    /// which now run exactly this. `addtext <words>` still wants a real
+    /// string, since `Write` has nowhere else to get one from.
     #[test]
-    fn writing_nothing_is_refused_rather_than_placing_an_empty_mark() {
+    fn bare_addtext_arms_the_box_tool_not_an_empty_mark() {
         let mut h = harness("text-lines.pdf");
         h.state_mut().submit("addtext");
         h.run_steps(1);
-        assert!(h.state().pending.is_none(), "an empty string armed the tool");
+        assert!(
+            matches!(h.state().pending.as_ref().map(|p| &p.kind), Some(PendingKind::PlaceText)),
+            "an empty string should arm the text-box tool, not refuse or place an empty mark"
+        );
     }
 
     /// A highlighter is a thing you pick up and then use.
@@ -15311,6 +22166,357 @@ mod raster_scale_tests {
             assert_eq!(got, raster_scale(i as f32 / 10.0), "not deterministic");
             last = got;
         }
+    }
+}
+
+#[cfg(test)]
+mod run_editor_font_size_tests {
+    use super::run_editor_font_size;
+
+    /// **The bug, pinned down**: an eight-line paragraph's box is roughly
+    /// eight lines tall. Before this divided by the line count, the
+    /// fallback size was that whole box's height — a font eight lines tall,
+    /// filling the screen with type big enough to wrap "lighting" into
+    /// "light" and "ing" on separate lines, which is exactly what was
+    /// reported.
+    #[test]
+    fn a_paragraphs_fallback_size_is_one_lines_share_of_the_box_not_the_whole_box() {
+        let one_line = run_editor_font_size(14.0, 1, 0.0, 1.0, None);
+        let eight_lines = run_editor_font_size(14.0 * 8.0, 8, 0.0, 1.0, None);
+        assert!(
+            (one_line - eight_lines).abs() < 0.5,
+            "a paragraph of evenly-spaced lines should fall back to about the \
+             same size as a single line of the same height: {one_line} vs {eight_lines}"
+        );
+    }
+
+    /// A real, sane font size for the run always wins over the fallback —
+    /// the box is only ever a guess for when there is nothing better.
+    #[test]
+    fn a_real_requested_size_is_not_overridden_by_the_fallback() {
+        // A realistic single-line box for 12pt text — not the exaggerated
+        // box that would make even a real size lose to the fallback, which
+        // is exactly the bug this whole function exists to avoid the other
+        // way around.
+        let size = run_editor_font_size(14.0, 1, 12.0, 1.0, None);
+        assert!(
+            (size - 12.0).abs() < 0.5,
+            "a real 12pt run should render at about 12pt, not fall back to the box: {size}"
+        );
+    }
+
+    /// Zero lines cannot mean dividing by zero.
+    #[test]
+    fn it_never_divides_by_a_zero_line_count() {
+        let size = run_editor_font_size(20.0, 0, 0.0, 1.0, None);
+        assert!(size.is_finite() && size > 0.0, "got {size}");
+    }
+
+    /// **`em_ratio` sizes the fallback from the face's own metrics, not the
+    /// fixed `0.92` guess.** A face with unusually deep descenders — an
+    /// `(ascent - descent)` of 1.4 em, well past the roughly-1-em most
+    /// fonts use — needs a *smaller* point size to fill the same box height
+    /// than the flat guess would give it; this is the whole reason the
+    /// ratio is asked for instead of assumed.
+    #[test]
+    fn a_known_em_ratio_replaces_the_flat_guess() {
+        let flat_guess = run_editor_font_size(14.0, 1, 0.0, 1.0, None);
+        let from_metrics = run_editor_font_size(14.0, 1, 0.0, 1.0, Some(1.4));
+        assert!(
+            from_metrics < flat_guess,
+            "a face with deep descenders should size smaller than the flat guess: \
+             {from_metrics} vs {flat_guess}"
+        );
+        assert!(
+            (from_metrics - 14.0 / 1.4).abs() < 0.01,
+            "expected exactly box_height / em_ratio: got {from_metrics}"
+        );
+    }
+
+    /// A nonsense ratio (a face with no real ascent/descent spread) falls
+    /// back to the flat guess rather than dividing by something tiny and
+    /// producing an absurd size.
+    #[test]
+    fn a_degenerate_em_ratio_is_not_trusted() {
+        let flat_guess = run_editor_font_size(14.0, 1, 0.0, 1.0, None);
+        let degenerate = run_editor_font_size(14.0, 1, 0.0, 1.0, Some(0.0));
+        assert_eq!(degenerate, flat_guess, "a zero ratio should fall back to the flat guess");
+    }
+
+    /// **The bug, pinned down: an ordinary "zoomed out to see the page"
+    /// level, not an extreme one, used to prop the fallback size back up
+    /// instead of letting it shrink with the rest of the page.** `box_height`
+    /// here stands in for `draw_run_editor`'s own `base_screen_height` — a
+    /// fixed page-space line height (6pt) carried through two different
+    /// zoom levels — and an untrustworthy nominal size (`0.0`) forces the
+    /// fallback branch at both, isolating it from `nominal`'s own, already
+    /// correct scaling. Dividing each result back out by its own zoom has to
+    /// land on the same page-space number; a hard floor anywhere in the
+    /// chain breaks that at whichever end of the range reaches it first.
+    #[test]
+    fn the_fallback_stays_proportional_across_a_wide_zoom_range() {
+        let page_space_height = 6.0_f32;
+        let low_zoom = 0.3_f32;
+        let high_zoom = 2.0_f32;
+        let size_at_low = run_editor_font_size(page_space_height * low_zoom, 1, 0.0, low_zoom, None);
+        let size_at_high = run_editor_font_size(page_space_height * high_zoom, 1, 0.0, high_zoom, None);
+        assert!(
+            ((size_at_low / low_zoom) - (size_at_high / high_zoom)).abs() < 0.01,
+            "the fallback size is not proportional to zoom: {size_at_low} at {low_zoom}x vs \
+             {size_at_high} at {high_zoom}x"
+        );
+    }
+}
+
+#[cfg(test)]
+mod run_editor_box_grow_tests {
+    use super::run_editor_box_grow;
+
+    #[test]
+    fn an_unchanged_size_grows_by_exactly_one() {
+        assert_eq!(run_editor_box_grow(20.0, 20.0), 1.0);
+    }
+
+    /// **The reported gap, in numbers: doubling the size must double the
+    /// box**, not leave it exactly where it started.
+    #[test]
+    fn doubling_the_size_doubles_the_box() {
+        assert!((run_editor_box_grow(20.0, 40.0) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn halving_the_size_halves_the_box() {
+        assert!((run_editor_box_grow(20.0, 10.0) - 0.5).abs() < 1e-6);
+    }
+
+    /// An absurd request shrinks or grows the box, never collapses or
+    /// explodes it off screen.
+    #[test]
+    fn extreme_ratios_stay_clamped() {
+        assert_eq!(run_editor_box_grow(20.0, 100_000.0), 20.0);
+        assert_eq!(run_editor_box_grow(20.0, 0.0), 0.1);
+    }
+
+    #[test]
+    fn a_vanishing_base_does_not_divide_by_zero() {
+        assert!(run_editor_box_grow(0.0, 20.0).is_finite());
+    }
+}
+
+#[cfg(test)]
+mod run_editor_glyph_size_tests {
+    use super::run_editor_glyph_size;
+
+    /// **The bug, pinned down: zooming past a fixed pixel range used to stop
+    /// the editor scaling with the rest of the page.** Neither end of that
+    /// range exists any more — an extreme zoom, in either direction, must
+    /// still come straight out the other end proportionally.
+    #[test]
+    fn there_is_no_ceiling_at_a_heavy_zoom_in() {
+        assert_eq!(run_editor_glyph_size(500.0), 500.0);
+    }
+
+    #[test]
+    fn there_is_no_floor_at_a_heavy_zoom_out() {
+        let tiny = run_editor_glyph_size(2.0);
+        assert!(
+            tiny < 6.0,
+            "a small on-screen size should stay small, not get propped back up to a fixed minimum: {tiny}"
+        );
+        assert_eq!(tiny, 2.0);
+    }
+
+    #[test]
+    fn only_a_literal_zero_is_floored() {
+        assert_eq!(run_editor_glyph_size(0.0), 0.5);
+    }
+}
+
+#[cfg(test)]
+mod run_editor_grip_rect_tests {
+    use super::run_editor_grip_rect;
+
+    /// **The bug, pinned down**: however small the box, or however close to
+    /// the page's own edge it sits, the grip must never overlap it — that
+    /// overlap is what painted over the run's own first letter, twice.
+    #[test]
+    fn the_grip_never_overlaps_the_box_it_belongs_to() {
+        for rect in [
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 14.0)),
+            egui::Rect::from_min_size(egui::pos2(3.0, 2.0), egui::vec2(400.0, 90.0)),
+            egui::Rect::from_min_size(egui::pos2(500.0, 500.0), egui::vec2(50.0, 8.0)),
+        ] {
+            let grip = run_editor_grip_rect(rect);
+            assert!(
+                !grip.intersects(rect),
+                "the grip {grip:?} overlaps its own box {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_grip_sits_at_the_boxs_own_top_left_corner() {
+        let rect = egui::Rect::from_min_size(egui::pos2(40.0, 60.0), egui::vec2(120.0, 20.0));
+        let grip = run_editor_grip_rect(rect);
+        assert!(grip.right() < rect.left(), "the grip should sit to the left of the box");
+        assert!(grip.bottom() < rect.top(), "the grip should sit above the box");
+    }
+}
+
+#[cfg(test)]
+mod justify_gaps_tests {
+    use super::justify_gaps;
+
+    /// Three words, a natural width of 60 and a target of 90: the 30-point
+    /// shortfall splits across the two gaps, 15 each, and the first word
+    /// gets none — nothing comes before it to stretch.
+    #[test]
+    fn the_shortfall_splits_evenly_across_every_gap() {
+        let gaps = justify_gaps(&[20.0, 20.0, 20.0], 90.0);
+        assert_eq!(gaps, vec![0.0, 15.0, 15.0]);
+    }
+
+    /// One word: nothing to stretch, so nothing is added, however wide the
+    /// target is.
+    #[test]
+    fn a_single_word_is_left_alone() {
+        assert_eq!(justify_gaps(&[40.0], 200.0), vec![0.0]);
+    }
+
+    /// Zero words: same answer, and no division by zero.
+    #[test]
+    fn no_words_divides_by_nothing() {
+        assert_eq!(justify_gaps(&[], 200.0), Vec::<f32>::new());
+    }
+
+    /// A line that already reaches (or overflows) the target only ever
+    /// gains space, never loses it by compressing a word into the gap.
+    #[test]
+    fn a_line_already_at_or_past_the_target_is_not_compressed() {
+        let gaps = justify_gaps(&[60.0, 60.0], 90.0);
+        assert_eq!(gaps, vec![0.0, 0.0], "a line already past its target should not shrink");
+    }
+}
+
+#[cfg(test)]
+mod join_paragraph_lines_tests {
+    use super::join_paragraph_lines;
+
+    /// **The bug, pinned down against the real file**: the run before the
+    /// wrap is `"...light"`, the run after is `"ing solution..."` — nothing
+    /// at all between them in the extracted text, not even a broken
+    /// character. The producer drew its wrap-hyphen as its own small mark,
+    /// never as a glyph this can repair; a hyphen has to be *added*, not
+    /// found.
+    #[test]
+    fn a_word_cut_mid_line_gets_its_hyphen_back() {
+        let lines = ["...heat dis".to_string(), "sipation and high CRI".to_string()];
+        assert_eq!(join_paragraph_lines(&lines), "...heat dis-\nsipation and high CRI");
+    }
+
+    /// An ordinary wrap breaks *at* a space — the line above still ends in
+    /// one — so nothing is inserted; two real, separate lines must not grow
+    /// a hyphen neither of them had.
+    #[test]
+    fn an_ordinary_wrap_gets_no_hyphen() {
+        let lines = ["prioritizes function, but ".to_string(), "also values design.".to_string()];
+        assert_eq!(join_paragraph_lines(&lines), "prioritizes function, but \nalso values design.");
+    }
+
+    /// Punctuation ending a line — a sentence's own full stop, not a cut
+    /// word — must not be read as a wrap either.
+    #[test]
+    fn a_line_ending_in_punctuation_gets_no_hyphen() {
+        let lines = ["a full sentence.".to_string(), "The next one.".to_string()];
+        assert_eq!(join_paragraph_lines(&lines), "a full sentence.\nThe next one.");
+    }
+
+    #[test]
+    fn a_single_line_is_returned_as_is() {
+        assert_eq!(join_paragraph_lines(&["only one line".to_string()]), "only one line");
+    }
+}
+
+#[cfg(test)]
+mod fix_extracted_text_tests {
+    use super::fix_extracted_text;
+
+    /// **The bug, pinned down**: a `\u{2}` (STX) sitting where a hyphen
+    /// should be, exactly as one real page's own broken `ToUnicode` mapping
+    /// produced — put back as `-`, since a letter sits on both sides.
+    #[test]
+    fn a_control_character_between_letters_becomes_a_hyphen() {
+        assert_eq!(fix_extracted_text("elitee\u{2}plus"), "elitee-plus");
+    }
+
+    /// **Reported a second time, with a screenshot: the first fix dropped
+    /// this same character outright, turning "elitee-plus" into
+    /// "eliteeplus" wherever the mapping bug's hyphen happened to fall
+    /// exactly on a line wrap.** The letter after it is on the far side of
+    /// the `\n` that joins two lines together, not immediately next to it —
+    /// this is the case that requires looking past the newline rather than
+    /// only at the one character right next door.
+    #[test]
+    fn a_control_character_is_still_a_hyphen_across_a_line_wrap() {
+        assert_eq!(fix_extracted_text("Camino elitee\u{2}\nplus 3.0"), "Camino elitee-\nplus 3.0");
+    }
+
+    /// With no letter on one side — the very start of the text, here — a
+    /// control character has no signal to be read as a hyphen and is
+    /// simply dropped.
+    #[test]
+    fn a_control_character_with_no_letter_beside_it_is_dropped() {
+        assert_eq!(fix_extracted_text("\u{2}plus"), "plus");
+    }
+
+    #[test]
+    fn ordinary_text_is_untouched() {
+        assert_eq!(fix_extracted_text("Camino elitee-plus 3.0"), "Camino elitee-plus 3.0");
+    }
+
+    /// Real structure, not just visible ink, survives — a paragraph's own
+    /// line breaks and a run's own tab are not the kind of "control
+    /// character" this exists to remove.
+    #[test]
+    fn newlines_and_tabs_survive() {
+        assert_eq!(fix_extracted_text("one\ntwo\tthree"), "one\ntwo\tthree");
+    }
+}
+
+#[cfg(test)]
+mod looks_rotated_tests {
+    use super::looks_rotated;
+    use pdf_core::document::Rect;
+
+    /// **The exact box a real page's rotated "54mm" dimension label
+    /// reported**: narrower than it is tall by nearly 4 to 1.
+    #[test]
+    fn a_narrow_tall_multi_character_box_looks_rotated() {
+        let rect = Rect { left: 429.6, top: 74.6, right: 434.2, bottom: 91.6 };
+        assert!(looks_rotated(&rect, "54mm".chars().count()));
+    }
+
+    /// An ordinary line of body text — wide, short — never looks rotated,
+    /// however many characters it holds.
+    #[test]
+    fn an_ordinary_line_of_text_does_not_look_rotated() {
+        let rect = Rect { left: 194.6, top: 127.8, right: 366.6, bottom: 135.4 };
+        assert!(!looks_rotated(&rect, "The sleek and modern design of Camino ".chars().count()));
+    }
+
+    /// A short run of narrow letters ("Ill") can be legitimately taller
+    /// than wide at a large size without being rotated at all — the
+    /// character-count gate exists precisely to leave these alone.
+    #[test]
+    fn a_short_run_of_narrow_letters_is_not_flagged() {
+        let rect = Rect { left: 0.0, top: 0.0, right: 8.0, bottom: 20.0 };
+        assert!(!looks_rotated(&rect, "Ill".chars().count()));
+    }
+
+    #[test]
+    fn an_empty_run_is_never_flagged() {
+        let rect = Rect { left: 0.0, top: 0.0, right: 1.0, bottom: 50.0 };
+        assert!(!looks_rotated(&rect, 0));
     }
 }
 
@@ -15885,6 +23091,65 @@ mod lock_wiring_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// **Add Images, end to end**: a real file on disk, decoded and armed by
+    /// the `addimage` command, then placed centred on the click — unlike a
+    /// signature, a plain picture has no line to sit on.
+    #[test]
+    fn the_addimage_command_decodes_a_file_and_arms_placement() {
+        let mut app = app("two-column.pdf");
+        let tmp = std::env::temp_dir()
+            .join(format!("pagify-test-addimage-{}.png", std::process::id()));
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([40, 90, 160, 255]))
+            .save(&tmp)
+            .expect("write a test picture");
+
+        app.submit(&format!("addimage {}", tmp.display()));
+        let _ = std::fs::remove_file(&tmp);
+        let Some(PendingKind::PlaceImage { rgba, width, height }) =
+            app.pending.as_ref().map(|p| &p.kind)
+        else {
+            panic!("the file was not decoded and armed: {}", said(&app));
+        };
+        assert_eq!((*width, *height), (8, 4));
+        let (rgba, width, height) = (rgba.clone(), *width, *height);
+
+        let before = app.doc.as_ref().expect("open").session.annotations(0).expect("read").len();
+        // Populate the foreign-marks cache with a stale, pre-placement
+        // snapshot — the exact state a person looking at the page already
+        // put it in before they ever reached for Add Images.
+        let _ = app.foreign_marks(0);
+        app.place_image_at(0, AppPoint { x: 300.0, y: 400.0 }, rgba, width, height)
+            .expect("placed");
+
+        // **Reported from use: a freshly placed picture could not be
+        // selected, moved or resized.** Its hit-test rectangle lived in a
+        // cache keyed only on the page number, never invalidated by a new
+        // annotation on the *current* page — so the picture was there, on
+        // the document, and simply invisible to anything that went looking
+        // for it until the page was left and returned to.
+        assert!(app.foreign.is_none(), "the foreign-marks cache was not invalidated");
+
+        let marks = app.doc.as_ref().expect("open").session.annotations(0).expect("read");
+        assert_eq!(marks.len(), before + 1, "nothing was added to the page");
+        let rect = marks
+            .iter()
+            .rev()
+            .find_map(|m| match &m.annotation {
+                pdf_core::document::Annotation::Image { rect, .. } => Some(*rect),
+                _ => None,
+            })
+            .expect("the picture is not on the page");
+
+        let (cx, cy) = ((rect.left + rect.right) / 2.0, (rect.top + rect.bottom) / 2.0);
+        assert!((cx - 300.0).abs() < 1.0, "not centred on x: {cx}");
+        assert!((cy - 400.0).abs() < 1.0, "not centred on y: {cy}");
+        // 8x4 is 2:1 — the width this app places at, and half that for height.
+        assert!(
+            ((rect.right - rect.left) - 2.0 * (rect.bottom - rect.top)).abs() < 1.0,
+            "the aspect ratio was not kept: {rect:?}"
+        );
+    }
+
     /// **A picture with real alpha is composited against the page it lands
     /// on, not placed with its background untouched** — the whole point of
     /// carrying alpha through from extraction at all. A pixel that was
@@ -16002,6 +23267,989 @@ mod lock_wiring_tests {
         assert!(((resized.rect.bottom - resized.rect.top) - h / 2.0).abs() < 1.0, "height did not halve");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// **Reported from use: a placed picture could not be selected, moved
+    /// or resized.** The same three tests as the signature system above,
+    /// for [`PagifyApp::placed_image_at`] / [`PagifyApp::finish_placed_image_grab`]
+    /// — proving the parallel system this session added actually works, not
+    /// just that it compiles.
+    #[test]
+    fn a_placed_image_is_found_at_its_own_rect_and_nowhere_else() {
+        let mut app = app("two-column.pdf");
+        app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(4, 4, [40, 90, 200]), 4, 4)
+            .expect("placed");
+
+        let marks = app.doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks");
+        let mark = marks.first().expect("the picture is placed");
+        let middle = AppPoint {
+            x: ((mark.rect.left + mark.rect.right) / 2.0) as f64,
+            y: ((mark.rect.top + mark.rect.bottom) / 2.0) as f64,
+        };
+        let found = app.placed_image_at(0, middle);
+        assert_eq!(found, Some((mark.index, mark.rect, mark.rotation)), "not found at its own middle");
+
+        let far_away = AppPoint { x: (mark.rect.right + 200.0) as f64, y: (mark.rect.bottom + 200.0) as f64 };
+        assert_eq!(app.placed_image_at(0, far_away), None, "found somewhere it was never placed");
+    }
+
+    #[test]
+    fn dragging_a_selected_placed_image_moves_it() {
+        let mut app = app("two-column.pdf");
+        app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(4, 4, [40, 90, 200]), 4, 4)
+            .expect("placed");
+
+        let mark = app.doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+        let sel = PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
+        let grab = Grab {
+            handle: None,
+            from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 },
+            by: (30.0, -15.0),
+        };
+        app.finish_placed_image_grab(sel, grab);
+
+        let moved = app.doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+        assert!((moved.rect.left - (mark.rect.left + 30.0)).abs() < 0.5, "left did not move");
+        assert!((moved.rect.top - (mark.rect.top - 15.0)).abs() < 0.5, "top did not move");
+        let (w0, h0) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
+        let (w1, h1) = (moved.rect.right - moved.rect.left, moved.rect.bottom - moved.rect.top);
+        assert!((w0 - w1).abs() < 0.5 && (h0 - h1).abs() < 0.5, "a move changed the size");
+        assert_eq!(
+            app.placed_image_selected,
+            Some(PlacedImageSelected { page: 0, index: moved.index, rect: moved.rect, rotation: moved.rotation }),
+            "the selection did not follow the move"
+        );
+    }
+
+    #[test]
+    fn dragging_a_placed_image_handle_resizes_about_the_opposite_corner() {
+        let mut app = app("two-column.pdf");
+        app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(4, 4, [40, 90, 200]), 4, 4)
+            .expect("placed");
+
+        let mark = app.doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+        let (w, h) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
+        let sel = PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
+        let grab = Grab {
+            handle: Some(Handle::BottomRight),
+            from: AppPoint { x: mark.rect.right as f64, y: mark.rect.bottom as f64 },
+            by: (-w / 2.0, -h / 2.0),
+        };
+        app.finish_placed_image_grab(sel, grab);
+
+        let resized = app.doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+        assert!(
+            (resized.rect.left - mark.rect.left).abs() < 0.5 && (resized.rect.top - mark.rect.top).abs() < 0.5,
+            "the anchored corner moved"
+        );
+        assert!(((resized.rect.right - resized.rect.left) - w / 2.0).abs() < 1.0, "width did not halve");
+        assert!(((resized.rect.bottom - resized.rect.top) - h / 2.0).abs() < 1.0, "height did not halve");
+    }
+
+    /// **The property the whole split exists for.** `apply_signatures`
+    /// burns in every `image_signature_marks` hit; if a plain placed
+    /// picture ever showed up there, applying signatures would flatten
+    /// someone's decorative image as though it had been signed with.
+    #[test]
+    fn placed_pictures_and_signatures_are_found_separately() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "disjoint");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("signature placed");
+        app.place_image_at(0, AppPoint { x: 300.0, y: 500.0 }, solid_rgba(6, 6, [10, 200, 60]), 6, 6)
+            .expect("picture placed");
+
+        let signatures = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap();
+        let pictures = app.doc.as_ref().unwrap().session.placed_image_marks(0).unwrap();
+        assert_eq!(signatures.len(), 1, "the signature should be found, and only once");
+        assert_eq!(pictures.len(), 1, "the picture should be found, and only once");
+        assert_ne!(signatures[0].index, pictures[0].index, "they must not resolve to the same annotation");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **Reported from use, with screenshots: a real page's paragraph
+    /// opened for editing with a chunk of its own first line missing —
+    /// "Camino elitee-plus 3.0" jumping straight to a mid-word "ing
+    /// solution..." with a stray "h" in between.** The producer had split
+    /// that line across two runs ("Camino elitee-plus 3.0 " and "is a
+    /// powerful accent light", side by side on the same line) — a shape
+    /// `paragraph_around` did not previously know how to include, since a
+    /// same-line candidate was treated as "not the next line" and simply
+    /// dropped rather than merged into the line it already was. Now it is
+    /// gathered into that line and concatenated in reading order, and a
+    /// row's several runs are edited as one line (see `EditingRun::lines`).
+    // `looks_rotated` — the actual decision `pick_text_run` refuses on —
+    // has its own dedicated tests in `looks_rotated_tests`, including the
+    // exact box dimensions a real rotated dimension label reported. There
+    // is no way to make `write_text_at` itself produce a rotated-looking
+    // rect to drive an end-to-end test through the public API with (it
+    // always lays glyphs out horizontally), so the integration was instead
+    // confirmed directly against the real page this was reported against:
+    // picking the rotated "54mm" label there returns
+    // `Err("that text is rotated on the page...")` rather than opening.
+
+    /// **Reported from use, on more than one paragraph, after a tool switch
+    /// left a run split into individual characters** (see
+    /// `taking_up_edit_object_puts_an_open_run_editor_down`, the fix for
+    /// how that happens): Edit Text opened a single letter instead of the
+    /// line it belonged to, permanently, since `paragraph_around` refused
+    /// to glue lone characters back together on principle — a rule that
+    /// exists to protect a split that just happened, not one to trap a line
+    /// at one letter forever. Simulated directly with
+    /// `split_run_into_characters`, the same call Edit Object's own
+    /// character-drilling makes.
+    #[test]
+    fn edit_text_recovers_a_line_that_was_split_into_characters() {
+        let mut app = app("text-lines.pdf");
+        let object = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs")[0].object;
+        let original_text = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs")[0]
+            .text
+            .clone();
+
+        app.doc
+            .as_mut()
+            .unwrap()
+            .session
+            .split_run_into_characters(0, object)
+            .expect("split");
+        let split_runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        assert!(
+            split_runs.len() > 1,
+            "setup: splitting should have produced more than one run"
+        );
+
+        let one_char = split_runs.iter().find(|r| r.text.trim().chars().count() == 1).expect("a lone character");
+        let at = AppPoint {
+            x: ((one_char.rect.left + one_char.rect.right) / 2.0) as f64,
+            y: ((one_char.rect.top + one_char.rect.bottom) / 2.0) as f64,
+        };
+
+        app.submit("edittext");
+        app.pick_text_run(0, at).expect("a run was here");
+
+        let edit = app.editing_run.as_ref().expect("should have opened");
+        assert_eq!(
+            edit.buffer.trim(),
+            original_text.trim(),
+            "should have reassembled the whole line, not just the letter clicked"
+        );
+        assert!(
+            edit.lines.iter().any(|(objects, _)| objects.len() > 1),
+            "should have recorded the recovered line as many objects, not one: {:?}",
+            edit.lines
+        );
+    }
+
+    /// **Two blocks the automatic heuristic keeps apart on purpose** —
+    /// picked as far apart on the page as `two-column.pdf` has runs, which
+    /// `paragraph_around`'s own gap limit refuses to bridge — can still be
+    /// declared one paragraph by hand, and the grouping persists: closing
+    /// the editor and clicking either run again re-opens the same joined
+    /// pair, not just the one under the pointer.
+    #[test]
+    fn joining_two_distant_runs_opens_them_as_one_paragraph_and_persists() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        assert!(runs.len() >= 2, "setup: need at least two runs");
+        let a = runs.iter().min_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        let b = runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        assert_ne!(a.object, b.object, "setup: need two distinct runs to prove a join did something");
+
+        let automatic = app.paragraph_around(0, a.object, a.rect, &runs);
+        assert!(
+            !automatic.iter().any(|s| s.object == b.object),
+            "setup: these two must not already share a paragraph automatically, or joining them by hand proves nothing"
+        );
+
+        let total_chars = app.characters(0).expect("characters").len();
+        app.text_selection = Some(0..total_chars);
+        app.selection_page = 0;
+
+        let message = app.join_selected_text().expect("join should succeed");
+        assert!(message.contains("paragraph"), "should have opened the paragraph editor: {message}");
+
+        let edit = app.editing_run.as_ref().expect("should have opened an editor");
+        assert!(edit.buffer.contains(a.text.trim()), "joined text should include the topmost run");
+        assert!(edit.buffer.contains(b.text.trim()), "joined text should include the bottommost run");
+
+        // Persists: closing the editor and clicking the *other* run reopens
+        // the same joined group, not just the run under the pointer.
+        app.editing_run = None;
+        let at_b = AppPoint {
+            x: ((b.rect.left + b.rect.right) / 2.0) as f64,
+            y: ((b.rect.top + b.rect.bottom) / 2.0) as f64,
+        };
+        app.pick_text_run(0, at_b).expect("b should still be there");
+        let reopened = app.editing_run.as_ref().expect("should have reopened");
+        assert!(
+            reopened.lines.iter().flat_map(|(objects, _)| objects).any(|o| *o == a.object),
+            "reopening on b should have brought a's run back in too"
+        );
+    }
+
+    /// Splitting forgets the grouping and nothing else — the page is
+    /// untouched, and a later click on either run edits it alone again.
+    #[test]
+    fn splitting_a_joined_pair_edits_them_separately_again() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let a = runs.iter().min_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        let b = runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+
+        let total_chars = app.characters(0).expect("characters").len();
+        app.text_selection = Some(0..total_chars);
+        app.selection_page = 0;
+        app.join_selected_text().expect("join should succeed");
+        assert!(app.group_containing(0, b.object).is_some(), "setup: should be joined");
+
+        assert!(app.split_group(0, b.object), "split should find the group");
+        assert!(app.group_containing(0, a.object).is_none(), "the group should be gone for both runs");
+        assert!(app.group_containing(0, b.object).is_none());
+
+        app.editing_run = None;
+        let at_b = AppPoint {
+            x: ((b.rect.left + b.rect.right) / 2.0) as f64,
+            y: ((b.rect.top + b.rect.bottom) / 2.0) as f64,
+        };
+        app.pick_text_run(0, at_b).expect("b should still be there");
+        let reopened = app.editing_run.as_ref().expect("should have reopened");
+        assert!(
+            !reopened.lines.iter().flat_map(|(objects, _)| objects).any(|o| *o == a.object),
+            "after splitting, editing b should not bring a's run back in"
+        );
+    }
+
+    /// A selection covering only one run's own words has nothing to join.
+    #[test]
+    fn joining_a_single_run_selection_is_refused() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let a = &runs[0];
+        let centre = ((a.rect.left + a.rect.right) / 2.0, (a.rect.top + a.rect.bottom) / 2.0);
+        let range = app
+            .characters(0)
+            .and_then(|c| c.range_between((centre.0, centre.1), (centre.0, centre.1)))
+            .expect("a point inside a run's own rect should hit something");
+        app.text_selection = Some(range);
+        app.selection_page = 0;
+        assert!(app.join_selected_text().is_err(), "one run alone is nothing to join");
+    }
+
+    /// The sample's size and colour carry over to a target run whose own
+    /// size and colour genuinely differ — picked as two separate
+    /// selections, one after the other, the way the ribbon tool actually
+    /// works.
+    #[test]
+    fn matching_properties_copies_size_and_colour_to_the_target() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let a = runs.iter().min_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        let b = runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        assert_ne!(a.object, b.object, "setup: need two distinct runs");
+
+        // Force a real mismatch first, so matching them proves something.
+        let doc = app.doc.as_ref().unwrap();
+        doc.session
+            .execute(pdf_core::command::Command::SetTextRun {
+                page_index: 0,
+                object: b.object,
+                text: b.text.clone(),
+                style: pdf_core::document::TextStyle { size: Some(a.size + 6.0), ..Default::default() },
+            })
+            .expect("setup: resize b");
+        doc.session
+            .execute(pdf_core::command::Command::SetTextRun {
+                page_index: 0,
+                object: b.object,
+                text: b.text.clone(),
+                style: pdf_core::document::TextStyle {
+                    color: Some(pdf_core::document::Color { r: 200, g: 10, b: 10, a: 255 }),
+                    ..Default::default()
+                },
+            })
+            .expect("setup: recolour b");
+
+        let centre_a = ((a.rect.left + a.rect.right) / 2.0, (a.rect.top + a.rect.bottom) / 2.0);
+        let centre_b = ((b.rect.left + b.rect.right) / 2.0, (b.rect.top + b.rect.bottom) / 2.0);
+
+        // The sample: a selection over `a` alone.
+        let sample_range = app
+            .characters(0)
+            .and_then(|c| c.range_between(centre_a, centre_a))
+            .expect("a point inside a's own rect");
+        app.text_selection = Some(sample_range);
+        app.selection_page = 0;
+        app.match_properties_sample_from_current_selection().expect("sample should be accepted");
+        assert!(app.match_properties_sample.is_some(), "the sample should be held");
+
+        // The target: a separate selection over `b` alone.
+        let target_range = app
+            .characters(0)
+            .and_then(|c| c.range_between(centre_b, centre_b))
+            .expect("a point inside b's own rect");
+        app.text_selection = Some(target_range);
+        app.selection_page = 0;
+        let message = app.apply_match_properties_to_current_selection().expect("match should succeed");
+        assert!(message.contains("matched"), "unexpected message: {message}");
+        assert!(app.match_properties_sample.is_some(), "the tool should stay in hand");
+
+        let after = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let b_after = after.iter().find(|r| r.object == b.object).expect("b should still be there");
+        assert!(
+            (b_after.size - a.size).abs() < 0.01,
+            "the target's size should now match the sample's: {} vs {}",
+            b_after.size,
+            a.size
+        );
+        assert_eq!(
+            (b_after.color.r, b_after.color.g, b_after.color.b),
+            (a.color.r, a.color.g, a.color.b),
+            "the target's colour should now match the sample's"
+        );
+    }
+
+    /// An empty selection has nothing to serve as a sample, or to change.
+    #[test]
+    fn an_empty_selection_is_refused_by_both_match_properties_steps() {
+        let mut app = app("two-column.pdf");
+        app.text_selection = Some(0..0);
+        app.selection_page = 0;
+        assert!(
+            app.match_properties_sample_from_current_selection().is_err(),
+            "an empty selection is nothing to copy from"
+        );
+
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let a = &runs[0];
+        app.match_properties_sample = Some(app.build_match_properties_sample(0, a));
+        app.text_selection = Some(0..0);
+        app.selection_page = 0;
+        assert!(
+            app.apply_match_properties_to_current_selection().is_err(),
+            "an empty selection is nothing to change"
+        );
+    }
+
+    /// **Reported from use: the app froze on right-click.** The context
+    /// menu used to recompute `joinable`/`split_object` itself, inline —
+    /// each a full-page `text_runs` read — and egui redraws an open popup's
+    /// contents every frame, so a real few-hundred-run document paid that
+    /// cost dozens of times a second for as long as the menu stayed open.
+    /// `compute_right_click_text_actions` is the fix's whole shape: called
+    /// once, at the click, with its result cached in
+    /// `right_click_text_actions` for the menu to only ever *read*. This
+    /// exercises exactly the entry point the click handler calls, on a
+    /// selection genuinely spanning two joinable runs.
+    #[test]
+    fn right_click_text_actions_are_computed_correctly_from_one_call() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let a = runs.iter().min_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        let b = runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        assert_ne!(a.object, b.object, "setup: need two distinct runs");
+
+        let centre_a = ((a.rect.left + a.rect.right) / 2.0, (a.rect.top + a.rect.bottom) / 2.0);
+        let centre_b = ((b.rect.left + b.rect.right) / 2.0, (b.rect.top + b.rect.bottom) / 2.0);
+        let range = app
+            .characters(0)
+            .and_then(|c| c.range_between(centre_a, centre_b))
+            .expect("a range covering both runs");
+        app.text_selection = Some(range);
+        app.selection_page = 0;
+
+        let at = AppPoint { x: centre_a.0 as f64, y: centre_a.1 as f64 };
+        let actions = app.compute_right_click_text_actions(0, at);
+        assert!(actions.joinable, "two distinct runs in the selection should be joinable: {actions:?}");
+        assert_eq!(actions.split_object, None, "neither run belongs to any joined group yet");
+
+        // Join, then ask again pointing at one of the now-joined runs:
+        // `split_object` should name it.
+        app.join_selected_text().expect("join should succeed");
+        let at_b = AppPoint { x: centre_b.0 as f64, y: centre_b.1 as f64 };
+        let after_join = app.compute_right_click_text_actions(0, at_b);
+        assert_eq!(
+            after_join.split_object,
+            Some(b.object),
+            "pointing at a joined run should offer to split it: {after_join:?}"
+        );
+    }
+
+    /// **Reported from use, general this time rather than tied to one
+    /// paragraph: "you are only fixing the paragraphs i am showing you...
+    /// description is written in [bold] but when i try to edit it becomes
+    /// regular."** `majority_look` used to be the only defence against a
+    /// heading merging into the body under it — whichever style had more
+    /// *lines* voting for it won, and the minority style, heading or body,
+    /// was simply overwritten in the editor, on any document where one
+    /// exists, not just the one in the screenshot. The real fix is upstream
+    /// of any vote: `paragraph_around` now stops growing a paragraph the
+    /// moment a candidate line's own face+size stops matching the seed's,
+    /// so a heading and the body under it become two separate edits, each
+    /// opening in its own real style, instead of one edit where a vote
+    /// decides which style to discard.
+    #[test]
+    fn a_heading_does_not_merge_into_the_body_beneath_it() {
+        use pdf_core::command::Command;
+        use pdf_core::document::{Annotation, Color, Glyph};
+
+        let mut app = app("text-lines.pdf");
+        let write_sized = |app: &mut PagifyApp, id: i32, at: AppPoint, size: f32, text: &str| {
+            let doc = app.doc.as_ref().expect("open");
+            doc.session
+                .execute(Command::AddAnnotation {
+                    page_index: 0,
+                    annotation: Annotation::Text {
+                        text: text.to_string(),
+                        font: "Helvetica".into(),
+                        font_asset: None,
+                        size,
+                        color: Color { r: 20, g: 20, b: 20, a: 255 },
+                        glyphs: vec![Glyph {
+                            ch: text.to_string(),
+                            id: 0,
+                            x: at.x as f32,
+                            y: at.y as f32,
+                            radians: 0.0,
+                        }],
+                        id,
+                        restore: String::new(),
+                        frame: Vec::new(),
+                        frame_width: 0.0,
+                    },
+                })
+                .expect("written");
+        };
+
+        // A bold-sized heading directly above an ordinary-sized paragraph —
+        // close enough, vertically, that a purely geometric merge would
+        // have pulled them together exactly as reported.
+        write_sized(&mut app, 9001, AppPoint { x: 100.0, y: 500.0 }, 20.0, "Description:");
+        write_sized(
+            &mut app,
+            9002,
+            AppPoint { x: 100.0, y: 522.0 },
+            12.0,
+            "This is the ordinary body text underneath it.",
+        );
+
+        let runs = app.doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        let heading = runs.iter().find(|r| r.text.contains("Description")).expect("heading");
+        let body = runs.iter().find(|r| r.text.contains("ordinary body")).expect("body");
+        assert!(
+            (heading.rect.bottom - body.rect.top).abs() < 20.0,
+            "the two lines need to start out close enough that only style keeps them apart: {:?} / {:?}",
+            heading.rect,
+            body.rect
+        );
+
+        app.submit("edittext");
+        let at = AppPoint {
+            x: ((heading.rect.left + heading.rect.right) / 2.0) as f64,
+            y: ((heading.rect.top + heading.rect.bottom) / 2.0) as f64,
+        };
+        app.pick_text_run(0, at).expect("the heading was here");
+        let edit = app.editing_run.as_ref().expect("should have opened");
+        assert!(
+            !edit.buffer.contains("ordinary body"),
+            "the heading's own edit swallowed the body beneath it: {:?}",
+            edit.buffer
+        );
+
+        let at = AppPoint {
+            x: ((body.rect.left + body.rect.right) / 2.0) as f64,
+            y: ((body.rect.top + body.rect.bottom) / 2.0) as f64,
+        };
+        app.pick_text_run(0, at).expect("the body was here");
+        let edit = app.editing_run.as_ref().expect("should have opened");
+        assert!(
+            !edit.buffer.contains("Description"),
+            "the body's own edit reached up and swallowed the heading above it: {:?}",
+            edit.buffer
+        );
+    }
+
+    /// **"see how the hyphens go missing?" — end to end, through
+    /// `pick_paragraph` rather than `join_paragraph_lines` in isolation.**
+    /// Two ordinary lines, one word cut across them, exactly the shape a
+    /// producer's own wrap-hyphen leaves when it draws that hyphen as a
+    /// mark rather than a character.
+    #[test]
+    fn opening_a_paragraph_restores_a_wrap_hyphen_the_producer_never_wrote() {
+        let mut app = app("text-lines.pdf");
+        app.write_text_at(0, AppPoint { x: 100.0, y: 500.0 }, "a powerful accent heat dis")
+            .expect("first line written");
+        app.write_text_at(0, AppPoint { x: 100.0, y: 516.0 }, "sipation and high CRI")
+            .expect("second line written");
+
+        let seed = app
+            .doc
+            .as_ref()
+            .expect("open")
+            .session
+            .text_runs(0)
+            .expect("runs")
+            .into_iter()
+            .find(|r| r.text.contains("heat dis"))
+            .expect("seed");
+        let at = AppPoint {
+            x: ((seed.rect.left + seed.rect.right) / 2.0) as f64,
+            y: ((seed.rect.top + seed.rect.bottom) / 2.0) as f64,
+        };
+
+        app.submit("edittext");
+        app.pick_text_run(0, at).expect("a run was here");
+
+        let edit = app.editing_run.as_ref().expect("should have opened");
+        assert!(
+            edit.buffer.contains("heat dis-\nsipation"),
+            "the wrap hyphen did not come back: {:?}",
+            edit.buffer
+        );
+    }
+
+    /// **"enter for new line doesnt work... when a new line is typed it
+    /// should be in the same font, size, color, etc as the text in the text
+    /// box."** A single run's own editor used to be a `singleline` field —
+    /// Enter submitted it rather than adding to it, and there was nowhere
+    /// for a second line to go. Now it can grow one, written in the run's
+    /// own appearance rather than `write_text_at`'s flat default.
+    ///
+    /// **A shaped write is one object per glyph, same as any other embedded-
+    /// font write** — see `write_styled_line_at`'s two branches — so the new
+    /// line's own text is read by joining every run below the first line
+    /// left to right, not by looking for one run that already says the
+    /// whole thing.
+    #[test]
+    fn a_single_run_can_grow_a_second_line_in_its_own_style() {
+        let mut app = app("text-lines.pdf");
+        let seed = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs")[0].clone();
+        let at = AppPoint {
+            x: ((seed.rect.left + seed.rect.right) / 2.0) as f64,
+            y: ((seed.rect.top + seed.rect.bottom) / 2.0) as f64,
+        };
+        app.submit("edittext");
+        app.pick_text_run(0, at).expect("picked");
+
+        {
+            let edit = app.editing_run.as_mut().expect("editing");
+            let original = edit.buffer.clone();
+            edit.buffer = format!("{original}\nSecond line");
+        }
+        app.apply_edited_run();
+
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        assert!(
+            runs.iter().any(|r| r.text.trim() == seed.text.trim()),
+            "the first line should still read what it always did: {runs:?}"
+        );
+
+        // The nearest line below the seed's own — not every later line on the
+        // page, which for this pangram fixture includes two more of its own.
+        let after_seed: Vec<_> = runs.iter().filter(|r| r.rect.top > seed.rect.bottom).collect();
+        let nearest_top = after_seed
+            .iter()
+            .map(|r| r.rect.top)
+            .fold(f32::INFINITY, f32::min);
+        let mut below: Vec<_> = after_seed
+            .into_iter()
+            .filter(|r| (r.rect.top - nearest_top).abs() < 5.0)
+            .collect();
+        below.sort_by(|a, b| a.rect.left.total_cmp(&b.rect.left));
+        let joined: String = below.iter().map(|r| r.text.as_str()).collect();
+        assert!(
+            joined.contains("Second line"),
+            "the second line was not written at all: {runs:?}"
+        );
+        let second = *below.first().expect("checked: joined is not empty");
+
+        assert!(
+            (second.size - seed.size).abs() < 0.5,
+            "the new line's size did not match the run it grew from: {} vs {}",
+            second.size,
+            seed.size
+        );
+        assert_eq!(
+            (second.color.r, second.color.g, second.color.b),
+            (seed.color.r, seed.color.g, seed.color.b),
+            "the new line's colour did not match the run it grew from"
+        );
+        // **The actual regression.** A face the app has no registration for
+        // — every ordinary embedded document font — used to fall silently
+        // back to plain, unembedded Helvetica for a grown line, regardless
+        // of how bold or unusual the run it grew from looked. An embedded
+        // font is the one thing that fallback can never produce.
+        assert!(
+            app.doc
+                .as_ref()
+                .unwrap()
+                .session
+                .run_font_is_embedded(0, second.object)
+                .unwrap_or(false),
+            "the new line fell back to an unembedded standard font instead \
+             of the run's own"
+        );
+    }
+
+    #[test]
+    fn a_line_the_producer_split_across_two_runs_is_not_missing_a_chunk() {
+        let mut app = app("text-lines.pdf");
+
+        // Two runs on the same baseline, side by side with an ordinary
+        // word-sized gap between them — exactly the shape a producer's own
+        // mid-line font or kerning change leaves behind, and exactly what
+        // the real page this was reported against turned out to have.
+        app.write_text_at(0, AppPoint { x: 100.0, y: 500.0 }, "Camino elitee-plus 3.0 ")
+            .expect("first chunk written");
+        let first = app
+            .doc
+            .as_ref()
+            .expect("open")
+            .session
+            .text_runs(0)
+            .expect("runs")
+            .into_iter()
+            .find(|r| r.text.contains("Camino elitee"))
+            .expect("first chunk");
+        app.write_text_at(0, AppPoint { x: first.rect.right as f64 + 2.0, y: 500.0 }, "is a powerful accent light")
+            .expect("second chunk written");
+
+        let seed = app
+            .doc
+            .as_ref()
+            .expect("open")
+            .session
+            .text_runs(0)
+            .expect("runs")
+            .into_iter()
+            .find(|r| r.text.contains("Camino elitee"))
+            .expect("seed");
+        let at = AppPoint {
+            x: ((seed.rect.left + seed.rect.right) / 2.0) as f64,
+            y: ((seed.rect.top + seed.rect.bottom) / 2.0) as f64,
+        };
+
+        app.submit("edittext");
+        app.pick_text_run(0, at).expect("a run was here");
+
+        let edit = app.editing_run.as_ref().expect("should have opened");
+        assert!(
+            edit.buffer.contains("Camino elitee-plus 3.0 is a powerful accent light"),
+            "the split line's second run is missing from the reconstructed text: {:?}",
+            edit.buffer
+        );
+        assert!(
+            edit.lines.iter().any(|(objects, _)| objects.len() > 1),
+            "the split line should have been recorded as one line of two objects: {:?}",
+            edit.lines
+        );
+    }
+
+    /// **Reported from use, with a screenshot: Edit Text and Edit Object
+    /// both showed as active on the ribbon at once.** `take_up_object_tool`
+    /// already clears `self.pending` when Edit Object is picked up; `arm`
+    /// (what Edit Text and every other picked-then-clicked tool goes
+    /// through) did not clear `self.object_tool` back — so using Edit
+    /// Object and then Edit Text left both armed, and since
+    /// `self.object_tool.is_some()` is checked first and takes the pointer
+    /// outright, every click after that went to Edit Object's own
+    /// character-drilling selection instead of the paragraph pick Edit Text
+    /// was meant to make.
+    #[test]
+    fn arming_edit_text_after_edit_object_puts_the_object_tool_down() {
+        let mut app = app("two-column.pdf");
+        app.submit("editobject");
+        assert!(app.object_tool.is_some(), "editobject should have armed the object tool");
+
+        app.submit("edittext");
+
+        assert!(app.object_tool.is_none(), "arming Edit Text should have put the object tool down");
+        assert!(
+            matches!(app.pending.as_ref().map(|p| &p.kind), Some(PendingKind::PickText)),
+            "Edit Text itself should still be armed"
+        );
+    }
+
+    /// The same fix, checked through every tool `arm` is the entry point
+    /// for, not just Edit Text — a stale object tool would have silently
+    /// swallowed clicks meant for any of these exactly the same way.
+    #[test]
+    fn arming_any_pending_tool_after_edit_object_puts_it_down() {
+        for command in ["edittext", "line", "circle", "redact"] {
+            let mut app = app("two-column.pdf");
+            app.submit("editobject");
+            assert!(app.object_tool.is_some(), "{command}: editobject should have armed the object tool");
+
+            app.submit(command);
+
+            assert!(
+                app.object_tool.is_none(),
+                "{command}: arming it should have put the object tool down"
+            );
+            assert!(app.pending.is_some(), "{command}: should itself be armed");
+        }
+    }
+
+    /// **Reported from use: a run picked with Edit Text, still open,
+    /// got split into individual characters the moment Edit Object was
+    /// clicked without an Escape in between.** `take_up_object_tool` cleared
+    /// `self.pending` and the object-tool's own selection state, but never
+    /// `self.editing_run` — so the run Edit Text still thought it was
+    /// editing sat there, orphaned, while Edit Object's own click handler
+    /// went on to split whatever the next click landed on into individual
+    /// characters, with nothing to say a different tool had already claimed
+    /// that exact run.
+    /// **Not `app.submit("editobject")`** — `submit` is the command box's
+    /// own entry point, and while a run editor is open it intercepts every
+    /// line as a replacement for the run being edited rather than as a
+    /// command (see `PagifyApp::submit`'s own doc). A ribbon button calls
+    /// `take_up_object_tool` directly, which is exactly what a click on it
+    /// does and what this calls too.
+    #[test]
+    fn taking_up_edit_object_puts_an_open_run_editor_down() {
+        let mut app = app("two-column.pdf");
+        app.submit("edittext");
+        let word = {
+            let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+            runs[0].clone()
+        };
+        let at = AppPoint {
+            x: ((word.rect.left + word.rect.right) / 2.0) as f64,
+            y: ((word.rect.top + word.rect.bottom) / 2.0) as f64,
+        };
+        app.pick_text_run(0, at).expect("a run was here");
+        assert!(app.editing_run.is_some(), "setup: the run editor should be open");
+
+        app.take_up_object_tool(true, 0);
+
+        assert!(
+            app.editing_run.is_none(),
+            "taking up Edit Object should have put the open run editor down"
+        );
+        assert!(app.object_tool.is_some(), "Edit Object itself should still be armed");
+    }
+
+    /// The same fix, for arming a `pending`-based tool over an open run
+    /// editor rather than taking up Edit Object — see the sibling test's
+    /// own doc for why this calls `arm` directly rather than through
+    /// `submit`.
+    #[test]
+    fn arming_a_pending_tool_puts_an_open_run_editor_down() {
+        let mut app = app("two-column.pdf");
+        app.submit("edittext");
+        let word = {
+            let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+            runs[0].clone()
+        };
+        let at = AppPoint {
+            x: ((word.rect.left + word.rect.right) / 2.0) as f64,
+            y: ((word.rect.top + word.rect.bottom) / 2.0) as f64,
+        };
+        app.pick_text_run(0, at).expect("a run was here");
+        assert!(app.editing_run.is_some(), "setup: the run editor should be open");
+
+        app.arm(PendingKind::Draw(DrawKind::Line), 0);
+
+        assert!(
+            app.editing_run.is_none(),
+            "arming a different tool should have put the open run editor down"
+        );
+        assert!(app.pending.is_some(), "the newly armed tool should itself be armed");
+    }
+
+    /// **Reported from use: a selected drawn or inserted object could not
+    /// be deleted.** Delete already reached the object tool's own selection
+    /// and the markup layer, but a placed picture and a placed signature —
+    /// both a bare annotation picked with no tool armed — had never been
+    /// wired in at all.
+    #[test]
+    fn deleting_a_selected_placed_picture_removes_it() {
+        let mut app = app("two-column.pdf");
+        app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(4, 4, [40, 90, 200]), 4, 4)
+            .expect("placed");
+        let mark = app.doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+        app.placed_image_selected =
+            Some(PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
+
+        app.delete_selection();
+
+        let remaining = app.doc.as_ref().unwrap().session.placed_image_marks(0).unwrap();
+        assert!(remaining.is_empty(), "the picture should be gone");
+        assert!(app.placed_image_selected.is_none(), "the selection should have cleared with it");
+    }
+
+    #[test]
+    fn deleting_a_selected_signature_removes_it() {
+        let (mut app, path) = with_signature_pad("two-column.pdf", "delete-signature");
+        app.save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4).expect("kept");
+        app.submit("signature");
+        app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
+        let mark = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
+        app.signature_selected =
+            Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
+
+        app.delete_selection();
+
+        let remaining = app.doc.as_ref().unwrap().session.image_signature_marks(0).unwrap();
+        assert!(remaining.is_empty(), "the signature should be gone");
+        assert!(app.signature_selected.is_none(), "the selection should have cleared with it");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// `copy` then `paste` on a drawn shape — the same "select a shape,
+    /// duplicate it" a reader asked for alongside movability.
+    #[test]
+    fn copying_and_pasting_a_selected_shape_makes_a_second_one() {
+        let mut app = app("pictures.pdf");
+        app.submit("circle");
+        app.submit("pick 300,300");
+        app.submit("pick 340,300");
+        app.submit("all");
+        assert_eq!(app.markup.existing(0).unwrap().len(), 1, "the circle should be the only object so far");
+
+        assert!(app.copy_object_selection(), "the selected circle should have been copied");
+        app.paste_object_selection();
+
+        let layer = app.markup.existing(0).expect("the layer exists");
+        assert_eq!(layer.len(), 2, "paste should have added a second shape");
+        let original = layer.objects()[0].geom.bbox();
+        let pasted = layer.objects()[1].geom.bbox();
+        assert_ne!(original, pasted, "the paste landed exactly on the original instead of beside it");
+        assert_eq!(layer.selection().len(), 1, "the pasted copy should end up selected, not the original");
+    }
+
+    /// **The fill this session added must survive a copy.** A Hatch is not
+    /// independently selectable (see `Layer::hit`), so a click-selected
+    /// shape's copy never carried one — this proves the fill still comes
+    /// along through `is_filled`/`set_filled` rather than being silently
+    /// dropped.
+    #[test]
+    fn copying_and_pasting_preserves_a_filled_shapes_fill() {
+        let mut app = app("pictures.pdf");
+        app.submit("circle");
+        app.submit("pick 300,300");
+        app.submit("pick 340,300");
+        app.submit("all");
+        app.markup.existing_mut(0).unwrap().set_filled(0, true);
+
+        assert!(app.copy_object_selection());
+        app.paste_object_selection();
+
+        let layer = app.markup.existing(0).expect("the layer exists");
+        // The original circle and its Hatch, plus a pasted circle and the
+        // *new* Hatch `set_filled` pairs with it — not a Hatch smuggled
+        // straight out of the clipboard onto the original's own handle.
+        assert_eq!(layer.len(), 4, "expected original+Hatch and pasted+Hatch");
+        assert!(layer.is_filled(2), "the pasted copy should be filled too");
+    }
+
+    /// **Requested alongside splines: "when a line is drawn in properties
+    /// let there be an option to pick ends."** The arrow tool is that
+    /// choice made in advance — a line whose head lands where the drawer
+    /// aimed, not the tail.
+    #[test]
+    fn finishing_an_arrow_draws_a_line_with_a_head_where_it_was_aimed() {
+        let mut app = app("pictures.pdf");
+        app.submit("arrow");
+        app.submit("pick 100,100");
+        app.submit("pick 200,150");
+
+        let layer = app.markup.existing(0).expect("the layer exists");
+        assert_eq!(layer.len(), 1);
+        assert!(matches!(&layer.objects()[0].geom, cad_kernel::Geom::Line(_)));
+        assert_eq!(
+            layer.arrow_ends(0),
+            (false, true),
+            "the head belongs at the second point, not the first"
+        );
+    }
+
+    /// The other half of "we also need... splines" — enough points make a
+    /// real curve, not a silently-truncated one.
+    #[test]
+    fn a_finished_spline_keeps_every_point_it_was_given() {
+        let mut app = app("pictures.pdf");
+        app.submit("spline");
+        app.submit("pick 100,100");
+        app.submit("pick 150,120");
+        app.submit("pick 200,100");
+        app.submit("pick 250,140");
+        app.submit("done");
+
+        let layer = app.markup.existing(0).expect("the layer exists");
+        assert_eq!(layer.len(), 1);
+        match &layer.objects()[0].geom {
+            cad_kernel::Geom::Spline(s) => assert_eq!(s.control_points.len(), 4),
+            other => panic!("expected a spline, got {other:?}"),
+        }
+    }
+
+    /// A degree-3 B-spline needs more control points than its degree —
+    /// finishing early must say so, not draw a shortened curve nobody asked
+    /// for.
+    #[test]
+    fn a_spline_finished_too_early_is_refused() {
+        let mut app = app("pictures.pdf");
+        app.submit("spline");
+        app.submit("pick 100,100");
+        app.submit("pick 150,120");
+        app.submit("done");
+
+        assert_eq!(
+            app.markup.existing(0).map(|l| l.len()).unwrap_or(0),
+            0,
+            "nothing should have been added"
+        );
+        assert!(said(&app).contains("at least four"), "{}", said(&app));
+    }
+
+    /// **"the thickness of the lines should also be adjustable."** A shape
+    /// with no lineweight of its own resolves to nothing special; giving it
+    /// one is what the properties panel's Thickness slider does, and it must
+    /// survive being read back exactly.
+    #[test]
+    fn giving_a_shape_a_lineweight_makes_it_resolve_to_that_thickness() {
+        let mut app = app("pictures.pdf");
+        app.submit("circle");
+        app.submit("pick 300,300");
+        app.submit("pick 340,300");
+
+        assert!(
+            app.markup.existing(0).unwrap().resolved_lineweight_mm(0).is_none(),
+            "nothing chosen yet"
+        );
+        let layer = app.markup.existing_mut(0).expect("the layer exists");
+        assert!(layer.set_lineweight_mm(0, 0.5));
+        assert_eq!(layer.resolved_lineweight_mm(0), Some(0.5));
+    }
+
+    #[test]
+    fn copying_and_pasting_a_selected_placed_picture_makes_a_second_one() {
+        let mut app = app("two-column.pdf");
+        app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(4, 4, [40, 90, 200]), 4, 4)
+            .expect("placed");
+        let mark = app.doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
+        app.placed_image_selected =
+            Some(PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
+
+        assert!(app.copy_object_selection(), "the selected picture should have been copied");
+        app.paste_object_selection();
+
+        let pictures = app.doc.as_ref().unwrap().session.placed_image_marks(0).unwrap();
+        assert_eq!(pictures.len(), 2, "paste should have added a second picture");
+        assert!(
+            (pictures[0].rect.left - pictures[1].rect.left).abs() > 1.0
+                || (pictures[0].rect.top - pictures[1].rect.top).abs() > 1.0,
+            "the paste landed exactly on the original instead of beside it"
+        );
+    }
+
+    #[test]
+    fn pasting_with_nothing_copied_says_so() {
+        let mut app = app("two-column.pdf");
+        app.paste_object_selection();
+        assert!(said(&app).contains("nothing to paste"), "expected a plain refusal, got: {}", said(&app));
     }
 
     /// A drag too small to mean anything (egui's own click-vs-drag noise
@@ -16193,6 +24441,88 @@ mod lock_wiring_tests {
         let _ = std::fs::remove_file(&sig_path);
     }
 
+    /// A PNG whose IHDR declares an absurd size — checked purely from the
+    /// bytes of a real header, no encoder involved, since a legitimate one
+    /// refuses to write anything this large.
+    fn png_declaring(width: u32, height: u32) -> Vec<u8> {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc: u32 = 0xFFFF_FFFF;
+            for &byte in bytes {
+                crc ^= byte as u32;
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+        fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let mut body = kind.to_vec();
+            body.extend_from_slice(data);
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&crc32(&body).to_be_bytes());
+            out
+        }
+        let mut out = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&width.to_be_bytes());
+        ihdr.extend_from_slice(&height.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 6, 0, 0, 0]); // 8-bit RGBA, no interlace
+        out.extend(chunk(b"IHDR", &ihdr));
+        // The decoder wants one to exist at all before it will report
+        // anything — its actual bytes are never reached, since the size
+        // this is testing is refused first.
+        out.extend(chunk(b"IDAT", &[0, 0, 0, 0]));
+        out.extend(chunk(b"IEND", &[]));
+        out
+    }
+
+    /// **Found by audit.** A picture's declared size is read from its own
+    /// header before a single pixel is decoded — the `image` crate caps a
+    /// decoder's allocation at 512 MB but not its dimensions, and what
+    /// follows (`to_rgba8`, orientation, signature extraction) each make
+    /// another full-size copy on top.
+    #[test]
+    fn a_picture_declaring_an_absurd_size_is_refused_before_it_is_decoded() {
+        let (mut app, sig_path) = with_signature_pad("two-column.pdf", "upload-huge");
+        let png_path = std::env::temp_dir()
+            .join(format!("pagify-test-upload-huge-{}.png", std::process::id()));
+        std::fs::write(&png_path, png_declaring(50_000, 50_000)).expect("write the scratch PNG");
+
+        app.upload_signature(&png_path);
+        assert!(said(&app).contains("too large"), "{}", said(&app));
+        assert!(app.signatures.is_empty(), "something was kept from an oversized picture");
+
+        let _ = std::fs::remove_file(&png_path);
+        let _ = std::fs::remove_file(&sig_path);
+    }
+
+    /// **Found by audit.** A script that names itself — or two that name
+    /// each other — has nothing else to stop it recursing forever; the
+    /// existing "stop at the first bad step" guard does not apply, since a
+    /// further `replay` dispatches just fine every time.
+    #[test]
+    fn a_script_that_replays_itself_stops_rather_than_recursing_forever() {
+        let mut app = app("two-column.pdf");
+        let path = std::env::temp_dir()
+            .join(format!("pagify-test-replay-self-{}.json", std::process::id()));
+        let script = Script {
+            version: pagify_shell::automate::SCRIPT_VERSION,
+            name: "self".into(),
+            steps: vec![format!("replay {}", path.display())],
+        };
+        std::fs::write(&path, script.to_json()).expect("write the scratch script");
+
+        app.replay(&path);
+
+        assert!(said(&app).contains("scripts deep"), "{}", said(&app));
+        assert_eq!(app.replay_depth, 0, "the depth counter was not unwound");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// **A file that is not a picture is refused, plainly, and nothing is
     /// kept.**
     #[test]
@@ -16282,6 +24612,315 @@ mod lock_wiring_tests {
         assert!(app.snippets.is_some(), "the panel did not open");
         assert!(said(&app).contains("nothing kept yet"), "{}", said(&app));
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The Search & Replace panel opens from its own command, the same way
+    /// every other small popup does — see `the_predefined_text_panel_opens_
+    /// and_says_when_it_is_empty` just above.
+    #[test]
+    fn the_search_and_replace_panel_opens_from_its_command() {
+        let mut app = app("two-column.pdf");
+        app.submit("replace");
+        assert!(app.find_replace.is_some(), "the panel did not open");
+    }
+
+    #[test]
+    fn bookmarking_the_page_opens_the_panel_with_a_default_title() {
+        let mut app = app("two-column.pdf");
+        app.submit("bookmark");
+
+        let panel = app.bookmark_panel.as_ref().expect("the panel did not open");
+        assert_eq!(panel.entries, vec![("Page 1".to_string(), 0)]);
+    }
+
+    /// **"there is no indication that it is bookmarked"** — `bookmarked_pages`
+    /// is the cache `draw_pages` reads to paint the corner icon; this is
+    /// what proves the cache is kept honest without needing to render a
+    /// frame to check it.
+    #[test]
+    fn bookmarking_a_page_marks_it_for_the_corner_icon() {
+        let mut app = app("two-column.pdf");
+        assert!(app.bookmarked_pages.is_empty(), "a fresh document should start with none");
+
+        app.submit("bookmark");
+        assert!(app.bookmarked_pages.contains(&0));
+
+        app.submit("undo");
+        assert!(
+            app.bookmarked_pages.is_empty(),
+            "the icon's own cache should have followed the undo"
+        );
+    }
+
+    /// **Named from what was already picked, not a bare page number** — the
+    /// same instinct as writing a caption from selected text.
+    #[test]
+    fn bookmarking_with_a_selection_uses_it_as_the_title() {
+        let mut app = app("two-column.pdf");
+        let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
+        app.text_selection = Some(range);
+        app.selection_page = 0;
+
+        app.submit("bookmark");
+
+        let panel = app.bookmark_panel.as_ref().expect("the panel did not open");
+        assert_eq!(panel.entries.len(), 1);
+        assert_eq!(panel.entries[0].0.to_lowercase(), "the");
+        assert_eq!(panel.entries[0].1, 0);
+    }
+
+    #[test]
+    fn undoing_a_bookmark_removes_it_from_the_document() {
+        let mut app = app("two-column.pdf");
+        app.submit("bookmark");
+        assert_eq!(
+            app.doc.as_ref().unwrap().session.bookmarks().expect("read").len(),
+            1
+        );
+
+        app.submit("undo");
+        assert!(
+            app.doc.as_ref().unwrap().session.bookmarks().expect("read").is_empty(),
+            "the bookmark should be gone after undo"
+        );
+    }
+
+    #[test]
+    fn weblinks_arms_when_nothing_is_selected() {
+        let mut app = app("two-column.pdf");
+        app.submit("weblinks");
+        assert!(app.link_armed, "the tool was not armed");
+        assert!(app.pending_link.is_none());
+    }
+
+    #[test]
+    fn weblinks_opens_the_prompt_when_text_is_already_selected() {
+        let mut app = app("two-column.pdf");
+        let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
+        app.text_selection = Some(range);
+        app.selection_page = 0;
+
+        app.submit("weblinks");
+
+        assert!(app.pending_link.is_some(), "the prompt did not open");
+        assert!(app.text_selection.is_none(), "the selection should have been consumed");
+        assert!(!app.link_armed, "arming is only for when nothing was selected yet");
+    }
+
+    /// **The ribbon's "Link & Join Text" button, reported as missing its
+    /// own effect**: it was still `Verb::Planned` in the command table, so
+    /// pressing it only ever said "not built yet" — even though the
+    /// underlying join/split feature this session built was fully working
+    /// from a right-click. With nothing selected, pressing the button says
+    /// how to use it rather than doing nothing silently.
+    #[test]
+    fn jointext_with_nothing_selected_says_how_to_use_it() {
+        let mut app = app("two-column.pdf");
+        app.submit("jointext");
+        let said_something = app.cmd.history().iter().any(|e| e.text.contains("drag across"));
+        assert!(said_something, "should have explained what to do: {:?}", app.cmd.history());
+    }
+
+    #[test]
+    fn jointext_joins_an_already_made_selection_at_once() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let a = runs.iter().min_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        let b = runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        assert_ne!(a.object, b.object, "setup: need two distinct runs");
+
+        let centre_a = ((a.rect.left + a.rect.right) / 2.0, (a.rect.top + a.rect.bottom) / 2.0);
+        let centre_b = ((b.rect.left + b.rect.right) / 2.0, (b.rect.top + b.rect.bottom) / 2.0);
+        let range = app
+            .characters(0)
+            .and_then(|c| c.range_between(centre_a, centre_b))
+            .expect("a range covering both runs");
+        app.text_selection = Some(range);
+        app.selection_page = 0;
+
+        app.submit("jointext");
+
+        assert!(app.editing_run.is_some(), "should have opened the joined paragraph editor");
+        assert!(app.group_containing(0, a.object).is_some(), "the two runs should now be a joined group");
+    }
+
+    /// **"it should have all the same properties of the replaced word"** does
+    /// not apply here — a link adds a mark, it does not rewrite the text —
+    /// but the equivalent guarantee does: the link lands exactly over the
+    /// selection, one annotation per line, all to the same address.
+    #[test]
+    fn applying_a_web_link_makes_one_link_per_line() {
+        let mut app = app("two-column.pdf");
+        let rects = vec![
+            pdf_core::document::Rect { left: 20.0, top: 30.0, right: 180.0, bottom: 44.0 },
+            pdf_core::document::Rect { left: 20.0, top: 46.0, right: 100.0, bottom: 60.0 },
+        ];
+        let pending = PendingLink { page: 0, rects: rects.clone(), url: "example.com".to_string() };
+
+        let said = app.apply_web_link(&pending).expect("apply failed");
+        assert!(said.contains('2'), "should report two lines linked: {said}");
+
+        let marks = app.doc.as_ref().unwrap().session.annotations(0).expect("read");
+        let links: Vec<&pdf_core::document::Rect> = marks
+            .iter()
+            .filter_map(|m| match &m.annotation {
+                pdf_core::document::Annotation::Link { rect, uri } => {
+                    // A bare domain needs a scheme, or the address opens
+                    // nowhere in most readers.
+                    assert_eq!(uri, "https://example.com");
+                    Some(rect)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(links.len(), 2, "expected one link per line: {marks:?}");
+    }
+
+    /// **"show it in blue font color but dont change the font style."**
+    #[test]
+    fn linked_text_turns_blue_but_keeps_its_words_and_size() {
+        let mut app = app("two-column.pdf");
+        let before = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs")[0].clone();
+
+        let pending =
+            PendingLink { page: 0, rects: vec![before.rect], url: "example.com".to_string() };
+        app.apply_web_link(&pending).expect("apply failed");
+
+        let after = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let changed = after
+            .iter()
+            .find(|r| r.object == before.object)
+            .expect("the run should still be there");
+        assert_eq!(changed.text, before.text, "the words should not have changed");
+        assert_eq!(changed.size, before.size, "the size should not have changed");
+        assert_eq!(
+            (changed.color.r, changed.color.g, changed.color.b),
+            (5, 99, 193),
+            "should have turned the standard hyperlink blue"
+        );
+
+        let marks = app.doc.as_ref().unwrap().session.annotations(0).expect("read");
+        assert!(
+            marks.iter().any(|m| matches!(&m.annotation, pdf_core::document::Annotation::Link { .. })),
+            "the link itself should still be there after recolouring: {marks:?}"
+        );
+        assert!(
+            !marks.iter().any(|m| matches!(&m.annotation, pdf_core::document::Annotation::Underline { .. })),
+            "the underline fallback should not fire when recolouring already succeeded: {marks:?}"
+        );
+    }
+
+    /// Recolouring is scoped to what the link actually covers — a run
+    /// nowhere near the link's own rects keeps whatever colour it already
+    /// had.
+    #[test]
+    fn only_the_linked_run_turns_blue() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let linked = runs[0].clone();
+        let untouched =
+            runs.iter().find(|r| r.object != linked.object).cloned().expect("a second run");
+
+        let pending =
+            PendingLink { page: 0, rects: vec![linked.rect], url: "example.com".to_string() };
+        app.apply_web_link(&pending).expect("apply failed");
+
+        let after = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let still = after
+            .iter()
+            .find(|r| r.object == untouched.object)
+            .expect("the unrelated run should still be there");
+        assert_eq!(
+            (still.color.r, still.color.g, still.color.b),
+            (untouched.color.r, untouched.color.g, untouched.color.b),
+            "an unrelated run should not have changed colour"
+        );
+    }
+
+    #[test]
+    fn applying_a_web_link_with_no_address_is_refused() {
+        let mut app = app("two-column.pdf");
+        let pending = PendingLink {
+            page: 0,
+            rects: vec![pdf_core::document::Rect { left: 0.0, top: 0.0, right: 10.0, bottom: 10.0 }],
+            url: String::new(),
+        };
+        assert!(app.apply_web_link(&pending).is_err());
+    }
+
+    /// **"once added theres no way of clicking it so it will take it the
+    /// user to that webpage"** — `link_uri_at` is the lookup the click
+    /// handler uses; this is what proves it actually finds the address
+    /// rather than just the annotation's existence.
+    #[test]
+    fn link_uri_at_finds_the_address_of_a_link_just_added() {
+        let mut app = app("two-column.pdf");
+        let pending = PendingLink {
+            page: 0,
+            rects: vec![pdf_core::document::Rect { left: 20.0, top: 30.0, right: 180.0, bottom: 44.0 }],
+            url: "example.com".to_string(),
+        };
+        app.apply_web_link(&pending).expect("apply failed");
+
+        assert_eq!(app.link_uri_at(0, 1), Some("https://example.com".to_string()));
+    }
+
+    #[test]
+    fn link_uri_at_is_none_for_a_mark_that_is_not_a_link() {
+        let mut app = app("two-column.pdf");
+        app.doc
+            .as_ref()
+            .unwrap()
+            .session
+            .highlight(
+                0,
+                vec![pdf_core::document::Rect { left: 20.0, top: 30.0, right: 180.0, bottom: 44.0 }],
+                pdf_core::document::Color { r: 255, g: 224, b: 102, a: 128 },
+            )
+            .expect("highlight failed");
+
+        assert_eq!(app.link_uri_at(0, 1), None);
+    }
+
+    #[test]
+    fn an_article_box_draws_a_border_and_a_note_for_its_title() {
+        let mut app = app("two-column.pdf");
+        let pending = PendingArticleBox {
+            page: 0,
+            rect: pdf_core::document::Rect { left: 20.0, top: 20.0, right: 200.0, bottom: 120.0 },
+            title: "Reading order 1".to_string(),
+        };
+
+        let said = app.apply_article_box(&pending).expect("apply failed");
+        assert!(said.contains("Reading order 1"), "{said}");
+
+        let marks = app.doc.as_ref().unwrap().session.annotations(0).expect("read");
+        let has_border = marks
+            .iter()
+            .any(|m| matches!(&m.annotation, pdf_core::document::Annotation::Ink { strokes, .. } if strokes.len() == 1 && strokes[0].len() == 5));
+        assert!(has_border, "no bordered region found: {marks:?}");
+
+        let has_title = marks.iter().any(|m| {
+            matches!(&m.annotation, pdf_core::document::Annotation::Note { contents, .. } if contents == "Reading order 1")
+        });
+        assert!(has_title, "no title note found: {marks:?}");
+    }
+
+    #[test]
+    fn an_article_box_with_no_title_skips_the_note() {
+        let mut app = app("two-column.pdf");
+        let pending = PendingArticleBox {
+            page: 0,
+            rect: pdf_core::document::Rect { left: 20.0, top: 20.0, right: 200.0, bottom: 120.0 },
+            title: String::new(),
+        };
+        app.apply_article_box(&pending).expect("apply failed");
+
+        let marks = app.doc.as_ref().unwrap().session.annotations(0).expect("read");
+        assert!(
+            !marks.iter().any(|m| matches!(&m.annotation, pdf_core::document::Annotation::Note { .. })),
+            "a note was added despite no title: {marks:?}"
+        );
     }
 
     /// **Any change to the document asks before it is thrown away.**
@@ -16919,6 +25558,496 @@ mod lock_wiring_tests {
         }
     }
 
+    /// **A rectangle dragged over more than one thing picks up all of
+    /// them**, not just whichever one a plain click would have landed on —
+    /// the fixture's two pictures, both inside one marquee.
+    #[test]
+    fn dragging_a_rectangle_over_two_pictures_selects_both() {
+        let mut app = app("pictures.pdf");
+        app.submit("editobject");
+        let pictures = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        assert_eq!(pictures.len(), 2, "the fixture should have two pictures");
+
+        let mut bounds = pictures[0].rect;
+        for p in &pictures[1..] {
+            bounds.left = bounds.left.min(p.rect.left);
+            bounds.top = bounds.top.min(p.rect.top);
+            bounds.right = bounds.right.max(p.rect.right);
+            bounds.bottom = bounds.bottom.max(p.rect.bottom);
+        }
+        let pad = 5.0;
+        app.select_group_in(
+            0,
+            AppPoint { x: (bounds.left - pad) as f64, y: (bounds.top - pad) as f64 },
+            AppPoint { x: (bounds.right + pad) as f64, y: (bounds.bottom + pad) as f64 },
+            false,
+        );
+        assert!(app.selected.is_none(), "a group should not also leave a single selection");
+        assert_eq!(app.group.len(), 2, "both pictures should be in the group: {:?}", app.group);
+        assert!(said(&app).contains("2 things selected"), "{}", said(&app));
+    }
+
+    /// **A marquee over just one thing behaves like clicking it** — full
+    /// [`PagifyApp::selected`], handles and all, not a one-member group with
+    /// no way to resize it.
+    #[test]
+    fn a_marquee_over_just_one_thing_selects_it_normally() {
+        let mut app = app("pictures.pdf");
+        app.submit("editobject");
+        let target = app.doc.as_ref().expect("open").session.images_on(0).expect("images")[0].clone();
+        let pad = 5.0;
+        app.select_group_in(
+            0,
+            AppPoint { x: (target.rect.left - pad) as f64, y: (target.rect.top - pad) as f64 },
+            AppPoint { x: (target.rect.right + pad) as f64, y: (target.rect.bottom + pad) as f64 },
+            false,
+        );
+        assert!(app.group.is_empty(), "one thing should not become a group");
+        assert_eq!(app.selected.as_ref().map(|s| s.object), Some(target.object));
+    }
+
+    /// **Clicking one line of a paragraph in Edit Text opens the whole
+    /// paragraph to retype, not just that line** — the fixture's left-hand
+    /// column is eight single-spaced lines, close enough together that
+    /// they must all merge into one paragraph.
+    #[test]
+    fn clicking_a_line_in_edit_text_opens_the_whole_paragraph_it_sits_in() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().expect("open").session.text_run_rects(0).expect("runs");
+
+        // The left column: everything left of the gap before the right
+        // column starts.
+        let left_column: std::collections::HashSet<usize> =
+            runs.iter().filter(|(_, r)| r.left < 300.0).map(|(o, _)| *o).collect();
+        assert_eq!(left_column.len(), 8, "expected the fixture's eight left-column lines");
+
+        // A line from the middle of the column, not an edge, so both
+        // directions of the walk in `paragraph_around` are exercised.
+        let mut left_runs: Vec<(usize, pdf_core::document::Rect)> =
+            runs.iter().filter(|(o, _)| left_column.contains(o)).cloned().collect();
+        left_runs.sort_by(|(_, a), (_, b)| a.top.total_cmp(&b.top));
+        let (_, seed_rect) = left_runs[left_runs.len() / 2];
+        let at = AppPoint {
+            x: ((seed_rect.left + seed_rect.right) / 2.0) as f64,
+            y: ((seed_rect.top + seed_rect.bottom) / 2.0) as f64,
+        };
+
+        app.submit("edittext");
+        app.pick_text_run(0, at).expect("a run was here");
+
+        let edit = app.editing_run.as_ref().expect("edit text should have opened");
+        let opened: std::collections::HashSet<usize> =
+            edit.lines.iter().flat_map(|(o, _)| o.iter().copied()).collect();
+        assert_eq!(
+            opened, left_column,
+            "the paragraph opened for editing did not match the left column exactly"
+        );
+        assert_eq!(
+            edit.buffer.lines().count(),
+            8,
+            "the combined buffer should hold all eight lines: {:?}",
+            edit.buffer
+        );
+    }
+
+    /// Arms Edit Text and clicks the middle of the fixture's eight-line
+    /// left column, the same way the test above finds it — shared by the
+    /// three `apply_paragraph_edit` tests below so each starts from the
+    /// same open paragraph rather than repeating the setup.
+    fn open_left_column_paragraph(app: &mut PagifyApp) -> Vec<usize> {
+        let runs = app.doc.as_ref().expect("open").session.text_run_rects(0).expect("runs");
+        let mut left_runs: Vec<(usize, pdf_core::document::Rect)> =
+            runs.iter().filter(|(_, r)| r.left < 300.0).cloned().collect();
+        left_runs.sort_by(|(_, a), (_, b)| a.top.total_cmp(&b.top));
+        assert_eq!(left_runs.len(), 8, "expected the fixture's eight left-column lines");
+        let (_, seed_rect) = left_runs[left_runs.len() / 2];
+        let at = AppPoint {
+            x: ((seed_rect.left + seed_rect.right) / 2.0) as f64,
+            y: ((seed_rect.top + seed_rect.bottom) / 2.0) as f64,
+        };
+
+        app.submit("edittext");
+        app.pick_text_run(0, at).expect("a run was here");
+        app.editing_run
+            .as_ref()
+            .expect("edit text should have opened")
+            .lines
+            .iter()
+            .map(|(objects, _)| *objects.first().expect("a line is never empty"))
+            .collect()
+    }
+
+    /// **Retyping a paragraph rewrites each of its lines in place** — the
+    /// object at index `i` gets the `i`th line of what was typed, the same
+    /// safe in-place swap a single run's own edit already uses.
+    #[test]
+    fn applying_a_paragraph_edit_rewrites_each_line_in_place() {
+        let mut app = app("two-column.pdf");
+        let objects = open_left_column_paragraph(&mut app);
+
+        let new_text = "ONE\nTWO\nTHREE\nFOUR\nFIVE\nSIX\nSEVEN\nEIGHT";
+        app.editing_run.as_mut().unwrap().buffer = new_text.to_string();
+        app.apply_edited_run();
+
+        let after = app.doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        let by_object: std::collections::HashMap<usize, String> =
+            after.into_iter().map(|r| (r.object, r.text)).collect();
+        for (i, object) in objects.iter().enumerate() {
+            let expected = new_text.split('\n').nth(i).unwrap();
+            assert_eq!(
+                by_object.get(object).map(|s| s.trim()),
+                Some(expected),
+                "line {i} (object {object}) did not get its own new text"
+            );
+        }
+    }
+
+    /// **Typing more lines than the paragraph had adds the rest below it**
+    /// — the existing lines stay exactly where they were; only the new
+    /// ones are placed.
+    ///
+    /// **A shaped write is one object per glyph**, same as any other
+    /// embedded-font write — see `write_styled_line_at` — so the new line's
+    /// own objects are read by joining every one that is not among the
+    /// paragraph's own original objects, not by looking for a single run
+    /// that already says the whole thing.
+    #[test]
+    fn applying_a_grown_paragraph_edit_adds_new_lines_below() {
+        let mut app = app("two-column.pdf");
+        let objects = open_left_column_paragraph(&mut app);
+
+        let mut new_text: Vec<String> = (0..objects.len()).map(|i| format!("L{i}")).collect();
+        new_text.push("EXTRALINE".to_string());
+        app.editing_run.as_mut().unwrap().buffer = new_text.join("\n");
+        app.apply_edited_run();
+
+        let after = app.doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        let mut added: Vec<_> = after
+            .iter()
+            .filter(|r| !objects.contains(&r.object) && !r.text.trim().is_empty())
+            .collect();
+        added.sort_by(|a, b| a.rect.left.total_cmp(&b.rect.left));
+        let joined: String = added.iter().map(|r| r.text.as_str()).collect();
+        assert!(
+            joined.contains("EXTRALINE"),
+            "the extra line was not added: {:?}",
+            after.iter().map(|r| r.text.trim()).collect::<Vec<_>>()
+        );
+        // And the original eight are still there, each with its own new text.
+        let by_object: std::collections::HashMap<usize, String> =
+            after.into_iter().map(|r| (r.object, r.text)).collect();
+        for (i, object) in objects.iter().enumerate() {
+            assert_eq!(by_object.get(object).map(|s| s.trim()), Some(format!("L{i}").as_str()));
+        }
+    }
+
+    /// **Typing fewer lines than the paragraph had blanks the rest** — the
+    /// objects stay (nothing here removes a text object outright), but
+    /// carry no more text.
+    #[test]
+    fn applying_a_shrunk_paragraph_edit_blanks_the_extra_lines() {
+        let mut app = app("two-column.pdf");
+        let objects = open_left_column_paragraph(&mut app);
+
+        app.editing_run.as_mut().unwrap().buffer = "ONLYONE".to_string();
+        app.apply_edited_run();
+
+        let after = app.doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        let by_object: std::collections::HashMap<usize, String> =
+            after.into_iter().map(|r| (r.object, r.text)).collect();
+        assert_eq!(by_object.get(&objects[0]).map(|s| s.trim()), Some("ONLYONE"));
+        for object in &objects[1..] {
+            assert_eq!(
+                by_object.get(object).map(|s| s.trim()).unwrap_or(""),
+                "",
+                "line for object {object} should have been blanked, not left as it was"
+            );
+        }
+    }
+
+    /// **Edit Object never groups a click on text into a paragraph** —
+    /// that belongs to Edit Text (see the test above); Edit Object always
+    /// answers at word or letter granularity, on the same fixture's
+    /// eight-line column that would have merged were this still there.
+    #[test]
+    fn clicking_a_line_in_edit_object_does_not_select_the_paragraph() {
+        let mut app = app("two-column.pdf");
+        app.submit("editobject");
+        let runs = app.doc.as_ref().expect("open").session.text_run_rects(0).expect("runs");
+        let mut left_runs: Vec<(usize, pdf_core::document::Rect)> =
+            runs.iter().filter(|(_, r)| r.left < 300.0).cloned().collect();
+        left_runs.sort_by(|(_, a), (_, b)| a.top.total_cmp(&b.top));
+        let (_, seed_rect) = left_runs[left_runs.len() / 2];
+        let at = AppPoint {
+            x: ((seed_rect.left + seed_rect.right) / 2.0) as f64,
+            y: ((seed_rect.top + seed_rect.bottom) / 2.0) as f64,
+        };
+
+        app.select_thing_at(0, at);
+
+        assert!(app.group.is_empty(), "edit object grouped a click into a paragraph");
+        assert!(app.selected.is_some(), "the click should still have selected something");
+    }
+
+    /// **`paragraph_around` has exactly one production caller — Edit Text's
+    /// own `pick_text_run` — and Edit Object's character split
+    /// (`split_run_into_characters`) is only ever reachable through a
+    /// different tool, gated behind its own `self.object_tool`.** The two
+    /// can never fire back to back in one action: reaching this function
+    /// with a just-split letter as its seed always means a tool switch (and
+    /// therefore real, elapsed use) happened first, never that the split
+    /// itself is still in flight. So the split's neighbouring one-letter
+    /// runs are exactly what this function exists to reassemble — see
+    /// `edit_text_recovers_a_line_that_was_split_into_characters` for the
+    /// same fix exercised through the real Edit Text entry point instead of
+    /// calling `paragraph_around` directly.
+    #[test]
+    fn splitting_a_run_leaves_its_letters_recoverable_as_one_paragraph() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        let target = runs
+            .iter()
+            .find(|r| r.text.trim().chars().count() > 5)
+            .cloned()
+            .expect("a run with words");
+
+        app.doc
+            .as_ref()
+            .expect("open")
+            .session
+            .split_run_into_characters(0, target.object)
+            .expect("split");
+
+        // A point a quarter of the way into where the run used to be — the
+        // same aim `clicking_a_run_splits_it_and_selects_one_letter` uses,
+        // chosen there because the exact centre can land in a gap between
+        // characters. Whichever of the newly split characters' rects
+        // contains it is the one this test seeds `paragraph_around` with.
+        let at = (
+            target.rect.left + (target.rect.right - target.rect.left) * 0.25,
+            (target.rect.top + target.rect.bottom) / 2.0,
+        );
+        // Fresh, not the `runs` fetched before the split: those still name
+        // the one whole object that no longer exists, and `paragraph_around`
+        // would fall back to "just the seed" for not finding it at all —
+        // passing this test without ever exercising the same-line merge it
+        // exists to guard.
+        let after_split = app.doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        let seed = after_split
+            .iter()
+            .find(|r| {
+                at.0 >= r.rect.left.min(r.rect.right)
+                    && at.0 <= r.rect.left.max(r.rect.right)
+                    && at.1 >= r.rect.top.min(r.rect.bottom)
+                    && at.1 <= r.rect.top.max(r.rect.bottom)
+            })
+            .expect("the click point should land on one of the split characters");
+        let (letter_object, letter_rect) = (seed.object, seed.rect);
+
+        let paragraph = app.paragraph_around(0, letter_object, letter_rect, &after_split);
+        assert!(
+            paragraph.len() > 1,
+            "a split letter should have found its same-line siblings again: {paragraph:?}"
+        );
+    }
+
+    /// **Found by audit-style report: a marquee must only take what it fully
+    /// encloses.** A rectangle that merely crosses a picture's edge — the old
+    /// "any overlap counts" rule — must leave it out.
+    #[test]
+    fn a_marquee_that_only_clips_a_picture_does_not_select_it() {
+        let mut app = app("pictures.pdf");
+        app.submit("editobject");
+        let pictures = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        let target = pictures[0].clone();
+
+        // The right half of the target's own bounding box: its left edge is
+        // outside this rectangle, so it is crossed, not enclosed.
+        let mid_x = (target.rect.left + target.rect.right) / 2.0;
+        app.select_group_in(
+            0,
+            AppPoint { x: mid_x as f64, y: (target.rect.top - 5.0) as f64 },
+            AppPoint { x: (target.rect.right + 5.0) as f64, y: (target.rect.bottom + 5.0) as f64 },
+            false,
+        );
+        assert_ne!(
+            app.selected.as_ref().map(|s| s.object),
+            Some(target.object),
+            "a picture only half inside the marquee was selected"
+        );
+    }
+
+    /// **Shift-click adds to the selection instead of replacing it.**
+    #[test]
+    fn shift_clicking_a_second_picture_adds_it_to_the_selection() {
+        let mut app = app("pictures.pdf");
+        app.submit("editobject");
+        let pictures = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        let (first, second) = (pictures[0].clone(), pictures[1].clone());
+
+        let at = |r: pdf_core::document::Rect| AppPoint {
+            x: ((r.left + r.right) / 2.0) as f64,
+            y: ((r.top + r.bottom) / 2.0) as f64,
+        };
+        app.select_thing_at(0, at(first.rect));
+        assert_eq!(app.selected.as_ref().map(|s| s.object), Some(first.object));
+
+        app.extend_selection_at(0, at(second.rect));
+        assert!(app.selected.is_none(), "a two-member selection must be a group, not `selected`");
+        let objects: Vec<usize> = app.group.iter().map(|s| s.object).collect();
+        assert!(objects.contains(&first.object) && objects.contains(&second.object), "{objects:?}");
+    }
+
+    /// **Shift-clicking a member already in the selection drops it again** —
+    /// the toggle every other multi-select gesture uses.
+    #[test]
+    fn shift_clicking_a_selected_picture_again_removes_it() {
+        let mut app = app("pictures.pdf");
+        app.submit("editobject");
+        let pictures = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        let (first, second) = (pictures[0].clone(), pictures[1].clone());
+        app.group = vec![
+            Selected { page: 0, object: first.object, rect: first.rect, what: "the picture" },
+            Selected { page: 0, object: second.object, rect: second.rect, what: "the picture" },
+        ];
+
+        app.extend_selection_at(
+            0,
+            AppPoint {
+                x: ((first.rect.left + first.rect.right) / 2.0) as f64,
+                y: ((first.rect.top + first.rect.bottom) / 2.0) as f64,
+            },
+        );
+        assert_eq!(app.group.len(), 0, "removing one of two should leave one, folded into `selected`");
+        assert_eq!(app.selected.as_ref().map(|s| s.object), Some(second.object));
+    }
+
+    /// **Shift-dragging a marquee adds to the selection rather than
+    /// replacing it.**
+    #[test]
+    fn shift_dragging_a_marquee_extends_an_existing_selection() {
+        let mut app = app("pictures.pdf");
+        app.submit("editobject");
+        let pictures = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        let (first, second) = (pictures[0].clone(), pictures[1].clone());
+        app.selected = Some(Selected { page: 0, object: first.object, rect: first.rect, what: "the picture" });
+
+        let pad = 5.0;
+        app.select_group_in(
+            0,
+            AppPoint { x: (second.rect.left - pad) as f64, y: (second.rect.top - pad) as f64 },
+            AppPoint { x: (second.rect.right + pad) as f64, y: (second.rect.bottom + pad) as f64 },
+            true,
+        );
+        assert!(app.selected.is_none());
+        let objects: Vec<usize> = app.group.iter().map(|s| s.object).collect();
+        assert!(
+            objects.contains(&first.object) && objects.contains(&second.object),
+            "the extended marquee lost the picture already selected: {objects:?}"
+        );
+    }
+
+    /// **Dragging the group moves every member by the same amount.**
+    #[test]
+    fn dragging_the_group_moves_every_member_by_the_same_amount() {
+        let mut app = app("pictures.pdf");
+        app.submit("editobject");
+        let pictures = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        app.group = pictures
+            .iter()
+            .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
+            .collect();
+
+        app.finish_group_grab(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (12.0, -7.0) }, 1.0);
+
+        let after = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        for before in &pictures {
+            let now = after.iter().find(|i| i.object == before.object).expect("still on the page");
+            assert!(
+                (now.rect.left - before.rect.left - 12.0).abs() < 0.5
+                    && (now.rect.top - before.rect.top + 7.0).abs() < 0.5,
+                "object {} moved to {:?} from {:?}",
+                before.object,
+                now.rect,
+                before.rect
+            );
+        }
+        assert_eq!(app.group.len(), 2, "the group should still hold both, at their new spots");
+    }
+
+    /// **Dragging one of the group's own handles resizes every member about
+    /// the same shared anchor** — the group's own bounding box, the same
+    /// way a single object's own handle anchors on its own opposite corner.
+    #[test]
+    fn resizing_the_group_scales_every_member_about_the_same_anchor() {
+        let mut app = app("pictures.pdf");
+        app.submit("editobject");
+        let pictures = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        app.group = pictures
+            .iter()
+            .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
+            .collect();
+        let bounds = app.group_bounds(0).expect("bounds");
+        let (w, h) = (bounds.right - bounds.left, bounds.bottom - bounds.top);
+
+        // Drag the bottom-right handle out by the group's own width and
+        // height — doubling it, anchored at the group's top-left.
+        app.finish_group_grab(
+            Grab {
+                handle: Some(Handle::BottomRight),
+                from: AppPoint { x: bounds.right as f64, y: bounds.bottom as f64 },
+                by: (w, h),
+            },
+            1.0,
+        );
+
+        let after = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        for before in &pictures {
+            let now = after.iter().find(|i| i.object == before.object).expect("still on the page");
+            let want_left = bounds.left + (before.rect.left - bounds.left) * 2.0;
+            let want_top = bounds.top + (before.rect.top - bounds.top) * 2.0;
+            assert!(
+                (now.rect.left - want_left).abs() < 1.0 && (now.rect.top - want_top).abs() < 1.0,
+                "object {} did not scale about the group's own anchor: now {:?}, wanted left {want_left} top {want_top}",
+                before.object,
+                now.rect
+            );
+        }
+        assert_eq!(app.group.len(), 2, "the group should still hold both, at their new sizes");
+        let bounds_after = app.group_bounds(0).expect("bounds");
+        assert!(
+            (bounds_after.right - bounds_after.left - w * 2.0).abs() < 1.0,
+            "the group's own bounds should have doubled: was {w}, now {}",
+            bounds_after.right - bounds_after.left
+        );
+    }
+
+    /// **Deleting the group removes every member** — highest object index
+    /// first, so the second removal is not reading a page whose earlier
+    /// objects have already shifted down underneath it.
+    #[test]
+    fn deleting_the_group_removes_every_member() {
+        let mut app = app("pictures.pdf");
+        app.submit("editobject");
+        let before = app.doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
+        assert_eq!(before.len(), 5, "the fixture should draw five things");
+        let pictures = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        assert_eq!(pictures.len(), 2);
+        app.group = pictures
+            .iter()
+            .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
+            .collect();
+
+        app.delete_group();
+
+        assert!(app.group.is_empty(), "the group should be spent after deleting it");
+        let after = app.doc.as_ref().expect("open").session.images_on(0).expect("images");
+        assert!(after.is_empty(), "both pictures should be gone: {after:?}");
+        let remaining = app.doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
+        assert_eq!(remaining.len(), 3, "only the two pictures should have been removed");
+        assert!(said(&app).contains("2 things removed"), "{}", said(&app));
+    }
+
     /// smaller thing is what was aimed at.
     #[test]
     fn a_run_of_words_can_be_moved_across_the_page() {
@@ -16972,6 +26101,56 @@ mod lock_wiring_tests {
                 "moving one run shifted another"
             );
         }
+    }
+
+    /// **Clicking into a run of words splits it into characters and selects
+    /// just the one that was clicked** — not the whole sentence, which used
+    /// to be the only thing Edit Object could ever select or move.
+    ///
+    /// `text-lines.pdf`, not `two-column.pdf`: its lines sit far enough
+    /// apart that each one is its own paragraph of one — see
+    /// `PagifyApp::paragraph_around` — so a click still drills straight to a
+    /// single letter instead of picking up a multi-line group.
+    #[test]
+    fn clicking_a_run_splits_it_and_selects_one_letter() {
+        let mut app = app("text-lines.pdf");
+        app.submit("editobject");
+        let before_runs = app.doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        let target = before_runs
+            .iter()
+            .find(|r| r.text.trim().chars().count() > 5)
+            .cloned()
+            .expect("a run with words");
+        let before_objects = app.doc.as_ref().expect("open").session.drawn_objects(0).expect("objects").len();
+
+        // A quarter of the way in rather than dead centre — the exact
+        // midpoint of a run with an even split can land in the gap between
+        // two characters (a space, say) rather than inside either one.
+        let at = AppPoint {
+            x: (target.rect.left + (target.rect.right - target.rect.left) * 0.25) as f64,
+            y: ((target.rect.top + target.rect.bottom) / 2.0) as f64,
+        };
+        app.select_thing_at(0, at);
+
+        let sel = app.selected.clone().expect("something should be selected");
+        assert_eq!(sel.what, "the letter", "should have split down to one letter:\n{}", said(&app));
+        let width = sel.rect.right - sel.rect.left;
+        let run_width = target.rect.right - target.rect.left;
+        assert!(
+            width < run_width * 0.6,
+            "the selection should be about one letter wide, not the whole run: {width} of {run_width}"
+        );
+
+        let after_objects =
+            app.doc.as_ref().expect("open").session.drawn_objects(0).expect("objects").len();
+        assert!(after_objects > before_objects, "the run should have split into more objects");
+
+        // Clicking the very same spot again is a no-op split — still one
+        // letter selected, not an error and not a second split on top of it.
+        app.select_thing_at(0, at);
+        assert_eq!(app.selected.as_ref().map(|s| s.what), Some("the letter"));
+        let again = app.doc.as_ref().expect("open").session.drawn_objects(0).expect("objects").len();
+        assert_eq!(again, after_objects, "clicking an already-split letter should change nothing further");
     }
 
     /// Clicking bare paper says so rather than moving whatever is nearest.
@@ -17106,9 +26285,13 @@ mod lock_wiring_tests {
     /// reaches it.
     #[test]
     fn editing_the_words_of_a_run_leaves_every_other_run_where_it_was() {
-        let mut app = app("two-column.pdf");
+        // Not `two-column.pdf`: its lines are close enough together that
+        // they now open as a paragraph (see `pick_paragraph`), and this
+        // test is specifically about the single-run path. Widely separated
+        // lines, so the run this picks is its own paragraph of one.
+        let mut app = app("text-lines.pdf");
         let before = app.doc.as_ref().expect("open").session.text_runs(0).expect("runs");
-        assert!(before.len() > 3, "the fixture has too little text to be a test");
+        assert!(before.len() >= 3, "the fixture has too little text to be a test");
 
         // A run with words in it, not a stray space.
         let (at, target) = before
@@ -17955,6 +27138,7 @@ mod lock_wiring_tests {
         assert!(app.recent.entries.is_empty(), "the list was not cleared: {told}");
         assert!(told.contains("recent-documents list is gone"), "{told}");
         assert!(told.contains("signatures.json"), "it did not say what else is kept: {told}");
+        assert!(told.contains("outlined_fonts.json"), "it did not mention outlined_fonts.json: {told}");
     }
 
     /// **Smart Redact reports before it acts, and says what it found.**
@@ -18475,6 +27659,25 @@ mod lock_wiring_tests {
         assert_eq!(page_text(&app, 0), hidden, "undo did not re-hide it:\n{}", said(&app));
     }
 
+    /// **A whole-document unlock clears the badge it just restored.**
+    /// Reported from use: after `unlock` put a locked passage's words back
+    /// on the page, its padlock stayed — because the page-wide restore never
+    /// told the vault the passage it had just put back was no longer locked,
+    /// only `unlock_item` did that bookkeeping.
+    #[test]
+    fn a_whole_document_unlock_clears_the_area_badge_it_restored() {
+        let mut app = app("text-lines.pdf");
+        app.lock_area(0, fox_area(), b"a good passcode", true).expect("lock");
+        assert_eq!(app.locked_items_on(0).len(), 1, "control: the badge should be there");
+
+        app.unlock(b"a good passcode").expect("unlock");
+        assert!(page_text(&app, 0).contains("The quick brown fox"));
+        assert!(
+            app.locked_items_on(0).is_empty(),
+            "the badge outlived a whole-document unlock that already put the words back"
+        );
+    }
+
     /// **The passcode is asked for once per document, not once per lock.**
     ///
     /// Reported from use: locking several things meant typing the same passcode
@@ -18808,7 +28011,7 @@ mod lock_wiring_tests {
 
         // Let go.
         let grab = app.grab.take().expect("grab");
-        app.finish_grab(sel, grab);
+        app.finish_grab(sel, grab, 1.0);
         let moved = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
         assert!(
             (moved.rect.left - panel.rect.left - 30.0).abs() < 0.5 && (moved.rect.top - panel.rect.top - 18.0).abs() < 0.5,
@@ -18819,6 +28022,193 @@ mod lock_wiring_tests {
         // And it is still selected, where it now is.
         let still = app.selected.clone().expect("still selected");
         assert!((still.rect.left - moved.rect.left).abs() < 0.5, "the selection did not follow the thing");
+    }
+
+    /// **Text placed by Add Text is real page content, so it is found and
+    /// dragged the same way any other run of words is** — the whole run,
+    /// not the one letter a plain click would drill into.
+    /// `select_thing_at_drilling(.., false)` is what `interact_objects`
+    /// actually calls when a drag starts fresh on unselected text; using it
+    /// here rather than `select_thing_at` is what makes this test exercise
+    /// the drag path's real bug rather than the click path's intended one.
+    #[test]
+    fn text_placed_by_add_text_can_be_selected_and_dragged_like_any_other_run() {
+        let mut app = app("single-page.pdf");
+        let at = AppPoint { x: 300.0, y: 700.0 };
+        app.write_text_at(0, at, "FRESHLYPLACED").expect("written");
+
+        app.submit("editobject");
+        assert!(
+            app.select_thing_at_drilling(0, at, false),
+            "the freshly written words were not found"
+        );
+        let sel = app.selected.clone().expect("selected");
+        assert_eq!(sel.what, "the words");
+
+        let grab = Grab { handle: None, from: at, by: (25.0, 12.0) };
+        app.finish_grab(sel.clone(), grab, 1.0);
+
+        let moved = app.selected.clone().expect("still selected after the drag");
+        assert_eq!(moved.what, "the words", "the drag left it split down to a single letter");
+        assert!(
+            (moved.rect.left - sel.rect.left - 25.0).abs() < 1.0
+                && (moved.rect.top - sel.rect.top - 12.0).abs() < 1.0,
+            "the freshly placed text did not move: {:?} then {:?}",
+            sel.rect,
+            moved.rect
+        );
+        assert!(
+            (moved.rect.right - moved.rect.left - (sel.rect.right - sel.rect.left)).abs() < 1.0,
+            "the whole run should have moved together, not shrunk to one letter's width: {:?} then {:?}",
+            sel.rect,
+            moved.rect
+        );
+    }
+
+    /// **The bug this whole fix was for**: before `select_thing_at_drilling`
+    /// existed, `interact_objects` used the drilling `select_thing_at` to
+    /// decide what a fresh drag had landed on — so starting a drag on an
+    /// ordinary, isolated line of text silently split it into one object per
+    /// character and moved only the one under the pointer, leaving the rest
+    /// of the line exactly where it was.
+    #[test]
+    fn dragging_an_isolated_line_of_text_moves_the_whole_line_not_one_letter() {
+        let mut app = app("single-page.pdf");
+        let at = AppPoint { x: 300.0, y: 700.0 };
+        app.write_text_at(0, at, "FRESHLYPLACED").expect("written");
+        app.submit("editobject");
+
+        // The exact shape of `interact_objects`'s own drag-start branch:
+        // select fresh, then drag the body.
+        assert!(app.select_thing_at_drilling(0, at, false));
+        let sel = app.selected.clone().expect("selected");
+        let leftmost = |rects: &[(usize, pdf_core::document::Rect)]| {
+            rects.iter().map(|(_, r)| r.left).fold(f32::INFINITY, f32::min)
+        };
+        let before = app.doc.as_ref().unwrap().session.text_run_rects(0).unwrap();
+        let before_count = before.len();
+        let before_left = leftmost(&before);
+
+        let grab = Grab { handle: None, from: at, by: (60.0, 0.0) };
+        app.finish_grab(sel, grab, 1.0);
+
+        let after = app.doc.as_ref().unwrap().session.text_run_rects(0).unwrap();
+        assert_eq!(after.len(), before_count, "the run was split into characters by a drag");
+        assert!(
+            (leftmost(&after) - (before_left + 60.0)).abs() < 1.0,
+            "the run did not move as one piece: {before_left} then {:?}",
+            leftmost(&after)
+        );
+    }
+
+    /// **`undo` puts a dragged object back** — Edit Object's move, resize
+    /// and delete used to bypass the command stack entirely, so there was
+    /// nothing for `undo` to find; now that a drag reaches the document
+    /// through [`pdf_core::command::Command`], the same `undo` that already
+    /// reverses everything else reverses these too, with no new wiring on
+    /// this side beyond routing the call through it.
+    #[test]
+    fn undo_puts_a_dragged_object_back() {
+        let mut app = app("covered.pdf");
+        app.submit("editobject");
+        let panel = app
+            .layers_on(0)
+            .iter()
+            .find(|d| d.kind == pdf_core::document::DrawnKind::Shape)
+            .cloned()
+            .expect("panel");
+        let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
+        assert!(app.select_thing_at(0, corner));
+        let sel = app.selected.clone().expect("selected");
+
+        app.finish_grab(sel, Grab { handle: None, from: corner, by: (30.0, 18.0) }, 1.0);
+        let moved = app
+            .layers_on(0)
+            .iter()
+            .find(|d| d.kind == pdf_core::document::DrawnKind::Shape)
+            .cloned()
+            .expect("panel");
+        assert!(
+            (moved.rect.left - panel.rect.left - 30.0).abs() < 0.5,
+            "the drag did not move it, so undoing it proves nothing"
+        );
+
+        app.submit("undo");
+        let back = app
+            .layers_on(0)
+            .iter()
+            .find(|d| d.kind == pdf_core::document::DrawnKind::Shape)
+            .cloned()
+            .expect("panel");
+        assert!(
+            (back.rect.left - panel.rect.left).abs() < 0.5 && (back.rect.top - panel.rect.top).abs() < 0.5,
+            "undo did not put the panel back: was {:?}, moved to {:?}, undo left it at {:?}",
+            panel.rect,
+            moved.rect,
+            back.rect
+        );
+    }
+
+    /// **A click's own tiny wobble does not move what it selected**,
+    /// measured against the screen rather than the page: the same couple of
+    /// page points of press-to-release drift is under a pixel at one zoom
+    /// and several pixels at another. Reported from use as clicking
+    /// something moving it — invisible on a whole sentence, glaring once a
+    /// click can pick out a single letter of one. A drag that really is a
+    /// few screen pixels, at a closer zoom, still moves it.
+    #[test]
+    fn a_tiny_wobble_does_not_move_the_selection_but_a_real_drag_still_does() {
+        let mut app = app("covered.pdf");
+        app.submit("editobject");
+        let panel = app
+            .layers_on(0)
+            .iter()
+            .find(|d| d.kind == pdf_core::document::DrawnKind::Shape)
+            .cloned()
+            .expect("panel");
+        let middle = AppPoint {
+            x: ((panel.rect.left + panel.rect.right) / 2.0) as f64,
+            y: ((panel.rect.top + panel.rect.bottom) / 2.0) as f64,
+        };
+        assert!(app.select_thing_at(0, middle));
+        // Not necessarily the panel itself: `covered.pdf` draws a picture
+        // right under it, and Edit Object looks at pictures first — tracked
+        // by whatever `select_thing_at` actually picked up, not assumed.
+        let sel = app.selected.clone().expect("selected");
+        let object = sel.object;
+        let before = app
+            .layers_on(0)
+            .iter()
+            .find(|d| d.object == object)
+            .cloned()
+            .expect("the selected thing");
+
+        // Two page points of drift at a zoom where that is under three
+        // screen pixels (scale 1.0) — should change nothing.
+        app.finish_grab(sel.clone(), Grab { handle: None, from: middle, by: (2.0, 0.0) }, 1.0);
+        let still = app
+            .layers_on(0)
+            .iter()
+            .find(|d| d.object == object)
+            .cloned()
+            .expect("the selected thing");
+        assert_eq!(still.rect, before.rect, "a sub-threshold wobble moved the selection");
+
+        // The identical two points of movement, but zoomed in enough (scale
+        // 3.0) that it is a real few-pixel drag — should move it.
+        app.finish_grab(sel, Grab { handle: None, from: middle, by: (2.0, 0.0) }, 3.0);
+        let moved = app
+            .layers_on(0)
+            .iter()
+            .find(|d| d.object == object)
+            .cloned()
+            .expect("the selected thing");
+        assert!(
+            (moved.rect.left - before.rect.left - 2.0).abs() < 0.5,
+            "a real drag at this zoom should still move it: {:?} then {:?}",
+            before.rect,
+            moved.rect
+        );
     }
 
     /// **Dragging a handle resizes about the opposite side.**
@@ -18838,7 +28228,7 @@ mod lock_wiring_tests {
             from: AppPoint { x: panel.rect.right as f64, y: panel.rect.bottom as f64 },
             by: (-w / 2.0, -h / 2.0),
         };
-        app.finish_grab(sel, grab);
+        app.finish_grab(sel, grab, 1.0);
         assert!(said(&app).contains("resized to 50%"), "{}", said(&app));
 
         let now = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
@@ -19312,6 +28702,31 @@ mod lock_wiring_tests {
         assert!(app.locked_items_on(0).is_empty(), "the badge outlived the lock");
     }
 
+    /// **The bare `unlock` command finishes the job too, not just
+    /// `unlock_item`.** Reported from use: after `unlock` put a document's
+    /// locked pages back, a locked picture's own padlock stayed on the page
+    /// — because the page-wide restore handed back the original bytes
+    /// without ever telling the vault the seal it read them from was done.
+    /// Only unlocking one item at a time did that bookkeeping.
+    #[test]
+    fn a_whole_document_unlock_clears_a_locked_images_badge_too() {
+        let mut app = app("scan-300dpi.pdf");
+        let object = app.images_on(0)[0].object;
+        app.lock_image(0, object, b"a good passcode").expect("lock");
+        assert_eq!(app.locked_items_on(0).len(), 1, "control: the image should be sealed");
+
+        app.unlock(b"a good passcode").expect("unlock");
+        assert!(app.images_on(0)[0].pixel_width > 1, "the image did not come back");
+        assert!(
+            app.locked_items_on(0).is_empty(),
+            "the image's badge outlived a whole-document unlock"
+        );
+        assert!(
+            app.doc.as_ref().unwrap().session.locked_pages().is_empty(),
+            "the page still counts as locked once everything on it is back"
+        );
+    }
+
     /// Clicking a badge asks for a passcode rather than unlocking on the spot,
     /// and a wrong one leaves the image sealed.
     #[test]
@@ -19412,6 +28827,146 @@ mod lock_wiring_tests {
         assert!(app.lock_pages(&[0], b"the wrong one").is_err());
         assert_eq!(page_text(&app, 0), locked, "a wrong passcode still changed the page");
     }
+
+    /// **Reported from use, on the real CAMINO file, after "Match the font"
+    /// had already been fixed once to actually change the typeface**: the
+    /// fix itself corrupted the page. Two adjacent runs — "...Efficacy 11"
+    /// and the "0" right after it — both went through `embed_typing_font`
+    /// in the same pass (one for the real font change, one retyping a run
+    /// that was already the right font for no reason), and the *boundary*
+    /// between them came back with a stray control character where a space
+    /// belonged. Root-caused to the second, unnecessary retype: a run
+    /// already in the target font family needs no edit at all, and skipping
+    /// it removed the adjacency that caused the corruption. Confirmed here
+    /// two ways: the page's own words read identically before and after
+    /// (whitespace-insensitive, since a face swap changing how many objects
+    /// draw one line can shift exactly where a synthetic word-gap space
+    /// lands without any real word changing), and the mismatched typeface
+    /// itself is gone from the page. Ported to Match Properties' own two
+    /// selections: the same span serves as both, since the sample's own run
+    /// is already in the target family and is skipped rather than retyped.
+    #[test]
+    fn matching_properties_does_not_corrupt_the_page() {
+        let path = r"C:\Users\hsili\Downloads\CAMINO elitee-plus 3.0.pdf";
+        let mut app = PagifyApp::new(Some(path));
+        let Some(_) = &app.doc else {
+            eprintln!("skipping: CAMINO not present on this machine");
+            return;
+        };
+
+        let before_text = app.characters(0).expect("characters").text();
+
+        let from = (278.0, 305.0);
+        let to = (300.0, 305.0);
+        let sample_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
+        app.text_selection = Some(sample_range);
+        app.selection_page = 0;
+        app.match_properties_sample_from_current_selection().expect("sample should be accepted");
+
+        let target_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
+        app.text_selection = Some(target_range);
+        app.selection_page = 0;
+        app.apply_match_properties_to_current_selection().expect("match should succeed");
+
+        app.text = None; // force a fresh read — `characters()` caches per page
+        let after_text = app.characters(0).expect("characters").text();
+        let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            squash(&after_text),
+            squash(&before_text),
+            "the page's own words must not change just from matching a font"
+        );
+
+        let after_runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let still_arial_mt = after_runs.iter().any(|r| {
+            (r.rect.top - 304.0).abs() < 10.0
+                && r.rect.left > 270.0
+                && r.rect.left < 320.0
+                && app
+                    .doc
+                    .as_ref()
+                    .unwrap()
+                    .session
+                    .run_font_name(0, r.object)
+                    .ok()
+                    .flatten()
+                    .as_deref()
+                    == Some("ArialMT")
+        });
+        assert!(!still_arial_mt, "the mismatched typeface should be gone from that line");
+    }
+
+    /// **Reported from use, screenshotted as "Pagify (Not Responding)":
+    /// the app froze solid the moment "Match the font" was clicked, on a
+    /// real, busy page — for a selection touching only two runs.** Picking
+    /// the sample used to ask every run on the page for its own font name
+    /// one at a time to build the list of alternates to try, and each of
+    /// those questions opened the page fresh to answer it — a few hundred
+    /// runs meant a few hundred page-opens for one click. See
+    /// `build_match_properties_sample`'s own doc for the fix. This is the
+    /// actual reported shape — a small selection, on the real file — timed
+    /// rather than merely asserted to succeed, since a slow-but-eventually-
+    /// correct answer would still be the bug.
+    #[test]
+    fn matching_properties_on_a_small_selection_is_fast_on_a_busy_page() {
+        let path = r"C:\Users\hsili\Downloads\CAMINO elitee-plus 3.0.pdf";
+        let mut app = PagifyApp::new(Some(path));
+        let Some(_) = &app.doc else {
+            eprintln!("skipping: CAMINO not present on this machine");
+            return;
+        };
+
+        let from = (278.0, 305.0);
+        let to = (300.0, 305.0);
+        let sample_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
+        app.text_selection = Some(sample_range);
+        app.selection_page = 0;
+
+        let started = std::time::Instant::now();
+        app.match_properties_sample_from_current_selection().expect("sample should be accepted");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed.as_secs() < 5,
+            "picking the sample took {elapsed:?} on a busy page — this used to hang the whole app"
+        );
+    }
+
+    /// **Reported from use, on the real CAMINO file**: a selection running
+    /// from inside "Luminaire Efficacy 11" (Montserrat-Light) through
+    /// "0 lm/w" — the "0" alone set in ArialMT, visibly a different
+    /// typeface — picked the wrong run as Match Properties' own sample. The
+    /// wide first run's own *centre* sits under "Luminaire Efficacy", far to
+    /// the left of where a drag starting mid-run actually lands, so the old
+    /// centre-point test dropped it and treated something else as the
+    /// start. Reproduced here without CAMINO: a selection starting near a
+    /// run's own trailing edge — nowhere near its centre — extending into a
+    /// second, deliberately mismatched run.
+    #[test]
+    fn matching_properties_finds_the_sample_the_selection_only_starts_inside() {
+        let mut app = app("two-column.pdf");
+        let runs = app.doc.as_ref().unwrap().session.text_runs(0).expect("runs");
+        let a = runs.iter().min_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        let b = runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
+        assert_ne!(a.object, b.object, "setup: need two distinct runs");
+
+        // Deliberately near `a`'s own trailing edge, not its centre — the
+        // exact shape that broke before this fix.
+        let from = (a.rect.right - 1.0, (a.rect.top + a.rect.bottom) / 2.0);
+        let to = ((b.rect.left + b.rect.right) / 2.0, (b.rect.top + b.rect.bottom) / 2.0);
+        let range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
+        app.text_selection = Some(range);
+        app.selection_page = 0;
+
+        app.match_properties_sample_from_current_selection().expect("sample should be accepted");
+        let sample = app.match_properties_sample.as_ref().expect("sample should be held");
+        assert!(
+            (sample.size - a.size).abs() < 0.01,
+            "should have found `a` even though the selection only barely starts inside it: \
+             sample size {} vs a's own size {}",
+            sample.size,
+            a.size
+        );
+    }
 }
 
 /// Draw a signature inside a box, fitted and centred.
@@ -19472,4 +29027,19 @@ fn short(text: &str) -> String {
     }
     let cut: String = flat.chars().take(39).collect();
     format!("{cut}…")
+}
+
+/// The six-letter, all-caps subset tag a PDF generator writes onto a
+/// font's own `/BaseFont` (`"DOHVNI+Montserrat-Light"`), stripped —
+/// leaving the family name a second, differently-subset copy of the same
+/// face shares (`"Montserrat-Light"`). The six letters exist only so two
+/// subsets of one face never collide inside a single document's
+/// `/Resources`; they say nothing about which glyphs either one has.
+fn strip_subset_prefix(name: &str) -> &str {
+    let bytes = name.as_bytes();
+    if bytes.len() > 7 && bytes[6] == b'+' && bytes[..6].iter().all(u8::is_ascii_uppercase) {
+        &name[7..]
+    } else {
+        name
+    }
 }

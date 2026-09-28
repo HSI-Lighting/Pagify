@@ -689,4 +689,147 @@ mod editing {
             "an object that is not there was accepted"
         );
     }
+
+    /// **The reported gap this closes: "i can't increase the font sizes."**
+    /// Sizing a run used to force the whole-page PDFium regeneration path
+    /// unconditionally — on some real pages that scrambles runs nobody
+    /// touched, which is exactly why a words-only edit was routed around it
+    /// in the first place. This proves a size change now takes the same
+    /// byte-safe content-stream edit, leaving every other run's own words
+    /// exactly where they were.
+    #[test]
+    fn a_runs_size_can_be_changed_without_touching_the_rest_of_the_page() {
+        let Some(pdfium) = skip_without_pdfium() else { return };
+        let _lock = serial();
+        let mut doc = open_fixture(&pdfium, "text-lines.pdf");
+
+        let runs_before = doc.text_runs(0).expect("runs");
+        let object = runs_before[0].object;
+        let text = runs_before[0].text.clone();
+        let before_size = runs_before[0].size;
+        let others_before: Vec<String> = runs_before
+            .iter()
+            .filter(|r| r.object != object)
+            .map(|r| r.text.trim().to_string())
+            .collect();
+
+        let new_size = before_size + 6.0;
+        doc.as_document_mut()
+            .expect("editable")
+            .set_text_run_styled(0, object, &text, &TextStyle { size: Some(new_size), ..Default::default() })
+            .expect("resize");
+
+        let runs_after = doc.text_runs(0).expect("runs");
+        let resized = runs_after.iter().find(|r| r.object == object).expect("still there");
+        assert!(
+            (resized.size - new_size).abs() < 0.01,
+            "the run's own size did not change: {}",
+            resized.size
+        );
+        let others_after: Vec<String> = runs_after
+            .iter()
+            .filter(|r| r.object != object)
+            .map(|r| r.text.trim().to_string())
+            .collect();
+        assert_eq!(others_before, others_after, "some other run's words changed");
+    }
+
+    /// The same guarantee `undoing_an_edit_restores_the_colour_as_well_as_
+    /// the_words` gives colour, for size — undo has to know what the size
+    /// *was*, not just that something changed.
+    #[test]
+    fn undoing_a_size_change_restores_the_old_size() {
+        let Some(pdfium) = skip_without_pdfium() else { return };
+        let _lock = serial();
+        let mut doc = open_fixture(&pdfium, "text-lines.pdf");
+        let runs = doc.text_runs(0).expect("runs");
+        let object = runs[0].object;
+        let text = runs[0].text.clone();
+        let before_size = runs[0].size;
+
+        let (words, appearance) = doc
+            .as_document_mut()
+            .expect("editable")
+            .set_text_run_styled(
+                0,
+                object,
+                &text,
+                &TextStyle { size: Some(before_size + 8.0), ..Default::default() },
+            )
+            .expect("resize");
+        assert_eq!(appearance.size, Some(before_size), "the write did not report the old size");
+
+        doc.as_document_mut()
+            .expect("editable")
+            .set_text_run_styled(0, object, &words, &appearance)
+            .expect("undo");
+
+        let run = &doc.text_runs(0).expect("runs")[0];
+        assert!((run.size - before_size).abs() < 0.01, "the size did not come back: {}", run.size);
+    }
+
+    /// **Reported from use: a size change came back unable to be undone** —
+    /// undo itself failed with "that run's codes cannot be lined up with its
+    /// text". Traced to `set_run_in_stream` re-finding the operator to edit
+    /// by probing near `rect.bottom` — the box's corner, which sits a
+    /// descender below the baseline and drifts further from it the bigger
+    /// the box grows — instead of `TextRun::origin`'s baseline, which does
+    /// not move when only the size changes; `run_operators` already probed
+    /// from the baseline for the same reason, `set_run_in_stream` did not.
+    /// On a page whose lines sit close enough together (confirmed against
+    /// the real file this was reported on) a large enough increase drifted
+    /// the probe onto the *next* line's own operator entirely. This fixture's
+    /// lines are spaced too generously to reproduce that particular failure,
+    /// but a large resize immediately followed by undo is a real, valuable
+    /// thing to keep proving works regardless.
+    #[test]
+    fn a_large_size_increase_can_still_be_found_and_undone() {
+        let Some(pdfium) = skip_without_pdfium() else { return };
+        let _lock = serial();
+        let mut doc = open_fixture(&pdfium, "text-lines.pdf");
+        let runs = doc.text_runs(0).expect("runs");
+        let object = runs[0].object;
+        let text = runs[0].text.clone();
+        let before_size = runs[0].size;
+        let neighbour_text = runs[1].text.clone();
+
+        let (words, appearance) = doc
+            .as_document_mut()
+            .expect("editable")
+            .set_text_run_styled(
+                0,
+                object,
+                &text,
+                &TextStyle { size: Some(before_size * 20.0), ..Default::default() },
+            )
+            .expect("a large resize should still succeed");
+
+        // The size actually has to have landed on the *right* run — a search
+        // that drifted to the neighbouring line would leave this one looking
+        // untouched instead of failing outright.
+        let grown = &doc.text_runs(0).expect("runs")[0];
+        assert!(
+            (grown.size - before_size * 20.0).abs() < 1.0,
+            "the resize did not land on the intended run: {}",
+            grown.size
+        );
+        assert_eq!(
+            doc.text_runs(0).expect("runs")[1].text,
+            neighbour_text,
+            "the neighbouring line was disturbed by a resize aimed at the one above it"
+        );
+
+        doc.as_document_mut()
+            .expect("editable")
+            .set_text_run_styled(0, object, &words, &appearance)
+            .expect("undo should still find the right run to reverse");
+
+        let run = &doc.text_runs(0).expect("runs")[0];
+        assert_eq!(run.text, text, "the words did not come back on the right run");
+        assert!(
+            (run.size - before_size).abs() < 0.01,
+            "the size did not come back: {}",
+            run.size
+        );
+    }
 }

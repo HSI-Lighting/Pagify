@@ -192,40 +192,6 @@ impl ByteRange {
     }
 }
 
-/// Find the placeholder in a prepared file.
-///
-/// Located by scanning rather than remembered from writing it, because the
-/// number that matters is where it ended up — after whatever the writer did to
-/// the bytes — not where it was meant to go.
-pub fn find_placeholder(bytes: &[u8]) -> Result<ByteRange> {
-    // **Found by its shape, not by the key in front of it.** Every page in a
-    // document has a `/Contents` of its own — `/Contents 9 0 R` — and looking
-    // for that word first found a page's, then took the next `<` in the file as
-    // the hole. What is unmistakable is the run of zeros: nothing else in a PDF
-    // is a hex string of a thousand noughts.
-    const LEAST: usize = 1024;
-
-    let mut at = 0usize;
-    while at < bytes.len() {
-        let Some(open) = bytes[at..].iter().position(|b| *b == b'<').map(|n| at + n) else {
-            break;
-        };
-        let zeros = bytes[open + 1..]
-            .iter()
-            .take_while(|b| **b == b'0')
-            .count();
-        if zeros >= LEAST && bytes.get(open + 1 + zeros) == Some(&b'>') {
-            return Ok(ByteRange {
-                hole_at: open,
-                hole_len: zeros + 2,
-                total: bytes.len(),
-            });
-        }
-        at = open + 1;
-    }
-    Err(PdfError::InvalidArgument("that file has no signature to fill in".into()))
-}
-
 /// Write a finished signature into the hole a prepared file left for it.
 ///
 /// **Nothing moves.** The blob is written as hex over the zeros already there,
@@ -255,30 +221,26 @@ pub fn fill_placeholder(bytes: &mut [u8], range: &ByteRange, signature: &[u8]) -
 mod tests {
     use super::*;
 
-    /// A file with a hole in the middle, as a prepared one has.
-    fn prepared() -> Vec<u8> {
-        // A page's own `/Contents` in front of the signature's, because that is
-        // what a real document looks like and what the finder used to trip on.
-        let mut out = b"%PDF-1.7\n/Contents 9 0 R\nsome objects\n/Contents <".to_vec();
+    /// A file with a hole in the middle, and the range that describes it — as
+    /// a prepared one has, with the range known from having written it rather
+    /// than found by scanning.
+    fn prepared() -> (Vec<u8>, ByteRange) {
+        // A page's own `/Contents` in front of the signature's, because that
+        // is what a real document looks like.
+        let mut out = b"%PDF-1.7\n/Contents 9 0 R\nsome objects\n/Contents ".to_vec();
+        let hole_at = out.len();
+        out.push(b'<');
         out.extend(std::iter::repeat_n(b'0', 2048));
-        out.extend_from_slice(b">\nmore objects\n%%EOF");
-        out
-    }
-
-    #[test]
-    fn the_placeholder_is_found_where_it_was_written() {
-        let bytes = prepared();
-        let range = find_placeholder(&bytes).expect("find");
-        assert_eq!(bytes[range.hole_at], b'<');
-        assert_eq!(bytes[range.hole_at + range.hole_len - 1], b'>');
-        assert_eq!(range.total, bytes.len());
+        out.push(b'>');
+        out.extend_from_slice(b"\nmore objects\n%%EOF");
+        let range = ByteRange { hole_at, hole_len: 2050, total: out.len() };
+        (out, range)
     }
 
     /// **The four numbers must leave exactly one hole and cover the rest.**
     #[test]
     fn the_byte_range_covers_the_whole_file_but_the_hole() {
-        let bytes = prepared();
-        let range = find_placeholder(&bytes).expect("find");
+        let (bytes, range) = prepared();
         assert!(range.covers_everything());
 
         let [start, first, second_at, second_len] = range.numbers();
@@ -292,17 +254,13 @@ mod tests {
     /// because an off-by-one here produces a signature that verifies nowhere.
     #[test]
     fn what_is_covered_is_everything_outside_the_hole() {
-        let bytes = prepared();
-        let range = find_placeholder(&bytes).expect("find");
+        let (bytes, range) = prepared();
         let (before, after) = range.covered(&bytes).expect("covered");
 
         assert_eq!(before.len() + after.len() + range.hole_len, bytes.len());
         assert!(!before.contains(&b'<'), "the hole leaked into what is signed");
         assert!(!after.starts_with(b"0"), "the hole leaked into what is signed");
-        assert!(
-            before.ends_with(b"/Contents "),
-            "the finder took a page's contents for the signature's"
-        );
+        assert!(before.ends_with(b"/Contents "), "the range names the wrong hole");
         assert!(after.starts_with(b"\nmore"), "the second span starts in the wrong place");
     }
 
@@ -311,8 +269,7 @@ mod tests {
     /// appended part was signed.
     #[test]
     fn a_range_that_does_not_reach_the_end_is_rejected() {
-        let bytes = prepared();
-        let mut range = find_placeholder(&bytes).expect("find");
+        let (bytes, mut range) = prepared();
         range.total += 64; // as though something had been appended
         assert!(range.covers_everything(), "the range describes the longer file");
 
@@ -322,9 +279,8 @@ mod tests {
 
     #[test]
     fn a_signature_is_written_without_moving_a_byte() {
-        let mut bytes = prepared();
+        let (mut bytes, range) = prepared();
         let before = bytes.len();
-        let range = find_placeholder(&bytes).expect("find");
 
         fill_placeholder(&mut bytes, &range, &[0xDE, 0xAD, 0xBE, 0xEF]).expect("fill");
         assert_eq!(bytes.len(), before, "the file changed length");
@@ -340,17 +296,9 @@ mod tests {
     /// move every offset the range was computed from.
     #[test]
     fn a_signature_too_large_for_its_hole_is_refused() {
-        let mut bytes = prepared();
-        let range = find_placeholder(&bytes).expect("find");
+        let (mut bytes, range) = prepared();
         let huge = vec![0u8; range.hole_len];
         assert!(fill_placeholder(&mut bytes, &range, &huge).is_err());
-    }
-
-    #[test]
-    fn a_file_with_no_placeholder_says_so() {
-        assert!(find_placeholder(b"%PDF-1.7\nnothing here\n%%EOF").is_err());
-        // Nor is a page's contents reference mistaken for one.
-        assert!(find_placeholder(b"%PDF-1.7\n/Contents 9 0 R\n%%EOF").is_err());
     }
 }
 
@@ -691,10 +639,13 @@ mod cms_tests {
     /// it changes the digest.
     #[test]
     fn the_digest_covers_the_file_around_the_hole() {
-        let mut bytes = b"%PDF-1.7\nbefore\n/Contents <".to_vec();
+        let mut bytes = b"%PDF-1.7\nbefore\n/Contents ".to_vec();
+        let hole_at = bytes.len();
+        bytes.push(b'<');
         bytes.extend(std::iter::repeat_n(b'0', 2048));
-        bytes.extend_from_slice(b">\nafter\n%%EOF");
-        let range = find_placeholder(&bytes).expect("find");
+        bytes.push(b'>');
+        bytes.extend_from_slice(b"\nafter\n%%EOF");
+        let range = ByteRange { hole_at, hole_len: 2050, total: bytes.len() };
         let first = digest_of(&bytes, &range).expect("digest");
 
         // A byte inside the hole does not change it.
@@ -734,9 +685,8 @@ pub fn sign(file: &File<'_>, identity: &Identity, about: &Reason) -> Result<Vec<
     } else {
         about.name.clone()
     };
-    let mut prepared = prepare(file, &name, about)?;
-    let range = find_placeholder(&prepared)?;
-    write_byte_range(&mut prepared, &range)?;
+    let (mut prepared, range, byte_range_at) = prepare(file, &name, about)?;
+    write_byte_range(&mut prepared, byte_range_at, &range)?;
     let digest = digest_of(&prepared, &range)?;
     let blob = detached_signature(identity, &digest)?;
     fill_placeholder(&mut prepared, &range, &blob)?;
@@ -751,12 +701,17 @@ pub fn sign(file: &File<'_>, identity: &Identity, about: &Reason) -> Result<Vec<
 /// came back was signed by somebody else's key in somebody else's scheme —
 /// two things this program has decided not to have. The time a signature
 /// carries is the signer's own clock, and says so by being in `/M`.
-fn prepare(file: &File<'_>, name: &str, about: &Reason) -> Result<Vec<u8>> {
+fn prepare(
+    file: &File<'_>,
+    name: &str,
+    about: &Reason,
+) -> Result<(Vec<u8>, ByteRange, std::ops::Range<usize>)> {
 
     // -- the signature dictionary, with room reserved ---------------------
-    let numbers: Vec<u32> = file.numbers().collect();
-    let signature_number = numbers.iter().copied().max().unwrap_or(0) + 1;
-    let field_number = signature_number + 1;
+    let signature_number = file.next_object_number()?;
+    let field_number = signature_number
+        .checked_add(1)
+        .ok_or_else(|| PdfError::Unsupported("this file already uses the highest object number a PDF can hold"))?;
 
     let mut signature = Dict(Vec::new());
     signature.set(b"Type", Object::Name(b"Sig".to_vec()));
@@ -853,19 +808,39 @@ fn prepare(file: &File<'_>, name: &str, about: &Reason) -> Result<Vec<u8>> {
     write_object(&mut page_body, &Object::Dict(page));
     replacements.push((first_page, page_body));
 
-    let prepared = file.rewrite_adding(
+    let (prepared, written) = file.rewrite_dropping_with_offsets(
         &replacements,
         &[(signature_number, signature_body), (field_number, field_body)],
         &Dict(Vec::new()),
+        &[],
     )?;
 
-    let range = find_placeholder(&prepared)?;
+    // Where the signature dictionary landed, from having just written it —
+    // never by scanning the prepared file for something shaped like a
+    // placeholder or the text `/ByteRange`, either of which a decoy earlier
+    // in the *original* document could put a reader onto. Found by audit.
+    let sig_at = *written
+        .get(&signature_number)
+        .ok_or_else(|| PdfError::Internal("the signature object went missing".into()))?;
+    let dict_at = sig_at + format!("{signature_number} 0 obj\n").len();
+
+    let contents = super::object::dict_value_span(&prepared, dict_at, b"Contents")
+        .ok_or_else(|| PdfError::Internal("the placeholder went missing".into()))?;
+    let range = ByteRange {
+        hole_at: contents.start,
+        hole_len: contents.end - contents.start,
+        total: prepared.len(),
+    };
     if !range.covers_everything() {
         return Err(PdfError::Internal(
             "the prepared file's byte range does not cover it".into(),
         ));
     }
-    Ok(prepared)
+
+    let byte_range_at = super::object::dict_value_span(&prepared, dict_at, b"ByteRange")
+        .ok_or_else(|| PdfError::Internal("the byte range went missing".into()))?;
+
+    Ok((prepared, range, byte_range_at))
 }
 
 /// Digits per number in `/ByteRange`.
@@ -877,27 +852,20 @@ fn prepare(file: &File<'_>, name: &str, about: &Reason) -> Result<Vec<u8>> {
 /// part of.
 const RANGE_DIGITS: usize = 10;
 
-/// Patch the four numbers in, in place.
-fn write_byte_range(bytes: &mut [u8], range: &ByteRange) -> Result<()> {
-    let at = bytes
-        .windows(10)
-        .position(|w| w == b"/ByteRange")
-        .ok_or_else(|| PdfError::Internal("the byte range went missing".into()))?;
-    let open = bytes[at..]
-        .iter()
-        .position(|b| *b == b'[')
-        .map(|n| at + n)
-        .ok_or_else(|| PdfError::Internal("the byte range has no array".into()))?;
-
+/// Patch the four numbers in, in place — at the array's own byte span,
+/// already known from [`prepare`] rather than found by scanning the file for
+/// the text `/ByteRange`, which a decoy placed earlier in the document could
+/// otherwise put this onto. Found by audit.
+fn write_byte_range(bytes: &mut [u8], array_at: std::ops::Range<usize>, range: &ByteRange) -> Result<()> {
     let values = range.numbers();
-    let mut cursor = open + 1;
+    let mut cursor = array_at.start + 1; // past the array's own `[`
     for value in values {
-        // Past whatever separates them.
-        while cursor < bytes.len() && !bytes[cursor].is_ascii_digit() {
+        // Past whatever separates them, never past the array itself.
+        while cursor < array_at.end && !bytes[cursor].is_ascii_digit() {
             cursor += 1;
         }
         let start = cursor;
-        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+        while cursor < array_at.end && bytes[cursor].is_ascii_digit() {
             cursor += 1;
         }
         if cursor - start != RANGE_DIGITS {

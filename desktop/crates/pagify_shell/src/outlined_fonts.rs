@@ -102,11 +102,11 @@ impl OutlinedFonts {
 
     pub fn save(&self) {
         let Some(path) = OutlinedFonts::path() else { return };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(text) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(path, text);
+            // Owner-only, like every other file Pagify keeps for itself —
+            // this held a bare `fs::write` with no mode of its own. Found by
+            // audit.
+            let _ = crate::state::write_own(&path, text.as_bytes());
         }
     }
 }

@@ -86,7 +86,18 @@ pub fn parse(bytes: &[u8]) -> ToUnicode {
                                 Object::Array(items) => {
                                     for (offset, item) in items.iter().enumerate() {
                                         let Some(text) = text_of(item) else { continue };
-                                        out.insert(low + offset as u32, text);
+                                        // `offset` runs over the array as given,
+                                        // not over `high - low` — a code near
+                                        // `u32::MAX` paired with a long enough
+                                        // array would otherwise wrap and file
+                                        // this text under an unrelated, low
+                                        // code, which is exactly the kind of
+                                        // silent misalignment this module
+                                        // exists to avoid. Found by audit.
+                                        let Some(code) = low.checked_add(offset as u32) else {
+                                            break;
+                                        };
+                                        out.insert(code, text);
                                     }
                                 }
                                 other => {
@@ -102,6 +113,11 @@ pub fn parse(bytes: &[u8]) -> ToUnicode {
                                         };
                                         let mut all = units.clone();
                                         all.push(unit);
+                                        // Safe unchecked: `step <= high - low`
+                                        // and `low <= high` are both already
+                                        // enforced above, so `low + step`
+                                        // never exceeds `high`, itself a valid
+                                        // `u32`.
                                         if let Ok(text) = String::from_utf16(&all) {
                                             out.insert(low + step, text);
                                         }
@@ -177,6 +193,20 @@ mod tests {
         assert_eq!(map.get(&0x0028).map(String::as_str), Some("X"));
         assert_eq!(map.get(&0x0029).map(String::as_str), Some("Y"));
         assert_eq!(map.get(&0x002A).map(String::as_str), Some("Z"));
+    }
+
+    /// **Found by audit.** `offset` runs over the array as given, not over
+    /// `high - low` — a low code near `u32::MAX` paired with an array long
+    /// enough to run past it must not wrap around to code 0 and silently
+    /// claim an unrelated, low code number for text that was never mapped
+    /// to it.
+    #[test]
+    fn a_bfrange_array_near_the_top_of_u32_does_not_wrap_around() {
+        let map =
+            parse(b"1 beginbfrange\n<FFFFFFFE> <FFFFFFFE> [<0041> <0042> <0043>]\nendbfrange\n");
+        assert_eq!(map.get(&0xFFFFFFFE).map(String::as_str), Some("A"));
+        assert_eq!(map.get(&0xFFFFFFFF).map(String::as_str), Some("B"));
+        assert_eq!(map.get(&0), None, "the third entry wrapped around to code 0");
     }
 
     /// **The case this module exists for.** One code, two characters — so a
