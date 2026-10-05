@@ -38,3 +38,48 @@ curl -sL -o en-US.txt \
 curl -sL -o LICENSE.txt \
   https://raw.githubusercontent.com/dwyl/english-words/master/LICENSE.md
 ```
+
+---
+
+# ar/ — Arabic (Hunspell)
+
+`ar/ar.dic` and `ar/ar.aff`: the Arabic Hunspell dictionary from the
+Ayaspell project, as packaged in LibreOffice's `dictionaries` repository
+(<https://github.com/LibreOffice/dictionaries/tree/master/ar>), by Mohamed
+Kebdani (2006–2008; see `ar/AUTHORS.txt`). 465,928 entries with affix rules,
+read by the `spellbook` crate (MPL-2.0, pure Rust).
+
+**Licence.** Ayaspell publishes it under the GPL family (its page says
+"GPL/LGPL/MPL"); the repository this was fetched from carries no licence file
+of its own for it. It is a data file read at run time, not linked code, and it
+is fine for HSI's own use. **Check the exact terms before Pagify is
+distributed outside HSI.**
+
+```bash
+base=https://raw.githubusercontent.com/LibreOffice/dictionaries/master/ar
+curl -sL -o ar/ar.dic $base/ar.dic
+curl -sL -o ar/ar.aff $base/ar.aff
+curl -sL -o ar/AUTHORS.txt $base/AUTHORS.txt
+```
+
+# han-common.txt — Chinese characters in everyday use
+
+One hex code point or `FIRST-LAST` range per line: the union of the Unicode
+Unihan fields `kTGH` (the 8,105 characters of the Table of General Standard
+Chinese Characters), `kGB0` (GB 2312), `kBigFive` (Big5, traditional) and
+`kJis0` (JIS X 0208, so Japanese kanji are not flagged either). 16,928
+characters. From `Unihan_OtherMappings.txt` in
+<https://www.unicode.org/Public/UCD/latest/ucd/Unihan.zip>, under the Unicode
+licence (free to use and redistribute with the notice).
+
+**What it can and cannot do.** A list of characters finds one that is
+*unusual* — what OCR and bad font encodings produce. Chinese has no spaces
+between words and any real character is a real character, so a wrong but
+valid character cannot be found by a word list. That needs a language model.
+
+**This repository is public**, so committing `ar/ar.dic` and `ar/ar.aff` here
+redistributes them. They are kept with their `AUTHORS.txt` and source link, and
+the licence question above is still open: if HSI wants the repository to carry
+no third-party dictionary, remove `ar/` and the `include_str!` lines for it in
+`crates/pagify_app/src/spelling.rs` (Arabic then goes back to "not judged"), or
+fetch it at build time with the commands above instead of committing it.

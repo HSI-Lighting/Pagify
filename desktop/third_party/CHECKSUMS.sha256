@@ -18,3 +18,6 @@ f728930966f503652b92acc89b9374a2eeca00ce42e26dccd3e4b5c5161b2d64  pdfium/pdfium-
 4eaad6c3e8d786cf6f66a45d7d014edf5c65f372f98c3070e66595ebb50e43d9  pdfium/pdfium-mac-x64/lib/libpdfium.dylib
 79d4676b656cfb1abcea88f9ade3b4b0826c5200382db5f4ec72a636c598c118  pdfium/pdfium-win-x64/bin/pdfium.dll
 7cdd473f6b4fd454c9761ae9de41c1241afd18420c136ca1112730c37b8ef544  pdfium/pdfium-win-x64/lib/pdfium.dll.lib
+2a3e5367f61c1583734db9d66734f5603e6be5c2d227cf5c5cd7e4ca586e34fe  dict/ar/ar.dic
+cec30b8621001e49618feb05aec1984c5fcfbf7d2ec309901d5cbf66585217a3  dict/ar/ar.aff
+38bf3093d484de4044799c915cbb80e1bddbdc33b542668974fdf79da7a9dd84  dict/han-common.txt

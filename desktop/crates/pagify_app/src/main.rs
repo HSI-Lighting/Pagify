@@ -472,9 +472,13 @@ struct SpellCheck {
     /// list, and a word's suggestions follow the word. Dropped with the panel,
     /// so a re-check starts clean.
     suggestions: HashMap<String, Vec<String>>,
-    /// Pages the scan did not check because they are mostly in a script the
-    /// English list cannot judge (see `spelling::misspelled_in_page`).
+    /// Pages the scan did not check because they are mostly in a script or
+    /// language none of the dictionaries can judge (see
+    /// `spelling::misspelled_in_page`).
     skipped_pages: Vec<usize>,
+    /// Whether any page has Chinese on it, which is only checked for unusual
+    /// characters — the panel says so.
+    chinese: bool,
     /// Why the last Change did not go through, shown in the panel until the
     /// next action. The word stays in `found` while this is set.
     notice: Option<String>,
@@ -506,7 +510,7 @@ impl Drop for SpellScan {
 enum ScanMessage {
     /// Pages looked at so far.
     Progress(usize),
-    Finished { found: Vec<Misspelling>, skipped: Vec<usize> },
+    Finished { found: Vec<Misspelling>, skipped: Vec<usize>, chinese: bool },
 }
 
 impl SpellCheck {
@@ -537,8 +541,15 @@ impl SpellCheck {
             many => (format!("{} pages are", many.len()), "they were"),
         };
         Some(format!(
-            "{who} mostly in a script the English dictionary cannot check - {were} skipped."
+            "{who} mostly in a language the spelling check has no dictionary for - {were} skipped."
         ))
+    }
+
+    /// What the check of Chinese amounts to, when there was any.
+    fn chinese_note(&self) -> Option<&'static str> {
+        self.chinese.then_some(
+            "Chinese is checked for unusual characters only - a wrong but real character cannot be found.",
+        )
     }
 }
 
@@ -4103,6 +4114,24 @@ impl PagifyApp {
         self.remove_tab(index);
     }
 
+    /// Put the tab showing among the tabs the strip has room for. `visible` is
+    /// how many tabs it drew. A hidden one — chosen from the menu, or left
+    /// showing when another was closed — takes the place of the last tab that
+    /// is drawn, which goes behind the menu instead.
+    ///
+    /// Not while a tab is being carried, or an unsaved-changes question is up:
+    /// both name their tab by its place in the strip.
+    fn bring_active_tab_into_the_strip(&mut self, visible: usize) {
+        if visible == 0 || visible >= self.tabs.len() || self.active_tab < visible {
+            return;
+        }
+        if self.carrying_a_tab() || self.tabs.iter().any(|t| t.closing.is_some()) {
+            return;
+        }
+        self.tabs.swap(visible - 1, self.active_tab);
+        self.active_tab = visible - 1;
+    }
+
     /// Bookkeeping shared by every way a tab goes away — take it out, then keep
     /// `active_tab` pointing at a tab that still exists. Left unadjusted if
     /// that empties `tabs` entirely: only a window about to be dropped (a tab
@@ -4711,8 +4740,17 @@ impl PagifyApp {
                 // blank tab behind — the tab that asked is the tab that
                 // either gets filled or stays exactly as it was.
                 if self.tab().doc.is_some() {
-                    self.tabs.push(DocTab::new());
-                    self.active_tab = self.tabs.len() - 1;
+                    // The newest tab is the leftmost: the strip is one row, and
+                    // the oldest are the ones that fall behind its menu.
+                    self.tabs.insert(0, DocTab::new());
+                    self.active_tab = 0;
+                    // A question already up names its tab by place, and every
+                    // tab has just moved one place along.
+                    for tab in self.tabs.iter_mut().skip(1) {
+                        if let Some(Closing::Tab(at)) = &mut tab.closing {
+                            *at += 1;
+                        }
+                    }
                 }
 
                 let name = session
@@ -7795,14 +7833,15 @@ impl PagifyApp {
         page_count: usize,
         stop: &std::sync::atomic::AtomicBool,
         mut on_page: impl FnMut(usize),
-    ) -> Option<(Vec<Misspelling>, Vec<usize>)> {
-        let (mut found, mut skipped) = (Vec::new(), Vec::new());
+    ) -> Option<(Vec<Misspelling>, Vec<usize>, bool)> {
+        let (mut found, mut skipped, mut chinese) = (Vec::new(), Vec::new(), false);
         for page in 0..page_count {
             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                 return None;
             }
             if let Ok(runs) = session.text_runs(page) {
                 let texts: Vec<&str> = runs.iter().map(|run| run.text.as_str()).collect();
+                chinese |= spelling::has_chinese(&texts);
                 match spelling::misspelled_in_page(&texts) {
                     None => skipped.push(page),
                     Some(words) => found.extend(words.into_iter().map(|(run, word)| Misspelling {
@@ -7814,7 +7853,7 @@ impl PagifyApp {
             }
             on_page(page + 1);
         }
-        Some((found, skipped))
+        Some((found, skipped, chinese))
     }
 
     /// Open the panel and start the scan at once — "when user clicks it, it
@@ -7836,8 +7875,8 @@ impl PagifyApp {
             let result = Self::scan_spelling(&session, page_count, &worker_stop, |n| {
                 let _ = progress.send(ScanMessage::Progress(n));
             });
-            if let Some((found, skipped)) = result {
-                let _ = tx.send(ScanMessage::Finished { found, skipped });
+            if let Some((found, skipped, chinese)) = result {
+                let _ = tx.send(ScanMessage::Finished { found, skipped, chinese });
             }
         });
         // Replacing a scan still running drops it, which stops it.
@@ -7855,8 +7894,8 @@ impl PagifyApp {
         loop {
             match scan.done.try_recv() {
                 Ok(ScanMessage::Progress(n)) => checked = Some(n),
-                Ok(ScanMessage::Finished { found, skipped }) => {
-                    finished = Some((found, skipped));
+                Ok(ScanMessage::Finished { found, skipped, chinese }) => {
+                    finished = Some((found, skipped, chinese));
                     break;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -7885,11 +7924,12 @@ impl PagifyApp {
             self.say_error("the spelling check stopped before it finished.");
             return;
         }
-        let Some((found, skipped_pages)) = finished else { return };
+        let Some((found, skipped_pages, chinese)) = finished else { return };
 
         self.tab_mut().spell_scan = None;
         let total_found = found.len();
-        let mut panel = SpellCheck { found, total_found, skipped_pages, ..SpellCheck::default() };
+        let mut panel =
+            SpellCheck { found, total_found, skipped_pages, chinese, ..SpellCheck::default() };
         panel.reset_replacement();
         if total_found > 0 {
             self.say_info(format!(
@@ -7990,6 +8030,7 @@ impl PagifyApp {
         let mut add_to_dictionary = false;
         let notice = panel.notice.clone();
         let note = panel.skipped_note();
+        let chinese = panel.chinese_note();
 
         egui::Window::new("Check Spelling")
             .id(egui::Id::new("spell-check-window"))
@@ -8012,6 +8053,10 @@ impl PagifyApp {
                     if let Some(note) = &note {
                         ui.add_space(6.0);
                         ui.weak(note);
+                    }
+                    if let Some(chinese) = chinese {
+                        ui.add_space(6.0);
+                        ui.weak(chinese);
                     }
                 };
 
@@ -18875,6 +18920,8 @@ impl eframe::App for PagifyApp {
         let mut switch_to: Option<usize> = None;
         let mut close_clicked: Option<usize> = None;
         let mut tab_rects: Vec<egui::Rect> = Vec::new();
+        // How many tabs the strip had room for this frame.
+        let mut visible_tabs = usize::MAX;
         let title_bar = egui::Panel::top("titlebar")
             .frame(egui::Frame::new().fill(theme::chrome()).inner_margin(egui::Margin::symmetric(16, 10)))
             .show(ui, |ui| {
@@ -18941,10 +18988,42 @@ impl eframe::App for PagifyApp {
                             ui.checkbox(&mut self.show_thumbs, "Pages");
                         }
 
+                        // **One row of tabs, the newest on the left.** Reported
+                        // from use: with a dozen documents open the tabs
+                        // wrapped onto five rows and took the page's space. The
+                        // ones that fit are drawn; the rest are behind the small
+                        // triangle, which sits just left of the checkboxes — in
+                        // this layout the first thing placed after them.
+                        let names: Vec<String> = self
+                            .tabs
+                            .iter()
+                            .map(|tab| {
+                                tab.doc
+                                    .as_ref()
+                                    .and_then(|d| d.session.path().file_name().map(|n| n.to_string_lossy().into_owned()))
+                                    .unwrap_or_else(|| "Untitled".to_string())
+                            })
+                            .collect();
+                        let widths: Vec<f32> = names.iter().map(|n| doc_tab_width(ui, n)).collect();
+                        let visible = tabs_that_fit(&widths, ui.spacing().item_spacing.x, ui.available_width(), DOC_TAB_MENU_WIDTH);
+                        visible_tabs = visible;
+                        if visible < names.len() {
+                            let menu = tab_menu_button(ui, names.len() - visible);
+                            egui::Popup::menu(&menu).align(egui::RectAlign::BOTTOM_END).show(|ui| {
+                                ui.set_min_width(280.0);
+                                for (i, name) in names.iter().enumerate().skip(visible) {
+                                    let shown = fit_tab_label(ui, name, DOC_TAB_MAX_TEXT * 2.0);
+                                    if ui.button(shown).on_hover_text(name).clicked() {
+                                        switch_to = Some(i);
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+
                         // The tabs fill whatever room is left between the
-                        // logo and the checkboxes above — wrapped, not
-                        // scrolled, so a tab that has scrolled out of sight
-                        // is never a tab nobody knows is there.
+                        // logo and the checkboxes above — never wrapped, so
+                        // the strip stays one row however many are open.
                         //
                         // **This `left_to_right` wrapper is not redundant, and
                         // taking it out put the tabs on the wrong side.**
@@ -18964,21 +19043,14 @@ impl eframe::App for PagifyApp {
                             // (measured: 38.0 against 32.5). Starting the row as
                             // tall as a tab fills the line instead.
                             ui.spacing_mut().interact_size.y = doc_tab_height(ui);
-                            ui.horizontal_wrapped(|ui| {
-                                for i in 0..self.tabs.len() {
-                                    let name = self.tabs[i]
-                                        .doc
-                                        .as_ref()
-                                        .and_then(|d| {
-                                            d.session.path().file_name().map(|n| n.to_string_lossy().into_owned())
-                                        })
-                                        .unwrap_or_else(|| "Untitled".to_string());
-                                    let button = doc_tab_button(ui, &name, i == self.active_tab, self.dragging_tab(i));
+                            ui.horizontal(|ui| {
+                                for (i, name) in names.iter().enumerate().take(visible) {
+                                    let button = doc_tab_button(ui, name, i == self.active_tab, self.dragging_tab(i));
                                     tab_rects.push(button.response.rect);
                                     // A tab can be picked up and carried to
                                     // another window, or out into a window of
                                     // its own — see `hub`.
-                                    self.tab_drag_event(&ctx, i, &button, &name);
+                                    self.tab_drag_event(&ctx, i, &button, name);
                                     if button.select {
                                         switch_to = Some(i);
                                     }
@@ -18998,9 +19070,13 @@ impl eframe::App for PagifyApp {
         if let Some(i) = switch_to {
             self.active_tab = i;
         }
+        // The tab showing is always one of the tabs in the strip: one chosen from
+        // the menu, or left showing when another was closed, takes the place of
+        // the last one that fits.
         if let Some(i) = close_clicked {
             self.close_tab(i);
         }
+        self.bring_active_tab_into_the_strip(visible_tabs);
 
         // -- ribbon ----------------------------------------------------------
         let mut ribbon_command: Option<String> = None;
@@ -22999,8 +23075,9 @@ fn doc_tab_button(ui: &mut egui::Ui, label: &str, chosen: bool, lifted: bool) ->
     let padding = egui::vec2(DOC_TAB_PADDING.0, DOC_TAB_PADDING.1);
     let gap = 8.0;
     let close_size = DOC_TAB_CLOSE;
+    let shown = fit_tab_label(ui, label, DOC_TAB_MAX_TEXT);
     let galley = ui.painter().layout_no_wrap(
-        label.to_string(),
+        shown.clone(),
         egui::FontId::proportional(DOC_TAB_FONT),
         theme::ink(),
     );
@@ -23056,12 +23133,98 @@ fn doc_tab_button(ui: &mut egui::Ui, label: &str, chosen: bool, lifted: bool) ->
     );
 
     let clicked = response.clicked();
+    // A name that was cut says what it was when the pointer rests on it.
+    let response = if shown != label { response.on_hover_text(label) } else { response };
     hub::TabButton {
         select: clicked && !over_close,
         close: clicked && over_close,
         close_rect,
         response,
     }
+}
+
+/// The longest a tab's name is drawn, in points. Longer names are cut in the
+/// middle: documents that belong together are often told apart only by the end
+/// of the name ("…-REV-02.pdf"), so that is what is kept.
+const DOC_TAB_MAX_TEXT: f32 = 230.0;
+
+/// The room kept for the triangle that opens the tabs that do not fit.
+const DOC_TAB_MENU_WIDTH: f32 = 26.0;
+
+/// `label`, or as much of it as fits `max` points with an ellipsis where the
+/// middle was taken out, keeping the last characters.
+fn fit_tab_label(ui: &egui::Ui, label: &str, max: f32) -> String {
+    let width = |text: &str| {
+        ui.painter()
+            .layout_no_wrap(text.to_string(), egui::FontId::proportional(DOC_TAB_FONT), egui::Color32::WHITE)
+            .size()
+            .x
+    };
+    if width(label) <= max {
+        return label.to_string();
+    }
+    let chars: Vec<char> = label.chars().collect();
+    let keep_tail = chars.len().min(14);
+    let tail: String = chars[chars.len() - keep_tail..].iter().collect();
+    for head in (0..=chars.len() - keep_tail).rev() {
+        let candidate = format!("{}\u{2026}{tail}", chars[..head].iter().collect::<String>());
+        if width(&candidate) <= max {
+            return candidate;
+        }
+    }
+    format!("\u{2026}{tail}")
+}
+
+/// How wide the tab for `label` is drawn, close button and padding included.
+fn doc_tab_width(ui: &egui::Ui, label: &str) -> f32 {
+    let text = fit_tab_label(ui, label, DOC_TAB_MAX_TEXT);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text, egui::FontId::proportional(DOC_TAB_FONT), egui::Color32::WHITE);
+    galley.size().x + DOC_TAB_PADDING.0 * 2.0 + 8.0 + DOC_TAB_CLOSE
+}
+
+/// How many of the tabs, taken from the left, fit in `room`. All of them when
+/// they all do; otherwise as many as fit beside the menu button, and never
+/// fewer than one — the strip is never empty.
+fn tabs_that_fit(widths: &[f32], gap: f32, room: f32, menu: f32) -> usize {
+    let count_within = |room: f32| {
+        let mut used = 0.0;
+        let mut n = 0;
+        for &w in widths {
+            let next = used + w + if n > 0 { gap } else { 0.0 };
+            if next > room {
+                break;
+            }
+            used = next;
+            n += 1;
+        }
+        n
+    };
+    let all = count_within(room);
+    if all == widths.len() {
+        return all;
+    }
+    count_within(room - menu - gap).max(1)
+}
+
+/// The small triangle that opens the tabs the strip had no room for. Drawn as a
+/// shape — a glyph for it may not exist in the font — with the count on hover.
+fn tab_menu_button(ui: &mut egui::Ui, hidden: usize) -> egui::Response {
+    let size = egui::vec2(DOC_TAB_MENU_WIDTH - 4.0, doc_tab_height(ui));
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "More tabs"));
+    if response.hovered() {
+        ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, theme::raised());
+    }
+    let colour = if response.hovered() { theme::ink() } else { theme::ink_dim() };
+    let c = rect.center();
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![c + egui::vec2(-4.5, -2.5), c + egui::vec2(4.5, -2.5), c + egui::vec2(0.0, 3.5)],
+        colour,
+        egui::Stroke::NONE,
+    ));
+    response.on_hover_text(format!("{hidden} more open document{}", if hidden == 1 { "" } else { "s" }))
 }
 
 struct Keys {
@@ -24049,8 +24212,9 @@ mod unsaved_guard_tests {
             app.tab().doc.as_ref().unwrap().session.path().to_string_lossy().contains("text-lines"),
             "the new tab should be showing the file that was just opened"
         );
+        // The newest tab is the leftmost, so the first one is now the second.
         assert_eq!(
-            app.tabs[0].markup.existing(0).map(|l| l.len()),
+            app.tabs[1].markup.existing(0).map(|l| l.len()),
             Some(1),
             "the first tab's mark should still be there, untouched"
         );
@@ -24371,7 +24535,7 @@ mod g3_spell_tests {
                     /CMapName /Adobe-Identity-UCS def\n/CMapType 2 def\n\
                     1 begincodespacerange\n<00> <FF>\nendcodespacerange\n\
                     1 beginbfrange\n<41> <52> <0627>\nendbfrange\n\
-                    1 beginbfchar\n<5F> <200C>\nendbfchar\n\
+                    6 beginbfchar\n<5F> <200C>\n<53> <067E>\n<54> <0686>\n<55> <06AF>\n<56> <06A9>\n<57> <06CC>\nendbfchar\n\
                     endcmap\nCMapName currentdict /CMap defineresource pop\nend\nend";
         let page = |content: &str| format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len() + 1);
         let objects = [
@@ -24473,13 +24637,15 @@ mod g3_spell_tests {
     /// **Arabic and Persian were flagged 100%**: the list holds a-z and
     /// nothing else, so every word in another script was unknown by
     /// construction. A Persian word with a half-space was also cut in two.
+    /// Arabic now has a dictionary of its own; Persian still has none, and a
+    /// page of it must not be flagged against the Arabic one.
     #[test]
-    fn arabic_and_persian_words_are_not_flagged_and_english_typos_still_are() {
-        // Page 2: eight English words, one Arabic-script word (`ABC DEF`
-        // reads as two Arabic words) and one Persian word with a half-space.
+    fn persian_words_are_not_flagged_and_english_typos_still_are() {
+        // Page 1: Persian (the font maps S-W to پ چ گ ک ی). Page 2: eight
+        // English words, and one Persian word with a half-space.
         let mut h = arabic_harness(
-            "ABC DEF GHI JKL",
-            "a tpyo is here and still fine today ABC_DEF",
+            "STU VWA STU VWA",
+            "a tpyo is here and still fine today SA_VW",
         );
         open_panel(&mut h);
         assert_eq!(
@@ -24501,20 +24667,20 @@ mod g3_spell_tests {
     /// reported as "no misspelled words", which would read as a clean bill
     /// of health for a page nothing looked at.
     #[test]
-    fn a_page_mostly_in_arabic_is_skipped_and_the_panel_says_so_once() {
-        let mut h = arabic_harness("ABC DEF GHI JKL", "a tpyo is here and still fine");
+    fn a_page_mostly_in_persian_is_skipped_and_the_panel_says_so_once() {
+        let mut h = arabic_harness("STU VWA STU VWA", "a tpyo is here and still fine");
         open_panel(&mut h);
         assert_eq!(found_words(&h), ["tpyo"], "the English page is still checked");
         h.run_steps(3);
-        h.get_by_label_contains("mostly in a script the English dictionary cannot check");
+        h.get_by_label_contains("mostly in a language the spelling check has no dictionary for");
     }
 
     #[test]
-    fn a_document_that_is_entirely_arabic_does_not_claim_to_be_clean() {
-        let mut h = arabic_harness("ABC DEF GHI JKL", "GHI JKL ABC DEF");
+    fn a_document_that_is_entirely_persian_does_not_claim_to_be_clean() {
+        let mut h = arabic_harness("STU VWA STU VWA", "VWA STU VWA STU");
         open_panel(&mut h);
         assert!(found_words(&h).is_empty(), "{:?}", found_words(&h));
-        h.get_by_label_contains("mostly in a script the English dictionary cannot check");
+        h.get_by_label_contains("mostly in a language the spelling check has no dictionary for");
     }
 
     /// A half-space (U+200C) or a joiner (U+200D) between two letters keeps
@@ -24553,10 +24719,11 @@ mod g3_spell_tests {
     /// Mostly means more than half of the words on the page.
     #[test]
     fn a_page_is_skipped_only_when_more_than_half_of_it_is_in_another_script() {
-        let arabic = "\u{647}\u{630}\u{627} \u{62C}\u{64A}\u{62F}";
-        assert_eq!(spelling::misspelled_in_page(&[&format!("tpyo here {arabic}")]), Some(vec![(0, "tpyo")]));
-        assert_eq!(spelling::misspelled_in_page(&[&format!("tpyo {arabic}")]), None);
-        assert_eq!(spelling::misspelled_in_page(&[arabic]), None);
+        // Russian: a script none of the dictionaries judges.
+        let russian = "\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442} \u{43c}\u{438}\u{440}";
+        assert_eq!(spelling::misspelled_in_page(&[&format!("tpyo here {russian}")]), Some(vec![(0, "tpyo")]));
+        assert_eq!(spelling::misspelled_in_page(&[&format!("tpyo {russian}")]), None);
+        assert_eq!(spelling::misspelled_in_page(&[russian]), None);
     }
 
     #[test]
@@ -24579,7 +24746,7 @@ mod g3_spell_tests {
         assert_eq!(note(vec![]), None);
         assert_eq!(
             note(vec![2]).as_deref(),
-            Some("Page 3 is mostly in a script the English dictionary cannot check - it was skipped.")
+            Some("Page 3 is mostly in a language the spelling check has no dictionary for - it was skipped.")
         );
         assert!(note(vec![0, 4]).unwrap().starts_with("Pages 1 and 5 are mostly"));
         assert!(note((0..40).collect()).unwrap().starts_with("40 pages are mostly"));
@@ -25353,11 +25520,12 @@ mod pointer_tests {
         app.submit("page 1");
         app.tab_mut().zoom = ZoomMode::Factor(1.0);
 
-        app.active_tab = 0;
+        // The newest tab is the leftmost: the first document is now the second.
+        app.active_tab = 1;
         assert_eq!(app.tab().page, page_a, "switching back lost the first tab's page");
         assert_eq!(app.tab().zoom, zoom_a, "switching back lost the first tab's zoom");
 
-        app.active_tab = 1;
+        app.active_tab = 0;
         assert_ne!(app.tab().page, page_a, "the second tab's own page should be unaffected");
         assert_eq!(app.tab().zoom, ZoomMode::Factor(1.0));
     }
@@ -25371,21 +25539,23 @@ mod pointer_tests {
         app.submit("l 10,10 100,100");
         app.submit(&format!("open \"{}\"", fixture("two-column.pdf")));
         assert_eq!(app.tabs.len(), 2);
-        assert_eq!(app.active_tab, 1, "opening should have switched to the new tab");
+        // The newest tab is the leftmost.
+        assert_eq!(app.active_tab, 0, "opening should have switched to the new tab");
         app.submit("l 20,20 120,120");
-        assert_eq!(app.tabs[1].markup.existing(0).map(|l| l.len()), Some(1));
+        assert_eq!(app.tabs[0].markup.existing(0).map(|l| l.len()), Some(1));
 
-        app.close_tab(0);
+        // The first document, now the second tab, has the unsaved mark.
+        app.close_tab(1);
         assert_eq!(app.tabs.len(), 2, "a tab with unsaved work should not vanish on its own");
-        assert_eq!(app.active_tab, 0, "asking about a tab should bring it to the front");
-        assert_eq!(app.tab().closing, Some(Closing::Tab(0)));
+        assert_eq!(app.active_tab, 1, "asking about a tab should bring it to the front");
+        assert_eq!(app.tab().closing, Some(Closing::Tab(1)));
 
         // Discard, driven directly the same way `discarding_actually_closes`
         // below drives `Closing::Document` — rendering the real modal needs
         // a full egui frame that a plain `Context::default()` cannot supply.
         let ctx = egui::Context::default();
         app.tab_mut().closing = None;
-        app.finish_closing(Closing::Tab(0), &ctx);
+        app.finish_closing(Closing::Tab(1), &ctx);
 
         assert_eq!(app.tabs.len(), 1, "discarding should have closed just the one tab");
         assert!(
@@ -25407,7 +25577,8 @@ mod pointer_tests {
         app.submit(&format!("open \"{}\"", fixture("two-column.pdf")));
         assert_eq!(app.tabs.len(), 2);
 
-        app.close_tab(0);
+        // single-page.pdf, the first one opened, is now the second tab.
+        app.close_tab(1);
         assert_eq!(app.tabs.len(), 1, "a clean tab should close outright");
         assert!(app.tab().closing.is_none(), "a clean tab has nothing to ask about");
         assert!(
@@ -26267,8 +26438,9 @@ mod ui_tests {
         };
         let logo = title_bar("Pagify logo");
         let name = title_bar("Pagify");
-        let first = title_bar("two-column.pdf");
-        let second = title_bar("text-lines.pdf");
+        // The newest tab is the leftmost: text-lines.pdf was opened second.
+        let first = title_bar("text-lines.pdf");
+        let second = title_bar("two-column.pdf");
         let ortho = title_bar("Ortho");
 
         // Left to right, in the order they were written.
@@ -32334,6 +32506,138 @@ mod g1_command_box_tests {
 /// that is genuinely running under the name `Pagify.exe`, because what
 /// Windows refuses to overwrite is a running program's file and nothing else
 /// reproduces that.
+/// **Reported from use: with many documents open the tabs stacked into five
+/// rows and took the page's space.** One row, the newest on the left, and the
+/// ones that do not fit behind a small triangle.
+#[cfg(test)]
+mod tab_strip_tests {
+    use super::ui_tests::{fixture, harness};
+    use super::*;
+    use egui_kittest::kittest::Queryable;
+    use egui_kittest::Harness;
+
+    const MANY: [&str; 10] = [
+        "secret-in-chained-form.pdf",
+        "secret-in-form-twice.pdf",
+        "secret-in-lzw-form.pdf",
+        "secret-in-matrix-form.pdf",
+        "secret-in-nested-form.pdf",
+        "secret-in-pixels-form.pdf",
+        "secret-in-predicted-form.pdf",
+        "pages-ladder.pdf",
+        "quadrants.pdf",
+        "mixed-sizes.pdf",
+    ];
+
+    fn many_tabs() -> Harness<'static, PagifyApp> {
+        let mut h = harness(MANY[0]);
+        for name in &MANY[1..] {
+            h.state_mut().open(&fixture(name));
+        }
+        assert_eq!(h.state().tabs.len(), MANY.len(), "the documents did not all open");
+        h.run_steps(6);
+        h
+    }
+
+    /// The tabs drawn in the title bar, left to right: their names and where they are.
+    fn drawn(h: &Harness<'static, PagifyApp>) -> Vec<(&'static str, egui::Rect)> {
+        let mut found: Vec<(&'static str, egui::Rect)> = MANY
+            .iter()
+            .filter_map(|name| {
+                h.query_all_by_label(name)
+                    .map(|n| n.rect())
+                    .find(|r| r.center().y < 70.0)
+                    .map(|r| (*name, r))
+            })
+            .collect();
+        found.sort_by(|a, b| a.1.left().total_cmp(&b.1.left()));
+        found
+    }
+
+    #[test]
+    fn how_many_tabs_fit_never_wraps_and_never_leaves_the_strip_empty() {
+        let widths = [100.0; 5];
+        assert_eq!(tabs_that_fit(&widths, 4.0, 520.0, 26.0), 5, "all of them, with no menu");
+        // Too many: as many as fit beside the menu button.
+        assert_eq!(tabs_that_fit(&widths, 4.0, 300.0, 26.0), 2);
+        assert_eq!(tabs_that_fit(&widths, 4.0, 10.0, 26.0), 1, "never fewer than one");
+        assert_eq!(tabs_that_fit(&[], 4.0, 300.0, 26.0), 0);
+        // The room for exactly all of them does not call for a menu.
+        assert_eq!(tabs_that_fit(&widths, 4.0, 516.0, 26.0), 5);
+    }
+
+    #[test]
+    fn many_tabs_are_one_row_with_the_newest_on_the_left_and_the_page_keeps_its_space() {
+        let mut one = harness(MANY[0]);
+        one.run_steps(4);
+        let page_top_with_one = one.state().tab().viewport_rect.expect("drawn").top();
+
+        let h = many_tabs();
+        let shown = drawn(&h);
+        assert!(shown.len() >= 2 && shown.len() < MANY.len(), "{} of {} tabs drawn", shown.len(), MANY.len());
+
+        // One row: the same line, whatever the number.
+        let (lo, hi) = shown
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), (_, r)| (lo.min(r.center().y), hi.max(r.center().y)));
+        assert!(hi - lo <= 1.5, "the tabs are on more than one row: {shown:?}");
+
+        // Newest first: the last document opened is the leftmost, then the one before.
+        let order: Vec<&str> = shown.iter().map(|(n, _)| *n).collect();
+        let expected: Vec<&str> = MANY.iter().rev().take(shown.len()).copied().collect();
+        assert_eq!(order, expected, "the tabs are not newest-first");
+
+        // The page starts where it did with one tab: the strip did not grow.
+        let page_top_with_many = h.state().tab().viewport_rect.expect("drawn").top();
+        assert!(
+            (page_top_with_many - page_top_with_one).abs() < 1.0,
+            "the page area moved from {page_top_with_one} to {page_top_with_many}: the tab strip is taller"
+        );
+        h.get_by_label("More tabs");
+    }
+
+    #[test]
+    fn a_tab_from_the_menu_is_shown_and_takes_the_last_place_in_the_strip() {
+        let mut h = many_tabs();
+        let before = drawn(&h);
+        let hidden = MANY[0];
+        assert!(!before.iter().any(|(n, _)| *n == hidden), "setup: the oldest tab should be behind the menu");
+
+        h.get_by_label("More tabs").click();
+        h.run_steps(3);
+        h.get_by_label(hidden).click();
+        h.run_steps(5);
+
+        let name_showing = h
+            .state()
+            .tab()
+            .doc
+            .as_ref()
+            .and_then(|d| d.session.path().file_name().map(|n| n.to_string_lossy().into_owned()));
+        assert_eq!(name_showing.as_deref(), Some(hidden), "the chosen tab is not the one showing");
+        let after = drawn(&h);
+        assert!(after.iter().any(|(n, _)| *n == hidden), "the chosen tab is not in the strip: {after:?}");
+        assert_eq!(after.len(), before.len(), "the strip changed size");
+        // The one it replaced is now the one behind the menu.
+        let (left_out, _) = before.last().unwrap();
+        assert!(!after.iter().any(|(n, _)| n == left_out), "{left_out} is still drawn");
+        assert_eq!(after.last().map(|(n, _)| *n), Some(hidden), "it did not take the last place");
+    }
+
+    #[test]
+    fn the_tab_showing_is_always_one_of_the_tabs_drawn() {
+        let mut h = many_tabs();
+        // Left showing by something other than a click: the last, oldest tab.
+        h.state_mut().active_tab = MANY.len() - 1;
+        h.run_steps(4);
+        let showing = h.state().tab().doc.as_ref().unwrap().session.path().file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            drawn(&h).iter().any(|(n, _)| *n == showing),
+            "{showing} is showing but is not in the strip"
+        );
+    }
+}
+
 /// **Reported from use: links inside a PDF do nothing.** A contents entry or a
 /// "back to the index" is a link to another page; only web addresses were ever
 /// followed.
@@ -32457,23 +32761,39 @@ mod update_script_tests {
         PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot")).join("System32")
     }
 
+    /// Start a helper program with no console of its own. With Windows Terminal
+    /// as the default terminal, each console program a test starts opens a tab,
+    /// and one that is killed leaves it open — a few hundred runs of this suite
+    /// left a hundred empty terminals on the owner's screen.
+    fn quiet(command: &mut Command) -> &mut Command {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+    }
+
     /// An install folder whose `Pagify.exe` is `ping.exe` — kept running for
     /// half a minute when `with_other_window` — and a "Dropbox" folder holding
-    /// a different `Pagify.exe` (`hostname.exe`, which exits at once, as the
-    /// relaunch at the end of the script will start it) and a new `pdfium.dll`.
+    /// a different `Pagify.exe` and a new `pdfium.dll`. The new one is
+    /// `rundll32.exe`, which exits at once as the relaunch at the end of the
+    /// script starts it — and which is a *window* program: a console one (the
+    /// first choice was `hostname.exe`) is given a terminal of its own by
+    /// `start`, and every run of the suite left one open.
     fn scratch(name: &str, with_other_window: bool) -> Scratch {
         let dir = std::env::temp_dir().join(format!("pagify-update-script-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let (install, source) = (dir.join("install"), dir.join("dropbox"));
         std::fs::create_dir_all(&install).expect("install dir");
         std::fs::create_dir_all(&source).expect("source dir");
-        std::fs::copy(system32().join("ping.exe"), install.join("Pagify.exe")).expect("old exe");
+        // Only the test that keeps "another window" running needs `ping.exe` (a
+        // program that stays up). In the others the old exe can be relaunched —
+        // when the update fails, the script starts what is left — and a console
+        // program started that way gets a terminal of its own.
+        let old = if with_other_window { "ping.exe" } else { "rundll32.exe" };
+        std::fs::copy(system32().join(old), install.join("Pagify.exe")).expect("old exe");
         std::fs::write(install.join("pdfium.dll"), b"old pdfium").expect("old dll");
-        std::fs::copy(system32().join("hostname.exe"), source.join("Pagify.exe")).expect("new exe");
+        std::fs::copy(system32().join("rundll32.exe"), source.join("Pagify.exe")).expect("new exe");
         std::fs::write(source.join("pdfium.dll"), b"new pdfium").expect("new dll");
         let other_window = with_other_window.then(|| {
-            Command::new(install.join("Pagify.exe"))
-                .args(["-n", "30", "127.0.0.1"])
+            quiet(Command::new(install.join("Pagify.exe")).args(["-n", "30", "127.0.0.1"]))
                 .stdout(Stdio::null())
                 .spawn()
                 .expect("the other window")
@@ -32484,12 +32804,12 @@ mod update_script_tests {
     /// Run the script the way `spawn_update_script` does, for a process that
     /// has already exited (the one that would have asked for the update).
     fn run_the_update(s: &Scratch) {
-        let mut gone = Command::new("cmd").args(["/C", "exit"]).spawn().expect("a short-lived process");
+        let mut gone = quiet(Command::new("cmd").args(["/C", "exit"])).spawn().expect("a short-lived process");
         let pid = gone.id();
         gone.wait().expect("it exits");
         let bat = s.dir.join("update.bat");
         std::fs::write(&bat, update_script(pid, &s.source, &s.install, &s.log, false)).expect("script");
-        let status = Command::new("cmd").arg("/C").arg(&bat).status().expect("cmd");
+        let status = quiet(Command::new("cmd").arg("/C").arg(&bat)).status().expect("cmd");
         assert!(status.success(), "the update script itself failed: {status}");
     }
 
@@ -32553,14 +32873,16 @@ mod update_script_tests {
     /// not leave Pagify without an exe, and must say it failed.
     #[test]
     fn an_update_that_cannot_be_finished_leaves_the_old_exe_in_place_and_says_so() {
-        let s = scratch("failing", true);
+        // No other window: after a failed update the script starts what is left,
+        // and a console program started that way opens a terminal that stays.
+        let s = scratch("failing", false);
         std::fs::remove_file(s.source.join("Pagify.exe")).expect("remove the new exe");
 
         run_the_update(&s);
 
         assert_eq!(
             std::fs::read(s.install.join("Pagify.exe")).expect("the installed exe must still exist"),
-            std::fs::read(system32().join("ping.exe")).expect("ping.exe"),
+            std::fs::read(system32().join("rundll32.exe")).expect("rundll32.exe"),
             "the old exe was not put back"
         );
         assert!(leftovers(&s).is_empty(), "a renamed copy was left behind: {:?}", leftovers(&s));

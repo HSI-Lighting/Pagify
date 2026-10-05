@@ -4,11 +4,95 @@
 //!
 //! See `third_party/dict/README.md` for where the list came from and why a
 //! flat `HashSet` was chosen over pulling in `hunspell-rs`/`symspell`.
+//!
+//! **Languages.** English is the flat list above. Arabic is a Hunspell
+//! dictionary (words plus affix rules), read by `spellbook`. Chinese cannot be
+//! checked by a word list — there are no spaces between words and any real
+//! character is a real character — so it is checked for *unusual characters*
+//! only: those outside the few thousand in everyday use, which is what OCR and
+//! broken font encodings produce. Persian, Urdu and every other script are not
+//! judged, and a page that is mostly in one is reported as skipped.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 const WORDLIST: &str = include_str!("../../../third_party/dict/en-US.txt");
+const ARABIC_DIC: &str = include_str!("../../../third_party/dict/ar/ar.dic");
+const ARABIC_AFF: &str = include_str!("../../../third_party/dict/ar/ar.aff");
+const HAN_COMMON: &str = include_str!("../../../third_party/dict/han-common.txt");
+
+/// The Arabic dictionary, read the first time it is needed — half a million
+/// entries, so on the scan's own thread and not at start-up. `None` if it
+/// could not be read, in which case Arabic is simply not judged.
+fn arabic() -> Option<&'static spellbook::Dictionary> {
+    static ARABIC: OnceLock<Option<spellbook::Dictionary>> = OnceLock::new();
+    ARABIC.get_or_init(|| spellbook::Dictionary::new(ARABIC_AFF, ARABIC_DIC).ok()).as_ref()
+}
+
+/// The ranges of everyday Chinese characters, as code points, sorted.
+fn han_common() -> &'static [(u32, u32)] {
+    static RANGES: OnceLock<Vec<(u32, u32)>> = OnceLock::new();
+    RANGES.get_or_init(|| {
+        let hex = |s: &str| u32::from_str_radix(s.trim(), 16).ok();
+        let mut ranges: Vec<(u32, u32)> = HAN_COMMON
+            .lines()
+            .filter_map(|line| match line.split_once('-') {
+                Some((a, b)) => Some((hex(a)?, hex(b)?)),
+                None => hex(line).map(|c| (c, c)),
+            })
+            .collect();
+        ranges.sort_unstable();
+        ranges
+    })
+}
+
+/// Whether `c` is a Chinese character in everyday use — simplified, traditional
+/// or Japanese kanji. Anything else Han is "unusual".
+fn is_common_han(c: char) -> bool {
+    let code = c as u32;
+    let ranges = han_common();
+    match ranges.binary_search_by(|&(first, _)| first.cmp(&code)) {
+        Ok(_) => true,
+        Err(0) => false,
+        Err(at) => ranges[at - 1].1 >= code,
+    }
+}
+
+fn is_han(c: char) -> bool {
+    use pdf_core::ocr::script::Script;
+    Script::of(c) == Some(Script::Han)
+}
+
+/// The plain Arabic alphabet, plus alef wasla — what a dictionary of ordinary
+/// Arabic can judge. Persian and Urdu letters, the shaped presentation forms
+/// and digits are not in it.
+fn is_arabic_letter(c: char) -> bool {
+    matches!(c as u32, 0x0621..=0x063A | 0x0641..=0x064A | 0x0671)
+}
+
+/// Marks that are written over or between the letters and are not part of the
+/// spelling the dictionary holds: short vowels and other diacritics, the
+/// dagger alef, the tatweel stretch, and the joiners.
+fn is_arabic_mark(c: char) -> bool {
+    matches!(c as u32, 0x064B..=0x0652 | 0x0670 | 0x0640 | 0x200C | 0x200D)
+}
+
+/// `word` with its marks taken off, if it is nothing but plain Arabic letters
+/// and marks; `None` for anything else — a Persian word, a shaped form, a
+/// letter of another script.
+fn plain_arabic(word: &str) -> Option<String> {
+    let mut plain = String::new();
+    for c in word.chars() {
+        if is_arabic_mark(c) {
+            continue;
+        }
+        if !is_arabic_letter(c) {
+            return None;
+        }
+        plain.push(c);
+    }
+    Some(plain)
+}
 
 fn words() -> &'static HashSet<&'static str> {
     static WORDS: OnceLock<HashSet<&'static str>> = OnceLock::new();
@@ -232,6 +316,19 @@ thread_local! {
 pub fn suggest(word: &str, limit: usize) -> Vec<String> {
     #[cfg(test)]
     SUGGEST_CALLS.with(|calls| calls.set(calls.get() + 1));
+    // Arabic comes from its own dictionary; a Chinese character has nothing to
+    // be suggested from.
+    if let Some(plain) = plain_arabic(word).filter(|p| !p.is_empty()) {
+        let mut out = Vec::new();
+        if let Some(dictionary) = arabic() {
+            dictionary.suggest(&plain, &mut out);
+        }
+        out.truncate(limit);
+        return out;
+    }
+    if word.chars().any(is_han) {
+        return Vec::new();
+    }
     let lower = word.to_lowercase();
     let letters: Vec<char> = lower.chars().collect();
     let len = letters.len();
@@ -318,23 +415,63 @@ fn in_another_script(word: &str) -> bool {
     word.chars().any(|c| Script::of(c).is_some_and(|script| script != Script::Latin))
 }
 
-/// The words on one page that the dictionary does not know, each with the
+/// Whether the Arabic dictionary knows `word` (marks already taken off). A
+/// dictionary that failed to load knows everything: nothing is flagged on its
+/// say-so.
+fn arabic_known(plain: &str) -> bool {
+    arabic().map_or(true, |dictionary| dictionary.check(plain))
+}
+
+/// The words on one page that the dictionaries do not know, each with the
 /// index of the run it is in, in reading order — or `None` when the page is
-/// mostly in a script the dictionary cannot judge, so nothing on it was
+/// mostly in a script or language none of them can judge, so nothing on it was
 /// checked and the caller must say so rather than report it clean.
 ///
-/// Skips a word that is a single letter (essentially always either a real
-/// word or an initial, never worth a prompt) or written in all capitals — an
-/// acronym or a model code such as "DALI" or "CAMINO" that a plain English
-/// word list was never going to know, and flagging every one of those would
-/// bury the real finds under noise — and any word [`can_judge`] refuses.
+/// **Latin** words go to the English list. A word is skipped when it is a
+/// single letter (essentially always either a real word or an initial, never
+/// worth a prompt) or written in all capitals — an acronym or a model code such
+/// as "DALI" or "CAMINO" that a plain English word list was never going to
+/// know, and flagging every one of those would bury the real finds under noise
+/// — and any word [`can_judge`] refuses.
+///
+/// **Arabic** words go to the Arabic dictionary, with their marks taken off.
+/// **Chinese** is checked a character at a time and only for characters that
+/// are not in everyday use; a returned "word" is that one character.
+///
+/// **Persian and Urdu are written in the same script and are not Arabic.** A
+/// page where more than a tenth of the Arabic-script words carry letters Arabic
+/// does not have (پ چ گ ک ی ...) is Persian or Urdu, and all its words count as
+/// ones nothing can judge — the Arabic list would flag nearly every one.
 pub fn misspelled_in_page<'a>(runs: &[&'a str]) -> Option<Vec<(usize, &'a str)>> {
     let mut words = 0usize;
     let mut foreign = 0usize;
-    let mut unknown = Vec::new();
+    let mut unknown: Vec<(usize, &'a str)> = Vec::new();
+    // Arabic-script words, judged after the whole page has been seen, and how
+    // many of the page's were not plain Arabic.
+    let mut arabic_words: Vec<(usize, &'a str, String)> = Vec::new();
+    let mut arabic_other = 0usize;
+
     for (index, run) in runs.iter().enumerate() {
         for (_, word) in words_in(run) {
             words += 1;
+            if word.chars().any(is_han) {
+                for (at, c) in word.char_indices() {
+                    if is_han(c) && !is_common_han(c) {
+                        unknown.push((index, &word[at..at + c.len_utf8()]));
+                    }
+                }
+                continue;
+            }
+            if word.chars().any(|c| pdf_core::ocr::script::Script::of(c) == Some(pdf_core::ocr::script::Script::Arabic)) {
+                match plain_arabic(word) {
+                    Some(plain) => arabic_words.push((index, word, plain)),
+                    None => {
+                        arabic_other += 1;
+                        foreign += 1;
+                    }
+                }
+                continue;
+            }
             if in_another_script(word) {
                 foreign += 1;
             }
@@ -346,7 +483,28 @@ pub fn misspelled_in_page<'a>(runs: &[&'a str]) -> Option<Vec<(usize, &'a str)>>
             }
         }
     }
+
+    let arabic_total = arabic_words.len() + arabic_other;
+    if arabic_other > 0 && arabic_other * 10 >= arabic_total {
+        // Persian or Urdu: nothing on the page in this script is judged.
+        foreign += arabic_words.len();
+    } else {
+        for (index, word, plain) in arabic_words {
+            if plain.chars().count() >= 2 && !arabic_known(&plain) {
+                unknown.push((index, word));
+            }
+        }
+    }
+    // Reading order across the languages: the stable sort keeps a run's own
+    // order.
+    unknown.sort_by_key(|&(index, _)| index);
     (foreign * 2 <= words).then_some(unknown)
+}
+
+/// Whether any run on a page holds Chinese — so the panel can say what the
+/// check of it amounts to.
+pub fn has_chinese(runs: &[&str]) -> bool {
+    runs.iter().any(|run| run.chars().any(is_han))
 }
 
 #[cfg(test)]
@@ -401,6 +559,105 @@ mod tests {
         assert_eq!(edit_distance(&chars("cat"), &chars("cats")), 1, "one insertion");
         assert_eq!(edit_distance(&chars("cats"), &chars("cat")), 1, "one deletion");
         assert_eq!(edit_distance(&chars("kitten"), &chars("sitting")), 3, "the classic example");
+    }
+
+    // ---- Arabic and Chinese -------------------------------------------------
+
+    /// "the book is new", and a string of one letter that is not a word.
+    const GOOD_ARABIC: &str = "\u{627}\u{644}\u{643}\u{62A}\u{627}\u{628} \u{62C}\u{62F}\u{64A}\u{62F}";
+    const NONSENSE_ARABIC: &str = "\u{633}\u{633}\u{633}\u{633}\u{633}\u{633}";
+
+    #[test]
+    fn arabic_is_judged_by_the_arabic_dictionary() {
+        assert_eq!(misspelled_in_page(&[GOOD_ARABIC]), Some(vec![]), "real words were flagged");
+        assert_eq!(
+            misspelled_in_page(&[GOOD_ARABIC, NONSENSE_ARABIC]),
+            Some(vec![(1, NONSENSE_ARABIC)]),
+            "a string that is not a word was not found"
+        );
+    }
+
+    /// Short vowels, the stretch mark and the joiners are not part of the
+    /// spelling the dictionary holds.
+    #[test]
+    fn arabic_marks_do_not_make_a_known_word_unknown() {
+        // كِتَابٌ — "a book" with its short vowels written; and with a tatweel.
+        let vowelled = "\u{643}\u{650}\u{62A}\u{64E}\u{627}\u{628}\u{64C}";
+        let stretched = "\u{643}\u{640}\u{62A}\u{627}\u{628}";
+        assert_eq!(misspelled_in_page(&[vowelled, stretched, GOOD_ARABIC]), Some(vec![]));
+    }
+
+    /// Persian and Urdu share the script and are not Arabic: the Arabic list
+    /// would flag nearly every word, so a page that is Persian is not judged at
+    /// all — and is reported as skipped, not as clean.
+    #[test]
+    fn a_persian_page_is_skipped_not_flagged() {
+        // پچگ کیا — letters Arabic does not have, among ones it does.
+        let persian = "\u{67E}\u{686}\u{6AF} \u{6A9}\u{6CC}\u{627} \u{628}\u{627}\u{628} \u{67E}\u{6CC}\u{62F}\u{627}";
+        assert_eq!(misspelled_in_page(&[persian]), None);
+        // A few Persian words in an English page do not skip it.
+        assert_eq!(misspelled_in_page(&["a tpyo is here and fine today", persian]), Some(vec![(0, "tpyo")]));
+    }
+
+    #[test]
+    fn a_shaped_presentation_form_is_not_judged() {
+        // ﻛﺘﺎب — the same word as isolated and final shapes, which extraction
+        // gives for a font with no Unicode map.
+        let shaped = "\u{FEDB}\u{FE98}\u{FE8E}\u{FE91}";
+        assert_eq!(misspelled_in_page(&["a tpyo is here and fine today", shaped]), Some(vec![(0, "tpyo")]));
+    }
+
+    #[test]
+    fn arabic_suggestions_come_from_the_arabic_dictionary_and_do_not_take_long() {
+        let started = std::time::Instant::now();
+        let near = suggest("\u{643}\u{62A}\u{627}\u{628}\u{628}", 5);
+        eprintln!("arabic suggestions: {near:?} in {:?}", started.elapsed());
+        assert!(near.len() <= 5);
+        assert!(started.elapsed() < std::time::Duration::from_secs(20), "a suggestion took {:?}", started.elapsed());
+    }
+
+    /// Read fresh, not through the cached one, so the figure is the load itself.
+    /// It happens once, on the scan's own thread, the first time Arabic is met.
+    #[test]
+    fn the_arabic_dictionary_loads_in_reasonable_time() {
+        let started = std::time::Instant::now();
+        let dictionary = spellbook::Dictionary::new(ARABIC_AFF, ARABIC_DIC).expect("the dictionary did not parse");
+        eprintln!("arabic dictionary loaded in {:?}", started.elapsed());
+        assert!(dictionary.check("\u{643}\u{62A}\u{627}\u{628}"), "كتاب is not known");
+        assert!(started.elapsed() < std::time::Duration::from_secs(30), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn chinese_is_checked_for_unusual_characters_only() {
+        // 这是一个测试 — all in everyday use, simplified.
+        let plain = "\u{8FD9}\u{662F}\u{4E00}\u{4E2A}\u{6D4B}\u{8BD5}";
+        // 測試 — traditional.
+        let traditional = "\u{6E2C}\u{8A66}";
+        assert_eq!(misspelled_in_page(&[plain, traditional]), Some(vec![]));
+        // U+3400, a rare character from the first extension block: the one
+        // character is what is returned, not the run it is in.
+        let rare = "\u{6D4B}\u{8BD5}\u{3400}\u{6D4B}";
+        assert_eq!(misspelled_in_page(&[rare]), Some(vec![(0, "\u{3400}")]));
+        assert!(has_chinese(&[rare]) && !has_chinese(&["plain english"]));
+    }
+
+    #[test]
+    fn chinese_beside_english_leaves_the_english_to_the_english_list() {
+        let runs = ["LED \u{706F} a tpyo here", "\u{6D4B}\u{8BD5}\u{3400}"];
+        assert_eq!(
+            misspelled_in_page(&runs),
+            Some(vec![(0, "tpyo"), (1, "\u{3400}")]),
+            "reading order across the languages"
+        );
+    }
+
+    #[test]
+    fn the_common_character_ranges_hold_what_they_should() {
+        assert!(is_common_han('\u{4E00}'), "一, the first");
+        assert!(is_common_han('\u{9FA5}') || is_common_han('\u{9F9C}'));
+        assert!(!is_common_han('\u{3400}'));
+        assert!(!is_common_han('a'));
+        assert!(han_common().windows(2).all(|w| w[0].1 < w[1].0), "ranges overlap or are out of order");
     }
 
     #[test]

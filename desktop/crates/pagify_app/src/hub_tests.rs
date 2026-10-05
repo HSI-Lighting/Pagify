@@ -12,12 +12,16 @@ fn fixture(name: &str) -> String {
     format!("{}/../../../rust/pdf_core/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
 }
 
-/// An app with these documents open, one tab each, the last one showing.
+/// An app with these documents open, one tab each, in the order given, the last
+/// one showing. A document opened is put on the left of the strip, so they are
+/// opened last to first.
 fn app_with(names: &[&str]) -> PagifyApp {
-    let mut app = PagifyApp::new(Some(&fixture(names[0])));
-    for name in &names[1..] {
+    let last = names.len() - 1;
+    let mut app = PagifyApp::new(Some(&fixture(names[last])));
+    for name in names[..last].iter().rev() {
         app.open(&fixture(name));
     }
+    app.active_tab = last;
     assert_eq!(app.tabs.len(), names.len(), "the documents did not all open");
     app
 }
@@ -352,7 +356,8 @@ fn a_moved_tab_keeps_its_page_zoom_and_view() {
 
     // A second tab, so the first can leave.
     from.open(&fixture("single-page.pdf"));
-    let moving = from.give_tab(0).unwrap();
+    // The new one is on the left; the tab that leaves is the one that was there.
+    let moving = from.give_tab(1).unwrap();
     let mut to = PagifyApp::build(None, true);
     to.take_in_tab(moving, None);
 

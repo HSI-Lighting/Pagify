@@ -454,6 +454,11 @@ impl PagifyApp {
 
     // -- the gesture, in the tab strip ------------------------------------------
 
+    /// Whether any tab of this window is being carried.
+    pub(crate) fn carrying_a_tab(&self) -> bool {
+        self.win.drag.is_some()
+    }
+
     /// Whether tab `index` is the one being carried.
     pub(crate) fn dragging_tab(&self, index: usize) -> bool {
         self.win.drag.as_ref().is_some_and(|d| d.tab == index && !d.cancelled)

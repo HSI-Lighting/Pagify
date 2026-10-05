@@ -526,7 +526,7 @@ impl PagifyApp {
         // away from it would hide the question until somebody found their way
         // back. The document still opens, as a tab, and the window still comes
         // forward — it just does not take the active place.
-        let asking = self.tab().closing.is_some().then_some(self.active_tab);
+        let asking = self.tab().closing.is_some();
         // In the session log, so that a document that "opened by itself" can be
         // told from one that was opened here.
         self.say_info(match request.files.len() {
@@ -548,8 +548,12 @@ impl PagifyApp {
         for command in &request.commands {
             self.submit(command);
         }
-        if let Some(index) = asking {
-            self.active_tab = index;
+        if asking {
+            // Found again by the question itself: the new tabs went in at the
+            // front, so the place it had is not the place it has.
+            if let Some(index) = self.tabs.iter().position(|t| t.closing.is_some()) {
+                self.active_tab = index;
+            }
         }
         ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd_to(window, egui::ViewportCommand::Focus);
@@ -763,6 +767,15 @@ mod tests {
         let mut command = if cfg!(windows) {
             let mut c = std::process::Command::new("ping");
             c.args(["-n", "6", "127.0.0.1"]);
+            // No console of its own. With Windows Terminal as the default
+            // terminal, every console program a test starts opens a tab, and a
+            // killed one leaves it open: a few hundred test runs left a
+            // hundred empty terminals behind.
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+            }
             c
         } else {
             let mut c = std::process::Command::new("sleep");
@@ -949,10 +962,11 @@ mod tests {
         assert!(run_until(&mut h, |app| app.tabs.len() == 2), "the document never became a tab");
 
         let app = h.state();
-        assert_eq!(app.active_tab, 1, "the new tab was not made the active one");
+        assert_eq!(app.active_tab, 0, "the new tab was not made the active one");
         let name = |t: &DocTab| t.doc.as_ref().map(|d| d.session.path().file_name().unwrap().to_string_lossy().into_owned());
-        assert_eq!(name(&app.tabs[0]).as_deref(), Some("single-page.pdf"), "the open document was replaced");
-        assert_eq!(name(&app.tabs[1]).as_deref(), Some("two-column.pdf"));
+        // The newest tab is the leftmost.
+        assert_eq!(name(&app.tabs[1]).as_deref(), Some("single-page.pdf"), "the open document was replaced");
+        assert_eq!(name(&app.tabs[0]).as_deref(), Some("two-column.pdf"));
         assert!(is_gone(&sent), "the request was never acknowledged");
         let _ = fs::remove_dir_all(&dir);
     }
@@ -965,14 +979,14 @@ mod tests {
         // A second document, then ask for the first again — spelled differently.
         h.state_mut().open(&fixture("two-column.pdf"));
         assert_eq!(h.state().tabs.len(), 2);
-        assert_eq!(h.state().active_tab, 1);
+        assert_eq!(h.state().active_tab, 0);
 
         let spelled = fixture("single-page.pdf").replace('/', if cfg!(windows) { "\\" } else { "/" });
         let sent = write_request(&inbox, &asking_for(&[&spelled])).unwrap();
         assert!(run_until(&mut h, |_| is_gone(&sent)), "the request was not taken");
         h.step();
         assert_eq!(h.state().tabs.len(), 2, "an open document was opened a second time");
-        assert_eq!(h.state().active_tab, 0, "the tab already showing it was not brought forward");
+        assert_eq!(h.state().active_tab, 1, "the tab already showing it was not brought forward");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1008,7 +1022,7 @@ mod tests {
         app.cmd.input_mut().push_str("pagify");
         assert!(app.consume_password_line());
         assert_eq!(app.tabs.len(), 2, "the document did not open once its password was given");
-        assert_eq!(app.active_tab, 1);
+        assert_eq!(app.active_tab, 0);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1037,9 +1051,9 @@ mod tests {
         assert!(run_until(&mut h, |app| app.tabs.len() == 2), "the document never became a tab");
         assert!(is_gone(&sent));
         let app = h.state();
-        assert_eq!(app.active_tab, 0, "the document took the place of the question");
-        assert_eq!(app.tabs[0].closing, Some(Closing::Document), "the question was dropped");
-        assert!(app.tabs[0].doc.is_some(), "the document with unsaved marks was closed");
+        assert_eq!(app.active_tab, 1, "the document took the place of the question");
+        assert_eq!(app.tabs[1].closing, Some(Closing::Document), "the question was dropped");
+        assert!(app.tabs[1].doc.is_some(), "the document with unsaved marks was closed");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1058,8 +1072,8 @@ mod tests {
         let app = h.state();
         assert_eq!(app.tabs.len(), 2);
         // The line was drawn on the new tab, not the one that was already open.
-        assert_eq!(app.tabs[1].markup.existing(0).map(|l| l.len()), Some(1));
-        assert_eq!(app.tabs[0].markup.existing(0).map(|l| l.len()), None);
+        assert_eq!(app.tabs[0].markup.existing(0).map(|l| l.len()), Some(1));
+        assert_eq!(app.tabs[1].markup.existing(0).map(|l| l.len()), None);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1080,7 +1094,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(h.state().tabs.len(), 2, "a window with no ui pass never took the document");
-        assert_eq!(h.state().active_tab, 1);
+        assert_eq!(h.state().active_tab, 0);
         assert!(is_gone(&sent));
         let _ = fs::remove_dir_all(&dir);
     }
