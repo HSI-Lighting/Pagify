@@ -1034,10 +1034,7 @@ struct Reveal {
     rect: pagify_shell::reader::Rect,
 }
 
-/// What the strip leaves round the pages, in screen pixels: a page at the top
-/// of the strip sits this far under the top of the window, and the last one
-/// this far above the bottom.
-const STRIP_PAD_PX: f32 = 12.0;
+use pagify_shell::reader::STRIP_PAD_PX;
 
 /// How much clear space [`reveal_axis`] likes to leave round a match.
 const REVEAL_AIR_PX: f32 = 32.0;
@@ -1109,6 +1106,10 @@ struct DocTab {
     /// Where the page strip is scrolled to, kept so zooming can hold the point
     /// under the cursor still.
     scroll_offset: egui::Vec2,
+    /// Where the reader was looking at the end of the last frame, so a change of
+    /// zoom, window or pages puts them back at the same place on the page and
+    /// not at the same pixel offset.
+    view: Option<pagify_shell::reader::ViewSnapshot>,
     /// Set when a zoom needs the scroll offset moved with it, applied on the
     /// next frame's `ScrollArea`.
     anchor_offset: Option<egui::Vec2>,
@@ -1537,6 +1538,7 @@ impl DocTab {
             scroll_pt: 0.0,
             last_view: None,
             scroll_offset: egui::Vec2::ZERO,
+            view: None,
             anchor_offset: None,
             editing_run: None,
             new_text_box: None,
@@ -19903,7 +19905,15 @@ impl PagifyApp {
         // small type that is the whole reason you were zooming. The point under
         // the cursor is the one the user is asking about, so it is the one that
         // stays still.
-        let viewport = self.tab_mut().viewport_rect.unwrap_or_else(|| ui.max_rect());
+        //
+        // **The window the pages are about to be drawn in, not the one they were
+        // drawn in last frame.** It was read back from the previous frame, so
+        // for one frame after the page area changed — a panel docking, the rail
+        // opening, a window being dragged — the page was centred for the old
+        // width and snapped a beat later. The scroll area is the first thing
+        // added to this `ui` and floating scroll bars take no room, so what is
+        // left of it is exactly what the scroll area gets.
+        let viewport = ui.available_rect_before_wrap();
         let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| viewport.contains(*p));
         if let Some(p) = pointer {
             // egui folds ⌘/Ctrl-scroll and a trackpad pinch into the same
@@ -20015,7 +20025,11 @@ impl PagifyApp {
         // `DISPLAY_DPI_SCALE`'s own doc for why they differ at all.
         zoom *= Self::DISPLAY_DPI_SCALE;
 
-        let mut area = egui::ScrollArea::both().auto_shrink([false, false]);
+        // One scroll state per document. With a shared one, switching tabs kept
+        // the other document's pixel offset under this one's pages.
+        let scroll_id = self.tab().doc.as_ref().map_or(0, |d| d.id);
+        let mut area =
+            egui::ScrollArea::both().id_salt(("pages", scroll_id)).auto_shrink([false, false]);
         // Whether this frame dictated the offset rather than observing it.
         let mut forced: Option<egui::Vec2> = None;
         if let Some(by) = self.tab_mut().pan_by.take() {
@@ -20070,6 +20084,18 @@ impl PagifyApp {
             let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
             let room = (content - viewport.size()).max(egui::Vec2::ZERO);
             let to = offset.clamp(egui::Vec2::ZERO, room);
+            forced = Some(to);
+            area = area.scroll_offset(to);
+        } else if let Some(to) = {
+            // Nothing asked to go anywhere, but the zoom, the window or the
+            // pages are not what they were last frame: keep the reader at the
+            // same place on the page rather than at the same pixel offset.
+            let tab = self.tab();
+            tab.view.zip(tab.doc.as_ref()).and_then(|(seen, doc)| {
+                seen.restored(&doc.strip, zoom, (viewport.width(), viewport.height()))
+            })
+        } {
+            let to = egui::vec2(to.0, to.1);
             forced = Some(to);
             area = area.scroll_offset(to);
         }
@@ -20304,6 +20330,16 @@ impl PagifyApp {
         let _ = forced;
         self.tab_mut().scroll_offset = scroll.state.offset;
         self.tab_mut().viewport_rect = Some(scroll.inner_rect);
+        // Where the reader is looking now, for the next frame to compare with.
+        let seen = self.tab().doc.as_ref().and_then(|doc| {
+            pagify_shell::reader::ViewSnapshot::capture(
+                &doc.strip,
+                zoom,
+                (scroll.inner_rect.width(), scroll.inner_rect.height()),
+                (scroll.state.offset.x, scroll.state.offset.y),
+            )
+        });
+        self.tab_mut().view = seen;
         let visible = scroll.inner;
         if let Some(target) = prefetch_targets(&visible, page_count, 2).first().copied() {
             // The same quantised scale the draw uses. Prefetching at the raw
@@ -30635,6 +30671,11 @@ mod g2_find_view_tests {
         );
         h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.0);
         h.run_steps(4);
+        // A zoom now keeps the middle of the page in the middle of the window,
+        // which for this page is the zebra itself. The match has to start out of
+        // sight for finding it to have anything to do.
+        h.state_mut().tab_mut().scroll_to_pt = Some(0.0);
+        h.run_steps(3);
 
         h.state_mut().submit("find zebra");
         h.run_steps(8);
@@ -30647,6 +30688,108 @@ mod g2_find_view_tests {
             "the match is not centred: it is at {:?}, the window's middle is {}",
             wash.center().y,
             view.center().y
+        );
+    }
+
+    // ---- the reader keeps their place when the page area changes ------------
+
+    /// Where in the strip, in page points, the middle of the window is.
+    fn middle_of_the_window_pt(h: &Harness<'static, PagifyApp>) -> f32 {
+        let view = h.state().tab().viewport_rect.expect("the page was never drawn");
+        let zoom = h.state().resolved_zoom() * PagifyApp::DISPLAY_DPI_SCALE;
+        (h.state().tab().scroll_offset.y + view.height() / 2.0 - STRIP_PAD_PX) / zoom
+    }
+
+    fn thirty_pages() -> Vec<Page> {
+        (0..30).map(|_| (612.0, 792.0, vec![(72.0, 400.0, "a line in the middle")])).collect()
+    }
+
+    /// **Reported from use: "the page shifts after editing", and the same when
+    /// changing tools.** Anything that changes the width of the page area — the
+    /// Edit Text panel docking, the Pages rail, Organize — changes the zoom in
+    /// Fit and Width, and the reader's place was only a pixel offset, so on a
+    /// long document the same pixels were a different part of it.
+    #[test]
+    fn narrowing_the_page_area_does_not_move_the_reader_in_width_zoom() {
+        for mode in [ZoomMode::Width, ZoomMode::Fit] {
+            let mut h = open_text_pdf("narrowing", &thirty_pages());
+            h.state_mut().tab_mut().zoom = mode;
+            h.run_steps(4);
+            h.state_mut().act(Verb::Page(PageTarget::Number(15)));
+            h.run_steps(4);
+            // Part of the way down the page, not at its top.
+            h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 500.0)));
+            h.run_steps(2);
+            h.input_mut().events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -150.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            });
+            h.run_steps(4);
+            let (page, before) = (h.state().tab().page, middle_of_the_window_pt(&h));
+            assert_eq!(page, 14, "{mode:?}: setup: the reader should be on page 15");
+
+            let rail = h.state().show_thumbs;
+            h.state_mut().show_thumbs = !rail;
+            h.run_steps(6);
+            let after = middle_of_the_window_pt(&h);
+            assert_eq!(h.state().tab().page, page, "{mode:?}: the reader was moved to another page");
+            assert!(
+                (after - before).abs() < 2.0,
+                "{mode:?}: the middle of the window moved from {before} to {after} (page points)"
+            );
+
+            // And putting it back puts them back.
+            h.state_mut().show_thumbs = rail;
+            h.run_steps(6);
+            let again = middle_of_the_window_pt(&h);
+            assert!((again - before).abs() < 2.0, "{mode:?}: {again} is not where it started, {before}");
+        }
+    }
+
+    /// The restore must only answer a change, never a scroll.
+    #[test]
+    fn an_ordinary_scroll_is_not_undone_by_the_view_restore() {
+        let mut h = open_text_pdf("scrolling", &thirty_pages());
+        h.state_mut().tab_mut().zoom = ZoomMode::Width;
+        h.run_steps(4);
+        let start = h.state().tab().scroll_offset.y;
+        h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 500.0)));
+        h.run_steps(2);
+        for _ in 0..4 {
+            h.input_mut().events.push(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -200.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Default::default(),
+            });
+            h.run_steps(2);
+        }
+        h.run_steps(6);
+        let moved = h.state().tab().scroll_offset.y - start;
+        assert!(moved > 400.0, "the scroll went only {moved} px");
+    }
+
+    /// Each document keeps its own place: another tab's offset must not be
+    /// carried under this one's pages.
+    #[test]
+    fn each_document_has_its_own_scroll_state() {
+        let mut h = open_text_pdf("own-state", &thirty_pages());
+        h.state_mut().tab_mut().zoom = ZoomMode::Width;
+        h.run_steps(3);
+        h.state_mut().act(Verb::Page(PageTarget::Number(20)));
+        h.run_steps(4);
+        let deep = h.state().tab().scroll_offset.y;
+        assert!(deep > 5_000.0, "setup: not far enough down ({deep})");
+
+        // A second document opened in a new tab starts at its own top.
+        h.state_mut().submit(&format!("open \"{}\"", fixture("single-page.pdf")));
+        h.run_steps(6);
+        assert!(
+            h.state().tab().scroll_offset.y < 100.0,
+            "the new document inherited the other's offset: {}",
+            h.state().tab().scroll_offset.y
         );
     }
 

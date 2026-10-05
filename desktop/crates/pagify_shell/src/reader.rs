@@ -273,6 +273,135 @@ impl Strip {
     }
 }
 
+/// What the strip leaves round the pages, in screen pixels: a page at the top
+/// of the strip sits this far under the top of the window, and the last one
+/// this far above the bottom.
+pub const STRIP_PAD_PX: f32 = 12.0;
+
+/// A place in the document: a page, and a point on it in page points from the
+/// page's top-left. Unlike a scroll offset in pixels it means the same thing
+/// at any zoom and in any size of window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Anchor {
+    pub page: usize,
+    pub dx: f32,
+    pub dy: f32,
+}
+
+impl Strip {
+    /// The anchor for the point `(x, y)` of the strip, in strip points.
+    pub fn anchor_at(&self, x: f32, y: f32) -> Anchor {
+        let page = self.page_at(y);
+        let left = self.lefts.get(page).copied().unwrap_or(0.0);
+        let top = self.tops.get(page).copied().unwrap_or(0.0);
+        Anchor { page, dx: x - left, dy: y - top }
+    }
+
+    /// The point of the strip an anchor names, in strip points. A page that is
+    /// no longer there is the last one: the place is kept as near as it can be.
+    pub fn point_of(&self, anchor: &Anchor) -> (f32, f32) {
+        let page = anchor.page.min(self.tops.len().saturating_sub(1));
+        let left = self.lefts.get(page).copied().unwrap_or(0.0);
+        let top = self.tops.get(page).copied().unwrap_or(0.0);
+        (left + anchor.dx, top + anchor.dy)
+    }
+
+    fn signature(&self) -> (usize, u32, u32) {
+        (self.tops.len(), self.total.to_bits(), self.width.to_bits())
+    }
+}
+
+/// The size of the strip's content on screen at `zoom`, padding included.
+fn content_px(strip: &Strip, zoom: f32) -> (f32, f32) {
+    (strip.width * zoom + 2.0 * STRIP_PAD_PX, strip.total * zoom + 2.0 * STRIP_PAD_PX)
+}
+
+/// How far the content is pushed in from the window's corner on an axis where
+/// it fits, so that a page narrower than the window sits in the middle of it.
+fn centring_px(strip: &Strip, zoom: f32, size: (f32, f32)) -> (f32, f32) {
+    let content = content_px(strip, zoom);
+    (((size.0 - content.0) * 0.5).max(0.0), ((size.1 - content.1) * 0.5).max(0.0))
+}
+
+/// Where the reader was looking, taken every frame, so that when something the
+/// view is made of changes — the zoom, the size of the window, the pages
+/// themselves — the reader can be put back at the same *place*.
+///
+/// **Reported from use: "the page shifts after editing", "the view jumps when I
+/// change tools".** The reader's place was kept only as a scroll offset in
+/// pixels, and nothing converted it when the scale or the window changed. Edit
+/// Text docks a panel and takes it away again, which narrows the window and, in
+/// Fit and Width, changes the zoom: the same pixel offset then showed another
+/// part of the document, and on a long one another page.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewSnapshot {
+    zoom: f32,
+    size: (f32, f32),
+    signature: (usize, u32, u32),
+    /// The place under the window's top-left corner, kept still while the
+    /// window or the pages change.
+    top_left: Anchor,
+    /// The place in the middle of the window, kept in the middle while the zoom
+    /// changes.
+    centre: Anchor,
+}
+
+impl ViewSnapshot {
+    /// What the view looks like now. `offset` is the scroll offset in pixels and
+    /// `size` the window the pages are shown in. `None` when there is no window
+    /// or zoom to speak of (a minimised window).
+    pub fn capture(strip: &Strip, zoom: f32, size: (f32, f32), offset: (f32, f32)) -> Option<Self> {
+        if !(zoom > 0.0) || !(size.0 > 0.0) || !(size.1 > 0.0) {
+            return None;
+        }
+        let pad = centring_px(strip, zoom, size);
+        let at = |sx: f32, sy: f32| {
+            let x = (offset.0 + sx - pad.0 - STRIP_PAD_PX) / zoom;
+            let y = (offset.1 + sy - pad.1 - STRIP_PAD_PX) / zoom;
+            strip.anchor_at(x, y)
+        };
+        Some(ViewSnapshot {
+            zoom,
+            size,
+            signature: strip.signature(),
+            top_left: at(0.0, 0.0),
+            centre: at(size.0 / 2.0, size.1 / 2.0),
+        })
+    }
+
+    /// The scroll offset that puts the reader back where they were, or `None`
+    /// when nothing the view is made of has changed — a plain scroll must never
+    /// be answered with an offset of its own.
+    ///
+    /// A change of zoom keeps what is in the *middle* of the window in the
+    /// middle. A change of the window or of the pages keeps what is at the
+    /// *corner* where it is, so a panel opening on the right leaves the page
+    /// exactly where it was.
+    pub fn restored(&self, strip: &Strip, zoom: f32, size: (f32, f32)) -> Option<(f32, f32)> {
+        if !(zoom > 0.0) || !(size.0 > 0.0) || !(size.1 > 0.0) {
+            return None;
+        }
+        let zoom_changed = (zoom - self.zoom).abs() > 1e-4;
+        let size_changed = (size.0 - self.size.0).abs() > 0.5 || (size.1 - self.size.1).abs() > 0.5;
+        if !zoom_changed && !size_changed && strip.signature() == self.signature {
+            return None;
+        }
+        let (anchor, from) = if zoom_changed {
+            (self.centre, (size.0 / 2.0, size.1 / 2.0))
+        } else {
+            (self.top_left, (0.0, 0.0))
+        };
+        let (x, y) = strip.point_of(&anchor);
+        let pad = centring_px(strip, zoom, size);
+        let content = content_px(strip, zoom);
+        let room = ((content.0 - size.0).max(0.0), (content.1 - size.1).max(0.0));
+        Some((
+            (pad.0 + STRIP_PAD_PX + x * zoom - from.0).clamp(0.0, room.0),
+            (pad.1 + STRIP_PAD_PX + y * zoom - from.1).clamp(0.0, room.1),
+        ))
+    }
+}
+
 /// What to rasterise ahead of the viewport, and in what order.
 ///
 /// The cache exists so a scroll resolves to a copy rather than a render, and it
@@ -840,5 +969,141 @@ mod layout_tests {
         assert_eq!(turned.page_count(), 4);
         assert_eq!(turned.size_of(3), strip.size_of(3), "the pages themselves did not change");
         assert_eq!(turned.top_of(0), turned.top_of(1), "facing puts two on a row");
+    }
+}
+
+#[cfg(test)]
+mod view_snapshot_tests {
+    use super::*;
+
+    fn pages(count: usize) -> Vec<PageSize> {
+        (0..count).map(|_| PageSize { width_pt: 600.0, height_pt: 800.0 }).collect()
+    }
+
+    /// The strip point at the middle of a window, for an offset and zoom.
+    fn middle(strip: &Strip, zoom: f32, size: (f32, f32), offset: (f32, f32)) -> (f32, f32) {
+        let pad = centring_px(strip, zoom, size);
+        (
+            (offset.0 + size.0 / 2.0 - pad.0 - STRIP_PAD_PX) / zoom,
+            (offset.1 + size.1 / 2.0 - pad.1 - STRIP_PAD_PX) / zoom,
+        )
+    }
+
+    #[test]
+    fn an_anchor_names_the_same_point_back_in_every_layout() {
+        for layout in [Layout::Single, Layout::Facing, Layout::FacingWithCover] {
+            for turned in [false, true] {
+                let strip = Strip::with_layout_turned(&pages(9), 12.0, layout, turned);
+                for (x, y) in [(-30.0, -20.0), (5.0, 3.0), (310.0, 900.0), (900.0, 4100.0), (50.0, 9000.0)] {
+                    let back = strip.point_of(&strip.anchor_at(x, y));
+                    assert!(
+                        (back.0 - x).abs() < 1e-3 && (back.1 - y).abs() < 1e-3,
+                        "{layout:?} turned={turned}: ({x}, {y}) came back as {back:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_changed_is_not_answered_so_a_plain_scroll_is_left_alone() {
+        let strip = Strip::new(&pages(40), 12.0);
+        let size = (1000.0, 700.0);
+        let seen = ViewSnapshot::capture(&strip, 1.0, size, (0.0, 12_000.0)).unwrap();
+        assert_eq!(seen.restored(&strip, 1.0, size), None);
+        // A scroll changes only the offset, which is not part of what is compared.
+        let later = ViewSnapshot::capture(&strip, 1.0, size, (0.0, 12_345.0)).unwrap();
+        assert_eq!(later.restored(&strip, 1.0, size), None);
+    }
+
+    /// The reported case: Width zoom on a long document, and a 220 px panel
+    /// docking on the right. The zoom drops about 18% and the pixel offset used
+    /// to be kept, which put the reader pages away.
+    #[test]
+    fn a_panel_docking_in_width_zoom_keeps_the_middle_of_the_window_where_it_was() {
+        let strip = Strip::new(&pages(100), 12.0);
+        let wide = (1220.0, 800.0);
+        let narrow = (1000.0, 800.0);
+        let zoom_for = |w: f32| (w - 24.0) / 600.0;
+        // Page 40, a fifth of the way down it.
+        let offset = (0.0, STRIP_PAD_PX + (strip.top_of(39).unwrap() + 160.0) * zoom_for(wide.0));
+        let seen = ViewSnapshot::capture(&strip, zoom_for(wide.0), wide, offset).unwrap();
+        let before = middle(&strip, zoom_for(wide.0), wide, offset);
+
+        let to = seen.restored(&strip, zoom_for(narrow.0), narrow).expect("the zoom and the window changed");
+        let after = middle(&strip, zoom_for(narrow.0), narrow, to);
+        assert!(
+            (after.0 - before.0).abs() < 0.5 && (after.1 - before.1).abs() < 0.5,
+            "the middle moved from {before:?} to {after:?}"
+        );
+        assert_eq!(strip.page_at(after.1), 39, "the reader was moved to another page");
+
+        // And taking the panel away again puts it back.
+        let seen = ViewSnapshot::capture(&strip, zoom_for(narrow.0), narrow, to).unwrap();
+        let back = seen.restored(&strip, zoom_for(wide.0), wide).unwrap();
+        let again = middle(&strip, zoom_for(wide.0), wide, back);
+        assert!((again.1 - before.1).abs() < 0.5, "{again:?} is not {before:?}");
+    }
+
+    /// A page wider than the window, the zoom unchanged, the window narrower:
+    /// nothing may move under the reader's eye.
+    #[test]
+    fn a_narrower_window_at_the_same_zoom_leaves_the_corner_where_it_was() {
+        let strip = Strip::new(&pages(20), 12.0);
+        let offset = (180.0, 5_000.0);
+        let seen = ViewSnapshot::capture(&strip, 3.0, (1000.0, 700.0), offset).unwrap();
+        let to = seen.restored(&strip, 3.0, (780.0, 700.0)).expect("the window changed");
+        assert!((to.0 - offset.0).abs() < 0.01 && (to.1 - offset.1).abs() < 0.01, "{to:?}");
+    }
+
+    #[test]
+    fn a_page_narrower_than_the_window_stays_centred_and_is_not_given_an_offset() {
+        let strip = Strip::new(&pages(5), 12.0);
+        let seen = ViewSnapshot::capture(&strip, 0.5, (1000.0, 700.0), (0.0, 400.0)).unwrap();
+        let to = seen.restored(&strip, 0.5, (780.0, 700.0)).unwrap();
+        assert_eq!(to.0, 0.0, "a page that fits cannot scroll across");
+    }
+
+    #[test]
+    fn the_ends_of_the_document_clamp_rather_than_run_past() {
+        let strip = Strip::new(&pages(3), 12.0);
+        let seen = ViewSnapshot::capture(&strip, 1.0, (1000.0, 700.0), (0.0, 0.0)).unwrap();
+        let to = seen.restored(&strip, 4.0, (1000.0, 700.0)).unwrap();
+        assert!(to.1 >= 0.0 && to.0 >= 0.0, "{to:?}");
+        let seen = ViewSnapshot::capture(&strip, 1.0, (1000.0, 700.0), (0.0, 2_000.0)).unwrap();
+        let to = seen.restored(&strip, 4.0, (1000.0, 700.0)).unwrap();
+        let room = content_px(&strip, 4.0).1 - 700.0;
+        assert!(to.1 <= room + 0.01, "{} is past the end ({room})", to.1);
+    }
+
+    /// A page taken out keeps the reader on the page that is now at that number,
+    /// at the same place on it; and the last page going leaves them on the new
+    /// last page, not past the end.
+    #[test]
+    fn a_page_removed_keeps_the_reader_on_the_same_page_number() {
+        let size = (1000.0, 700.0);
+        let before = Strip::new(&pages(10), 12.0);
+        let offset = (0.0, STRIP_PAD_PX + before.top_of(4).unwrap() + 100.0);
+        let seen = ViewSnapshot::capture(&before, 1.0, size, offset).unwrap();
+        let after = Strip::new(&pages(9), 12.0);
+        let to = seen.restored(&after, 1.0, size).expect("the strip changed");
+        let top = middle(&after, 1.0, size, to);
+        let corner_y = to.1 - STRIP_PAD_PX;
+        assert_eq!(after.page_at(corner_y), 4);
+        assert!(top.1 > 0.0);
+
+        let seen = ViewSnapshot::capture(&before, 1.0, size, (0.0, STRIP_PAD_PX + before.top_of(9).unwrap())).unwrap();
+        let to = seen.restored(&after, 1.0, size).unwrap();
+        let room = content_px(&after, 1.0).1 - size.1;
+        assert!(to.1 <= room + 0.01, "left past the end: {to:?}");
+    }
+
+    #[test]
+    fn a_window_with_no_size_is_not_remembered_or_restored() {
+        let strip = Strip::new(&pages(3), 12.0);
+        assert_eq!(ViewSnapshot::capture(&strip, 1.0, (0.0, 0.0), (0.0, 0.0)), None);
+        assert_eq!(ViewSnapshot::capture(&strip, 0.0, (100.0, 100.0), (0.0, 0.0)), None);
+        let seen = ViewSnapshot::capture(&strip, 1.0, (100.0, 100.0), (0.0, 0.0)).unwrap();
+        assert_eq!(seen.restored(&strip, 1.0, (0.0, 0.0)), None);
     }
 }
