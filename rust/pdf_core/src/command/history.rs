@@ -5,6 +5,9 @@
 //! execution and is spent when it is used, while the command that produced it can
 //! simply be run again to make a fresh one.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
 use crate::command::{Command, UndoRecord};
 use crate::document::DocumentMut;
 use crate::error::Result;
@@ -26,7 +29,12 @@ pub struct CommandHistory {
     /// three, not just `execute`, for the same reason the layer's own counter
     /// is: an undo or a redo is itself the most recent thing that happened,
     /// and has to read that way to whichever stack was not just used.
-    generation: u64,
+    ///
+    /// **An atomic, shared out — see [`CommandHistory::generation_counter`].**
+    /// It is read every frame by a UI, and everything else about this history
+    /// lives behind the one lock that covers all use of PDFium, which a page
+    /// render on another thread holds for its whole length.
+    generation: Arc<AtomicU64>,
 }
 
 impl Default for CommandHistory {
@@ -41,13 +49,20 @@ impl CommandHistory {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             depth: depth.max(1),
-            generation: 0,
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// How many times this history has changed. See the field's own doc.
     pub fn generation(&self) -> u64 {
-        self.generation
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// The counter itself, so that something that must not wait for the lock
+    /// around this history — a UI polling it every frame — can read it without.
+    /// It moves at the moment the history does, so it is never behind.
+    pub fn generation_counter(&self) -> Arc<AtomicU64> {
+        self.generation.clone()
     }
 
     /// Run a command and record it, returning the pages whose cached rasters it
@@ -67,7 +82,7 @@ impl CommandHistory {
         if self.undo_stack.len() > self.depth {
             self.undo_stack.remove(0);
         }
-        self.generation += 1;
+        self.generation.fetch_add(1, Ordering::Relaxed);
         Ok(affected)
     }
 
@@ -86,7 +101,7 @@ impl CommandHistory {
         undo.revert(doc)?;
 
         self.redo_stack.push(command);
-        self.generation += 1;
+        self.generation.fetch_add(1, Ordering::Relaxed);
         Ok(Some(affected))
     }
 
@@ -99,7 +114,7 @@ impl CommandHistory {
             Ok(undo) => {
                 let affected = command.affected_pages();
                 self.undo_stack.push((command, undo));
-                self.generation += 1;
+                self.generation.fetch_add(1, Ordering::Relaxed);
                 Ok(Some(affected))
             }
             Err(e) => {
@@ -341,6 +356,102 @@ mod tests {
         // The redo produced a *fresh* undo record; without one this would fail.
         history.undo(&mut doc).unwrap();
         assert_eq!(vec![10.0, 20.0, 30.0], doc.widths);
+    }
+
+    /// **The whole point of `Command::Batch`.** Two independent changes, run
+    /// through one `execute`, come back with one undo — not two — and that
+    /// one undo reverses both.
+    #[test]
+    fn a_batch_of_two_commands_undoes_together_in_one_step() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
+
+        history
+            .execute(
+                Command::Batch {
+                    commands: vec![
+                        Command::SetPageRotation { index: 0, quarter_turns: 1 },
+                        Command::SetPageRotation { index: 2, quarter_turns: 3 },
+                    ],
+                },
+                &mut doc,
+            )
+            .unwrap();
+        assert_eq!(doc.rotations, vec![1, 0, 3], "both rotations should have taken");
+
+        history.undo(&mut doc).unwrap();
+        assert_eq!(
+            doc.rotations,
+            vec![0, 0, 0],
+            "one undo should have reversed both rotations together"
+        );
+        assert!(!history.can_undo(), "a batch is one undo entry, not two");
+    }
+
+    /// Undoing a batch reverses its commands in the opposite order they ran
+    /// in — the same reasoning a multi-page removal already relies on.
+    #[test]
+    fn a_batch_undoes_its_commands_in_reverse_order() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
+
+        history
+            .execute(
+                Command::Batch {
+                    commands: vec![
+                        Command::DeletePage { index: 0 },
+                        // Deleting index 0 first shifts every later index down
+                        // by one — deleting "index 0" a second time here is
+                        // really the page that was originally at index 1.
+                        Command::DeletePage { index: 0 },
+                    ],
+                },
+                &mut doc,
+            )
+            .unwrap();
+        assert_eq!(doc.widths, vec![30.0]);
+
+        history.undo(&mut doc).unwrap();
+        assert_eq!(
+            doc.widths,
+            vec![10.0, 20.0, 30.0],
+            "reversing in the wrong order would restore the pages out of place"
+        );
+    }
+
+    /// **All or nothing.** `CommandHistory::execute` only records a command
+    /// that returns `Ok` — so a batch that fails partway through, without
+    /// undoing what it already did, leaves that partial mutation sitting in
+    /// the document with no undo record pointing back to it: applied, but
+    /// permanent. Reported from use: on a page with one run whose text
+    /// `SetTextRun`'s fast path refuses to touch, one Apply covering several
+    /// other, unrelated paragraphs left every one of them changed with no
+    /// way to undo any of it, and still reported the Apply as failed.
+    #[test]
+    fn a_batch_that_fails_partway_through_leaves_nothing_applied() {
+        let mut history = CommandHistory::default();
+        let mut doc = FakeDoc::with_pages(&[10.0, 20.0, 30.0]);
+
+        doc.fail_next = true;
+        let err = history.execute(
+            Command::Batch {
+                commands: vec![
+                    Command::SetPageRotation { index: 0, quarter_turns: 1 },
+                    Command::SetPageRotation { index: 2, quarter_turns: 3 },
+                    Command::DeletePage { index: 1 },
+                ],
+            },
+            &mut doc,
+        );
+
+        assert!(err.is_err(), "the batch should report the failing command's error");
+        assert_eq!(
+            doc.rotations,
+            vec![0, 0, 0],
+            "the two rotations that ran before the failure must be rolled back, not left applied"
+        );
+        assert_eq!(doc.widths, vec![10.0, 20.0, 30.0], "no page should have been touched");
+        assert!(!history.can_undo(), "a failed batch is not a change and has nothing to undo");
     }
 
     /// A rotation is not its own inverse, so this catches an undo that merely

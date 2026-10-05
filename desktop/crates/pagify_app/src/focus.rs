@@ -47,8 +47,9 @@ impl Focus {
         Focus { widget }
     }
 
-    /// Keys that submit or edit the command line — Enter, Space, history
-    /// recall. Only when the command box itself has focus.
+    /// Keys that submit or edit the command line — Enter, history recall.
+    /// Only when the command box itself has focus. (Not Space: that is a
+    /// space; see the note in `ui` where it used to submit.)
     pub fn allows_submit(&self, command_box: egui::Id) -> bool {
         self.widget == Some(command_box)
     }
@@ -61,6 +62,22 @@ impl Focus {
     /// reach the document.
     pub fn allows_document_keys(&self) -> bool {
         self.widget.is_none()
+    }
+
+    /// Copy and paste: allowed when nothing has focus, same as
+    /// [`Self::allows_document_keys`], but *also* when the command box does.
+    ///
+    /// The command box calls `request_focus` on itself right after every
+    /// typed command runs, so it is still focused the next time the reader
+    /// reaches for the raw shortcut instead of typing one. Treating that
+    /// residual focus the same as a real field's meant ⌘C/⌘V to silently miss
+    /// the page or object selection and fall through to the no-op "nothing
+    /// selected" path below — the command box was never a field the reader
+    /// was *typing into* at that moment, just the last thing that had focus.
+    /// A real field (a numeric box, the command line mid-edit) still blocks
+    /// this, same as it blocks `allows_document_keys`.
+    pub fn allows_clipboard_keys(&self, command_box: egui::Id) -> bool {
+        self.widget.is_none() || self.widget == Some(command_box)
     }
 }
 
@@ -105,6 +122,23 @@ mod tests {
 
         assert!(!focus.allows_document_keys(), "typing a page number could turn the page");
         assert!(!focus.allows_submit(command_box), "typing a page number could run a command");
+    }
+
+    #[test]
+    fn clipboard_keys_also_allow_the_command_box_itself() {
+        let (command_box, other) = ids();
+
+        assert!(Focus::on(None).allows_clipboard_keys(command_box));
+        assert!(
+            Focus::on(Some(command_box)).allows_clipboard_keys(command_box),
+            "the command box re-focuses itself after every typed command; \
+             the raw ⌘C/⌘V shortcut must still reach the page/object selection \
+             right after, not just the typed `copy`/`paste` commands"
+        );
+        assert!(
+            !Focus::on(Some(other)).allows_clipboard_keys(command_box),
+            "a real field (not the command box) must still block the shortcut"
+        );
     }
 
     #[test]

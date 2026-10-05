@@ -82,7 +82,14 @@ pub(crate) struct PathSegment {
 /// three at a time because the source gives them one point per call; a stray
 /// run whose length is not a multiple of three is a malformed file, not a
 /// contour, and its dangling points are dropped rather than guessed at.
-pub(crate) fn build_outline(segments: &[PathSegment]) -> Outline {
+/// Every sub-path, flattened to points, with nothing dropped for being too
+/// short to matter *yet* — that judgement belongs to each caller, not to the
+/// reading. [`build_outline`] is the one caller that wants a glyph's own
+/// noise floor; [`PdfiumDocument::object_outline`](crate::document::pdfium_doc::PdfiumDocument::object_outline)
+/// wants every sub-path a hit test might need to measure against, including
+/// the two-point line that is the single most common shape a CAD drawing
+/// draws and that a `len() >= 3` filter would have erased entirely.
+pub(crate) fn flatten_segments(segments: &[PathSegment]) -> Vec<Contour> {
     const STEPS: usize = 16;
 
     let mut contours = Vec::new();
@@ -91,10 +98,8 @@ pub(crate) fn build_outline(segments: &[PathSegment]) -> Outline {
     let mut bezier_buffer: Vec<(f32, f32)> = Vec::with_capacity(2);
 
     let mut finish_contour = |current: &mut Contour, contours: &mut Vec<Contour>| {
-        if current.len() >= 3 {
+        if !current.is_empty() {
             contours.push(std::mem::take(current));
-        } else {
-            current.clear();
         }
     };
 
@@ -136,7 +141,15 @@ pub(crate) fn build_outline(segments: &[PathSegment]) -> Outline {
     }
     finish_contour(&mut current, &mut contours);
 
-    Outline { contours }
+    contours
+}
+
+/// A glyph's own shape — [`flatten_segments`], with anything too short to be
+/// a recognisable letter (under three points) dropped as noise. Recognition
+/// is the only caller that wants that filter; see [`flatten_segments`] for
+/// why hit-testing native content must not inherit it.
+pub(crate) fn build_outline(segments: &[PathSegment]) -> Outline {
+    Outline { contours: flatten_segments(segments).into_iter().filter(|c| c.len() >= 3).collect() }
 }
 
 // ----------------------------------------------------------------- splitting --

@@ -644,3 +644,37 @@ mod page_operations {
         );
     }
 }
+
+/// **The undo history's change counter is read without the engine, and is never
+/// behind it.**
+///
+/// The app reads it every frame, and the one lock around all use of PDFium is
+/// held for the whole of a page render — which is on another thread now, so as
+/// not to stop the frames. Reading the counter through the lock made a frame
+/// wait for the render: measured, a 270 ms frame on a drawing that takes that
+/// long to draw.
+#[test]
+fn the_undo_counter_is_read_without_waiting_for_the_engine_and_is_never_behind() {
+    let session = Session::open(fixture("two-column.pdf")).expect("open");
+    let before = session.undo_generation();
+
+    session
+        .execute(pdf_core::command::Command::InsertBlankPage {
+            at: 0,
+            width_pt: 100.0,
+            height_pt: 100.0,
+            fill: None,
+            ruling: 0,
+        })
+        .expect("an edit");
+    let after = session.undo_generation();
+    assert_eq!(after, before + 1, "an edit did not move the counter");
+
+    // Read while this very thread holds the engine's lock: a read that asked the
+    // engine for it would wait for itself.
+    let while_busy = pdf_core::registry::exclusive(|| session.undo_generation());
+    assert_eq!(while_busy, after, "the counter was not readable while the engine was busy");
+
+    session.undo().expect("undo");
+    assert_eq!(session.undo_generation(), after + 1, "an undo is a change too");
+}

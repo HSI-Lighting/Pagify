@@ -24,7 +24,7 @@
 ; SIGNING_THUMBPRINT in build.ps1, which this can be pointed at the same way.
 
 #define MyAppName "Pagify"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.1.39"
 #define MyAppPublisher "HSI Lighting"
 #define MyAppExeName "Pagify.exe"
 
@@ -61,6 +61,15 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 [Files]
 Source: "..\..\target\release\pagify_app.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
 Source: "..\..\third_party\pdfium\pdfium-win-x64\bin\pdfium.dll"; DestDir: "{app}"; Flags: ignoreversion
+; The OCR models (`pagify_shell::models` — "beside the executable… is what an
+; installed app uses") were missing from here entirely: fonts and the
+; dictionary are embedded in the exe itself (`include_bytes!`/`include_str!`),
+; but these two are loaded from disk, so `extracttext` silently had nothing
+; to load on any machine that only ever ran this installer. Reported from a
+; fresh install that got past the earlier VCRUNTIME/pdfium.dll failures and
+; still would have hit this one next.
+Source: "..\..\third_party\ocr\text-detection.rten"; DestDir: "{app}\ocr"; Flags: ignoreversion
+Source: "..\..\third_party\ocr\text-recognition.rten"; DestDir: "{app}\ocr"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

@@ -44,32 +44,37 @@ struct Card {
 /// conversion engine and none is planned in the build plan. A card that does
 /// nothing is worse than one that does something, so the slot holds Extract,
 /// which is real and is the operation people reach for next to Merge.
-const CARDS: [Card; 3] = [
-    Card {
-        icon: Icon::Pencil,
-        title: "Edit",
-        blurb: "Open a PDF and mark it up — lines, arcs and dimensions, with object snap.",
-        command: "open",
-        top: theme::VIOLET_BRIGHT,
-        bottom: theme::VIOLET_DEEP,
-    },
-    Card {
-        icon: Icon::Merge,
-        title: "Merge",
-        blurb: "Bring pages in from another document and put them where you want them.",
-        command: "import",
-        top: theme::VIOLET,
-        bottom: Color32::from_rgb(0x4C, 0x35, 0xA8),
-    },
-    Card {
-        icon: Icon::Extract,
-        title: "Extract",
-        blurb: "Pull a range of pages out into a new document of their own.",
-        command: "extract",
-        top: theme::BLUE,
-        bottom: Color32::from_rgb(0x2B, 0x5A, 0xB8),
-    },
-];
+/// The mockup's colours are themed now, so this builds fresh each call
+/// instead of sitting as a `const` — cheap (three small structs), and the
+/// one place this runs is the start screen, not a per-frame hot path.
+fn cards() -> [Card; 3] {
+    [
+        Card {
+            icon: Icon::Pencil,
+            title: "Edit",
+            blurb: "Open a PDF and mark it up — lines, arcs and dimensions, with object snap.",
+            command: "open",
+            top: theme::violet_bright(),
+            bottom: theme::violet_deep(),
+        },
+        Card {
+            icon: Icon::Merge,
+            title: "Merge",
+            blurb: "Bring pages in from another document and put them where you want them.",
+            command: "import",
+            top: theme::violet(),
+            bottom: Color32::from_rgb(0x4C, 0x35, 0xA8),
+        },
+        Card {
+            icon: Icon::Extract,
+            title: "Extract",
+            blurb: "Pull a range of pages out into a new document of their own.",
+            command: "extract",
+            top: theme::blue(),
+            bottom: Color32::from_rgb(0x2B, 0x5A, 0xB8),
+        },
+    ]
+}
 
 /// Draw the start screen. Returns a command string if something was clicked.
 pub fn show(ui: &mut Ui, recent: &Recent, outlined_fonts: &OutlinedFonts) -> Option<String> {
@@ -85,7 +90,7 @@ pub fn show(ui: &mut Ui, recent: &Recent, outlined_fonts: &OutlinedFonts) -> Opt
     let card_width = ((available - 24.0) / 3.0).max(180.0);
 
     ui.horizontal_wrapped(|ui| {
-        for card in &CARDS {
+        for card in &cards() {
             if draw_card(ui, card, card_width) {
                 command = Some(card.command.to_string());
             }
@@ -102,9 +107,9 @@ pub fn show(ui: &mut Ui, recent: &Recent, outlined_fonts: &OutlinedFonts) -> Opt
 
     // Recent documents, in a bordered panel like the mockup's.
     egui::Frame::new()
-        .fill(theme::PANEL)
-        .stroke(Stroke::new(1.0, theme::LINE))
-        .corner_radius(CornerRadius::same(10))
+        .fill(theme::panel())
+        .stroke(Stroke::new(1.0, theme::line()))
+        .corner_radius(CornerRadius::ZERO)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             // The mockup's recents panel runs to the bottom of the window, so
@@ -118,7 +123,7 @@ pub fn show(ui: &mut Ui, recent: &Recent, outlined_fonts: &OutlinedFonts) -> Opt
             if entries.is_empty() {
                 ui.add_space(12.0);
                 ui.vertical_centered(|ui| {
-                    ui.colored_label(theme::INK_FAINT, "Nothing yet — open a PDF and it will appear here.");
+                    ui.colored_label(theme::ink_faint(), "Nothing yet — open a PDF and it will appear here.");
                 });
                 ui.add_space(12.0);
                 return;
@@ -134,9 +139,9 @@ pub fn show(ui: &mut Ui, recent: &Recent, outlined_fonts: &OutlinedFonts) -> Opt
     ui.add_space(12.0);
 
     egui::Frame::new()
-        .fill(theme::PANEL)
-        .stroke(Stroke::new(1.0, theme::LINE))
-        .corner_radius(CornerRadius::same(10))
+        .fill(theme::panel())
+        .stroke(Stroke::new(1.0, theme::line()))
+        .corner_radius(CornerRadius::ZERO)
         .inner_margin(egui::Margin::symmetric(14, 12))
         .show(ui, |ui| {
             ui.set_min_height(FONTS_PANEL_HEIGHT);
@@ -164,19 +169,19 @@ fn fonts_section(ui: &mut Ui, fonts: &OutlinedFonts) -> Option<String> {
         egui::RichText::new(
             "Tried, alongside the bundled Montserrat, on a page whose text turns out to be drawn as outlines.",
         )
-        .color(theme::INK_DIM)
+        .color(theme::ink_dim())
         .font(FontId::proportional(12.0)),
     );
     ui.add_space(8.0);
 
     let present = fonts.present();
     if present.is_empty() {
-        ui.colored_label(theme::INK_FAINT, "No extra fonts added.");
+        ui.colored_label(theme::ink_faint(), "No extra fonts added.");
     } else {
         for path in &present {
             ui.horizontal(|ui| {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                ui.label(egui::RichText::new(name).color(theme::INK).font(FontId::proportional(13.0)));
+                ui.label(egui::RichText::new(name).color(theme::ink()).font(FontId::proportional(13.0)));
                 if ui.small_button("Remove").clicked() {
                     command = Some(format!("outlinedfont remove \"{}\"", path.display()));
                 }
@@ -195,7 +200,7 @@ fn fonts_section(ui: &mut Ui, fonts: &OutlinedFonts) -> Option<String> {
 fn heading(ui: &mut Ui, text: &str) {
     ui.label(
         egui::RichText::new(text)
-            .color(theme::INK)
+            .color(theme::ink())
             .font(FontId::proportional(16.0)),
     );
 }
@@ -203,15 +208,24 @@ fn heading(ui: &mut Ui, text: &str) {
 fn draw_card(ui: &mut Ui, card: &Card, width: f32) -> bool {
     let height = 92.0;
     let (rect, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::click());
+    // The card is painted, not made of widgets, so it has no name of its own:
+    // a screen reader finds nothing here, and a test cannot click it by label.
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::WidgetType::Button,
+            true,
+            format!("{}: {}", card.title, card.blurb),
+        )
+    });
 
     let hovered = response.hovered();
     let painter = ui.painter();
 
-    painter.rect_filled(rect, CornerRadius::same(10), theme::PANEL);
+    painter.rect_filled(rect, CornerRadius::ZERO, theme::panel());
     painter.rect_stroke(
         rect,
-        CornerRadius::same(10),
-        Stroke::new(1.0, if hovered { theme::VIOLET } else { theme::LINE }),
+        CornerRadius::ZERO,
+        Stroke::new(1.0, if hovered { theme::violet() } else { theme::line() }),
         StrokeKind::Inside,
     );
 
@@ -226,7 +240,7 @@ fn draw_card(ui: &mut Ui, card: &Card, width: f32) -> bool {
         Align2::LEFT_TOP,
         card.title,
         FontId::proportional(16.0),
-        theme::INK,
+        theme::ink(),
     );
 
     // Wrapped by hand: `Painter::text` does not wrap, and the blurbs are two
@@ -235,10 +249,10 @@ fn draw_card(ui: &mut Ui, card: &Card, width: f32) -> bool {
     let galley = painter.layout(
         card.blurb.to_string(),
         FontId::proportional(12.0),
-        theme::INK_DIM,
+        theme::ink_dim(),
         wrap_at,
     );
-    painter.galley(egui::pos2(text_left, rect.min.y + 44.0), galley, theme::INK_DIM);
+    painter.galley(egui::pos2(text_left, rect.min.y + 44.0), galley, theme::ink_dim());
 
     response.clicked()
 }
@@ -266,11 +280,11 @@ fn table(ui: &mut Ui, entries: &[&pagify_shell::recent::Entry]) -> Option<String
                     ui.painter().rect_filled(
                         ui.max_rect().expand2(egui::vec2(20.0, 5.0)),
                         CornerRadius::ZERO,
-                        theme::HEADER,
+                        theme::header(),
                     );
                     ui.label(
                         egui::RichText::new(title)
-                            .color(theme::INK_DIM)
+                            .color(theme::ink_dim())
                             .font(FontId::proportional(12.5)),
                     );
                 });
@@ -283,21 +297,21 @@ fn table(ui: &mut Ui, entries: &[&pagify_shell::recent::Entry]) -> Option<String
                 row.col(|ui| {
                     pdf_icon(ui);
                     ui.add_space(6.0);
-                    ui.label(egui::RichText::new(entry.name()).color(theme::INK).font(FontId::proportional(13.0)));
+                    ui.label(egui::RichText::new(entry.name()).color(theme::ink()).font(FontId::proportional(13.0)));
                 });
                 row.col(|ui| {
                     // Elided at the front, so the filename end of a long path
                     // stays readable — which is the part that identifies it.
                     ui.label(
                         egui::RichText::new(elide(&entry.location(), 46))
-                            .color(theme::INK_DIM)
+                            .color(theme::ink_dim())
                             .font(FontId::proportional(12.5)),
                     );
                 });
                 row.col(|ui| {
                     ui.label(
                         egui::RichText::new(format_time(entry.opened_at))
-                            .color(theme::INK_DIM)
+                            .color(theme::ink_dim())
                             .font(FontId::proportional(12.5)),
                     );
                 });
@@ -321,7 +335,7 @@ fn draw_icon(painter: &egui::Painter, tile: Rect, icon: Icon) {
         // A sheet with a stroke across it.
         Icon::Pencil => {
             let sheet = Rect::from_center_size(c, Vec2::new(r * 1.5, r * 1.9));
-            painter.rect_stroke(sheet, CornerRadius::same(2), pen, StrokeKind::Inside);
+            painter.rect_stroke(sheet, CornerRadius::ZERO, pen, StrokeKind::Inside);
             painter.line_segment(
                 [
                     egui::pos2(sheet.left() + 2.0, sheet.bottom() - 3.0),
@@ -355,7 +369,7 @@ fn draw_icon(painter: &egui::Painter, tile: Rect, icon: Icon) {
                 egui::pos2(c.x - r * 1.4, c.y - r),
                 Vec2::new(r * 1.3, r * 2.0),
             );
-            painter.rect_stroke(sheet, CornerRadius::same(2), pen, StrokeKind::Inside);
+            painter.rect_stroke(sheet, CornerRadius::ZERO, pen, StrokeKind::Inside);
             let tail = egui::pos2(sheet.right() + 3.0, c.y);
             let tip = egui::pos2(c.x + r * 1.4, c.y);
             painter.line_segment([tail, tip], pen);
@@ -379,7 +393,7 @@ fn pdf_icon(ui: &mut Ui) {
     let painter = ui.painter();
     let fold = 4.5;
 
-    painter.rect_filled(rect, CornerRadius::same(2), theme::PDF_RED);
+    painter.rect_filled(rect, CornerRadius::ZERO, theme::pdf_red());
     // The turned-down corner, in the surface colour behind it.
     painter.add(egui::Shape::convex_polygon(
         vec![
@@ -387,7 +401,7 @@ fn pdf_icon(ui: &mut Ui) {
             egui::pos2(rect.right(), rect.top()),
             egui::pos2(rect.right(), rect.top() + fold),
         ],
-        theme::PANEL,
+        theme::panel(),
         Stroke::NONE,
     ));
 }
@@ -400,7 +414,7 @@ mod tests {
     fn every_wizard_card_runs_a_command_the_box_understands() {
         // The same guard the ribbon has: a card whose command string is a typo
         // is a card that does nothing, and nothing else would catch it.
-        for card in &CARDS {
+        for card in &cards() {
             match pagify_shell::command::dispatch(card.command) {
                 Some(pagify_shell::command::Dispatch::Unknown(token)) => {
                     panic!("card `{}` runs `{}`, and `{token}` is not a command", card.title, card.command)

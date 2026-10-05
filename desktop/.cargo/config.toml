@@ -1,0 +1,19 @@
+# Statically links the MSVC C runtime into the .exe.
+#
+# **Reported from use**: a fresh install on a PC that had never had any other
+# Visual Studio software on it failed to launch at all —
+# "Pagify.exe - System Error: The code execution cannot proceed because
+# VCRUNTIME140.dll was not found." That DLL (and MSVCP140.dll) ships with the
+# Microsoft Visual C++ Redistributable, which every *development* machine
+# already has (Visual Studio, Build Tools, or a previous install all carry
+# it) — so this never surfaced locally, only on a genuinely clean machine,
+# which is exactly who downloads an installer.
+#
+# `+crt-static` embeds the runtime in the binary instead of dynamically
+# loading it, so the .exe needs nothing from the target machine beyond what
+# Windows itself ships. Safe here specifically because the one native
+# dependency that matters, `pdfium.dll`, is loaded as an ordinary DLL at
+# runtime through a plain C function-call ABI — it carries its own runtime
+# dependencies, independent of whatever CRT Pagify's own .exe links against.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

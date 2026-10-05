@@ -27,6 +27,29 @@ image  = { version = "0.25", default-features = false, features = ["png", "jpeg"
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 
+# The native Print dialog and the GDI calls Ctrl+P sends a page's own
+# rendered bitmap through — see `print_windows`. Windows-only: no printing
+# feature exists yet for the other two platforms this builds for.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_Graphics_Gdi",
+    # `StartDocW`/`StartPage`/`EndPage`/`EndDoc`/`AbortDoc`/`DOCINFOW` — the
+    # actual GDI print-job functions `wingdi.h` documents — live under this
+    # crate's own `Storage::Xps` path, not `Graphics::Gdi`, despite what
+    # their own HDC parameter and Microsoft's own header categorisation
+    # would suggest. Confirmed against the crate's own generated source,
+    # not assumed from the docs.
+    "Win32_Storage_Xps",
+    "Win32_System_Memory",
+    "Win32_System_Com",
+] }
+# To read the `HWND` out of `eframe::Frame::window_handle()`'s own
+# `raw_window_handle::RawWindowHandle` — matching the exact version `eframe`
+# itself depends on, confirmed against this workspace's own `Cargo.lock`.
+raw-window-handle = "0.6"
+
 [dev-dependencies]
 egui_kittest = "0.36"
 # Reads the session log's own JSON lines back out in its wiring test —

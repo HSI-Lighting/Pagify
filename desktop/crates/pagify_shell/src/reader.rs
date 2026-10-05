@@ -71,7 +71,14 @@ pub struct Strip {
     tops: Vec<f32>,
     /// Left of each page within the strip's width.
     lefts: Vec<f32>,
+    /// Each page's own size, as the document has it — **page space**, however
+    /// the strip is turned. Everything that works in page coordinates (a mark's
+    /// height, whether a lock covers a page, the size of a page to insert) asks
+    /// for this and must keep getting it.
     sizes: Vec<(f32, f32)>,
+    /// Whether the pages are laid out a quarter turn on, so each takes up its
+    /// height across and its width down — see [`Strip::frame_of`].
+    turned: bool,
     gap: f32,
     total: f32,
     width: f32,
@@ -84,6 +91,35 @@ impl Strip {
     }
 
     pub fn with_layout(sizes: &[PageSize], gap: f32, layout: Layout) -> Self {
+        Self::with_layout_turned(sizes, gap, layout, false)
+    }
+
+    /// As [`Strip::with_layout`], for a view turned a quarter. The strip is laid
+    /// out from the turned sizes, so the pages' rows, positions and the strip's
+    /// own height and width are all those of what is drawn — not of what is
+    /// stored.
+    pub fn with_layout_turned(sizes: &[PageSize], gap: f32, layout: Layout, turned: bool) -> Self {
+        Self::build(sizes.iter().map(|s| (s.width_pt, s.height_pt)).collect(), gap, layout, turned)
+    }
+
+    /// The same pages, laid out another way.
+    pub fn retarget(&self, layout: Layout, turned: bool) -> Self {
+        Self::build(self.sizes.clone(), self.gap, layout, turned)
+    }
+
+    fn build(page_space: Vec<(f32, f32)>, gap: f32, layout: Layout, turned: bool) -> Self {
+        // **What each page occupies in the strip.** Reported from use, with
+        // screenshots, as a regression: turning the view squeezed the turned
+        // page into the portrait frame it had before the turn, because the
+        // frame was still made from the page's own, unturned, size.
+        let sizes: Vec<PageSize> = page_space
+            .iter()
+            .map(|&(w, h)| {
+                let (width_pt, height_pt) = if turned { (h, w) } else { (w, h) };
+                PageSize { width_pt, height_pt }
+            })
+            .collect();
+        let sizes = sizes.as_slice();
         let count = sizes.len();
         let per_row = layout.per_row();
 
@@ -131,12 +167,18 @@ impl Strip {
         Strip {
             tops,
             lefts,
-            sizes: sizes.iter().map(|s| (s.width_pt, s.height_pt)).collect(),
+            sizes: page_space,
+            turned,
             gap,
             total,
             width,
             layout,
         }
+    }
+
+    /// Whether the pages are laid out turned a quarter.
+    pub fn turned(&self) -> bool {
+        self.turned
     }
 
     pub fn layout(&self) -> Layout {
@@ -167,8 +209,20 @@ impl Strip {
         self.lefts.get(page).copied()
     }
 
+    /// A page's own size, in page space — what the document says, however the
+    /// strip is turned. For where it is *drawn*, ask [`Strip::frame_of`].
     pub fn size_of(&self, page: usize) -> Option<(f32, f32)> {
         self.sizes.get(page).copied()
+    }
+
+    /// The size a page occupies in the strip: its own, or that turned on its
+    /// side when the strip is laid out turned. This is the frame to draw it in.
+    pub fn frame_of(&self, page: usize) -> Option<(f32, f32)> {
+        self.sizes.get(page).map(|&(w, h)| if self.turned { (h, w) } else { (w, h) })
+    }
+
+    fn frame_height(&self, page: usize) -> f32 {
+        self.frame_of(page).map_or(0.0, |(_, h)| h)
     }
 
     /// Every page overlapping the window `[top, bottom)` in strip points.
@@ -184,7 +238,7 @@ impl Strip {
         let mut last = None;
 
         for (index, page_top) in self.tops.iter().enumerate() {
-            let page_bottom = page_top + self.sizes[index].1;
+            let page_bottom = page_top + self.frame_height(index);
             if page_bottom > top && *page_top < bottom {
                 first.get_or_insert(index);
                 last = Some(index);
@@ -206,7 +260,7 @@ impl Strip {
         }
 
         for (index, top) in self.tops.iter().enumerate() {
-            if y < top + self.sizes[index].1 + self.gap / 2.0 {
+            if y < top + self.frame_height(index) + self.gap / 2.0 {
                 return index;
             }
         }
@@ -733,5 +787,58 @@ mod layout_tests {
             assert_eq!(strip.page_count(), 0);
             assert_eq!(strip.height_pt(), 0.0);
         }
+    }
+
+    /// **A turned view lays the pages out by what they occupy turned.**
+    ///
+    /// Reported from use, with screenshots, as a regression: turning the view
+    /// squeezed the turned page into the frame it had before the turn.
+    #[test]
+    fn a_turned_strip_lays_pages_out_by_their_turned_size() {
+        let strip = Strip::with_layout_turned(&sizes(3), 10.0, Layout::Single, true);
+        // 200 wide by 300 tall, on its side, is 300 wide by 200 tall.
+        assert_eq!(strip.frame_of(0), Some((300.0, 200.0)));
+        assert_eq!(strip.top_of(1), Some(210.0), "rows are as tall as the turned pages");
+        assert_eq!(strip.top_of(2), Some(420.0));
+        assert_eq!(strip.height_pt(), 620.0);
+        assert_eq!(strip.width_pt(), 300.0);
+    }
+
+    /// And page space stays page space — a mark's height, a lock's extent and
+    /// the size of a page to insert are all read from it.
+    #[test]
+    fn a_turned_strip_still_reports_each_pages_own_size() {
+        let strip = Strip::with_layout_turned(&sizes(2), 10.0, Layout::Single, true);
+        assert_eq!(strip.size_of(0), Some((200.0, 300.0)));
+        assert_eq!(strip.size_of(1), Some((200.0, 300.0)));
+        assert!(strip.turned());
+
+        let upright = Strip::with_layout(&sizes(2), 10.0, Layout::Single);
+        assert_eq!(upright.frame_of(0), upright.size_of(0), "an upright strip has one answer");
+        assert!(!upright.turned());
+    }
+
+    /// Which page is in view is a question about the turned heights: a window
+    /// at 250–260 is on page 0 upright (it runs to 300) and on page 1 turned
+    /// (page 0 only runs to 200).
+    #[test]
+    fn what_is_visible_follows_the_turned_heights() {
+        let upright = Strip::with_layout(&sizes(3), 10.0, Layout::Single);
+        let turned = Strip::with_layout_turned(&sizes(3), 10.0, Layout::Single, true);
+        assert_eq!(upright.visible(250.0, 260.0), 0..1);
+        assert_eq!(turned.visible(250.0, 260.0), 1..2);
+        assert_eq!(upright.page_at(250.0), 0);
+        assert_eq!(turned.page_at(250.0), 1);
+    }
+
+    #[test]
+    fn retargeting_keeps_the_pages_and_changes_how_they_are_laid_out() {
+        let strip = Strip::with_layout(&sizes(4), 10.0, Layout::Single);
+        let turned = strip.retarget(Layout::Facing, true);
+        assert_eq!(turned.layout(), Layout::Facing);
+        assert!(turned.turned());
+        assert_eq!(turned.page_count(), 4);
+        assert_eq!(turned.size_of(3), strip.size_of(3), "the pages themselves did not change");
+        assert_eq!(turned.top_of(0), turned.top_of(1), "facing puts two on a row");
     }
 }

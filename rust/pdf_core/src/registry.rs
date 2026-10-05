@@ -45,8 +45,25 @@ fn sessions() -> &'static Mutex<HashMap<i64, DocumentSession>> {
 /// A panic while a document was borrowed poisons the registry. Recovering the
 /// guard is the right call here: the alternative is that one malformed page
 /// bricks every document in the app until it is restarted.
+#[track_caller]
 fn lock() -> MutexGuard<'static, HashMap<i64, DocumentSession>> {
-    sessions().lock().unwrap_or_else(PoisonError::into_inner)
+    let waited_from = std::time::Instant::now();
+    let held = sessions().lock().unwrap_or_else(PoisonError::into_inner);
+    // **Who waited, written down — when asked to.** One lock covers every use of
+    // PDFium, so a long wait on it is whatever else was using it at the time, and
+    // "the window froze" cannot say which call it was. With `PAGIFY_TRACE_LOCK`
+    // set, any wait of 30 ms or more prints the thread and the call that waited.
+    if waited_from.elapsed() >= std::time::Duration::from_millis(30)
+        && std::env::var_os("PAGIFY_TRACE_LOCK").is_some()
+    {
+        eprintln!(
+            "waited {:?} for the PDFium lock: thread {:?}, at {}",
+            waited_from.elapsed(),
+            std::thread::current().name(),
+            std::panic::Location::caller()
+        );
+    }
+    held
 }
 
 /// Run something that uses PDFium directly, without a session, while nothing
@@ -127,6 +144,7 @@ pub fn insert_with(open: impl FnOnce() -> Result<Box<dyn Document>>) -> Result<i
 /// of the *same* process, which is acceptable because PDFium is itself serialised
 /// by pdfium-render's `thread_safe` feature — a finer-grained lock here would buy
 /// no parallelism while adding a second way to deadlock.
+#[track_caller]
 pub fn with_session<T>(
     handle: i64,
     f: impl FnOnce(&mut DocumentSession) -> Result<T>,

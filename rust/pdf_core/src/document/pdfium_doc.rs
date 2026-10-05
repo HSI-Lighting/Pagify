@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use pdfium_render::prelude::{
     PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfPage, PdfPagePaperSize,
     PdfPageObjectCommon, PdfPageObjectType, PdfPageObjectsCommon, PdfPageRenderRotation, PdfPoints,
-    PdfRenderConfig, Pdfium, PdfiumLibraryBindingsAccessor,
+    PdfRenderConfig, Pdfium, PdfiumError, PdfiumLibraryBindingsAccessor,
     FPDFANNOT_COLORTYPE, FPDF_ANNOTATION, FPDF_ANNOTATION_SUBTYPE, FPDF_DOCUMENT, FPDF_FILEWRITE,
     FPDF_FONT, FPDF_PAGE, FPDF_PAGEOBJECT, FPDF_PAGEOBJECTMARK, FS_MATRIX, FS_POINTF,
     FS_QUADPOINTSF, FS_RECTF,
@@ -23,7 +23,7 @@ use pdfium_render::prelude::{
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
-    Annotation, Color, Document, DocumentMut, Glyph, IndexedAnnotation, Page, PageCharacters,
+    Annotation, Color, Document, DocumentMut, Glyph, IndexedAnnotation, InternalLink, Page, PageCharacters,
     PageClassification, PageSize, PageTextKind, RecognisedWord, TEXT_LAYER_ID,
     Point, Rect, RegionRequest, RemovedPage, RenderRequest, Rotation, Ruling, TextSegment,
     Redaction, RedactionReport, Uncleared,
@@ -57,6 +57,70 @@ pub fn set_library_path(path: String) -> bool {
     LIBRARY_PATH.set(path).is_ok() && PDFIUM.get().is_none()
 }
 
+/// `pdfium-render`'s own `LoadLibraryError` message names the library by its
+/// Unix soname (`libpdfium.so`) unconditionally — a generic, cross-platform
+/// placeholder, not the path this process actually tried. On Windows this
+/// read as "looking for the wrong file entirely", which is not what
+/// happened and sent a report chasing the wrong thing.
+///
+/// **Reported from use, on a fresh install**: `pdfium.dll` was sitting right
+/// there next to `Pagify.exe` — confirmed in Explorer — and Windows still
+/// refused to load it (`LoadLibraryExW` error 126, "module not found", which
+/// despite its name is also what a dependency failure or an outright refusal
+/// to load an unrecognised file reports). "The file is missing" and "the
+/// file is there but got refused" want different next steps, so this checks
+/// which one actually happened before saying anything.
+fn describe_bind_failure(path: &str, error: &PdfiumError) -> String {
+    if !std::path::Path::new(path).is_file() {
+        return format!("could not find {path} — the install may be incomplete.");
+    }
+    let unblock_hint = if cfg!(target_os = "windows") {
+        " On Windows, this usually means the file is missing a dependency, or \
+         Windows is refusing to load an unrecognised, unsigned file — right-click \
+         it, choose Properties, and look for an \"Unblock\" checkbox at the \
+         bottom of the General tab."
+    } else {
+        ""
+    };
+    format!(
+        "{path} is there, but the system would not load it.{unblock_hint} \
+         (reported as: {error})"
+    )
+}
+
+#[cfg(test)]
+mod describe_bind_failure_tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_path_says_so_without_touching_the_raw_error() {
+        let message = describe_bind_failure(
+            "Z:\\nowhere\\pdfium.dll",
+            &PdfiumError::UnrecognizedPath,
+        );
+        assert!(message.contains("could not find"));
+        assert!(message.contains("Z:\\nowhere\\pdfium.dll"));
+        assert!(!message.contains("libpdfium.so"), "must not repeat the misleading soname");
+    }
+
+    #[test]
+    fn an_existing_path_that_failed_to_load_names_itself_not_the_soname() {
+        let dir = std::env::temp_dir().join(format!("pdfium-bind-failure-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("pdfium.dll");
+        std::fs::write(&path, b"not a real library").expect("write stand-in file");
+
+        let message = describe_bind_failure(path.to_str().unwrap(), &PdfiumError::UnrecognizedPath);
+        assert!(message.contains("is there, but the system would not load it"));
+        assert!(
+            !message.contains("libpdfium.so"),
+            "must describe the real path, not pdfium-render's own generic soname: {message}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 pub fn pdfium() -> Result<&'static Pdfium> {
     PDFIUM
         .get_or_init(|| {
@@ -72,8 +136,12 @@ pub fn pdfium() -> Result<&'static Pdfium> {
                 // Set by the app (iOS), and first because it is the deliberate
                 // one: an env var left over in a test runner must not win over a
                 // path the running app chose.
-                (Some(path), _) => Pdfium::bind_to_library(path).map_err(|e| e.to_string())?,
-                (None, Ok(path)) => Pdfium::bind_to_library(&path).map_err(|e| e.to_string())?,
+                (Some(path), _) => {
+                    Pdfium::bind_to_library(path).map_err(|e| describe_bind_failure(path, &e))?
+                }
+                (None, Ok(path)) => {
+                    Pdfium::bind_to_library(&path).map_err(|e| describe_bind_failure(&path, &e))?
+                }
                 (None, Err(_)) => Pdfium::bind_to_system_library().map_err(|e| e.to_string())?,
             };
             Ok(&*Box::leak(Box::new(Pdfium::new(bindings))))
@@ -266,6 +334,18 @@ pub struct PdfiumDocument {
     /// whose entry was already consumed by `apply_signatures`, or dropped
     /// with a closed document) can never collide with a live one.
     next_alpha_id: u64,
+    /// **Temporary.** Where [`Self::set_runs_in_stream`] last spent its own
+    /// time — overwritten on every call, read back by
+    /// [`Self::last_batch_timing`] right after, for a caller to put in its
+    /// own log. Reported from use: a paragraph apply that measured fast,
+    /// repeatedly, as an isolated single edit in a fresh test still took
+    /// several seconds in the actual running app, growing across a session
+    /// in a way a fresh-document-per-test could not reproduce — this exists
+    /// to see, from the real session itself, which part of the real call
+    /// actually spent that time, since the usual `eprintln!` this file would
+    /// otherwise reach for has nowhere to go in a windowed build with no
+    /// console attached.
+    last_batch_timing: Vec<(&'static str, std::time::Duration)>,
 }
 
 /// What an edit starts from: some bytes, and whether they are the document's
@@ -617,6 +697,7 @@ impl PdfiumDocument {
             substituted: None,
             image_alpha: std::collections::HashMap::new(),
             next_alpha_id: 0,
+            last_batch_timing: Vec::new(),
         })
     }
 
@@ -1012,103 +1093,110 @@ impl Document for PdfiumDocument {
         Ok(names)
     }
 
-    /// Uses `FPDF_GetPageSizeByIndexF`, which reads the page tree without
-    /// loading the page itself.
-    fn text_runs(&self, page_index: usize) -> Result<Vec<crate::document::TextRun>> {
+    /// One page open and one walk over its objects, like `run_font_names`.
+    ///
+    /// **The font's identity is its PDFium handle**, which is one-to-one with
+    /// the page's `/Font` resource — measured on the datasheet, where nine,
+    /// eleven and nine handles came back for nine, eleven and nine resources,
+    /// none merged and none split. The handle is an address, so it is only
+    /// ever used as a key inside this call and handed out as a dense number.
+    /// Its stem is probed once per handle however many objects share it.
+    fn run_styles(
+        &self,
+        page_index: usize,
+    ) -> Result<std::collections::HashMap<usize, crate::document::RunStyle>> {
         self.validate_page_index(page_index)?;
         let page_number = i32::try_from(page_index).map_err(|_| {
             PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
         })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
 
-        let page = self
-            .document
-            .pages()
-            .get(page_number)
-            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-        // **The origins first, and the handle closed before the walk begins.**
-        //
-        // The matrix that says where a run is drawn from is only reachable
-        // through a raw page handle, and this function already holds one of
-        // PDFium's through `pages().get`. Two live handles on one page is the
-        // arrangement this file warns about elsewhere in as many words — see
-        // `set_text_run_styled` — so they are not held at once: everything the
-        // raw handle knows is read here and it is dropped.
-        let (space, origins) = {
-            let raw = RawPage::open(self.document.handle(), page_number)?;
-            let space = raw.space()?;
-            let bindings = pdfium()?.bindings();
-            let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
-            let mut origins = Vec::with_capacity(count.max(0) as usize);
-            for index in 0..count.max(0) {
-                let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
-                let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
-                let read = !handle.is_null()
-                    && unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) } != 0;
-                origins.push(read.then(|| space.to_top_left(m.e, m.f)));
-            }
-            (space, origins)
-        };
-        // The text page is what turns a run's bytes into characters — the same
-        // machinery extraction uses, so a run reads the way the rest of the
-        // program reads the page.
-        let text_page = page.text().map_err(|e| PdfError::Pdfium(e.to_string()))?;
-
-        let mut runs = Vec::new();
-        for (index, object) in page.objects().iter().enumerate() {
-            let Some(text_object) = object.as_text_object() else { continue };
-            let words = text_object.text();
-            // Kept even when it reports no words.
-            //
-            // A run whose font has no `/ToUnicode` reads as empty here while
-            // being perfectly visible on the page — which is most of "some
-            // words are not recognised". Dropping those made them unclickable,
-            // and a word you can see but cannot point at is worse than one
-            // labelled unreadable.
-            //
-            // A run with no *area* is a different thing and is dropped: it
-            // draws nothing, so there is nothing to have clicked on.
-            let Ok(bounds) = object.bounds() else { continue };
-            let wide = (bounds.right().value - bounds.left().value).abs() > 0.5;
-            let tall = (bounds.top().value - bounds.bottom().value).abs() > 0.5;
-            if !wide || !tall {
+        // font handle -> (the dense id it was given, its stem)
+        let mut fonts: HashMap<usize, (u32, Option<u16>)> = HashMap::new();
+        let mut styles = HashMap::new();
+        for index in 0..count.max(0) {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if handle.is_null()
+                || unsafe { bindings.FPDFPageObj_GetType(handle) }
+                    != pdfium_render::prelude::FPDF_PAGEOBJ_TEXT as i32
+            {
                 continue;
             }
-            let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
-            let (right, bottom) =
-                space.to_top_left(bounds.right().value, bounds.bottom().value);
+            let font = unsafe { bindings.FPDFTextObj_GetFont(handle) };
+            if font.is_null() {
+                continue;
+            }
+            let next = fonts.len() as u32;
+            let (id, stem) = *fonts
+                .entry(font as usize)
+                .or_insert_with(|| (next, glyph_stem_milli_em(bindings, font)));
 
-            // The colour it is actually drawn in, so an editor can show it and
-            // an edit can put it back.
-            let colour = object
-                .fill_color()
-                .map(|c| Color { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() })
-                .unwrap_or(Color { r: 0, g: 0, b: 0, a: 255 });
-
-            // Where the text is drawn from, which is the matrix's translation
-            // — the baseline, not the top of the box above it.
-            let origin = match origins.get(index).copied().flatten() {
-                Some((x, y)) => Point { x, y },
-                // Better a point on the run than no run at all; the box's
-                // bottom-left is the closest thing to a baseline there is.
-                None => Point { x: left, y: bottom },
+            // The text matrix, with the CTM already folded in by PDFium: its
+            // x axis is the way the line runs. Normalised because a producer
+            // that writes `1 Tf` carries the real size in it, and flipped in y
+            // into the space `TextRun` uses (`0.0 - b`, not `-b`, so a level
+            // line reads `0.0` and not `-0.0` in a log). The identity stands in
+            // for a matrix that cannot be read or has collapsed to a point.
+            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+            let read = unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) } != 0;
+            let length = m.a.hypot(m.b);
+            let axis = if read && length.is_finite() && length > 1e-6 {
+                (m.a / length, 0.0 - m.b / length)
+            } else {
+                (1.0, 0.0)
             };
-
-            runs.push(crate::document::TextRun {
-                object: index,
-                text: words,
-                rect: Rect { left, top, right, bottom },
-                origin,
-                // The *effective* size, folding in whatever vertical stretch
-                // the text matrix carries — see `set_text_run_styled`'s own
-                // `vertical_scale` doc for the producer that makes this
-                // matter: `1 Tf` with the real size baked into the matrix,
-                // which `unscaled_font_size` alone would report as "1pt".
-                size: text_object.scaled_font_size().value,
-                color: colour,
-            });
+            styles.insert(
+                index as usize,
+                crate::document::RunStyle { font: id, stem_milli_em: stem, axis },
+            );
         }
-        drop(text_page);
-        Ok(runs)
+        Ok(styles)
+    }
+
+    /// One page open and one question per object — its kind. Nothing is read:
+    /// no word, no font, no box, no matrix. The page open is most of it (5 to 8
+    /// ms on a datasheet page, 0.9 s on a villa drawing of 878,000 objects, which
+    /// PDFium parses whole to open); the walk over the objects is a tenth of a
+    /// microsecond apiece (a page of 40,000 words: 77 ms to open, 80 to count).
+    fn page_scale(&self, page_index: usize) -> Result<crate::document::PageScale> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) }.max(0);
+        let mut text_objects = 0usize;
+        for index in 0..count {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if !handle.is_null()
+                && unsafe { bindings.FPDFPageObj_GetType(handle) } == pdfium_render::prelude::FPDF_PAGEOBJ_TEXT as i32
+            {
+                text_objects += 1;
+            }
+        }
+        Ok(crate::document::PageScale { text_objects, page_objects: count as usize })
+    }
+
+    /// Uses `FPDF_GetPageSizeByIndexF`, which reads the page tree without
+    /// loading the page itself.
+    fn text_runs(&self, page_index: usize) -> Result<Vec<crate::document::TextRun>> {
+        Ok(self
+            .text_runs_all(page_index)?
+            .into_iter()
+            .filter(|run| {
+                let wide = (run.rect.right - run.rect.left).abs() > 0.5;
+                let tall = (run.rect.top - run.rect.bottom).abs() > 0.5;
+                wide && tall
+            })
+            .collect())
+    }
+
+    /// `text_runs` without its area filter: see [`Document::text_runs_unfiltered`].
+    fn text_runs_unfiltered(&self, page_index: usize) -> Result<Vec<crate::document::TextRun>> {
+        self.text_runs_all(page_index)
     }
 
     /// Every text object's own bounding rect, without extracting its words —
@@ -1116,12 +1204,13 @@ impl Document for PdfiumDocument {
     /// most often) that only needs to know *where* things are, not what they
     /// say.
     ///
-    /// **Why this exists.** `text_runs()`'s per-object cost is almost
-    /// entirely `PdfPageTextObject::text()` — real PDFium work extracting
-    /// Unicode from every run, not a loop this crate could make faster — and
-    /// a hit-test throws that work away for every object except the one
-    /// under the pointer. On a page with a few hundred runs, clicking to
-    /// select one was paying to extract the words of all the others too.
+    /// **Why this exists.** `text_runs()` was almost entirely
+    /// `PdfPageTextObject::text()` — a text layer loaded afresh for every run,
+    /// seconds on a busy page; it now reads every run's words through the
+    /// page's one layer (see `text_runs_all`) and takes tens of milliseconds —
+    /// and a hit-test throws the words of every object except the one under
+    /// the pointer away. On a page with a few hundred runs, clicking to select
+    /// one was paying to extract the words of all the others too.
     fn text_run_rects(&self, page_index: usize) -> Result<Vec<(usize, Rect)>> {
         self.validate_page_index(page_index)?;
         let page_number = i32::try_from(page_index).map_err(|_| {
@@ -1157,6 +1246,171 @@ impl Document for PdfiumDocument {
         Ok(out)
     }
 
+    /// One run, by its object number — the same fields [`Self::text_runs`]
+    /// computes for every text object on the page, computed for just this
+    /// one instead.
+    ///
+    /// **Why this exists at all.** `text_runs()` used to read the words of
+    /// every text object on the page one `PdfPageTextObject::text()` call at a
+    /// time — a text layer loaded afresh for each — and on a page of a few
+    /// hundred runs that was most of a second, every single time it was asked
+    /// for. It reads them through the page's one text layer now (tens of
+    /// milliseconds), but a caller that already knows *which* object it wants
+    /// (a click already resolved to one, a resize already has one selected)
+    /// still has no use for the other few hundred answers, so it should not
+    /// have to wait for them. **It is a page open and a text layer per call**
+    /// — about 12 ms on the datasheet — so a caller after several runs wants
+    /// [`Self::text_runs_some`]. `Option`, not an error, for the
+    /// object existing but not being a run of real text — a picture, a
+    /// shape, an index past the end — since none of those are a caller
+    /// mistake worth a distinct message; `text_runs()` treats them the same
+    /// way, by leaving them out of the list.
+    fn text_run_at(&self, page_index: usize, object: usize) -> Result<Option<crate::document::TextRun>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+
+        let page = self
+            .document
+            .pages()
+            .get(page_number)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        // Same "read the matrix, then drop the raw handle" shape as
+        // `text_runs()`, for the same reason — see its own comment.
+        let (space, origin) = {
+            let raw = RawPage::open(self.document.handle(), page_number)?;
+            let space = raw.space()?;
+            let bindings = pdfium()?.bindings();
+            let index = i32::try_from(object).unwrap_or(-1);
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if handle.is_null() {
+                return Ok(None);
+            }
+            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+            let read = unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) } != 0;
+            (space, read.then(|| space.to_top_left(m.e, m.f)))
+        };
+
+        let Ok(object_ref) = page.objects().get(object) else { return Ok(None) };
+        let Some(text_object) = object_ref.as_text_object() else { return Ok(None) };
+        // The same machinery `text_runs()` reads a run's words with — see
+        // its own comment on why this is kept even when it reports none.
+        let text_page = page.text().map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        // Through the text layer just loaded, not `text_object.text()`, which
+        // loads one of its own on every call — see `text_runs_all`.
+        let words = text_page.for_object(text_object);
+        drop(text_page);
+
+        let Ok(bounds) = object_ref.bounds() else { return Ok(None) };
+        let wide = (bounds.right().value - bounds.left().value).abs() > 0.5;
+        let tall = (bounds.top().value - bounds.bottom().value).abs() > 0.5;
+        if !wide || !tall {
+            return Ok(None);
+        }
+        let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+        let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
+
+        let colour = object_ref
+            .fill_color()
+            .map(|c| Color { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() })
+            .unwrap_or(Color { r: 0, g: 0, b: 0, a: 255 });
+        let origin = match origin {
+            Some((x, y)) => Point { x, y },
+            None => Point { x: left, y: bottom },
+        };
+
+        Ok(Some(crate::document::TextRun {
+            object,
+            text: words,
+            rect: Rect { left, top, right, bottom },
+            origin,
+            // The *effective* size, as `text_runs_all` and `text_runs_some` give
+            // it — not the bare `Tf` size. Every caller that divides a requested
+            // size by `run.size / found.size` (see `set_run_in_stream`'s
+            // `vertical_scale`) needs the effective one in `run.size`: for a
+            // producer that writes `1 Tf` and puts the size in the matrix, the
+            // bare one made that ratio 1 and a requested 9 pt a `9 Tf` under a
+            // 9x matrix.
+            size: text_object.scaled_font_size().value,
+            color: colour,
+        }))
+    }
+
+    /// Same walk as [`Self::text_run_at`] repeated per object costs a page
+    /// open and a text layer on every call (about 12 ms each on the
+    /// datasheet), more than reading the whole page once does. This instead
+    /// opens the page once, the same as `text_runs_all`, and reads the words
+    /// — through the page's one text layer — of only the objects actually in
+    /// `wanted`.
+    fn text_runs_some(
+        &self,
+        page_index: usize,
+        wanted: &std::collections::HashSet<usize>,
+    ) -> Result<Vec<crate::document::TextRun>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+        let page = self
+            .document
+            .pages()
+            .get(page_number)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        let (space, origins) = {
+            let raw = RawPage::open(self.document.handle(), page_number)?;
+            let space = raw.space()?;
+            let bindings = pdfium()?.bindings();
+            let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
+            let mut origins = Vec::with_capacity(count.max(0) as usize);
+            for index in 0..count.max(0) {
+                let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+                let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+                let read = !handle.is_null()
+                    && unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) } != 0;
+                origins.push(read.then(|| space.to_top_left(m.e, m.f)));
+            }
+            (space, origins)
+        };
+        let text_page = page.text().map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        let mut runs = Vec::new();
+        for (index, object) in page.objects().iter().enumerate() {
+            if !wanted.contains(&index) {
+                continue;
+            }
+            let Some(text_object) = object.as_text_object() else { continue };
+            let words = text_page.for_object(text_object);
+            let Ok(bounds) = object.bounds() else { continue };
+            let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+            let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
+            let colour = object
+                .fill_color()
+                .map(|c| Color { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() })
+                .unwrap_or(Color { r: 0, g: 0, b: 0, a: 255 });
+            let origin = match origins.get(index).copied().flatten() {
+                Some((x, y)) => Point { x, y },
+                None => Point { x: left, y: bottom },
+            };
+            runs.push(crate::document::TextRun {
+                object: index,
+                text: words,
+                rect: Rect { left, top, right, bottom },
+                origin,
+                size: text_object.scaled_font_size().value,
+                color: colour,
+            });
+        }
+        drop(text_page);
+        Ok(runs)
+    }
+
+    fn take_last_batch_timing(&mut self) -> Vec<(&'static str, std::time::Duration)> {
+        std::mem::take(&mut self.last_batch_timing)
+    }
+
     fn annotations(&self, page_index: usize) -> Result<Vec<IndexedAnnotation>> {
         self.validate_page_index(page_index)?;
         let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
@@ -1189,6 +1443,46 @@ impl Document for PdfiumDocument {
             }
         }
         Ok(marks)
+    }
+
+    fn internal_links(&self, page_index: usize) -> Result<Vec<InternalLink>> {
+        self.validate_page_index(page_index)?;
+        let number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let space = RawPage::open(self.document.handle(), number)?.space()?;
+        let page = self
+            .document
+            .pages()
+            .get(number)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for link in page.links().iter() {
+            // A link names its place either directly (`/Dest`) or through a
+            // `/GoTo` action; a `/URI`, a launch or a link to another file has
+            // neither and is not this method's to report.
+            let target = link.destination().and_then(|d| d.page_index().ok()).or_else(|| {
+                let action = link.action()?;
+                let local = action.as_local_destination_action()?;
+                local.destination().ok()?.page_index().ok()
+            });
+            let Some(target) = target else { continue };
+            let Ok(bounds) = link.rect() else { continue };
+            let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+            let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
+            out.push(InternalLink {
+                rect: Rect {
+                    left: left.min(right),
+                    top: top.min(bottom),
+                    right: left.max(right),
+                    bottom: top.max(bottom),
+                },
+                page: target as usize,
+            });
+        }
+        Ok(out)
     }
 
     fn bookmarks(&self) -> Result<Vec<(String, usize)>> {
@@ -1471,7 +1765,9 @@ impl Document for PdfiumDocument {
                         })
                         .sum()
                 };
-                let (first, last, _) = run_operators(&run, height, &placed, &operations, &codes_in)?;
+                let order = self.text_order(page_index, object);
+                let (first, last, _) =
+                    run_operators(&run, height, &placed, &operations, &codes_in, order)?;
                 break 'span first..last + 1;
             }
 
@@ -1543,7 +1839,9 @@ impl Document for PdfiumDocument {
                 })
                 .sum()
         };
-        let (first, last, continues) = run_operators(&run, height, &placed, &operations, &codes_in)?;
+        let order = self.text_order(page_index, object);
+        let (first, last, continues) =
+            run_operators(&run, height, &placed, &operations, &codes_in, order)?;
         if continues {
             return Err(PdfError::Unsupported(
                 "more text is drawn right after these words on the same line with nothing \
@@ -1694,6 +1992,32 @@ impl Document for PdfiumDocument {
     }
 
     fn drawn_objects(&self, page_index: usize) -> Result<Vec<crate::document::DrawnObject>> {
+        self.drawn_walk(page_index, false)
+    }
+
+    /// See [`Document::drawn_shapes`]: the same walk with nothing read that a
+    /// shape's entry does not hold.
+    fn drawn_shapes(&self, page_index: usize) -> Result<Vec<crate::document::DrawnObject>> {
+        self.drawn_walk(page_index, true)
+    }
+
+    /// Every drawn object of a page — or, with `shapes_only`, just its paths.
+    ///
+    /// **`shapes_only` returns the very entries the full list holds for its
+    /// paths.** What it skips is what no path's entry contains: the text of every
+    /// text object (read through the page's text layer, which is a pass over the
+    /// whole page's characters *per object* — the cost of the full list grows
+    /// with the square of the page's text, until a page has more than
+    /// [`LINEAR_TEXT_READ_FROM`] text objects and the labels are read in one pass
+    /// as `text_runs_unfiltered`'s words are), the pictures' pixel sizes and
+    /// their opacity, and a text object's or a group's own box and opacity. Everything
+    /// that decides a path's entry is kept: the walk order, the forms stepped
+    /// into, each path's box and opacity, and the placeholder rule that moves a
+    /// grey box under the picture it backs — which looks at the kinds and boxes
+    /// of neighbours, so a picture's box is read and the rest of the list's
+    /// entries are still made. `tests/page_weight.rs` holds the two lists to each
+    /// other on a page with all of it.
+    fn drawn_walk(&self, page_index: usize, shapes_only: bool) -> Result<Vec<crate::document::DrawnObject>> {
         use crate::document::{DrawnKind, DrawnObject};
         use pdfium_render::prelude::{
             FPDF_PAGEOBJ_FORM, FPDF_PAGEOBJ_IMAGE, FPDF_PAGEOBJ_PATH, FPDF_PAGEOBJ_SHADING,
@@ -1710,12 +2034,13 @@ impl Document for PdfiumDocument {
         let bindings = pdfium()?.bindings();
         // Open once for the whole walk: `FPDFTextObj_GetText` needs one, and
         // opening a text page per object on a busy page is the difference
-        // between a list and a wait.
-        let text_page = unsafe { bindings.FPDFText_LoadPage(raw.handle) };
+        // between a list and a wait. Not at all for the shapes: no path's entry
+        // has words in it.
+        let text_page = if shapes_only { std::ptr::null_mut() } else { unsafe { bindings.FPDFText_LoadPage(raw.handle) } };
 
         // The pictures, for their pixel size — which is the useful thing to say
         // about one in a list, and is not on the object.
-        let pictures = self.images_on(page_index).unwrap_or_default();
+        let pictures = if shapes_only { Vec::new() } else { self.images_on(page_index).unwrap_or_default() };
 
         /// How far in this will go. A form inside a form inside a form is real;
         /// an unbounded walk of a malformed one is a hang.
@@ -1730,13 +2055,25 @@ impl Document for PdfiumDocument {
         // first, which is what the page's own objects have as identity.
         let mut stack: Vec<(FPDF_PAGEOBJECT, usize, usize, [f32; 6])> = Vec::new();
         let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
+        // The page's own text objects, for the labels of a page large enough that
+        // reading each one's words by itself is the slow part (see
+        // [`LINEAR_TEXT_READ_FROM`]).
+        let mut own_text: Vec<(usize, FPDF_PAGEOBJECT)> = Vec::new();
         // Pushed backwards so the first object is taken first.
         for index in (0..count).rev() {
             let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
             if !handle.is_null() {
                 stack.push((handle, 0, index as usize, IDENTITY_MATRIX));
+                if !shapes_only && unsafe { bindings.FPDFPageObj_GetType(handle) } == FPDF_PAGEOBJ_TEXT as i32 {
+                    own_text.push((index as usize, handle));
+                }
             }
         }
+        // `None` for a small page, which asks PDFium object by object; and for any
+        // object inside a form, which the page's own characters do not name.
+        let read_in_one_pass = (own_text.len() > LINEAR_TEXT_READ_FROM)
+            .then(|| words_by_characters(bindings, raw.handle, &own_text))
+            .flatten();
 
         while let Some((handle, depth, top, to_page)) = stack.pop() {
             let kind_code = unsafe { bindings.FPDFPageObj_GetType(handle) };
@@ -1749,21 +2086,29 @@ impl Document for PdfiumDocument {
             };
 
             let (mut l, mut b, mut r, mut t) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            let rect =
-                if unsafe { bindings.FPDFPageObj_GetBounds(handle, &mut l, &mut b, &mut r, &mut t) }
-                    == 0
-                {
-                    Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 }
-                } else {
-                    let (l, b, r, t) = bounds_through(l, b, r, t, to_page);
-                    let (left, top_pt) = space.to_top_left(l, t);
-                    let (right, bottom) = space.to_top_left(r, b);
-                    Rect { left, top: top_pt, right, bottom }
-                };
+            // Only a path's entry holds a box that is read back, and the
+            // placeholder rule below compares one with a picture's; a text
+            // object's and a group's are not asked for when only the paths are
+            // wanted.
+            let wants_box = !shapes_only || matches!(kind, DrawnKind::Shape | DrawnKind::Picture);
+            let rect = if !wants_box
+                || unsafe { bindings.FPDFPageObj_GetBounds(handle, &mut l, &mut b, &mut r, &mut t) } == 0
+            {
+                Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 }
+            } else {
+                let (l, b, r, t) = bounds_through(l, b, r, t, to_page);
+                let (left, top_pt) = space.to_top_left(l, t);
+                let (right, bottom) = space.to_top_left(r, b);
+                Rect { left, top: top_pt, right, bottom }
+            };
 
             let label = match kind {
+                DrawnKind::Words | DrawnKind::Picture if shapes_only => String::new(),
                 DrawnKind::Words => {
-                    let words = object_text(bindings, text_page, handle);
+                    let words = match &read_in_one_pass {
+                        Some(read) if depth == 0 => read.get(&top).cloned().unwrap_or_default(),
+                        _ => object_text(bindings, text_page, handle),
+                    };
                     let words = words.trim();
                     let short: String = words.chars().take(40).collect();
                     if words.chars().count() > 40 {
@@ -1790,8 +2135,11 @@ impl Document for PdfiumDocument {
             };
 
             // The fill alpha is the object's own opacity as PDFium resolved it
-            // — the `ca` in force when it was drawn.
-            let opacity = {
+            // — the `ca` in force when it was drawn. Only a path's is wanted
+            // when only paths are.
+            let opacity = if shapes_only && kind != DrawnKind::Shape {
+                1.0
+            } else {
                 let (mut r, mut g, mut b, mut a) = (0u32, 0u32, 0u32, 255u32);
                 if unsafe { bindings.FPDFPageObj_GetFillColor(handle, &mut r, &mut g, &mut b, &mut a) }
                     == 0
@@ -1829,14 +2177,16 @@ impl Document for PdfiumDocument {
             }
         }
 
-        unsafe { bindings.FPDFText_ClosePage(text_page) };
+        if !text_page.is_null() {
+            unsafe { bindings.FPDFText_ClosePage(text_page) };
+        }
 
         // **A picture's opacity comes from the stream, not from PDFium.**
         // `FPDFPageObj_GetFillColor` has no answer for an image object, so the
         // `gs` in force at its `Do` is resolved through the page's ExtGState
         // resources to its `ca`. Read once for the page, only when it has a
-        // picture at all.
-        if out.iter().any(|d| d.kind == DrawnKind::Picture && d.depth == 0) {
+        // picture at all — and not when only the paths are wanted.
+        if !shapes_only && out.iter().any(|d| d.kind == DrawnKind::Picture && d.depth == 0) {
             if let Some(found) = self.picture_opacities(page_index) {
                 for entry in out.iter_mut().filter(|d| d.kind == DrawnKind::Picture && d.depth == 0) {
                     if let Some(alpha) = found.get(&entry.object) {
@@ -1879,6 +2229,9 @@ impl Document for PdfiumDocument {
             } else {
                 index += 1;
             }
+        }
+        if shapes_only {
+            out.retain(|d| d.kind == DrawnKind::Shape);
         }
         Ok(out)
     }
@@ -2153,8 +2506,9 @@ impl Document for PdfiumDocument {
                     })
                     .sum()
             };
+            let order = self.text_order(page_index, object);
             let (first, last, continues) =
-                run_operators(run, height, &placed, &operations, &codes_in)?;
+                run_operators(run, height, &placed, &operations, &codes_in, order)?;
             if continues {
                 // Lifting them out takes their advance with them, and the words
                 // that follow on the line would close up over the gap.
@@ -2412,6 +2766,55 @@ impl Document for PdfiumDocument {
         let (left, top) = space.to_top_left(l, t);
         let (right, bottom) = space.to_top_left(r, b);
         Ok(Rect { left, top, right, bottom })
+    }
+
+    /// Same extraction `outlined_clusters`/`identify_outlined_glyphs` already
+    /// do for font-recognition purposes (read every segment, flatten curves
+    /// via `build_outline`) — reused here for one specific object rather than
+    /// walked across the whole page, since a hit test only ever needs one
+    /// candidate's ink at a time. The typed `pdfium-render` wrapper is used
+    /// rather than `object_bounds`'s raw bindings above: `path.segments()`
+    /// already transforms by the object's own matrix and classifies segment
+    /// types, which a hand-rolled `FPDFPath_*` walk would have to redo.
+    fn object_outline(&self, page_index: usize, object: usize) -> Result<Vec<Vec<(f32, f32)>>> {
+        use crate::document::outlined::{flatten_segments, PathSegment, SegmentKind};
+        use pdfium_render::prelude::{PdfPathSegmentType, PdfPathSegments};
+
+        self.validate_page_index(page_index)?;
+        let pdfium_index = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let page = self
+            .document
+            .pages()
+            .get(pdfium_index)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        let space = PageSpace::for_page(&page, page.height().value);
+
+        let Some(page_object) = page.objects().iter().nth(object) else {
+            return Err(PdfError::InvalidArgument(format!(
+                "page {} has no object {object}",
+                page_index + 1
+            )));
+        };
+        let Some(path) = page_object.as_path_object() else {
+            return Err(PdfError::Unsupported("that object is not a path"));
+        };
+        let matrix = page_object.matrix().map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        let mut segments: Vec<PathSegment> = Vec::new();
+        for segment in path.segments().transform(matrix).iter() {
+            let (x, y) = space.to_top_left(segment.x().value, segment.y().value);
+            let kind = match segment.segment_type() {
+                PdfPathSegmentType::MoveTo => SegmentKind::MoveTo,
+                PdfPathSegmentType::LineTo => SegmentKind::LineTo,
+                _ => SegmentKind::BezierTo,
+            };
+            segments.push(PathSegment { kind, x, y, close: segment.is_close() });
+        }
+
+        Ok(flatten_segments(&segments))
     }
 
     fn signature_marks(&self, page_index: usize) -> Result<Vec<crate::document::SignatureMark>> {
@@ -2986,6 +3389,290 @@ impl<'a> Page for PdfiumPage<'a> {
     }
 }
 
+impl PdfiumDocument {
+    /// Every text object on the page, including ones with no visible ink —
+    /// unlike [`Document::text_runs`], which drops those because there is
+    /// nothing there to click.
+    ///
+    /// A run blanked down to a single space (see `apply_paragraph_edit` in
+    /// the app, which does this to lines a shrinking paragraph no longer
+    /// needs) has a space glyph's empty ink outline, so it fails that
+    /// click-target filter — and a lookup meant to find an *already-known*
+    /// object by its own id has nothing to do with what a click could land
+    /// on. Reported from use: undoing exactly that blank came back "that is
+    /// not a text run," because the very run being reverted had vanished
+    /// from the filtered list before its own revert could look it up.
+    ///
+    /// An inherent method, not part of the `Document` trait — it exists
+    /// purely so `set_text_run_styled`, `set_run_in_stream`, and
+    /// `set_run_color_in_stream` (all in `DocumentMut`'s impl, or below it)
+    /// can look up a run by id without the click filter, alongside
+    /// `text_runs` itself, which is in `Document`'s impl and needs the same
+    /// lookup to build its own filtered list.
+    fn text_runs_all(&self, page_index: usize) -> Result<Vec<crate::document::TextRun>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+
+        let page = self
+            .document
+            .pages()
+            .get(page_number)
+            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
+        // **The origins first, and the handle closed before the walk begins.**
+        //
+        // The matrix that says where a run is drawn from is only reachable
+        // through a raw page handle, and this function already holds one of
+        // PDFium's through `pages().get`. Two live handles on one page is the
+        // arrangement this file warns about elsewhere in as many words — see
+        // `set_text_run_styled` — so they are not held at once: everything the
+        // raw handle knows is read here and it is dropped.
+        let (space, origins, mut read_in_one_pass) = {
+            let raw = RawPage::open(self.document.handle(), page_number)?;
+            let space = raw.space()?;
+            let bindings = pdfium()?.bindings();
+            let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
+            let mut origins = Vec::with_capacity(count.max(0) as usize);
+            let mut text_objects: Vec<(usize, FPDF_PAGEOBJECT)> = Vec::new();
+            for index in 0..count.max(0) {
+                let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+                let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+                let read = !handle.is_null()
+                    && unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) } != 0;
+                origins.push(read.then(|| space.to_top_left(m.e, m.f)));
+                if !handle.is_null()
+                    && unsafe { bindings.FPDFPageObj_GetType(handle) } == FPDF_PAGEOBJ_TEXT as i32
+                {
+                    text_objects.push((index as usize, handle));
+                }
+            }
+            // **A large page's words are read in one pass over its characters,
+            // not one pass per object** — see [`LINEAR_TEXT_READ_FROM`]. `None`
+            // for a page that is not large, and for one whose characters could
+            // not be listed, which fall back to the per-object read below.
+            let words = (text_objects.len() > LINEAR_TEXT_READ_FROM)
+                .then(|| words_by_characters(bindings, raw.handle, &text_objects))
+                .flatten();
+            (space, origins, words)
+        };
+        // The text page is what turns a run's bytes into characters — the same
+        // machinery extraction uses, so a run reads the way the rest of the
+        // program reads the page. Not loaded when the words are already read.
+        let text_page = match read_in_one_pass {
+            Some(_) => None,
+            None => Some(page.text().map_err(|e| PdfError::Pdfium(e.to_string()))?),
+        };
+
+        let mut runs = Vec::new();
+        for (index, object) in page.objects().iter().enumerate() {
+            let Some(text_object) = object.as_text_object() else { continue };
+            // **Read through the text layer loaded above, once for the page.**
+            // `text_object.text()` loads a text layer of its own on every
+            // call — and, for an object with no words, returns without
+            // closing it: seconds of work on a page of a thousand runs, and a
+            // handle left open per empty one. Measured on a three-page
+            // datasheet, the words of every text object took 1.1, 2.4 and
+            // 2.4 s per page that way and 24, 36 and 39 ms this way, every
+            // string identical (see `tests/text_words.rs`, which keeps the old
+            // call as its oracle and the numbers in `what_the_words_cost`).
+            //
+            // **On a large page, already read** — see `read_in_one_pass` above.
+            let words = match (&mut read_in_one_pass, &text_page) {
+                (Some(read), _) => read.remove(&index).unwrap_or_default(),
+                (None, Some(text_page)) => text_page.for_object(text_object),
+                (None, None) => String::new(),
+            };
+            // Kept even when it reports no words.
+            //
+            // A run whose font has no `/ToUnicode` reads as empty here while
+            // being perfectly visible on the page — which is most of "some
+            // words are not recognised". Dropping those made them unclickable,
+            // and a word you can see but cannot point at is worse than one
+            // labelled unreadable.
+            //
+            // A run with no *area* is a different thing, and `text_runs()`
+            // (above) drops it: it draws nothing, so there is nothing to
+            // have clicked on. That filter is applied there, not here, so an
+            // identity lookup by object id can still find a run this thin.
+            let Ok(bounds) = object.bounds() else { continue };
+            let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
+            let (right, bottom) =
+                space.to_top_left(bounds.right().value, bounds.bottom().value);
+
+            // The colour it is actually drawn in, so an editor can show it and
+            // an edit can put it back.
+            let colour = object
+                .fill_color()
+                .map(|c| Color { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() })
+                .unwrap_or(Color { r: 0, g: 0, b: 0, a: 255 });
+
+            // Where the text is drawn from, which is the matrix's translation
+            // — the baseline, not the top of the box above it.
+            let origin = match origins.get(index).copied().flatten() {
+                Some((x, y)) => Point { x, y },
+                // Better a point on the run than no run at all; the box's
+                // bottom-left is the closest thing to a baseline there is.
+                None => Point { x: left, y: bottom },
+            };
+
+            runs.push(crate::document::TextRun {
+                object: index,
+                text: words,
+                rect: Rect { left, top, right, bottom },
+                origin,
+                // The *effective* size, folding in whatever vertical stretch
+                // the text matrix carries — see `set_text_run_styled`'s own
+                // `vertical_scale` doc for the producer that makes this
+                // matter: `1 Tf` with the real size baked into the matrix,
+                // which `unscaled_font_size` alone would report as "1pt".
+                size: text_object.scaled_font_size().value,
+                color: colour,
+            });
+        }
+        drop(text_page);
+        Ok(runs)
+    }
+
+    /// The words of every text object of a page, read in one pass over the page's
+    /// characters whatever its size: what [`Document::text_runs_unfiltered`]
+    /// puts in each run's `text` for a page above [`LINEAR_TEXT_READ_FROM`]
+    /// objects, here for any page — chiefly so a test can hold it to PDFium's
+    /// own per-object call (`tests/page_weight.rs` does, on the datasheet, the
+    /// repository's fixtures and a page built to be awkward, and on any documents
+    /// it is pointed at). An object with no words is in the map with an empty
+    /// string.
+    pub fn text_words_by_characters(&self, page_index: usize) -> Result<HashMap<usize, String>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index).map_err(|_| {
+            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
+        })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
+        let mut text_objects: Vec<(usize, FPDF_PAGEOBJECT)> = Vec::new();
+        for index in 0..count.max(0) {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if !handle.is_null() && unsafe { bindings.FPDFPageObj_GetType(handle) } == FPDF_PAGEOBJ_TEXT as i32 {
+                text_objects.push((index as usize, handle));
+            }
+        }
+        let mut words = words_by_characters(bindings, raw.handle, &text_objects)
+            .ok_or_else(|| PdfError::Pdfium("the page's characters could not be listed".into()))?;
+        for (index, _) in &text_objects {
+            words.entry(*index).or_default();
+        }
+        Ok(words)
+    }
+}
+
+/// Pages with more text objects than this have their words read in one pass
+/// over the page's characters ([`words_by_characters`]); a page with this many
+/// or fewer reads them one text object at a time, through PDFium's own call.
+///
+/// **Why there are two ways.** `FPDFTextObj_GetText` finds an object's characters
+/// by walking *every* character of the page, so reading the words of all *n*
+/// objects is *n* walks of *n* objects' characters — **quadratic**. Measured
+/// (this PDFium, one thread, a page of one word per object): 1,000 objects 30 ms,
+/// 5,000 0.75 s, 10,000 3.3 s, 40,000 about 140 s (136 to 148 over three runs).
+/// One pass over the characters, giving each to the object that drew it, is
+/// linear — the same pages in 4 ms, 21 ms, 44 ms and 217 ms (50,000: 0.27 s) —
+/// and gives the same words: character for
+/// character, on all 28,692 text objects of the first four pages of 105 documents
+/// (the owner's own quotations, invoices, receipts, datasheets and plots among
+/// them), and on every page of the datasheet and of the repository's fixtures,
+/// which `tests/page_weight.rs` holds it to.
+///
+/// **Why not always.** PDFium's own call is the definition of what an object
+/// says, and a page small enough for its cost not to matter stays with it: the
+/// pass over the characters re-implements a rule (below) that is verified, not
+/// proved. At 1,500 objects the per-object read costs about 66 ms; the datasheet's
+/// pages (883, 1,488 and 1,394 objects) stay on PDFium's own call.
+const LINEAR_TEXT_READ_FROM: usize = 1500;
+
+/// The words of every text object of an open page, in one pass over the page's
+/// characters: the same strings `FPDFTextObj_GetText` gives for each, without
+/// walking every character of the page once per object. `text_objects` are the
+/// page's text objects, as (index in the page's object list, handle). `None`
+/// when the page's characters cannot be listed.
+///
+/// **The rule being reproduced** (found by reading what the call answers, then
+/// held to it on 105 documents): the words of an object are its own characters in
+/// the order the page lists them, **less U+0000** — and **one space after them when
+/// the character the page lists straight after them is a space** (whoever drew
+/// it: a space of the object next to it, or one PDFium made up between two words),
+/// a space that is how PDFium reports that a run was followed by one. An object
+/// with no characters says nothing. A space follows a character of an object
+/// only through the character *directly* after it: one object's character
+/// between them and it is not appended. A string that is not valid UTF-16 reads
+/// as empty, which is what the safe wrapper does with it.
+///
+/// Characters come as UTF-16 code units on Windows and as scalar values
+/// elsewhere; both are put back into UTF-16 before the string is made.
+fn words_by_characters(
+    bindings: &dyn PdfiumLibraryBindings,
+    page: FPDF_PAGE,
+    text_objects: &[(usize, FPDF_PAGEOBJECT)],
+) -> Option<HashMap<usize, String>> {
+    let text_page = unsafe { bindings.FPDFText_LoadPage(page) };
+    if text_page.is_null() {
+        return None;
+    }
+    let owner_of: HashMap<usize, usize> =
+        text_objects.iter().map(|(index, handle)| (*handle as usize, *index)).collect();
+    let characters = unsafe { bindings.FPDFText_CountChars(text_page) }.max(0);
+
+    let mut units: HashMap<usize, Vec<u16>> = HashMap::with_capacity(text_objects.len());
+    let push = |units: &mut HashMap<usize, Vec<u16>>, object: usize, unicode: u32| {
+        // U+0000 is never part of an object's words.
+        if unicode == 0 {
+            return;
+        }
+        let list = units.entry(object).or_default();
+        match u16::try_from(unicode) {
+            Ok(unit) => list.push(unit),
+            Err(_) => {
+                if let Some(c) = char::from_u32(unicode) {
+                    let mut pair = [0u16; 2];
+                    list.extend_from_slice(c.encode_utf16(&mut pair));
+                }
+            }
+        }
+    };
+
+    // The object that drew the previous character: the one a space can still be
+    // appended to. The handle of the last character looked up, and what it was.
+    let mut previous: Option<usize> = None;
+    let mut last: (FPDF_PAGEOBJECT, Option<usize>) = (std::ptr::null_mut(), None);
+    for at in 0..characters {
+        let unicode = unsafe { bindings.FPDFText_GetUnicode(text_page, at) };
+        let handle = unsafe { bindings.FPDFText_GetTextObject(text_page, at) };
+        let owner = if handle.is_null() {
+            None
+        } else if handle == last.0 {
+            last.1
+        } else {
+            let found = owner_of.get(&(handle as usize)).copied();
+            last = (handle, found);
+            found
+        };
+        if owner != previous {
+            // A character that is not the previous object's own: if it is a space
+            // it is the one that follows that object's last character.
+            if let (Some(p), true) = (previous, unicode == 0x20) {
+                push(&mut units, p, 0x20);
+            }
+        }
+        if let Some(o) = owner {
+            push(&mut units, o, unicode);
+        }
+        previous = owner;
+    }
+    unsafe { bindings.FPDFText_ClosePage(text_page) };
+
+    Some(units.into_iter().map(|(object, units)| (object, String::from_utf16(&units).unwrap_or_default())).collect())
+}
+
 fn build_render_config(request: &RenderRequest, width: u32, height: u32) -> PdfRenderConfig {
     let rotation = match request.rotation {
         Rotation::None => PdfPageRenderRotation::None,
@@ -3246,7 +3933,7 @@ impl DocumentMut for PdfiumDocument {
         if style.face.is_none() && style.size.is_none() && style.at.is_none() {
             if let Some(color) = style.color {
                 let current = self
-                    .text_runs(page_index)?
+                    .text_runs_all(page_index)?
                     .into_iter()
                     .find(|r| r.object == object)
                     .ok_or_else(|| PdfError::InvalidArgument("that is not a text run".into()))?;
@@ -3513,6 +4200,173 @@ impl DocumentMut for PdfiumDocument {
         self.touch();
         Ok((previous, was))
     }
+
+    /// Overrides the trait's own one-call-per-edit default with
+    /// [`Self::set_runs_in_stream`]'s real batch — but only when every edit
+    /// in the group is one `set_text_run_styled` would already send down
+    /// its own byte-safe path (see that method's `only_words_face_or_size`
+    /// gate); anything else falls back to the default, unchanged, since the
+    /// slower PDFium-regenerating path this skips has never been batched
+    /// and doing so is out of scope here.
+    fn set_text_runs_styled(
+        &mut self,
+        page_index: usize,
+        edits: &[(usize, String, crate::document::TextStyle)],
+    ) -> Result<Vec<(String, crate::document::TextStyle)>> {
+        // **Atomic per call, not per edit.** `set_text_run_styled` commits
+        // each edit to the live document immediately (its own write-and-
+        // reopen), so a plain `.map().collect()` here used to stop at the
+        // first failure having already written every edit before it —
+        // leaving some lines of the same paragraph changed and others not.
+        //
+        // **The session log of a reported corruption shows the shape of
+        // this exactly**: a paragraph apply that succeeded cleanly, then —
+        // with no new pick logged in between — a font-encoding error
+        // ("'\u{2}' is not in this text's font"), immediately followed by
+        // "nothing to undo". That error's own wording only comes from the
+        // path a *retype* takes, which an undo reaches too: `revert` calls
+        // back in here with the paragraph's *original* text for every
+        // line, and if one line's original text carries a character this
+        // document's font cannot re-encode (a broken `ToUnicode` entry —
+        // see `fix_extracted_text`'s own doc for the same defect read back
+        // the other way), that line's own revert fails here. By then
+        // `CommandHistory::undo` has already popped this command's undo
+        // record *before* calling `revert` — see its own doc for why that
+        // makes a command's own revert the last chance to be all-or-
+        // nothing — matching "nothing to undo" right after. Reproducing
+        // the exact failing edit was not achieved directly, but the
+        // fallback's own lack of atomicity is confirmed by inspection
+        // regardless: a half-reverted paragraph with its undo record
+        // already spent is exactly the "right words, wrong colour"
+        // corruption reported, and is possible here independent of
+        // whatever specific edit triggers the underlying re-encode
+        // failure.
+        //
+        // So every edit this fallback already committed is itself reverted,
+        // in reverse order, before the original error is handed up — the
+        // same guarantee `Command::Batch` already gives its own steps, now
+        // given to this one's internal fallback too.
+        let fallback = |doc: &mut Self| -> Result<Vec<(String, crate::document::TextStyle)>> {
+            let mut done: Vec<(usize, String, crate::document::TextStyle)> = Vec::with_capacity(edits.len());
+            for (object, text, style) in edits {
+                match doc.set_text_run_styled(page_index, *object, text, style) {
+                    Ok((previous_text, previous_style)) => done.push((*object, previous_text, previous_style)),
+                    Err(e) => {
+                        for (object, previous_text, previous_style) in done.into_iter().rev() {
+                            let _ = doc.set_text_run_styled(page_index, object, &previous_text, &previous_style);
+                        }
+                        return Err(e);
+                    }
+                }
+            }
+            Ok(done.into_iter().map(|(_, text, style)| (text, style)).collect())
+        };
+
+        if edits.len() <= 1 {
+            return fallback(self);
+        }
+        // **Two fast shapes, not one** — the same two `set_text_run_styled`
+        // itself already recognises, just checked per edit here instead of
+        // once: an ordinary retype (`color`/`at` both absent — face/size may
+        // be anything, see `only_words_face_or_size`'s own doc above), or a
+        // colour-only change (`face`/`size`/`at` all absent, `color` set) —
+        // see `set_runs_in_stream`'s own doc for why the second one matters
+        // here specifically.
+        let all_fast_path = edits.iter().all(|(_, _, style)| {
+            let text_edit = style.color.is_none() && style.at.is_none();
+            let color_only =
+                style.face.is_none() && style.size.is_none() && style.at.is_none() && style.color.is_some();
+            text_edit || color_only
+        });
+        if !all_fast_path {
+            return fallback(self);
+        }
+
+        let requests: Vec<(usize, &str, Option<&str>, Option<f32>, Option<crate::document::Color>)> = edits
+            .iter()
+            .map(|(object, text, style)| {
+                (*object, text.as_str(), style.face.as_deref(), style.size, style.color)
+            })
+            .collect();
+        match self.set_runs_in_stream(page_index, &requests, &[], &HashMap::new()) {
+            Ok(results) => Ok(results),
+            Err(PdfError::Unsupported(msg)) if msg == TOO_MANY_EMBEDS_IN_ONE_BATCH => fallback(self),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// See [`DocumentMut::replace_text_lines`].
+    ///
+    /// One pass over the page's own content stream: each first piece is written
+    /// as [`Self::set_runs_in_stream`] writes an edit, and every piece to remove
+    /// is cut out in the same splice, so the page is opened, rewritten and
+    /// reopened once however many lines there are — and a refusal anywhere in the
+    /// batch happens before anything is written.
+    fn replace_text_lines(
+        &mut self,
+        page_index: usize,
+        edits: &[crate::document::TextLineEdit],
+    ) -> Result<()> {
+        use crate::document::TextLineEdit;
+
+        let mut requests: Vec<(usize, &str, Option<&str>, Option<f32>, Option<crate::document::Color>)> =
+            Vec::new();
+        let mut removals: Vec<usize> = Vec::new();
+        // The width each stretched line is to span, by its first piece.
+        let mut stretch: HashMap<usize, f32> = HashMap::new();
+        for edit in edits {
+            match edit {
+                TextLineEdit::Retype { first, text, style, remove, justify_to } => {
+                    if let Some(width) = justify_to {
+                        if !(width.is_finite() && *width > 0.0) {
+                            return Err(PdfError::InvalidArgument(format!(
+                                "a line cannot be stretched to a width of {width} points"
+                            )));
+                        }
+                        stretch.insert(*first, *width);
+                    }
+                    // `set_runs_in_stream` reads a colour as "recolour this and
+                    // leave its words", so one asked for here would drop the new
+                    // words without a word — and the only other way to write both
+                    // is PDFium regenerating the whole page, which is neither
+                    // byte-safe nor something a removal can be atomic with.
+                    if style.color.is_some() || style.at.is_some() {
+                        return Err(PdfError::Unsupported(
+                            "retyping a line and changing its colour or position in the same step",
+                        ));
+                    }
+                    requests.push((*first, text.as_str(), style.face.as_deref(), style.size, None));
+                    removals.extend(remove.iter().copied());
+                }
+                TextLineEdit::Remove { objects } => removals.extend(objects.iter().copied()),
+            }
+        }
+        // Every object once, whatever it is asked to do: two things asked of one
+        // object cannot both be done, and which was meant is not for this to guess.
+        let mut seen = std::collections::HashSet::new();
+        for object in requests.iter().map(|r| r.0).chain(removals.iter().copied()) {
+            if !seen.insert(object) {
+                return Err(PdfError::InvalidArgument(format!(
+                    "object {object} is named more than once in one edit of lines"
+                )));
+            }
+        }
+        if requests.is_empty() && removals.is_empty() {
+            return Ok(());
+        }
+        self.validate_page_index(page_index)?;
+
+        match self.set_runs_in_stream(page_index, &requests, &removals, &stretch) {
+            Ok(_) => Ok(()),
+            // Two lines that each need a font written into the file: the batch
+            // writes one, so these go one line at a time.
+            Err(PdfError::Unsupported(msg)) if msg == TOO_MANY_EMBEDS_IN_ONE_BATCH => {
+                self.replace_text_lines_one_at_a_time(page_index, &requests, &removals, &stretch)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
 
     fn set_page_crop(&mut self, index: usize, crop: Rect) -> Result<()> {
         self.validate_page_index(index)?;
@@ -5200,7 +6054,9 @@ impl DocumentMut for PdfiumDocument {
         let mut edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
         for object in &marked {
             let Some(run) = self.text_run_at(page_index, *object)? else { continue };
-            let (first, last, _) = run_operators(&run, height, &placed, &operations, &codes_in)?;
+            let order = self.text_order(page_index, *object);
+            let (first, last, _) =
+                run_operators(&run, height, &placed, &operations, &codes_in, order)?;
             let from = operations[first].span.start;
             let to = operations[last].span.end;
             edits.push((from..to, Vec::new()));
@@ -5661,6 +6517,207 @@ impl Drop for RawPage {
 /// because y grows downwards; afterwards `top > bottom`. Handing PDFium an
 /// inverted rect produces an annotation with no area, which draws as nothing at
 /// all rather than as anything visibly wrong.
+///
+/// An internal signal only — [`PdfiumDocument::set_runs_in_stream`] returns
+/// it, and [`PdfiumDocument::set_text_runs_styled`] catches it and falls
+/// back to one call per line; it is never meant to reach a caller outside
+/// this file. See `set_runs_in_stream`'s own doc for why it refuses here at
+/// all.
+const TOO_MANY_EMBEDS_IN_ONE_BATCH: &str =
+    "more than one new font embedded in the same batch is not implemented yet";
+
+/// The most a stem can plausibly be, in thousandths of an em. The heaviest face
+/// the weights are calibrated on (Montserrat ExtraBold) reads 198; a serif face
+/// reads its foot serif too (Times Bold 346, Courier near 380), which says
+/// nothing about its weight. Above this a result is "unknown", never a stem.
+const MAX_PLAUSIBLE_STEM_MILLI_EM: f32 = 300.0;
+
+/// Letters asked of a font only to learn what it draws for one it does not have:
+/// a font that has none of two of them draws the same glyph for both. Capitals
+/// and descenders nobody needs for the weight, and rarely all in one subset.
+const ABSENT_WITNESSES: [char; 12] = ['Q', 'X', 'Z', 'J', 'K', 'V', 'W', 'Y', 'j', 'k', 'q', 'z'];
+
+/// A glyph's outline as PDFium gives it: every point of its path (control
+/// points included), in em — or `None` for no path, or a path with no points.
+///
+/// **`unicode` is a character, not a glyph number and not a character code**,
+/// whatever the header calls the parameter (`glyph`). Measured on three kinds of
+/// font: asked for U+0049, a font answers with the glyph that *its own tables*
+/// give that character — the `/Encoding` of a simple font, the `/ToUnicode` of a
+/// composite one, and then the `CIDToGIDMap` — so a CID subset whose character
+/// codes are glyph numbers (Identity-H) still gives its `I`; a code-for-code
+/// guess would not. Asked for a character the font has no entry for, it gives
+/// the font's `.notdef` (glyph 0) or nothing — see [`glyph_stem_milli_em`].
+fn glyph_outline(
+    bindings: &dyn PdfiumLibraryBindings,
+    font: FPDF_FONT,
+    unicode: u32,
+) -> Option<Vec<(f32, f32)>> {
+    // Asked at size 1000, this PDFium answers in em, not in thousandths of
+    // one: Montserrat Light's `I` comes back 0.051 wide.
+    let path = unsafe { bindings.FPDFFont_GetGlyphPath(font, unicode, 1000.0) };
+    if path.is_null() {
+        return None;
+    }
+    let segments = unsafe { bindings.FPDFGlyphPath_CountGlyphSegments(path) };
+    // Control points count, as points of the outline. Exact for the
+    // straight-sided `I` and `l`, whose points are their corners.
+    let mut points = Vec::new();
+    for index in 0..segments.max(0) {
+        let segment = unsafe { bindings.FPDFGlyphPath_GetGlyphPathSegment(path, index) };
+        let (mut x, mut y) = (0.0f32, 0.0f32);
+        if !segment.is_null() && unsafe { bindings.FPDFPathSegment_GetPoint(segment, &mut x, &mut y) } != 0 {
+            points.push((x, y));
+        }
+    }
+    (!points.is_empty()).then_some(points)
+}
+
+/// Whether two outlines are the very same glyph: as many points, none of them
+/// more than a thousandth of an em from its counterpart. Two glyphs of one font
+/// that are the same shape *and* the same number of points are the same glyph;
+/// there is no tolerance in this for a different letter.
+fn same_outline(a: &[(f32, f32)], b: &[(f32, f32)]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(p, q)| (p.0 - q.0).abs() < 0.001 && (p.1 - q.1).abs() < 0.001)
+}
+
+/// How thick a font draws its letters: the ink width of the lower half of the
+/// first of `I`, `l` and `i` that it has a real outline for, in thousandths of
+/// an em — see [`crate::document::RunStyle::stem_milli_em`] for what that
+/// number is and is not. `None` when none of the three can be measured **or the
+/// measurement cannot be trusted**.
+///
+/// **The lower half, so that `i`'s dot does not count.** The dot is wider than
+/// the stem it sits on: whole-glyph, `i` read 82 in the datasheet's Light face
+/// where `I` reads 51. Measured over every font on its three pages, the lower
+/// half of `i` came out exactly the width of the same font's `l`, and for `I`
+/// and `l` themselves the lower half is the whole width, so nothing else moves.
+///
+/// Asked of PDFium's own outline for the glyph rather than of the font file,
+/// because that is the one source that answers for every kind of font here — a
+/// TrueType subset, a CFF fragment, a composite font with its `CIDToGIDMap` —
+/// where a font-file parser stops at the first program that is not an sfnt.
+///
+/// # What is not a measurement
+///
+/// **A font that is not embedded.** PDFium draws whatever it found on this
+/// machine instead: the datasheet's Light body text, set in a non-embedded
+/// `Montserrat-Light`, reads 20 (a Thin) here and 51 beside its own embedded
+/// copy, and a non-embedded `Helvetica` reads Arial's 95 — a number about this
+/// computer, not about the file. Its name still says what it is.
+///
+/// **A letter the font has no glyph for, which PDFium answers with `.notdef`.**
+/// A subset drops the letters nobody typed, and asked for one of them PDFium
+/// gives the font's glyph 0 — a box in some faces (Montserrat's is 0.507 x 0.7
+/// em, which read as a stem of 507; ArialNarrow's 0.190 x 0.625, a stem of 190
+/// in every invoice that uses it), in others a drawing of its own (Source Sans
+/// Pro's reads 476, Calibri's 456). That is what split the paragraphs of a real
+/// document whose body was set in two copies of one font, a simple one that
+/// carries no `I` (so `l` was measured: 134) and a CID one whose `I` came back
+/// `.notdef` (476).
+///
+/// It is not a fixed shape, so it is found by what it does: **`.notdef` is the
+/// one glyph that two different characters draw.** A letter whose outline is
+/// the outline of another of the three, or of one of a dozen witnesses no one
+/// would mistake for it (`Q`, `X`, `j` …), or of what a character with no entry
+/// at all is given (U+E000 and a few more; **not** U+FFFF, which PDFium treats
+/// as an invalid character and answers differently), is skipped: the next letter
+/// is tried, and a font none of whose three letters it has is unknown. A
+/// composite font with no `/ToUnicode`, or none for these letters, is that for
+/// every letter: the "cannot be resolved with certainty" case, answered by
+/// [`glyph_outline`] going through the font's own tables and finding nothing.
+///
+/// **A font with no program of its own.** A Type 3 font says it is embedded and
+/// has no font file, and PDFium answers outline questions about it from a
+/// stand-in (a Chrome-printed page's two Type 3 fonts read Arial's 95).
+///
+/// **An implausible result.** A glyph with no height, fewer than four points
+/// (a stem has four corners), or a stem above
+/// [`MAX_PLAUSIBLE_STEM_MILLI_EM`]. That letter is not a measurement; the next
+/// one is tried (Liberation Sans Bold's `I` read 549 where its `l` reads 137).
+///
+/// **Also unknown, as before:** no path at all (a TrueType subset's answer for
+/// a letter its embedded copy does not carry: on the datasheet `I` in the
+/// SemiBold subsets, `l` in the Regular ones, `l` and `i` in the Medium ones),
+/// and a path with no points (a subset can keep a letter's cmap entry and
+/// advance width and still have dropped its outline).
+fn glyph_stem_milli_em(bindings: &dyn PdfiumLibraryBindings, font: FPDF_FONT) -> Option<u16> {
+    // `1` embedded, `0` not, `-1` could not be told.
+    if unsafe { bindings.FPDFFont_GetIsEmbedded(font) } != 1 {
+        return None;
+    }
+    // **Embedded, with a program to measure.** A Type 3 font reports itself
+    // embedded and has no font program at all — its glyphs are drawings in the
+    // page — and PDFium answers outline questions about it from a stand-in: a
+    // Chrome-printed page whose two Type 3 fonts read Arial's 95.
+    let mut program: usize = 0;
+    unsafe { bindings.FPDFFont_GetFontData(font, std::ptr::null_mut(), 0, &mut program) };
+    if program == 0 {
+        return None;
+    }
+    // The three letters, asked once. Two of them drawing the very same glyph is
+    // a font that has neither (see below), not two measurements.
+    let letters = ['I', 'l', 'i'].map(|letter| glyph_outline(bindings, font, letter as u32));
+    // What the font draws for a letter it does not have: read the first time a
+    // letter gets that far, because most fonts never need it asked.
+    let mut absent: Option<Vec<Vec<(f32, f32)>>> = None;
+    for (index, points) in letters.iter().enumerate() {
+        let Some(points) = points else { continue };
+        // The whole box tells a missing glyph from a letter. No point read
+        // leaves `left > right`, and so a width below zero.
+        let (mut left, mut right) = (f32::MAX, f32::MIN);
+        let (mut bottom, mut top) = (f32::MAX, f32::MIN);
+        for &(x, y) in points {
+            left = left.min(x);
+            right = right.max(x);
+            bottom = bottom.min(y);
+            top = top.max(y);
+        }
+        let (width, height) = (right - left, top - bottom);
+        if points.len() < 4 || !(width > 0.0) || !(height > 0.0) {
+            continue;
+        }
+        // A CFF fragment's `.notdef`, 0.5 x 0.7 em: a box, not a letter.
+        if (width - 0.5).abs() < 0.001 && (height - 0.7).abs() < 0.001 {
+            continue;
+        }
+        // The stem is the width of what is left below the middle of the glyph.
+        let middle = bottom + height / 2.0;
+        let (mut low_left, mut low_right) = (f32::MAX, f32::MIN);
+        for &(x, _) in points.iter().filter(|p| p.1 < middle) {
+            low_left = low_left.min(x);
+            low_right = low_right.max(x);
+        }
+        let stem = (low_right - low_left) * 1000.0;
+        if !(stem > 0.0) || stem > MAX_PLAUSIBLE_STEM_MILLI_EM {
+            continue;
+        }
+        // `.notdef`: the glyph a font draws for a letter it has not got. It is
+        // not a fixed shape (a box here, a drawing of its own there), so it is
+        // found by what it does: it is the one glyph that **two different
+        // characters** draw. Two of the three letters alike, or a letter that
+        // looks like a letter nobody would mistake it for (`Q`, `X`, `j` …), or
+        // like what a character with no entry at all is given, is that.
+        let twin = letters
+            .iter()
+            .enumerate()
+            .any(|(other, q)| other != index && q.as_deref().is_some_and(|q| same_outline(points, q)));
+        if twin {
+            continue;
+        }
+        let absent = absent.get_or_insert_with(|| {
+            let letters = ABSENT_WITNESSES.iter().map(|c| *c as u32);
+            let unmapped = [0xE000u32, 0xFFFD, 0x7F, 0x01];
+            letters.chain(unmapped).filter_map(|u| glyph_outline(bindings, font, u)).collect()
+        });
+        if absent.iter().any(|notdef| same_outline(notdef, points)) {
+            continue;
+        }
+        return Some(stem.round().min(f32::from(u16::MAX)) as u16);
+    }
+    None
+}
+
 impl PdfiumDocument {
     /// The text object at `object` on `page_index`, with the page handle that
     /// keeps it alive.
@@ -6471,8 +7528,9 @@ fn font_to_unicode(
                 })
                 .sum()
         };
+        let order = self.text_order(page_index, object);
         let (first, last, continues) =
-            run_operators(&run, height, &placed, &operations, &codes_in)?;
+            run_operators(&run, height, &placed, &operations, &codes_in, order)?;
 
         // **The move, expressed where the operator lives.** A text matrix's
         // translation reaches the page through the CTM alone, so the distance
@@ -6554,86 +7612,6 @@ fn font_to_unicode(
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
-    /// One run, by its object number — the same fields [`Self::text_runs`]
-    /// computes for every text object on the page, computed for just this
-    /// one instead.
-    ///
-    /// **Why this exists at all.** `text_runs()` calls PDFium's own
-    /// `PdfPageTextObject::text()` once per text object on the page — real,
-    /// unavoidable PDFium work, not a loop this crate could make faster —
-    /// and on a page of a few hundred runs that is most of a second, every
-    /// single time it is asked for. A caller that already knows *which*
-    /// object it wants (a click already resolved to one, a resize already
-    /// has one selected) has no use for the other few hundred answers, so it
-    /// should not have to wait for them. `Option`, not an error, for the
-    /// object existing but not being a run of real text — a picture, a
-    /// shape, an index past the end — since none of those are a caller
-    /// mistake worth a distinct message; `text_runs()` treats them the same
-    /// way, by leaving them out of the list.
-    fn text_run_at(&self, page_index: usize, object: usize) -> Result<Option<crate::document::TextRun>> {
-        self.validate_page_index(page_index)?;
-        let page_number = i32::try_from(page_index).map_err(|_| {
-            PdfError::InvalidArgument(format!("page index {page_index} is out of range"))
-        })?;
-
-        let page = self
-            .document
-            .pages()
-            .get(page_number)
-            .map_err(|e| PdfError::Pdfium(e.to_string()))?;
-
-        // Same "read the matrix, then drop the raw handle" shape as
-        // `text_runs()`, for the same reason — see its own comment.
-        let (space, origin) = {
-            let raw = RawPage::open(self.document.handle(), page_number)?;
-            let space = raw.space()?;
-            let bindings = pdfium()?.bindings();
-            let index = i32::try_from(object).unwrap_or(-1);
-            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
-            if handle.is_null() {
-                return Ok(None);
-            }
-            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
-            let read = unsafe { bindings.FPDFPageObj_GetMatrix(handle, &mut m) } != 0;
-            (space, read.then(|| space.to_top_left(m.e, m.f)))
-        };
-
-        let Ok(object_ref) = page.objects().get(object) else { return Ok(None) };
-        let Some(text_object) = object_ref.as_text_object() else { return Ok(None) };
-        // The same machinery `text_runs()` reads a run's words with — see
-        // its own comment on why this is kept even when it reports none.
-        let text_page = page.text().map_err(|e| PdfError::Pdfium(e.to_string()))?;
-        let words = text_object.text();
-        drop(text_page);
-
-        let Ok(bounds) = object_ref.bounds() else { return Ok(None) };
-        let wide = (bounds.right().value - bounds.left().value).abs() > 0.5;
-        let tall = (bounds.top().value - bounds.bottom().value).abs() > 0.5;
-        if !wide || !tall {
-            return Ok(None);
-        }
-        let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
-        let (right, bottom) = space.to_top_left(bounds.right().value, bounds.bottom().value);
-
-        let colour = object_ref
-            .fill_color()
-            .map(|c| Color { r: c.red(), g: c.green(), b: c.blue(), a: c.alpha() })
-            .unwrap_or(Color { r: 0, g: 0, b: 0, a: 255 });
-        let origin = match origin {
-            Some((x, y)) => Point { x, y },
-            None => Point { x: left, y: bottom },
-        };
-
-        Ok(Some(crate::document::TextRun {
-            object,
-            text: words,
-            rect: Rect { left, top, right, bottom },
-            origin,
-            size: text_object.unscaled_font_size().value,
-            color: colour,
-        }))
-    }
-
     /// Resize a run along one or both axes independently: `sy` as a `Tf`
     /// (font size — height, in effect) and `sx` as a `Tz` (horizontal
     /// scale — width, leaving glyph height alone), each written just before
@@ -6712,7 +7690,8 @@ fn font_to_unicode(
                 })
                 .sum()
         };
-        let (first, last, _) = run_operators(run, height, &placed, &operations, &codes_in)?;
+        let order = self.text_order(page_index, run.object);
+        let (first, last, _) = run_operators(run, height, &placed, &operations, &codes_in, order)?;
 
         // The font and size already in force where the run starts — written
         // back afterward, unconditionally, because both are graphics state
@@ -6854,6 +7833,44 @@ fn font_to_unicode(
         Ok(which.map(|w| (w, seen)))
     }
 
+    /// The page objects that are text, in the order PDFium lists them — which is
+    /// the order the content stream draws them, one per show-text operator.
+    ///
+    /// Only each object's kind is asked, one call apiece: [`Self::object_census`]
+    /// asks four, and on a drawing of sixty thousand shapes that is the
+    /// difference between a delay nobody sees and one they do.
+    fn text_objects_in_order(&self, page_index: usize) -> Result<Vec<usize>> {
+        let page_number = i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+            index: page_index,
+            count: self.page_count,
+        })?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let mut text = Vec::new();
+        for index in 0..unsafe { bindings.FPDFPage_CountObjects(raw.handle) } {
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if !handle.is_null()
+                && unsafe { bindings.FPDFPageObj_GetType(handle) }
+                    == pdfium_render::prelude::FPDF_PAGEOBJ_TEXT as i32
+            {
+                text.push(index as usize);
+            }
+        }
+        Ok(text)
+    }
+
+    /// Where a page object sits among that page's **text objects**, and how many
+    /// there are — the ordinal `content::placed` is indexed by, if the page draws
+    /// as many text operators as PDFium found objects. See [`run_operators`].
+    ///
+    /// `None` rather than an error when it cannot be worked out: the caller
+    /// still has the position match to try.
+    fn text_order(&self, page_index: usize, object: usize) -> Option<(usize, usize)> {
+        let text = self.text_objects_in_order(page_index).ok()?;
+        let which = text.iter().position(|o| *o == object)?;
+        Some((which, text.len()))
+    }
+
     /// Which names in a page's resources are pictures.
     ///
     /// A `Do` may draw a form rather than an image, and the operator does not
@@ -6931,9 +7948,15 @@ fn font_to_unicode(
                 })
                 .sum()
         };
+        // The page's text objects, listed once for every run below.
+        let text_objects = self.text_objects_in_order(page_index).unwrap_or_default();
         for run in self.text_runs(page_index).unwrap_or_default() {
+            let order = text_objects
+                .iter()
+                .position(|o| *o == run.object)
+                .map(|which| (which, text_objects.len()));
             if let Ok((first, last, continues)) =
-                run_operators(&run, height, placed, operations, &codes_in)
+                run_operators(&run, height, placed, operations, &codes_in, order)
             {
                 // A run whose line goes on cannot be lifted out — see
                 // `restack` — so it is not placed either.
@@ -7402,7 +8425,8 @@ fn font_to_unicode(
                     })
                     .sum()
             };
-            let (first, last, _) = run_operators(run, height, placed, operations, &codes_in)?;
+            let order = self.text_order(page_index, object);
+            let (first, last, _) = run_operators(run, height, placed, operations, &codes_in, order)?;
             return match frame_scope(operations, first..last + 1) {
                 Some((open, close)) => Ok(WrapSite { span: open..close + 1, own_scope: true, ctm: states[open].ctm }),
                 // **Worded to survive `Unsupported`'s own template.** Its
@@ -7546,12 +8570,29 @@ fn font_to_unicode(
     ) -> Result<(String, f32)> {
         use crate::pdf::content;
 
-        let run_list = self.text_runs(page_index)?;
-        let run = run_list
-            .iter()
-            .find(|r| r.object == object)
-            .cloned()
+        // **One run, not every run.** This used to be `text_runs_all()`
+        // filtered down to the one object wanted — on a page of a few
+        // hundred runs, most of a second spent extracting the words of
+        // every *other* run just to read this one's own origin.
+        // `text_runs_some` answers the same question for one object without
+        // touching the rest. `run_list` itself is only ever needed below, in
+        // the rare fallback where neither the page's order nor geometry could
+        // place this run among the page's content stream operations —
+        // fetched there, lazily, not here.
+        //
+        // **Not `text_run_at`, which leaves out a run with no ink.** A lone
+        // `l` or `-` under half a point wide is not something to click, but it
+        // is a text object with a place in the page's order like any other,
+        // and a line with one on it must not be refused for it.
+        let run = self
+            .text_runs_some(page_index, &std::collections::HashSet::from([object]))?
+            .into_iter()
+            .next()
             .ok_or_else(|| PdfError::InvalidArgument("that is not a text run".into()))?;
+        // Where this object falls among the page's text objects, counting every
+        // one: the operator that drew it is the same number among the stream's
+        // show-text operators, if the stream bears that out — see below.
+        let order = self.text_order(page_index, object);
         let previous = run.text.clone();
         let height = self.page_size(page_index)?.height_pt;
         self.substituted = None;
@@ -7579,8 +8620,17 @@ fn font_to_unicode(
         // wide enough — reported from use as a size change coming back
         // unable to be undone, on the run it had just resized.
         let (want_x, want_y) = (run.origin.x, height - run.origin.y);
-        let found = match nearest_placed(&placed, want_x, want_y) {
-            Some((at, _)) => &placed[at],
+        // **By count first, where the stream bears the count out.** The *n*th
+        // text object is the *n*th show-text operator — see `placed_by_order` —
+        // which finds a piece that continues the one before it, and does not
+        // mistake it for that one, as a match by position does when the piece
+        // before it is narrow. The position match is for a page whose count the
+        // stream does not confirm.
+        let codes_in = |p: &content::Placed| codes_drawn(&file, fonts.as_ref(), &operations, p);
+        let found = match placed_by_order(&run, height, &placed, order, &codes_in)
+            .or_else(|| nearest_placed(&placed, want_x, want_y).map(|(at, _)| &placed[at]))
+        {
+            Some(found) => found,
             // **Where it is drawn is not always where the walk thinks.**
             //
             // The text matrix advances by the width of whatever was just shown,
@@ -7594,8 +8644,13 @@ fn font_to_unicode(
             // Counting is the way out — but only where the page has *shown*
             // that counting works. See `placed_in_order`.
             None => {
-                let index = self
-                    .text_runs(page_index)?
+                // The rare path: geometry alone did not place this run, so
+                // every run's own position is needed to count where it falls
+                // among the page's content-stream operations — see
+                // `placed_in_order`. Paid here, not for every ordinary edit
+                // that `nearest_placed` above already resolves directly.
+                let run_list = self.text_runs_all(page_index)?;
+                let index = run_list
                     .iter()
                     .position(|r| r.object == object)
                     .ok_or(PdfError::Unsupported("that is not a text run"))?;
@@ -7729,11 +8784,11 @@ fn font_to_unicode(
             size,
             width,
         );
-        if swap.is_some() {
-            // **Put the page's own font back.** `Tf` is graphics state: it
-            // stays selected until something changes it, so anything drawn
-            // after this in the same text object would come out in a face
-            // nobody asked for.
+        // **Put the page's own font — and size — back.** `Tf` is graphics state:
+        // it stays selected until something changes it, so anything drawn after
+        // this that relies on the one in force would come out in a face, or at a
+        // size, nobody asked for. A size is no less a `Tf` than a face is.
+        if swap.is_some() || size != found.size {
             replacement.extend_from_slice(
                 format!("\n/{} {} Tf", String::from_utf8_lossy(&name), found.size).as_bytes(),
             );
@@ -7771,6 +8826,608 @@ fn font_to_unicode(
         Ok((previous, run.size))
     }
 
+    /// Several runs on the same page, written in one pass — the batched
+    /// counterpart to [`Self::set_run_in_stream`], for a multi-line
+    /// paragraph's several lines sharing one transaction instead of one
+    /// each.
+    ///
+    /// **Why this exists.** Every call to `set_run_in_stream` independently
+    /// pays `edit_base()` (`save_to_bytes()` — a full PDFium
+    /// re-serialisation of the whole document, unless it is signed) and
+    /// `adopt_edit()` (a full PDFium reopen of the rewritten bytes), on top
+    /// of parsing the page's own content stream. None of that depends on
+    /// which run is being edited, so paying it once per line of a paragraph
+    /// — which `apply_paragraph_edit` in the app does, one `SetTextRun` per
+    /// line — multiplies a cost that has nothing to do with how many lines
+    /// changed. Reported from use: a three-line paragraph took close to a
+    /// second to apply, after `set_run_in_stream`'s own per-run identity
+    /// lookup had already been fixed — the remaining cost scaled with line
+    /// count, which only this, not that earlier fix, explains.
+    ///
+    /// Parses the page's content stream once, finds and encodes every
+    /// requested run's own replacement against that one parse, splices every
+    /// span in in one pass (`content::splice` already takes a slice of
+    /// them), and writes/reopens the result once for the whole group.
+    ///
+    /// **Each run's operator is found by count where the stream bears the count
+    /// out** — the *n*th text object is the *n*th show-text operator, held to
+    /// the stream by [`order_agrees`] — and only otherwise by position. That is
+    /// what lets a line drawn as several pieces be retyped, or hidden, piece by
+    /// piece: a piece that continues the one before it has no position of its
+    /// own to be found by. Refused whole, with nothing written, when two of the
+    /// runs resolve to one operator or one of them cannot be resolved at all.
+    ///
+    /// **Refuses, deliberately, the moment a second edit in the group would
+    /// also need a brand new font embedded.** `embed_typing_font` picks a
+    /// resource name and a page-resources patch by looking at what the page
+    /// (and this crate's own insertions project onto it) already has — fine
+    /// once, but two calls made here against the same unmodified starting
+    /// point would each pick the *same* free name and each produce its own
+    /// complete resources patch, the second silently discarding the first's
+    /// addition. Rather than get a shared allocation table right for a case
+    /// this rare (two different lines of one paragraph each spelling
+    /// characters nothing already on the page covers), this refuses with
+    /// [`TOO_MANY_EMBEDS_IN_ONE_BATCH`] and leaves [`Self::set_text_runs_styled`]
+    /// to fall back to one call per line — correct, just not faster, the
+    /// same as before this existed.
+    ///
+    /// **A `requested_color` entry is a colour-only change, not a retype.**
+    /// `apply_paragraph_edit`'s own `hidden_or_written` recolours a shrinking
+    /// paragraph's now-unwanted lines to the page's background instead of
+    /// blanking them (see that function's own doc), which is a completely
+    /// ordinary part of editing a paragraph that already has more than one
+    /// run per line — not a rare shape. Reported from use: with this gate
+    /// absent, a `requested_color` edit mixed into an otherwise ordinary
+    /// batch failed `set_text_runs_styled`'s own fast-path check (it is not
+    /// `TextStyle::default()`), silently sending the *whole* paragraph back
+    /// through one call per line — exactly the cost this function exists to
+    /// avoid, on exactly the documents where lines split across several
+    /// runs are common enough that nearly every real paragraph hit it.
+    ///
+    /// **`removals` are objects to take off the page in the same pass**, each
+    /// found the way an edit's run is and cut out whole — see
+    /// [`DocumentMut::replace_text_lines`], which is what asks for it. With none,
+    /// this is exactly what it always was.
+    ///
+    /// **`stretch` names retyped runs that are to span a width** (points, from the
+    /// run's left origin): each such run is written with its gaps opened or closed
+    /// by `TJ` spacing numbers until PDFium's own box for it is that wide — see
+    /// [`Stretch`]. The width is measured, not worked out from glyph advances: the
+    /// batch is first written *plain* to a copy of the document that is read back
+    /// and thrown away, and only the stretched version reaches `self`, so a line
+    /// that cannot be stretched is refused with nothing written. With none, this
+    /// is exactly what it always was.
+    fn set_runs_in_stream(
+        &mut self,
+        page_index: usize,
+        edits: &[(usize, &str, Option<&str>, Option<f32>, Option<crate::document::Color>)],
+        removals: &[usize],
+        stretch: &HashMap<usize, f32>,
+    ) -> Result<Vec<(String, crate::document::TextStyle)>> {
+        use crate::pdf::content;
+
+        // **Temporary — see `last_batch_timing`'s own doc.** A local `Vec`
+        // throughout, assigned to `self` only once at the end, so pushing
+        // into it never fights the `&self`/`&mut self` calls this function
+        // already makes in between.
+        let mut timing: Vec<(&'static str, std::time::Duration)> = Vec::new();
+        let t = std::time::Instant::now();
+
+        self.substituted = None;
+        let height = self.page_size(page_index)?.height_pt;
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        timing.push(("edit_base", t.elapsed()));
+
+        let t = std::time::Instant::now();
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let fonts = self.page_fonts(&file, &page);
+
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+        // The state each operator draws in (horizontal scaling is read from it),
+        // walked only when a line is to be stretched.
+        let states = if stretch.is_empty() { Vec::new() } else { content::states(&operations) };
+        timing.push(("parse_file_and_stream", t.elapsed()));
+
+        let mut spans: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
+        let mut extra: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut page_patch: Option<(u32, Vec<u8>)> = None;
+        let mut embeds = 0usize;
+        let mut face_written: Option<String> = None;
+        let mut results = Vec::with_capacity(edits.len());
+        // The lines to be spread to a width, and what it takes to write each again.
+        let mut stretches: Vec<Stretch> = Vec::new();
+        let t_loop = std::time::Instant::now();
+
+        // **Every requested run, resolved against one page open.** Asking
+        // `text_run_at` once per edit opened the page, loaded its text layer
+        // and walked to the one object afresh for each — about 9 ms a line on
+        // the datasheet, which was three quarters of a 33-line apply (305 of
+        // 415 ms) and everything per line that the apply cost.
+        // `text_runs_some` does the page once for all of them and gives each
+        // the run `text_run_at` would (`tests/text_words.rs` checks that field
+        // by field) — **and keeps the ones with no ink area, which
+        // `text_run_at` drops.** A lone `l` or `-` under half a point wide is
+        // not a run to click but is a text object to edit, with a place in the
+        // page's order like any other, and a paragraph with one on a line must
+        // not be refused for it. Only an object that is not text at all is
+        // "not a text run", and that is refused before anything is written.
+        let t_resolve = std::time::Instant::now();
+        let wanted: std::collections::HashSet<usize> =
+            edits.iter().map(|e| e.0).chain(removals.iter().copied()).collect();
+        let resolved: HashMap<usize, crate::document::TextRun> = self
+            .text_runs_some(page_index, &wanted)?
+            .into_iter()
+            .map(|run| (run.object, run))
+            .collect();
+        // Every text object of the page, once for the whole batch, in the order
+        // the page draws them. Where a requested object falls among them is the
+        // number of the show-text operator that drew it, if the stream bears
+        // that out — see `placed_by_order`. Not a `text_order` per edit: each of
+        // those opens the page.
+        let text_objects = self.text_objects_in_order(page_index).unwrap_or_default();
+        let resolve_total = t_resolve.elapsed();
+        // Every run on the page, read the first time a line needs counting to
+        // be found (below) and kept for the rest of the batch.
+        let mut run_list: Option<Vec<crate::document::TextRun>> = None;
+        // The operators already taken by an edit of this batch.
+        let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let codes_in = |p: &content::Placed| codes_drawn(&file, fonts.as_ref(), &operations, p);
+
+        for &(object, text, requested_face, new_size, requested_color) in edits {
+            let run = resolved
+                .get(&object)
+                .cloned()
+                .ok_or_else(|| PdfError::InvalidArgument("that is not a text run".into()))?;
+            let previous = run.text.clone();
+
+            let order = text_objects.binary_search(&object).ok().map(|which| (which, text_objects.len()));
+            let found = self.operator_of(page_index, &run, height, &placed, order, &codes_in, &mut run_list)?;
+            // **One operator, one edit.** Two edits spliced into the same
+            // operator keep the first and drop the second without a word
+            // (`content::splice` skips what overlaps), so a batch that said both
+            // were done would have done one. Two objects can only land on one
+            // operator where one of them was found by position and found wrong:
+            // refused, with nothing written, rather than half applied.
+            if !claimed.insert(found.origin.operation) {
+                return Err(PdfError::Unsupported("editing two runs that one operator draws"));
+            }
+
+            // **A colour-only change never touches the codes at all** —
+            // wrap the operator in a fresh fill colour and restore the old
+            // one after, the same shape `set_run_color_in_stream` already
+            // uses for one run alone, needing none of the font-matching
+            // below. The colour put back is the stream's own — see
+            // `fill_before` — so a piece hidden in the middle of a line leaves
+            // every piece after it drawn in exactly the colour it was.
+            if let Some(color) = requested_color {
+                let operation = &operations[found.origin.operation];
+                let replacement = drawn_in_colour(&stream, &operations, found.origin.operation, color);
+                spans.push((operation.span.clone(), replacement));
+                results.push((
+                    previous,
+                    crate::document::TextStyle { color: Some(run.color), ..Default::default() },
+                ));
+                continue;
+            }
+
+            let name = found.font.clone().ok_or(PdfError::Unsupported("that text selects no font"))?;
+            let fonts_ref = fonts.as_ref().ok_or(PdfError::Unsupported("that page declares no fonts"))?;
+            let width = code_width(&file, fonts_ref, &name)
+                .ok_or(PdfError::Unsupported("that font's codes cannot be counted"))?;
+            let unicode = match Self::font_to_unicode(&file, bytes, fonts_ref, &name) {
+                Some(map) => map,
+                None if width == 1 => (0x20u32..0x7F)
+                    .filter_map(|code| char::from_u32(code).map(|c| (code, c.to_string())))
+                    .collect(),
+                None => {
+                    return Err(PdfError::Unsupported("that font carries no character map this can read"))
+                }
+            };
+            let mut reverse: std::collections::BTreeMap<String, u32> = Default::default();
+            for (code, spelling) in &unicode {
+                reverse.entry(spelling.clone()).or_insert(*code);
+            }
+            let wanted = encodable(text, &reverse);
+
+            let (encoded, swap) = if let Some(face) = requested_face {
+                let (swap, encoded) =
+                    self.embed_typing_font(&file, page_index, &page, &wanted, &reverse, Some(face))?;
+                (encoded, Some(swap))
+            } else {
+                match encode_with(&reverse, &wanted, width) {
+                    Some(bytes) => (bytes, None),
+                    None => match self.borrow_font_on_page(&file, bytes, fonts_ref, &name, &wanted) {
+                        Some((swap, encoded)) => (encoded, Some(swap)),
+                        None => {
+                            let (swap, encoded) =
+                                self.embed_typing_font(&file, page_index, &page, &wanted, &reverse, None)?;
+                            (encoded, Some(swap))
+                        }
+                    },
+                }
+            };
+
+            let operation = &operations[found.origin.operation];
+            let codes = codes_of(operation, width);
+            let spellings: Vec<Option<String>> =
+                codes.iter().map(|code| unicode.get(code).cloned()).collect();
+            let owner = align_codes(&spellings, &run.text)
+                .or_else(|| (codes.len() == run.text.chars().count()).then(|| (0..codes.len()).collect()))
+                .ok_or(PdfError::Unsupported("that run's codes cannot be lined up with its text"))?;
+            let span = owned_codes(&owner)
+                .ok_or(PdfError::Unsupported("that run's characters belong to none of its codes"))?;
+            let (first, last) = (span.start, span.end - 1);
+
+            let drawing = swap.as_ref().map(|s| s.resource.clone()).unwrap_or_else(|| name.clone());
+            let vertical_scale = if found.size.abs() > 1e-6 { run.size / found.size } else { 1.0 };
+            let size = new_size
+                .filter(|s| *s > 0.0)
+                .map(|wanted| if vertical_scale.abs() > 1e-6 { wanted / vertical_scale } else { wanted })
+                .unwrap_or(found.size);
+            let mut replacement =
+                content::replacing_codes(operation, first..last + 1, &encoded, &drawing, size, width);
+            // The page's own font and size back after it — see `set_run_in_stream`.
+            let mut after: Vec<u8> = Vec::new();
+            if swap.is_some() || size != found.size {
+                after = format!("\n/{} {} Tf", String::from_utf8_lossy(&name), found.size).into_bytes();
+                replacement.extend_from_slice(&after);
+            }
+            // A `'` or `"` also moved to the next line before it drew, which the
+            // `TJ` written in its place does not do: so that is said first, and
+            // the lines after it keep their place.
+            let moved = quote_effect(operation)?;
+            if !moved.is_empty() {
+                replacement = [moved.as_slice(), b"\n", replacement.as_slice()].concat();
+            }
+            spans.push((operation.span.clone(), replacement));
+
+            // **A line to be spread to a width** is written plain here, like any
+            // other, and written again below once its plain width is known. What
+            // cannot be spread is refused now, before anything has been written:
+            // text drawn at an angle or vertically (its box is not its width), and
+            // a size that moves nothing.
+            if let Some(&target) = stretch.get(&object) {
+                if (found.axis.0 - 1.0).abs() > 1e-3 || found.axis.1.abs() > 1e-3 {
+                    return Err(PdfError::InvalidArgument(
+                        "this line is drawn at an angle, so it cannot be stretched to a width".into(),
+                    ));
+                }
+                if font_is_vertical(&file, fonts_ref, &name) {
+                    return Err(PdfError::InvalidArgument(
+                        "this line is written vertically, so it cannot be stretched to a width".into(),
+                    ));
+                }
+                let th = states.get(found.origin.operation).map_or(1.0, |s| s.horizontal_scale);
+                let points_per_unit = size * found.scale * th / 1000.0;
+                if !(points_per_unit.is_finite() && points_per_unit > 1e-9) {
+                    return Err(PdfError::InvalidArgument(
+                        "this line is drawn at a size that cannot be spaced, so it cannot be stretched to a width".into(),
+                    ));
+                }
+                stretches.push(Stretch {
+                    span: spans.len() - 1,
+                    object,
+                    target,
+                    operation: found.origin.operation,
+                    range: first..last + 1,
+                    encoded: encoded.clone(),
+                    text: wanted.clone(),
+                    drawing: drawing.clone(),
+                    size,
+                    width,
+                    after,
+                    before: moved,
+                    points_per_unit,
+                });
+            }
+
+            if let Some(swap) = swap {
+                if !swap.added.is_empty() || swap.page.is_some() {
+                    embeds += 1;
+                    if embeds > 1 {
+                        return Err(PdfError::Unsupported(TOO_MANY_EMBEDS_IN_ONE_BATCH));
+                    }
+                    extra.extend(swap.added.iter().cloned());
+                    page_patch = swap.page.clone();
+                }
+                face_written = Some(swap.face);
+            }
+            results.push((
+                previous,
+                crate::document::TextStyle { size: Some(run.size), ..Default::default() },
+            ));
+        }
+
+        // ---- the pieces that come off the page
+        //
+        // Found the way an edit's run is, claimed so that no operator is both
+        // edited and cut, and checked *all together* before any of them is
+        // spliced: whether the pieces left behind keep their places depends on
+        // which pieces are going, not on any one of them.
+        let t_removals = std::time::Instant::now();
+        let mut taking: Vec<(usize, usize)> = Vec::with_capacity(removals.len());
+        for &object in removals {
+            let run = resolved
+                .get(&object)
+                .ok_or_else(|| PdfError::InvalidArgument("that is not a text run".into()))?;
+            let order = text_objects.binary_search(&object).ok().map(|which| (which, text_objects.len()));
+            let found = self.operator_of(page_index, run, height, &placed, order, &codes_in, &mut run_list)?;
+            if !claimed.insert(found.origin.operation) {
+                return Err(PdfError::Unsupported("editing two runs that one operator draws"));
+            }
+            taking.push((object, found.origin.operation));
+        }
+        let going: std::collections::HashSet<usize> = taking.iter().map(|(_, at)| *at).collect();
+        let mut carried: Vec<(usize, Vec<usize>)> = Vec::new();
+        for &(object, at) in &taking {
+            // Text that adds to the clipping path takes the clip with it.
+            if render_mode_before(&operations, at) >= 4 {
+                return Err(PdfError::Unsupported("taking out text that is drawn as a clipping path"));
+            }
+            let after = carried_after_removal(&operations, at, &going);
+            if !after.is_empty() {
+                carried.push((object, after));
+            }
+            // The operator and its operands, whole — and, for a quote operator,
+            // the line it moves to, which the lines after it are placed from.
+            spans.push((operations[at].span.clone(), quote_effect(&operations[at])?));
+        }
+        // **A piece placed by the pen cannot lose the piece before it** — if it
+        // draws anything. The pen carries on from a piece that goes into whatever
+        // follows it with nothing repositioning it; a piece that stays and is seen
+        // would move. One that is not seen can be left to move: a line that
+        // Illustrator wrote with a space of its own between its words is the
+        // ordinary case, and those spaces draw nothing.
+        if !carried.is_empty() {
+            let judged: Vec<usize> = carried.iter().flat_map(|(_, after)| after.iter().copied()).collect();
+            let seen = self.draws_something(page_index, &operations, &placed, &text_objects, &resolved, height, &codes_in, &judged)?;
+            for (object, after) in &carried {
+                if after.iter().any(|op| seen.get(op).copied().unwrap_or(true)) {
+                    return Err(PdfError::InvalidArgument(format!(
+                        "object {object} cannot come off the page: a piece after it on its line that \
+                         draws something has nothing repositioning it, so it would move"
+                    )));
+                }
+            }
+        }
+        timing.push(("  of which taking pieces off", t_removals.elapsed()));
+        timing.push(("per_edit_loop_total", t_loop.elapsed()));
+        timing.push(("  of which reading the runs and their order", resolve_total));
+
+        // The document as these spans make it: the content stream spliced, packed
+        // and written out, with the font objects the batch added. Written twice
+        // when a line is to span a width (below), so it is a closure.
+        let write = |spans: &[(std::ops::Range<usize>, Vec<u8>)]| -> Result<(Vec<u8>, std::time::Duration, std::time::Duration)> {
+            let t = std::time::Instant::now();
+            let edited = content::splice(&stream, spans);
+            let mut replacements = Vec::new();
+            for (index, (number, dict)) in streams.iter().enumerate() {
+                let data = if index == 0 { edited.clone() } else { Vec::new() };
+                let packed = content::encode(&data)?;
+                let mut dict = dict.clone();
+                dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+                dict.remove(b"DecodeParms");
+                replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+            }
+            if let Some(patch) = &page_patch {
+                replacements.push(patch.clone());
+            }
+            let packed_in = t.elapsed();
+            let t = std::time::Instant::now();
+            let rewritten = Self::write_edit(&base, &file, &replacements, &extra)?;
+            Ok((rewritten, packed_in, t.elapsed()))
+        };
+
+        // ---- the lines that are to span a width
+        //
+        // **Written plain first, to a copy that is only read.** The width a line
+        // comes to depends on the font's glyph advances, on any `Tc` and `Tw`
+        // and `Tz` in force where it is drawn, and on where PDFium puts the right
+        // edge of the last glyph — and PDFium already knows all of it. So the whole
+        // batch is written as it is without the stretching, opened as a document
+        // of its own, and the retyped runs' boxes read from it; that copy is
+        // dropped, and `self` is given only the version with the gaps opened.
+        // Nothing here has touched `self`: a refusal leaves the page as it was.
+        if !stretches.is_empty() {
+            let t_stretch = std::time::Instant::now();
+            let (plain, _, _) = write(&spans)?;
+            let copy = Self::open_bytes(plain, None)?;
+            // The page's objects are numbered as the copy now has them: a piece
+            // taken off lowers the number of every object after it, and an edit
+            // replaces one operator with one.
+            let renumbered = |object: usize| object - removals.iter().filter(|r| **r < object).count();
+            let wanted_now: std::collections::HashSet<usize> = stretches.iter().map(|s| renumbered(s.object)).collect();
+            let measured: HashMap<usize, crate::document::TextRun> = copy
+                .text_runs_some(page_index, &wanted_now)?
+                .into_iter()
+                .map(|run| (run.object, run))
+                .collect();
+            for stretching in &stretches {
+                let run = measured.get(&renumbered(stretching.object)).ok_or_else(|| {
+                    PdfError::InvalidArgument("this line could not be measured, so it cannot be stretched to a width".into())
+                })?;
+                // The retyped run is where the original was: its origin is the
+                // operator's own, and the retype does not move it. If it is not,
+                // the numbers did not line up and what was measured is something else.
+                let was = &resolved[&stretching.object];
+                if (run.origin.x - was.origin.x).abs() > 0.05 || (run.origin.y - was.origin.y).abs() > 0.05 {
+                    return Err(PdfError::InvalidArgument(
+                        "this line could not be measured, so it cannot be stretched to a width".into(),
+                    ));
+                }
+                let plain_width = run.rect.right - run.rect.left;
+                if !(plain_width.is_finite() && plain_width > 0.0) {
+                    return Err(PdfError::InvalidArgument(
+                        "this line has no width to measure, so it cannot be stretched to a width".into(),
+                    ));
+                }
+                spans[stretching.span].1 = stretching.spread(&operations[stretching.operation], plain_width)?;
+            }
+            timing.push(("  of which measuring the lines to stretch", t_stretch.elapsed()));
+        }
+
+        let (rewritten, packed_in, written_in) = write(&spans)?;
+        timing.push(("splice_and_pack", packed_in));
+        timing.push(("write_edit", written_in));
+
+        let t = std::time::Instant::now();
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)?;
+        timing.push(("adopt_edit", t.elapsed()));
+
+        self.substituted = face_written;
+        self.last_batch_timing = timing;
+        Ok(results)
+    }
+
+    /// [`DocumentMut::replace_text_lines`] for a batch in which more than one line
+    /// needs a new font embedded: each first piece is written on its own, as
+    /// [`DocumentMut::set_text_run_styled`] writes it, and then every piece to
+    /// remove comes off in one pass.
+    ///
+    /// **Atomic all the same**, by a copy of the page taken first and put back on
+    /// any failure — which is what the one-line-at-a-time fallback of
+    /// `set_text_runs_styled` does not have, and could not have here, where the
+    /// removal would be left undone. No object is renumbered by the writes (each
+    /// replaces one show-text operator with one), so the objects to remove are
+    /// still the ones that were asked for when their turn comes.
+    fn replace_text_lines_one_at_a_time(
+        &mut self,
+        page_index: usize,
+        requests: &[(usize, &str, Option<&str>, Option<f32>, Option<crate::document::Color>)],
+        removals: &[usize],
+        stretch: &HashMap<usize, f32>,
+    ) -> Result<()> {
+        let page = self.snapshot_page(page_index)?;
+        let outcome = (|| -> Result<()> {
+            for &(first, text, face, size, _) in requests {
+                // A line that is to be stretched is written the way the batch
+                // writes it, as a batch of one: that is where the stretching is.
+                if let Some(width) = stretch.get(&first) {
+                    self.set_runs_in_stream(
+                        page_index,
+                        &[(first, text, face, size, None)],
+                        &[],
+                        &HashMap::from([(first, *width)]),
+                    )?;
+                    continue;
+                }
+                let style = crate::document::TextStyle { face: face.map(str::to_string), size, ..Default::default() };
+                self.set_text_run_styled(page_index, first, text, &style)?;
+            }
+            if !removals.is_empty() {
+                self.set_runs_in_stream(page_index, &[], removals, &HashMap::new())?;
+            }
+            Ok(())
+        })();
+        if let Err(first) = &outcome {
+            if let Err(restore) = self.delete_page(page_index).and_then(|_| self.insert_page(page_index, page)) {
+                return Err(PdfError::Pdfium(format!("{first}; and the page could not be put back: {restore}")));
+            }
+        }
+        outcome
+    }
+
+    /// For each of these show-text operations, whether the object that drew it
+    /// draws something (`true`) or nothing ([`draws_nothing`]).
+    ///
+    /// **`true` wherever it cannot be told**: moving something that is seen is the
+    /// one thing taking a piece out must not do unawares, so an operation that
+    /// does not lead to its object through the verified count — [`placed_by_order`],
+    /// held to the stream like every other use of it — is judged to draw
+    /// something. `known` are runs already read; the others are read together, in
+    /// one page open.
+    #[allow(clippy::too_many_arguments)]
+    fn draws_something(
+        &self,
+        page_index: usize,
+        operations: &[crate::pdf::content::Operation],
+        placed: &[crate::pdf::content::Placed],
+        text_objects: &[usize],
+        known: &HashMap<usize, crate::document::TextRun>,
+        height: f32,
+        codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
+        wanted: &[usize],
+    ) -> Result<HashMap<usize, bool>> {
+        let mut out: HashMap<usize, bool> = wanted.iter().map(|op| (*op, true)).collect();
+        // The count is the only way from an operation to its object, and only
+        // where it holds for the page.
+        if text_objects.len() != placed.len() {
+            return Ok(out);
+        }
+        let ordinal_of: HashMap<usize, usize> =
+            placed.iter().enumerate().map(|(k, p)| (p.origin.operation, k)).collect();
+        // (operation, its place among the show-text operators, its object)
+        let mut judged: Vec<(usize, usize, usize)> = Vec::new();
+        for &op in wanted {
+            if let Some(&k) = ordinal_of.get(&op) {
+                judged.push((op, k, text_objects[k]));
+            }
+        }
+        let missing: std::collections::HashSet<usize> =
+            judged.iter().map(|j| j.2).filter(|o| !known.contains_key(o)).collect();
+        let fetched: HashMap<usize, crate::document::TextRun> = if missing.is_empty() {
+            HashMap::new()
+        } else {
+            self.text_runs_some(page_index, &missing)?.into_iter().map(|r| (r.object, r)).collect()
+        };
+        for (op, k, object) in judged {
+            let Some(run) = known.get(&object).or_else(|| fetched.get(&object)) else { continue };
+            let agreed = placed_by_order(run, height, placed, Some((k, text_objects.len())), codes_in)
+                .is_some_and(|p| p.origin.operation == op);
+            if agreed {
+                out.insert(op, !draws_nothing(run, render_mode_before(operations, op)));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The show-text operator that drew `run`: **by the verified count** where
+    /// the stream bears it out ([`placed_by_order`]), then by position, then by
+    /// counting against every run of the page. `run_list` is that every-run list,
+    /// read the first time it is needed and kept by the caller for the rest of a
+    /// batch.
+    fn operator_of<'a>(
+        &self,
+        page_index: usize,
+        run: &crate::document::TextRun,
+        height: f32,
+        placed: &'a [crate::pdf::content::Placed],
+        order: Option<(usize, usize)>,
+        codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
+        run_list: &mut Option<Vec<crate::document::TextRun>>,
+    ) -> Result<&'a crate::pdf::content::Placed> {
+        let (want_x, want_y) = (run.origin.x, height - run.origin.y);
+        if let Some(found) = placed_by_order(run, height, placed, order, codes_in)
+            .or_else(|| nearest_placed(placed, want_x, want_y).map(|(at, _)| &placed[at]))
+        {
+            return Ok(found);
+        }
+        // **Where it is drawn is not always where the walk thinks.** The text
+        // matrix advances by the width of whatever was just shown, and working
+        // that out needs the font's glyph widths, which the walk does not have,
+        // so a piece that continues another is reported at the first one's
+        // origin. Counting is the way out — but only where the page has *shown*
+        // that counting works. See `placed_in_order`.
+        if run_list.is_none() {
+            *run_list = Some(self.text_runs_all(page_index)?);
+        }
+        let run_list = run_list.as_deref().unwrap_or_default();
+        let index = run_list
+            .iter()
+            .position(|r| r.object == run.object)
+            .ok_or(PdfError::Unsupported("that is not a text run"))?;
+        placed_in_order(run_list, placed, height, index)
+            .ok_or(PdfError::Unsupported("that text is drawn in a way this cannot edit"))
+    }
+
     /// Change a run's fill colour without letting PDFium anywhere near the
     /// page's own content.
     ///
@@ -7795,7 +9452,7 @@ fn font_to_unicode(
     ) -> Result<crate::document::Color> {
         use crate::pdf::content;
 
-        let run_list = self.text_runs(page_index)?;
+        let run_list = self.text_runs_all(page_index)?;
         let run = run_list
             .iter()
             .find(|r| r.object == object)
@@ -7816,12 +9473,17 @@ fn font_to_unicode(
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
 
-        // Same baseline-origin lookup `set_run_in_stream` uses, and the same
-        // ordered fallback for a second `Tj` on one line — see its own doc
-        // for why either is needed.
+        // The same lookup `set_run_in_stream` uses — by count where the stream
+        // bears it out, then by position, then by counting against every run —
+        // see its own doc for why each is needed.
         let (want_x, want_y) = (run.origin.x, height - run.origin.y);
-        let found = match nearest_placed(&placed, want_x, want_y) {
-            Some((at, _)) => &placed[at],
+        let fonts = self.page_fonts(&file, &page);
+        let order = self.text_order(page_index, object);
+        let codes_in = |p: &content::Placed| codes_drawn(&file, fonts.as_ref(), &operations, p);
+        let found = match placed_by_order(&run, height, &placed, order, &codes_in)
+            .or_else(|| nearest_placed(&placed, want_x, want_y).map(|(at, _)| &placed[at]))
+        {
+            Some(found) => found,
             None => {
                 let index = run_list
                     .iter()
@@ -7833,20 +9495,14 @@ fn font_to_unicode(
             }
         };
 
-        fn rg(c: crate::document::Color) -> String {
-            format!("{:.3} {:.3} {:.3} rg", c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0)
-        }
-
-        let operation = &operations[found.origin.operation];
-        let mut replacement = rg(color).into_bytes();
-        replacement.push(b'\n');
-        replacement.extend_from_slice(&stream[operation.span.clone()]);
         // Put the page's own colour back. Colour is graphics state exactly
         // like the font `set_run_in_stream` restores after a swap: it stays
         // selected until something changes it again, so anything drawn
         // after this in the same text object would otherwise come out in
-        // this run's new colour too.
-        replacement.extend_from_slice(format!("\n{}", rg(previous)).as_bytes());
+        // this run's new colour too. The stream's own colour operators, not a
+        // stand-in for what PDFium read — see `fill_before`.
+        let replacement = drawn_in_colour(&stream, &operations, found.origin.operation, color);
+        let operation = &operations[found.origin.operation];
 
         let edited = content::splice(&stream, &[(operation.span.clone(), replacement)]);
 
@@ -8922,6 +10578,148 @@ fn placed_in_order<'a>(
     (confirmed * 2 >= runs.len()).then(|| &placed[wanted])
 }
 
+/// A retyped line that is to span a width, with what it takes to write it again
+/// once the width of its plain version is known — see
+/// [`PdfiumDocument::set_runs_in_stream`]'s `stretch`.
+///
+/// **How a line is spread.** The words of a justified line are spaced apart to
+/// fill it, and retyping it writes plain words that come out a few points short.
+/// What put the producer's spacing there is gone; what puts it back is a `TJ`
+/// spacing number after each of the line's gaps — the spaces between its first
+/// and last letters, or, for a line of one word, the places between its letters.
+/// All the gaps get the same share of the difference, as a word-spacing
+/// operator would give them, and **a `TJ` number belongs to the operator it is
+/// written in**: nothing is left in force for the lines after it, which `Tw`
+/// and `Tc` (graphics state, to be set and set back) would need — and a
+/// composite font has no single-byte space for `Tw` to find.
+struct Stretch {
+    /// Where its replacement sits in the batch's spans.
+    span: usize,
+    /// The run (its object number before the edit) and the width, in points from
+    /// its left origin, that it is to span.
+    object: usize,
+    target: f32,
+    /// The operator it is written into (an index into the stream's operations),
+    /// the codes of it that the new words replace, and the new words as codes and
+    /// as text — one code to a character, `encoded.len() / text.chars().count()`
+    /// bytes each.
+    operation: usize,
+    range: std::ops::Range<usize>,
+    encoded: Vec<u8>,
+    text: String,
+    /// The font resource it is drawn in, the `Tf` size it is drawn at and the
+    /// width in bytes of a code of the operator's own font.
+    drawing: Vec<u8>,
+    size: f32,
+    width: usize,
+    /// What follows the operator to put the page's own `Tf` back, and what goes
+    /// before it to say a quote operator's move to the next line.
+    after: Vec<u8>,
+    before: Vec<u8>,
+    /// How many points one `TJ` number of 1 moves the pen along the line: the
+    /// size, the magnification of the text matrix and the page's transform, and
+    /// the horizontal scaling, over a thousand.
+    points_per_unit: f32,
+}
+
+impl Stretch {
+    /// The operator's replacement for a line whose plain version is `plain_width`
+    /// points wide, written so that it comes out [`Self::target`] wide.
+    ///
+    /// Refused — with `InvalidArgument`, and nothing written — when the gaps
+    /// would have to close until the words touch (a line far too long for the
+    /// width, a third of an em a gap and more), when a single word would have to
+    /// open beyond what a word can bear (more than a third of an em between
+    /// letters), and when the line is of a single character, which has no gap at
+    /// all.
+    fn spread(&self, operation: &crate::pdf::content::Operation, plain_width: f32) -> Result<Vec<u8>> {
+        use crate::pdf::content::{self, Piece};
+
+        let delta = self.target - plain_width;
+        let chars: Vec<char> = self.text.chars().collect();
+        // Which gaps the difference is shared among: the characters after which
+        // a spacing number goes.
+        let first = chars.iter().position(|c| *c != ' ');
+        let last = chars.iter().rposition(|c| *c != ' ');
+        let gaps: Vec<usize> = match (first, last) {
+            (Some(first), Some(last)) => {
+                let spaces: Vec<usize> = (first + 1..last).filter(|j| chars[*j] == ' ').collect();
+                if spaces.is_empty() { (first..last).collect() } else { spaces }
+            }
+            _ => Vec::new(),
+        };
+        let between_words = gaps.first().is_some_and(|j| chars[*j] == ' ');
+        let em = self.points_per_unit * 1000.0;
+
+        // Where the plain line already spans the width, to a hundredth of a
+        // point, it is written as it is.
+        let kern = if delta.abs() < 0.005 {
+            0.0
+        } else {
+            if gaps.is_empty() {
+                return Err(PdfError::InvalidArgument(
+                    "a line of one character has no gap to open, so it cannot be stretched to a width".into(),
+                ));
+            }
+            let each = delta / gaps.len() as f32;
+            if between_words && each < -0.35 * em {
+                return Err(PdfError::InvalidArgument(format!(
+                    "this line is {:.1} pt wider than the {:.1} pt it is to fit, and closing its {} gaps by that much \
+                     would put its words on top of each other",
+                    -delta, self.target, gaps.len()
+                )));
+            }
+            if !between_words && (each < -0.1 * em || each > 0.35 * em) {
+                return Err(PdfError::InvalidArgument(format!(
+                    "this line is a single word, {:.1} pt wide, and cannot be spread to {:.1} pt without pulling its \
+                     letters apart or onto each other",
+                    plain_width, self.target
+                )));
+            }
+            -each / self.points_per_unit
+        };
+
+        let per_char = if chars.is_empty() { 0 } else { self.encoded.len() / chars.len() };
+        if chars.is_empty() || per_char == 0 || per_char * chars.len() != self.encoded.len() {
+            return Err(PdfError::InvalidArgument(
+                "this line's codes cannot be told from its characters, so it cannot be stretched to a width".into(),
+            ));
+        }
+        let mut pieces: Vec<Piece> = Vec::new();
+        let mut run: Vec<u8> = Vec::new();
+        for (j, bytes) in self.encoded.chunks(per_char).enumerate() {
+            run.extend_from_slice(bytes);
+            if kern != 0.0 && gaps.binary_search(&j).is_ok() {
+                pieces.push(Piece::Codes(std::mem::take(&mut run)));
+                pieces.push(Piece::Kern(kern));
+            }
+        }
+        if !run.is_empty() {
+            pieces.push(Piece::Codes(run));
+        }
+
+        let mut replacement =
+            content::replacing_pieces(operation, self.range.clone(), &pieces, &self.drawing, self.size, self.width);
+        replacement.extend_from_slice(&self.after);
+        if !self.before.is_empty() {
+            replacement = [self.before.as_slice(), b"\n", replacement.as_slice()].concat();
+        }
+        Ok(replacement)
+    }
+}
+
+/// Whether a font writes top to bottom: a composite font with a vertical CMap
+/// (`Identity-V`, or any other ending in `-V`). A `TJ` number in one moves the
+/// pen *down* the line, so a box's width says nothing about how far it has been
+/// spread.
+fn font_is_vertical(file: &crate::pdf::File<'_>, fonts: &crate::pdf::Dict, name: &[u8]) -> bool {
+    use crate::pdf::Object;
+    let Some(font) = fonts.get(name).and_then(|f| file.resolve(f).ok()) else { return false };
+    let Some(dict) = font.as_dict() else { return false };
+    dict.get(b"Subtype").and_then(Object::as_name) == Some(b"Type0")
+        && dict.get(b"Encoding").and_then(Object::as_name).is_some_and(|n| n.ends_with(b"-V"))
+}
+
 /// A run written in a font that is not the one it was drawn in.
 struct Swapped {
     /// The resource name to select, without the slash.
@@ -9616,6 +11414,7 @@ fn run_operators(
     placed: &[crate::pdf::content::Placed],
     operations: &[crate::pdf::content::Operation],
     codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
+    order: Option<(usize, usize)>,
 ) -> Result<(usize, usize, bool)> {
     const NEAR: f32 = 4.0;
     // **The baseline origin, not the box's corner.** The box's bottom sits a
@@ -9624,6 +11423,38 @@ fn run_operators(
     // line matched nothing. `TextRun::origin` is read from the text object's
     // own matrix and is exactly what `content::placed` computes.
     let (want_x, want_y) = (run.origin.x, page_height - run.origin.y);
+
+    // **By count first, where the page proves it can be — as a picture and a
+    // shape already are.** Reported from use: Edit Object refusing to delete a
+    // word — "those words are drawn in a way this cannot follow". On the page
+    // it was reported from, a third of the text could not be found by position,
+    // and a measurable share of the rest was found *wrongly*.
+    //
+    // The cause is that `content::placed` reports where the last positioning
+    // operator put the pen, not where the pen is — it cannot know how far the
+    // glyphs advanced — so every show-text operator after the first in a line
+    // is reported at the line's start. A run drawn as several pieces
+    // (a hyphenated line's last syllable, a word set in its own fragment) is
+    // therefore found nowhere, or, if the piece before it is only a few points
+    // wide, found *at that piece*: measured, deleting "y repre-" deleted the
+    // "il" before it.
+    //
+    // PDFium makes one text object per show-text operator, in the order the
+    // stream draws them. So where there are as many of each, the *n*th object
+    // is the *n*th operator — and that is checked against the stream before it
+    // is trusted, rather than assumed (see [`order_agrees`]). Checked on the
+    // page above: all 3,765 of its text objects agree, geometry and words, and
+    // none disagrees.
+    //
+    // Anything that does not check out falls through to the position match
+    // below, exactly as before.
+    let by_order = placed_by_order(run, page_height, placed, order, codes_in);
+    if let Some(start) = by_order {
+        // One text object is one operator: there is nothing after it to collect.
+        let at = start.origin.operation;
+        return Ok((at, at, continues_after(operations, at)));
+    }
+
     let start = placed
         .iter()
         .map(|p| {
@@ -9684,26 +11515,282 @@ fn run_operators(
         }
     }
 
-    // **Does anything go on drawing this line?** The scan walks past the
-    // operators that do not move the pen — `Tf`, a colour, a `gs` — and looks
-    // at the first one that does. A show-text operator reached that way
-    // continues this very line, and where the pen leaves off is decided by the
-    // advance of the glyphs in between.
-    let mut continues = false;
+    Ok((first, last, continues_after(operations, last)))
+}
+
+/// **Does anything go on drawing this line?** The scan walks past the operators
+/// that do not move the pen — `Tf`, a colour, a `gs` — and looks at the first
+/// one that does. A show-text operator reached that way continues this very
+/// line, and where the pen leaves off is decided by the advance of the glyphs in
+/// between.
+fn continues_after(operations: &[crate::pdf::content::Operation], last: usize) -> bool {
     for operation in operations.iter().skip(last + 1) {
         if matches!(
             operation.operator.as_slice(),
             b"Tm" | b"Td" | b"TD" | b"T*" | b"ET" | b"BT"
         ) {
-            break;
+            return false;
         }
         if operation.shows_text() {
-            continues = true;
-            break;
+            return true;
         }
     }
+    false
+}
 
-    Ok((first, last, continues))
+/// Whether the operator found for a run *by count* is plausibly the one that
+/// drew it — the check that stops "the *n*th object is the *n*th operator" being
+/// taken on faith.
+///
+/// Two things, both read from the stream and neither from the count:
+///
+/// - **Where.** The run starts where the operator's own positioning put the
+///   pen, or further along that same line in the direction the text runs — a
+///   continuation is drawn *after* the pen advanced. Never a different line, and
+///   never behind it. A point off the baseline by more than a couple of points
+///   is another line's.
+/// - **How much.** The operator draws at least as many codes as the run has
+///   characters, less the one PDFium appends to some runs. *At least*, not
+///   *exactly*: a run of spaces is one space in PDFium's text and as many codes
+///   as the font drew — measured, `"        900mA"` read as `" 900mA"`, and an
+///   exact match refused the right operator for it. A run PDFium extracted no
+///   characters for (a font with no character map) is not held to it at all.
+fn order_agrees(
+    run: &crate::document::TextRun,
+    operator: &crate::pdf::content::Placed,
+    want_x: f32,
+    want_y: f32,
+    codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
+) -> bool {
+    let (dx, dy) = (want_x - operator.origin.x, want_y - operator.origin.y);
+    let (ux, uy) = operator.axis;
+    let along = dx * ux + dy * uy;
+    let across = (dx * uy - dy * ux).abs();
+    if along < -0.5 || across > 2.0 {
+        return false;
+    }
+    let characters = run.text.chars().count();
+    characters == 0 || codes_in(operator) + 1 >= characters
+}
+
+/// **The operator the stream confirms drew this run, found by count.**
+///
+/// PDFium makes one text object per show-text operator, in the order the stream
+/// draws them, so where there are as many of each the *n*th object is the *n*th
+/// operator. Unlike a lookup by position that finds a piece which continues the
+/// one before it, whose operator has no position of its own — and which, where
+/// the piece before it is narrow, finds *that* one instead, and edits the wrong
+/// word without a sign of it.
+///
+/// Never taken on faith: [`order_agrees`] holds the operator to the stream.
+/// `None` where the counts differ, where the object is not one of the page's
+/// text objects, or where the stream does not agree — the caller has the
+/// position match left to try. `order` is `(which text object this is, how many
+/// the page has)`, counting **every** text object, whatever it draws: a lone thin
+/// letter has a place in the order like any other.
+fn placed_by_order<'a>(
+    run: &crate::document::TextRun,
+    page_height: f32,
+    placed: &'a [crate::pdf::content::Placed],
+    order: Option<(usize, usize)>,
+    codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
+) -> Option<&'a crate::pdf::content::Placed> {
+    let (want_x, want_y) = (run.origin.x, page_height - run.origin.y);
+    order
+        .filter(|&(_, total)| total == placed.len())
+        .and_then(|(which, _)| placed.get(which))
+        .filter(|p| order_agrees(run, p, want_x, want_y, codes_in))
+}
+
+/// How many codes a show-text operator draws, by the width its font gives them —
+/// the length [`order_agrees`] holds an operator to.
+fn codes_drawn(
+    file: &crate::pdf::File<'_>,
+    fonts: Option<&crate::pdf::Dict>,
+    operations: &[crate::pdf::content::Operation],
+    operator: &crate::pdf::content::Placed,
+) -> usize {
+    use crate::pdf::content;
+    let width = operator
+        .font
+        .as_ref()
+        .zip(fonts)
+        .and_then(|(name, dict)| code_width(file, dict, name))
+        .unwrap_or(1)
+        .max(1);
+    content::pieces(&operations[operator.origin.operation])
+        .iter()
+        .map(|piece| match piece {
+            content::Piece::Codes(bytes) => bytes.len() / width,
+            content::Piece::Kern(_) => 0,
+        })
+        .sum()
+}
+
+/// What puts the fill colour back **as the stream had it** after operation `at`:
+/// the very operators that set it, copied from the stream, not a stand-in made
+/// from the colour PDFium reports.
+///
+/// A `rg` for what PDFium read is not the same state as the CMYK black the stream
+/// set: everything after that draws in the inherited colour would draw in a
+/// DeviceRGB stand-in for it. So the stream is read back from `at`, as far as the
+/// state goes:
+///
+/// - the nearest `g`, `rg` or `k` — or `cs`, which also names the space — is the
+///   whole of it, with the nearest `sc` or `scn` after it when there was one;
+/// - a `q` … `Q` block that closed before `at` is not in force, so what was set
+///   inside it is stepped over; one that is still open is, and what was set
+///   before it still holds;
+/// - where nothing set a colour, it is the page's own initial one, black in
+///   DeviceGray, and `0 g` puts it back.
+///
+/// Only the fill colour: that is the one text is drawn in. Backwards from `at`
+/// every time rather than carried forward through the stream: a batch hides a
+/// few dozen pieces, and a walk back stops at the nearest colour.
+fn fill_before(
+    stream: &[u8],
+    operations: &[crate::pdf::content::Operation],
+    at: usize,
+) -> Vec<u8> {
+    let mut closed = 0usize;
+    let mut value: Option<usize> = None;
+    for index in (0..at).rev() {
+        match operations[index].operator.as_slice() {
+            b"Q" => closed += 1,
+            b"q" => closed = closed.saturating_sub(1),
+            b"g" | b"rg" | b"k" | b"cs" if closed == 0 => {
+                let mut put = stream[operations[index].span.clone()].to_vec();
+                if let Some(v) = value {
+                    put.push(b'\n');
+                    put.extend_from_slice(&stream[operations[v].span.clone()]);
+                }
+                return put;
+            }
+            b"sc" | b"scn" if closed == 0 && value.is_none() => value = Some(index),
+            _ => {}
+        }
+    }
+    match value {
+        Some(v) => stream[operations[v].span.clone()].to_vec(),
+        None => b"0 g".to_vec(),
+    }
+}
+
+/// Operation `at` — a show-text operator — drawn in `colour`, with the fill
+/// colour put back exactly as it was ([`fill_before`]) so nothing drawn after it
+/// is touched. Colour operators are legal inside a text object, which `q` and `Q`
+/// are not.
+fn drawn_in_colour(
+    stream: &[u8],
+    operations: &[crate::pdf::content::Operation],
+    at: usize,
+    colour: crate::document::Color,
+) -> Vec<u8> {
+    let part = |v: u8| f32::from(v) / 255.0;
+    let mut out =
+        format!("{:.3} {:.3} {:.3} rg\n", part(colour.r), part(colour.g), part(colour.b)).into_bytes();
+    out.extend_from_slice(&stream[operations[at].span.clone()]);
+    out.push(b'\n');
+    out.extend(fill_before(stream, operations, at));
+    out
+}
+
+/// What is left of a show-text operator once it shows nothing.
+///
+/// `Tj` and `TJ` leave nothing: they draw and advance the pen. The quote
+/// operators do more — `'` moves to the next line first, and `"` also sets the
+/// word and character spacing — and the lines after one are placed from where it
+/// left the line matrix. Cut out whole, it would pull every line after it up one
+/// line, so what it leaves is `T*`, with the `Tw` and `Tc` a `"` set.
+///
+/// `Unsupported` when a `"` carries operands that are not numbers: it cannot be
+/// written back, and guessing would move the page.
+fn quote_effect(operation: &crate::pdf::content::Operation) -> Result<Vec<u8>> {
+    match operation.operator.as_slice() {
+        b"'" => Ok(b"T*".to_vec()),
+        b"\"" => {
+            let numbers: Option<Vec<f64>> = operation
+                .operands
+                .iter()
+                .rev()
+                .skip(1)
+                .take(2)
+                .map(|o| o.as_f64())
+                .collect();
+            let [ac, aw] = numbers.as_deref().unwrap_or_default() else {
+                return Err(PdfError::Unsupported("that text is drawn by a quote operator this cannot read"));
+            };
+            let mut out = number_operand(*aw as f32)?;
+            out.extend_from_slice(b" Tw\n");
+            out.extend(number_operand(*ac as f32)?);
+            out.extend_from_slice(b" Tc\nT*");
+            Ok(out)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// The text rendering mode in force at operation `at`: that of the nearest `Tr`
+/// before it that is still in force (not inside a `q`..`Q` block that closed),
+/// or `0` — fill — where none was set. Modes 4 to 7 add what is drawn to the
+/// clipping path, which is why taking such text out changes more than the text.
+fn render_mode_before(operations: &[crate::pdf::content::Operation], at: usize) -> i64 {
+    let mut closed = 0usize;
+    for index in (0..at).rev() {
+        match operations[index].operator.as_slice() {
+            b"Q" => closed += 1,
+            b"q" => closed = closed.saturating_sub(1),
+            b"Tr" if closed == 0 => {
+                return operations[index].operands.last().and_then(|o| o.as_f64()).map_or(0, |v| v as i64);
+            }
+            _ => {}
+        }
+    }
+    0
+}
+
+/// The show-text operators that stay and that the pen carries on to from
+/// show-text operation `at` — the ones taking `at` out would move.
+///
+/// A piece drawn with nothing repositioning before it starts where the piece
+/// before it *ended*, so cutting that one out moves it. What places a piece of
+/// its own is a `Tm`, `Td`, `TD` or `T*`, a new text object (`BT`, `ET`), or a
+/// `'` or `"`, which move to the next line before they draw: the walk stops at
+/// the first of those. Pieces that are being taken out too (`removed`) are not
+/// carried, but do not stop it either — what follows them is moved as well.
+///
+/// Whether moving one matters is another question: see [`draws_nothing`].
+fn carried_after_removal(
+    operations: &[crate::pdf::content::Operation],
+    at: usize,
+    removed: &std::collections::HashSet<usize>,
+) -> Vec<usize> {
+    let mut carried = Vec::new();
+    for (index, operation) in operations.iter().enumerate().skip(at + 1) {
+        match operation.operator.as_slice() {
+            b"Tm" | b"Td" | b"TD" | b"T*" | b"BT" | b"ET" | b"'" | b"\"" => break,
+            b"Tj" | b"TJ" if !removed.contains(&index) => carried.push(index),
+            _ => {}
+        }
+    }
+    carried
+}
+
+/// Whether a text object draws nothing — so that moving it moves no pixel.
+///
+/// A space is the usual case: Illustrator writes one as a `( ) Tj` of its own
+/// between the pieces of a line; it advances the pen like any other piece and has
+/// no ink, so PDFium reports it with no text and a box with no height — and no
+/// width either when it is a zero-width one, though a justified line's space is
+/// measured 16 pt wide and 0 tall. Not the same as an object with *little* area:
+/// a lone `l` in a light face is 0.4 pt wide and a hyphen 0.4 pt tall, and both
+/// are there to be seen. So: a side of no length (under a hundredth of a point),
+/// since ink has both, or drawn invisibly (render mode 3), or fully transparent.
+fn draws_nothing(run: &crate::document::TextRun, render_mode: i64) -> bool {
+    render_mode == 3
+        || run.color.a == 0
+        || (run.rect.right - run.rect.left).abs() < 0.01
+        || (run.rect.bottom - run.rect.top).abs() < 0.01
 }
 
 /// One PDF number, refusing anything that cannot be written as one.
@@ -13291,7 +15378,11 @@ fn close_trailing_xref_object(bytes: Vec<u8>) -> Vec<u8> {
     // an offset that holds an object no reader will accept as a table, and qpdf
     // reports `xref not found` at exactly the right offset.
     if let Some(dict) = trailing_dictionary_start(&bytes) {
-        if !contains(&bytes[dict..], b"/Type") {
+        // Asked of the dictionary alone: from its `<<` to the `stream` keyword
+        // that follows it, never the binary table after that, where the bytes
+        // `/Type` could turn up by chance.
+        let dictionary_end = bytes[dict..].windows(6).position(|w| w == b"stream").map_or(dict, |n| dict + n);
+        if !contains(&bytes[dict..dictionary_end], b"/Type") {
             let mut typed = Vec::with_capacity(bytes.len() + 12);
             typed.extend_from_slice(&bytes[..dict]);
             typed.extend_from_slice(b"/Type/XRef");
@@ -13311,10 +15402,30 @@ fn close_trailing_xref_object(bytes: Vec<u8>) -> Vec<u8> {
 /// before the insertion — and every offset the table itself holds points at
 /// objects earlier in the file. Nothing that is pointed at moves.
 fn trailing_dictionary_start(bytes: &[u8]) -> Option<usize> {
+    // **Found by following `startxref` to the object, never by searching
+    // backwards for `<<`.** Reported from use: a saved file that would not open
+    // again ("pdfium error: PdfiumLibraryInternalError(Unknown)"). The search
+    // that used to be here started from the last `stream` before `startxref` —
+    // which is the one inside `endstream`, at the *end* of the cross-reference
+    // table's binary data — and took the nearest `<<` before it. A table of
+    // four-byte offsets is a few thousand bytes of arbitrary numbers, and two
+    // `<` bytes in a row turn up in it by chance (the offsets 0x3C3C00.. — a
+    // file of about four megabytes on), so `/Type/XRef` was written INTO the
+    // table: ten bytes more than its `/Length` said, and the file no longer
+    // opened. Whether a save did that depended on the numbers in the file.
     let startxref = find_last(bytes, b"startxref")?;
-    let stream = find_last(&bytes[..startxref], b"stream")?;
-    let open = find_last(&bytes[..stream], b"<<")?;
-    Some(open + 2)
+    let digits: Vec<u8> = bytes[startxref + b"startxref".len()..]
+        .iter()
+        .copied()
+        .skip_while(|b| b.is_ascii_whitespace())
+        .take_while(u8::is_ascii_digit)
+        .collect();
+    let offset = std::str::from_utf8(&digits).ok()?.parse::<usize>().ok()?;
+    // `169 0 obj <<`: the dictionary opens within a few bytes of the header.
+    let header = bytes.get(offset..)?;
+    let header = &header[..header.len().min(64)];
+    let open = header.windows(2).position(|w| w == b"<<")?;
+    Some(offset + open + 2)
 }
 
 fn find_last(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -13413,6 +15524,42 @@ startxref
             text.contains("/Size 5"),
             "the rest of the dictionary survives: {text}"
         );
+    }
+
+    /// **Reported from use: a document that could not be opened again after a
+    /// save.** The table's binary data holds two `<` bytes in a row, as a table
+    /// of offsets sometimes does; the repair put `/Type/XRef` there, in the data,
+    /// instead of in the dictionary. The data must come through byte for byte,
+    /// the type must land in the dictionary, and `/Length` must still be true.
+    #[test]
+    fn a_table_whose_data_contains_two_angle_brackets_is_not_written_into() {
+        // Four-byte offsets, as a real table has them: ...3C 3C... in the middle,
+        // and the bytes "stream" and "/Type" appearing in it for good measure.
+        let data: Vec<u8> = [&[0u8, 0, 0x12, 0x34, 1][..], &[0, 0x3C, 0x3C, 0x00, 1], b"/Type\0stream\0", &[0, 0, 0x55, 0x66, 1]].concat();
+        let header = b"169 0 obj <</Info 3 0 R/Size 170/Prev 9/W[0 4 1]/Length ";
+        let mut file = Vec::new();
+        file.extend_from_slice(b"%PDF-1.7\n");
+        let obj = file.len();
+        file.extend_from_slice(header);
+        file.extend_from_slice(data.len().to_string().as_bytes());
+        file.extend_from_slice(b">>stream\r\n");
+        file.extend_from_slice(&data);
+        file.extend_from_slice(b"\r\nendstream\nstartxref\r\n");
+        file.extend_from_slice(obj.to_string().as_bytes());
+        file.extend_from_slice(b"\r\n%%EOF\r\n");
+
+        let fixed = close_trailing_xref_object(file);
+        let text = String::from_utf8_lossy(&fixed).into_owned();
+
+        // The table's bytes are exactly what they were, and `/Length` still
+        // names exactly them.
+        let data_at = fixed.windows(data.len()).position(|w| w == &data[..]).expect("the table's data was altered");
+        assert_eq!(&fixed[data_at - 2..data_at], b"\r\n");
+        assert!(text.contains(&format!("/Length {}>>stream", data.len())), "{text}");
+        // The type went where it belongs.
+        let at = text.find("/Type/XRef").expect("no /Type/XRef at all");
+        assert!(at < data_at, "/Type/XRef was written after the dictionary, at {at}: {text}");
+        assert_eq!(text.matches("/Type/XRef").count(), 1);
     }
 
     #[test]
@@ -13855,6 +16002,7 @@ mod order_tests {
             size: 10.0,
             line: at,
             scale: 1.0,
+            axis: (1.0, 0.0),
         }
     }
 
@@ -13908,6 +16056,316 @@ mod order_tests {
         let runs = vec![run(0, 100.0, 100.0)];
         let ops = vec![placed(0, 100.0, 100.0)];
         assert!(placed_in_order(&runs, &ops, HEIGHT, 7).is_none());
+    }
+
+    // -- the operator found by count is checked against the stream -------------
+
+    /// A run's origin is `(x, y - 1)` in these tests, in top-left coordinates —
+    /// `HEIGHT - that` in the stream's own — and its text is `words` (five
+    /// characters).
+    fn agrees(operator: &Placed, run_x: f32, run_y: f32, codes: usize) -> bool {
+        let mut r = run(0, run_x, run_y);
+        r.text = "words".into();
+        super::order_agrees(&r, operator, r.origin.x, HEIGHT - r.origin.y, &|_| codes)
+    }
+
+    /// The run starts where the operator's own positioning put the pen.
+    #[test]
+    fn an_operator_at_the_runs_own_origin_with_the_right_length_agrees() {
+        assert!(agrees(&placed(0, 100.0, 100.0), 100.0, 100.0, 5));
+    }
+
+    /// Or further along the same line — a continuation is drawn after the pen
+    /// advanced, and the walk has no way to know by how much.
+    #[test]
+    fn a_continuation_further_along_the_same_line_agrees() {
+        assert!(agrees(&placed(0, 100.0, 100.0), 160.0, 100.0, 5));
+    }
+
+    /// Never another line, and never behind the pen.
+    #[test]
+    fn another_line_or_a_place_behind_the_operator_does_not() {
+        assert!(!agrees(&placed(0, 100.0, 100.0), 160.0, 112.0, 5), "a line below");
+        assert!(!agrees(&placed(0, 100.0, 100.0), 90.0, 100.0, 5), "behind the pen");
+    }
+
+    /// An operator that draws *fewer* codes than the run has characters is
+    /// another operator — less the one PDFium sometimes appends. More is fine:
+    /// a run of spaces is one in PDFium's text and however many the font drew.
+    #[test]
+    fn an_operator_drawing_too_little_for_the_run_does_not() {
+        let at = placed(0, 100.0, 100.0);
+        assert!(agrees(&at, 100.0, 100.0, 5), "exactly as many");
+        assert!(agrees(&at, 100.0, 100.0, 4), "one less: the space PDFium adds");
+        assert!(agrees(&at, 100.0, 100.0, 13), "more: collapsed spaces");
+        assert!(!agrees(&at, 100.0, 100.0, 3), "two less is another operator");
+        assert!(!agrees(&at, 100.0, 100.0, 1));
+    }
+
+    /// A run whose font has no character map reads as nothing, and cannot be
+    /// held to a length it has no way to state.
+    #[test]
+    fn a_run_that_reads_as_nothing_is_not_held_to_a_length() {
+        let at = placed(0, 100.0, 100.0);
+        let mut r = run(0, 100.0, 100.0);
+        r.text = String::new();
+        assert!(super::order_agrees(&r, &at, r.origin.x, HEIGHT - r.origin.y, &|_| 9));
+    }
+
+    /// Text set at an angle runs along its own axis, not the page's.
+    #[test]
+    fn along_is_along_the_way_the_text_runs() {
+        let mut up = placed(0, 100.0, 100.0);
+        up.axis = (0.0, 1.0);
+        // Text running up the page: a continuation is further up (larger y in
+        // the stream's own coordinates, smaller in the run's top-left ones).
+        assert!(agrees(&up, 100.0, 40.0, 5), "50 points along");
+        assert!(!agrees(&up, 160.0, 100.0, 5), "across the way it runs");
+    }
+
+    // -- the lookup the edits use: by count, held to the stream ----------------
+
+    /// The operation the `which`th of `total` objects is found at by count, for
+    /// operators that all draw `codes` codes.
+    fn by_count(run: &TextRun, ops: &[Placed], order: Option<(usize, usize)>, codes: usize) -> Option<usize> {
+        super::placed_by_order(run, HEIGHT, ops, order, &|_| codes).map(|p| p.origin.operation)
+    }
+
+    /// **The case position cannot do.** The second piece of a line is drawn after
+    /// the first, 60 pt along it; the walk reports it at the first one's origin,
+    /// where nothing of it is. Counting finds it.
+    #[test]
+    fn a_continuation_is_found_by_count_where_position_finds_nothing() {
+        let ops = vec![placed(0, 100.0, 100.0), placed(1, 100.0, 100.0)];
+        let second = run(1, 160.0, 100.0);
+        assert!(nearest_placed(&ops, second.origin.x, HEIGHT - second.origin.y).is_none(), "control");
+        assert_eq!(by_count(&second, &ops, Some((1, 2)), 5), Some(1));
+    }
+
+    /// Only where the page has as many operators as text objects.
+    #[test]
+    fn no_count_is_taken_where_the_totals_differ() {
+        let ops = vec![placed(0, 100.0, 100.0), placed(1, 100.0, 100.0)];
+        let second = run(1, 160.0, 100.0);
+        assert_eq!(by_count(&second, &ops, Some((1, 3)), 5), None, "an object more than there are operators");
+        assert_eq!(by_count(&second, &ops, Some((1, 1)), 5), None, "an operator more than there are objects");
+    }
+
+    /// An object that is not a text object has no place in the order.
+    #[test]
+    fn an_object_with_no_place_in_the_order_is_not_counted() {
+        let ops = vec![placed(0, 100.0, 100.0), placed(1, 100.0, 100.0)];
+        assert_eq!(by_count(&run(1, 160.0, 100.0), &ops, None, 5), None);
+        assert_eq!(by_count(&run(1, 160.0, 100.0), &ops, Some((2, 2)), 5), None, "past the last operator");
+    }
+
+    /// **The stream has the last word.** The right count and the wrong operator —
+    /// on another line, or behind the pen, or too short for the run — is refused,
+    /// and the caller falls back to the position match.
+    #[test]
+    fn a_count_the_stream_does_not_bear_out_is_refused() {
+        let line_below = vec![placed(0, 100.0, 100.0), placed(1, 100.0, 140.0)];
+        assert_eq!(by_count(&run(1, 160.0, 100.0), &line_below, Some((1, 2)), 5), None, "another line");
+        let behind = vec![placed(0, 100.0, 100.0), placed(1, 300.0, 100.0)];
+        assert_eq!(by_count(&run(1, 160.0, 100.0), &behind, Some((1, 2)), 5), None, "behind the pen");
+        let ops = vec![placed(0, 100.0, 100.0), placed(1, 100.0, 100.0)];
+        assert_eq!(by_count(&run(1, 160.0, 100.0), &ops, Some((1, 2)), 2), None, "too short for the run");
+    }
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::{drawn_in_colour, fill_before};
+    use crate::document::Color;
+    use crate::pdf::content;
+
+    /// What puts the fill colour back after the first show-text operator in
+    /// `stream`.
+    fn restored_after_the_show(stream: &str) -> String {
+        let bytes = stream.as_bytes();
+        let operations = content::parse(bytes).expect("parse");
+        let at = operations.iter().position(|o| o.shows_text()).expect("a show-text operator");
+        String::from_utf8(fill_before(bytes, &operations, at)).expect("utf8")
+    }
+
+    /// Nothing set a colour: the page's own initial one.
+    #[test]
+    fn a_page_that_never_set_a_colour_gets_black_in_device_gray() {
+        assert_eq!(restored_after_the_show("BT /F1 12 Tf (a) Tj ET"), "0 g");
+    }
+
+    /// The nearest device colour is the whole of the state, whatever came before.
+    #[test]
+    fn the_nearest_device_colour_is_all_of_it() {
+        assert_eq!(restored_after_the_show("0.2 g 1 0 0 rg BT (a) Tj ET"), "1 0 0 rg");
+        assert_eq!(restored_after_the_show("1 0 0 rg 0 0 0 1 k BT (a) Tj ET"), "0 0 0 1 k");
+        assert_eq!(restored_after_the_show("/DeviceRGB cs 0.2 0.4 0.6 sc 0.5 g BT (a) Tj ET"), "0.5 g");
+    }
+
+    /// A colour space and the value set in it are two operators and both come back.
+    #[test]
+    fn a_colour_space_and_its_value_come_back_together() {
+        assert_eq!(
+            restored_after_the_show("/DeviceRGB cs 0.2 0.4 0.6 sc BT (a) Tj ET"),
+            "/DeviceRGB cs\n0.2 0.4 0.6 sc"
+        );
+        assert_eq!(restored_after_the_show("0.5 g 0.3 sc BT (a) Tj ET"), "0.5 g\n0.3 sc");
+        assert_eq!(restored_after_the_show("0.3 sc BT (a) Tj ET"), "0.3 sc", "a value in the initial space");
+        // The value that is in force, not one it replaced.
+        assert_eq!(
+            restored_after_the_show("/DeviceRGB cs 0.1 0.1 0.1 sc 0.2 0.4 0.6 sc BT (a) Tj ET"),
+            "/DeviceRGB cs\n0.2 0.4 0.6 sc"
+        );
+    }
+
+    /// A block that closed before the operator is not in force; one still open is.
+    #[test]
+    fn a_block_that_closed_is_stepped_over_and_one_still_open_is_not() {
+        assert_eq!(restored_after_the_show("0.5 g q 1 0 0 rg Q BT (a) Tj ET"), "0.5 g");
+        assert_eq!(
+            restored_after_the_show("0.5 g q 0.1 g q 0.2 g Q Q BT (a) Tj ET"),
+            "0.5 g",
+            "two blocks closed, one inside the other"
+        );
+        assert_eq!(restored_after_the_show("0.5 g q 0.1 g Q q 0.2 g BT (a) Tj ET Q"), "0.2 g", "the one still open");
+        assert_eq!(restored_after_the_show("0.9 g q BT (a) Tj ET Q"), "0.9 g", "opened, and nothing set inside it");
+    }
+
+    /// Text is drawn in the fill colour; the stroke colour is another state.
+    #[test]
+    fn the_stroke_colour_is_not_the_fill() {
+        assert_eq!(restored_after_the_show("0.2 g 1 0 0 RG 0 0 1 SC BT (a) Tj ET"), "0.2 g");
+    }
+
+    /// The operator, between the colour it is hidden in and the colour put back.
+    #[test]
+    fn the_operator_is_drawn_between_the_new_colour_and_the_old_one() {
+        let stream = "0 0 0 1 k BT /F1 12 Tf (a) Tj (b) Tj ET";
+        let operations = content::parse(stream.as_bytes()).expect("parse");
+        let at = operations.iter().rposition(|o| o.shows_text()).expect("the second operator");
+        let wrapped = drawn_in_colour(stream.as_bytes(), &operations, at, Color { r: 255, g: 51, b: 0, a: 255 });
+        assert_eq!(String::from_utf8(wrapped).expect("utf8"), "1.000 0.200 0.000 rg\n(b) Tj\n0 0 0 1 k");
+    }
+}
+
+#[cfg(test)]
+mod line_removal_tests {
+    use super::{carried_after_removal, draws_nothing, quote_effect, render_mode_before};
+    use crate::document::{Color, Point, Rect, TextRun};
+    use crate::pdf::content;
+    use std::collections::HashSet;
+
+    fn parse(stream: &str) -> Vec<content::Operation> {
+        content::parse(stream.as_bytes()).expect("parse")
+    }
+
+    /// The `n`th show-text operation's index.
+    fn show(operations: &[content::Operation], n: usize) -> usize {
+        operations.iter().enumerate().filter(|(_, o)| o.shows_text()).nth(n).map(|(i, _)| i).expect("a show-text operator")
+    }
+
+    /// `Tj` and `TJ` leave nothing behind; the quote operators leave the line
+    /// they move to, and `"` the spacing it sets.
+    #[test]
+    fn a_quote_operator_leaves_its_line_move_behind_and_the_others_nothing() {
+        let operations = parse("BT (a) Tj [(b)] TJ (c) ' 3 1 (d) \" ET");
+        let effects: Vec<String> = operations
+            .iter()
+            .filter(|o| o.shows_text())
+            .map(|o| String::from_utf8(quote_effect(o).expect("an effect")).expect("utf8"))
+            .collect();
+        assert_eq!(effects, ["", "", "T*", "3 Tw\n1 Tc\nT*"]);
+    }
+
+    /// A `"` whose spacing is not a number cannot be written back.
+    #[test]
+    fn a_double_quote_operator_with_operands_that_are_not_numbers_is_refused() {
+        let operations = parse("BT /a /b (d) \" ET");
+        let quote = operations.iter().find(|o| o.shows_text()).expect("an operator");
+        assert!(quote_effect(quote).is_err());
+        let operations = parse("BT (d) \" ET");
+        assert!(quote_effect(operations.iter().find(|o| o.shows_text()).expect("an operator")).is_err(), "too few operands");
+    }
+
+    /// The nearest `Tr` still in force; fill where none was set.
+    #[test]
+    fn the_rendering_mode_is_the_nearest_one_still_in_force() {
+        let at = |stream: &str| {
+            let operations = parse(stream);
+            let index = show(&operations, 0);
+            render_mode_before(&operations, index)
+        };
+        assert_eq!(at("BT (a) Tj ET"), 0);
+        assert_eq!(at("7 Tr BT (a) Tj ET"), 7);
+        assert_eq!(at("7 Tr 0 Tr BT (a) Tj ET"), 0);
+        assert_eq!(at("7 Tr q 0 Tr Q BT (a) Tj ET"), 7, "a block that closed is not in force");
+        assert_eq!(at("0 Tr q 5 Tr BT (a) Tj ET Q"), 5, "one still open is");
+    }
+
+    /// Cutting a piece out moves exactly the pieces the pen places after it.
+    #[test]
+    fn only_a_piece_the_pen_places_is_moved_by_what_comes_out_before_it() {
+        let moved = |stream: &str, removing: &[usize]| {
+            let operations = parse(stream);
+            let removed: HashSet<usize> = removing.iter().map(|n| show(&operations, *n)).collect();
+            let first = show(&operations, removing[0]);
+            !carried_after_removal(&operations, first, &removed).is_empty()
+        };
+        assert!(moved("BT (a) Tj (b) Tj ET", &[0]), "the next piece starts where this one ended");
+        assert!(moved("BT (a) Tj /F1 9 Tf 0 g (b) Tj ET", &[0]), "state operators do not place a piece");
+        assert!(moved("BT (a) Tj (b) Tj (c) Tj ET", &[0, 1]), "the third still starts where the second ended");
+        assert!(!moved("BT (a) Tj (b) Tj ET", &[0, 1]), "both go");
+        assert!(!moved("BT (a) Tj 5 0 Td (b) Tj ET", &[0]), "a Td places the next piece");
+        assert!(!moved("BT (a) Tj 1 0 0 1 5 5 Tm (b) Tj ET", &[0]), "a Tm does");
+        assert!(!moved("BT (a) Tj T* (b) Tj ET", &[0]), "a T* does");
+        assert!(!moved("BT (a) Tj (b) ' ET", &[0]), "a quote moves to the next line first");
+        assert!(!moved("BT (a) Tj 1 2 (b) \" ET", &[0]), "so does the other");
+        assert!(!moved("BT (a) Tj ET BT (b) Tj ET", &[0]), "a new text object starts afresh");
+        assert!(!moved("BT (a) Tj ET", &[0]), "nothing after it at all");
+    }
+
+    /// What the pen carries on to is every piece that stays and has nothing
+    /// repositioning it — including the ones after a piece that stays, which is
+    /// how a line with a space between its words is seen: removing `(a)` carries
+    /// the space, and the word after the space, and what follows that.
+    #[test]
+    fn what_the_pen_carries_on_to_is_every_kept_piece_before_the_next_placement() {
+        let operations = parse("BT (a) Tj ( ) Tj (b) Tj ( ) Tj (c) Tj 5 0 Td (d) Tj ET");
+        let shows: Vec<usize> = (0..6).map(|n| show(&operations, n)).collect();
+        let removed: HashSet<usize> = [0, 2, 4].iter().map(|n| shows[*n]).collect();
+        // Taking out a, b and c: the two spaces are carried; d is placed by its Td.
+        assert_eq!(carried_after_removal(&operations, shows[0], &removed), [shows[1], shows[3]]);
+        assert_eq!(carried_after_removal(&operations, shows[2], &removed), [shows[3]]);
+        assert!(carried_after_removal(&operations, shows[4], &removed).is_empty());
+    }
+
+    fn run_in(rect: Rect, alpha: u8) -> TextRun {
+        TextRun {
+            object: 0,
+            text: String::new(),
+            rect,
+            origin: Point { x: rect.left, y: rect.bottom },
+            size: 8.0,
+            color: Color { r: 0, g: 0, b: 0, a: alpha },
+        }
+    }
+
+    /// A space has a box of no area at all — or the advance of a space and no
+    /// height, as the space of a justified line does (measured 16.35 pt wide, 0
+    /// tall, between two words of the datasheet); a hair-line letter has some.
+    #[test]
+    fn an_object_draws_nothing_when_it_has_no_area_or_is_not_painted() {
+        let point = Rect { left: 357.4, top: 378.6, right: 357.4, bottom: 378.6 };
+        let wide_space = Rect { left: 150.512, top: 536.201, right: 166.864, bottom: 536.201 };
+        let stem = Rect { left: 10.0, top: 0.0, right: 10.4, bottom: 6.0 };
+        let dash = Rect { left: 10.0, top: 3.0, right: 12.2, bottom: 3.4 };
+        assert!(draws_nothing(&run_in(point, 255), 0), "a space: no area at all");
+        assert!(draws_nothing(&run_in(wide_space, 255), 0), "a space with an advance and no height has no ink either");
+        assert!(!draws_nothing(&run_in(stem, 255), 0), "a lone `l` is 0.4 pt wide and is there to be seen");
+        assert!(!draws_nothing(&run_in(dash, 255), 0), "a hyphen is 0.4 pt tall and is there to be seen");
+        assert!(draws_nothing(&run_in(stem, 0), 0), "fully transparent");
+        assert!(draws_nothing(&run_in(stem, 255), 3), "invisible render mode");
+        assert!(!draws_nothing(&run_in(stem, 255), 0));
     }
 }
 
@@ -14040,3 +16498,4 @@ mod page_tree_dag_tests {
         );
     }
 }
+

@@ -515,6 +515,17 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The links on a page that go to another page of this same document — a
+    /// contents list, a "back to the index", a cross-reference.
+    ///
+    /// Apart from [`Document::annotations`] on purpose: that lists marks this
+    /// engine can show, move and remove, and a `/GoTo` link is none of those —
+    /// it is something a reader follows. Empty by default, for the same reason
+    /// `annotations` is.
+    fn internal_links(&self, _page_index: usize) -> Result<Vec<InternalLink>> {
+        Ok(Vec::new())
+    }
+
     /// Every bookmark in the document's own outline tree, top level only, in
     /// the order they appear: its title and which page it goes to.
     ///
@@ -536,6 +547,31 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Every text object on a page as a run, with **nothing filtered out** —
+    /// [`Document::text_runs`] without its area filter, for a caller that
+    /// wants to decide for itself what is clickable and what is visible.
+    ///
+    /// What `text_runs` leaves out is here: a run with no ink area (a blank
+    /// one, a lone space). Every run keeps its colour as drawn, alpha 0
+    /// included. `size` is the effective one, with the text matrix's scale
+    /// folded in — what [`Document::text_runs_some`] reports, and not the bare
+    /// `Tf` size that `1 Tf` under an 8x matrix would give.
+    ///
+    /// **What it costs grows with the page, linearly now.** A page of up to
+    /// 1,500 text objects has the words of each read through PDFium's own call,
+    /// one object at a time — about 66 ms at 1,500 and quadratic beyond (5,000
+    /// objects take 0.75 s, 10,000 take 3.3 s, 40,000 take about 140 s) — and a larger
+    /// page has all of them read in one pass over its characters, the same words
+    /// (see [`crate::document::pdfium_doc::PdfiumDocument::text_words_by_characters`]),
+    /// 50,000 objects in 0.3 s. [`Document::page_scale`] says how big a page is
+    /// before any of this is asked.
+    ///
+    /// The same list as `text_runs` for a backend that does not tell the two
+    /// apart.
+    fn text_runs_unfiltered(&self, page_index: usize) -> Result<Vec<TextRun>> {
+        self.text_runs(page_index)
+    }
+
     /// Every text object's own bounding rect, without its words — the
     /// hit-testing half of [`Self::text_runs`]. See
     /// [`crate::document::pdfium_doc::PdfiumDocument::text_run_rects`] for
@@ -544,6 +580,44 @@ pub trait Document: Send + Sync {
     /// for the words of every run a click did not land on.
     fn text_run_rects(&self, _page_index: usize) -> Result<Vec<(usize, Rect)>> {
         Ok(Vec::new())
+    }
+
+    /// One text object's own full run — words included — by object index.
+    /// See [`crate::document::pdfium_doc::PdfiumDocument::text_run_at`] for
+    /// why this earns its own method rather than a caller reading one entry
+    /// off `text_runs()`'s own answer: the whole point is not paying for
+    /// every other run's words just to reach the one already known by id.
+    /// `None` for an index that is not a text run at all — not an error, the
+    /// same as `text_runs()` leaving such an object out of its own list.
+    fn text_run_at(&self, _page_index: usize, _object: usize) -> Result<Option<TextRun>> {
+        Ok(None)
+    }
+
+    /// Full runs — words included — for just the given objects. The middle
+    /// ground between `text_runs()` (every run) and [`Self::text_run_at`]
+    /// (one run, but a page open and a text layer are paid again on every
+    /// call — about 12 ms each on the datasheet, so a few dozen runs fetched
+    /// one call at a time cost more than every run on the page does at once).
+    /// A caller after several specific runs pays that once here and reads
+    /// the words only of the ones actually asked for. Order matches the page's own
+    /// object order, not `wanted`'s; an id not on the page, or not a text
+    /// run, is silently absent from the answer.
+    fn text_runs_some(&self, _page_index: usize, _wanted: &std::collections::HashSet<usize>) -> Result<Vec<TextRun>> {
+        Ok(Vec::new())
+    }
+
+    /// **Temporary diagnostic.** The timing breakdown
+    /// [`crate::document::pdfium_doc::PdfiumDocument::set_runs_in_stream`]
+    /// left behind on its last call, taken rather than cloned — a caller
+    /// asks for this once, right after the call it describes, to put in its
+    /// own log. Reported from use: a paragraph apply that measured fast,
+    /// repeatedly, as an isolated single edit in a fresh test still took
+    /// several seconds in the real running app in a way that grew across a
+    /// session — this exists to see which part of a real call actually
+    /// spent that time, from the session itself, since `eprintln!` has
+    /// nowhere to go in a windowed build with no console attached.
+    fn take_last_batch_timing(&mut self) -> Vec<(&'static str, std::time::Duration)> {
+        Vec::new()
     }
 
     /// Every image on a page, in the order the file stores them.
@@ -654,6 +728,38 @@ pub trait Document: Send + Sync {
     /// from "never asked".
     fn run_font_names(&self, _page_index: usize) -> Result<std::collections::HashMap<usize, String>> {
         Ok(std::collections::HashMap::new())
+    }
+
+    /// Every text run's [`RunStyle`] — which font program draws it, how thick
+    /// that font's strokes are, which way it runs — for the whole page in one
+    /// pass, keyed by object index like [`Document::run_font_names`].
+    ///
+    /// **It exists because `run_font_names` cannot answer the question it is
+    /// asked.** A page whose producer stored several weights of one face under
+    /// a single name reads as one font throughout, so "is this run in the same
+    /// font as that one" was always "yes" and a heading could not be told from
+    /// the body beside it. See [`RunStyle`] for what is measured instead, and
+    /// for what a caller must not assume about it.
+    ///
+    /// Covers every text object, with or without ink. Missing only where PDFium
+    /// has no font for the object at all — not an object that merely has no
+    /// readable name, which `run_font_names` leaves out and this does not. The
+    /// default is an empty map, for a document with no fonts to ask.
+    fn run_styles(&self, _page_index: usize) -> Result<std::collections::HashMap<usize, RunStyle>> {
+        Ok(std::collections::HashMap::new())
+    }
+
+    /// How many objects a page holds and how many of them are text — counted,
+    /// not read: no word is extracted and no font is touched.
+    ///
+    /// **For deciding whether to read a page at all.** Reading the text of a page
+    /// (and listing its shapes) costs by these numbers, and on a page of tens of
+    /// thousands of objects it costs more than anyone will wait; this costs a page
+    /// open and one question per object — milliseconds where reading took
+    /// minutes. See [`PageScale`] for exactly what is counted. The default is
+    /// nothing counted, for a document with no page to open.
+    fn page_scale(&self, _page_index: usize) -> Result<PageScale> {
+        Ok(PageScale::default())
     }
 
     /// Every text mark on a page, as the blobs the app stored beside them.
@@ -812,8 +918,60 @@ pub trait Document: Send + Sync {
         Err(PdfError::Unsupported("listing what a page draws"))
     }
 
+    /// The paths of a page — exactly the entries of [`Document::drawn_objects`]
+    /// whose kind is [`DrawnKind::Shape`], the same ones in the same order — for
+    /// a caller that has no use for the rest.
+    ///
+    /// **It exists because the rest is the expensive part.** Listing everything
+    /// a page draws reads the words of every text object to give each a label,
+    /// and that read is slower than the page has objects (an object costs as much
+    /// as the characters on the page); the paths of the same page are a walk. A
+    /// block detector wants rules, boxes and outlined words and nothing else.
+    /// The default is `drawn_objects` filtered, correct for any backend.
+    fn drawn_shapes(&self, page_index: usize) -> Result<Vec<DrawnObject>> {
+        Ok(self
+            .drawn_objects(page_index)?
+            .into_iter()
+            .filter(|d| d.kind == DrawnKind::Shape)
+            .collect())
+    }
+
+    /// The walk [`Document::drawn_objects`] and [`Document::drawn_shapes`] are
+    /// both made of, for a backend that has one: `shapes_only` skips what only
+    /// the other needs (the words of every text object, the pictures'
+    /// descriptions) and returns the page's shapes. Not for a caller to use
+    /// directly — and an implementor that has no such walk leaves it alone.
+    fn drawn_walk(&self, _page_index: usize, _shapes_only: bool) -> Result<Vec<DrawnObject>> {
+        Err(PdfError::Unsupported("listing what a page draws"))
+    }
+
     fn object_bounds(&self, _page_index: usize, _object: usize) -> Result<Rect> {
         Err(PdfError::Unsupported("measuring an object on this page"))
+    }
+
+    /// One path object's own ink, flattened to polylines in page points
+    /// (top-left origin, the same space [`DrawnObject::rect`] already uses)
+    /// — a contour per closed or open sub-path, curves already sampled into
+    /// line segments.
+    ///
+    /// **For hit-testing against the actual shape, not its bounding box.**
+    /// [`DrawnObject::rect`] alone cannot tell a click near a long diagonal
+    /// line from a click anywhere in the mostly-empty box that line's
+    /// bounding rect sweeps out — reported from use on an AutoCAD export,
+    /// where that box routinely also covers a dozen nearby outlined-glyph
+    /// paths with far smaller boxes of their own, so the smallest-box
+    /// heuristic every bounding-box hit test uses picked a random letter
+    /// instead of the line someone actually clicked on. Called per
+    /// *candidate* object a bounding-box pass has already narrowed things
+    /// down to, not for a whole page at once — walking every path object on
+    /// a 28,000-object CAD page to answer one click would cost far more than
+    /// the handful of candidates actually near it.
+    ///
+    /// `Err`/empty for anything that is not a path object (words, pictures,
+    /// groups) or where the engine cannot say — callers fall back to the
+    /// bounding box they already had.
+    fn object_outline(&self, _page_index: usize, _object: usize) -> Result<Vec<Vec<(f32, f32)>>> {
+        Err(PdfError::Unsupported("reading this object's own path"))
     }
 
     /// The signatures placed on a page, as opposed to any other ink on it.
@@ -1003,6 +1161,87 @@ pub trait DocumentMut {
         text: &str,
         style: &TextStyle,
     ) -> Result<(String, TextStyle)>;
+
+    /// Several runs on the same page, written as one transaction — the
+    /// batched counterpart to [`DocumentMut::set_text_run_styled`], for a
+    /// multi-line paragraph's several lines. The default just calls that
+    /// once per edit, in order — correct for any implementor, including the
+    /// test doubles in this crate's own tests — but pays whatever per-call
+    /// cost that method has once per line. [`PdfiumDocument`] overrides this
+    /// with a real batch that pays that cost once for the whole group; see
+    /// its own doc for why that matters.
+    ///
+    /// [`PdfiumDocument`]: crate::document::pdfium_doc::PdfiumDocument
+    fn set_text_runs_styled(
+        &mut self,
+        page_index: usize,
+        edits: &[(usize, String, TextStyle)],
+    ) -> Result<Vec<(String, TextStyle)>> {
+        edits
+            .iter()
+            .map(|(object, text, style)| self.set_text_run_styled(page_index, *object, text, style))
+            .collect()
+    }
+
+    /// Edit lines of text by **replacing their pieces**, as one transaction.
+    ///
+    /// For each [`TextLineEdit::Retype`] the first piece is written exactly as
+    /// [`DocumentMut::set_text_runs_styled`] writes an edit — its own font where
+    /// that can spell the words, another font of the page, or a font the caller
+    /// offered; a new size if `style` has one — and every object in `remove` is
+    /// taken off the page: its show-text operator and operands are cut out of the
+    /// content stream, and the `Tf`, colour and positioning operators around it
+    /// stay. A [`TextLineEdit::Remove`] takes a line off outright.
+    ///
+    /// **Atomic.** Every object is resolved, and every refusal made, before
+    /// anything is written; an `Err` leaves the page as it was.
+    ///
+    /// **Every object number of the page is stale afterwards.** Objects that were
+    /// removed are gone, so every object after them has a lower index, and the
+    /// page is reopened besides. A caller that kept ids must read the page again.
+    ///
+    /// **Refused** rather than done wrongly:
+    /// - a piece to remove that a *kept* piece depends on for its place. A piece
+    ///   drawn with nothing repositioning before it starts where the one before
+    ///   it ended, so taking that one out moves it. (A piece placed by a `Td`,
+    ///   `Tm`, `T*`, `'` or `"` is placed by its own operator and is not moved.)
+    /// - an object that is not a text object of the page, or one named twice;
+    /// - a `Retype` whose `style` has a colour or a position, which cannot be
+    ///   written in the same step; and text drawn in a clipping render mode.
+    ///
+    /// **A `Retype` with a `justify_to` is spread to that width.** The new words
+    /// are written first as they come, to a copy of the document that is read and
+    /// thrown away; PDFium's own box for the retyped piece says how far it falls
+    /// from the width asked for, and the words are then written with a `TJ`
+    /// spacing number after each of the line's gaps — the spaces between its first
+    /// and last letters, or the places between the letters of a line of one word —
+    /// the same share of the difference at each, so that the box is exactly that
+    /// wide. The numbers are part of the operator that draws the line: **no `Tw`,
+    /// `Tc` or `Tz` is written, and nothing is left in force for the lines drawn
+    /// after it.** It works for a composite font as for a simple one (a `Tw`
+    /// finds no single-byte space in a two-byte font), whatever `Tc`, `Tw` or `Tz`
+    /// is in force where the line is drawn (they are in the width that is
+    /// measured), and with a font the edit has to write into the file. A line
+    /// that is **refused, with nothing written, and the whole batch with it**:
+    /// text drawn at an angle or vertically (its box is not its width), a line
+    /// of one character (no gap to open), a line so much wider than the width
+    /// that its gaps would have to close by more than a third of an em (words on
+    /// top of each other), a single word that would have to open by more than a
+    /// third of an em between its letters, and a width that is not a positive
+    /// number.
+    ///
+    /// Lines that each need a new font written into the file go one at a time
+    /// instead of in one pass — slower, and still all or nothing.
+    ///
+    /// The quote operators `'` and `"` move to the next line before they draw,
+    /// so one that is removed is replaced by the `T*` it contains (with the
+    /// `Tw` and `Tc` a `"` sets) and the lines after it keep their place.
+    ///
+    /// Undo is by a page snapshot, taken by [`crate::command::Command::ReplaceTextLines`]
+    /// before this runs; this method does not take one.
+    fn replace_text_lines(&mut self, _page_index: usize, _edits: &[TextLineEdit]) -> Result<()> {
+        Err(PdfError::Unsupported("replacing the lines of text on this page"))
+    }
 
     // ------------------------------------------------------------- object --
     // Named again here, `_mut`-suffixed, rather than reached through
@@ -1995,6 +2234,98 @@ pub struct TextRun {
     pub color: Color,
 }
 
+/// What a text object's *font* looks like, measured rather than taken from
+/// its name — see [`Document::run_styles`].
+///
+/// **Why the name is not enough.** Page 1 of the datasheet this was built
+/// against came out of Illustrator with five static instances of Montserrat
+/// (ExtraBold headings, Light body, Regular, SemiBold, Medium) stored under one
+/// `/BaseFont`, `Montserrat-Thin`, every one declaring `FontWeight 100` and
+/// `StemV 20`. Name, weight, descriptor and flags all read "Thin" for each of
+/// them, so a bold heading was indistinguishable from the light paragraph
+/// beneath it. Two things do tell them apart, and this carries both: *which*
+/// font program a run is drawn with, and how thick that program's own letters
+/// are.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunStyle {
+    /// Which font program draws this run: 0, 1, 2 … in the order the page
+    /// first uses its fonts.
+    ///
+    /// Equal ids mean the very same `/Font` resource — one program, so one
+    /// look. **Meaningful only among the runs of one page returned by one
+    /// call**: the next page numbers from 0 again, and PDFium's own font
+    /// handle, which this stands in for, is an address that changes from one
+    /// process run to the next.
+    pub font: u32,
+    /// The font's stroke thickness in thousandths of an em: the width of the
+    /// lower half of its capital `I`, which is what separates the weights of a
+    /// face (Montserrat: Thin 20, Light 51, Regular 74, Medium 100, SemiBold
+    /// 124, ExtraBold 198).
+    ///
+    /// `l` and then `i` stand in, in that order, for a subset font whose
+    /// embedded copy has no outline for the letter before; only the lower half
+    /// is measured so that `i`'s dot, wider than its stem, does not count.
+    ///
+    /// **`None` is "no evidence", and it is never a stem.** It is the answer
+    /// for a font that is **not embedded** (PDFium draws, and measures, a
+    /// stand-in from this computer: a non-embedded `Montserrat-Light` reads 20,
+    /// a Thin, here), for one with **no program of its own** (Type 3), for one
+    /// that has **none of the three letters** — a subset drops the letters nobody
+    /// typed and PDFium then draws the font's `.notdef`, which is a glyph in
+    /// its own right (0.507 wide in Montserrat, 0.19 in ArialNarrow) and not a
+    /// stem — and for a stem **above 300**, which a serif foot or a stray glyph
+    /// makes and a weight never does. A composite font is measured through its
+    /// own `/ToUnicode` and `CIDToGIDMap`, so one that has a map for the letter
+    /// gives its stem and one that has not gives `None`. A caller that gets
+    /// `None` for either of two fonts is to decide by their names, and not to
+    /// call them different.
+    ///
+    /// Three things to know before comparing it across fonts:
+    ///
+    /// - The letter used shifts it a little. `l` measures 2–4% thinner than
+    ///   `I` in the same Montserrat, and `i` agrees with `l`.
+    /// - It is the width of the letter's lower half, so a serif face reads its
+    ///   foot serif too (Times Regular's `I` comes out 284; Courier's, near 380,
+    ///   is above 300 and skipped). Compare weights within a family, not across
+    ///   families.
+    /// - Two copies of one font can differ in which letter they have, and so
+    ///   in the number: a copy with an `I` reads the `I`, one without reads its
+    ///   `l`.
+    pub stem_milli_em: Option<u16>,
+    /// The unit vector the text runs along, in the same top-left, y-down page
+    /// space as [`TextRun::rect`] and [`TextRun::origin`] — `(1.0, 0.0)` is
+    /// upright and left to right, `(0.0, -1.0)` reads up the page.
+    ///
+    /// Taken from the object's own text matrix, which PDFium folds the
+    /// graphics state's CTM into, so a rotation made either way shows up here.
+    /// A page's own `/Rotate` is **not** applied, exactly as it is not for the
+    /// rect and origin. It is the *matrix's* direction: vertical writing mode
+    /// is not read.
+    pub axis: (f32, f32),
+}
+
+/// How much a page holds, counted without reading any of it — see
+/// [`Document::page_scale`].
+///
+/// What a caller needs to know **before** it asks for the page's text, because
+/// what that costs grows with these numbers (and the text of a page is read
+/// once for every object on it unless the page is large — see
+/// [`Document::text_runs_unfiltered`]): refusing a page of forty thousand words
+/// takes this one count and about 50 ms (a datasheet page: 5 to 8 ms, nearly all
+/// of it PDFium opening the page); finding out by reading it took four and a half
+/// minutes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PageScale {
+    /// The text objects the page itself lists — the ones
+    /// [`Document::text_runs_unfiltered`] returns one run for, and what a
+    /// text read costs by. **Text inside a form XObject is not counted**: it is
+    /// numbered inside the form and is not a page object.
+    pub text_objects: usize,
+    /// Every object the page itself lists: text, paths, pictures, forms,
+    /// shadings. A form counts as one, whatever it holds.
+    pub page_objects: usize,
+}
+
 /// Something sealed on a page, as the page needs to show it.
 ///
 /// Deliberately carries no ciphertext: this is what draws a badge over the gap
@@ -2157,6 +2488,57 @@ pub struct TextStyle {
     /// Not `Copy` any more because of this field — see the call sites this
     /// touched if that trait bound is ever wanted back.
     pub face: Option<String>,
+}
+
+/// What editing a line of text does to the objects that draw it — see
+/// [`DocumentMut::replace_text_lines`].
+///
+/// A line is often drawn as several pieces: separate show-text operators, one
+/// text object each. Typing a line's new words into its first piece and
+/// painting the others in the page's colour leaves the old words in the file and
+/// lets positioned pieces paint over the new ones; so an edited line
+/// **replaces** its pieces: the first takes the new words, the others come off
+/// the page.
+///
+/// Objects are PDFium page-object indices, as everywhere in this crate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum TextLineEdit {
+    /// Put `text` on `first` with `style` (what [`DocumentMut::set_text_runs_styled`]
+    /// means by an edit's words, face and size) and take every object in
+    /// `remove` — the same line's other pieces — off the page.
+    Retype {
+        first: usize,
+        text: String,
+        #[serde(default)]
+        style: TextStyle,
+        #[serde(default)]
+        remove: Vec<usize>,
+        /// The width in points the retyped line is to span: PDFium's own box
+        /// for the retyped piece — its right edge minus its left — comes out
+        /// this wide, to a hundredth of a point, with its origin and its left
+        /// edge where they were. **What a caller passes for a justified line is
+        /// the width of the line it replaces**: the union of its pieces' boxes
+        /// (`TextRun::rect`), right minus left. `None` writes the words as they
+        /// come, which is a few points short of a margin the producer had
+        /// spaced them to. See [`DocumentMut::replace_text_lines`] for how the
+        /// width is made and what is refused.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        justify_to: Option<f32>,
+    },
+    /// Take these objects off the page: a line deleted outright.
+    Remove { objects: Vec<usize> },
+}
+
+/// A link that goes to another page of the same document.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InternalLink {
+    /// Where it can be clicked, in the page's own top-left space — the same
+    /// space as every annotation's rect.
+    pub rect: Rect,
+    /// The page it goes to, zero-based. Where on that page is not carried: a
+    /// follower arrives at the top of it.
+    pub page: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

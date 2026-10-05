@@ -680,3 +680,109 @@ fn splitting_a_run_through_the_command_stack_undoes() {
         .expect("the run should be back");
     assert_eq!(restored.text, run.text, "the words should read the same as before the split");
 }
+
+// ------------------------------------- finding the words in the content --
+
+/// A one-page PDF whose content stream is `content`, with Helvetica as `/F1`.
+fn page_drawing(content: &str) -> Vec<u8> {
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
+        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R \
+         /Resources << /Font << /F1 5 0 R >> >> >>"
+            .to_string(),
+        format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
+    ];
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, body) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref_at = out.len();
+    out.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in &offsets {
+        out.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    out.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    out
+}
+
+/// What is left on the page's one line of words, in order, after deleting the
+/// run that reads `word` — or what the refusal was.
+fn after_deleting(content: &str, word: &str) -> Result<Vec<String>, String> {
+    let mut doc = PdfiumDocument::open_bytes(page_drawing(content), None).expect("open");
+    let run = doc
+        .text_runs(0)
+        .expect("runs")
+        .into_iter()
+        .find(|r| r.text.trim() == word)
+        .unwrap_or_else(|| panic!("no run reads {word:?}"));
+    doc.remove_object(0, run.object).map_err(|e| e.to_string())?;
+    Ok(doc
+        .text_runs(0)
+        .expect("runs")
+        .into_iter()
+        .map(|r| r.text.trim().to_string())
+        .collect())
+}
+
+/// **A piece of a line is found, and found rightly.**
+///
+/// Reported from use as Edit Object refusing to delete a word — "those words
+/// are drawn in a way this cannot follow". A line drawn as several show-text
+/// operators after one positioning reports every operator at the *line's*
+/// origin, so a piece past the first was found nowhere — and, where the piece
+/// before it was only a few points wide, found at *that* one, so deleting a word
+/// deleted the one before it. Measured on a real datasheet: a third of its text
+/// could not be found at all, and a few dozen pieces were found wrongly.
+#[test]
+fn deleting_a_piece_of_a_line_deletes_that_piece_and_not_a_neighbour() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    // `i` is under three points wide, so `hello` starts within the four the
+    // position match allows of where the line began — which is where it took
+    // `hello` to be.
+    let line = "BT /F1 12 Tf 72 700 Td (i) Tj (hello) Tj (world) Tj ET";
+    assert_eq!(
+        after_deleting(line, "hello").expect("delete hello"),
+        ["i", "world"],
+        "deleting `hello` removed something else"
+    );
+    // And a piece far enough along that the position match saw nothing at all.
+    assert_eq!(
+        after_deleting(line, "world").expect("delete world"),
+        ["i", "hello"],
+        "deleting `world` removed something else"
+    );
+}
+
+/// What already worked still does: a run that has an operator of its own.
+#[test]
+fn deleting_a_run_with_its_own_position_still_works() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let page = "BT /F1 12 Tf 72 700 Td (first) Tj ET BT /F1 12 Tf 72 650 Td (second) Tj ET";
+    assert_eq!(after_deleting(page, "first").expect("delete"), ["second"]);
+    assert_eq!(after_deleting(page, "second").expect("delete"), ["first"]);
+}
+
+/// **Text rise moves where the words are drawn, and the stream walk has to
+/// know.** A superscript or a footnote mark is ordinary in a datasheet.
+#[test]
+fn a_raised_run_can_be_deleted() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let page = "BT /F1 12 Tf 72 700 Td (Area) Tj ET BT /F1 8 Tf 1 0 0 1 120 700 Tm 6 Ts (2) Tj ET";
+    assert_eq!(after_deleting(page, "2").expect("delete the superscript"), ["Area"]);
+}

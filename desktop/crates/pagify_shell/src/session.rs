@@ -118,10 +118,71 @@ fn write_then_rename_via(
         }
         return Err(problem);
     }
-    std::fs::rename(staging, target).map_err(|e| {
-        let _ = std::fs::remove_file(staging);
-        pdf_core::PdfError::Io(e)
-    })
+    replace_target(staging, target)
+}
+
+/// Whether an error is Windows saying the file is open in another program
+/// (ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, or ERROR_ACCESS_DENIED for a
+/// file held without delete sharing) — a scanner or indexer that has just
+/// looked at the new file, another Pagify window with the same document open,
+/// a preview pane. Never true on another platform.
+fn is_in_use(e: &std::io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(5) | Some(32) | Some(33))
+}
+
+/// Swap the finished staging file over the target.
+///
+/// **Reported from use: "save failed: i/o error: the process cannot access the
+/// file because it is being used by another process (os error 32)", and a
+/// copy of the document left beside it.** The whole new file was written and
+/// only the swap was refused, because something else had one of the two files
+/// open. That is usually gone a moment later, so the swap is tried again for
+/// about two seconds. When it is not, the finished copy is **kept** under a
+/// name a person can use (`<name> (saved copy).pdf`) and the error says where
+/// it is — deleting it, which every other failure here does, would throw away
+/// the edits the person was saving.
+fn replace_target(staging: &Path, target: &Path) -> Result<()> {
+    let mut last = None;
+    for attempt in 0..25 {
+        match std::fs::rename(staging, target) {
+            Ok(()) => return Ok(()),
+            Err(e) if is_in_use(&e) => {
+                last = Some(e);
+                if attempt < 24 {
+                    std::thread::sleep(std::time::Duration::from_millis(80));
+                }
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(staging);
+                return Err(pdf_core::PdfError::Io(e));
+            }
+        }
+    }
+    let e = last.expect("the loop only ends with an in-use error");
+    let stem = target.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "document".into());
+    let dir = target.parent().map(Path::to_path_buf).unwrap_or_default();
+    let kept = (0..100)
+        .map(|n| match n {
+            0 => dir.join(format!("{stem} (saved copy).pdf")),
+            n => dir.join(format!("{stem} (saved copy {}).pdf", n + 1)),
+        })
+        .find(|p| !p.exists())
+        .and_then(|p| std::fs::rename(staging, &p).ok().map(|_| p));
+    match kept {
+        Some(copy) => Err(pdf_core::PdfError::Io(std::io::Error::new(
+            e.kind(),
+            format!(
+                "{} is open in another program (another Pagify window with the same file?), so it could not \
+                 be replaced. Your changes are saved in {} — close the other program, then use that copy.",
+                target.display(),
+                copy.display()
+            ),
+        ))),
+        None => {
+            let _ = std::fs::remove_file(staging);
+            Err(pdf_core::PdfError::Io(e))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -320,10 +381,39 @@ fn merged_catalogue(fonts: &[&[u8]]) -> Option<pdf_core::document::glyphs::Catal
     Some(catalogue)
 }
 
+/// Everything the paragraph detector reads about one page's text, taken in one
+/// pass under one registry lock — see [`Session::page_text_snapshot`].
+///
+/// A copy: it stays true to the page as it was when taken, and is for the
+/// caller to keep or drop.
+#[derive(Clone, Debug)]
+pub struct PageTextSnapshot {
+    /// Every text object on the page, in the order the file stores them, with
+    /// **nothing filtered out**: a blank run, a run with no ink area and a run
+    /// drawn at alpha 0 are all here, for the caller to decide about. `size` is
+    /// the effective (scaled) font size.
+    pub runs: Vec<pdf_core::document::TextRun>,
+    /// Each run's font identity and weight, by object index — see
+    /// [`pdf_core::document::RunStyle`].
+    pub styles: std::collections::HashMap<usize, pdf_core::document::RunStyle>,
+    /// Each run's font name, by object index — what
+    /// [`Session::run_font_names`] answers.
+    pub faces: std::collections::HashMap<usize, String>,
+    /// The page's drawn paths (rules, boxes and words converted to outlines),
+    /// bottom first, as [`Session::drawn_objects`] reports them. **Empty when
+    /// the page has no text objects at all**, without having been asked for:
+    /// a page of only outlines has tens of thousands of them, and nothing here
+    /// has a use for shapes on a page with no text to bridge between.
+    pub shapes: Vec<pdf_core::document::DrawnObject>,
+}
+
 /// An open document. Owns its registry entry for as long as it lives.
 pub struct Session {
     handle: i64,
     path: PathBuf,
+    /// The undo history's change counter — the history's own, shared out, so it
+    /// can be read without the registry lock. See [`Session::undo_generation`].
+    generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Session {
@@ -360,7 +450,8 @@ impl Session {
             Ok(Box::new(document) as Box<dyn Document>)
         })?;
 
-        Ok(Session { handle, path })
+        let generation = registry::with_session(handle, |s| Ok(s.history.generation_counter()))?;
+        Ok(Session { handle, path, generation })
     }
 
     pub fn path(&self) -> &Path {
@@ -435,6 +526,31 @@ impl Session {
                 height,
                 pixels,
                 from_cache: outcome == RenderOutcome::CacheHit,
+            })
+        })
+    }
+
+    /// Rasterise one crop of a page, at `scale` — the engine capability
+    /// behind printing and export, reused here so a detail on a page too
+    /// large to raster whole at the zoom asked for (an A1 drawing, say) can
+    /// still be shown sharp: the crop, not the whole sheet, is what the
+    /// render ceiling has to cover. `crop` is in page points, top-left
+    /// origin, y increasing downwards — the same space [`Self::page_crop`]
+    /// and every `Annotation` already use.
+    ///
+    /// **Not cached** — same as the engine's own `render_region`, and for
+    /// the same reason: this is for the one crop currently on screen, which
+    /// the caller (`PagifyApp::detail_texture_for`) caches itself, keyed by
+    /// the crop and the quantised zoom, exactly as the whole-page path does.
+    pub fn render_page_region(&self, index: usize, crop: pdf_core::document::Rect, scale: f32) -> Result<PageRaster> {
+        let request = pdf_core::document::RegionRequest { crop, scale, ..Default::default() };
+        registry::with_session(self.handle, |s| {
+            let bitmap = engine::render_region(s.document.as_ref(), index, &request)?;
+            Ok(PageRaster {
+                width: bitmap.width,
+                height: bitmap.height,
+                pixels: bitmap.data,
+                from_cache: false,
             })
         })
     }
@@ -607,6 +723,17 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.run_font_names(page))
     }
 
+    /// Every text run's style identity on a page, in one pass — which font
+    /// program draws it, how thick that font's strokes are and which way it
+    /// runs. For the page where `run_font_names` reads one name throughout;
+    /// see `pdf_core::document::RunStyle`.
+    pub fn run_styles(
+        &self,
+        page: usize,
+    ) -> Result<std::collections::HashMap<usize, pdf_core::document::RunStyle>> {
+        registry::with_session(self.handle, |s| s.document.run_styles(page))
+    }
+
     /// Whether a run's font is embedded in the document rather than
     /// substituted by whatever reader opened it.
     pub fn run_font_is_embedded(&self, page: usize, object: usize) -> Result<bool> {
@@ -626,6 +753,13 @@ impl Session {
     /// The area one page object covers.
     pub fn object_bounds(&self, page: usize, object: usize) -> Result<pdf_core::document::Rect> {
         registry::with_session(self.handle, |s| s.document.object_bounds(page, object))
+    }
+
+    /// One path object's own ink — see [`pdf_core::document::Document::
+    /// object_outline`] for why this is for hit-testing a click against the
+    /// actual shape rather than its bounding box.
+    pub fn object_outline(&self, page: usize, object: usize) -> Result<Vec<Vec<(f32, f32)>>> {
+        registry::with_session(self.handle, |s| s.document.object_outline(page, object))
     }
 
     /// The words a page *draws*, whatever else is on it.
@@ -673,6 +807,12 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.annotations(page))
     }
 
+    /// The links on a page that go to another page of this document — see
+    /// [`pdf_core::document::Document::internal_links`].
+    pub fn internal_links(&self, page: usize) -> Result<Vec<pdf_core::document::InternalLink>> {
+        registry::with_session(self.handle, |s| s.document.internal_links(page))
+    }
+
     /// A page's current rotation, in quarter-turns clockwise.
     ///
     /// Needed because `SetPageRotation` is absolute and rotating is relative: a
@@ -702,8 +842,15 @@ impl Session {
     /// than an error: this is read to *compare* recency against a separate
     /// undo stack (the markup layer's own edit counter), and a session that
     /// no longer exists cannot be the more recently changed one.
+    ///
+    /// **Never waits, and is never behind.** The app reads this every frame, and
+    /// the engine is locked for the whole of a page render — on another thread
+    /// now, so as not to stop the frames. A frame that waited here waited for
+    /// the render (measured: 270 ms, on a drawing that takes that long to
+    /// draw). So this reads the history's own counter, an atomic that moves at
+    /// the moment the history does, rather than asking the engine for it.
     pub fn undo_generation(&self) -> u64 {
-        registry::with_session(self.handle, |s| Ok(s.history.generation())).unwrap_or(0)
+        self.generation.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// What a redaction of this rectangle would destroy, and what it could not.
@@ -1435,6 +1582,73 @@ impl Session {
     /// [`pdf_core::document::Document::text_run_rects`].
     pub fn text_run_rects(&self, page: usize) -> Result<Vec<(usize, pdf_core::document::Rect)>> {
         registry::with_session(self.handle, |s| s.document.text_run_rects(page))
+    }
+
+    /// One run, by object number, words included — see
+    /// [`pdf_core::document::Document::text_run_at`].
+    pub fn text_run_at(
+        &self,
+        page: usize,
+        object: usize,
+    ) -> Result<Option<pdf_core::document::TextRun>> {
+        registry::with_session(self.handle, |s| s.document.text_run_at(page, object))
+    }
+
+    /// Full runs, words included, for just the given objects — see
+    /// [`pdf_core::document::Document::text_runs_some`].
+    pub fn text_runs_some(
+        &self,
+        page: usize,
+        wanted: &std::collections::HashSet<usize>,
+    ) -> Result<Vec<pdf_core::document::TextRun>> {
+        registry::with_session(self.handle, |s| s.document.text_runs_some(page, wanted))
+    }
+
+    /// Everything the paragraph detector reads about one page's text, in one
+    /// pass: every text object (nothing filtered), its font identity and
+    /// weight, its font name, and the page's drawn shapes.
+    ///
+    /// **One registry lock for all four reads**, not four. Each of them walks
+    /// the page, and taking the lock separately for each would let another
+    /// thread's open, render or edit slip in between them — a run list from
+    /// before an edit beside a shape list from after it. See
+    /// [`PageTextSnapshot`] for what each part holds, and
+    /// [`pdf_core::document::Document::text_runs_unfiltered`] for why the runs
+    /// are not `text_runs`' (which drops those with no ink area).
+    ///
+    /// The shapes are not read at all for a page with no text objects: a page
+    /// of only outlines has tens of thousands of them, and the walk that lists
+    /// them is the slowest of the four.
+    pub fn page_text_snapshot(&self, page: usize) -> Result<PageTextSnapshot> {
+        registry::with_session(self.handle, |s| {
+            let runs = s.document.text_runs_unfiltered(page)?;
+            let styles = s.document.run_styles(page)?;
+            let faces = s.document.run_font_names(page)?;
+            let shapes = if runs.is_empty() { Vec::new() } else { s.document.drawn_shapes(page)? };
+            Ok(PageTextSnapshot { runs, styles, faces, shapes })
+        })
+    }
+
+    /// How many objects a page holds and how many of them are text, **counted
+    /// without reading any of it** — see [`pdf_core::document::PageScale`].
+    ///
+    /// For deciding whether to call [`Session::page_text_snapshot`] at all: that
+    /// reads every text object's words and lists every path, and what it costs
+    /// grows with these numbers — linearly now (a page of 40,000 words in about
+    /// 0.4 s; it took five minutes while the words were read one object at a
+    /// time), and a drawing of 880,000 paths is still seconds. This is a page
+    /// open and one question per object: milliseconds on a datasheet page, a
+    /// second on a drawing of 880,000 paths (PDFium parses the whole page to open
+    /// it — no count can be had without that).
+    pub fn page_scale(&self, page: usize) -> Result<pdf_core::document::PageScale> {
+        registry::with_session(self.handle, |s| s.document.page_scale(page))
+    }
+
+    /// **Temporary diagnostic** — see
+    /// [`pdf_core::document::Document::take_last_batch_timing`].
+    pub fn take_last_batch_timing(&self) -> Vec<(&'static str, std::time::Duration)> {
+        registry::with_session(self.handle, |s| Ok(s.document.take_last_batch_timing()))
+            .unwrap_or_default()
     }
 
     /// One object per character, in place of a run of them — see

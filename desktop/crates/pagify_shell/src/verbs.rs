@@ -452,6 +452,14 @@ pub enum Verb {
 
     /// Turn the document back to front.
     ReversePages,
+
+    /// Show or hide the Organize grid — a thumbnail view with multi-select,
+    /// drag-to-reorder, and copy/paste across tabs, replacing the plain
+    /// scrolling thumbnail rail for as long as it's open.
+    Thumbnails,
+    /// Flip between the dark and light palettes — see `theme::toggle`. The
+    /// choice is remembered across launches.
+    ToggleAppearance,
     /// Exchange two pages, one-based as typed.
     SwapPages { a: usize, b: usize },
     /// Turn pages a quarter-turn. Positive is clockwise.
@@ -464,6 +472,16 @@ pub enum Verb {
     /// command box, scripted, or recorded — and §7 says the box can do
     /// anything the interface can.
     CopyText,
+
+    /// Put back whatever was last copied — a page, a drawn object, or
+    /// nothing yet.
+    ///
+    /// **Reported from use**: `copy` on a selected page says "1 page copied
+    /// — `paste` puts it in." — its own message names this exact word — and
+    /// typing it answered "unknown command 'paste'.", because only ⌘V had
+    /// ever been wired up. The one word the app tells you to type did not
+    /// exist.
+    Paste,
 
     /// Read the page with OCR and write what it finds back as an invisible
     /// text layer, so it can be selected, searched and copied.
@@ -501,6 +519,12 @@ pub enum Verb {
     /// Report which PDFium this build loaded. A wrong one presents as "some
     /// pages render oddly", so it is worth being answerable from the box.
     Pdfium,
+    /// Say which build this is — otherwise unanswerable from the box, which
+    /// makes "did the update actually take" unanswerable too.
+    Version,
+    /// Look again for a newer build without waiting for the next launch —
+    /// mainly for confirming a publish landed, without relaunching.
+    CheckUpdate,
     /// Say what kind of text this page has, and what that means.
     TextLayer,
     Quit { force: bool },
@@ -812,7 +836,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("stamp", "the annotation phase", "the Stamp tool"),
     ("tagspanel", "the accessibility phase", "the Tags Panel tool"),
     ("textbox", "the annotation phase", "the Textbox tool"),
-    ("thumbnails", "the page phase", "the Thumbnail View tool"),
     ("tickmark", "the annotation phase", "the TickMark tool"),
     ("tohtml", "the conversion phase", "the To HTML tool"),
     ("toimage", "the conversion phase", "the To Image tool"),
@@ -1029,7 +1052,10 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         "unsecure" => Ok(Verb::Unsecure),
         "unlock" => Ok(Verb::Unlock),
         "copy" | "copytext" => Ok(Verb::CopyText),
+        "paste" => Ok(Verb::Paste),
         "reversepages" => Ok(Verb::ReversePages),
+        "thumbnails" => Ok(Verb::Thumbnails),
+        "appearance" => Ok(Verb::ToggleAppearance),
         // An inset rather than a rectangle. Trimming the same amount off every
         // edge is what "crop the margins" means, and a rectangle typed into a
         // box is four numbers nobody can picture.
@@ -1298,6 +1324,8 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         "undo" => Ok(Verb::Undo),
         "redo" => Ok(Verb::Redo),
         "pdfium" => Ok(Verb::Pdfium),
+        "version" => Ok(Verb::Version),
+        "checkupdate" => Ok(Verb::CheckUpdate),
         "textlayer" | "whytext" => Ok(Verb::TextLayer),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
@@ -1379,7 +1407,7 @@ fn split_path_and_extra(tail: &str) -> Option<(String, String)> {
 pub fn claimed_tokens() -> Vec<&'static str> {
     let mut tokens = vec![
         "open", "close", "save", "saveas", "page", "p", "next", "zoom", "z", "fit",
-        "rotate", "undo", "redo", "pdfium", "quit", "exit", "help",
+        "rotate", "undo", "redo", "pdfium", "version", "checkupdate", "quit", "exit", "help",
         "close!", "quit!", "exit!",
         // Several page operations are spelt out rather than taking the short
         // word: `delete`, `insert`, `scale`, `mp` and `dist` are all live

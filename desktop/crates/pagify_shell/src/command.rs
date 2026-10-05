@@ -114,6 +114,12 @@ pub enum Mode {
 
 /// How a submission was triggered. Kept distinct because they are not
 /// interchangeable: space submits only in [`Mode::Command`].
+///
+/// The app never sends [`Submit::Space`] any more: arguments are typed inline
+/// (`extract 1-3 out.pdf`), so a Space after the first word is a space, and
+/// Enter, the Run button and the ribbon are the ways to submit. The variant and
+/// [`CommandBox::space_submits`] stay as the box's own rule, asserted in
+/// `tests/command_box.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Submit {
     Enter,

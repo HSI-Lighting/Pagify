@@ -188,6 +188,12 @@ pub struct Placed {
     /// matrix, so leaving it out overstated every gap by an order of magnitude
     /// — which looked exactly like the text having been shoved sideways.
     pub scale: f32,
+    /// The direction the text runs in on the page — the text matrix's x-axis, as
+    /// a unit vector. What says whether a point is *along this line*: where a
+    /// continuation of the run is drawn is somewhere further down it, and the
+    /// origin alone cannot say so, because the walk does not know how far the
+    /// glyphs advanced.
+    pub axis: (f32, f32),
 }
 
 /// Multiply two PDF matrices, `a b c d e f`.
@@ -400,12 +406,33 @@ pub fn placed(operations: &[Operation]) -> Vec<Placed> {
             // The length of the transformed x-axis: what one unit of text space
             // measures on the page.
             let scale = (at[0] * at[0] + at[1] * at[1]).sqrt();
+            // **The glyph's own origin, not the text matrix's.** Per the PDF
+            // spec the matrix that actually places a glyph is
+            // `[Tfs*Th 0 0 Tfs 0 Trise] * Tm * CTM` — rise is a translation
+            // of the *glyph's local* origin, `(0, Trise)` in unscaled text
+            // space, applied before `Tm`/`CTM`, not an adjustment to the pen
+            // position `Td`/`Tm` leave for what comes after (see `rise`'s own
+            // doc on `State` — "leaves the pen exactly where it was"). `at`
+            // alone is where text-space `(0, 0)` lands; transforming
+            // `(0, rise)` through the same `Tm * CTM` instead adds this.
+            // Left out, every run drawn with a non-zero `Ts` (superscript
+            // units, footnote marks — ordinary in a datasheet) reports an
+            // origin off by roughly the rise itself, which is routinely
+            // enough to clear `run_operators`'s own 4pt matching tolerance —
+            // reported from use as Edit Object refusing to touch such a run
+            // at all ("those words are drawn in a way this cannot follow"),
+            // and a latent risk for every other caller of this function that
+            // locates a run by its origin: a near-miss under the tolerance
+            // could match a neighbouring run instead of refusing outright.
+            let (rise_x, rise_y) = (at[2] * state.rise, at[3] * state.rise);
+            let axis = if scale > 1e-6 { (at[0] / scale, at[1] / scale) } else { (1.0, 0.0) };
             Placed {
-                origin: Origin { operation: index, x: at[4], y: at[5] },
+                origin: Origin { operation: index, x: at[4] + rise_x, y: at[5] + rise_y },
                 font: state.font,
                 size: state.size,
                 scale,
                 line: state.line_number,
+                axis,
             }
         })
         .collect()
@@ -677,6 +704,20 @@ pub fn replacing_codes(
     size: f32,
     width: usize,
 ) -> Vec<u8> {
+    replacing_pieces(operation, range, &[Piece::Codes(replacement.to_vec())], font, size, width)
+}
+
+/// [`replacing_codes`] with the replacement given as pieces — codes and the
+/// spacing numbers between them — rather than as one run of codes: what writes a
+/// line whose words are spaced apart to fill a width.
+pub fn replacing_pieces(
+    operation: &Operation,
+    range: std::ops::Range<usize>,
+    replacement: &[Piece],
+    font: &[u8],
+    size: f32,
+    width: usize,
+) -> Vec<u8> {
     let mut kept: Vec<Piece> = Vec::new();
     let mut code = 0usize;
     let mut put = false;
@@ -698,7 +739,7 @@ pub fn replacing_codes(
                             kept.push(Piece::Codes(std::mem::take(&mut run)));
                         }
                         if !put {
-                            kept.push(Piece::Codes(replacement.to_vec()));
+                            kept.extend(replacement.iter().cloned());
                             put = true;
                         }
                     } else {
@@ -713,7 +754,7 @@ pub fn replacing_codes(
         }
     }
     if !put {
-        kept.push(Piece::Codes(replacement.to_vec()));
+        kept.extend(replacement.iter().cloned());
     }
 
     let mut out = Vec::new();
@@ -1689,6 +1730,32 @@ mod tests {
         let found = ops(b"q 2 0 0 2 0 0 cm BT 1 0 0 1 50 60 Tm (x) Tj ET Q");
         let placed = origins(&found);
         assert_eq!((placed[0].x, placed[0].y), (100.0, 120.0));
+    }
+
+    /// **Reported from use**: Edit Object refused to touch ordinary-looking
+    /// text with "those words are drawn in a way this cannot follow" — text
+    /// set with `Ts` (rise), common in a datasheet's footnote marks and unit
+    /// superscripts. `Ts` offsets where the glyph is actually painted without
+    /// moving the pen (see `rise`'s own doc on `State`); `origins`/`placed`
+    /// tracked it but never folded it into the reported position, so it
+    /// disagreed with PDFium's own origin for the same run by roughly the
+    /// rise itself — comfortably past `run_operators`'s 4pt matching
+    /// tolerance.
+    #[test]
+    fn text_rise_shifts_the_reported_origin() {
+        let found = ops(b"BT 1 0 0 1 72 720 Tm 3 Ts (here) Tj ET");
+        let placed = origins(&found);
+        assert_eq!((placed[0].x, placed[0].y), (72.0, 723.0));
+    }
+
+    /// Rise is in the same unscaled text space `Tm`'s own translation is —
+    /// it has to go through the surrounding transform just like the rest of
+    /// where the text lands, not get tacked on afterwards unscaled.
+    #[test]
+    fn text_rise_is_scaled_by_the_same_transform_as_the_rest_of_the_text() {
+        let found = ops(b"q 2 0 0 2 0 0 cm BT 1 0 0 1 50 60 Tm 5 Ts (x) Tj ET Q");
+        let placed = origins(&found);
+        assert_eq!((placed[0].x, placed[0].y), (100.0, 130.0));
     }
 
     /// `'` moves down a line before drawing — miss that and every such string

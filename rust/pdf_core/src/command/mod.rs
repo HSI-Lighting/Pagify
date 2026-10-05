@@ -120,6 +120,33 @@ pub enum Command {
         /// What else to change. `Default` means the words only.
         style: crate::document::TextStyle,
     },
+    /// The same, for several runs on one page in one transaction — a
+    /// paragraph's own several lines, most often. See
+    /// [`crate::document::DocumentMut::set_text_runs_styled`] for why this
+    /// earns its own command rather than a caller sending one `SetTextRun`
+    /// per line through [`Command::Batch`]: each of those independently
+    /// pays a per-call cost `set_text_runs_styled`'s own batch pays once for
+    /// the whole group.
+    SetTextRuns {
+        page_index: usize,
+        /// `(object, text, style)` per line, same meaning as `SetTextRun`'s
+        /// own fields.
+        edits: Vec<(usize, String, crate::document::TextStyle)>,
+    },
+    /// Edit lines of text by **replacing their pieces**: the first piece of a
+    /// line takes the new words and the line's other pieces come off the page —
+    /// see [`crate::document::DocumentMut::replace_text_lines`].
+    ///
+    /// Undoes by a page snapshot, the same as [`Command::RemoveObject`], for the
+    /// same reason: the removed operators are gone once cut out, and re-typing
+    /// the old words could not bring back a piece's exact bytes.
+    ///
+    /// **Every object number of the page is stale after this, and after its
+    /// undo.**
+    ReplaceTextLines {
+        page_index: usize,
+        edits: Vec<crate::document::TextLineEdit>,
+    },
 
     // ------------------------------------------------------------ object --
     /// Slide one page object by `by`, geometrically.
@@ -285,6 +312,22 @@ pub enum Command {
         title: String,
         page_index: usize,
     },
+
+    // -------------------------------------------------------------- batch --
+    /// Several commands, undone together by one `undo`.
+    ///
+    /// Editing a whole page of text at once — as many paragraphs as were
+    /// touched, each its own `SetTextRun` (or more, for a paragraph that
+    /// grew a line) — used to mean one `CommandHistory` entry per paragraph,
+    /// so undoing "Apply" back out of a page took as many presses as there
+    /// were paragraphs changed. A struct variant, not a bare `Vec<Command>`
+    /// newtype: this enum is internally tagged (`#[serde(tag = "op")]`),
+    /// which only works when a variant's payload serialises as a JSON
+    /// object — a named field gives it one; a bare array-valued newtype
+    /// would not serialise under this tagging at all.
+    Batch {
+        commands: Vec<Command>,
+    },
 }
 
 /// An optional font's bytes, the same way [`page_bytes`] carries a page's —
@@ -372,6 +415,11 @@ pub enum UndoRecord {
         text: String,
         style: crate::document::TextStyle,
     },
+    /// Reverses a [`Command::SetTextRuns`].
+    SetTextRuns {
+        page_index: usize,
+        edits: Vec<(usize, String, crate::document::TextStyle)>,
+    },
     /// The exact opposite slide.
     MoveObject {
         page_index: usize,
@@ -426,6 +474,9 @@ pub enum UndoRecord {
     RemoveBookmark {
         added: crate::document::BookmarkAdded,
     },
+    /// Reverses a [`Command::Batch`] — every inner record, in the reverse of
+    /// the order the commands that produced them ran in.
+    Batch(Vec<UndoRecord>),
 }
 
 impl Command {
@@ -529,6 +580,25 @@ impl Command {
                     text: previous,
                     style: appearance,
                 })
+            }
+            Command::SetTextRuns { page_index, edits } => {
+                let previous = doc.set_text_runs_styled(*page_index, edits)?;
+                Ok(UndoRecord::SetTextRuns {
+                    page_index: *page_index,
+                    edits: edits
+                        .iter()
+                        .zip(previous)
+                        .map(|((object, _, _), (text, style))| (*object, text, style))
+                        .collect(),
+                })
+            }
+            Command::ReplaceTextLines { page_index, edits } => {
+                // Copied before anything is removed, same as `RemoveObject`.
+                // The call is atomic, so a refusal leaves the page as it was and
+                // the copy is simply dropped.
+                let page = doc.snapshot_page(*page_index)?;
+                doc.replace_text_lines(*page_index, edits)?;
+                Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
             }
             Command::MoveObject { page_index, object, by } => {
                 doc.move_object_mut(*page_index, *object, *by)?;
@@ -654,6 +724,39 @@ impl Command {
                 let added = doc.add_bookmark(title, *page_index)?;
                 Ok(UndoRecord::RemoveBookmark { added })
             }
+            Command::Batch { commands } => {
+                let mut records: Vec<UndoRecord> = Vec::with_capacity(commands.len());
+                for command in commands {
+                    match command.execute(doc) {
+                        Ok(record) => records.push(record),
+                        // **All or nothing.** `CommandHistory::execute` only
+                        // records a command that returns `Ok` — a batch that
+                        // fails partway through would otherwise leave
+                        // whatever it already did sitting in the document
+                        // with no undo record pointing back to it, since the
+                        // overall call still returns `Err`. Reported from
+                        // use: a page dense enough to have even one run
+                        // `SetTextRun`'s fast path refuses (an unusual font
+                        // encoding it cannot align text against) turned
+                        // "Apply everything, one Undo" into "silently keep
+                        // every other paragraph's edit, with no way to undo
+                        // any of it, and still show an error" the moment
+                        // that one run was anywhere in the batch. Reverting
+                        // what already ran, in the same reverse order
+                        // `UndoRecord::Batch` itself would use, makes a
+                        // failed batch leave the document exactly as it
+                        // found it — the same guarantee every other command
+                        // here already gives on its own.
+                        Err(e) => {
+                            for record in records.into_iter().rev() {
+                                let _ = record.revert(doc);
+                            }
+                            return Err(e);
+                        }
+                    }
+                }
+                Ok(UndoRecord::Batch(records))
+            }
         }
     }
 
@@ -667,6 +770,12 @@ impl Command {
             Command::SetPageRotation { index, .. } => format!("Rotate page {}", index + 1),
             Command::SetPageCrop { index, .. } => format!("Crop page {}", index + 1),
             Command::SetTextRun { page_index, .. } => {
+                format!("Edit text on page {}", page_index + 1)
+            }
+            Command::SetTextRuns { page_index, .. } => {
+                format!("Edit text on page {}", page_index + 1)
+            }
+            Command::ReplaceTextLines { page_index, .. } => {
                 format!("Edit text on page {}", page_index + 1)
             }
             Command::SetPageSize { index, .. } => format!("Resize page {}", index + 1),
@@ -695,6 +804,11 @@ impl Command {
             Command::Redact { page_index, .. } => format!("Redact on page {}", page_index + 1),
             Command::ReplacePage { index, .. } => format!("Restore page {}", index + 1),
             Command::AddBookmark { title, .. } => format!("Bookmark \"{title}\""),
+            Command::Batch { commands } => match commands.len() {
+                0 => "Nothing to do".into(),
+                1 => commands[0].description(),
+                n => format!("{n} edits"),
+            },
         }
     }
 
@@ -713,6 +827,9 @@ impl Command {
             Command::SetPageRotation { index, .. } => vec![*index],
             Command::SetPageCrop { index, .. } => vec![*index],
             Command::SetTextRun { page_index, .. } => vec![*page_index],
+            Command::SetTextRuns { page_index, .. } => vec![*page_index],
+            // Pieces come off the page: the raster from before is wrong.
+            Command::ReplaceTextLines { page_index, .. } => vec![*page_index],
             Command::SetPageSize { index, .. } => vec![*index],
             // A mark changes one page and renumbers nothing, so the rest of the
             // cache survives — which matters, because marks are made far more
@@ -738,6 +855,22 @@ impl Command {
             // costs far less to re-render than all of them for a change
             // that in truth invalidates none.
             Command::AddBookmark { page_index, .. } => vec![*page_index],
+            // Empty means "everything" (see this method's own doc) — if any
+            // inner command invalidates everything, so does the batch; that
+            // has to short-circuit rather than fall out of a plain
+            // `flat_map`, which would just contribute nothing for an empty
+            // inner `Vec` and silently lose the "everything" signal.
+            Command::Batch { commands } => {
+                let mut pages = Vec::new();
+                for command in commands {
+                    let affected = command.affected_pages();
+                    if affected.is_empty() {
+                        return Vec::new();
+                    }
+                    pages.extend(affected);
+                }
+                pages
+            }
         }
     }
 }
@@ -792,6 +925,9 @@ impl UndoRecord {
             UndoRecord::SetTextRun { page_index, object, text, style } => {
                 doc.set_text_run_styled(page_index, object, &text, &style).map(|_| ())
             }
+            UndoRecord::SetTextRuns { page_index, edits } => {
+                doc.set_text_runs_styled(page_index, &edits).map(|_| ())
+            }
             UndoRecord::MoveObject { page_index, object, by } => {
                 doc.move_object_mut(page_index, object, by)
             }
@@ -814,6 +950,15 @@ impl UndoRecord {
                 annotation,
             } => doc.add_annotation(page_index, &annotation).map(|_| ()),
             UndoRecord::RemoveBookmark { added } => doc.remove_bookmark(added),
+            // Reverse order: the commands that produced these ran forwards,
+            // so undoing them has to run backwards — the same reasoning
+            // `RemovePages`' own revert above already documents.
+            UndoRecord::Batch(records) => {
+                for record in records.into_iter().rev() {
+                    record.revert(doc)?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -877,6 +1022,19 @@ mod tests {
                 index: 7,
                 quarter_turns: 3,
             },
+            Command::ReplaceTextLines {
+                page_index: 2,
+                edits: vec![
+                    crate::document::TextLineEdit::Retype {
+                        first: 985,
+                        text: "The COB in products".into(),
+                        style: crate::document::TextStyle { size: Some(8.0), ..Default::default() },
+                        remove: vec![986, 987, 988],
+                        justify_to: Some(412.5),
+                    },
+                    crate::document::TextLineEdit::Remove { objects: vec![1041, 1042] },
+                ],
+            },
         ];
 
         for command in commands {
@@ -892,6 +1050,52 @@ mod tests {
     fn the_serialised_form_is_tagged_by_operation() {
         let json = serde_json::to_string(&Command::DeletePage { index: 2 }).unwrap();
         assert!(json.contains("\"op\":\"deletePage\""), "got {json}");
+    }
+
+    /// The wire format of the line-replacing command, pinned against a literal
+    /// string like every other one: a field that is absent decodes to nothing
+    /// (no style change, nothing to remove), and the two kinds of edit are told
+    /// apart by their tag.
+    #[test]
+    fn replace_text_lines_decodes_from_the_json_an_app_would_send() {
+        let decoded: Command = serde_json::from_str(
+            r#"{"op":"replaceTextLines","pageIndex":3,"edits":[
+                {"kind":"retype","first":985,"text":"The COB","style":{"size":8.0},"remove":[986,987]},
+                {"kind":"retype","first":989,"text":"plied","justifyTo":300.5},
+                {"kind":"remove","objects":[1041,1042]}]}"#,
+        )
+        .expect("decode");
+        let Command::ReplaceTextLines { page_index, edits } = decoded else { panic!("not the command") };
+        assert_eq!(page_index, 3);
+        assert_eq!(edits.len(), 3);
+        assert_eq!(
+            edits[0],
+            crate::document::TextLineEdit::Retype {
+                first: 985,
+                text: "The COB".into(),
+                style: crate::document::TextStyle { size: Some(8.0), ..Default::default() },
+                remove: vec![986, 987],
+                justify_to: None,
+            }
+        );
+        assert_eq!(
+            edits[1],
+            crate::document::TextLineEdit::Retype {
+                first: 989,
+                text: "plied".into(),
+                style: crate::document::TextStyle::default(),
+                remove: Vec::new(),
+                justify_to: Some(300.5),
+            }
+        );
+        assert_eq!(edits[2], crate::document::TextLineEdit::Remove { objects: vec![1041, 1042] });
+    }
+
+    #[test]
+    fn replace_text_lines_names_its_page_for_the_undo_button_and_the_cache() {
+        let command = Command::ReplaceTextLines { page_index: 4, edits: Vec::new() };
+        assert_eq!(command.description(), "Edit text on page 5");
+        assert_eq!(command.affected_pages(), vec![4]);
     }
 
     #[test]
