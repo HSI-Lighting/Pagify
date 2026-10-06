@@ -143,57 +143,78 @@ pub(crate) fn show(ui: &mut Ui, id: egui::Id, look: &Look, gates: &Gates) -> Cha
     changes
 }
 
+/// The font, its size and its colour, on one row.
+///
+/// **Laid out from the right, so the font button takes what is *measured* to be
+/// left, not what is assumed.** It used to be sized as "the width available,
+/// less what the other two were expected to take" — and the colour button took
+/// 14 pt more than the 26 expected of it (egui's own button is `interact_size`,
+/// 40 pt). A panel is as wide as its content, so the row outgrew the panel by
+/// that much on every frame, for as long as the window had room: opening Edit
+/// Text gave a Properties panel as wide as the window, which came straight back
+/// when dragged narrower (reported from use). A constant that is right today is
+/// wrong the day a widget changes; a measurement cannot be.
 fn first_row(ui: &mut Ui, look: &Look, changes: &mut Changes) {
+    let colour = 26.0;
+    let size_box = 74.0;
     ui.horizontal(|ui| {
-        let colour = 26.0;
-        let size_box = 74.0;
-        let gap = ui.spacing().item_spacing.x;
-        let font_width = (ui.available_width() - size_box - colour - gap * 2.0).max(90.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            // The colour — a button of the size this row was laid out for.
+            let mut rgb = look.color;
+            let picked = ui
+                .scope(|ui| {
+                    ui.spacing_mut().interact_size = Vec2::splat(colour);
+                    ui.color_edit_button_srgb(&mut rgb).on_hover_text("The colour.").changed()
+                })
+                .inner;
+            if picked {
+                changes.color = Some(rgb);
+            }
 
-        // The font: a wide button that reads as a drop-down and opens the picker.
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(font_width, 26.0), Sense::click());
-        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Font {}", look.font)));
-        draw_field(ui.painter(), rect, &response);
-        ui.painter().with_clip_rect(rect.shrink2(Vec2::new(8.0, 0.0)).with_max_x(rect.right() - 20.0)).text(
-            Pos2::new(rect.left() + 8.0, rect.center().y),
-            egui::Align2::LEFT_CENTER,
-            &look.font,
-            egui::FontId::proportional(12.5),
-            theme::ink(),
-        );
-        draw_triangle(ui.painter(), Pos2::new(rect.right() - 11.0, rect.center().y), theme::ink_dim());
-        if response.on_hover_text("The font. Click to choose another.").clicked() {
-            changes.font_clicked = true;
-        }
-
-        // The size: a number that can be typed or dragged, and a menu of the usual ones.
-        let mut size = look.size;
-        let (box_rect, _) = ui.allocate_exact_size(Vec2::new(size_box, 26.0), Sense::hover());
-        let mut inner = ui.new_child(egui::UiBuilder::new().max_rect(box_rect).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        let number = inner.add(
-            egui::DragValue::new(&mut size).speed(0.25).range(1.0..=400.0).max_decimals(1).min_decimals(0),
-        );
-        if number.changed() {
-            changes.size = Some(size);
-        }
-        number.on_hover_text("The size, in points.");
-        let menu = inner.add(egui::Button::new("").min_size(Vec2::new(18.0, 22.0)).frame(false));
-        draw_triangle(inner.painter(), menu.rect.center(), theme::ink_dim());
-        egui::Popup::menu(&menu).show(|ui| {
-            for preset in SIZES {
-                let label = if preset.fract() == 0.0 { format!("{preset:.0}") } else { format!("{preset}") };
-                if ui.selectable_label((look.size - preset).abs() < 0.01, label).clicked() {
-                    changes.size = Some(preset);
-                    ui.close();
+            // The size: a number that can be typed or dragged, and a menu of the usual ones.
+            let mut size = look.size;
+            let (box_rect, _) = ui.allocate_exact_size(Vec2::new(size_box, 26.0), Sense::hover());
+            let mut inner = ui.new_child(
+                egui::UiBuilder::new().max_rect(box_rect).layout(egui::Layout::left_to_right(egui::Align::Center)),
+            );
+            let number = inner.add(
+                egui::DragValue::new(&mut size).speed(0.25).range(1.0..=400.0).max_decimals(1).min_decimals(0),
+            );
+            if number.changed() {
+                changes.size = Some(size);
+            }
+            number.on_hover_text("The size, in points.");
+            let menu = inner.add(egui::Button::new("").min_size(Vec2::new(18.0, 22.0)).frame(false));
+            draw_triangle(inner.painter(), menu.rect.center(), theme::ink_dim());
+            egui::Popup::menu(&menu).show(|ui| {
+                for preset in SIZES {
+                    let label = if preset.fract() == 0.0 { format!("{preset:.0}") } else { format!("{preset}") };
+                    if ui.selectable_label((look.size - preset).abs() < 0.01, label).clicked() {
+                        changes.size = Some(preset);
+                        ui.close();
+                    }
                 }
+            });
+
+            // The font: a wide button that reads as a drop-down and opens the
+            // picker, and takes everything that is left.
+            let font_width = ui.available_width().max(90.0);
+            let (rect, response) = ui.allocate_exact_size(Vec2::new(font_width, 26.0), Sense::click());
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Font {}", look.font)));
+            draw_field(ui.painter(), rect, &response);
+            ui.painter().with_clip_rect(rect.shrink2(Vec2::new(8.0, 0.0)).with_max_x(rect.right() - 20.0)).text(
+                Pos2::new(rect.left() + 8.0, rect.center().y),
+                egui::Align2::LEFT_CENTER,
+                &look.font,
+                egui::FontId::proportional(12.5),
+                theme::ink(),
+            );
+            draw_triangle(ui.painter(), Pos2::new(rect.right() - 11.0, rect.center().y), theme::ink_dim());
+            if response.on_hover_text("The font. Click to choose another.").clicked() {
+                changes.font_clicked = true;
             }
         });
-
-        // The colour.
-        let mut rgb = look.color;
-        if ui.color_edit_button_srgb(&mut rgb).on_hover_text("The colour.").changed() {
-            changes.color = Some(rgb);
-        }
     });
 }
 
