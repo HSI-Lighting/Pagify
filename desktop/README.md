@@ -123,6 +123,46 @@ in the Pagify repo fetches the Apple slices only. Building for those targets
 fails at compile time with a message naming the missing slice — deliberately, so
 it fails while it is a chore rather than in month seven.
 
+## Checks
+
+From `desktop\` (Windows):
+
+```
+$env:PAGIFY_PDFIUM_LIB = "third_party\pdfium\pdfium-win-x64\bin\pdfium.dll"
+cargo test -p pagify_app --release --bin pagify_app     # ~970 tests, ~35s once built
+cargo test -p pagify_shell --release                     # ~640 tests
+cargo test -p pdf_core --release --manifest-path ..\rust\pdf_core\Cargo.toml --no-fail-fast
+```
+
+Without `PAGIFY_PDFIUM_LIB` set, every engine-backed test silently skips rather
+than failing — a green run with the variable unset proves almost nothing.
+`--no-fail-fast` on `pdf_core` matters: it has ~30 separate integration test
+binaries, and without it `cargo test` stops at the first one that fails and
+never runs the rest.
+
+```
+cargo clippy --workspace --all-targets --message-format short -- \
+  -W clippy::too_many_lines -W clippy::too_many_arguments \
+  -W clippy::type_complexity -W clippy::large_enum_variant
+```
+
+Compiles clean (no hard errors) as of 2026-10-06. It is **not** clean under
+`-D warnings`: about 195 warnings exist today, 42 of them `too_many_lines` —
+pre-existing structural debt a refactor is under way to address (see the
+owner's own copy of the plan), not something to chase down one at a time.
+Don't add a blanket `-D warnings` gate until that debt is actually paid down;
+a per-file gate on new code is fine.
+
+**On Windows, commit `.gitattributes` to version control and keep it there.**
+Without it, `core.autocrlf=true` (the default a standard Git-for-Windows
+install suggests) silently rewrites line endings inside any fixture file git's
+own heuristic mistakes for text — which corrupts a PDF's byte-exact
+cross-reference table on checkout, with no warning. If a fixture-reading test
+fails only on Windows and says something about an unsupported
+cross-reference *stream*, check this before looking anywhere else:
+`git cat-file -p HEAD:path/to/file.pdf | wc -c` against `wc -c` on the working-tree
+file — if they differ, it is this.
+
 ## Status
 
 Phases 0 through 12 of the build plan are implemented. **150 tests, none of
