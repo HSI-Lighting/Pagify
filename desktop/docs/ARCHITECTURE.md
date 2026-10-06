@@ -1,0 +1,89 @@
+# Pagify Desktop — Architecture
+
+Status as of 2026-10-06, build **0.1.46** (Windows). Branch `pagify-desktop-windows` in `D:\pagify desktop`, public repo `HSI-Lighting/Pagify`.
+
+Pagify is a PDF editor written in Rust. The window is built with egui/eframe 0.36; PDF reading and writing goes through PDFium.
+
+## 1. The layers
+
+```
+ pagify_app   (desktop/crates/pagify_app)   the window: egui UI, tools, panels, tests of the UI
+      │  calls
+ pagify_shell (desktop/crates/pagify_shell) the app's logic with no UI: sessions, verbs, markup, guides, organize, reader
+      │  calls
+ pdf_core     (rust/pdf_core)               the engine: documents, commands + undo, text edits, render, OCR, crypto
+      │  calls
+ pdfium-render (rust/vendor/pdfium-render)   vendored Rust binding over PDFium (pdfium.dll)
+```
+
+`cad_kernel` (workspace dependency) is the 2D geometry for the markup layer (lines, circles, polylines, hatch). `pagify_issue` is the third workspace member (issue reporting).
+
+| Layer | Size | What it owns |
+|---|---|---|
+| `pagify_app` | `main.rs` ≈ 46,000 lines plus `overlay.rs`, `paragraph_lines.rs`, `spelling.rs`, `text_style_panel.rs`, `system_fonts.rs`, `focus.rs`, `hub.rs`, `instance.rs`, `theme.rs`, `home.rs`, `print_windows.rs` | Everything drawn, every pointer/keyboard gesture, per-tab state, the ribbon, the properties panel |
+| `pagify_shell` | ~30 modules | `session.rs` (one open document), `verbs.rs` (the typed-command language), `markup.rs`, `guides.rs` (alignment lines), `organize.rs` (page reorder maths), `reader.rs` (view anchor, characters), `blocks.rs` + `block_input.rs` (paragraph detection), `diagnose.rs` (why a file will not open), `session_log.rs` |
+| `pdf_core` | `document/pdfium_doc.rs` ≈ 17,000 lines | The `Document` / `DocumentMut` traits, `Command` + undo, byte-safe content-stream edits, text shaping/embedding, rendering, redaction, signing |
+
+The main file is large on purpose-by-accident, not by design: new UI code lands in `main.rs` unless it is a self-contained widget (`text_style_panel.rs`, `overlay.rs`). Splitting it is a future cleanup, not a requirement.
+
+## 2. How an edit travels (the important path)
+
+1. **Pick.** A click in Edit Text resolves against a cached `PageBlocks` reading of the page (`page_blocks`, stamped with page + render epoch + undo generation). The result is an `EditingRun`: the object numbers, the original text, per-line rectangles, `frozen` flags (lines the page draws as shapes), `twins` (faux-bold duplicates), the style as opened (`was`) and as edited (`style`), and `box_resize` (§5).
+2. **Edit.** `draw_run_editor` draws an egui `TextEdit` over the words, in the document's own face where it can. Typing never touches the document.
+3. **Apply.** `apply_editing_page` refuses a stale editor (the page changed under it), then `apply_one_edit` decides: empty buffer → delete; drawn (outlined) words → `replace_outlined_word`; several lines/objects or frozen lines → the paragraph path; otherwise `SetTextRun` for a single run.
+4. **Paragraph path.** `plan_paragraph_edit` (pure, in `paragraph_lines.rs`) matches typed lines to original lines by content, not position, and gives each a fate: `Kept`, `Written`, `Removed`, `Frozen`. `line_edits` turns that into one `Command::ReplaceTextLines`.
+5. **Engine.** Two routes, chosen by what the edit asks for:
+   - **Byte-safe**: swap the characters inside the page's content stream (`transform_in_stream`, `object_wrap_site`, `set_run_in_stream`). Nothing else on the page is touched. This is the preferred route.
+   - **PDFium object model**: used for colour, size and position changes, and for rotating text. It ends with `FPDFPage_GenerateContent`, which rewrites the whole page, so it runs behind a guard that compares the rest of the page before and after, and restores a snapshot if anything else moved.
+6. **Undo.** Every `Command` has an `UndoRecord`. Either an inverse operation (a move is undone by the opposite move, a rotation by the opposite angle) or a page snapshot restore (used by anything that renumbers objects). A `Batch` undoes as one step.
+
+Page objects are addressed by their **index in the page's object list**. Anything that adds or removes objects renumbers them, which is why open editors carry a `(render epoch, undo generation)` stamp and are closed when it moves.
+
+## 3. State
+
+- `PagifyApp` — app-wide: tabs, theme, shared clipboards (`object_clipboard`, `page_clipboard`, `paste_ghost`), session log, font registries, update checker.
+- `DocTab` — per document: the `Doc` (session, thumbnails, textures, page strip), the selection mechanisms (`selected`, `group`, markup `Layer` selection, signature/placed-image selections), the open editors (`editing_run`, `new_text_box`), view state and `ViewSnapshot` (so the reader keeps its place).
+- The **selection mechanisms are mutually exclusive** by convention; most "delete / copy" code checks them in a fixed order.
+- Documents are rendered off the UI thread by a `RenderWorker`; the page draws from the last picture it holds until the right one arrives.
+
+## 4. Input and focus
+
+- `Focus::capture` runs once per frame. Typing keys reach the document only when nothing has focus (`allows_document_keys`); copy/paste is allowed with the command box focused (`allows_clipboard_keys`).
+- ⌘C / ⌘V arrive as `Event::Copy` / `Event::Paste(text)`, never as key presses. After a non-text copy the app writes a placeholder (`COPIED_IN_PAGIFY`) to the system clipboard so the next paste event fires.
+- The command box (`pagify_shell::verbs`) is a second, complete way to drive everything; the ribbon buttons mostly prefill or run verbs.
+
+## 5. Recent features and where they live
+
+| Feature | Where |
+|---|---|
+| Reference lines while moving (grey/green, 6 px snap, Alt = no snap) | `pagify_shell::guides::align`; app `guide_targets`, `snap_the_move`, `draw_move_guides` |
+| Rotate handle with angle label (Shift = 15° steps) | app `draw_rotate_icon`, `object_turn`, `rotate_thing`; engine `Command::RotateObject`, `Document::rotate_object` |
+| Typed-away text deletes it | `apply_one_edit` empty branch; `edit_has_changes` |
+| Paste ghost (50 % opacity, click to place) | `start_paste_ghost`, `draw_paste_ghost`, `place_paste_ghost`; `ObjectClipboard::{Shapes, Image, Text}` |
+| Text-box resize handles | `RunBox` on `EditingRun.box_resize`; grips in `draw_run_editor`; eight handles in `draw_new_text_box` |
+| Text Style panel | `text_style_panel.rs` (UI only: `Look`, `Gates`, `Changes`, `show`) wired by `draw_text_style` |
+| Xref repair on open | `pdfium_doc.rs`: `mended_if_damaged`, `repair_misplaced_xref_type` |
+| One-row tab strip, multi-window, single instance | `tabs_that_fit`, `hub.rs`, `instance.rs` |
+
+**Resize handles.** A run's box is a *width to wrap to*. A resize joins the box's lines into one and the existing wrap loop re-wraps it; Apply writes the first line over the run and the rest as new lines below. The left handle also moves the run: `left_shift_pt` is folded into `style.at` from `was.at` when applying.
+
+**Paste.** Words paste as new editable text (all lines in one `Batch`, so one undo). A picture or shape picked from the *page itself* is copied as a raster of its box, because the engine has no "duplicate this object" command. Shapes drawn in Pagify's markup layer and pictures placed by Pagify paste as themselves.
+
+**Text Style panel.** Font, size, colour, Bold/Italic (the same family's real Bold/Italic face, found by name over installed and bundled fonts), and left/centre/right for a new box work. The rest is drawn greyed with a reason on hover.
+
+## 6. Build, test, ship
+
+- Build: `cargo build --release --locked` from `D:\pagify desktop\desktop`. The exe loads `pdfium.dll` and `ocr\` models from beside it (`target\Pagify\`).
+- Tests: `cargo test -p pagify_app --release --bin pagify_app` (≈ 950 tests, ~40 s once built; needs `PAGIFY_PDFIUM_LIB` pointing at `third_party\pdfium\pdfium-win-x64\bin\pdfium.dll`, otherwise engine tests silently skip). UI tests use `egui_kittest` (`harness`, `click`, `drag`, `run_steps`).
+- Ship: `desktop\packaging\windows\build.ps1 -Publish` — gates (verify third-party checksums, `cargo audit`, no-sockets check), builds, copies to `target\Pagify`, then publishes loose files + `Pagify.zip` + `version.txt` to `D:\Dropbox\YASEEN\pagify desktop`. The version lives in `desktop/Cargo.toml`, `pagify.iss` and `Cargo.lock`.
+- Run `build.ps1` through a child `powershell -File`, never with PowerShell `*>` redirection (the audit step prints to stderr and PowerShell turns that into a fatal error).
+- If the app is running from `target\Pagify`, move its `Pagify.exe` and `pdfium.dll` to `target\Pagify-<ver>-running\` first (a rename is allowed on a running exe). Never kill the user's window.
+- Always confirm the Dropbox `Pagify.exe` hash equals `target\Pagify\Pagify.exe` and that `version.txt` shows the new number.
+
+## 7. Hazards worth knowing
+
+- `FPDFPage_GenerateContent` rewrites an entire page. Used carelessly it corrupts files from Illustrator/InDesign (fonts merged, spacing and colour operators lost). See *Pagify-Remaining-Work.md*.
+- Object numbers change when objects are added or removed. Never hold one across an edit.
+- Parallel tests must each use their own fixture file name; a shared temp path made tests race.
+- Never write source files with PowerShell (encoding damage); use the editor tools or `sed`/`perl`.
+- Tests must not open consoles or windows on the owner's screen (`CREATE_NO_WINDOW`, stand-in exes, isolated `APPDATA`).
