@@ -1,0 +1,49 @@
+# Binary files, explicitly. Git's own "is this text" heuristic looks at the
+# first few KB for a NUL byte, and a small, mostly-ASCII PDF fixture (an
+# uncompressed content stream, no embedded image) reads as plain text to it —
+# so with no rule here, `core.autocrlf=true` (the default a Windows Git
+# install suggests) silently rewrites every `\n` inside such a file to `\r\n`
+# on checkout.
+#
+# That is invisible for most files, and it corrupts a PDF: every byte offset
+# in its cross-reference table and its `startxref` pointer is counted from
+# the start of the file, so one converted newline before a pointer's target
+# shifts everything after it. PDFium recovers by rescanning the file for
+# objects, which is why a document still opens and renders; this crate's own
+# minimal reader (`pdf_core::pdf::reader::File`) takes the declared offsets at
+# their word — by design, see its own doc — and refuses a file whose `xref`
+# keyword is not where `startxref` says, reporting it as an unsupported
+# cross-reference *stream* (the only other legal thing at that position),
+# which is a different and wrong diagnosis of what is actually a checkout
+# corrupting the file underneath it.
+#
+# Found 2026-10-06: three `lock_wiring_tests` plus two `pdf_core::signing`
+# tests (one of them reading a pre-signed fixture, where the same corruption
+# risked reading as a tampering alteration rather than what it was) were
+# failing from exactly this, on this machine, with nothing wrong in the code
+# or the committed fixtures — confirmed by extracting the git blob directly:
+# `git show` reproduces a byte-correct file every time, only the checkout is
+# wrong. 11 fixtures were affected across `rust/pdf_core/fixtures` and the iOS
+# resource copies.
+#
+# `binary` is shorthand for `-diff -merge -text`: never line-ending-converted,
+# and a diff of one is reported as "Binary files differ" rather than garbage.
+*.pdf binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.exe binary
+*.p12 binary
+*.pfx binary
+*.der binary
+*.rten binary
+*.zip binary
