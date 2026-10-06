@@ -1107,3 +1107,46 @@ mod view_snapshot_tests {
         assert_eq!(seen.restored(&strip, 1.0, (0.0, 0.0)), None);
     }
 }
+/// How much clear space [`reveal_axis`] likes to leave round a match.
+pub const REVEAL_AIR_PX: f32 = 32.0;
+
+/// Where to scroll one axis so that the extent `lo..hi` — a match, in content
+/// pixels from the content's own origin — is in the window.
+///
+/// `offset` is where the window is now, `len` how long the window is on this
+/// axis and `room` how far the content can scroll (content minus window, never
+/// below nothing). `page_top`, vertically, is the offset that puts the match's
+/// page at the top of the window.
+///
+/// In this order, so that reading on never jerks the page about:
+///
+/// 1. **Already comfortably in view** — [`REVEAL_AIR_PX`] to spare on both
+///    sides: stay where you are.
+/// 2. **In the first screenful of its page**: go to the page's top, which is
+///    what going to a page has always done. The bottom of the test is the
+///    strip's own padding and not the air above: at Fit the page's bottom edge
+///    is exactly that far from the window's, so asking for more would send a
+///    page number or a footer to rule 3 and scroll the page half out of the
+///    window.
+/// 3. Otherwise **centre it** — or, for something longer than the window, show
+///    where it starts.
+///
+/// Always within `0..=room`. Pure arithmetic, so it is checked on its own.
+pub fn reveal_axis(offset: f32, len: f32, room: f32, lo: f32, hi: f32, page_top: Option<f32>) -> f32 {
+    let air = REVEAL_AIR_PX.min(len / 4.0);
+    let clamp = |o: f32| o.clamp(0.0, room.max(0.0));
+
+    if lo - air >= offset && hi + air <= offset + len {
+        return clamp(offset);
+    }
+    if let Some(top) = page_top.map(clamp) {
+        if lo >= top && hi + STRIP_PAD_PX <= top + len {
+            return top;
+        }
+    }
+    if hi - lo <= len {
+        clamp((lo + hi) / 2.0 - len / 2.0)
+    } else {
+        clamp(lo - air)
+    }
+}

@@ -27,10 +27,15 @@
 use pdf_core::command::Command;
 use pdf_core::document::{Rect, TextLineEdit, TextStyle};
 
+/// `"1 line"`, `"13 lines"`: a count with its noun, in the number it is.
+pub fn count_of(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// What applying an edit does to one line of a paragraph — see
 /// [`plan_paragraph_edit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LineFate<'a> {
+pub enum LineFate<'a> {
     /// The page draws (part of) this line as shapes: never touched, whatever
     /// was typed over it — see `EditingRun::frozen`.
     Frozen,
@@ -48,20 +53,20 @@ pub(crate) enum LineFate<'a> {
 /// What applying the typed text does to a paragraph, decided from the text
 /// alone. Built by [`plan_paragraph_edit`].
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ParagraphPlan<'a> {
+pub struct ParagraphPlan<'a> {
     /// One per original line, top to bottom.
-    pub(crate) fates: Vec<LineFate<'a>>,
+    pub fates: Vec<LineFate<'a>>,
     /// How many whole lines at the top and at the bottom the typed text shares
     /// with the original (compared trimmed). For the session log.
-    pub(crate) prefix: usize,
-    pub(crate) suffix: usize,
+    pub prefix: usize,
+    pub suffix: usize,
     /// Typed lines with no original line left to hold them, top to bottom:
     /// written as new lines below original line `surplus_below`.
-    pub(crate) surplus: Vec<&'a str>,
-    pub(crate) surplus_below: usize,
+    pub surplus: Vec<&'a str>,
+    pub surplus_below: usize,
     /// Frozen lines whose typed text is not what they said — a line typed away
     /// counts, as the empty text it became. Those words were written nowhere.
-    pub(crate) frozen_changed: usize,
+    pub frozen_changed: usize,
 }
 
 /// Decide what an apply does to each line of a paragraph.
@@ -94,7 +99,7 @@ pub(crate) struct ParagraphPlan<'a> {
 /// Enter at the very end, or blank lines left behind, are not words. Blank
 /// lines inside the paragraph's own count are kept — a blanked line is how a
 /// line is removed.
-pub(crate) fn plan_paragraph_edit<'a>(
+pub fn plan_paragraph_edit<'a>(
     original: &[&str],
     frozen: &[bool],
     typed: &[&'a str],
@@ -183,7 +188,7 @@ pub(crate) fn plan_paragraph_edit<'a>(
 /// A release build used to index past the end, or pair every later line with
 /// the wrong object and write the words there (only a `debug_assert` stood
 /// guard). An `Err` comes before anything is built, so the page is as it was.
-pub(crate) fn check_lines_up(
+pub fn check_lines_up(
     text_lines: usize,
     lines: &[(Vec<usize>, Rect)],
     twins: &[Vec<usize>],
@@ -193,12 +198,12 @@ pub(crate) fn check_lines_up(
     let reason = if n == 0 || text_lines != n || frozen.len() != n {
         format!(
             "{}, {} of text, {}",
-            crate::count_of(n, "line", "lines"),
-            crate::count_of(text_lines, "line", "lines"),
-            crate::count_of(frozen.len(), "frozen flag", "frozen flags")
+            count_of(n, "line", "lines"),
+            count_of(text_lines, "line", "lines"),
+            count_of(frozen.len(), "frozen flag", "frozen flags")
         )
     } else if !twins.is_empty() && twins.len() != n {
-        format!("{}, {}", crate::count_of(n, "line", "lines"), crate::count_of(twins.len(), "list of twins", "lists of twins"))
+        format!("{}, {}", count_of(n, "line", "lines"), count_of(twins.len(), "list of twins", "lists of twins"))
     } else if let Some(i) = lines
         .iter()
         .zip(frozen)
@@ -257,7 +262,7 @@ pub(crate) fn check_lines_up(
 ///
 /// A line with no object has nothing to write to or remove and produces
 /// nothing; [`check_lines_up`] refuses such a paragraph before it gets here.
-pub(crate) fn line_edits(
+pub fn line_edits(
     fates: &[LineFate<'_>],
     lines: &[(Vec<usize>, Rect)],
     twins: &[Vec<usize>],
@@ -306,12 +311,12 @@ pub(crate) fn line_edits(
 /// stretching can be turned off in one word: with it off a retyped line of a
 /// justified paragraph ends short, and the detector then reads that line as the
 /// paragraph's last.
-pub(crate) const STRETCH_JUSTIFIED_LINES: bool = true;
+pub const STRETCH_JUSTIFIED_LINES: bool = true;
 
 /// Whether any retyped line in `commands` asks for the width it had — whether a
 /// refusal of them might be the stretching's doing, and so worth asking again
 /// without it.
-pub(crate) fn asks_for_width(commands: &[Command]) -> bool {
+pub fn asks_for_width(commands: &[Command]) -> bool {
     commands.iter().any(|command| match command {
         Command::ReplaceTextLines { edits, .. } => edits
             .iter()
@@ -336,7 +341,7 @@ pub(crate) fn asks_for_width(commands: &[Command]) -> bool {
 ///
 /// A paragraph of one line has no margin to speak of: `false`. One non-last
 /// line is trivially at "one margin"; with so little to go on it counts.
-pub(crate) fn ends_at_one_margin(lines: &[(Vec<usize>, Rect)]) -> bool {
+pub fn ends_at_one_margin(lines: &[(Vec<usize>, Rect)]) -> bool {
     let rights: Vec<f32> = lines[..lines.len().saturating_sub(1)]
         .iter()
         .map(|(_, rect)| rect.left.max(rect.right))
@@ -366,7 +371,7 @@ pub(crate) fn ends_at_one_margin(lines: &[(Vec<usize>, Rect)]) -> bool {
 /// paragraph. "Last" is the last of the *original* lines: a last line that was
 /// removed does not make the one above it the end of the paragraph — it was
 /// full width, and stays so.
-pub(crate) fn justify_targets(
+pub fn justify_targets(
     fates: &[LineFate<'_>],
     lines: &[(Vec<usize>, Rect)],
     justified: bool,
@@ -387,7 +392,7 @@ pub(crate) fn justify_targets(
 /// remove and every object of a `Remove`. **Zero means nothing is renumbered**
 /// (a page whose lines are all one piece keeps its object numbers); anything
 /// else moves every object after a removed one down.
-pub(crate) fn removed_pieces(edits: &[TextLineEdit]) -> usize {
+pub fn removed_pieces(edits: &[TextLineEdit]) -> usize {
     edits
         .iter()
         .map(|edit| match edit {
@@ -402,7 +407,7 @@ pub(crate) fn removed_pieces(edits: &[TextLineEdit]) -> usize {
 /// reach: every piece of a line that is kept, and the first piece of a line
 /// that is retyped (its other pieces are about to be removed). Nothing for a
 /// removed line or a frozen one.
-pub(crate) fn recolour_targets(fates: &[LineFate<'_>], lines: &[(Vec<usize>, Rect)]) -> Vec<usize> {
+pub fn recolour_targets(fates: &[LineFate<'_>], lines: &[(Vec<usize>, Rect)]) -> Vec<usize> {
     let mut targets = Vec::new();
     for (fate, (objects, _)) in fates.iter().zip(lines) {
         match fate {
@@ -423,7 +428,7 @@ pub(crate) fn recolour_targets(fates: &[LineFate<'_>], lines: &[(Vec<usize>, Rec
 /// and then the colour on objects that are numbered as they were when it ran.
 ///
 /// Nothing at all when there is nothing to do.
-pub(crate) fn commands_for(
+pub fn commands_for(
     page: usize,
     recolour: Vec<(usize, String, TextStyle)>,
     edits: Vec<TextLineEdit>,
@@ -443,7 +448,7 @@ pub(crate) fn commands_for(
 /// edit decided were unchanged, retyped, removed or left alone is exactly what
 /// a report of a wrong line needs to confirm or rule out, and it does not need
 /// the page's own text.
-pub(crate) fn plan_log_line(
+pub fn plan_log_line(
     typed_lines: usize,
     plan: &ParagraphPlan<'_>,
     lines: &[(Vec<usize>, Rect)],
@@ -494,7 +499,7 @@ pub(crate) fn plan_log_line(
 /// believing words they typed over a drawn line are on the page; and a new
 /// position is named as not applied, because a paragraph is several lines and
 /// has no single place to move to.
-pub(crate) fn paragraph_applied_message(
+pub fn paragraph_applied_message(
     nothing_written: bool,
     frozen_changed: usize,
     position_ignored: bool,
@@ -1139,4 +1144,287 @@ mod tests {
         assert!(paragraph_applied_message(true, 1, true).contains("1 line drawn as shapes"));
         assert!(paragraph_applied_message(true, 1, true).contains("the position was not changed"));
     }
+}
+/// Whether a picked paragraph's non-last lines should be stretched to the
+/// box's own width — see [`PagifyApp::draw_run_editor`]'s own call site.
+///
+/// Not simply "more than one line": a label-above-an-indented-value field —
+/// "Current Input: ..." over an indented "1050mA" — merges into a 2-line
+/// "paragraph" by the same geometry a real wrapped paragraph does, but its
+/// second line starts well to the right of the first, not flush against the
+/// margin every line of a real wrap shares. Stretching its one real line to
+/// the box's own width invents a look the page never had. **Reported from
+/// use**, alongside the paragraph misdetection itself: a field like this one
+/// showed visibly gapped spacing ("Respectively  for  power") that the real
+/// page never had. The tolerance absorbs ordinary floating-point noise
+/// between runs extracted from the same left-aligned block, not a real
+/// indent.
+pub fn paragraph_should_justify(lines: &[(Vec<usize>, pdf_core::document::Rect)]) -> bool {
+    lines.len() > 1
+        && lines
+            .windows(2)
+            .all(|w| (w[0].1.left.min(w[0].1.right) - w[1].1.left.min(w[1].1.right)).abs() <= 2.0)
+}
+
+/// How much extra space to insert before each word of a justified line, so
+/// its natural width stretches to fill `target_width` — real justification
+/// (every gap gets an equal share of the shortfall), not an approximation.
+///
+/// `word_widths` is each word's own already-measured width, left to right,
+/// in the same units as `target_width`. A line of fewer than two words has
+/// no gap to stretch and is returned unchanged (every entry `0.0`); a line
+/// that already reaches or exceeds the target is left alone too — this
+/// only ever adds space, never removes it by compressing a word.
+///
+/// **Reported from use, twice: the run editor's own paragraph box showed a
+/// ragged right edge where the real page showed the same paragraph fully
+/// justified**, on top of everything else about the box that had already
+/// been made to match. This is the one piece of that look `egui::TextEdit`
+/// has no setting for — `LayoutJob::justify` exists, but it only stretches
+/// rows *it* wrapped, and every one of this editor's lines already ends in
+/// an explicit `\n` (one object per line, not a reflowed paragraph), which
+/// is exactly the case that built-in flag deliberately leaves alone. So the
+/// stretch is computed by hand instead, one line at a time, and applied as
+/// `leading_space` — see `draw_run_editor`'s own layouter.
+pub fn justify_gaps(word_widths: &[f32], target_width: f32) -> Vec<f32> {
+    if word_widths.len() < 2 {
+        return vec![0.0; word_widths.len()];
+    }
+    let natural: f32 = word_widths.iter().sum();
+    let deficit = (target_width - natural).max(0.0);
+    let extra_per_gap = deficit / (word_widths.len() - 1) as f32;
+    std::iter::once(0.0).chain(std::iter::repeat(extra_per_gap).take(word_widths.len() - 1)).collect()
+}
+
+/// Joins a paragraph's own lines back into one string, putting back the
+/// hyphen a wrapped word shows on the page but the text layer does not carry.
+///
+/// `hyphen_after[i]` says the page draws a hyphen mark at the end of line `i`
+/// — see [`wrap_hyphen_marks`]; an entry that is missing reads as `false`.
+///
+/// **Reported from use, with a screenshot: the real page reads
+/// "light-\ning" and "dis-\nsipation", the editor read "light\ning" and
+/// "dis\nsipation" — no hyphen at all, not even a broken one.** Checked
+/// directly against the file: the run before the break is `"...light"`,
+/// the run after is `"ing..."`, with nothing — not a character, not a
+/// control code — between them in the extracted text. `fix_extracted_text`
+/// only ever repairs a character that is *there*; this producer draws its
+/// wrap-hyphen as its own small mark rather than a glyph, so the text layer
+/// never carried one to repair.
+///
+/// **Only where the page shows one — never because two lines happen to
+/// meet mid-word.** The first fix judged by the shape of the break alone:
+/// letters touching on both sides, so a hyphen goes in. That is true of this
+/// producer's hyphenated wraps and equally of every ordinary wrap on a page
+/// whose lines never end in a space — an Illustrator export's justified
+/// columns end every line on a letter, and every such join grew a hyphen the
+/// page never drew (764 of 3,930 joins in a census of real pages). Worse than
+/// the look of the box: applying an edit rewrites every line of the paragraph
+/// from the buffer, so each invented "-" was typed into the page as real
+/// text, on lines nobody had touched — see `wrap_hyphen_tests`.
+///
+/// So the evidence has to be on the page: the line's own text already
+/// carries the hyphen (a real one, or the U+0002 PDFium reads one back as —
+/// `fix_extracted_text` turns that into "-"), or a hyphen mark is drawn right
+/// after the line and `hyphen_after` says so. Letters on both sides of the
+/// break are still required of a *drawn* mark: it has to be splitting a word.
+pub fn join_paragraph_lines(lines: &[String], hyphen_after: &[bool]) -> String {
+    let mut combined = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            // `alphanumeric` on the line above also means "does not already
+            // end in a hyphen or a U+0002", so a mark drawn after a hyphen the
+            // text carries cannot double it.
+            let drawn_hyphen = hyphen_after.get(i - 1).copied().unwrap_or(false)
+                && combined.chars().next_back().is_some_and(char::is_alphanumeric)
+                && line.chars().next().is_some_and(char::is_alphanumeric);
+            if drawn_hyphen {
+                combined.push('-');
+            }
+            combined.push('\n');
+        }
+        combined.push_str(line);
+    }
+    combined
+}
+
+/// Where a wrapped line ends, as far as spotting a hyphen drawn after it
+/// goes: the right edge of its last glyph, its baseline (page points, top-left
+/// origin, so `y` grows downward) and the size it is set in. A hyphen mark is
+/// described in ems of that size, not in points, so one rule serves a 7 pt
+/// datasheet and a 40 pt heading.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineEnd {
+    pub right: f32,
+    pub baseline: f32,
+    pub em: f32,
+}
+
+/// Whether `shape` is a hyphen mark standing at the end of the line `end`
+/// describes: a short, thin, horizontal drawn shape, at about the height a
+/// hyphen sits, starting just right of the line's last glyph.
+///
+/// Every number is in ems and deliberately loose — a mark is whatever the
+/// producer's own hyphen glyph looks like once converted to a path — while
+/// still ruling out what else lives at the end of a line: an underline is
+/// below the baseline, a rule or a strike-through is long or starts inside the
+/// last word, a full stop is as tall as it is wide, an outlined letter is far
+/// taller than 0.2 em.
+pub fn is_hyphen_mark(shape: &pdf_core::document::DrawnObject, end: LineEnd) -> bool {
+    if shape.kind != pdf_core::document::DrawnKind::Shape || end.em <= 0.0 {
+        return false;
+    }
+    let r = &shape.rect;
+    let (left, right) = (r.left.min(r.right), r.left.max(r.right));
+    let (top, bottom) = (r.top.min(r.bottom), r.top.max(r.bottom));
+    let (width, height) = (right - left, bottom - top);
+    let em = end.em;
+    // Up from the baseline — the page's `y` grows the other way.
+    let centre_above_baseline = end.baseline - (top + bottom) / 2.0;
+    let gap_after_last_glyph = left - end.right;
+    (0.1 * em..=0.6 * em).contains(&width)
+        && height <= 0.2 * em
+        && width >= 1.5 * height
+        && (0.1 * em..=0.65 * em).contains(&centre_above_baseline)
+        && (-0.15 * em..=0.4 * em).contains(&gap_after_last_glyph)
+}
+
+/// For every line of a paragraph, whether the page draws a hyphen mark right
+/// after it — the evidence [`join_paragraph_lines`] needs before it puts a
+/// "-" at that wrap. One entry per line; `None` for a line whose geometry is
+/// not known, which has no mark to find. The last line's entry is never
+/// consulted, there being no wrap after it.
+pub fn wrap_hyphen_marks(ends: &[Option<LineEnd>], shapes: &[pdf_core::document::DrawnObject]) -> Vec<bool> {
+    ends.iter()
+        .map(|end| end.is_some_and(|end| shapes.iter().any(|shape| is_hyphen_mark(shape, end))))
+        .collect()
+}
+
+/// Repair characters a font has no glyph for and no font ever will — real
+/// control codes, not real text — before they ever reach the run editor's
+/// buffer.
+///
+/// **Reported from use, with a screenshot: a word mid-paragraph rendered
+/// with what looked like the font suddenly changing.** It was a `\u{2}`
+/// (STX) sitting where the source page draws a hyphen — this PDF's own
+/// `ToUnicode` mapping for its hyphen glyph resolves to a control code
+/// rather than `-`, a defect in the file's own text. No installed font has
+/// a real glyph for a control character, so egui fell back to a
+/// *different* font's own placeholder box for that one character — which
+/// is exactly what "the font changed" looks like from the outside.
+///
+/// **A control character sitting between two letters is put back as a
+/// hyphen, not dropped.** Reported a second time, with a screenshot: the
+/// first fix dropped the character outright, which fixed the tofu box but
+/// silently turned "elitee-plus" into "eliteeplus" wherever that same
+/// mapping bug landed on the product name's own hyphen rather than on a
+/// line-wrap. A hyphen is overwhelmingly the most common glyph a broken
+/// `ToUnicode` table mismaps this way, and a letter on both sides is
+/// exactly the shape a real hyphen — not an en dash, not a bullet, not
+/// nothing — leaves. Anywhere else (start of a line, next to a digit,
+/// next to another control character), there is no such signal, and the
+/// character is dropped rather than guessed at.
+///
+/// **Looks past a `\n` on either side, not just the immediately adjacent
+/// character.** A hyphen can fall exactly on a line wrap — the ordinary
+/// place one occurs — where the character actually touching it is the
+/// newline itself and the letter is one further away; a paragraph's own
+/// lines are expected to already be joined into one string by the time
+/// this runs, for exactly this reason.
+pub fn fix_extracted_text(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    for (i, &c) in chars.iter().enumerate() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            let prev = chars[..i].iter().rev().find(|p| **p != '\n');
+            let next = chars[i + 1..].iter().find(|n| **n != '\n');
+            let between_letters =
+                prev.is_some_and(|p| p.is_alphabetic()) && next.is_some_and(|n| n.is_alphabetic());
+            if between_letters {
+                out.push('-');
+            }
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// **A line-end hyphen the page's text carries as a control code stays a
+/// hyphen when the line after it is one the page draws as shapes.**
+/// [`fix_extracted_text`] puts such a code back as "-" only between two
+/// letters, looking past the line break, and drops it anywhere else; before a
+/// drawn line the next character is the placeholder's "[" (or, before a line
+/// with a drawn word at its start, whatever text follows the gap), so the hyphen
+/// the page visibly draws was dropped from the buffer — and retyping the line
+/// then took it off the page. Reported by the pick-path census on the datasheet's
+/// first paragraph ("driv" + U+0002, line 1, a drawn line after it).
+///
+/// What is known here is better than a letter test: the code is *the page's own
+/// hyphen glyph*, it follows a letter, and the word it cuts goes on in words
+/// nobody can read. So when line `i` is drawn (`drawn[i]`: a placeholder or a
+/// line with a drawn word in it), a control code ending line `i - 1` after a
+/// letter becomes "-" there. A code after anything but a letter, or before a line
+/// that is written, is left to [`fix_extracted_text`] as before.
+pub fn hyphens_before_drawn_lines(texts: &mut [String], drawn: &[bool]) {
+    for i in 1..texts.len() {
+        if !drawn.get(i).copied().unwrap_or(false) {
+            continue;
+        }
+        let above = &mut texts[i - 1];
+        let mut tail = above.char_indices().rev();
+        let Some((at, last)) = tail.next() else { continue };
+        let is_marker = last.is_control() && last != '\n' && last != '\t';
+        if is_marker && tail.next().is_some_and(|(_, before)| before.is_alphabetic()) {
+            above.replace_range(at.., "-");
+        }
+    }
+}
+
+/// Which of a paragraph's lines its *look* — the one font/size the run
+/// editor's single `TextEdit` renders every line in — should be taken from.
+///
+/// Each entry is `(object, look, weight)` — one per text fragment, `look`
+/// being whatever the caller decides makes two fragments look alike (so far
+/// `(face name, size bits)`; a font identity once the caller has one) and
+/// `weight` how much that fragment should count for. The winner is the look
+/// with the largest total weight, ties broken by whichever appeared first;
+/// the object returned is the first fragment that has that look. `None` only
+/// when `fragments` is empty.
+///
+/// **Reported from use, with a screenshot**: a paragraph whose first line
+/// was a bold "Description:" heading opened with its entire multi-line body
+/// rendered in that same bold, oversized face, even though every line
+/// beneath it was ordinary body text. `pick_paragraph` used to seed the
+/// whole editor from `lines[0]` alone; this is what replaced it.
+///
+/// **Weighed by ink, not counted by fragment.** One vote per fragment let
+/// a producer's chopping decide: a heading cut into five scraps outvotes a
+/// body of four long lines, and a three-letter "HSI" in another weight
+/// inside a paragraph is a fragment like any other. The caller passes each
+/// fragment's non-space character count, so the look that most of the
+/// *text* has wins, however many pieces it was written in. And when every
+/// fragment shares one look — which is what a font name reported
+/// identically for five different weights makes of a whole page — the
+/// first-seen rule still gives the first fragment, as it always did.
+pub fn majority_look<K: PartialEq>(fragments: &[(usize, K, usize)]) -> Option<usize> {
+    // (look, total weight, first object with it)
+    let mut tally: Vec<(&K, usize, usize)> = Vec::new();
+    for (object, look, weight) in fragments {
+        match tally.iter_mut().find(|(seen, ..)| *seen == look) {
+            Some((_, total, _)) => *total += weight,
+            None => tally.push((look, *weight, *object)),
+        }
+    }
+    // Not `Iterator::max_by_key`: on a tie it keeps the *last* maximum, and
+    // first-seen order is what makes `a_tie_resolves_to_whichever_look_
+    // appeared_first` (and, in practice, a paragraph with no real majority)
+    // deterministic in the more expected direction.
+    let mut best: Option<(usize, usize)> = None; // (total weight, first object)
+    for (_, total, first) in &tally {
+        if best.map_or(true, |(most, _)| *total > most) {
+            best = Some((*total, *first));
+        }
+    }
+    best.map(|(_, first)| first)
 }

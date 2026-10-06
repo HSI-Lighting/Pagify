@@ -12,4 +12,9 @@ cad_kernel.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# Reads a Hunspell dictionary (words plus affix rules) — the Arabic spelling
+# list is one, and a flat word list cannot hold a language whose words are made
+# by adding prefixes and suffixes to a stem. Pure Rust, MPL-2.0, one dependency
+# of its own (a hasher). See `third_party/dict/README.md`.
+spellbook = "0.4"
 zeroize = "1"

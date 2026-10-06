@@ -186,7 +186,7 @@ impl Custom {
         sorted.sort_unstable();
         let mut text = sorted.join("\n");
         text.push('\n');
-        pagify_shell::state::write_own(path, text.as_bytes())
+        crate::state::write_own(path, text.as_bytes())
             .map(|()| true)
             .map_err(|e| format!("added for now, but {} could not be written: {e}", path.display()))
     }
@@ -204,7 +204,7 @@ fn is_custom(lower: &str) -> bool {
 /// Read the person's dictionary from Pagify's settings folder and keep adding
 /// to it there. Not called under test, so a test run never touches the real one.
 pub fn use_dictionary_file() {
-    if let Some(dir) = pagify_shell::state::state_dir() {
+    if let Some(dir) = crate::state::state_dir() {
         *custom().write().unwrap_or_else(|e| e.into_inner()) = Custom::load(dir.join("dictionary.txt"));
     }
 }
@@ -300,13 +300,21 @@ fn edit_distance_within(
     (distance <= limit).then_some(distance)
 }
 
-#[cfg(test)]
 thread_local! {
     /// How many times [`suggest`] has run on this thread — a search is
     /// hundreds of thousands of edit distances, so a test has to be able to
     /// say "once per word, not once per frame". Per thread, not global: the
     /// tests run in parallel and each of them calls `suggest`.
-    pub(crate) static SUGGEST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    ///
+    /// **Not `#[cfg(test)]`**, though it only means anything to one: this
+    /// crate's own test build gates it crate-wide, but `pagify_app`'s tests
+    /// — the only callers that read it — build this crate in its ordinary,
+    /// non-test configuration, where a `#[cfg(test)]` item here would simply
+    /// not exist for them to see. The increment is a `Cell<usize>` bump
+    /// nothing in production reads; the cost of always paying it is nothing
+    /// next to the cost of a counter that silently stops counting the moment
+    /// the crate boundary moved.
+    pub static SUGGEST_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Known words that read close to `word`, nearest first — candidates are
@@ -314,7 +322,6 @@ thread_local! {
 /// what keeps this a length-bucketed scan rather than all 370,000 words
 /// run through `edit_distance` on every call.
 pub fn suggest(word: &str, limit: usize) -> Vec<String> {
-    #[cfg(test)]
     SUGGEST_CALLS.with(|calls| calls.set(calls.get() + 1));
     // Arabic comes from its own dictionary; a Chinese character has nothing to
     // be suggested from.

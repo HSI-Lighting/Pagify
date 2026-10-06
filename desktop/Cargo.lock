@@ -2713,7 +2713,6 @@ dependencies = [
  "raw-window-handle",
  "rfd",
  "serde_json",
- "spellbook",
  "windows",
  "winresource",
  "zeroize",
@@ -2745,6 +2744,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "spellbook",
  "zeroize",
 ]
 

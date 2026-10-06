@@ -24,7 +24,6 @@ mod logo;
 mod overlay;
 mod edit;
 mod panels;
-mod paragraph_lines;
 mod pending;
 mod picking;
 #[cfg(test)]
@@ -32,7 +31,6 @@ mod edit_text_hardening_tests;
 #[cfg(target_os = "windows")]
 mod print_windows;
 mod ribbon;
-mod spelling;
 mod view;
 mod workspace;
 mod system_fonts;
@@ -55,9 +53,10 @@ use pagify_shell::recent::Recent;
 use pagify_shell::tools::{self, SnapSet};
 use pagify_shell::verbs::{self, MeasureKind, PageTarget, SignatureAction, Verb, ZoomTarget};
 use pagify_shell::{PageRaster, Session};
-use paragraph_lines::{
-    asks_for_width, check_lines_up, commands_for, ends_at_one_margin, line_edits, paragraph_applied_message,
-    plan_log_line, plan_paragraph_edit, recolour_targets, removed_pieces, STRETCH_JUSTIFIED_LINES,
+use pagify_shell::paragraph_lines::{
+    asks_for_width, check_lines_up, commands_for, count_of, ends_at_one_margin, line_edits,
+    paragraph_applied_message, plan_log_line, plan_paragraph_edit, recolour_targets, removed_pieces,
+    STRETCH_JUSTIFIED_LINES,
 };
 use pdf_core::document::Color;
 use pdf_core::error::PdfError;
@@ -72,6 +71,16 @@ pub(crate) use ribbon::{
     DOC_TAB_MAX_TEXT, DOC_TAB_MENU_WIDTH, DOC_TAB_PADDING, RIBBON_MARGIN_X, RIBBON_MARGIN_Y, TOOL_HEIGHT, TOOL_WIDTH,
 };
 pub(crate) use pending::{DrawKind, MatchPropertiesSample, Pending, PendingArticleBox, PendingKind, PendingLink};
+// `spelling` and `paragraph_lines` moved to `pagify_shell` (Phase 4a: no
+// egui, so they belong where they can be tested without a window) —
+// re-exported under their old names so every existing `spelling::X` /
+// `paragraph_lines::X` call and test import keeps resolving.
+pub(crate) use pagify_shell::spelling;
+pub(crate) use pagify_shell::paragraph_lines::{
+    self, fix_extracted_text, hyphens_before_drawn_lines, is_hyphen_mark, join_paragraph_lines, justify_gaps,
+    majority_look, paragraph_should_justify, wrap_hyphen_marks, LineEnd,
+};
+pub(crate) use pagify_shell::reader::{reveal_axis, REVEAL_AIR_PX, STRIP_PAD_PX};
 
 /// Switches a test flips to make part of the app fail on purpose, and the
 /// helpers the tests that edit a page share.
@@ -468,51 +477,7 @@ struct Reveal {
     rect: pagify_shell::reader::Rect,
 }
 
-use pagify_shell::reader::STRIP_PAD_PX;
 
-/// How much clear space [`reveal_axis`] likes to leave round a match.
-const REVEAL_AIR_PX: f32 = 32.0;
-
-/// Where to scroll one axis so that the extent `lo..hi` — a match, in content
-/// pixels from the content's own origin — is in the window.
-///
-/// `offset` is where the window is now, `len` how long the window is on this
-/// axis and `room` how far the content can scroll (content minus window, never
-/// below nothing). `page_top`, vertically, is the offset that puts the match's
-/// page at the top of the window.
-///
-/// In this order, so that reading on never jerks the page about:
-///
-/// 1. **Already comfortably in view** — [`REVEAL_AIR_PX`] to spare on both
-///    sides: stay where you are.
-/// 2. **In the first screenful of its page**: go to the page's top, which is
-///    what going to a page has always done. The bottom of the test is the
-///    strip's own padding and not the air above: at Fit the page's bottom edge
-///    is exactly that far from the window's, so asking for more would send a
-///    page number or a footer to rule 3 and scroll the page half out of the
-///    window.
-/// 3. Otherwise **centre it** — or, for something longer than the window, show
-///    where it starts.
-///
-/// Always within `0..=room`. Pure arithmetic, so it is checked on its own.
-fn reveal_axis(offset: f32, len: f32, room: f32, lo: f32, hi: f32, page_top: Option<f32>) -> f32 {
-    let air = REVEAL_AIR_PX.min(len / 4.0);
-    let clamp = |o: f32| o.clamp(0.0, room.max(0.0));
-
-    if lo - air >= offset && hi + air <= offset + len {
-        return clamp(offset);
-    }
-    if let Some(top) = page_top.map(clamp) {
-        if lo >= top && hi + STRIP_PAD_PX <= top + len {
-            return top;
-        }
-    }
-    if hi - lo <= len {
-        clamp((lo + hi) / 2.0 - len / 2.0)
-    } else {
-        clamp(lo - air)
-    }
-}
 
 /// Everything about one open document — its own tab. Fully independent of
 /// every other tab: its own page, zoom, scroll position, selections, armed
@@ -1334,11 +1299,6 @@ const HEAVY_PAGE_OBJECTS: usize = 60_000;
 /// [`HEAVY_PAGE_TEXT_OBJECTS`].
 fn page_is_heavy(weight: &pdf_core::document::PageScale) -> bool {
     weight.text_objects > HEAVY_PAGE_TEXT_OBJECTS || weight.page_objects > HEAVY_PAGE_OBJECTS
-}
-
-/// `"1 line"`, `"13 lines"`: a count with its noun, in the number it is.
-fn count_of(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// What an editor whose page changed under it is told — see
@@ -15219,56 +15179,7 @@ fn run_editor_glyph_size(on_screen: f32) -> f32 {
     on_screen.max(0.5)
 }
 
-/// Whether a picked paragraph's non-last lines should be stretched to the
-/// box's own width — see [`PagifyApp::draw_run_editor`]'s own call site.
-///
-/// Not simply "more than one line": a label-above-an-indented-value field —
-/// "Current Input: ..." over an indented "1050mA" — merges into a 2-line
-/// "paragraph" by the same geometry a real wrapped paragraph does, but its
-/// second line starts well to the right of the first, not flush against the
-/// margin every line of a real wrap shares. Stretching its one real line to
-/// the box's own width invents a look the page never had. **Reported from
-/// use**, alongside the paragraph misdetection itself: a field like this one
-/// showed visibly gapped spacing ("Respectively  for  power") that the real
-/// page never had. The tolerance absorbs ordinary floating-point noise
-/// between runs extracted from the same left-aligned block, not a real
-/// indent.
-fn paragraph_should_justify(lines: &[(Vec<usize>, pdf_core::document::Rect)]) -> bool {
-    lines.len() > 1
-        && lines
-            .windows(2)
-            .all(|w| (w[0].1.left.min(w[0].1.right) - w[1].1.left.min(w[1].1.right)).abs() <= 2.0)
-}
 
-/// How much extra space to insert before each word of a justified line, so
-/// its natural width stretches to fill `target_width` — real justification
-/// (every gap gets an equal share of the shortfall), not an approximation.
-///
-/// `word_widths` is each word's own already-measured width, left to right,
-/// in the same units as `target_width`. A line of fewer than two words has
-/// no gap to stretch and is returned unchanged (every entry `0.0`); a line
-/// that already reaches or exceeds the target is left alone too — this
-/// only ever adds space, never removes it by compressing a word.
-///
-/// **Reported from use, twice: the run editor's own paragraph box showed a
-/// ragged right edge where the real page showed the same paragraph fully
-/// justified**, on top of everything else about the box that had already
-/// been made to match. This is the one piece of that look `egui::TextEdit`
-/// has no setting for — `LayoutJob::justify` exists, but it only stretches
-/// rows *it* wrapped, and every one of this editor's lines already ends in
-/// an explicit `\n` (one object per line, not a reflowed paragraph), which
-/// is exactly the case that built-in flag deliberately leaves alone. So the
-/// stretch is computed by hand instead, one line at a time, and applied as
-/// `leading_space` — see `draw_run_editor`'s own layouter.
-fn justify_gaps(word_widths: &[f32], target_width: f32) -> Vec<f32> {
-    if word_widths.len() < 2 {
-        return vec![0.0; word_widths.len()];
-    }
-    let natural: f32 = word_widths.iter().sum();
-    let deficit = (target_width - natural).max(0.0);
-    let extra_per_gap = deficit / (word_widths.len() - 1) as f32;
-    std::iter::once(0.0).chain(std::iter::repeat(extra_per_gap).take(word_widths.len() - 1)).collect()
-}
 
 /// Splits `text` into the stretches the document's own face can draw and the
 /// stretches it cannot, as `(byte range, drawable)` pairs that tile the whole
@@ -15388,238 +15299,12 @@ fn editor_layout_job(
     job
 }
 
-/// Joins a paragraph's own lines back into one string, putting back the
-/// hyphen a wrapped word shows on the page but the text layer does not carry.
-///
-/// `hyphen_after[i]` says the page draws a hyphen mark at the end of line `i`
-/// — see [`wrap_hyphen_marks`]; an entry that is missing reads as `false`.
-///
-/// **Reported from use, with a screenshot: the real page reads
-/// "light-\ning" and "dis-\nsipation", the editor read "light\ning" and
-/// "dis\nsipation" — no hyphen at all, not even a broken one.** Checked
-/// directly against the file: the run before the break is `"...light"`,
-/// the run after is `"ing..."`, with nothing — not a character, not a
-/// control code — between them in the extracted text. `fix_extracted_text`
-/// only ever repairs a character that is *there*; this producer draws its
-/// wrap-hyphen as its own small mark rather than a glyph, so the text layer
-/// never carried one to repair.
-///
-/// **Only where the page shows one — never because two lines happen to
-/// meet mid-word.** The first fix judged by the shape of the break alone:
-/// letters touching on both sides, so a hyphen goes in. That is true of this
-/// producer's hyphenated wraps and equally of every ordinary wrap on a page
-/// whose lines never end in a space — an Illustrator export's justified
-/// columns end every line on a letter, and every such join grew a hyphen the
-/// page never drew (764 of 3,930 joins in a census of real pages). Worse than
-/// the look of the box: applying an edit rewrites every line of the paragraph
-/// from the buffer, so each invented "-" was typed into the page as real
-/// text, on lines nobody had touched — see `wrap_hyphen_tests`.
-///
-/// So the evidence has to be on the page: the line's own text already
-/// carries the hyphen (a real one, or the U+0002 PDFium reads one back as —
-/// `fix_extracted_text` turns that into "-"), or a hyphen mark is drawn right
-/// after the line and `hyphen_after` says so. Letters on both sides of the
-/// break are still required of a *drawn* mark: it has to be splitting a word.
-fn join_paragraph_lines(lines: &[String], hyphen_after: &[bool]) -> String {
-    let mut combined = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        if i > 0 {
-            // `alphanumeric` on the line above also means "does not already
-            // end in a hyphen or a U+0002", so a mark drawn after a hyphen the
-            // text carries cannot double it.
-            let drawn_hyphen = hyphen_after.get(i - 1).copied().unwrap_or(false)
-                && combined.chars().next_back().is_some_and(char::is_alphanumeric)
-                && line.chars().next().is_some_and(char::is_alphanumeric);
-            if drawn_hyphen {
-                combined.push('-');
-            }
-            combined.push('\n');
-        }
-        combined.push_str(line);
-    }
-    combined
-}
 
-/// Where a wrapped line ends, as far as spotting a hyphen drawn after it
-/// goes: the right edge of its last glyph, its baseline (page points, top-left
-/// origin, so `y` grows downward) and the size it is set in. A hyphen mark is
-/// described in ems of that size, not in points, so one rule serves a 7 pt
-/// datasheet and a 40 pt heading.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct LineEnd {
-    right: f32,
-    baseline: f32,
-    em: f32,
-}
 
-/// Whether `shape` is a hyphen mark standing at the end of the line `end`
-/// describes: a short, thin, horizontal drawn shape, at about the height a
-/// hyphen sits, starting just right of the line's last glyph.
-///
-/// Every number is in ems and deliberately loose — a mark is whatever the
-/// producer's own hyphen glyph looks like once converted to a path — while
-/// still ruling out what else lives at the end of a line: an underline is
-/// below the baseline, a rule or a strike-through is long or starts inside the
-/// last word, a full stop is as tall as it is wide, an outlined letter is far
-/// taller than 0.2 em.
-fn is_hyphen_mark(shape: &pdf_core::document::DrawnObject, end: LineEnd) -> bool {
-    if shape.kind != pdf_core::document::DrawnKind::Shape || end.em <= 0.0 {
-        return false;
-    }
-    let r = &shape.rect;
-    let (left, right) = (r.left.min(r.right), r.left.max(r.right));
-    let (top, bottom) = (r.top.min(r.bottom), r.top.max(r.bottom));
-    let (width, height) = (right - left, bottom - top);
-    let em = end.em;
-    // Up from the baseline — the page's `y` grows the other way.
-    let centre_above_baseline = end.baseline - (top + bottom) / 2.0;
-    let gap_after_last_glyph = left - end.right;
-    (0.1 * em..=0.6 * em).contains(&width)
-        && height <= 0.2 * em
-        && width >= 1.5 * height
-        && (0.1 * em..=0.65 * em).contains(&centre_above_baseline)
-        && (-0.15 * em..=0.4 * em).contains(&gap_after_last_glyph)
-}
 
-/// For every line of a paragraph, whether the page draws a hyphen mark right
-/// after it — the evidence [`join_paragraph_lines`] needs before it puts a
-/// "-" at that wrap. One entry per line; `None` for a line whose geometry is
-/// not known, which has no mark to find. The last line's entry is never
-/// consulted, there being no wrap after it.
-fn wrap_hyphen_marks(ends: &[Option<LineEnd>], shapes: &[pdf_core::document::DrawnObject]) -> Vec<bool> {
-    ends.iter()
-        .map(|end| end.is_some_and(|end| shapes.iter().any(|shape| is_hyphen_mark(shape, end))))
-        .collect()
-}
 
-/// Repair characters a font has no glyph for and no font ever will — real
-/// control codes, not real text — before they ever reach the run editor's
-/// buffer.
-///
-/// **Reported from use, with a screenshot: a word mid-paragraph rendered
-/// with what looked like the font suddenly changing.** It was a `\u{2}`
-/// (STX) sitting where the source page draws a hyphen — this PDF's own
-/// `ToUnicode` mapping for its hyphen glyph resolves to a control code
-/// rather than `-`, a defect in the file's own text. No installed font has
-/// a real glyph for a control character, so egui fell back to a
-/// *different* font's own placeholder box for that one character — which
-/// is exactly what "the font changed" looks like from the outside.
-///
-/// **A control character sitting between two letters is put back as a
-/// hyphen, not dropped.** Reported a second time, with a screenshot: the
-/// first fix dropped the character outright, which fixed the tofu box but
-/// silently turned "elitee-plus" into "eliteeplus" wherever that same
-/// mapping bug landed on the product name's own hyphen rather than on a
-/// line-wrap. A hyphen is overwhelmingly the most common glyph a broken
-/// `ToUnicode` table mismaps this way, and a letter on both sides is
-/// exactly the shape a real hyphen — not an en dash, not a bullet, not
-/// nothing — leaves. Anywhere else (start of a line, next to a digit,
-/// next to another control character), there is no such signal, and the
-/// character is dropped rather than guessed at.
-///
-/// **Looks past a `\n` on either side, not just the immediately adjacent
-/// character.** A hyphen can fall exactly on a line wrap — the ordinary
-/// place one occurs — where the character actually touching it is the
-/// newline itself and the letter is one further away; a paragraph's own
-/// lines are expected to already be joined into one string by the time
-/// this runs, for exactly this reason.
-fn fix_extracted_text(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = String::with_capacity(chars.len());
-    for (i, &c) in chars.iter().enumerate() {
-        if c.is_control() && c != '\n' && c != '\t' {
-            let prev = chars[..i].iter().rev().find(|p| **p != '\n');
-            let next = chars[i + 1..].iter().find(|n| **n != '\n');
-            let between_letters =
-                prev.is_some_and(|p| p.is_alphabetic()) && next.is_some_and(|n| n.is_alphabetic());
-            if between_letters {
-                out.push('-');
-            }
-            continue;
-        }
-        out.push(c);
-    }
-    out
-}
 
-/// **A line-end hyphen the page's text carries as a control code stays a
-/// hyphen when the line after it is one the page draws as shapes.**
-/// [`fix_extracted_text`] puts such a code back as "-" only between two
-/// letters, looking past the line break, and drops it anywhere else; before a
-/// drawn line the next character is the placeholder's "[" (or, before a line
-/// with a drawn word at its start, whatever text follows the gap), so the hyphen
-/// the page visibly draws was dropped from the buffer — and retyping the line
-/// then took it off the page. Reported by the pick-path census on the datasheet's
-/// first paragraph ("driv" + U+0002, line 1, a drawn line after it).
-///
-/// What is known here is better than a letter test: the code is *the page's own
-/// hyphen glyph*, it follows a letter, and the word it cuts goes on in words
-/// nobody can read. So when line `i` is drawn (`drawn[i]`: a placeholder or a
-/// line with a drawn word in it), a control code ending line `i - 1` after a
-/// letter becomes "-" there. A code after anything but a letter, or before a line
-/// that is written, is left to [`fix_extracted_text`] as before.
-fn hyphens_before_drawn_lines(texts: &mut [String], drawn: &[bool]) {
-    for i in 1..texts.len() {
-        if !drawn.get(i).copied().unwrap_or(false) {
-            continue;
-        }
-        let above = &mut texts[i - 1];
-        let mut tail = above.char_indices().rev();
-        let Some((at, last)) = tail.next() else { continue };
-        let is_marker = last.is_control() && last != '\n' && last != '\t';
-        if is_marker && tail.next().is_some_and(|(_, before)| before.is_alphabetic()) {
-            above.replace_range(at.., "-");
-        }
-    }
-}
 
-/// Which of a paragraph's lines its *look* — the one font/size the run
-/// editor's single `TextEdit` renders every line in — should be taken from.
-///
-/// Each entry is `(object, look, weight)` — one per text fragment, `look`
-/// being whatever the caller decides makes two fragments look alike (so far
-/// `(face name, size bits)`; a font identity once the caller has one) and
-/// `weight` how much that fragment should count for. The winner is the look
-/// with the largest total weight, ties broken by whichever appeared first;
-/// the object returned is the first fragment that has that look. `None` only
-/// when `fragments` is empty.
-///
-/// **Reported from use, with a screenshot**: a paragraph whose first line
-/// was a bold "Description:" heading opened with its entire multi-line body
-/// rendered in that same bold, oversized face, even though every line
-/// beneath it was ordinary body text. `pick_paragraph` used to seed the
-/// whole editor from `lines[0]` alone; this is what replaced it.
-///
-/// **Weighed by ink, not counted by fragment.** One vote per fragment let
-/// a producer's chopping decide: a heading cut into five scraps outvotes a
-/// body of four long lines, and a three-letter "HSI" in another weight
-/// inside a paragraph is a fragment like any other. The caller passes each
-/// fragment's non-space character count, so the look that most of the
-/// *text* has wins, however many pieces it was written in. And when every
-/// fragment shares one look — which is what a font name reported
-/// identically for five different weights makes of a whole page — the
-/// first-seen rule still gives the first fragment, as it always did.
-fn majority_look<K: PartialEq>(fragments: &[(usize, K, usize)]) -> Option<usize> {
-    // (look, total weight, first object with it)
-    let mut tally: Vec<(&K, usize, usize)> = Vec::new();
-    for (object, look, weight) in fragments {
-        match tally.iter_mut().find(|(seen, ..)| *seen == look) {
-            Some((_, total, _)) => *total += weight,
-            None => tally.push((look, *weight, *object)),
-        }
-    }
-    // Not `Iterator::max_by_key`: on a tie it keeps the *last* maximum, and
-    // first-seen order is what makes `a_tie_resolves_to_whichever_look_
-    // appeared_first` (and, in practice, a paragraph with no real majority)
-    // deterministic in the more expected direction.
-    let mut best: Option<(usize, usize)> = None; // (total weight, first object)
-    for (_, total, first) in &tally {
-        if best.map_or(true, |(most, _)| *total > most) {
-            best = Some((*total, *first));
-        }
-    }
-    best.map(|(_, first)| first)
-}
 
 #[cfg(test)]
 mod majority_look_tests;
