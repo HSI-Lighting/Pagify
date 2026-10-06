@@ -415,7 +415,7 @@ mod tests {
     fn a_real_font() -> Option<Vec<u8>> {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../../pagify/third_party/fonts/Montserrat-Regular.ttf"
+            "/../../desktop/third_party/fonts/Montserrat-Regular.ttf"
         );
         std::fs::read(path).ok()
     }
