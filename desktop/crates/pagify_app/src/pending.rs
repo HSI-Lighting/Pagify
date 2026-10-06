@@ -1,0 +1,374 @@
+//! The tool that is waiting for clicks: what it still wants, what to say about
+//! it, and whether it stays armed once it has what it wanted.
+//!
+//! **Still in its current shape, not redesigned.** This is the state the
+//! mentor's review calls tool-state sprawl — the fields it belongs with
+//! (`pending`, `markup_armed`, `editing_run`, `grab`, `handle`, `selected_*`,
+//! and the rest) are still on `PagifyApp`/`DocTab`, and the transition
+//! functions (`arm`, `resolve`, `leave_editor_by_click`, …) are still where
+//! they were. Collapsing all of that into one `Tool` enum with its own
+//! transitions is later work; this is only the file it moves to first.
+
+use pagify_shell::page_space::AppPoint;
+use pagify_shell::tools;
+use pagify_shell::verbs::MeasureKind;
+
+/// What a command is still waiting for from the pointer.
+///
+/// Objects and points are collected separately because they are not the same
+/// thing: fillet wants two *objects* clicked on, move wants two *points*, and
+/// offset wants an object and then a point saying which side. Treating both as
+/// "clicks" is what made fillet perform a move.
+pub(crate) struct Pending {
+    pub(crate) kind: PendingKind,
+    pub(crate) page: usize,
+    pub(crate) objects: Vec<(usize, AppPoint)>,
+    pub(crate) points: Vec<AppPoint>,
+}
+
+pub(crate) enum PendingKind {
+    /// Waiting for a click on the words to change.
+    PickText,
+    /// Waiting for a click on a highlight, underline, strike-out or squiggle to
+    /// take it off the page — what the Eraser arms when nothing drawn is
+    /// selected. Stays in hand, so a run of marks can be rubbed out in a row.
+    EraseMark,
+    /// Words waiting for a point to be written at.
+    Write(String),
+    /// Two corners of a box brand new text is composed into — see
+    /// [`crate::NewTextBox`]. What bare `addtext` arms, as opposed to `Write`,
+    /// which is `addtext <words>` and still just wants the one point.
+    PlaceText,
+    /// A decoded picture waiting for a point to be centred on.
+    PlaceImage { rgba: Vec<u8>, width: u32, height: u32 },
+    Draw(DrawKind),
+    Modify(tools::Pick),
+    Calibrate { distance: f64, unit: String },
+    Measure(MeasureKind),
+    /// Two corners of an area whose contents are to be destroyed.
+    Redact,
+    /// A point to put a tick, a cross or a dot at.
+    Fill(pdf_core::document::FillMark),
+    /// Where a drawn signature is to sit — on the line that is clicked.
+    Signature,
+    /// Two corners of a box to draw while filling a form in.
+    SignRectangle,
+    /// The two ends of a line to rule while filling a form in.
+    SignLine,
+    /// Two corners of an area to paint over.
+    ///
+    /// **Covers; does not remove.** Kept apart from `Redact` for the same
+    /// reason the verbs are: the difference is the whole point, and a flag on
+    /// one is how somebody ends up with the other.
+    Whiteout,
+    /// Two corners of an area to hide, sealed under a passcode.
+    Lock,
+    /// Two corners of a labelled region — see [`PendingArticleBox`] for the
+    /// title, asked for once the area is drawn.
+    ArticleBox,
+}
+
+/// A drawn Article Box rectangle, waiting for the title that names it.
+#[derive(Debug, Clone)]
+pub(crate) struct PendingArticleBox {
+    pub(crate) page: usize,
+    pub(crate) rect: pdf_core::document::Rect,
+    pub(crate) title: String,
+}
+
+/// A text selection waiting for the address to link it to.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PendingLink {
+    pub(crate) page: usize,
+    /// One rect per line — see [`pdf_core::document::Annotation::Link`]'s own
+    /// doc for why applying this writes one link per entry rather than one
+    /// link covering all of them.
+    pub(crate) rects: Vec<pdf_core::document::Rect>,
+    pub(crate) url: String,
+}
+
+/// The sample "Match Properties" copies from — see
+/// [`crate::PagifyApp::match_properties_sample`].
+///
+/// Built once, when the sample is picked, rather than re-read before every
+/// target: `alternate_objects` is one pass over the whole page, and running
+/// that again for every separate target selection would be the same
+/// per-selection page walk `compute_right_click_text_actions`'s own doc
+/// already found seconds long on a real few-hundred-run document.
+#[derive(Debug, Clone)]
+pub(crate) struct MatchPropertiesSample {
+    pub(crate) page: usize,
+    /// The sample run's own registered face name, if it has an embedded copy
+    /// at all — `None` means only size and colour can carry over.
+    pub(crate) face: Option<String>,
+    pub(crate) size: f32,
+    pub(crate) color: pdf_core::document::Color,
+    /// The sample's own family, subset tag stripped — see
+    /// `strip_subset_prefix`. A target already in this family is left alone
+    /// rather than retyped.
+    pub(crate) family: Option<String>,
+    /// One representative object per distinct on-page font name sharing
+    /// `family` — tried in turn when `face`'s own embedded copy cannot spell
+    /// a target's text. See `match_font_to_first_selected`'s own doc, which
+    /// this is ported from.
+    pub(crate) alternate_objects: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum DrawKind {
+    Line,
+    Circle,
+    Rectangle,
+    Polyline,
+    /// A line with an arrowhead pre-picked on its end — see `PagifyApp::
+    /// draw_shape_properties`'s "ends" control for turning one on or off
+    /// after the fact, on this or any other line.
+    Arrow,
+    /// A NURBS curve — `cad_kernel::Geom::Spline`. Picked the same way a
+    /// Polyline is (any number of points, Enter to finish); the difference
+    /// is only in what the points become.
+    Spline,
+}
+
+/// How many of each a pick still wants. `usize::MAX` means "until Enter".
+impl PendingKind {
+    pub(crate) fn wants(&self) -> (usize, usize) {
+        match self {
+            PendingKind::PickText | PendingKind::EraseMark => (0, 1),
+            PendingKind::Write(_) => (0, 1),
+            PendingKind::PlaceText => (0, 2),
+            PendingKind::PlaceImage { .. } => (0, 1),
+            PendingKind::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => {
+                (0, 2)
+            }
+            PendingKind::Draw(DrawKind::Polyline | DrawKind::Spline) => (0, usize::MAX),
+            PendingKind::Modify(pick) => (pick.objects, pick.points),
+            PendingKind::Calibrate { .. } => (0, 2),
+            PendingKind::Whiteout => (0, 2),
+            PendingKind::Fill(_) => (0, 1),
+            PendingKind::Signature => (0, 1),
+            PendingKind::SignRectangle => (0, 2),
+            PendingKind::SignLine => (0, 2),
+            PendingKind::Measure(MeasureKind::Distance) => (0, 2),
+            PendingKind::Measure(MeasureKind::Area) => (0, usize::MAX),
+            PendingKind::Redact | PendingKind::Lock => (0, 2),
+            PendingKind::ArticleBox => (0, 2),
+        }
+    }
+
+    pub(crate) fn prompt(&self, objects_done: usize, points_done: usize) -> String {
+        match self {
+            PendingKind::Write(text) => {
+                let short: String = text.chars().take(24).collect();
+                format!(
+                    "click where \"{short}{}\" goes",
+                    if text.chars().count() > 24 { "…" } else { "" }
+                )
+            }
+            PendingKind::PickText => "click the words to change".into(),
+            PendingKind::EraseMark => {
+                "click a highlight, underline or strike-out to erase it — Escape puts the eraser down".into()
+            }
+            PendingKind::PlaceImage { .. } => "click where the picture goes".into(),
+            PendingKind::PlaceText => match points_done {
+                0 => "text: first corner of the box".into(),
+                _ => "text: opposite corner".into(),
+            },
+            PendingKind::Redact => match points_done {
+                0 => "redact: first corner of the area to destroy".into(),
+                _ => "redact: opposite corner".into(),
+            },
+            // Says what it does *not* do, because that is the thing somebody
+            // reaching for it might be wrong about.
+            PendingKind::Whiteout => match points_done {
+                0 => "whiteout: first corner — this covers, it does not remove".into(),
+                _ => "whiteout: opposite corner".into(),
+            },
+            PendingKind::Fill(mark) => {
+                format!("fill: click where the {} goes", mark.describe())
+            }
+            // Says where the click lands, because a signature that appears
+            // above or below the line is the thing to get right first time.
+            PendingKind::Signature => "signature: click the line to sign on".into(),
+            // Says which of the two rectangles this is, because the other one
+            // is a drawing that can be picked up again and this one is not.
+            PendingKind::SignRectangle => match points_done {
+                0 => "rectangle: first corner — a mark on the form, not a drawing".into(),
+                _ => "rectangle: opposite corner".into(),
+            },
+            PendingKind::SignLine => match points_done {
+                0 => "line: from — a mark on the form, not a drawing".into(),
+                _ => "line: to".into(),
+            },
+            PendingKind::Lock => match points_done {
+                0 => "lock: first corner of the area to hide".into(),
+                _ => "lock: opposite corner".into(),
+            },
+            PendingKind::ArticleBox => match points_done {
+                0 => "article box: first corner".into(),
+                _ => "article box: opposite corner".into(),
+            },
+            PendingKind::Draw(kind) => match (kind, points_done) {
+                (DrawKind::Line, 0) => "line: from".into(),
+                (DrawKind::Line, _) => "line: to".into(),
+                (DrawKind::Circle, 0) => "circle: centre".into(),
+                (DrawKind::Circle, _) => "circle: a point on it".into(),
+                (DrawKind::Rectangle, 0) => "rectangle: first corner".into(),
+                (DrawKind::Rectangle, _) => "rectangle: opposite corner".into(),
+                (DrawKind::Arrow, 0) => "arrow: from".into(),
+                (DrawKind::Arrow, _) => "arrow: to — the point the head lands on".into(),
+                (DrawKind::Polyline, n) => {
+                    format!("polyline: point {} — Enter to finish", n + 1)
+                }
+                (DrawKind::Spline, n) => {
+                    format!("spline: point {} — Enter to finish", n + 1)
+                }
+            },
+            PendingKind::Modify(pick) => pick.prompt(objects_done, points_done),
+            PendingKind::Calibrate { .. } => {
+                if points_done == 0 {
+                    "calibrate: first of the two points".into()
+                } else {
+                    "calibrate: second point".into()
+                }
+            }
+            PendingKind::Measure(MeasureKind::Distance) => {
+                if points_done == 0 { "measure: from".into() } else { "measure: to".into() }
+            }
+            PendingKind::Measure(MeasureKind::Area) => {
+                format!("measure area: corner {} — Enter to close", points_done + 1)
+            }
+        }
+    }
+
+    /// Whether finishing it should arm it again — trim and extend are used on
+    /// one piece after another and re-arming by hand each time is miserable.
+    /// Whether the tool stays in hand after it has been used.
+    ///
+    /// **Nearly all of them do.** A tool is something you pick up and keep
+    /// using until you put it down; one that lets go after a single line means
+    /// going back to the ribbon between every line, and drawing four sides of a
+    /// box becomes four trips.
+    ///
+    /// The exceptions are the ones that answer a question rather than make
+    /// a mark, or whose mark is immediately the thing to keep working on
+    /// rather than repeat: calibration is set once; and a placed signature
+    /// is the same — what someone wants right after placing one is almost
+    /// always to move, resize or turn the one just placed, not stamp
+    /// another, and a tool left in hand would swallow that very click,
+    /// reading it as the start of a second signature instead of a pick on
+    /// the first (reported from use: "the scaling and rotating isn't
+    /// working" was this, not the drag math).
+    ///
+    /// **`PickText` used to be a third exception, on the reasoning that
+    /// picking a run opens an editor where the attention now belongs — but
+    /// the attention belongs there only until the *next* word someone means
+    /// to change, and every one after the first needed `edittext` retyped by
+    /// hand to reach.** Reported from use: editing a column of a datasheet
+    /// field by field took a fresh `edittext` before every single one.
+    /// Repeating here only matters together with `interact_page`'s own
+    /// click-elsewhere handler, which re-arms and resolves a fresh pick at
+    /// that same click — this flag is what lets that re-arm survive a click
+    /// that lands on bare paper instead of another run, rather than putting
+    /// the tool down right back where `edittext` would have to undo it.
+    pub(crate) fn repeats(&self) -> bool {
+        !matches!(
+            self,
+            PendingKind::Calibrate { .. } | PendingKind::Signature
+                // **Reported from use: placing a picture kept the tool
+                // armed, so every later click on the page stamped another
+                // copy of it.** The same reasoning as a placed signature,
+                // above: what someone wants right after placing a picture
+                // is almost always to move or resize the one just placed,
+                // not stamp a second identical one.
+                | PendingKind::PlaceImage { .. }
+                // Same reasoning again: what someone wants right after
+                // dragging out a text box is to type into the box just
+                // drawn, not immediately drag out a second one.
+                | PendingKind::PlaceText
+        )
+    }
+
+    /// Whether Enter can end it early.
+    /// The ribbon command that arms this, so the button can show itself lit
+    /// while it is collecting clicks.
+    ///
+    /// `None` where no button arms it — a pick started from a typed command
+    /// with no ribbon equivalent has nothing to light up.
+    pub(crate) fn command(&self) -> Option<&'static str> {
+        Some(match self {
+            PendingKind::Draw(DrawKind::Line) => "line",
+            PendingKind::Draw(DrawKind::Circle) => "circle",
+            PendingKind::Draw(DrawKind::Polyline) => "pline",
+            PendingKind::Draw(DrawKind::Rectangle) => return None,
+            PendingKind::Draw(DrawKind::Arrow) => "arrow",
+            PendingKind::Draw(DrawKind::Spline) => "spline",
+            PendingKind::Redact => "redact",
+            PendingKind::Whiteout => "whiteout",
+            // No ribbon button lights up per mark; the tool is one word with
+            // an argument.
+            PendingKind::Fill(_) => return None,
+            PendingKind::Signature => "signature",
+            PendingKind::SignRectangle => "signrectangle",
+            PendingKind::SignLine => "signline",
+            PendingKind::Lock => "lock",
+            PendingKind::ArticleBox => "articlebox",
+            PendingKind::PickText => "edittext",
+            PendingKind::EraseMark => "erase",
+            PendingKind::Write(_) => "addtext",
+            PendingKind::PlaceText => "addtext",
+            // No ribbon button lights up per click: it names a file, not a
+            // repeatable command, so nothing on the ribbon says "this again".
+            PendingKind::PlaceImage { .. } => return None,
+            PendingKind::Measure(MeasureKind::Distance) => "measure distance",
+            PendingKind::Measure(MeasureKind::Area) => "measure area",
+            PendingKind::Calibrate { .. } => "calibrate",
+            PendingKind::Modify(_) => return None,
+        })
+    }
+
+    /// Whether the pointer should be pulled to nearby geometry.
+    ///
+    /// **Only while a tool is placing points.** Snapping, ortho and the grid
+    /// exist to put a line exactly on the end of another line; applied to
+    /// ordinary clicking they drag the pointer away from whatever the user was
+    /// aiming at — a word, a run to edit, somebody else's highlight — and the
+    /// page feels like it is fighting them.
+    ///
+    /// Picking a run of text is not placing a point: it means "the words
+    /// there", and the nearest drawn line has nothing to do with it.
+    pub(crate) fn wants_snapping(&self) -> bool {
+        matches!(
+            self,
+            PendingKind::Draw(_)
+                | PendingKind::Modify(_)
+                | PendingKind::Measure(_)
+                | PendingKind::Calibrate { .. }
+        )
+    }
+
+    pub(crate) fn ends_on_enter(&self) -> bool {
+        let (_, points) = self.wants();
+        points == usize::MAX
+    }
+}
+
+impl Pending {
+    pub(crate) fn ready(&self) -> bool {
+        let (objects, points) = self.kind.wants();
+        objects != usize::MAX
+            && points != usize::MAX
+            && self.objects.len() >= objects
+            && self.points.len() >= points
+    }
+
+    /// Whether the next click should pick an object rather than a free point.
+    pub(crate) fn wants_object(&self) -> bool {
+        let (objects, _) = self.kind.wants();
+        self.objects.len() < objects
+    }
+
+    pub(crate) fn prompt(&self) -> String {
+        self.kind.prompt(self.objects.len(), self.points.len())
+    }
+}
