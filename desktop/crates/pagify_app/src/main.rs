@@ -23362,23 +23362,6 @@ fn run_editor_glyph_size(on_screen: f32) -> f32 {
     on_screen.max(0.5)
 }
 
-/// Which face to write a line an edit is growing in, if any.
-///
-/// **Not `EditingRun::current_face` on its own.** That is the run's own font
-/// exactly as the PDF names it — read for display, so the properties panel
-/// shows what a run is actually set in rather than a flat "(automatic)" —
-/// but nothing has ever registered *that* name with `pdf_core::text`'s own
-/// typing-font pool, which is populated only by the font picker or the
-/// outline matcher's bundled faces. Handing it to [`PagifyApp::
-/// write_styled_line_at`] regardless failed to spell anything at all,
-/// silently, the moment a run grew a line — reported from use as the new
-/// line simply not being there. An explicit pick from the font picker *is*
-/// registered by the time it reaches here; checked anyway, since a face is
-/// only ever used if `pdf_core::text::is_registered` agrees, tried in the
-/// order a person would expect it to win: what was just picked, then what
-/// the run already reads as, falling back to `None` — `write_styled_line_at`'s
-/// own Helvetica fallback — only once neither is.
-
 /// Whether a picked paragraph's non-last lines should be stretched to the
 /// box's own width — see [`PagifyApp::draw_run_editor`]'s own call site.
 ///
