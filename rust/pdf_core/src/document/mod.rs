@@ -791,6 +791,13 @@ pub trait Document: Send + Sync {
         None
     }
 
+    /// Whether the file had to be mended in memory to be opened — a file an
+    /// earlier build damaged when it saved it. The file on disk is as it was
+    /// until it is saved over. `false` for every ordinary document.
+    fn repaired_on_open(&self) -> bool {
+        false
+    }
+
 
     /// Shift one page object by a distance, in page points.
     ///
@@ -838,6 +845,23 @@ pub trait Document: Send + Sync {
         _sy: f32,
     ) -> Result<()> {
         Err(PdfError::Unsupported("resizing an object"))
+    }
+
+    /// Turn one thing about `pivot`, **clockwise as it is seen on the page** by
+    /// `degrees` (negative turns it the other way).
+    ///
+    /// `pivot` is in page points with a top-left origin — usually the middle of
+    /// the thing, so that it turns in place. Words that share a text object with
+    /// others cannot be turned on their own, for the reason they cannot be
+    /// resized (see [`Document::scale_object`]), and are refused.
+    fn rotate_object(
+        &mut self,
+        _page_index: usize,
+        _object: usize,
+        _pivot: Point,
+        _degrees: f32,
+    ) -> Result<()> {
+        Err(PdfError::Unsupported("turning an object"))
     }
 
     /// Make one thing more or less see-through: `opacity` from 0 (invisible)
@@ -1272,6 +1296,17 @@ pub trait DocumentMut {
         _sy: f32,
     ) -> Result<()> {
         Err(PdfError::Unsupported("resizing an object on this page"))
+    }
+
+    /// See [`Document::rotate_object`].
+    fn rotate_object_mut(
+        &mut self,
+        _page_index: usize,
+        _object: usize,
+        _pivot: Point,
+        _degrees: f32,
+    ) -> Result<()> {
+        Err(PdfError::Unsupported("turning an object on this page"))
     }
 
     /// See [`Document::remove_object`].

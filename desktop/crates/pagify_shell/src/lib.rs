@@ -18,6 +18,8 @@ pub mod block_input;
 pub mod blocks;
 pub mod command;
 pub mod commit;
+pub mod diagnose;
+pub mod guides;
 pub mod markup;
 pub mod measure;
 pub mod organize;

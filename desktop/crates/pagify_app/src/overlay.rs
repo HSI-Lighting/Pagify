@@ -100,6 +100,26 @@ pub fn draw_layer(painter: &Painter, layer: &Layer, view: PageView, plain: Color
     }
 }
 
+/// Copies of `objects` moved by `by` (kernel space), outlined in `colour` — the
+/// shapes of a paste that has been picked up and not yet put down. `layer` only
+/// gives the page space the shapes are drawn through.
+pub fn draw_ghost(
+    painter: &Painter,
+    objects: &[(cad_kernel::DObject, bool)],
+    layer: &Layer,
+    view: PageView,
+    by: Vec2,
+    colour: Color32,
+) {
+    for (object, filled) in objects {
+        let moved = object.translated(by);
+        if *filled {
+            fill_geom(painter, &moved.geom, layer, view, colour.gamma_multiply(0.5));
+        }
+        draw_geom(painter, &moved.geom, layer, view, Stroke::new(1.6, colour));
+    }
+}
+
 /// The solid interior a filled Rectangle or Circle carries, painted before
 /// its own outline stroke — the live match for the fill `commit_page` writes
 /// on save, so drawing one does not look identical to leaving it hollow until

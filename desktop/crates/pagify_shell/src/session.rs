@@ -1066,6 +1066,12 @@ impl Session {
             .flatten()
     }
 
+    /// Whether the file had to be mended in memory to be opened — see
+    /// [`pdf_core::document::Document::repaired_on_open`].
+    pub fn repaired_on_open(&self) -> bool {
+        registry::with_session(self.handle, |s| Ok(s.document.repaired_on_open())).unwrap_or(false)
+    }
+
     /// Rule a line, as a form is filled in by hand.
     pub fn stamp_line(
         &self,

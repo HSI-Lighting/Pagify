@@ -261,6 +261,10 @@ pub struct PdfiumDocument {
     /// appended edit reads from `written` has changed). `touch_annotation`
     /// is the lighter call that keeps the two apart.
     exact_content: bool,
+    /// Whether the file had to be mended to be opened at all — see
+    /// [`repair_misplaced_xref_type`]. The document in memory is sound; the file
+    /// it came from is not, until this is saved over it.
+    repaired_on_open: bool,
     /// Whether this document was opened by giving a password.
     ///
     /// Which is to say: the file it came from is already encrypted, and cannot
@@ -548,8 +552,57 @@ impl PdfiumDocument {
                 return Ok(doc);
             }
         }
+        // **A file an earlier build damaged when it saved it.** Reported from use
+        // twice: "pdfium error: PdfiumLibraryInternalError(Unknown)" on a
+        // document that was fine until Pagify saved it. The fix for what did the
+        // damage only stops new files being damaged; the ones already saved stay
+        // as they are. Mended in memory here — the file on disk is not touched,
+        // and a save writes a sound one.
+        //
+        // **Looked for before the open, not after it fails.** PDFium opens such a
+        // file — it reports the right number of pages — and fails when a page
+        // is loaded (poppler: "Kid object (page 1) is wrong type"), which is
+        // later, somewhere else, and with a message that says nothing. So the end
+        // of the file is asked first, for a damage that leaves a signature.
+        if let Some(mended) = Self::mended_if_damaged(path)? {
+            let byte_len = mended.len();
+            let mut doc = Self::from_reader(
+                std::io::Cursor::new(mended),
+                password,
+                DocumentSource::Memory { byte_len },
+            )?;
+            doc.repaired_on_open = true;
+            return Ok(doc);
+        }
         let file = File::open(path)?;
         Self::from_reader(file, password, DocumentSource::Path(path.to_string()))
+    }
+
+    /// The file's bytes with the old repair's damage taken out — or `None`, which
+    /// is nearly always.
+    ///
+    /// Only the last stretch of the file is read to ask: the damaged
+    /// cross-reference stream is the last object in it. The whole file is read
+    /// only for one that is found damaged.
+    fn mended_if_damaged(path: &str) -> Result<Option<Vec<u8>>> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = File::open(path)?;
+        let length = file.metadata()?.len();
+        let start = length.saturating_sub(Self::TAIL_PROBE);
+        file.seek(SeekFrom::Start(start))?;
+        let mut tail = Vec::with_capacity((length - start) as usize);
+        file.take(Self::TAIL_PROBE).read_to_end(&mut tail)?;
+        let Some((open, stray)) = locate_misplaced_xref_type(&tail, start as usize) else {
+            return Ok(None);
+        };
+        let mut bytes = std::fs::read(path)?;
+        let (open, stray) = (open + start as usize, stray + start as usize);
+        // The same bytes the tail held; if the file moved underfoot, leave it be.
+        if bytes.len() != length as usize || bytes.get(stray..stray + MISPLACED_TYPE.len()) != Some(MISPLACED_TYPE) {
+            return Ok(None);
+        }
+        move_xref_type(&mut bytes, open, stray);
+        Ok(Some(bytes))
     }
 
     /// Whether the end of the file carries the Secure Plus handler's name.
@@ -650,12 +703,23 @@ impl PdfiumDocument {
             doc.opened_with = password.map(|p| zeroize::Zeroizing::new(p.as_bytes().to_vec()));
             return Ok(doc);
         }
+        // The same mending as `open_path`, for a document that arrives as bytes.
+        let (bytes, repaired) = match locate_misplaced_xref_type(&bytes, 0) {
+            Some((open, stray)) => {
+                let mut bytes = bytes;
+                move_xref_type(&mut bytes, open, stray);
+                (bytes, true)
+            }
+            None => (bytes, false),
+        };
         let byte_len = bytes.len();
-        Self::from_reader(
+        let mut doc = Self::from_reader(
             std::io::Cursor::new(bytes),
             password,
             DocumentSource::Memory { byte_len },
-        )
+        )?;
+        doc.repaired_on_open = repaired;
+        Ok(doc)
     }
 
     fn from_reader<R: Read + Seek + 'static>(
@@ -693,6 +757,7 @@ impl PdfiumDocument {
             written: None,
             exact_pending: false,
             exact_content: true,
+            repaired_on_open: false,
             typing_fonts: Vec::new(),
             substituted: None,
             image_alpha: std::collections::HashMap::new(),
@@ -1532,6 +1597,10 @@ impl Document for PdfiumDocument {
         self.substituted.clone()
     }
 
+    fn repaired_on_open(&self) -> bool {
+        self.repaired_on_open
+    }
+
 
     fn move_object(&mut self, page_index: usize, object: usize, by: Point) -> Result<()> {
         self.validate_page_index(page_index)?;
@@ -2316,6 +2385,42 @@ impl Document for PdfiumDocument {
         // Scale about the anchor: p' = (p − a)·S + a.
         let page_matrix = [sx, 0.0, 0.0, sy, ax * (1.0 - sx), ay * (1.0 - sy)];
         self.transform_in_stream(page_index, object, page_matrix)
+    }
+
+    fn rotate_object(
+        &mut self,
+        page_index: usize,
+        object: usize,
+        pivot: Point,
+        degrees: f32,
+    ) -> Result<()> {
+        if !degrees.is_finite() || !pivot.x.is_finite() || !pivot.y.is_finite() {
+            return Err(PdfError::InvalidArgument("that is not an angle".into()));
+        }
+        // Nothing to do, and nothing worth rewriting the page for.
+        if degrees.rem_euclid(360.0).min(360.0 - degrees.rem_euclid(360.0)) < 1e-3 {
+            return Ok(());
+        }
+        // The pivot arrives top-left down; page space is bottom-left up, where a
+        // turn clockwise as seen is a negative angle.
+        let height = self.page_size(page_index)?.height_pt;
+        let (px, py) = (pivot.x, height - pivot.y);
+        let (s, c) = (-degrees).to_radians().sin_cos();
+        // p' = R(p − pivot) + pivot.
+        let page_matrix = [c, s, -s, c, px - px * c + py * s, py - px * s - py * c];
+        // Through the content stream — a matrix written round the operators that
+        // draw this one thing, every other byte of the page copied as it is —
+        // the same lever a resize and a move use for anything that is not words,
+        // and for words too: a turn is the one change a text object's own
+        // matrix is for. Words that share a text object with others cannot have
+        // a matrix written round them, and go through PDFium's own object —
+        // guarded, and refused with a reason if the page does not survive it.
+        match self.transform_in_stream(page_index, object, page_matrix) {
+            Err(PdfError::Unsupported(_)) if self.text_run_at(page_index, object)?.is_some() => {
+                self.rotate_text_object_via_pdfium(page_index, object, page_matrix)
+            }
+            other => other,
+        }
     }
 
     fn set_opacity(&mut self, page_index: usize, object: usize, opacity: f32) -> Result<()> {
@@ -4415,6 +4520,16 @@ impl DocumentMut for PdfiumDocument {
         sy: f32,
     ) -> Result<()> {
         <Self as Document>::scale_object(self, page_index, object, anchor, sx, sy)
+    }
+
+    fn rotate_object_mut(
+        &mut self,
+        page_index: usize,
+        object: usize,
+        pivot: Point,
+        degrees: f32,
+    ) -> Result<()> {
+        <Self as Document>::rotate_object(self, page_index, object, pivot, degrees)
     }
 
     fn remove_object_mut(&mut self, page_index: usize, object: usize) -> Result<()> {
@@ -15394,6 +15509,161 @@ fn close_trailing_xref_object(bytes: Vec<u8>) -> Vec<u8> {
     bytes
 }
 
+impl PdfiumDocument {
+    /// Turn one run of words that shares its text object with others — which a
+    /// matrix written round it cannot do, because a transform is not allowed
+    /// inside a text object — through PDFium's own object, which treats every
+    /// show-text as a thing of its own.
+    ///
+    /// **Guarded the way every other change through PDFium here is.** Writing the
+    /// page back (`FPDFPage_GenerateContent`) re-emits all of it, and on some
+    /// pages that has scrambled what nobody touched. So what the rest of the page
+    /// says is read before and after, and if it differs the document is put back
+    /// exactly as it was and the turn is refused.
+    fn rotate_text_object_via_pdfium(&mut self, page_index: usize, object: usize, page_matrix: [f32; 6]) -> Result<()> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index)
+            .map_err(|_| PdfError::InvalidArgument(format!("page index {page_index} is out of range")))?;
+        let rest = |runs: &[crate::document::TextRun]| -> Vec<String> {
+            let mut out: Vec<String> =
+                runs.iter().filter(|r| r.object != object).map(|r| r.text.trim().to_string()).collect();
+            out.sort();
+            out
+        };
+        let untouched = rest(&self.text_runs(page_index)?);
+        let snapshot = self.document.save_to_bytes().map_err(|e| PdfError::Pdfium(e.to_string()))?;
+
+        {
+            let raw = RawPage::open(self.document.handle(), page_number)?;
+            let bindings = pdfium()?.bindings();
+            let count = unsafe { bindings.FPDFPage_CountObjects(raw.handle) };
+            let index = i32::try_from(object)
+                .map_err(|_| PdfError::InvalidArgument(format!("object {object} is out of range")))?;
+            if index < 0 || index >= count {
+                return Err(PdfError::InvalidArgument(format!("page {} has no object {object}", page_index + 1)));
+            }
+            let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, index) };
+            if handle.is_null()
+                || unsafe { bindings.FPDFPageObj_GetType(handle) } != pdfium_render::prelude::FPDF_PAGEOBJ_TEXT as i32
+            {
+                return Err(PdfError::InvalidArgument("that is not text".into()));
+            }
+            let [a, b, c, d, e, f] = page_matrix;
+            unsafe { bindings.FPDFPageObj_Transform(handle, a as f64, b as f64, c as f64, d as f64, e as f64, f as f64) };
+            if unsafe { bindings.FPDFPage_GenerateContent(raw.handle) } == 0 {
+                return Err(PdfError::Pdfium("the page could not be rewritten".into()));
+            }
+        }
+
+        if rest(&self.text_runs(page_index)?) != untouched {
+            let restored = Self::open_bytes(snapshot, None)?;
+            self.document = restored.document;
+            self.page_count = restored.page_count;
+            if let Ok(mut cached) = self.vault.lock() {
+                *cached = None;
+            }
+            return Err(PdfError::Unsupported(
+                "turning these words rewrites the rest of the page here, so nothing was changed; \
+                 these words cannot be turned on this page",
+            ));
+        }
+        self.touch();
+        Ok(())
+    }
+}
+
+/// What the old repair wrote where it should not have.
+const MISPLACED_TYPE: &[u8] = b"/Type/XRef";
+
+/// Take [`MISPLACED_TYPE`] out of the table at `stray` and put it in the
+/// dictionary at `open`, both found by [`locate_misplaced_xref_type`]. The file
+/// keeps its length: ten bytes out, ten bytes in.
+fn move_xref_type(bytes: &mut Vec<u8>, open: usize, stray: usize) {
+    bytes.drain(stray..stray + MISPLACED_TYPE.len());
+    bytes.splice(open..open, MISPLACED_TYPE.iter().copied());
+}
+
+/// The file with the damage taken out, or `None` when it is not damaged that way.
+fn repair_misplaced_xref_type(bytes: &[u8]) -> Option<Vec<u8>> {
+    let (open, stray) = locate_misplaced_xref_type(bytes, 0)?;
+    let mut mended = bytes.to_vec();
+    move_xref_type(&mut mended, open, stray);
+    Some(mended)
+}
+
+/// Mend a file whose last cross-reference stream an earlier build damaged.
+///
+/// **What was wrong, and why the fix did not mend files.** Before 0.1.36 the
+/// repair `close_trailing_xref_object` makes after an incremental save went to
+/// the wrong `<<` in some files: one inside the stream's binary data, which a
+/// table of offsets can hold by chance. It wrote `/Type/XRef` there — ten bytes
+/// more than the stream's `/Length` says — and left the dictionary without the
+/// key a cross-reference stream must have. PDFium cannot read such a file
+/// (`PdfiumLibraryInternalError(Unknown)`), and nothing but Pagify's own save
+/// could have made one, so the files are real and they are the owner's.
+///
+/// What this does is exactly the reverse: take the ten bytes out of the data
+/// and put them in the dictionary. The two cancel, so the file's length and
+/// every offset in it — `startxref` included — stay as they were.
+///
+/// Where that damage is, as two places in `bytes`: just after the `<<` that
+/// opens the cross-reference stream's dictionary, and the start of the stray
+/// type in its table. `bytes` may be only the end of a file; `base` is where in
+/// the file it begins, because `startxref` names an offset in the whole file.
+///
+/// `None` for any file that does not look like that damage precisely: no
+/// cross-reference stream, a `/Length` that is not a plain number, a data
+/// section not exactly ten bytes over (give or take the end of line), no
+/// `/Type/XRef` in it, or a dictionary that already has a `/Type`. An undamaged
+/// file, or one damaged some other way, is left to report its own error.
+fn locate_misplaced_xref_type(bytes: &[u8], base: usize) -> Option<(usize, usize)> {
+    let dict = trailing_dictionary_start_at(bytes, base)?;
+    let startxref = find_last(bytes, b"startxref")?;
+    let stream = dict + bytes.get(dict..startxref)?.windows(6).position(|w| w == b"stream")?;
+    let dictionary = &bytes[dict..stream];
+    if contains(dictionary, b"/Type") {
+        return None;
+    }
+    let declared = declared_length(dictionary)?;
+
+    let mut data = stream + b"stream".len();
+    match bytes.get(data..) {
+        Some([b'\r', b'\n', ..]) => data += 2,
+        Some([b'\n', ..]) | Some([b'\r', ..]) => data += 1,
+        _ => {}
+    }
+    let end = find_last(&bytes[..startxref], b"endstream")?;
+    let region = bytes.get(data..end)?;
+    // The end of line before `endstream` is not counted in `/Length`: up to two bytes.
+    let extra = region.len().checked_sub(declared)?;
+    if !(MISPLACED_TYPE.len()..=MISPLACED_TYPE.len() + 2).contains(&extra) {
+        return None;
+    }
+    let stray = data + region.windows(MISPLACED_TYPE.len()).position(|w| w == MISPLACED_TYPE)?;
+    Some((dict, stray))
+}
+
+/// The number after `/Length` in a stream's dictionary, when it is written
+/// directly — not as a reference (`12 0 R`), which would need a lookup.
+fn declared_length(dictionary: &[u8]) -> Option<usize> {
+    let at = dictionary.windows(7).position(|w| w == b"/Length")? + 7;
+    let rest = &dictionary[at..];
+    let rest = &rest[rest.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
+    let digits = rest.iter().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    let number: usize = std::str::from_utf8(&rest[..digits]).ok()?.parse().ok()?;
+    // `/Length 12 0 R` is a reference, and 12 is not the length.
+    let after = &rest[digits..];
+    let after = &after[after.iter().take_while(|b| b.is_ascii_whitespace()).count()..];
+    let reference = after.first().is_some_and(u8::is_ascii_digit) && {
+        let spaced = after.iter().skip_while(|b| b.is_ascii_digit()).skip_while(|b| b.is_ascii_whitespace());
+        spaced.clone().next() == Some(&b'R')
+    };
+    (!reference).then_some(number)
+}
+
 /// Byte just after the `<<` opening the trailing cross-reference stream's
 /// dictionary, if there is one.
 ///
@@ -15402,6 +15672,14 @@ fn close_trailing_xref_object(bytes: Vec<u8>) -> Vec<u8> {
 /// before the insertion — and every offset the table itself holds points at
 /// objects earlier in the file. Nothing that is pointed at moves.
 fn trailing_dictionary_start(bytes: &[u8]) -> Option<usize> {
+    trailing_dictionary_start_at(bytes, 0)
+}
+
+/// As [`trailing_dictionary_start`] for `bytes` that are the file from `base`
+/// on — the end of a large file, read without the rest. `startxref` names an
+/// offset in the whole file, so it is brought into `bytes` first; an object
+/// that lies before `bytes` begins is not found.
+fn trailing_dictionary_start_at(bytes: &[u8], base: usize) -> Option<usize> {
     // **Found by following `startxref` to the object, never by searching
     // backwards for `<<`.** Reported from use: a saved file that would not open
     // again ("pdfium error: PdfiumLibraryInternalError(Unknown)"). The search
@@ -15420,7 +15698,7 @@ fn trailing_dictionary_start(bytes: &[u8]) -> Option<usize> {
         .skip_while(|b| b.is_ascii_whitespace())
         .take_while(u8::is_ascii_digit)
         .collect();
-    let offset = std::str::from_utf8(&digits).ok()?.parse::<usize>().ok()?;
+    let offset = std::str::from_utf8(&digits).ok()?.parse::<usize>().ok()?.checked_sub(base)?;
     // `169 0 obj <<`: the dictionary opens within a few bytes of the header.
     let header = bytes.get(offset..)?;
     let header = &header[..header.len().min(64)];
@@ -15531,6 +15809,112 @@ startxref
     /// of offsets sometimes does; the repair put `/Type/XRef` there, in the data,
     /// instead of in the dictionary. The data must come through byte for byte,
     /// the type must land in the dictionary, and `/Length` must still be true.
+    // ---- mending a file the old repair already damaged ------------------------
+
+    /// A cross-reference stream as PDFium writes it after an incremental save:
+    /// no `/Type`, `\r\n` after `stream`, and the table's binary data holding
+    /// `<<`. `damaged` is what the repair before 0.1.36 made of it: the type
+    /// written into the data, after that `<<`.
+    fn xref_file(data: &[u8], damaged: bool) -> Vec<u8> {
+        let mut data = data.to_vec();
+        let mut dictionary = format!("<</Info 3 0 R/Size 170/W[0 4 1]/Length {}", data.len());
+        if damaged {
+            let at = data.windows(2).position(|w| w == b"<<").expect("the data holds <<") + 2;
+            data.splice(at..at, b"/Type/XRef".iter().copied());
+        }
+        dictionary.push_str(">>");
+        let mut file = b"%PDF-1.5\n".to_vec();
+        let object = file.len();
+        file.extend_from_slice(b"169 0 obj ");
+        file.extend_from_slice(dictionary.as_bytes());
+        file.extend_from_slice(b"stream\r\n");
+        file.extend_from_slice(&data);
+        file.extend_from_slice(b"\r\nendstream\nendobj\nstartxref\n");
+        file.extend_from_slice(object.to_string().as_bytes());
+        file.extend_from_slice(b"\n%%EOF\n");
+        file
+    }
+
+    const TABLE: &[u8] = &[0, 0, 0x12, 0x34, 1, 0, 0x3C, 0x3C, 0x00, 1, 0, 0, 0x55, 0x66, 1];
+
+    #[test]
+    fn a_file_with_the_type_written_into_its_table_is_mended_to_what_it_should_have_been() {
+        let damaged = xref_file(TABLE, true);
+        let mended = super::repair_misplaced_xref_type(&damaged).expect("the damage was not recognised");
+
+        // Same length: the ten bytes taken out of the table are the ten put in
+        // the dictionary, so every offset in the file stands.
+        assert_eq!(mended.len(), damaged.len());
+        // The table is back to exactly what it was...
+        assert!(mended.windows(TABLE.len()).any(|w| w == TABLE), "the table was not restored");
+        // ...and the key is where a reader looks for it, once.
+        let text = String::from_utf8_lossy(&mended).into_owned();
+        assert!(text.contains("169 0 obj <</Type/XRef/Info"), "{text}");
+        assert_eq!(text.matches("/Type/XRef").count(), 1);
+        // And it is now what the sound repair would have written, so it is left alone after.
+        assert_eq!(super::close_trailing_xref_object(mended.clone()), mended);
+    }
+
+    /// Against a real pair: a document an earlier build damaged and the same
+    /// document mended by hand, byte by byte, with a different tool. Set
+    /// `PAGIFY_REAL_DAMAGED_PDF` and `PAGIFY_REAL_MENDED_PDF`.
+    #[test]
+    #[ignore = "needs a real damaged document and its hand-mended twin"]
+    fn the_mending_matches_a_file_mended_by_hand() {
+        let (Ok(damaged), Ok(mended)) =
+            (std::env::var("PAGIFY_REAL_DAMAGED_PDF"), std::env::var("PAGIFY_REAL_MENDED_PDF"))
+        else {
+            return;
+        };
+        let (damaged, mended) = (std::fs::read(damaged).unwrap(), std::fs::read(mended).unwrap());
+        let ours = super::repair_misplaced_xref_type(&damaged).expect("the damage was not recognised");
+        assert_eq!(ours.len(), mended.len());
+        assert!(ours == mended, "the two mended files differ");
+    }
+
+    /// A catalogue is 80 MB and the stream is the last object in it: asking
+    /// whether it is damaged must not need the rest.
+    #[test]
+    fn the_damage_is_found_from_the_end_of_a_file_alone() {
+        let damaged = xref_file(TABLE, true);
+        let whole = super::locate_misplaced_xref_type(&damaged, 0).expect("not found in the whole file");
+
+        let object = damaged.windows(9).position(|w| w == b"169 0 obj").unwrap();
+        let from = object - 4;
+        let (open, stray) = super::locate_misplaced_xref_type(&damaged[from..], from).expect("not found from the end");
+        assert_eq!((open + from, stray + from), whole);
+
+        // A tail that begins after the object cannot see it, and says nothing.
+        assert_eq!(super::locate_misplaced_xref_type(&damaged[object + 1..], object + 1), None);
+    }
+
+    #[test]
+    fn a_file_that_is_not_damaged_that_way_is_never_touched() {
+        // Undamaged: PDFium's own shape, no `/Type`, a data section as long as `/Length` says.
+        assert_eq!(super::repair_misplaced_xref_type(&xref_file(TABLE, false)), None);
+        // Already mended: the dictionary has its type.
+        let mended = super::repair_misplaced_xref_type(&xref_file(TABLE, true)).unwrap();
+        assert_eq!(super::repair_misplaced_xref_type(&mended), None);
+        // A `/Length` that is a reference says nothing about the data.
+        let mut indirect = xref_file(TABLE, true);
+        let text = String::from_utf8_lossy(&indirect).into_owned();
+        let changed = text.replace(&format!("/Length {}", TABLE.len()), "/Length 12 0 R");
+        indirect = changed.into_bytes();
+        assert_eq!(super::repair_misplaced_xref_type(&indirect), None);
+        // Not a file with a cross-reference stream at all.
+        assert_eq!(super::repair_misplaced_xref_type(b"%PDF-1.4\nnot much of one\n"), None);
+        assert_eq!(super::repair_misplaced_xref_type(b""), None);
+    }
+
+    #[test]
+    fn the_declared_length_is_read_only_when_it_is_a_plain_number() {
+        assert_eq!(super::declared_length(b"/Size 3/Length 25"), Some(25));
+        assert_eq!(super::declared_length(b"/Length   7 /W[1 2 1]"), Some(7));
+        assert_eq!(super::declared_length(b"/Length 25 0 R"), None);
+        assert_eq!(super::declared_length(b"/Length"), None);
+        assert_eq!(super::declared_length(b"/Size 3"), None);
+    }
+
     #[test]
     fn a_table_whose_data_contains_two_angle_brackets_is_not_written_into() {
         // Four-byte offsets, as a real table has them: ...3C 3C... in the middle,

@@ -26,6 +26,7 @@ mod edit_text_hardening_tests;
 mod print_windows;
 mod spelling;
 mod system_fonts;
+mod text_style_panel;
 mod theme;
 
 use std::collections::HashMap;
@@ -1330,6 +1331,9 @@ struct DocTab {
     /// tool shared `Handle`/`Grab` with the signature one but not the fix,
     /// so an ordinary picture's handles were exactly this bug, unfixed.
     object_hover_handle: Option<Handle>,
+    /// Whether Shift was held on the last frame of a turn: the angle is then
+    /// snapped to 15 degrees, in what is drawn and in what is applied.
+    rotate_snap: bool,
     /// More than one thing, picked up together by dragging a rectangle over
     /// empty page area — see [`Self::interact_objects`]. Moves and deletes
     /// as a group; resizing stays a [`Self::selected`]-only, one-thing-at-a-
@@ -1594,6 +1598,7 @@ impl DocTab {
             selected: None,
             grab: None,
             object_hover_handle: None,
+            rotate_snap: false,
             group: Vec::new(),
             marquee: None,
             group_grab: None,
@@ -1777,6 +1782,10 @@ struct PagifyApp {
     /// ([`Self::copy_selection`]/⌘C). Not the system clipboard itself —
     /// these are structured page objects, not text.
     object_clipboard: Option<ObjectClipboard>,
+    /// A paste picked up with ⌘V in Edit Object / Edit Text and not yet put
+    /// down: drawn under the pointer at 50% opacity, placed by the next click
+    /// on a page, dropped by Escape. Shared across tabs like the clipboard.
+    paste_ghost: Option<PasteGhost>,
     /// How many times `paste` has run since the clipboard was last filled —
     /// see [`Self::PASTE_STEP`].
     paste_count: u32,
@@ -2510,6 +2519,8 @@ struct EditingRun {
     /// it is drawn, not every frame, or typing could never hand focus back
     /// to whatever else gets clicked afterwards.
     focused: bool,
+    /// How the reader has dragged the box open round this run — see [`RunBox`].
+    box_resize: RunBox,
 }
 
 /// Runs a person declared one paragraph by hand — see [`DocTab::joined_groups`].
@@ -2604,6 +2615,31 @@ struct NewTextBox {
     /// Focus is asked for once — see [`EditingRun::focused`].
     focused: bool,
 }
+
+/// What the reader has done to the box open round a run, by dragging the
+/// handles on its left and right edges — see `PagifyApp::draw_run_editor`.
+/// Everything is in page points, so it holds still as the page is zoomed.
+///
+/// **A run's box is a width to wrap the words to.** Dragged narrower the words
+/// fold onto more lines, wider they come back onto fewer; either way what lands
+/// on the page is what the box showed (see `apply_one_edit`'s extra lines).
+/// ponytail: a resize joins the box's lines into one before it wraps again, so
+/// a line break the reader typed by hand is lost to it; keep hand breaks apart
+/// from wrapped ones if that is ever reported.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct RunBox {
+    /// The width dragged to; `None` is the width the run opened at.
+    width_pt: Option<f32>,
+    /// How far the left edge has been dragged from where the run starts. The
+    /// run moves with it: applying takes it into [`TextStyle::at`].
+    left_shift_pt: f32,
+    /// The width changed since the buffer was last wrapped, so the next frame
+    /// joins its lines and wraps them afresh.
+    reflow: bool,
+}
+
+/// The narrowest a box can be dragged to, in page points.
+const MIN_RUN_BOX_PT: f32 = 12.0;
 
 /// A page in the hands of the recogniser.
 struct Reading {
@@ -2797,6 +2833,24 @@ enum ObjectClipboard {
     /// of the paste.
     Shapes(Vec<(cad_kernel::DObject, bool)>),
     Image { rgba: Vec<u8>, width: u32, height: u32, rect: pdf_core::document::Rect },
+    /// Words — a run or a paragraph, one entry per line — with what they were
+    /// drawn in. Pasted as new text, so it stays text.
+    Text { lines: Vec<String>, size: f32, color: pdf_core::document::Color, face: Option<String> },
+}
+
+/// What the system clipboard is given after a copy that is not text, so the
+/// ⌘V that follows has something to paste — see
+/// [`PagifyApp::clipboard_mirror_wanted`]. Also how a paste tells "my own copy
+/// is the newest" from "text was copied since, somewhere else".
+const COPIED_IN_PAGIFY: &str = "(copied in Pagify)";
+
+/// A paste waiting for a click: the copy follows the pointer at half
+/// strength and is put down only where the reader clicks, so it never lands
+/// somewhere they did not choose. See [`PagifyApp::paste_ghost`].
+struct PasteGhost {
+    content: ObjectClipboard,
+    /// A picture's pixels as a texture, made the first frame it is drawn.
+    texture: Option<egui::TextureHandle>,
 }
 
 /// What Organize's own `copy` carries to `paste` — see
@@ -3579,7 +3633,7 @@ const HANDLE_PX: f32 = 4.0;
 /// the resize handle right below it.
 const ROTATE_HANDLE_OFFSET_PX: f32 = 26.0;
 /// The rotate handle's own drawn (and hit-tested) radius, in screen pixels.
-const ROTATE_HANDLE_PX: f32 = 5.0;
+const ROTATE_HANDLE_PX: f32 = 8.0;
 
 /// How wide a placed signature is, in page points — a signature on a form
 /// is around two inches across; wider looks like a banner and narrower like
@@ -3806,6 +3860,7 @@ impl PagifyApp {
                 pagify_shell::session_log::SessionLog::start()
             },
             object_clipboard: None,
+            paste_ghost: None,
             paste_count: 0,
             page_clipboard: None,
             clipboard_dir: if cfg!(test) {
@@ -4788,6 +4843,15 @@ impl PagifyApp {
                     if page_count == 1 { "" } else { "s" },
                     if restored > 0 { format!(" {restored} marks restored.") } else { String::new() }
                 ));
+                // **Said, because it was not as it was found.** An earlier build
+                // damaged the file when it saved it (the cross-reference stream);
+                // it was mended as it opened, in memory. Saving writes a sound one.
+                if session.repaired_on_open() {
+                    self.say_info(format!(
+                        "{name} had been damaged by a save in an older version of Pagify. \
+                         It was repaired as it opened; save it to keep the repair."
+                    ));
+                }
 
                 self.tab_mut().doc = Some(Doc {
                     session: std::sync::Arc::new(session),
@@ -4844,9 +4908,36 @@ impl PagifyApp {
                 self.sync_bookmarks();
             }
             Err(e) => {
-                self.say_error(format!("{e}"));
-                let where_ = pagify_shell::pdfium::describe();
-                self.say_info(format!("PDFium was looked for at: {where_}"));
+                // The raw error goes in the session log whatever is shown.
+                self.session_log.record("open-error", &format!("{path}: {e}"));
+                match e {
+                    // The library itself is missing: where it was looked for is
+                    // the one useful thing to say.
+                    PdfError::LibraryUnavailable(_) => {
+                        self.say_error(format!("{e}"));
+                        let where_ = pagify_shell::pdfium::describe();
+                        self.say_info(format!("PDFium was looked for at: {where_}"));
+                    }
+                    // **The file, not the library.** "PdfiumLibraryInternalError(
+                    // Unknown)" followed by where PDFium was looked for read as a
+                    // broken install, when PDFium had loaded and only this file had
+                    // not — reported from use, twice, on a document an older build
+                    // had damaged.
+                    PdfError::Pdfium(_) | PdfError::MalformedDocument => {
+                        let name = std::path::Path::new(path)
+                            .file_name()
+                            .map_or_else(|| path.to_string(), |n| n.to_string_lossy().into_owned());
+                        let why = pagify_shell::diagnose::why_unreadable(std::path::Path::new(path))
+                            .unwrap_or_else(|| "its structure is damaged".to_string());
+                        self.say_error(format!("{name} could not be opened — {why}."));
+                        self.say_info(
+                            "Nothing is wrong with Pagify itself. If this file opened before, \
+                             it may have been damaged since: send the file with the session log \
+                             (`sessionlog` says where it is).",
+                        );
+                    }
+                    other => self.say_error(format!("{other}")),
+                }
             }
         }
     }
@@ -5811,6 +5902,12 @@ impl PagifyApp {
     /// for the handles being drawn at a fixed size on screen.
     fn handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
         let sel = self.tab().selected.as_ref()?;
+        // The rotate handle floats above the top edge, so it is asked first: it
+        // is the one handle that is not on the rectangle itself.
+        let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
+        if (view.to_screen(at) - rotate_screen).length() <= ROTATE_HANDLE_PX + 2.0 {
+            return Some(Handle::Rotate);
+        }
         Self::handle_near(at, view, &sel.rect)
     }
 
@@ -5838,6 +5935,143 @@ impl PagifyApp {
             bounds.bottom = bounds.bottom.max(r.bottom);
         }
         Some(bounds)
+    }
+
+    /// How near, in screen pixels, a side or the middle of a thing being moved has
+    /// to be to a reference line to be pulled onto it.
+    const GUIDE_SNAP_PX: f32 = 6.0;
+    /// How near a reference line is shown at all.
+    const GUIDE_NEAR_PX: f32 = 40.0;
+
+    /// The rectangles the thing being moved can line up with: everything else
+    /// the page draws that is a thing of its own — not the page-sized
+    /// background, not a speck, not what is being moved.
+    fn guide_targets(&mut self, page: usize, exclude: &[usize]) -> Vec<pdf_core::document::Rect> {
+        let size = self.tab().doc.as_ref().and_then(|d| d.strip.size_of(page));
+        let layers = self.layers_on(page);
+        // A page of tens of thousands of drawn pieces is a map, not something
+        // to align to; and scanning it every frame of a drag would show.
+        if layers.len() > 20_000 {
+            return Vec::new();
+        }
+        layers
+            .iter()
+            .filter(|o| o.depth <= 2 && !exclude.contains(&o.object))
+            .map(|o| o.rect)
+            .filter(|r| {
+                let (w, h) = ((r.right - r.left).abs(), (r.bottom - r.top).abs());
+                // The page's own background covers all of it and lines up with
+                // nothing but the page, whose edges are lines already.
+                let background = size.is_some_and(|(pw, ph)| w >= pw * 0.95 && h >= ph * 0.95);
+                w >= 1.0 && h >= 1.0 && !background
+            })
+            .collect()
+    }
+
+    /// Where `moving` would sit if it were pulled onto the nearest reference
+    /// line, and the lines to show for it. `snap` is off while Alt is held: the
+    /// lines still show, and nothing pulls.
+    fn align_for(
+        &mut self,
+        page: usize,
+        moving: pdf_core::document::Rect,
+        exclude: &[usize],
+        scale: f32,
+        snap: bool,
+    ) -> ((f32, f32), pagify_shell::guides::Guides) {
+        let size = self.tab().doc.as_ref().and_then(|d| d.strip.size_of(page)).unwrap_or((612.0, 792.0));
+        let targets = self.guide_targets(page, exclude);
+        let scale = scale.max(0.01);
+        pagify_shell::guides::align(
+            moving,
+            &targets,
+            size,
+            if snap { Self::GUIDE_SNAP_PX / scale } else { 0.0 },
+            Self::GUIDE_NEAR_PX / scale,
+        )
+    }
+
+    /// **While a thing is dragged by its body, pull it onto a reference line.**
+    ///
+    /// Asked for with a screenshot: lines through the edges and the middles of
+    /// the other things on the page, and the thing landing exactly on one.
+    /// Applied to the drag itself, every frame, from the pointer — so the ghost
+    /// drawn while it moves and the place it is dropped are the same place, and
+    /// letting go away from a line is not "sticky".
+    fn snap_the_move(&mut self, page: usize, scale: f32, snap: bool) {
+        if let (Some(grab), Some(sel)) = (self.tab().grab.clone(), self.tab().selected.clone()) {
+            if grab.handle.is_none() && sel.page == page {
+                let moving = Self::shifted(sel.rect, grab.by);
+                let (nudge, _) = self.align_for(page, moving, &[sel.object], scale, snap);
+                if let Some(g) = self.tab_mut().grab.as_mut() {
+                    g.by = (g.by.0 + nudge.0, g.by.1 + nudge.1);
+                }
+            }
+        }
+        if let Some(grab) = self.tab().group_grab.clone() {
+            if grab.handle.is_none() {
+                if let Some(bounds) = self.group_bounds(page) {
+                    let members: Vec<usize> =
+                        self.tab().group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
+                    let moving = Self::shifted(bounds, grab.by);
+                    let (nudge, _) = self.align_for(page, moving, &members, scale, snap);
+                    if let Some(g) = self.tab_mut().group_grab.as_mut() {
+                        g.by = (g.by.0 + nudge.0, g.by.1 + nudge.1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn shifted(r: pdf_core::document::Rect, by: (f32, f32)) -> pdf_core::document::Rect {
+        pdf_core::document::Rect { left: r.left + by.0, top: r.top + by.1, right: r.right + by.0, bottom: r.bottom + by.1 }
+    }
+
+    /// The reference lines, **only while something is being moved** — not while it
+    /// is resized, and not when it is merely selected. Grey for a line near it,
+    /// green for one a side or the middle is exactly on.
+    fn draw_move_guides(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let (moving, exclude): (pdf_core::document::Rect, Vec<usize>) = {
+            let single = match (self.tab().grab.clone(), self.tab().selected.clone()) {
+                (Some(grab), Some(sel)) if grab.handle.is_none() && sel.page == page => {
+                    Some((Self::shifted(sel.rect, grab.by), vec![sel.object]))
+                }
+                _ => None,
+            };
+            let group = || match (self.tab().group_grab.clone(), self.group_bounds(page)) {
+                (Some(grab), Some(bounds)) if grab.handle.is_none() => {
+                    let members = self.tab().group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
+                    Some((Self::shifted(bounds, grab.by), members))
+                }
+                _ => None,
+            };
+            match single.or_else(group) {
+                Some(found) => found,
+                None => return,
+            }
+        };
+        let (_, guides) = self.align_for(page, moving, &exclude, view.scale, false);
+        if guides.is_empty() {
+            return;
+        }
+        let Some((page_w, page_h)) = self.tab().doc.as_ref().and_then(|d| d.strip.size_of(page)) else { return };
+        let painter = ui.painter();
+        let grey = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(120, 130, 150, 190));
+        let green = egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 230, 0));
+        // Grey first, so a green line over the same place is the one that shows.
+        for exact in [false, true] {
+            let stroke = if exact { green } else { grey };
+            for line in guides.vertical.iter().filter(|l| l.exact == exact) {
+                let top = view.to_screen(AppPoint::new(line.at as f64, 0.0));
+                let bottom = view.to_screen(AppPoint::new(line.at as f64, page_h as f64));
+                painter.line_segment([top, bottom], stroke);
+            }
+            for line in guides.horizontal.iter().filter(|l| l.exact == exact) {
+                let left = view.to_screen(AppPoint::new(0.0, line.at as f64));
+                let right = view.to_screen(AppPoint::new(page_w as f64, line.at as f64));
+                painter.line_segment([left, right], stroke);
+            }
+        }
     }
 
     /// The union, in app space, of every shape the markup layer's own
@@ -5933,7 +6167,15 @@ impl PagifyApp {
                 // A drag on the current selection's own body or a handle:
                 // move or resize it.
                 self.tab_mut().group = Vec::new();
-                self.tab_mut().grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
+                // **A turn is measured from where the pointer went down, not from
+                // where egui decided it was a drag** — a few pixels along already,
+                // which at the handle's distance from the middle is several
+                // degrees the shape would jump by the moment it began to turn.
+                let from = match (on_handle, ui.input(|i| i.pointer.press_origin())) {
+                    (Some(Handle::Rotate), Some(pressed)) => view.to_page(pressed),
+                    _ => at,
+                };
+                self.tab_mut().grab = Some(Grab { handle: on_handle, from, by: (0.0, 0.0) });
             } else {
                 // **Reported from use: dragging out a marquee across
                 // several objects kept grabbing and moving whichever one
@@ -5977,6 +6219,11 @@ impl PagifyApp {
             if let Some((_, current)) = self.tab_mut().marquee.as_mut() {
                 *current = at;
             }
+            // Pulled onto a reference line, unless Alt is held.
+            let snap = !ui.input(|i| i.modifiers.alt);
+            self.snap_the_move(page, view.scale, snap);
+            // A turn snaps to whole steps of 15 degrees while Shift is held.
+            self.tab_mut().rotate_snap = ui.input(|i| i.modifiers.shift);
         }
 
         if response.drag_stopped() {
@@ -6039,6 +6286,19 @@ impl PagifyApp {
                 // this drag picked up, back when it was selected.
                 self.move_object_by(sel.page, sel.object, sel.what, (dx, dy))
             }
+            // **Turned about its own middle.** Clockwise as seen, which is what the
+            // drag swept; the same turn the other way is the undo.
+            Some(Handle::Rotate) => {
+                let degrees = Self::object_turn(&sel.rect, &grab, self.tab().rotate_snap);
+                if degrees.abs() < 0.5 {
+                    return;
+                }
+                let pivot = pdf_core::document::Point {
+                    x: (sel.rect.left + sel.rect.right) / 2.0,
+                    y: (sel.rect.top + sel.rect.bottom) / 2.0,
+                };
+                self.rotate_thing(sel.page, sel.object, pivot, degrees)
+            }
             Some(handle) => {
                 let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
                 if (sx - 1.0).abs() < 0.005 && (sy - 1.0).abs() < 0.005 {
@@ -6063,6 +6323,9 @@ impl PagifyApp {
                 right: sel.rect.right + dx,
                 bottom: sel.rect.bottom + dy,
             },
+            // Turned about its middle: the middle stays where it is, which is all
+            // that the finding-again below looks at.
+            Some(Handle::Rotate) => sel.rect,
             Some(handle) => {
                 let (sx, sy) = handle.scale(&sel.rect, (dx, dy));
                 let (ax, ay) = handle.anchor(&sel.rect);
@@ -6224,6 +6487,29 @@ impl PagifyApp {
             (None, Some(page)) => self.say_info(format!("{removed} things removed from page {}.", page + 1)),
             (None, None) => {}
         }
+    }
+
+    /// Turn something about a point, clockwise as seen.
+    fn rotate_thing(
+        &mut self,
+        page: usize,
+        object: usize,
+        pivot: pdf_core::document::Point,
+        degrees: f32,
+    ) -> Result<String, String> {
+        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
+        doc.session
+            .execute(pdf_core::command::Command::RotateObject { page_index: page, object, pivot, degrees })
+            .map_err(|e| explain(&e))?;
+        if let Some(doc) = &mut self.tab_mut().doc {
+            doc.rendered_is_stale();
+        }
+        self.tab_mut().text = None;
+        self.tab_mut().text_selection = None;
+        self.tab_mut().find_hits.clear();
+        self.tab_mut().layers = None;
+        // Said the way the label says it: counter-clockwise is positive.
+        Ok(format!("turned {:.0}\u{b0} on page {} — `undo` turns it back.", -degrees, page + 1))
     }
 
     /// Resize something about a point.
@@ -6778,6 +7064,7 @@ impl PagifyApp {
     /// The selection's outline, its handles, and — mid-drag — where it is
     /// going.
     fn draw_object_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        self.draw_move_guides(ui, page, view);
         let Some(sel) = self.tab_mut().selected.clone().filter(|s| s.page == page) else { return };
         let to_screen = |r: &pdf_core::document::Rect| {
             egui::Rect::from_min_max(
@@ -6795,6 +7082,39 @@ impl PagifyApp {
             egui::Stroke::new(1.5, theme::violet()),
             egui::StrokeKind::Outside,
         );
+
+        // **Being turned: the outline as it will be, and by how much.** Asked for
+        // with a screenshot of what a design program shows — the shape turned
+        // about its middle, a line from the middle to the pointer, and the angle
+        // in a small label beside it.
+        if let Some(grab) = self.tab().grab.clone().filter(|g| g.handle == Some(Handle::Rotate)) {
+            let degrees = Self::object_turn(&sel.rect, &grab, self.tab().rotate_snap);
+            let centre = view.to_screen(AppPoint::new(
+                ((sel.rect.left + sel.rect.right) / 2.0) as f64,
+                ((sel.rect.top + sel.rect.bottom) / 2.0) as f64,
+            ));
+            let corners = [
+                egui::pos2(outline.left(), outline.top()),
+                egui::pos2(outline.right(), outline.top()),
+                egui::pos2(outline.right(), outline.bottom()),
+                egui::pos2(outline.left(), outline.bottom()),
+            ];
+            let (s, c) = degrees.to_radians().sin_cos();
+            // Turned clockwise on a y-down screen: the plain rotation matrix.
+            let turned: Vec<egui::Pos2> = corners
+                .iter()
+                .map(|p| {
+                    let d = *p - centre;
+                    centre + egui::vec2(d.x * c - d.y * s, d.x * s + d.y * c)
+                })
+                .collect();
+            let tint = egui::Stroke::new(1.5, theme::violet_bright());
+            painter.add(egui::Shape::convex_polygon(turned, theme::violet().gamma_multiply(0.10), tint));
+            let pointer = view.to_screen(AppPoint::new(grab.from.x + grab.by.0 as f64, grab.from.y + grab.by.1 as f64));
+            painter.line_segment([centre, pointer], egui::Stroke::new(1.0, theme::violet()));
+            Self::draw_angle_label(painter, pointer, degrees);
+            return;
+        }
 
         // Where it is going, while it is being dragged.
         if let Some(grab) = &self.tab_mut().grab {
@@ -6841,6 +7161,79 @@ impl PagifyApp {
                 egui::StrokeKind::Inside,
             );
         }
+
+        // The rotate handle above the top edge, joined to it by a stem, and the
+        // small diamond in the middle that it turns about.
+        let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
+        let top_centre = view.to_screen(AppPoint::new(
+            ((sel.rect.left + sel.rect.right) / 2.0) as f64,
+            sel.rect.top as f64,
+        ));
+        painter.line_segment([top_centre, rotate_screen], egui::Stroke::new(1.0, theme::violet()));
+        Self::draw_rotate_icon(painter, rotate_screen);
+        let middle = outline.center();
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                middle + egui::vec2(0.0, -4.0),
+                middle + egui::vec2(4.0, 0.0),
+                middle + egui::vec2(0.0, 4.0),
+                middle + egui::vec2(-4.0, 0.0),
+            ],
+            egui::Color32::WHITE,
+            egui::Stroke::new(1.0, theme::violet()),
+        ));
+    }
+
+    /// The turn a rotate drag means, in degrees **clockwise as seen**, snapped to
+    /// the nearest 15 when `snap` (Shift held), and kept in `-180..=180`.
+    fn object_turn(rect: &pdf_core::document::Rect, grab: &Grab, snap: bool) -> f32 {
+        let mut degrees = Self::angle_from_drag(rect, 0.0, grab.from, grab.by);
+        // Wrapped, so sweeping past straight down reads -170 and not 190.
+        degrees = (degrees + 180.0).rem_euclid(360.0) - 180.0;
+        if snap {
+            degrees = (degrees / 15.0).round() * 15.0;
+        }
+        degrees
+    }
+
+    /// The ring with a turning arrow in it that marks every rotate handle.
+    fn draw_rotate_icon(painter: &egui::Painter, centre: egui::Pos2) {
+        let r = ROTATE_HANDLE_PX;
+        painter.circle_filled(centre, r, egui::Color32::WHITE);
+        painter.circle_stroke(centre, r, egui::Stroke::new(1.0, theme::violet()));
+        // Three quarters of a circle, and a head on its end.
+        let arc = egui::Stroke::new(1.3, theme::violet());
+        let inner = r * 0.55;
+        let points: Vec<egui::Pos2> = (0..=18)
+            .map(|i| {
+                let a = (-60.0f32 + 20.0 * i as f32).to_radians();
+                centre + egui::vec2(a.cos(), a.sin()) * inner
+            })
+            .collect();
+        painter.add(egui::Shape::line(points.clone(), arc));
+        if let (Some(&end), Some(&before)) = (points.last(), points.get(points.len() - 2)) {
+            let dir = (end - before).normalized();
+            let side = egui::vec2(-dir.y, dir.x);
+            painter.add(egui::Shape::convex_polygon(
+                vec![end + dir * 2.4, end - dir * 0.6 + side * 2.2, end - dir * 0.6 - side * 2.2],
+                theme::violet(),
+                egui::Stroke::NONE,
+            ));
+        }
+    }
+
+    /// The label beside the pointer while turning: the angle, as the other
+    /// programs write it — **counter-clockwise is positive**, so a turn clockwise
+    /// reads `-33°`.
+    fn draw_angle_label(painter: &egui::Painter, near: egui::Pos2, clockwise_degrees: f32) {
+        let shown = -clockwise_degrees;
+        let text = format!("{:.0}\u{b0}", if shown == 0.0 { 0.0 } else { shown });
+        let galley = painter.layout_no_wrap(text, egui::FontId::proportional(12.0), egui::Color32::BLACK);
+        let size = galley.size() + egui::vec2(10.0, 6.0);
+        let rect = egui::Rect::from_min_size(near + egui::vec2(16.0, -size.y - 6.0), size);
+        painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(255, 250, 205));
+        painter.rect_stroke(rect, 2.0, egui::Stroke::new(1.0, egui::Color32::from_gray(90)), egui::StrokeKind::Inside);
+        painter.galley(rect.min + egui::vec2(5.0, 3.0), galley, egui::Color32::BLACK);
     }
 
     /// The marquee rectangle while it is being dragged out; every member of
@@ -7037,8 +7430,7 @@ impl PagifyApp {
             sel.rect.top as f64,
         ));
         painter.line_segment([stem_from, rotate_screen], egui::Stroke::new(1.0, theme::violet()));
-        painter.circle_filled(rotate_screen, ROTATE_HANDLE_PX, egui::Color32::WHITE);
-        painter.circle_stroke(rotate_screen, ROTATE_HANDLE_PX, egui::Stroke::new(1.0, theme::violet()));
+        Self::draw_rotate_icon(painter, rotate_screen);
     }
 
     /// The same as [`Self::draw_signature_selection`], for
@@ -7128,8 +7520,7 @@ impl PagifyApp {
             sel.rect.top as f64,
         ));
         painter.line_segment([stem_from, rotate_screen], egui::Stroke::new(1.0, theme::violet()));
-        painter.circle_filled(rotate_screen, ROTATE_HANDLE_PX, egui::Color32::WHITE);
-        painter.circle_stroke(rotate_screen, ROTATE_HANDLE_PX, egui::Stroke::new(1.0, theme::violet()));
+        Self::draw_rotate_icon(painter, rotate_screen);
     }
 
     /// The markup layer's own selection needs no outline of its own — a
@@ -7175,8 +7566,7 @@ impl PagifyApp {
             bounds.top as f64,
         ));
         painter.line_segment([stem_from, rotate_screen], egui::Stroke::new(1.0, theme::violet()));
-        painter.circle_filled(rotate_screen, ROTATE_HANDLE_PX, egui::Color32::WHITE);
-        painter.circle_stroke(rotate_screen, ROTATE_HANDLE_PX, egui::Stroke::new(1.0, theme::violet()));
+        Self::draw_rotate_icon(painter, rotate_screen);
     }
 
     /// Pick something up and put it down somewhere else.
@@ -8903,7 +9293,256 @@ impl PagifyApp {
                 }
             }
         }
+        // A picture, shape or run of words picked with Edit Object.
+        if let Some(sel) = self.tab().selected.clone().filter(|s| s.page == page) {
+            return self.copy_page_object(&sel);
+        }
         false
+    }
+
+    /// Fill the clipboard from a copy that is not text, and say how to put it
+    /// down.
+    fn put_on_clipboard(&mut self, content: ObjectClipboard, said: String) {
+        self.object_clipboard = Some(content);
+        self.paste_count = 0;
+        self.clipboard_mirror_wanted = true;
+        self.forget_copied_pages();
+        self.say_info(said);
+    }
+
+    /// ⌘C on what Edit Object has picked.
+    ///
+    /// **Words are copied as words** — their text, size, colour and font — and
+    /// paste back as new, editable text. A picture or shape the page itself
+    /// draws cannot be lifted out of the page's content stream, so it is
+    /// copied as what it looks like: the page's own pixels over its box, the
+    /// paper around a shape made see-through (see [`clear_paper_around`]) so
+    /// that it can be set down over other things.
+    fn copy_page_object(&mut self, sel: &Selected) -> bool {
+        let page = sel.page;
+        let content = if sel.what == "the words" {
+            let run = self
+                .tab()
+                .doc
+                .as_ref()
+                .and_then(|d| d.session.text_runs(page).ok())
+                .and_then(|runs| runs.into_iter().find(|r| r.object == sel.object));
+            let Some(run) = run else { return false };
+            let face = self.registered_face_of_object(page, sel.object);
+            ObjectClipboard::Text { lines: vec![run.text.trim().to_string()], size: run.size, color: run.color, face }
+        } else {
+            let raster = self.tab().doc.as_ref().and_then(|d| d.session.render_page_region(page, sel.rect, 3.0).ok());
+            let Some(raster) = raster else { return false };
+            let mut rgba = raster.pixels;
+            if sel.what == "the shape" {
+                clear_paper_around(&mut rgba, raster.width as usize, raster.height as usize);
+            }
+            ObjectClipboard::Image { rgba, width: raster.width, height: raster.height, rect: sel.rect }
+        };
+        let what = sel.what.strip_prefix("the ").unwrap_or(sel.what);
+        self.put_on_clipboard(content, format!("{what} copied — Ctrl+V picks it up, a click puts it down."));
+        true
+    }
+
+    /// ⌘C in the run/paragraph editor with **nothing selected inside its box**:
+    /// the whole text object is the thing copied (with a selection, the box's
+    /// own copy of the characters is what is meant, and is left alone).
+    fn copy_editing_run(&mut self, ctx: &egui::Context) -> bool {
+        let Some(edit) = self.tab().editing_run.clone() else { return false };
+        let id = egui::Id::new(("run-editor", edit.page, edit.object));
+        let has_selection = egui::TextEdit::load_state(ctx, id)
+            .and_then(|state| state.cursor.char_range())
+            .is_some_and(|range| !range.is_empty());
+        if has_selection || edit.buffer.trim().is_empty() {
+            return false;
+        }
+        let lines: Vec<String> = edit.buffer.split('\n').map(|line| line.trim_end().to_string()).collect();
+        let content = ObjectClipboard::Text {
+            lines,
+            size: edit.style.size.or(edit.was.size).unwrap_or(12.0),
+            color: edit.style.color.or(edit.was.color).unwrap_or(pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 }),
+            face: self.registered_face_of(&edit),
+        };
+        self.put_on_clipboard(content, "text copied — Ctrl+V picks it up, a click puts it down.".into());
+        true
+    }
+
+    /// ⌘V in Edit Object / Edit Text: **pick the paste up instead of putting it
+    /// down.** It follows the pointer at half strength ([`Self::draw_paste_ghost`])
+    /// and goes where the next click on a page lands ([`Self::place_paste_ghost`]).
+    /// `pasted` is the text the system clipboard held: anything but our own
+    /// placeholder means words were copied since, somewhere else, and those win.
+    /// `false` when this is not the time (no such tool in hand) or there is
+    /// nothing to paste, and the caller pastes the old way.
+    fn start_paste_ghost(&mut self, pasted: Option<String>) -> bool {
+        let in_hand = self.tab().object_tool.is_some()
+            || self.tab().editing_run.is_some()
+            || self.tab().pending.as_ref().is_some_and(|p| matches!(p.kind, PendingKind::PickText));
+        if !in_hand {
+            return false;
+        }
+        let from_elsewhere = pasted.filter(|text| text != COPIED_IN_PAGIFY && !text.trim().is_empty());
+        let content = match from_elsewhere {
+            Some(text) => ObjectClipboard::Text {
+                lines: text.lines().map(str::to_string).collect(),
+                size: 12.0,
+                color: pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 },
+                face: None,
+            },
+            None => match self.object_clipboard.clone() {
+                Some(content) => content,
+                None => return false,
+            },
+        };
+        self.paste_ghost = Some(PasteGhost { content, texture: None });
+        self.say_info("pasting — move to where it goes and click to put it down. Escape cancels.");
+        true
+    }
+
+    /// The click that puts a picked-up paste down, with the pointer at `at`:
+    /// words start at the pointer, a picture or shapes are centred on it.
+    /// One undo step, however many lines.
+    fn place_paste_ghost(&mut self, page: usize, at: AppPoint) {
+        let Some(ghost) = self.paste_ghost.take() else { return };
+        match ghost.content {
+            ObjectClipboard::Text { lines, size, color, face } => {
+                let gap = size * 1.2;
+                let mut baseline = at.y as f32 + size * 0.8;
+                let mut commands = Vec::new();
+                for line in &lines {
+                    if !line.trim().is_empty() {
+                        match self.styled_line_command(page, (at.x as f32, baseline), line, size, color, face.as_deref()) {
+                            Ok(command) => commands.push(command),
+                            Err(e) => {
+                                self.say_error(e);
+                                return;
+                            }
+                        }
+                    }
+                    baseline += gap;
+                }
+                let n = commands.len();
+                let command = match commands.len() {
+                    0 => {
+                        self.say_info("nothing to paste.");
+                        return;
+                    }
+                    1 => commands.remove(0),
+                    _ => pdf_core::command::Command::Batch { commands },
+                };
+                let outcome = self.tab().doc.as_ref().map(|d| d.session.execute(command));
+                match outcome {
+                    Some(Ok(_)) => {
+                        if let Some(doc) = &mut self.tab_mut().doc {
+                            doc.rendered_is_stale();
+                        }
+                        self.say_info(format!("text pasted ({n} line{}) — `undo` takes it back.", if n == 1 { "" } else { "s" }));
+                    }
+                    Some(Err(e)) => self.say_error(format!("{e}")),
+                    None => self.say_error("nothing open."),
+                }
+            }
+            ObjectClipboard::Image { rgba, width, height, rect } => {
+                let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+                let rect = pdf_core::document::Rect {
+                    left: at.x as f32 - w / 2.0,
+                    right: at.x as f32 + w / 2.0,
+                    top: at.y as f32 - h / 2.0,
+                    bottom: at.y as f32 + h / 2.0,
+                };
+                let Some(doc) = &self.tab().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                let outcome = doc.session.execute(pdf_core::command::Command::AddAnnotation {
+                    page_index: page,
+                    annotation: pdf_core::document::Annotation::Image { rect, rgba, width, height },
+                });
+                match outcome {
+                    Ok(_) => {
+                        if let Some(doc) = &mut self.tab_mut().doc {
+                            doc.rendered_is_stale();
+                        }
+                        self.tab_mut().foreign = None;
+                        self.say_info("picture pasted — `undo` takes it back.");
+                    }
+                    Err(e) => self.say_error(format!("{e}")),
+                }
+            }
+            ObjectClipboard::Shapes(objects) => {
+                let height = view_height(self, page);
+                let layer = self.tab_mut().markup.page(page, height);
+                let centre = shapes_centre(&objects, layer);
+                let by = cad_kernel::Vec2::new(at.x - centre.x, -(at.y - centre.y));
+                self.put_shapes_down(page, &objects, by);
+            }
+        }
+    }
+
+    /// Copies of `objects`, each moved by `by` (kernel space, which counts
+    /// upwards), added to the page's markup and left selected.
+    fn put_shapes_down(&mut self, page: usize, objects: &[(cad_kernel::DObject, bool)], by: cad_kernel::Vec2) {
+        let height = view_height(self, page);
+        let layer = self.tab_mut().markup.page(page, height);
+        layer.begin("paste");
+        layer.clear_selection();
+        let mut made = Vec::new();
+        for (object, was_filled) in objects {
+            let copy = cad_kernel::DObject { handle: cad_kernel::next_handle(), ..object.translated(by) };
+            made.push((layer.add_object(copy), *was_filled));
+        }
+        let n = made.len();
+        for (index, was_filled) in made {
+            layer.select_box_index(index);
+            if was_filled {
+                layer.set_filled(index, true);
+            }
+        }
+        layer.end();
+        self.say_info(format!("{n} shape{} pasted.", if n == 1 { "" } else { "s" }));
+    }
+
+    /// The picked-up paste, drawn under the pointer at 50% opacity while the
+    /// pointer is over this page.
+    fn draw_paste_ghost(&mut self, ui: &mut egui::Ui, page: usize, rect: egui::Rect, view: PageView) {
+        let Some(pointer) = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p)) else { return };
+        let painter = ui.painter_at(rect);
+        // Taken out while it is drawn (the shapes need the markup layer, which
+        // is the app's too) and put straight back.
+        let Some(mut ghost) = self.paste_ghost.take() else { return };
+        match &ghost.content {
+            ObjectClipboard::Text { lines, size, color, .. } => {
+                let font = egui::FontId::proportional((size * view.scale).max(4.0));
+                let ink = egui::Color32::from_rgb(color.r, color.g, color.b).gamma_multiply(0.5);
+                for (i, line) in lines.iter().enumerate() {
+                    let at = pointer + egui::vec2(0.0, i as f32 * size * 1.2 * view.scale);
+                    painter.text(at, egui::Align2::LEFT_TOP, line, font.clone(), ink);
+                }
+            }
+            ObjectClipboard::Image { rgba, width, height, rect: source } => {
+                let texture = ghost.texture.get_or_insert_with(|| {
+                    let image = egui::ColorImage::from_rgba_unmultiplied([*width as usize, *height as usize], rgba);
+                    ui.ctx().load_texture("paste-ghost", image, egui::TextureOptions::LINEAR)
+                });
+                let size = egui::vec2((source.right - source.left) * view.scale, (source.bottom - source.top) * view.scale);
+                painter.image(
+                    texture.id(),
+                    egui::Rect::from_center_size(pointer, size),
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::from_white_alpha(128),
+                );
+            }
+            ObjectClipboard::Shapes(objects) => {
+                let at = view.to_page(pointer);
+                let height = view_height(self, page);
+                let layer = self.tab_mut().markup.page(page, height);
+                let centre = shapes_centre(objects, layer);
+                let by = cad_kernel::Vec2::new(at.x - centre.x, -(at.y - centre.y));
+                let ink = egui::Color32::from_rgb(40, 40, 40).gamma_multiply(0.5);
+                overlay::draw_ghost(&painter, objects, layer, view, by, ink);
+            }
+        }
+        self.paste_ghost = Some(ghost);
     }
 
     /// How far each successive paste is offset from where it was copied —
@@ -8924,31 +9563,16 @@ impl PagifyApp {
         let page = self.tab_mut().page;
 
         match clip {
+            // Words have no place of their own to be copied beside: they are
+            // picked up and put down where the reader clicks.
+            ObjectClipboard::Text { .. } => {
+                self.paste_ghost = Some(PasteGhost { content: clip, texture: None });
+                self.say_info("pasting — move to where it goes and click to put it down. Escape cancels.");
+            }
             ObjectClipboard::Shapes(objects) => {
-                let height = view_height(self, page);
-                let layer = self.tab_mut().markup.page(page, height);
-                layer.begin("paste");
-                layer.clear_selection();
                 // Kernel space counts upwards — see `finish_markup_grab` —
                 // so "down and to the right" on the page is `(+, -)` here.
-                let by = cad_kernel::Vec2::new(step, -step);
-                let mut made = Vec::new();
-                for (object, was_filled) in &objects {
-                    let copy = cad_kernel::DObject {
-                        handle: cad_kernel::next_handle(),
-                        ..object.translated(by)
-                    };
-                    made.push((layer.add_object(copy), *was_filled));
-                }
-                let n = made.len();
-                for (index, was_filled) in made {
-                    layer.select_box_index(index);
-                    if was_filled {
-                        layer.set_filled(index, true);
-                    }
-                }
-                layer.end();
-                self.say_info(format!("{n} shape{} pasted.", if n == 1 { "" } else { "s" }));
+                self.put_shapes_down(page, &objects, cad_kernel::Vec2::new(step, -step));
             }
             ObjectClipboard::Image { rgba, width, height, rect } => {
                 let Some(doc) = &self.tab_mut().doc else {
@@ -11004,6 +11628,9 @@ impl PagifyApp {
         // Escape means "stop what you are doing", and being left in Hand
         // afterwards is not stopping.
         self.tab_mut().pointer = Default::default();
+        if self.paste_ghost.take().is_some() {
+            self.say_info("nothing was pasted.");
+        }
         if self.organize_open {
             self.organize_open = false;
             self.say_info("Organize closed.");
@@ -14080,6 +14707,7 @@ impl PagifyApp {
             },
             drawn: run.color.a == 0,
             focused: false,
+            box_resize: RunBox::default(),
         });
         // The face these words are already in, for the field to be set in. Asked
         // for here and used a frame or two later — see `want_document_face`.
@@ -14426,6 +15054,7 @@ impl PagifyApp {
             background: Self::background_at(page_raster, union, color),
             drawn: false,
             focused: false,
+            box_resize: RunBox::default(),
         };
         Ok((edit, look_object))
     }
@@ -15239,6 +15868,7 @@ impl PagifyApp {
             background: self.page_behind(page, found.rect, pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 }),
             drawn: true,
             focused: false,
+            box_resize: RunBox::default(),
         });
         Some(
             "these words are drawn, not written — type converted to outlines. \
@@ -15321,7 +15951,13 @@ impl PagifyApp {
         // not whichever object happens to be first in the paragraph (a scrap
         // in another weight can be).
         let source = if edit.look_object == usize::MAX { edit.object } else { edit.look_object };
-        let bytes = self.tab().doc.as_ref()?.session.run_font_data(edit.page, source).ok()??;
+        self.registered_face_of_object(edit.page, source)
+    }
+
+    /// The font program object `object` of `page` is drawn in, registered for
+    /// writing with and named.
+    fn registered_face_of_object(&self, page: usize, object: usize) -> Option<String> {
+        let bytes = self.tab().doc.as_ref()?.session.run_font_data(page, object).ok()??;
         // Named from its own bytes, not the run: many runs on a page share
         // one font, and this way they share one registration too instead of
         // piling up a copy per run edited in a session.
@@ -15376,8 +16012,23 @@ impl PagifyApp {
     fn apply_one_edit(&mut self, edit: EditingRun) {
         let typed = edit.buffer.trim().to_string();
 
+        // **Everything typed away deletes the text.** This used to say "left as it
+        // was" and do nothing, so a paragraph could be cut down to one character
+        // but never to none (reported from use). The paragraph path already reads
+        // an empty buffer as "every line removed" — twins and all, frozen lines
+        // left alone — and a single run is the one-line case of it, so it is
+        // one undo step like any other edit.
         if typed.is_empty() {
-            self.say_info("left as it was.");
+            if edit.original.trim().is_empty() {
+                self.say_info("left as it was.");
+            } else if edit.drawn {
+                self.say_error(
+                    "those words are drawn as shapes, not text, so they cannot be deleted here — \
+                     pick them with Edit Object instead.",
+                );
+            } else {
+                self.apply_paragraph_edit(&edit, &edit.buffer);
+            }
             return;
         }
         // **A font pick is judged on its own, not lumped in with size, colour
@@ -15739,11 +16390,14 @@ impl PagifyApp {
             // so a refusal changes nothing.
             Some(e) => self.say_error(format!("{e} — nothing was changed.")),
             None => {
-                let said = paragraph_applied_message(
+                let mut said = paragraph_applied_message(
                     nothing_to_execute && surplus_written == 0,
                     frozen_changed,
                     position_ignored,
                 );
+                if typed.trim().is_empty() {
+                    said = said.replacen("paragraph changed", "deleted — `undo` puts it back", 1);
+                }
                 self.say_info(if ragged {
                     format!("{said} The retyped lines could not be stretched to the width they had, so they end where the new words end.")
                 } else {
@@ -15769,7 +16423,16 @@ impl PagifyApp {
     /// would not go on, new lines that could not be added — moved the history, and
     /// its editor is **not** brought back: those words are on the page now.
     fn apply_editing_page(&mut self) -> bool {
-        let Some(edit) = self.tab_mut().editing_run.take() else { return false };
+        let Some(mut edit) = self.tab_mut().editing_run.take() else { return false };
+        // A box dragged by its left edge has moved the run with it: the new
+        // start is part of what is applied. From where the run started, not
+        // from `style.at`, so applying it again after a refusal is the same.
+        if edit.box_resize.left_shift_pt != 0.0 {
+            if let Some((x, y)) = edit.was.at {
+                let y = edit.style.at.map_or(y, |(_, y)| y);
+                edit.style.at = Some((x + edit.box_resize.left_shift_pt, y));
+            }
+        }
         if !self.edit_has_changes(&edit) {
             self.say_info("left as it was.");
             return false;
@@ -15917,7 +16580,8 @@ impl PagifyApp {
     fn edit_has_changes(&self, edit: &EditingRun) -> bool {
         let typed = edit.buffer.trim();
         if typed.is_empty() {
-            return false;
+            // Typed away is a deletion — a change, unless there was nothing to delete.
+            return !edit.original.trim().is_empty();
         }
         let changed_look = pdf_core::document::TextStyle { face: None, ..edit.style.clone() }
             != pdf_core::document::TextStyle { face: None, ..edit.was.clone() };
@@ -16508,6 +17172,23 @@ impl PagifyApp {
         color: pdf_core::document::Color,
         face: Option<&str>,
     ) -> Result<(), String> {
+        let command = self.styled_line_command(page, origin, text, size, color, face)?;
+        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
+        doc.session.execute(command).map_err(|e| format!("{e}"))?;
+        Ok(())
+    }
+
+    /// The command [`Self::write_styled_line_at`] executes, **not yet run**, so
+    /// that several lines can go in as one `Command::Batch` and undo as one.
+    fn styled_line_command(
+        &mut self,
+        page: usize,
+        origin: (f32, f32),
+        text: &str,
+        size: f32,
+        color: pdf_core::document::Color,
+        face: Option<&str>,
+    ) -> Result<pdf_core::command::Command, String> {
         use pdf_core::document::{Annotation, Glyph};
 
         let (font, font_asset, glyphs) = match face {
@@ -16549,25 +17230,21 @@ impl PagifyApp {
 
         let id = self.tab_mut().next_text_id;
         self.tab_mut().next_text_id += 1;
-        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
-        doc.session
-            .execute(pdf_core::command::Command::AddAnnotation {
-                page_index: page,
-                annotation: Annotation::Text {
-                    text: text.to_string(),
-                    font,
-                    font_asset,
-                    size,
-                    color,
-                    glyphs,
-                    id,
-                    restore: String::new(),
-                    frame: Vec::new(),
-                    frame_width: 0.0,
-                },
-            })
-            .map_err(|e| format!("{e}"))?;
-        Ok(())
+        Ok(pdf_core::command::Command::AddAnnotation {
+            page_index: page,
+            annotation: Annotation::Text {
+                text: text.to_string(),
+                font,
+                font_asset,
+                size,
+                color,
+                glyphs,
+                id,
+                restore: String::new(),
+                frame: Vec::new(),
+                frame_width: 0.0,
+            },
+        })
     }
 
     /// Turn [`Self::new_text_box`]'s typed buffer into real page content,
@@ -18768,6 +19445,9 @@ impl eframe::App for PagifyApp {
             // whenever no page is selected).
         } else if keys.copy && focus.allows_clipboard_keys(command_id) && self.copy_object_selection() {
             // handled — an object was copied, not text.
+        } else if keys.copy && self.copy_editing_run(&ctx) {
+            // handled — the run or paragraph open in the editor, copied whole
+            // because nothing inside its box was selected.
         } else if keys.copy || std::mem::take(&mut self.tab_mut().copy_wanted) {
             self.copy_selection(&ctx);
         }
@@ -18778,7 +19458,7 @@ impl eframe::App for PagifyApp {
         // successful copy — the one place in the app that actually has the
         // `egui::Context` a real write needs.
         if std::mem::take(&mut self.clipboard_mirror_wanted) {
-            ctx.copy_text("(copied in Pagify)".to_string());
+            ctx.copy_text(COPIED_IN_PAGIFY.to_string());
         }
         if keys.find_next && !self.tab_mut().find_hits.is_empty() {
             self.find_step(true);
@@ -18883,9 +19563,15 @@ impl eframe::App for PagifyApp {
         // Focus::allows_clipboard_keys), so it needs to keep working right
         // after a typed `copy`/`paste`, not just once focus is empty.
         if keys.paste && focus.allows_clipboard_keys(command_id) && self.tab_mut().doc.is_some() {
+            let pasted = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Paste(text) => Some(text.clone()),
+                    _ => None,
+                })
+            });
             if self.current_page_clipboard().is_some() {
                 self.paste_organize_selection();
-            } else {
+            } else if !self.start_paste_ghost(pasted) {
                 self.paste_object_selection();
             }
         }
@@ -20373,6 +21059,7 @@ impl PagifyApp {
                         self.draw_markup_selection(ui, page, view);
                         self.draw_signature_selection(ui, page, view);
                         self.draw_placed_image_selection(ui, page, view);
+                        self.draw_paste_ghost(ui, page, rect, view);
                         // On top of the page and its badges, under the editor:
                         // a tool part-way through is the most recent thing the
                         // reader did and the thing they are aiming with.
@@ -20794,7 +21481,19 @@ impl PagifyApp {
             .fonts_mut(|f| f.layout_no_wrap(original_last_line.to_string(), font_id.clone(), ink))
             .size()
             .x;
-        let max_width = (base_screen_width * grow).max(original_width);
+        // A width the reader dragged the box to is the width, exactly: no
+        // floor at what the unedited words measured, or it could never be
+        // dragged narrower than the run it opened on.
+        let max_width = match edit.box_resize.width_pt {
+            Some(width_pt) => (width_pt * view.scale).max(1.0),
+            None => (base_screen_width * grow).max(original_width),
+        };
+        // Resized since last frame: the lines are joined, then wrapped afresh to
+        // the new width by the loop below. One byte each way (`\n` for ` `), so
+        // the caret does not move.
+        if std::mem::take(&mut edit.box_resize.reflow) && edit.lines.len() <= 1 {
+            edit.buffer = edit.buffer.replace('\n', " ");
+        }
         if edit.lines.len() <= 1 {
             for _ in 0..64 {
                 let last_start = edit.buffer.rfind('\n').map(|i| i + 1).unwrap_or(0);
@@ -20848,9 +21547,15 @@ impl PagifyApp {
             .map(|line| ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), font_id.clone(), ink)).size().x)
             .fold(0.0f32, f32::max);
         let width = max_width.max(text_width + 8.0);
+        // **As tall as the lines it holds.** The first line stays where the run
+        // is and the others fall below it, so the box grows downwards — it used
+        // to stay one line tall, with the wrapped lines hanging out of its
+        // bottom.
+        let extra_lines = edit.buffer.split('\n').count().saturating_sub(1);
+        let row_height = ui.fonts_mut(|f| f.row_height(&font_id));
         let rect = egui::Rect::from_min_size(
-            egui::pos2(top_left.x, bottom_right.y - height),
-            egui::vec2(width, height + 6.0),
+            egui::pos2(top_left.x + edit.box_resize.left_shift_pt * view.scale, bottom_right.y - height),
+            egui::vec2(width, height + 6.0 + extra_lines as f32 * row_height),
         );
         ui.painter().rect_filled(rect.expand(1.0), 0.0, paper);
         // **Reported from use**: clicking different parts of a page picked up
@@ -20954,6 +21659,52 @@ impl PagifyApp {
         }
         ui.style_mut().visuals.override_text_color = None;
 
+        // **Handles on the left and right edges: the box is a width to wrap the
+        // words to**, so the same words can sit on one line or several. Declared
+        // after the page's own response, so a press on one is the handle's and
+        // not a click away from the editor. Single runs only: a paragraph's
+        // lines are its page's own, not a width to refold (see `RunBox`).
+        if edit.lines.len() <= 1 && !edit.drawn {
+            let scale = view.scale.max(0.01);
+            for handle in [Handle::Left, Handle::Right] {
+                let at = egui::pos2(
+                    if handle == Handle::Left { rect.left() } else { rect.right() },
+                    rect.center().y,
+                );
+                let grip = ui.interact(
+                    egui::Rect::from_center_size(at, egui::vec2(14.0, 18.0)),
+                    id.with(("grip", handle as u8)),
+                    egui::Sense::drag(),
+                );
+                if grip.hovered() || grip.dragged() {
+                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::ResizeHorizontal);
+                }
+                if grip.dragged() {
+                    let current = rect.width() / scale;
+                    let dragged = grip.drag_delta().x / scale;
+                    let wanted = if handle == Handle::Left { current - dragged } else { current + dragged };
+                    let width = wanted.max(MIN_RUN_BOX_PT);
+                    let applied = if handle == Handle::Left { current - width } else { width - current };
+                    if applied.abs() > f32::EPSILON {
+                        edit.box_resize.width_pt = Some(width);
+                        if handle == Handle::Left {
+                            edit.box_resize.left_shift_pt += applied;
+                        }
+                        edit.box_resize.reflow = true;
+                        ui.ctx().request_repaint();
+                    }
+                }
+                let square = egui::Rect::from_center_size(at, egui::vec2(HANDLE_PX * 2.0 + 1.0, HANDLE_PX * 2.0 + 1.0));
+                ui.painter().rect_filled(square, 1.0, egui::Color32::WHITE);
+                ui.painter().rect_stroke(
+                    square,
+                    1.0,
+                    egui::Stroke::new(1.5, theme::violet_bright()),
+                    egui::StrokeKind::Outside,
+                );
+            }
+        }
+
         // No hairline, no grip: matches the look of the page around it
         // rather than marking itself off as a widget.
 
@@ -21015,6 +21766,61 @@ impl PagifyApp {
         if !new_text.focused {
             new_text.focused = true;
             response.request_focus();
+        }
+
+        // The box can be dragged to any size from its eight handles, like a
+        // picture picked with Edit Object. Its width is what the typing wraps
+        // to, so the words re-wrap as it moves (see `apply_new_text_box`).
+        let scale = view.scale.max(0.01);
+        for handle in Handle::ALL {
+            let (hx, hy) = handle.at(&new_text.rect);
+            let at = view.to_screen(AppPoint { x: hx as f64, y: hy as f64 });
+            let grip = ui.interact(
+                egui::Rect::from_center_size(at, egui::vec2(14.0, 14.0)),
+                id.with(("grip", handle as u8)),
+                egui::Sense::drag(),
+            );
+            if grip.hovered() || grip.dragged() {
+                ui.output_mut(|o| {
+                    o.cursor_icon = match handle {
+                        Handle::Left | Handle::Right => egui::CursorIcon::ResizeHorizontal,
+                        Handle::Top | Handle::Bottom => egui::CursorIcon::ResizeVertical,
+                        Handle::TopLeft | Handle::BottomRight => egui::CursorIcon::ResizeNwSe,
+                        _ => egui::CursorIcon::ResizeNeSw,
+                    }
+                });
+            }
+            if grip.dragged() {
+                let by = grip.drag_delta() / scale;
+                let r = &mut new_text.rect;
+                match handle {
+                    Handle::Left | Handle::TopLeft | Handle::BottomLeft => {
+                        r.left = (r.left + by.x).min(r.right - MIN_RUN_BOX_PT)
+                    }
+                    Handle::Right | Handle::TopRight | Handle::BottomRight => {
+                        r.right = (r.right + by.x).max(r.left + MIN_RUN_BOX_PT)
+                    }
+                    _ => {}
+                }
+                match handle {
+                    Handle::Top | Handle::TopLeft | Handle::TopRight => {
+                        r.top = (r.top + by.y).min(r.bottom - MIN_RUN_BOX_PT)
+                    }
+                    Handle::Bottom | Handle::BottomLeft | Handle::BottomRight => {
+                        r.bottom = (r.bottom + by.y).max(r.top + MIN_RUN_BOX_PT)
+                    }
+                    _ => {}
+                }
+                ui.ctx().request_repaint();
+            }
+            let square = egui::Rect::from_center_size(at, egui::vec2(HANDLE_PX * 2.0 + 1.0, HANDLE_PX * 2.0 + 1.0));
+            ui.painter().rect_filled(square, 1.0, egui::Color32::WHITE);
+            ui.painter().rect_stroke(
+                square,
+                1.0,
+                egui::Stroke::new(1.5, theme::violet_bright()),
+                egui::StrokeKind::Outside,
+            );
         }
     }
 
@@ -21078,85 +21884,10 @@ impl PagifyApp {
     /// since a box being composed has no existing run to seed a size or
     /// position from.
     fn draw_new_text_properties(&mut self, ui: &mut egui::Ui, page: usize) {
-        // Read before `new_text` borrows `self.tab_mut().new_text_box`, so the
-        // "align on page" buttons below need no further access to `self`.
-        let page_width = self.tab_mut()
-            .doc
-            .as_ref()
-            .and_then(|d| d.session.page_sizes().ok())
-            .and_then(|sizes| sizes.get(page).copied())
-            .map(|size| size.width_pt);
-
-        let Some(new_text) = &mut self.tab_mut().new_text_box else { return };
-
-        let mut size = new_text.size;
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Size").color(theme::ink_dim()));
-            if ui.add(egui::DragValue::new(&mut size).speed(0.25).range(1.0..=400.0)).changed() {
-                new_text.size = size;
-            }
-        });
-
-        let c = new_text.color;
-        let mut rgb = [c.r, c.g, c.b];
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Colour").color(theme::ink_dim()));
-            if ui.color_edit_button_srgb(&mut rgb).changed() {
-                new_text.color = pdf_core::document::Color { r: rgb[0], g: rgb[1], b: rgb[2], a: c.a };
-            }
-        });
-
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new("Align in box").color(theme::ink_dim()));
-        ui.horizontal(|ui| {
-            for (label, value) in
-                [("Left", TextAlign::Left), ("Center", TextAlign::Center), ("Right", TextAlign::Right)]
-            {
-                if ui.selectable_label(new_text.align == value, label).clicked() {
-                    new_text.align = value;
-                }
-            }
-        });
-
-        // Moves the box itself, keeping its width and height — a shortcut
-        // for "put it against the left margin" or "centre it" rather than
-        // dragging by eye. Only offered once the page's own width is known.
-        if let Some(page_width) = page_width {
-            ui.add_space(6.0);
-            ui.label(egui::RichText::new("Align on page").color(theme::ink_dim()));
-            ui.horizontal(|ui| {
-                // "Page Left"/"Page Right", not the bare "Left"/"Right" the
-                // in-box row above already uses — two controls sharing a
-                // label is as unfindable for a screen reader as for a test
-                // that queries by it.
-                let width = new_text.rect.right - new_text.rect.left;
-                if ui.button("Page Left").clicked() {
-                    new_text.rect.left = 0.0;
-                    new_text.rect.right = width;
-                }
-                if ui.button("Page Center").clicked() {
-                    let left = ((page_width - width) / 2.0).max(0.0);
-                    new_text.rect.left = left;
-                    new_text.rect.right = left + width;
-                }
-                if ui.button("Page Right").clicked() {
-                    new_text.rect.left = (page_width - width).max(0.0);
-                    new_text.rect.right = new_text.rect.left + width;
-                }
-            });
+        if self.tab().new_text_box.is_none() {
+            return;
         }
-
-        let label = new_text.face.clone().unwrap_or_else(|| "(automatic)".into());
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Font").color(theme::ink_dim()));
-            if ui.button(label).clicked() {
-                self.font_picker_open = !self.font_picker_open;
-                if self.font_picker_open && self.system_fonts.is_none() {
-                    self.system_fonts = Some(system_fonts::list());
-                }
-            }
-        });
+        self.draw_text_style(ui, true);
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
@@ -21176,64 +21907,150 @@ impl PagifyApp {
         }
     }
 
-    /// The size, colour, position and font of the one run
-    /// [`Self::editing_run`] holds — what the run editor's floating box
-    /// used to show next to the words themselves. See
+    /// The Text Style block (see [`text_style_panel`]) for the run being edited
+    /// (`new_box` false) or the new text box being composed (`true`) — one layout
+    /// for both. **No position row: a page's words are moved by dragging them**
+    /// (or the box's left handle), not by typing coordinates (reported from use).
+    ///
+    /// What does something: the font (the picker), size, colour, **bold and
+    /// italic as the font family's own Bold/Italic face** — an error says so when
+    /// the family has none installed — and, for a new box, left/centre/right.
+    /// Everything else is drawn greyed with its reason on hover.
+    fn draw_text_style(&mut self, ui: &mut egui::Ui, new_box: bool) {
+        use text_style_panel as tsp;
+        let black = pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 };
+        let (face, size, color, align) = if new_box {
+            let Some(b) = self.tab().new_text_box.as_ref() else { return };
+            let align = match b.align {
+                TextAlign::Left => tsp::Align::Left,
+                TextAlign::Center => tsp::Align::Center,
+                TextAlign::Right => tsp::Align::Right,
+            };
+            (b.face.clone(), b.size, b.color, Some(align))
+        } else {
+            let Some(e) = self.tab().editing_run.as_ref() else { return };
+            // An explicit pick wins; short of that, the run's own current font
+            // beats a flat "(automatic)" that never said which font that meant.
+            (
+                e.style.face.clone().or_else(|| e.current_face.clone()),
+                e.style.size.unwrap_or(12.0),
+                e.style.color.unwrap_or(black),
+                None,
+            )
+        };
+        let (bold, italic) = face.as_deref().map(tsp::style_of).unwrap_or((false, false));
+        let look = tsp::Look {
+            font: face.clone().unwrap_or_else(|| "(automatic)".into()),
+            size,
+            color: [color.r, color.g, color.b],
+            bold,
+            italic,
+            underline: false,
+            strike: false,
+            script: tsp::Script::Normal,
+            align,
+        };
+        let mut gates = tsp::Gates::all_off("Not built yet. It comes in the next stage.");
+        gates.bold = None;
+        gates.italic = None;
+        if new_box {
+            gates.left = None;
+            gates.center = None;
+            gates.right = None;
+            gates.justify = Some("Justified text is not available for a new box yet.".into());
+        } else {
+            let why = || {
+                Some("Alignment is for new text boxes for now. Drag the side handles of the box to set where the lines wrap.".to_string())
+            };
+            (gates.left, gates.center, gates.right, gates.justify) = (why(), why(), why(), why());
+        }
+
+        let changes = tsp::show(ui, egui::Id::new(("text-style", new_box)), &look, &gates);
+
+        if changes.font_clicked {
+            self.font_picker_open = !self.font_picker_open;
+            if self.font_picker_open && self.system_fonts.is_none() {
+                self.system_fonts = Some(system_fonts::list());
+            }
+        }
+        if let Some(new_size) = changes.size {
+            if new_box {
+                if let Some(b) = self.tab_mut().new_text_box.as_mut() {
+                    b.size = new_size;
+                }
+            } else if let Some(e) = self.tab_mut().editing_run.as_mut() {
+                e.style.size = Some(new_size);
+            }
+        }
+        if let Some([r, g, b]) = changes.color {
+            let new = pdf_core::document::Color { r, g, b, a: color.a };
+            if new_box {
+                if let Some(held) = self.tab_mut().new_text_box.as_mut() {
+                    held.color = new;
+                }
+            } else if let Some(e) = self.tab_mut().editing_run.as_mut() {
+                e.style.color = Some(new);
+            }
+        }
+        if changes.bold.is_some() || changes.italic.is_some() {
+            self.pick_style_face(face.as_deref(), changes.bold.unwrap_or(bold), changes.italic.unwrap_or(italic));
+        }
+        if let (true, Some(a)) = (new_box, changes.align) {
+            let picked = match a {
+                tsp::Align::Left => Some(TextAlign::Left),
+                tsp::Align::Center => Some(TextAlign::Center),
+                tsp::Align::Right => Some(TextAlign::Right),
+                tsp::Align::Justify => None,
+            };
+            if let (Some(picked), Some(b)) = (picked, self.tab_mut().new_text_box.as_mut()) {
+                b.align = picked;
+            }
+        }
+    }
+
+    /// Switch the run or new box to the `bold`/`italic` face of `current`'s own
+    /// family, from the installed and bundled fonts. Says so, and changes
+    /// nothing, when the family has no such face.
+    fn pick_style_face(&mut self, current: Option<&str>, bold: bool, italic: bool) {
+        if self.system_fonts.is_none() {
+            self.system_fonts = Some(system_fonts::list());
+        }
+        // A new box set in "(automatic)" is Helvetica, whose installed twin is Arial.
+        let hint = current.unwrap_or("Arial").to_string();
+        let bundled = self.writing_faces();
+        let found = {
+            let names: Vec<&str> = self
+                .system_fonts
+                .iter()
+                .flatten()
+                .map(|f| f.name.as_str())
+                .chain(bundled.iter().map(String::as_str))
+                .collect();
+            text_style_panel::family_variant(&hint, bold, italic, &names)
+        };
+        match found {
+            Some(name) => self.choose_face(Some(name)),
+            None => self.say_error(format!(
+                "there is no {} face of {} installed, so the font was left as it is.",
+                match (bold, italic) {
+                    (true, true) => "bold italic",
+                    (true, false) => "bold",
+                    (false, true) => "italic",
+                    (false, false) => "regular",
+                },
+                text_style_panel::family_of(&hint)
+            )),
+        }
+    }
+
+    /// The Text Style of the one run [`Self::editing_run`] holds, and the Apply
+    /// button, with why the engine refused when it did. See
     /// [`Self::draw_run_editor`] for the box those words are still typed
     /// into, which stays on the page.
     fn draw_run_properties(&mut self, ui: &mut egui::Ui) {
-        let Some(edit) = self.tab_mut().editing_run.as_mut() else { return };
+        let Some(edit) = self.tab().editing_run.as_ref() else { return };
         let refusal_said = edit.refusal.as_ref().map(|refusal| format!("Not applied: {}", refusal.reason));
-
-        let mut size = edit.style.size.unwrap_or(12.0);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Size").color(theme::ink_dim()));
-            if ui.add(egui::DragValue::new(&mut size).speed(0.25).range(1.0..=400.0)).changed() {
-                edit.style.size = Some(size);
-            }
-        });
-
-        let c = edit
-            .style
-            .color
-            .unwrap_or(pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 });
-        let mut rgb = [c.r, c.g, c.b];
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Colour").color(theme::ink_dim()));
-            if ui.color_edit_button_srgb(&mut rgb).changed() {
-                edit.style.color =
-                    Some(pdf_core::document::Color { r: rgb[0], g: rgb[1], b: rgb[2], a: c.a });
-            }
-        });
-
-        let (mut x, mut y) = edit.style.at.unwrap_or((0.0, 0.0));
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Position").color(theme::ink_dim()));
-            let moved = ui.add(egui::DragValue::new(&mut x).speed(0.5).prefix("x ")).changed()
-                | ui.add(egui::DragValue::new(&mut y).speed(0.5).prefix("y ")).changed();
-            if moved {
-                edit.style.at = Some((x, y));
-            }
-        });
-
-        // An explicit choice from the font picker wins; short of that, the
-        // run's own current font — read once when it was picked — beats a
-        // flat "(automatic)" that never said which font "automatic" meant.
-        let label = edit
-            .style
-            .face
-            .clone()
-            .or_else(|| edit.current_face.clone())
-            .unwrap_or_else(|| "(automatic)".into());
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Font").color(theme::ink_dim()));
-            if ui.button(label).clicked() {
-                self.font_picker_open = !self.font_picker_open;
-                if self.font_picker_open && self.system_fonts.is_none() {
-                    self.system_fonts = Some(system_fonts::list());
-                }
-            }
-        });
+        self.draw_text_style(ui, false);
 
         ui.add_space(8.0);
         if ui.button("Apply").clicked() {
@@ -21429,6 +22246,20 @@ impl PagifyApp {
             });
 
         if let Some(face) = chosen {
+            self.choose_face(face);
+            close = true;
+        }
+
+        if close {
+            self.font_picker_open = false;
+            self.font_picker_filter.clear();
+        }
+    }
+
+    /// Use `face` for the run or new text box being edited, registering the
+    /// font file for both writing paths first. `None` is "automatic".
+    fn choose_face(&mut self, face: Option<String>) {
+        {
             // The file this picks a font by is read once, here, rather than
             // every font on the machine being loaded up front — see
             // `system_fonts::list`, which reads only enough of each file to
@@ -21467,12 +22298,6 @@ impl PagifyApp {
             } else if let Some(new_text) = &mut self.tab_mut().new_text_box {
                 new_text.face = face;
             }
-            close = true;
-        }
-
-        if close {
-            self.font_picker_open = false;
-            self.font_picker_filter.clear();
         }
     }
 
@@ -22046,6 +22871,16 @@ impl PagifyApp {
         };
         let mut at = view.to_page(pointer);
 
+        // A paste picked up with ⌘V owns the pointer until it is put down: the
+        // click that does it is not also a pick, a selection or a mark.
+        if self.paste_ghost.is_some() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
+            if response.clicked() {
+                self.place_paste_ghost(page, at);
+            }
+            return;
+        }
+
         // Snap, then ortho, then grid — in that order, because a snap is an
         // explicit request for a specific point and must not then be nudged off
         // it by a constraint.
@@ -22386,6 +23221,58 @@ fn view_height(app: &PagifyApp, page: usize) -> f64 {
         .and_then(|d| d.strip.size_of(page))
         .map(|(_, h)| h as f64)
         .unwrap_or(792.0)
+}
+
+/// The middle of the box round `objects`, in page space — what a paste of
+/// shapes is centred on the pointer by.
+fn shapes_centre(objects: &[(cad_kernel::DObject, bool)], layer: &pagify_shell::markup::Layer) -> AppPoint {
+    let (mut min, mut max) = (cad_kernel::Vec2::new(f64::MAX, f64::MAX), cad_kernel::Vec2::new(f64::MIN, f64::MIN));
+    for (object, _) in objects {
+        let (lo, hi) = object.bbox();
+        min = cad_kernel::Vec2::new(min.x.min(lo.x), min.y.min(lo.y));
+        max = cad_kernel::Vec2::new(max.x.max(hi.x), max.y.max(hi.y));
+    }
+    layer.space().from_kernel(cad_kernel::Vec2::new((min.x + max.x) / 2.0, (min.y + max.y) / 2.0))
+}
+
+/// Make the paper around a copied shape see-through: every near-white pixel
+/// **reachable from the edge of the picture** without crossing ink becomes
+/// transparent. White *inside* the shape (a white fill, a letter's counter) is
+/// not reachable and stays, so the shape is not holed.
+fn clear_paper_around(rgba: &mut [u8], width: usize, height: usize) {
+    let is_paper = |px: &[u8]| px[3] > 0 && px[0] >= 250 && px[1] >= 250 && px[2] >= 250;
+    if width == 0 || height == 0 || rgba.len() < width * height * 4 {
+        return;
+    }
+    let mut stack: Vec<usize> = Vec::new();
+    for x in 0..width {
+        stack.push(x);
+        stack.push((height - 1) * width + x);
+    }
+    for y in 0..height {
+        stack.push(y * width);
+        stack.push(y * width + width - 1);
+    }
+    while let Some(i) = stack.pop() {
+        let at = i * 4;
+        if !is_paper(&rgba[at..at + 4]) {
+            continue;
+        }
+        rgba[at + 3] = 0;
+        let (x, y) = (i % width, i / width);
+        if x > 0 {
+            stack.push(i - 1);
+        }
+        if x + 1 < width {
+            stack.push(i + 1);
+        }
+        if y > 0 {
+            stack.push(i - width);
+        }
+        if y + 1 < height {
+            stack.push(i + width);
+        }
+    }
 }
 
 /// The size the run editor draws its words at — the size they are *drawn*,
@@ -27834,7 +28721,7 @@ mod ui_tests {
         h.state_mut().tab_mut().new_text_box.as_mut().expect("open").buffer = "Hi".to_string();
         h.run_steps(1);
 
-        h.get_by_label("Right").click();
+        h.get_by_label("Align right").click();
         h.run_steps(1);
         assert_eq!(
             h.state().tab().new_text_box.as_ref().map(|b| b.align),
@@ -31679,6 +32566,500 @@ mod g4_edit_error_tests {
         assert!(h.query_all_by_label_contains("refuses").next().is_some(), "not on screen: {said:?}");
     }
 
+    /// The page's text now, read fresh.
+    fn page_text(h: &mut Harness<'static, PagifyApp>) -> String {
+        let app = h.state_mut();
+        app.tab_mut().text = None;
+        app.characters(0).map(|c| c.text()).unwrap_or_default()
+    }
+
+    /// The editor open on the first thing in `content`, the page's other text left alone.
+    fn editing_first_thing_of(content: &[u8]) -> Harness<'static, PagifyApp> {
+        // A file of its own: tests run side by side, and one shared name races.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let name = format!("typed-away-{}.pdf", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let mut h = opened(&name, &page_with(content, "", &[]));
+        h.state_mut().command_open = false;
+        h.state_mut().submit("edittext");
+        h.run_steps(1);
+        let at = a_character_on_screen(&mut h);
+        click(&mut h, at);
+        h.run_steps(2);
+        assert!(h.state().tab().editing_run.is_some(), "no editor opened");
+        h
+    }
+
+    /// **Selecting all the words in the box and deleting them deletes the text.**
+    /// Reported from use: it did nothing, though cutting it down to one character
+    /// worked — "left as it was" for an empty box.
+    #[test]
+    fn typing_a_run_away_deletes_it_and_undo_puts_it_back() {
+        let mut h = editing_first_thing_of(
+            b"BT /F1 12 Tf 72 700 Td (Hello) Tj ET BT /F1 12 Tf 72 400 Td (Elsewhere) Tj ET",
+        );
+        assert!(page_text(&mut h).contains("Hello"));
+        h.state_mut().tab_mut().editing_run.as_mut().expect("editor").buffer.clear();
+        h.state_mut().apply_editing_page();
+        h.run_steps(2);
+
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+        let after = page_text(&mut h);
+        assert!(!after.contains("Hello"), "the words are still on the page: {after:?}");
+        assert!(after.contains("Elsewhere"), "something else was deleted too: {after:?}");
+        let said = history(&h).last().map(|(text, _)| text.clone()).unwrap_or_default();
+        assert!(said.starts_with("deleted"), "{said:?}");
+
+        h.state_mut().submit("undo");
+        let back = page_text(&mut h);
+        assert!(back.contains("Hello") && back.contains("Elsewhere"), "undo did not put it back: {back:?}");
+    }
+
+    /// A box with only spaces left is as empty as one with nothing in it.
+    #[test]
+    fn a_box_left_with_only_spaces_deletes_too() {
+        let mut h = editing_first_thing_of(
+            b"BT /F1 12 Tf 72 700 Td (Hello) Tj ET BT /F1 12 Tf 72 400 Td (Elsewhere) Tj ET",
+        );
+        h.state_mut().tab_mut().editing_run.as_mut().expect("editor").buffer = "  \n ".into();
+        h.state_mut().apply_editing_page();
+        h.run_steps(2);
+
+        let after = page_text(&mut h);
+        assert!(!after.contains("Hello") && after.contains("Elsewhere"), "{after:?}");
+    }
+
+    /// Every line of a paragraph goes, as one undo step, and nothing outside it.
+    #[test]
+    fn typing_a_whole_paragraph_away_deletes_every_line_in_one_undo() {
+        let mut h = editing_first_thing_of(
+            b"BT /F1 12 Tf 14 TL 72 700 Td (First line of the words that run on) Tj T* \
+              (Second line of the words that run) Tj T* (Third line of the words that go) Tj ET \
+              BT /F1 12 Tf 72 400 Td (Elsewhere) Tj ET",
+        );
+        let lines = h.state().tab().editing_run.as_ref().expect("editor").lines.len();
+        assert_eq!(lines, 3, "this page's three lines were not picked as one paragraph");
+        h.state_mut().tab_mut().editing_run.as_mut().expect("editor").buffer.clear();
+        h.state_mut().apply_editing_page();
+        h.run_steps(2);
+
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+        let after = page_text(&mut h);
+        assert!(!after.contains("First") && !after.contains("Second") && !after.contains("Third"), "a line is left: {after:?}");
+        assert!(after.contains("Elsewhere"), "something else was deleted too: {after:?}");
+
+        h.state_mut().submit("undo");
+        let back = page_text(&mut h);
+        assert!(back.contains("First line") && back.contains("Second line"), "one undo did not bring it all back: {back:?}");
+    }
+
+    /// Leaving the box alone is still no edit — only an emptied box is a deletion.
+    #[test]
+    fn a_box_left_as_it_was_is_still_not_an_edit() {
+        let mut h = editing_first_thing_of(b"BT /F1 12 Tf 72 700 Td (Hello) Tj ET");
+        let generation = h.state().doc_generation();
+        h.state_mut().apply_editing_page();
+        h.run_steps(2);
+        assert_eq!(h.state().doc_generation(), generation, "an untouched box changed the document");
+        assert!(page_text(&mut h).contains("Hello"));
+    }
+
+    // ---- ⌘V in Edit Object / Edit Text picks the paste up; a click puts it down ----
+
+    /// Where a click puts a paste down, on the page.
+    fn page_spot(h: &Harness<'static, PagifyApp>, x: f64, y: f64) -> egui::Pos2 {
+        h.state().tab().last_view.expect("the page was never drawn").to_screen(AppPoint { x, y })
+    }
+
+    fn occurrences(h: &mut Harness<'static, PagifyApp>, words: &str) -> usize {
+        page_text(h).matches(words).count()
+    }
+
+    /// Every galley painted this frame, as `(its text, the alpha of its first letter's colour, where it starts)`.
+    fn painted_texts(h: &Harness<'static, PagifyApp>) -> Vec<(String, u8, egui::Pos2)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(String, u8, egui::Pos2)>) {
+            match shape {
+                egui::Shape::Text(t) => out.push((
+                    t.galley.job.text.clone(),
+                    t.galley.job.sections.first().map(|s| s.format.color.a()).unwrap_or(255),
+                    t.pos,
+                )),
+                egui::Shape::Vec(inner) => inner.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        h.output().shapes.iter().for_each(|clipped| walk(&clipped.shape, &mut out));
+        out
+    }
+
+    /// An Edit Object harness with the page's first run of words picked.
+    fn words_picked_in_edit_object() -> (Harness<'static, PagifyApp>, pdf_core::document::TextRun) {
+        let mut h = harness("text-lines.pdf");
+        h.state_mut().submit("editobject");
+        h.run_steps(1);
+        let run = h
+            .state()
+            .tab()
+            .doc
+            .as_ref()
+            .unwrap()
+            .session
+            .text_runs(0)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.text.trim().chars().count() > 4)
+            .expect("a run with words in it");
+        h.state_mut().tab_mut().selected =
+            Some(Selected { page: 0, object: run.object, rect: run.rect, what: "the words" });
+        (h, run)
+    }
+
+    /// **Copy words in Edit Object, paste, and the copy follows the pointer —
+    /// nothing is on the page until the click.** Then undo takes it away.
+    #[test]
+    fn pasting_words_picks_them_up_and_a_click_puts_them_down() {
+        let (mut h, run) = words_picked_in_edit_object();
+        let words = run.text.trim().to_string();
+        let before = occurrences(&mut h, &words);
+
+        h.event(egui::Event::Copy);
+        h.run_steps(2);
+        assert!(
+            matches!(&h.state().object_clipboard, Some(ObjectClipboard::Text { lines, .. }) if lines == &[words.clone()]),
+            "the words were not copied as words"
+        );
+
+        h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+        h.run_steps(2);
+        assert!(h.state().paste_ghost.is_some(), "paste did not pick the copy up");
+        assert_eq!(occurrences(&mut h, &words), before, "something was put on the page before the click");
+
+        { let spot = page_spot(&h, 100.0, 150.0); click(&mut h, spot); }
+        h.run_steps(2);
+        assert!(h.state().paste_ghost.is_none(), "the click did not put it down");
+        assert_eq!(occurrences(&mut h, &words), before + 1, "the copy is not on the page");
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+
+        h.state_mut().submit("undo");
+        assert_eq!(occurrences(&mut h, &words), before, "undo did not take the pasted words back");
+    }
+
+    /// While it is picked up it is drawn at half strength under the pointer.
+    #[test]
+    fn the_picked_up_paste_is_drawn_at_half_strength_where_the_pointer_is() {
+        let (mut h, run) = words_picked_in_edit_object();
+        let words = run.text.trim().to_string();
+        h.event(egui::Event::Copy);
+        h.run_steps(2);
+        h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+        h.run_steps(2);
+
+        let pointer = page_spot(&h, 250.0, 300.0);
+        h.event(egui::Event::PointerMoved(pointer));
+        h.run_steps(2);
+
+        let ghosts: Vec<_> = painted_texts(&h).into_iter().filter(|(text, _, at)| text == &words && (at.x - pointer.x).abs() < 2.0).collect();
+        assert!(!ghosts.is_empty(), "no ghost was painted at the pointer {pointer:?}");
+        assert!(ghosts.iter().all(|(_, alpha, _)| (100..=140).contains(alpha)), "not half strength: {ghosts:?}");
+
+        // And the pointer's own page position is where it would land.
+        h.event(egui::Event::PointerMoved(page_spot(&h, 100.0, 100.0)));
+        h.run_steps(2);
+        assert!(painted_texts(&h).iter().any(|(text, _, at)| text == &words && (at.x - page_spot(&h, 100.0, 100.0).x).abs() < 2.0));
+    }
+
+    #[test]
+    fn escape_puts_a_picked_up_paste_down_nowhere() {
+        let (mut h, run) = words_picked_in_edit_object();
+        let words = run.text.trim().to_string();
+        let before = occurrences(&mut h, &words);
+        h.event(egui::Event::Copy);
+        h.run_steps(2);
+        h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+        h.run_steps(2);
+        assert!(h.state().paste_ghost.is_some());
+
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert!(h.state().paste_ghost.is_none(), "Escape did not drop it");
+        assert_eq!(occurrences(&mut h, &words), before);
+    }
+
+    /// Words copied somewhere else (what `Event::Paste` carries) are pasted the
+    /// same way in Edit Text.
+    #[test]
+    fn text_copied_elsewhere_is_picked_up_in_edit_text_too() {
+        let mut h = harness("text-lines.pdf");
+        h.state_mut().submit("edittext");
+        h.run_steps(1);
+        h.event(egui::Event::Paste("Brand new words\nand a second line".into()));
+        h.run_steps(2);
+        assert!(
+            matches!(&h.state().paste_ghost, Some(PasteGhost { content: ObjectClipboard::Text { lines, .. }, .. }) if lines.len() == 2),
+            "the pasted text was not picked up"
+        );
+
+        { let spot = page_spot(&h, 100.0, 160.0); click(&mut h, spot); }
+        h.run_steps(2);
+        let page = page_text(&mut h);
+        assert!(page.contains("Brand new words") && page.contains("and a second line"), "{page:?}");
+
+        h.state_mut().submit("undo");
+        let after = page_text(&mut h);
+        assert!(!after.contains("Brand new words") && !after.contains("second line"), "one undo should take both lines back: {after:?}");
+    }
+
+    /// Outside Edit Object / Edit Text nothing changes: ⌘V pastes at once.
+    #[test]
+    fn with_no_editing_tool_in_hand_paste_does_not_pick_anything_up() {
+        let mut h = harness("text-lines.pdf");
+        h.event(egui::Event::Paste("Brand new words".into()));
+        h.run_steps(2);
+        assert!(h.state().paste_ghost.is_none());
+    }
+
+    /// A picture copied from the page is picked up and put down as a picture.
+    #[test]
+    fn a_picture_from_the_page_is_copied_and_pasted_where_clicked() {
+        let mut h = harness("pictures.pdf");
+        h.state_mut().submit("editobject");
+        h.run_steps(1);
+        let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        let middle = page_spot(
+            &h,
+            ((image.rect.left + image.rect.right) / 2.0) as f64,
+            ((image.rect.top + image.rect.bottom) / 2.0) as f64,
+        );
+        click(&mut h, middle);
+        assert!(h.state().tab().selected.is_some(), "the picture was not picked");
+        let marks = |h: &Harness<'static, PagifyApp>| h.state().tab().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().len();
+        let before = marks(&h);
+
+        h.event(egui::Event::Copy);
+        h.run_steps(2);
+        assert!(matches!(h.state().object_clipboard, Some(ObjectClipboard::Image { .. })), "the picture was not copied");
+        h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
+        h.run_steps(2);
+        assert!(h.state().paste_ghost.is_some());
+        assert_eq!(marks(&h), before, "it was placed before the click");
+
+        { let spot = page_spot(&h, 150.0, 150.0); click(&mut h, spot); }
+        h.run_steps(2);
+        assert_eq!(marks(&h), before + 1, "the click did not put the picture down; said {:?}", history(&h));
+    }
+
+    /// Nothing selected inside the box: ⌘C takes the whole run or paragraph.
+    #[test]
+    fn copying_in_the_editor_with_nothing_selected_takes_the_whole_text() {
+        let mut h = editing_first_thing_of(b"BT /F1 12 Tf 72 700 Td (Hello there) Tj ET");
+        h.event(egui::Event::Copy);
+        h.run_steps(2);
+        assert!(
+            matches!(&h.state().object_clipboard, Some(ObjectClipboard::Text { lines, .. }) if lines == &["Hello there".to_string()]),
+            "the run was not copied whole"
+        );
+    }
+
+    // ---- the run editor's box has handles on its left and right edges ----
+
+    /// Where the box's two grips are on screen, left then right.
+    fn grips(h: &Harness<'static, PagifyApp>) -> Vec<egui::Pos2> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<egui::Pos2>) {
+            match shape {
+                egui::Shape::Rect(r) if r.fill == egui::Color32::WHITE && (r.rect.width() - 9.0).abs() < 0.1 => {
+                    out.push(r.rect.center())
+                }
+                egui::Shape::Vec(inner) => inner.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        h.output().shapes.iter().for_each(|clipped| walk(&clipped.shape, &mut out));
+        out.sort_by(|a, b| a.x.total_cmp(&b.x));
+        out.dedup_by(|a, b| (a.x - b.x).abs() < 0.5 && (a.y - b.y).abs() < 0.5);
+        out
+    }
+
+    const WORDS: &[u8] = b"BT /F1 12 Tf 72 700 Td (Hello big wide world there) Tj ET";
+
+    /// **Drag the right edge in and the words fold onto more lines; drag it out
+    /// and they come back onto one** — the same words either way, and Apply
+    /// writes what the box showed.
+    #[test]
+    fn dragging_the_right_edge_wraps_the_words_and_dragging_it_back_unwraps_them() {
+        let mut h = editing_first_thing_of(WORDS);
+        h.run_steps(2);
+        let grips_now = grips(&h);
+        assert_eq!(grips_now.len(), 2, "the box has no grips: {grips_now:?}");
+        let (left, right) = (grips_now[0], grips_now[1]);
+        assert!(!h.state().tab().editing_run.as_ref().unwrap().buffer.contains('\n'));
+
+        drag(&mut h, right, right - egui::vec2((right.x - left.x) * 0.55, 0.0));
+        h.run_steps(3);
+        let narrow = h.state().tab().editing_run.as_ref().unwrap().clone();
+        assert!(narrow.box_resize.width_pt.is_some(), "the drag did not set a width");
+        assert!(narrow.buffer.contains('\n'), "narrowing the box did not wrap the words: {:?}", narrow.buffer);
+        assert_eq!(narrow.buffer.replace('\n', " "), "Hello big wide world there", "the words changed");
+
+        let now = grips(&h);
+        let back_out = now.last().copied().expect("a grip");
+        drag(&mut h, back_out, back_out + egui::vec2(400.0, 0.0));
+        h.run_steps(3);
+        let wide = h.state().tab().editing_run.as_ref().unwrap().clone();
+        assert!(!wide.buffer.contains('\n'), "widening the box left the words folded: {:?}", wide.buffer);
+        assert_eq!(wide.buffer, "Hello big wide world there");
+    }
+
+    #[test]
+    fn a_narrowed_box_applies_as_the_lines_it_showed() {
+        let mut h = editing_first_thing_of(WORDS);
+        h.run_steps(2);
+        let grips_now = grips(&h);
+        let (left, right) = (grips_now[0], grips_now[1]);
+        drag(&mut h, right, right - egui::vec2((right.x - left.x) * 0.6, 0.0));
+        h.run_steps(3);
+        let lines = h.state().tab().editing_run.as_ref().unwrap().buffer.matches('\n').count() + 1;
+        assert!(lines >= 2);
+
+        h.state_mut().apply_editing_page();
+        h.run_steps(2);
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+        let page = page_text(&mut h);
+        for word in ["Hello", "big", "wide", "world", "there"] {
+            assert_eq!(page.matches(word).count(), 1, "{word} is not on the page exactly once: {page:?}");
+        }
+    }
+
+    /// Dragging the left edge moves where the run starts.
+    #[test]
+    fn dragging_the_left_edge_moves_the_run_with_it() {
+        let mut h = editing_first_thing_of(WORDS);
+        h.run_steps(2);
+        let before = h.state().tab().doc.as_ref().unwrap().session.text_runs(0).unwrap().remove(0).origin.x;
+        let left = grips(&h)[0];
+        drag(&mut h, left, left + egui::vec2(30.0, 0.0));
+        h.run_steps(3);
+        let shift = h.state().tab().editing_run.as_ref().unwrap().box_resize.left_shift_pt;
+        assert!(shift > 1.0, "the left grip did not move the box: {shift}");
+
+        h.state_mut().apply_editing_page();
+        h.run_steps(2);
+        assert!(errors(&h).is_empty(), "{:?}", errors(&h));
+        let after = h.state().tab().doc.as_ref().unwrap().session.text_runs(0).unwrap().remove(0).origin.x;
+        assert!((after - (before + shift)).abs() < 1.0, "run started at {before}, box moved {shift}, now at {after}");
+    }
+
+    /// A new text box has all eight handles, and each moves its own edges.
+    #[test]
+    fn a_new_text_box_is_resized_from_its_eight_handles() {
+        let mut h = harness("text-lines.pdf");
+        h.state_mut().begin_text_box(0, AppPoint { x: 20.0, y: 100.0 }, AppPoint { x: 120.0, y: 160.0 }).expect("a box");
+        h.run_steps(3);
+        let all = grips(&h);
+        assert_eq!(all.len(), 8, "the box has {} handles: {all:?}", all.len());
+
+        let before = h.state().tab().new_text_box.as_ref().unwrap().rect;
+        let corner = all.iter().copied().max_by(|a, b| (a.x + a.y).total_cmp(&(b.x + b.y))).unwrap();
+        drag(&mut h, corner, corner + egui::vec2(60.0, 30.0));
+        h.run_steps(3);
+        let grown = h.state().tab().new_text_box.as_ref().unwrap().rect;
+        // The page re-fits while the panel settles, so only the size of the move is
+        // checked: a 60 x 30 px drag, at a zoom of about two, is about 30 x 15 points.
+        assert!((15.0..45.0).contains(&(grown.right - before.right)), "right edge: {before:?} -> {grown:?}");
+        assert!((7.0..23.0).contains(&(grown.bottom - before.bottom)), "bottom edge: {before:?} -> {grown:?}");
+        assert_eq!((grown.left, grown.top), (before.left, before.top), "the far corner moved");
+
+        // And the left edge on its own moves only the left edge.
+        let left = grips(&h).into_iter().min_by(|a, b| a.x.total_cmp(&b.x)).unwrap();
+        drag(&mut h, left, left + egui::vec2(20.0, 0.0));
+        h.run_steps(3);
+        let narrowed = h.state().tab().new_text_box.as_ref().unwrap().rect;
+        assert!(narrowed.left > grown.left + 5.0, "{grown:?} -> {narrowed:?}");
+        assert_eq!((narrowed.right, narrowed.top, narrowed.bottom), (grown.right, grown.top, grown.bottom));
+    }
+
+    // ---- the Text Style panel ----
+
+    /// The panel has the controls of a text editor and no position row.
+    #[test]
+    fn the_style_panel_has_the_text_controls_and_no_position_row() {
+        let mut h = editing_first_thing_of(WORDS);
+        h.run_steps(2);
+        for label in [
+            "Bold", "Italic", "Underline", "Strikethrough", "Superscript", "Subscript", "Align left", "Align centre",
+            "Align right", "Justify", "Line spacing",
+        ] {
+            assert!(h.query_all_by_label(label).next().is_some(), "no `{label}` control in the panel");
+        }
+        for gone in ["Position", "Page Left", "Page Center", "Page Right", "Align in box"] {
+            assert!(h.query_all_by_label(gone).next().is_none(), "`{gone}` is still in the panel");
+        }
+    }
+
+    /// Bold is the same family's own Bold face — not the font left as it was.
+    #[test]
+    fn bold_picks_the_bold_face_of_the_same_family_and_says_when_there_is_none() {
+        let mut h = editing_first_thing_of(WORDS);
+        h.state_mut().pick_style_face(Some("Montserrat-Regular"), true, false);
+        let face = h.state().tab().editing_run.as_ref().unwrap().style.face.clone();
+        assert!(face.as_deref().is_some_and(|f| f.to_ascii_lowercase().contains("bold")), "not a bold face: {face:?}");
+
+        let before = face;
+        h.state_mut().pick_style_face(Some("Zzyzx Sans"), true, false);
+        assert_eq!(h.state().tab().editing_run.as_ref().unwrap().style.face, before, "the face changed with no bold to change to");
+        let said = errors(&h);
+        assert!(said.last().is_some_and(|e| e.contains("no bold face of zzyzx sans")), "{said:?}");
+    }
+
+    /// A new text box's alignment buttons set its alignment; Justify, which
+    /// does nothing for a box yet, is there greyed and changes nothing.
+    #[test]
+    fn a_new_box_takes_its_alignment_from_the_style_panel() {
+        let mut h = harness("text-lines.pdf");
+        h.state_mut().begin_text_box(0, AppPoint { x: 20.0, y: 100.0 }, AppPoint { x: 120.0, y: 160.0 }).expect("a box");
+        h.run_steps(3);
+        assert_eq!(h.state().tab().new_text_box.as_ref().unwrap().align, TextAlign::Left);
+        let centre = h.get_by_label("Align centre").rect().center();
+        click(&mut h, centre);
+        h.run_steps(2);
+        assert_eq!(h.state().tab().new_text_box.as_ref().unwrap().align, TextAlign::Center);
+        let right = h.get_by_label("Align right").rect().center();
+        click(&mut h, right);
+        h.run_steps(2);
+        assert_eq!(h.state().tab().new_text_box.as_ref().unwrap().align, TextAlign::Right);
+        let justify = h.get_by_label("Justify").rect().center();
+        click(&mut h, justify);
+        h.run_steps(2);
+        assert_eq!(h.state().tab().new_text_box.as_ref().unwrap().align, TextAlign::Right);
+    }
+
+    /// A paragraph's lines are the page's own — no grips on it.
+    #[test]
+    fn a_paragraph_has_no_resize_grips() {
+        let mut h = editing_first_thing_of(
+            b"BT /F1 12 Tf 14 TL 72 700 Td (First line of the words that run on) Tj T* \
+              (Second line of the words that run) Tj T* (Third line of the words that go) Tj ET",
+        );
+        h.run_steps(2);
+        assert!(grips(&h).is_empty(), "a paragraph got grips: {:?}", grips(&h));
+    }
+
+    #[test]
+    fn the_paper_round_a_copied_shape_goes_clear_but_white_inside_it_stays() {
+        // 5x5: a black ring on white, one white pixel inside the ring.
+        let mut rgba = vec![255u8; 5 * 5 * 4];
+        for (x, y) in [(1, 1), (2, 1), (3, 1), (1, 2), (3, 2), (1, 3), (2, 3), (3, 3)] {
+            let at = (y * 5 + x) * 4;
+            rgba[at..at + 3].copy_from_slice(&[0, 0, 0]);
+        }
+        clear_paper_around(&mut rgba, 5, 5);
+        let alpha = |x: usize, y: usize| rgba[(y * 5 + x) * 4 + 3];
+        assert_eq!(alpha(0, 0), 0, "the corner paper stayed");
+        assert_eq!(alpha(4, 2), 0, "the paper on the edge stayed");
+        assert_eq!(alpha(1, 1), 255, "ink was cleared");
+        assert_eq!(alpha(2, 2), 255, "the white inside the ring was cleared");
+    }
+
     /// Search & Replace goes through the same engine call and prints its own
     /// copy of the error.
     #[test]
@@ -32506,6 +33887,382 @@ mod g1_command_box_tests {
 /// that is genuinely running under the name `Pagify.exe`, because what
 /// Windows refuses to overwrite is a running program's file and nothing else
 /// reproduces that.
+/// **Asked for with a screenshot: reference lines while something is moved.**
+/// Grey lines through the edges and middles of what is near, green where a side
+/// or the middle lines up, the thing pulled onto it — and none of it unless a
+/// thing is actually being moved.
+#[cfg(test)]
+mod guide_tests {
+    use super::ui_tests::harness;
+    use super::*;
+
+    const GREEN: egui::Color32 = egui::Color32::from_rgb(0, 230, 0);
+
+    /// Two top-level objects with different left edges, and the first one as a selection.
+    fn two_objects(app: &mut PagifyApp) -> (Selected, pdf_core::document::Rect) {
+        let layers: Vec<_> = app.layers_on(0).to_vec();
+        let page = app.tab().doc.as_ref().unwrap().strip.size_of(0).unwrap();
+        let things: Vec<_> = layers
+            .iter()
+            .filter(|o| o.depth == 0)
+            .filter(|o| (o.rect.right - o.rect.left) > 5.0 && (o.rect.bottom - o.rect.top) > 5.0)
+            .filter(|o| (o.rect.right - o.rect.left) < page.0 * 0.9)
+            .collect();
+        let a = things[0];
+        let b = things.iter().find(|o| (o.rect.left - a.rect.left).abs() > 40.0).expect("a second object elsewhere");
+        let sel = Selected { page: 0, object: a.object, rect: a.rect, what: "the shape" };
+        (sel, b.rect)
+    }
+
+    #[test]
+    fn dragging_close_to_another_things_edge_lands_exactly_on_it() {
+        let mut app = PagifyApp::new(Some(&ui_fixture("covered.pdf")));
+        let (sel, other) = two_objects(&mut app);
+        app.tab_mut().selected = Some(sel.clone());
+        // Where the drag would put its left edge: 3 points past the other thing's.
+        let dx = other.left + 3.0 - sel.rect.left;
+        app.tab_mut().grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+
+        app.snap_the_move(0, 1.0, true);
+
+        let by = app.tab().grab.as_ref().unwrap().by;
+        let targets: Vec<f32> = {
+            let t = app.guide_targets(0, &[sel.object]);
+            t.iter().flat_map(|r| [r.left, (r.left + r.right) / 2.0, r.right]).chain([0.0]).collect()
+        };
+        let moved = PagifyApp::shifted(sel.rect, by);
+        let sides = [moved.left, (moved.left + moved.right) / 2.0, moved.right];
+        assert!(
+            sides.iter().any(|s| targets.iter().any(|t| (s - t).abs() < 0.01)),
+            "the thing was not pulled onto a line: sides {sides:?}, drag by {by:?}"
+        );
+        assert!((by.0 - dx).abs() <= 6.0 + 0.01, "pulled further than the snap allows: {} for {}", by.0, dx);
+    }
+
+    #[test]
+    fn holding_alt_shows_the_lines_but_pulls_nothing() {
+        let mut app = PagifyApp::new(Some(&ui_fixture("covered.pdf")));
+        let (sel, other) = two_objects(&mut app);
+        app.tab_mut().selected = Some(sel.clone());
+        let dx = other.left + 3.0 - sel.rect.left;
+        app.tab_mut().grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+        app.snap_the_move(0, 1.0, false);
+        assert_eq!(app.tab().grab.as_ref().unwrap().by, (dx, 0.0));
+    }
+
+    #[test]
+    fn a_resize_is_not_pulled_onto_anything() {
+        let mut app = PagifyApp::new(Some(&ui_fixture("covered.pdf")));
+        let (sel, other) = two_objects(&mut app);
+        app.tab_mut().selected = Some(sel.clone());
+        let dx = other.left + 3.0 - sel.rect.left;
+        app.tab_mut().grab = Some(Grab { handle: Some(Handle::Right), from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+        app.snap_the_move(0, 1.0, true);
+        assert_eq!(app.tab().grab.as_ref().unwrap().by, (dx, 0.0));
+    }
+
+    /// The lines of this frame, by colour: how many green ones were drawn.
+    fn lines_drawn(h: &egui_kittest::Harness<'static, PagifyApp>) -> (usize, usize) {
+        let (mut grey, mut green) = (0, 0);
+        for s in &h.output().shapes {
+            if let egui::Shape::LineSegment { points, stroke } = &s.shape {
+                // A reference line runs most of the page; ignore every short stroke.
+                if (points[0] - points[1]).length() < 150.0 {
+                    continue;
+                }
+                if stroke.color == GREEN {
+                    green += 1;
+                } else if stroke.color == egui::Color32::from_rgba_unmultiplied(120, 130, 150, 190) {
+                    grey += 1;
+                }
+            }
+        }
+        (grey, green)
+    }
+
+    #[test]
+    fn the_lines_are_drawn_only_while_something_is_being_moved() {
+        let mut h = harness("covered.pdf");
+        let (sel, other) = {
+            let app = h.state_mut();
+            two_objects(app)
+        };
+        h.state_mut().submit("editobject");
+        h.state_mut().tab_mut().selected = Some(sel.clone());
+        h.run_steps(3);
+        assert_eq!(lines_drawn(&h), (0, 0), "lines were drawn for a selection that is not being moved");
+
+        // Dragged so its left edge is on the other thing's: a green line.
+        let dx = other.left - sel.rect.left;
+        h.state_mut().tab_mut().grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+        h.run_steps(2);
+        let (_, green) = lines_drawn(&h);
+        assert!(green >= 1, "no green line while a thing sits on another's edge");
+
+        // Let go: gone again.
+        h.state_mut().tab_mut().grab = None;
+        h.run_steps(2);
+        assert_eq!(lines_drawn(&h), (0, 0), "the lines stayed after the move");
+
+        // And a resize shows none.
+        h.state_mut().tab_mut().grab = Some(Grab { handle: Some(Handle::Right), from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+        h.run_steps(2);
+        assert_eq!(lines_drawn(&h), (0, 0), "lines were drawn for a resize");
+    }
+
+    fn ui_fixture(name: &str) -> String {
+        super::ui_tests::fixture(name)
+    }
+}
+
+/// **Asked for with a screenshot: a rotate handle on a selected object, like the
+/// move and resize handles, and the angle shown while it is turned.**
+#[cfg(test)]
+mod rotate_handle_tests {
+    use super::ui_tests::{click, drag, harness};
+    use super::*;
+
+    /// Select the first picture of `pictures.pdf` through a real click.
+    fn picture_selected() -> (egui_kittest::Harness<'static, PagifyApp>, PageView, pdf_core::document::Rect) {
+        let mut h = harness("pictures.pdf");
+        let view = h.state().tab().last_view.expect("the page was never drawn");
+        h.state_mut().submit("editobject");
+        h.run_steps(1);
+        let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        let middle = view.to_screen(AppPoint {
+            x: ((image.rect.left + image.rect.right) / 2.0) as f64,
+            y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
+        });
+        click(&mut h, middle);
+        assert!(h.state().tab().selected.is_some(), "the picture was not selected");
+        (h, view, image.rect)
+    }
+
+    #[test]
+    fn the_rotate_handle_is_above_the_top_edge_and_a_press_there_is_a_turn() {
+        let (h, view, rect) = picture_selected();
+        let handle = PagifyApp::rotate_handle_screen_pos(&rect, view);
+        let page_point = view.to_page(handle);
+        assert_eq!(h.state().handle_at(page_point, view), Some(Handle::Rotate));
+        // Nowhere else near it is the rotate handle: the middle of the picture, and a corner.
+        let middle = AppPoint { x: ((rect.left + rect.right) / 2.0) as f64, y: ((rect.top + rect.bottom) / 2.0) as f64 };
+        assert_ne!(h.state().handle_at(middle, view), Some(Handle::Rotate));
+        assert_eq!(
+            h.state().handle_at(AppPoint { x: rect.right as f64, y: rect.bottom as f64 }, view),
+            Some(Handle::BottomRight)
+        );
+    }
+
+    #[test]
+    fn dragging_the_rotate_handle_a_quarter_clockwise_turns_the_picture_and_undo_turns_it_back() {
+        let (mut h, view, rect) = picture_selected();
+        let (w, ht) = (rect.right - rect.left, rect.bottom - rect.top);
+        let centre = view.to_screen(AppPoint {
+            x: ((rect.left + rect.right) / 2.0) as f64,
+            y: ((rect.top + rect.bottom) / 2.0) as f64,
+        });
+        let handle = PagifyApp::rotate_handle_screen_pos(&rect, view);
+        // Straight above the middle to straight to its right: a quarter clockwise.
+        let reach = (handle - centre).length();
+        drag(&mut h, handle, centre + egui::vec2(reach, 0.0));
+
+        let turned = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        let (tw, th) = (turned.rect.right - turned.rect.left, turned.rect.bottom - turned.rect.top);
+        assert!(
+            (tw - ht).abs() < 1.5 && (th - w).abs() < 1.5,
+            "a quarter turn should swap the sides: {rect:?} then {:?}",
+            turned.rect
+        );
+        let said = h.state().cmd.history().iter().map(|e| e.text.clone()).collect::<Vec<_>>().join("\n");
+        assert!(said.contains("turned -90"), "{said}");
+
+        h.state_mut().submit("undo");
+        h.run_steps(2);
+        let back = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        assert!(
+            (back.rect.left - rect.left).abs() < 1.5 && (back.rect.right - rect.right).abs() < 1.5,
+            "undo did not turn it back: {rect:?} then {:?}",
+            back.rect
+        );
+    }
+
+    /// While it is turned, nothing is applied — the page changes once, on release.
+    #[test]
+    fn while_the_handle_is_dragged_the_angle_is_shown_and_the_page_has_not_changed() {
+        let (mut h, view, rect) = picture_selected();
+        let centre = view.to_screen(AppPoint {
+            x: ((rect.left + rect.right) / 2.0) as f64,
+            y: ((rect.top + rect.bottom) / 2.0) as f64,
+        });
+        let handle = PagifyApp::rotate_handle_screen_pos(&rect, view);
+        let from = view.to_page(handle);
+        // A drag in progress, by the amount that carries the pointer to the right of the middle.
+        let reach = (handle - centre).length() as f64 / view.scale as f64;
+        let to_right = (
+            ((rect.left + rect.right) / 2.0) as f64 + reach - from.x,
+            ((rect.top + rect.bottom) / 2.0) as f64 - from.y,
+        );
+        h.state_mut().tab_mut().grab =
+            Some(Grab { handle: Some(Handle::Rotate), from, by: (to_right.0 as f32, to_right.1 as f32) });
+        h.run_steps(2);
+
+        let shown: Vec<String> = h
+            .output()
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(shown.iter().any(|t| t == "-90\u{b0}"), "no angle label for a quarter turn clockwise: {shown:?}");
+
+        let unchanged = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
+        assert_eq!(unchanged.rect, rect, "the page changed before the pointer was let go");
+    }
+
+    /// Shift snaps a turn to whole steps of 15 degrees.
+    #[test]
+    fn a_turn_is_kept_in_range_and_snaps_to_fifteen_degrees_with_shift() {
+        let rect = pdf_core::document::Rect { left: 100.0, top: 100.0, right: 200.0, bottom: 140.0 };
+        let centre = (150.0, 120.0);
+        // From straight above to a point 33 degrees clockwise of it.
+        let from = AppPoint { x: centre.0, y: centre.1 - 50.0 };
+        let (s, c) = 33.0f64.to_radians().sin_cos();
+        let to = (centre.0 + 50.0 * s, centre.1 - 50.0 * c);
+        let grab = Grab { handle: Some(Handle::Rotate), from, by: ((to.0 - from.x) as f32, (to.1 - from.y) as f32) };
+        let free = PagifyApp::object_turn(&rect, &grab, false);
+        assert!((free - 33.0).abs() < 0.1, "{free}");
+        assert_eq!(PagifyApp::object_turn(&rect, &grab, true), 30.0);
+        // Swept the other way it reads as a turn the other way, not 340.
+        let (s, c) = (-20.0f64).to_radians().sin_cos();
+        let to = (centre.0 + 50.0 * s, centre.1 - 50.0 * c);
+        let grab = Grab { handle: Some(Handle::Rotate), from, by: ((to.0 - from.x) as f32, (to.1 - from.y) as f32) };
+        assert!((PagifyApp::object_turn(&rect, &grab, false) + 20.0).abs() < 0.1);
+    }
+}
+
+/// **Reported from use, twice: "pdfium error: PdfiumLibraryInternalError(
+/// Unknown) ... PDFium was looked for at ..." opening a file.** A file an older
+/// build damaged when it saved it opens now, and says so; any other file that
+/// will not open says what is wrong with *it*, not where PDFium was looked for.
+#[cfg(test)]
+mod open_error_tests {
+    use super::*;
+
+    fn said(app: &PagifyApp) -> String {
+        app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n")
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pagify-open-error-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    /// One blank page in an object stream, with a cross-reference stream whose
+    /// table holds `<<` in an offset — and, when `damaged`, the type the old
+    /// repair wrote into that table. Same shape as `pdf_core`'s own test of it.
+    fn pdf(damaged: bool) -> Vec<u8> {
+        let bodies = [
+            "<< /Type /Catalog /Pages 3 0 R >>",
+            "<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+            "<< /Type /Page /Parent 3 0 R /MediaBox [0 0 200 300] >>",
+        ];
+        let (mut header, mut packed) = (String::new(), String::new());
+        for (i, body) in bodies.iter().enumerate() {
+            header.push_str(&format!("{} {} ", i + 2, packed.len()));
+            packed.push_str(body);
+            packed.push('\n');
+        }
+        let (first, objstm) = (header.len(), format!("{header}{packed}"));
+        const AT: usize = 0x3C3C;
+        let mut out = b"%PDF-1.5\n%".to_vec();
+        out.resize(AT - 1, b'x');
+        out.push(b'\n');
+        out.extend_from_slice(
+            format!(
+                "1 0 obj\n<< /Type /ObjStm /N 3 /First {first} /Length {} >>\nstream\n{objstm}\nendstream\nendobj\n",
+                objstm.len()
+            )
+            .as_bytes(),
+        );
+        let table_at = out.len();
+        let mut data: Vec<u8> = vec![0, 0, 0, 0, 0, 255, 1];
+        data.extend_from_slice(&(AT as u32).to_be_bytes());
+        data.push(0);
+        for index in 0..3u8 {
+            data.push(2);
+            data.extend_from_slice(&1u32.to_be_bytes());
+            data.push(index);
+        }
+        data.push(1);
+        data.extend_from_slice(&(table_at as u32).to_be_bytes());
+        data.push(0);
+        let length = data.len();
+        if damaged {
+            let at = data.windows(2).position(|w| w == b"<<").unwrap() + 2;
+            data.splice(at..at, b"/Type/XRef".iter().copied());
+        }
+        out.extend_from_slice(
+            format!(
+                "5 0 obj\n<<{}/Root 2 0 R/Size 6/W[1 4 1]/Length {length}>>stream\r\n",
+                if damaged { "" } else { "/Type/XRef" }
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(&data);
+        out.extend_from_slice(format!("\r\nendstream\nendobj\nstartxref\n{table_at}\n%%EOF\n").as_bytes());
+        out
+    }
+
+    #[test]
+    fn a_file_an_older_build_damaged_opens_and_says_it_was_repaired() {
+        let path = scratch("damaged.pdf");
+        std::fs::write(&path, pdf(true)).unwrap();
+        let mut app = PagifyApp::new(None);
+        app.open(path.to_str().unwrap());
+
+        assert!(app.tab().doc.is_some(), "the damaged file did not open:\n{}", said(&app));
+        assert!(said(&app).contains("had been damaged by a save in an older version"), "{}", said(&app));
+        // And the file on disk was left as it was.
+        assert_eq!(std::fs::read(&path).unwrap(), pdf(true));
+    }
+
+    #[test]
+    fn a_sound_file_is_not_said_to_have_been_repaired() {
+        let path = scratch("sound.pdf");
+        std::fs::write(&path, pdf(false)).unwrap();
+        let mut app = PagifyApp::new(None);
+        app.open(path.to_str().unwrap());
+        assert!(app.tab().doc.is_some(), "{}", said(&app));
+        assert!(!said(&app).contains("damaged"), "{}", said(&app));
+    }
+
+    #[test]
+    fn a_file_that_will_not_open_says_what_is_wrong_with_it_and_does_not_blame_the_library() {
+        let not_a_pdf = scratch("letter.pdf");
+        std::fs::write(&not_a_pdf, b"Dear Sir, this is a letter and not a PDF at all.").unwrap();
+        let mut app = PagifyApp::new(None);
+        app.open(not_a_pdf.to_str().unwrap());
+        let said_so = said(&app);
+        assert!(said_so.contains("letter.pdf could not be opened"), "{said_so}");
+        assert!(said_so.contains("does not begin like a PDF"), "{said_so}");
+        assert!(!said_so.contains("PDFium was looked for"), "it blamed the install:\n{said_so}");
+        assert!(!said_so.contains("PdfiumLibraryInternalError"), "{said_so}");
+        assert!(app.tab().doc.is_none());
+
+        // One cut short while it was copied.
+        let cut = scratch("cut.pdf");
+        let whole = pdf(false);
+        std::fs::write(&cut, &whole[..whole.len() - 40]).unwrap();
+        let mut app = PagifyApp::new(None);
+        app.open(cut.to_str().unwrap());
+        // Whether PDFium refuses this or recovers from it, it never blames the library.
+        assert!(!said(&app).contains("PDFium was looked for"), "{}", said(&app));
+    }
+}
+
 /// **Reported from use: with many documents open the tabs stacked into five
 /// rows and took the page's space.** One row, the newest on the left, and the
 /// ones that do not fit behind a small triangle.

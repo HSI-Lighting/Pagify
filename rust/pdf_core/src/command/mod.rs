@@ -164,6 +164,14 @@ pub enum Command {
         sx: f32,
         sy: f32,
     },
+    /// Turn one page object about `pivot`, clockwise as seen on the page — see
+    /// [`crate::document::Document::rotate_object`].
+    RotateObject {
+        page_index: usize,
+        object: usize,
+        pivot: crate::document::Point,
+        degrees: f32,
+    },
     /// Take one picture, shape or run of text off a page entirely.
     ///
     /// Undoes by a page snapshot, the same as [`Command::Redact`], for the
@@ -434,6 +442,13 @@ pub enum UndoRecord {
         sx: f32,
         sy: f32,
     },
+    /// The same turn the other way, about the same point.
+    RotateObject {
+        page_index: usize,
+        object: usize,
+        pivot: crate::document::Point,
+        degrees: f32,
+    },
     /// Put a resized page back exactly as it was.
     ///
     /// The **inverse matrix**, not the previous size. Re-deriving a scale from
@@ -618,6 +633,15 @@ impl Command {
                     sy: 1.0 / *sy,
                 })
             }
+            Command::RotateObject { page_index, object, pivot, degrees } => {
+                doc.rotate_object_mut(*page_index, *object, *pivot, *degrees)?;
+                Ok(UndoRecord::RotateObject {
+                    page_index: *page_index,
+                    object: *object,
+                    pivot: *pivot,
+                    degrees: -*degrees,
+                })
+            }
             Command::RemoveObject { page_index, object } => {
                 // Copied before the removal, same as `Redact` — there is
                 // nothing left to copy once the operators are gone.
@@ -781,6 +805,7 @@ impl Command {
             Command::SetPageSize { index, .. } => format!("Resize page {}", index + 1),
             Command::MoveObject { page_index, .. } => format!("Move on page {}", page_index + 1),
             Command::ScaleObject { page_index, .. } => format!("Resize on page {}", page_index + 1),
+            Command::RotateObject { page_index, .. } => format!("Rotate on page {}", page_index + 1),
             Command::RemoveObject { page_index, .. } => format!("Delete on page {}", page_index + 1),
             Command::SplitRunIntoCharacters { page_index, .. } => {
                 format!("Split into characters on page {}", page_index + 1)
@@ -839,6 +864,7 @@ impl Command {
             | Command::RemoveText { page_index, .. }
             | Command::MoveObject { page_index, .. }
             | Command::ScaleObject { page_index, .. }
+            | Command::RotateObject { page_index, .. }
             | Command::RemoveObject { page_index, .. }
             | Command::SplitRunIntoCharacters { page_index, .. }
             // Invisible text changes no pixels, but the cache is not only for
@@ -933,6 +959,9 @@ impl UndoRecord {
             }
             UndoRecord::ScaleObject { page_index, object, anchor, sx, sy } => {
                 doc.scale_object_mut(page_index, object, anchor, sx, sy)
+            }
+            UndoRecord::RotateObject { page_index, object, pivot, degrees } => {
+                doc.rotate_object_mut(page_index, object, pivot, degrees)
             }
             UndoRecord::RestorePageSize { index, matrix, width_pt, height_pt } => {
                 // The sheet first, then the content: transforming into a page
