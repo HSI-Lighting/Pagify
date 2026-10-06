@@ -1,0 +1,1232 @@
+use super::*;
+use pdf_core::document::{Rect, TextRun};
+
+const MARINA: &str = r"C:\Users\hsili\Desktop\Datasheets - Editors market - Marina mall.pdf";
+const CAMINO: &str = r"C:\Users\hsili\Downloads\CAMINO elitee-plus 3.0.pdf";
+
+fn fixture(name: &str) -> String {
+    format!("{}/../../../rust/pdf_core/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
+}
+
+use super::tests_support::one_at_a_time;
+
+fn app(name: &str) -> PagifyApp {
+    let app = PagifyApp::new(Some(&fixture(name)));
+    assert!(app.tab().doc.is_some(), "{name} did not open");
+    app
+}
+
+/// The middle of a box, as a click on it.
+fn centre(rect: &Rect) -> AppPoint {
+    AppPoint { x: ((rect.left + rect.right) / 2.0) as f64, y: ((rect.top + rect.bottom) / 2.0) as f64 }
+}
+
+fn text_runs(app: &PagifyApp, page: usize) -> Vec<TextRun> {
+    app.tab().doc.as_ref().expect("open").session.text_runs(page).expect("runs")
+}
+
+/// The session log of `app` redirected to a scratch folder, and where to
+/// read it back from. The folder is the caller's to remove.
+fn log_into(app: &mut PagifyApp, tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let dir = std::env::temp_dir().join(format!("pagify-test-pick-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let path = app.session_log.path().expect("the scratch folder is writable").to_path_buf();
+    (dir, path)
+}
+
+/// The text of every log line of this kind, in order.
+fn logged(path: &std::path::Path, kind: &str) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .expect("the log file exists")
+        .lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid json"))
+        .filter(|l| l["kind"] == kind)
+        .map(|l| l["text"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+// -- the user's paragraph ------------------------------------------------
+
+/// The objects of one block, grouped into the visual lines a person sees —
+/// by baseline, top to bottom, each line left to right. **Worked out from
+/// the page's own words and positions, not from the detector**, so it is a
+/// second opinion on what the detector says.
+fn expected_lines(runs: &HashMap<usize, TextRun>, ids: &[usize]) -> Vec<Vec<usize>> {
+    let mut ids = ids.to_vec();
+    ids.sort_by(|a, b| runs[a].origin.y.total_cmp(&runs[b].origin.y).then(a.cmp(b)));
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    let mut baseline = f32::NAN;
+    for id in ids {
+        if lines.is_empty() || (runs[&id].origin.y - baseline).abs() > 3.0 {
+            baseline = runs[&id].origin.y;
+            lines.push(vec![id]);
+        } else {
+            lines.last_mut().expect("a line").push(id);
+        }
+    }
+    for line in &mut lines {
+        line.sort_by(|a, b| runs[a].rect.left.total_cmp(&runs[b].rect.left));
+    }
+    lines
+}
+
+/// **The user's own paragraph, on the user's own datasheet.** Page 1 has,
+/// one under the other: a five-line paragraph (objects 951 to 979), a
+/// heading, the 13-line paragraph the user marked in red (985 to 1043 —
+/// 57 text objects, plus two words the page draws as shapes, 1026 and
+/// 1035, which are not text objects at all), and another heading. Clicking
+/// *any* word of any of them has to open exactly that block, whole: the old
+/// geometric walk managed it for none of these 95 words.
+///
+/// Every one of the 95 words is clicked in turn and each time the editor
+/// must hold: the block's own objects in the block's own lines (worked
+/// out here from the page, see [`expected_lines`]); one buffer line per
+/// line; the words exactly as the page has them, with a hyphen only where
+/// the page has one; the two lines with a drawn word in them frozen and
+/// no others; and the look of the body text — not of the three-letter
+/// "HSI" in another weight inside the first line, and not of the headings.
+///
+/// Skipped, with a note, where the file is not on this machine.
+#[test]
+fn clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block() {
+    if !std::path::Path::new(MARINA).is_file() {
+        eprintln!("skipping: the Marina datasheet is not on this machine");
+        return;
+    }
+    let _turn = one_at_a_time();
+    let mut app = PagifyApp::new(Some(MARINA));
+    assert!(app.tab().doc.is_some(), "the datasheet is on this machine but would not open");
+    let runs: HashMap<usize, TextRun> = text_runs(&app, 0).into_iter().map(|r| (r.object, r)).collect();
+    let (page, _) = app.page_blocks(0).expect("the page's blocks");
+    let font_of = |object: usize| page.styles[&object].font;
+    fn face_key(app: &PagifyApp, object: usize) -> u64 {
+        let bytes = app.tab().doc.as_ref().unwrap().session.run_font_data(0, object).unwrap().expect("a font");
+        font_key(&bytes)
+    }
+
+    // (what it is, its objects, which of its lines draw a word as shapes,
+    //  an object that is in the body font / the heading font of the block)
+    let blocks: [(&str, std::ops::RangeInclusive<usize>, &[usize], usize); 4] = [
+        ("the five-line paragraph", 951..=979, &[], 951),
+        ("the heading 'The Light Source - COB'", 980..=984, &[], 981),
+        ("the 13-line paragraph marked in red", 985..=1043, &[8, 10], 986),
+        ("the heading under it", 1044..=1047, &[], 1045),
+    ];
+    // The two fonts the test leans on must really be different fonts, or
+    // "the body font, not the heading's" would pass for any answer.
+    assert_ne!(font_of(986), font_of(981), "setup: the body and the heading are one font");
+    assert_ne!(font_of(986), font_of(987), "setup: the 'HSI ' scrap is the body's own font");
+    assert_ne!(face_key(&app, 986), face_key(&app, 981), "setup: the body and heading font programs are one");
+    assert_ne!(face_key(&app, 986), face_key(&app, 987), "setup: the scrap's font program is the body's");
+
+    let mut ran = 0usize;
+    let mut alone = 0usize;
+    let mut failures: Vec<String> = Vec::new();
+    let mut times: Vec<std::time::Duration> = Vec::new();
+    for (name, range, frozen_at, look_of) in blocks {
+        let ids: Vec<usize> = range.filter(|o| runs.contains_key(o)).collect();
+        let lines = expected_lines(&runs, &ids);
+        let frozen: Vec<bool> = (0..lines.len()).map(|i| frozen_at.contains(&i)).collect();
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|line| line.iter().map(|o| runs[o].text.replace(['\r', '\n'], " ")).collect::<String>())
+            .collect();
+        let want_buffer = fix_extracted_text(&texts.join("\n"));
+        let want_font = font_of(look_of);
+        let want_face = face_key(&app, look_of);
+        eprintln!("{name}: {} words in {} lines", ids.len(), lines.len());
+
+        for &seed in &ids {
+            ran += 1;
+            app.tab_mut().editing_run = None;
+            let started = std::time::Instant::now();
+            let outcome = app.pick_text_run(0, centre(&runs[&seed].rect));
+            times.push(started.elapsed());
+            let who = format!("{name}, clicking object {seed} ({:?})", runs[&seed].text);
+            let message = match outcome {
+                Ok(message) => message,
+                Err(why) => {
+                    failures.push(format!("{who}: refused: {why}"));
+                    continue;
+                }
+            };
+            let Some(edit) = app.tab().editing_run.as_ref() else {
+                failures.push(format!("{who}: no editor opened"));
+                continue;
+            };
+            // **A word on a line the page draws part of as shapes opens that
+            // word alone**, not the paragraph: in the paragraph its line is
+            // frozen — never written — so a box over it could not change the
+            // words that were clicked. The paragraph is still one click away on
+            // any of its written lines (all the rest of the words, below).
+            let own_line = lines.iter().position(|line| line.contains(&seed)).expect("the seed is on a line");
+            if frozen_at.contains(&own_line) {
+                alone += 1;
+                if edit.lines != vec![(vec![seed], runs[&seed].rect)] || edit.frozen != [false] {
+                    failures.push(format!("{who}: on a frozen line it should open the word alone: {:?}", edit.lines));
+                } else if edit.buffer != fix_extracted_text(&runs[&seed].text) {
+                    failures.push(format!("{who}: the word alone reads {:?}", edit.buffer));
+                } else if !message.starts_with("opened this word alone: its line is partly drawn as shapes") {
+                    failures.push(format!("{who}: the message does not say why it opened alone: {message}"));
+                }
+                continue;
+            }
+            let got: Vec<Vec<usize>> = edit.lines.iter().map(|(objects, _)| objects.clone()).collect();
+            if got != lines {
+                let flat = |ls: &[Vec<usize>]| ls.iter().flatten().copied().collect::<std::collections::BTreeSet<_>>();
+                failures.push(format!(
+                    "{who}: opened {} lines / {} objects, wanted {} lines / {} objects (missing {:?}, extra {:?})",
+                    got.len(),
+                    flat(&got).len(),
+                    lines.len(),
+                    ids.len(),
+                    flat(&lines).difference(&flat(&got)).collect::<Vec<_>>(),
+                    flat(&got).difference(&flat(&lines)).collect::<Vec<_>>()
+                ));
+                continue;
+            }
+            if edit.buffer.split('\n').count() != edit.lines.len() {
+                failures.push(format!("{who}: {} buffer lines for {} lines", edit.buffer.split('\n').count(), edit.lines.len()));
+            }
+            if edit.original != edit.buffer {
+                failures.push(format!("{who}: the buffer is not what was picked"));
+            }
+            if edit.buffer != want_buffer {
+                failures.push(format!("{who}: the words differ from the page's own:\n  got  {:?}\n  want {want_buffer:?}", edit.buffer));
+            }
+            if edit.frozen != frozen {
+                failures.push(format!("{who}: frozen lines {:?}, wanted {frozen:?}", edit.frozen));
+            }
+            if edit.object != lines[0][0] {
+                failures.push(format!("{who}: the editor sits on object {}, not the first, {}", edit.object, lines[0][0]));
+            }
+            if font_of(edit.look_object) != want_font || !ids.contains(&edit.look_object) {
+                failures.push(format!(
+                    "{who}: the look comes from object {} (font {}), wanted font {want_font}",
+                    edit.look_object,
+                    font_of(edit.look_object)
+                ));
+            }
+            if app.editor_face != Some(want_face) {
+                failures.push(format!("{who}: the editor asked for another font program than the block's own"));
+            }
+            let drawn = frozen.iter().filter(|f| **f).count();
+            if drawn > 0 && !message.contains(&format!("{drawn} lines hold words drawn as shapes")) {
+                failures.push(format!("{who}: the message does not say words are drawn as shapes: {message}"));
+            }
+            if drawn == 0 && message.contains("drawn as shapes") {
+                failures.push(format!("{who}: the message talks of drawn words where there are none: {message}"));
+            }
+        }
+    }
+
+    times.sort();
+    eprintln!(
+        "datasheet page 1: {ran} picks — first {:?}, median {:?}, slowest {:?}",
+        times.first().copied().unwrap_or_default(),
+        times[times.len() / 2],
+        times.last().copied().unwrap_or_default()
+    );
+    assert_eq!(ran, 95, "29 + 5 + 57 + 4 words: has the file changed?");
+    assert_eq!(alone, 9, "the words on the two lines with a drawn word in them (4 + 5): has the file changed?");
+    assert!(
+        failures.is_empty(),
+        "{} of {ran} clicks did not open the block they were in:\n{}",
+        failures.len(),
+        failures.iter().take(12).cloned().collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// **A hyphen before a drawn line stays — in the buffer, and on the page once
+/// the line is retyped.** The datasheet's first paragraph (objects 8 to 16,
+/// "VEGA series is powerful lighting solutions...") has a line the page draws
+/// as shapes between its first and its fourth lines, and the line before it
+/// ends "driv" + the page's hyphen code: the census found the hyphen dropped
+/// from the buffer — so retyping the line would have taken it off the page.
+///
+/// Checked on the real page: every line of the buffer is the page's own words
+/// with the hyphen code as "-" (including that one); a word of line 1 is
+/// retyped and applied; the retyped piece ends in a real "-" that PDFium reads
+/// back, the apply says it went through, and a click on the paragraph again
+/// opens the same nine lines with the hyphen still there once, not twice.
+///
+/// Skipped, with a note, where the file is not on this machine.
+#[test]
+fn the_hyphen_before_a_drawn_line_stays_in_the_buffer_and_on_the_page_when_the_line_is_retyped() {
+    if !std::path::Path::new(MARINA).is_file() {
+        eprintln!("skipping: the Marina datasheet is not on this machine");
+        return;
+    }
+    let _turn = one_at_a_time();
+    let mut app = PagifyApp::new(Some(MARINA));
+    let runs: HashMap<usize, TextRun> = text_runs(&app, 0).into_iter().map(|r| (r.object, r)).collect();
+    assert!(runs[&9].text.ends_with('\u{2}'), "setup: object 9 ends in the hyphen code: {:?}", runs[&9].text);
+    app.pick_text_run(0, centre(&runs[&8].rect)).expect("picked");
+    let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    assert_eq!(edit.lines.len(), 9, "setup: the paragraph's nine lines: {:?}", edit.buffer);
+    assert_eq!(edit.frozen, [false, false, true, false, false, false, false, false, false]);
+
+    // The page's own words, the hyphen code as "-" wherever there is one.
+    let wanted: Vec<String> = edit
+        .lines
+        .iter()
+        .map(|(objects, _)| {
+            if objects.is_empty() {
+                block_input::OUTLINED_PLACEHOLDER.to_string()
+            } else {
+                objects.iter().map(|o| runs[o].text.replace('\u{2}', "-")).collect()
+            }
+        })
+        .collect();
+    let lines: Vec<&str> = edit.buffer.split('\n').collect();
+    assert_eq!(lines, wanted, "the buffer is not the page's own words");
+    assert!(lines[1].ends_with("COB, driv-"), "the hyphen before the drawn line was dropped: {:?}", lines[1]);
+
+    // Retype a word of that line.
+    let mut typed: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    typed[1] = typed[1].replacen("technology", "technologies", 1);
+    assert_ne!(typed[1], lines[1], "setup: the word is on the line");
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed.join("\n");
+    app.apply_editing_page();
+    let said = app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(said.contains("paragraph changed"), "the apply did not go through:\n{said}");
+
+    // On the page: the retyped piece is the typed words, and the typed "-" is
+    // written as the font's own hyphen glyph — the same code the page used
+    // before, which this document's broken text mapping reads back as the
+    // control code again. So the hyphen is still drawn, as the same glyph, in
+    // the line's own font (nothing was substituted).
+    let after: HashMap<usize, TextRun> = text_runs(&app, 0).into_iter().map(|r| (r.object, r)).collect();
+    assert_eq!(
+        after[&9].text,
+        typed[1].replace('-', "\u{2}"),
+        "what the page now says of that line: the hyphen is no longer the page's own glyph"
+    );
+    assert!(after[&9].text.ends_with("driv\u{2}"));
+    let substituted = app.tab().doc.as_ref().expect("open").session.substituted_face();
+    assert_eq!(substituted, None, "the line was written in another font than its own");
+
+    // And the detector still reads it as a hyphenated line end: the same nine
+    // lines, the same words, the hyphen once.
+    app.tab_mut().editing_run = None;
+    app.pick_text_run(0, centre(&after[&8].rect)).expect("picked again");
+    let again = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    assert_eq!(again.lines.len(), 9, "the paragraph reopens whole: {:?}", again.buffer);
+    let lines_again: Vec<&str> = again.buffer.split('\n').collect();
+    assert_eq!(lines_again[1], typed[1], "line 1 reopens as it was typed");
+    assert!(!again.buffer.contains("--"), "the hyphen was doubled: {:?}", again.buffer);
+}
+
+/// **The box takes its look from the font most of the text is set in, by
+/// the page's own identity for the font — not by its name.** The real
+/// datasheet names five different weights "Montserrat-Thin", so a vote on
+/// names sees one font and falls back to the first line's: a paragraph
+/// that starts with a bold scrap would open in bold. Here every object has
+/// the same name and size; only the font ids differ.
+#[test]
+fn the_look_is_the_font_most_of_the_text_is_set_in_even_when_every_font_has_the_same_name() {
+    let mut app = app("text-lines.pdf");
+    let run = |object: usize, text: &str, top: f32| TextRun {
+        object,
+        text: text.to_string(),
+        rect: Rect { left: 100.0, top, right: 100.0 + 5.0 * text.len() as f32, bottom: top + 10.0 },
+        origin: pdf_core::document::Point { x: 100.0, y: top + 8.0 },
+        size: 8.0,
+        color: pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 },
+    };
+    let runs = vec![run(0, "Head", 100.0), run(1, "the body of the paragraph", 112.0), run(2, "more body", 124.0)];
+    let names: HashMap<usize, String> = (0..3).map(|o| (o, "Montserrat-Thin".to_string())).collect();
+    let lines = || -> Vec<ParagraphLine> {
+        runs.iter().map(|r| ParagraphLine { objects: vec![r.object], rect: r.rect, frozen: false }).collect()
+    };
+    let style = |font: u32| pdf_core::document::RunStyle { font, stem_milli_em: Some(51), axis: (1.0, 0.0) };
+
+    // Object 0 alone in one font, 1 and 2 in another: the second has most of the ink.
+    let styles: HashMap<usize, pdf_core::document::RunStyle> =
+        [(0, style(3)), (1, style(5)), (2, style(5))].into_iter().collect();
+    let (edit, look) = app.build_editor_from_lines(0, lines(), &runs, &names, &styles, &[], None).expect("built");
+    assert_eq!(look, 1, "the body's first object, not the first line's");
+    assert_eq!(edit.look_object, 1);
+
+    // One font throughout: nothing to outvote, the first object it is.
+    let one: HashMap<usize, pdf_core::document::RunStyle> =
+        [(0, style(5)), (1, style(5)), (2, style(5))].into_iter().collect();
+    let (edit, look) = app.build_editor_from_lines(0, lines(), &runs, &names, &one, &[], None).expect("built");
+    assert_eq!((look, edit.look_object), (0, 0));
+}
+
+/// **The whole of what the user asked for, on the user's own paragraph:
+/// click a word of it, retype one line, apply — and only that line
+/// changes.** The 13-line paragraph of page 1 (objects 985 to 1043) has
+/// lines of three to eight pieces, two lines with a word the page draws
+/// as shapes, and a hyphen glyph at the end of five of them. One middle
+/// line made of plain words is retyped by repeating a word it already
+/// has (so no letter the font lacks is needed); every other line's objects
+/// must hold exactly the words and colour they held, the retyped line's
+/// other pieces are removed from the page, and nothing else is.
+#[test]
+fn retyping_one_line_of_the_datasheets_paragraph_writes_only_that_line() {
+    if !std::path::Path::new(MARINA).is_file() {
+        eprintln!("skipping: the Marina datasheet is not on this machine");
+        return;
+    }
+    let _turn = one_at_a_time();
+    let mut app = PagifyApp::new(Some(MARINA));
+    assert!(app.tab().doc.is_some(), "the datasheet is on this machine but would not open");
+    let runs: HashMap<usize, TextRun> = text_runs(&app, 0).into_iter().map(|r| (r.object, r)).collect();
+    app.pick_text_run(0, centre(&runs[&986].rect)).expect("picked");
+    let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    assert_eq!(edit.lines.len(), 13, "setup: the user's paragraph");
+
+    // Line 3, "lighting industry conforming": plain words, several pieces.
+    let target = 3;
+    let typed_lines: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
+    assert!(typed_lines[target].starts_with("lighting industry"), "setup: {:?}", typed_lines[target]);
+    assert!(edit.lines[target].0.len() > 1, "setup: the line is made of several pieces");
+    let mut retyped = typed_lines.clone();
+    retyped[target] = format!("{} industry", typed_lines[target].trim_end());
+
+    let before = tests_support::runs_in_order(&app);
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped.join("\n");
+    let started = std::time::Instant::now();
+    app.apply_editing_page();
+    eprintln!("timing: retyping one line of the 13-line datasheet paragraph took {:?}", started.elapsed());
+    let said = app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(
+        said.contains("paragraph changed"),
+        "the apply did not go through — the engine must be able to write every object of the line:\n{said}"
+    );
+    let after = tests_support::runs_in_order(&app);
+
+    // The retyped line is its first piece holding the new words and its
+    // other pieces are gone from the page (they were painted in the page's
+    // colour, which left their old words in the file); every other object
+    // — every piece of every other line, and everything outside the
+    // paragraph — holds exactly the words, colour and place it held.
+    let (first, rest) = edit.lines[target].0.split_first().expect("the line has objects");
+    tests_support::assert_page_after(
+        "one line of the datasheet's paragraph",
+        &before,
+        &after,
+        &[(*first, &retyped[target])],
+        rest,
+    );
+}
+
+// -- the log -------------------------------------------------------------
+
+/// Click once; what came of it and the one log line it wrote.
+fn click_logged(
+    app: &mut PagifyApp,
+    log: &std::path::Path,
+    page: usize,
+    at: AppPoint,
+) -> (Result<String, String>, String) {
+    let before = logged(log, "pick").len();
+    let outcome = app.pick_text_run(page, at);
+    let lines = logged(log, "pick");
+    assert_eq!(lines.len(), before + 1, "a click must write exactly one pick line: {lines:?}");
+    (outcome, lines.last().cloned().expect("a line"))
+}
+
+/// `key=value` out of a pick line (values hold no spaces).
+fn field<'a>(line: &'a str, key: &str) -> &'a str {
+    line.split(' ')
+        .find_map(|pair| pair.strip_prefix(key).and_then(|rest| rest.strip_prefix('=')))
+        .unwrap_or_else(|| panic!("no `{key}=` in {line:?}"))
+}
+
+/// **Every click leaves exactly one `pick` line in the session log, on
+/// whichever way it goes** — a paragraph, one run, a joined group, a word
+/// drawn as outlines, rotated text refused, nothing there — and the line
+/// holds ids, counts, geometry and times, never a word of the page.
+#[test]
+fn every_click_writes_exactly_one_content_free_pick_line_to_the_session_log() {
+    let _turn = one_at_a_time();
+    // -- a paragraph, then the same click again -------------------------
+    let mut app = app("two-column.pdf");
+    let (dir, log) = log_into(&mut app, "paths");
+    let runs = text_runs(&app, 0);
+    let mut left: Vec<TextRun> = runs.iter().filter(|r| r.rect.left < 300.0).cloned().collect();
+    left.sort_by(|a, b| a.rect.top.total_cmp(&b.rect.top));
+    let middle = left[left.len() / 2].clone();
+    let at = centre(&middle.rect);
+
+    let (outcome, line) = click_logged(&mut app, &log, 0, at);
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(field(&line, "path"), "block", "{line}");
+    assert_eq!(field(&line, "seed"), middle.object.to_string(), "{line}");
+    assert_eq!(field(&line, "rule"), "exact", "{line}");
+    assert_eq!((field(&line, "lines"), field(&line, "objects"), field(&line, "frozen")), ("8", "8", "[]"), "{line}");
+    assert_eq!(field(&line, "cache"), "miss", "the first click on a page reads it: {line}");
+    assert!(line.starts_with("page 1 click=("), "{line}");
+    assert!(field(&line, "frags").parse::<usize>().unwrap() >= 8, "{line}");
+    assert!(field(&line, "total_ms").parse::<f32>().unwrap() >= 0.0, "{line}");
+    // Content-free: not one word of what was clicked on.
+    for run in &left {
+        for word in run.text.split_whitespace().filter(|w| w.chars().count() >= 4) {
+            assert!(!line.contains(word), "the log line holds the page's own word {word:?}: {line}");
+        }
+    }
+    let block = field(&line, "block").to_string();
+
+    let (_, again) = click_logged(&mut app, &log, 0, at);
+    assert_eq!(field(&again, "cache"), "hit", "nothing changed since the page was read: {again}");
+    assert_eq!(field(&again, "block"), block, "{again}");
+
+    // -- a joined group ---------------------------------------------------
+    let (a, b) = (
+        runs.iter().min_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone(),
+        runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone(),
+    );
+    let total = app.characters(0).expect("characters").len();
+    app.tab_mut().text_selection = Some(0..total);
+    app.tab_mut().selection_page = 0;
+    app.join_selected_text().expect("join");
+    app.tab_mut().editing_run = None;
+    let (outcome, line) = click_logged(&mut app, &log, 0, centre(&b.rect));
+    assert!(outcome.is_ok(), "{outcome:?}");
+    assert_eq!(field(&line, "path"), "joined", "{line}");
+    assert_eq!(field(&line, "seed"), b.object.to_string(), "{line}");
+    let _ = a;
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // -- one run alone, and bare paper -------------------------------------
+    let (mut single, (dir, log)) = app_with_log("text-lines.pdf", "single");
+    let only = text_runs(&single, 0)[0].clone();
+    let (outcome, line) = click_logged(&mut single, &log, 0, centre(&only.rect));
+    assert!(outcome.expect("picked").starts_with("edit the words on the page"), "{line}");
+    assert_eq!(field(&line, "path"), "single", "{line}");
+    assert_eq!((field(&line, "lines"), field(&line, "objects")), ("1", "1"), "a block of one object: {line}");
+
+    let (outcome, line) = click_logged(&mut single, &log, 0, AppPoint { x: 3.0, y: 3.0 });
+    assert!(outcome.expect_err("bare paper").contains("no text there"), "{line}");
+    assert_eq!(field(&line, "path"), "none", "{line}");
+    assert_eq!((field(&line, "seed"), field(&line, "block")), ("none", "none"), "{line}");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // -- a word drawn as outlines -------------------------------------------
+    let (mut outlined, (dir, log)) = app_with_log("outlined-montserrat.pdf", "drawn");
+    let word = outlined
+        .drawn_words_on(0)
+        .iter()
+        .filter(|w| !w.text.trim().is_empty())
+        .max_by_key(|w| w.text.trim().chars().count())
+        .cloned()
+        .expect("a recognised word");
+    let (outcome, line) = click_logged(&mut outlined, &log, 0, centre(&word.rect));
+    assert!(outcome.expect("picked").contains("drawn, not written"), "{line}");
+    assert_eq!(field(&line, "path"), "drawn", "{line}");
+    assert_eq!(
+        (field(&line, "frags"), field(&line, "blocks"), field(&line, "seed")),
+        ("0", "0", "none"),
+        "no text objects on this page: {line}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // -- rotated text, refused (needs the real file) ---------------------------
+    if !std::path::Path::new(CAMINO).is_file() {
+        eprintln!("skipping the rotated-text case: CAMINO is not on this machine");
+        return;
+    }
+    let mut camino = PagifyApp::new(Some(CAMINO));
+    let (dir, log) = log_into(&mut camino, "rotated");
+    let pages = camino.tab().doc.as_ref().expect("open").page_count;
+    let rotated = (0..pages).find_map(|p| {
+        text_runs(&camino, p)
+            .into_iter()
+            .find(|r| looks_rotated(&r.rect, r.text.trim().chars().count()))
+            .map(|r| (p, r))
+    });
+    let Some((page, run)) = rotated else {
+        eprintln!("skipping the rotated-text case: CAMINO has no rotated label");
+        return;
+    };
+    let (outcome, line) = click_logged(&mut camino, &log, page, centre(&run.rect));
+    assert!(outcome.expect_err("refused").contains("rotated"), "{line}");
+    assert_eq!(field(&line, "path"), "refused-rotated", "{line}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn app_with_log(name: &str, tag: &str) -> (PagifyApp, (std::path::PathBuf, std::path::PathBuf)) {
+    let mut app = app(name);
+    let log = log_into(&mut app, tag);
+    (app, log)
+}
+
+// -- a page that moved, and a page that cannot be read --------------------
+
+/// **A page read before an edit, an undo or a redo is never used after
+/// it.** The reading is cached per page and stamped with the document's
+/// render epoch and the session's undo generation; both are checked, so a
+/// page changed behind the app's back — straight through the session, as
+/// the tests (and any path that forgets to say so) do — is still read
+/// afresh. A stale reading would show the words as they were, and
+/// object numbers that no longer mean what they did.
+#[test]
+fn a_page_read_before_an_edit_or_an_undo_is_not_used_after_it() {
+    let (mut app, (dir, log)) = app_with_log("text-lines.pdf", "stale");
+    let first = text_runs(&app, 0)[0].clone();
+    // Just inside the left end of the run: still inside it after its words change.
+    let at = AppPoint { x: (first.rect.left + 3.0) as f64, y: ((first.rect.top + first.rect.bottom) / 2.0) as f64 };
+    let session = app.tab().doc.as_ref().expect("open").session.clone();
+
+    let (_, line) = click_logged(&mut app, &log, 0, at);
+    assert_eq!(field(&line, "cache"), "miss", "{line}");
+    assert_eq!(app.tab().editing_run.as_ref().expect("picked").buffer.trim(), first.text.trim());
+    let (_, line) = click_logged(&mut app, &log, 0, at);
+    assert_eq!(field(&line, "cache"), "hit", "nothing moved: {line}");
+
+    // Changed behind the app's back: no `rendered_is_stale`, no epoch move.
+    session
+        .execute(pdf_core::command::Command::SetTextRun {
+            page_index: 0,
+            object: first.object,
+            text: "CHANGED UNDERNEATH THE CACHE".to_string(),
+            style: Default::default(),
+        })
+        .expect("edit through the session");
+    let (_, line) = click_logged(&mut app, &log, 0, at);
+    assert_eq!(field(&line, "cache"), "miss", "the history moved, so the page is read again: {line}");
+    assert_eq!(
+        app.tab().editing_run.as_ref().expect("picked").buffer.trim(),
+        "CHANGED UNDERNEATH THE CACHE",
+        "a stale reading would still offer the old words"
+    );
+
+    // And back, the same way.
+    let (undone, _) = session.undo().expect("undo");
+    assert!(undone);
+    let (_, line) = click_logged(&mut app, &log, 0, at);
+    assert_eq!(field(&line, "cache"), "miss", "{line}");
+    assert_eq!(app.tab().editing_run.as_ref().expect("picked").buffer.trim(), first.text.trim());
+    let (_, line) = click_logged(&mut app, &log, 0, at);
+    assert_eq!(field(&line, "cache"), "hit", "{line}");
+
+    // Through the app's own paths: an apply, then the app's own undo.
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "TYPED IN THE BOX".to_string();
+    app.apply_editing_page();
+    let (_, line) = click_logged(&mut app, &log, 0, at);
+    assert_eq!(field(&line, "cache"), "miss", "an apply makes the next click read the page again: {line}");
+    assert_eq!(app.tab().editing_run.as_ref().expect("picked").buffer.trim(), "TYPED IN THE BOX");
+    app.tab_mut().editing_run = None;
+    app.submit("undo");
+    let (_, line) = click_logged(&mut app, &log, 0, at);
+    assert_eq!(field(&line, "cache"), "miss", "{line}");
+    assert_eq!(app.tab().editing_run.as_ref().expect("picked").buffer.trim(), first.text.trim());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The other half of the cache's key, and of its clearing. Splitting a run
+/// into its letters is the one page change that does not go through the
+/// history (it moves no undo generation); what makes the next click read
+/// the page again is [`Doc::rendered_is_stale`], which the app calls right
+/// after — the render epoch it moves, and the cache it empties.
+#[test]
+fn a_page_changed_outside_the_history_is_read_again_once_it_is_declared_stale() {
+    let (mut app, (dir, log)) = app_with_log("text-lines.pdf", "split");
+    let first = text_runs(&app, 0)[0].clone();
+    let at = AppPoint { x: (first.rect.left + 2.0) as f64, y: ((first.rect.top + first.rect.bottom) / 2.0) as f64 };
+    let (_, line) = click_logged(&mut app, &log, 0, at);
+    assert_eq!((field(&line, "objects"), field(&line, "cache")), ("1", "miss"), "{line}");
+
+    let session = app.tab().doc.as_ref().expect("open").session.clone();
+    let generation = session.undo_generation();
+    session.split_run_into_characters(0, first.object).expect("split");
+    assert_eq!(session.undo_generation(), generation, "setup: a split does not move the history");
+    app.tab_mut().doc.as_mut().expect("open").rendered_is_stale();
+
+    let (_, line) = click_logged(&mut app, &log, 0, at);
+    assert_eq!(field(&line, "cache"), "miss", "{line}");
+    assert!(
+        field(&line, "objects").parse::<usize>().unwrap() > 1,
+        "the letters of the split run are the page now: {line}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **Edit Text never stops working.** If the page's text cannot be read in
+/// one pass the click falls back to what the tool always did: the one run
+/// under the pointer, found from the boxes alone — no paragraph, no
+/// detector. The log says it happened.
+#[test]
+fn edit_text_still_opens_the_run_when_the_pages_text_cannot_be_read_in_one_pass() {
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            tests_support::SNAPSHOT_FAILS.with(|fails| fails.set(false));
+        }
+    }
+    let _restore = Restore;
+
+    let (mut app, (dir, log)) = app_with_log("two-column.pdf", "fallback");
+    let runs = text_runs(&app, 0);
+    let mut left: Vec<TextRun> = runs.iter().filter(|r| r.rect.left < 300.0).cloned().collect();
+    left.sort_by(|a, b| a.rect.top.total_cmp(&b.rect.top));
+    let middle = left[left.len() / 2].clone();
+
+    tests_support::SNAPSHOT_FAILS.with(|fails| fails.set(true));
+    let (outcome, line) = click_logged(&mut app, &log, 0, centre(&middle.rect));
+    assert!(outcome.expect("still picked").starts_with("edit the words on the page"), "{line}");
+    let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+    assert_eq!(edit.lines, vec![(vec![middle.object], middle.rect)], "the run alone, not its paragraph");
+    assert_eq!(edit.buffer.trim(), middle.text.trim());
+    assert_eq!(field(&line, "path"), "single", "{line}");
+    assert_eq!((field(&line, "frags"), field(&line, "blocks"), field(&line, "block")), ("0", "0", "none"), "{line}");
+    assert_eq!(field(&line, "seed"), middle.object.to_string(), "{line}");
+    let notes = logged(&log, "pick-note");
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("picking the run alone"), "{notes:?}");
+
+    // Bare paper is still bare paper.
+    let (outcome, line) = click_logged(&mut app, &log, 0, AppPoint { x: 3.0, y: 3.0 });
+    assert!(outcome.expect_err("nothing there").contains("no text there"), "{line}");
+    assert_eq!(field(&line, "path"), "none", "{line}");
+
+    // And the moment it can be read again, the paragraph is back.
+    tests_support::SNAPSHOT_FAILS.with(|fails| fails.set(false));
+    app.tab_mut().editing_run = None;
+    let (_, line) = click_logged(&mut app, &log, 0, centre(&middle.rect));
+    assert_eq!((field(&line, "path"), field(&line, "lines")), ("block", "8"), "{line}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **The small picture a paragraph's background colour is sampled from is
+/// made once per state of the page, not once per click.** A render is the
+/// bulk of what a click costs once the page has been read, and every click
+/// on one page wants the same picture. It is kept under the same key as the
+/// page's reading — page, render epoch, undo generation — so an edit, an
+/// undo or a declared change makes the next click render the page as it is
+/// now, and a hide colour is never sampled from a picture of what was.
+#[test]
+fn the_background_is_sampled_from_one_picture_per_state_of_the_page() {
+    let mut app = app("two-column.pdf");
+    let kept = |app: &PagifyApp| {
+        app.tab().doc.as_ref().expect("open").sampling.borrow().as_ref().map(|(_, picture)| picture.clone())
+    };
+    let mut left: Vec<TextRun> = text_runs(&app, 0).into_iter().filter(|r| r.rect.left < 300.0).collect();
+    left.sort_by(|a, b| a.rect.top.total_cmp(&b.rect.top));
+    assert!(kept(&app).is_none(), "nothing is rendered before the first click");
+
+    app.pick_text_run(0, centre(&left[1].rect)).expect("picked");
+    let first = kept(&app).expect("a picture was kept");
+    app.pick_text_run(0, centre(&left[5].rect)).expect("picked");
+    assert!(
+        std::rc::Rc::ptr_eq(&first, &kept(&app).expect("still kept")),
+        "a second click on the same page made a picture of its own"
+    );
+
+    // The page moves: the next click makes a new picture.
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "ONE\nTWO\nTHREE\nFOUR\nFIVE\nSIX\nSEVEN\nEIGHT".to_string();
+    app.apply_editing_page();
+    assert!(kept(&app).is_none(), "an apply leaves the old picture behind");
+    // At the left end of a line: the words there are short now.
+    let at_left = |r: &Rect| AppPoint { x: (r.left + 2.0) as f64, y: ((r.top + r.bottom) / 2.0) as f64 };
+    app.pick_text_run(0, at_left(&left[1].rect)).expect("picked");
+    let second = kept(&app).expect("a picture was kept");
+    assert!(!std::rc::Rc::ptr_eq(&first, &second), "the picture is of the page before the edit");
+
+    // Behind the app's back, as the stale-cache test does: only the key can tell.
+    let session = app.tab().doc.as_ref().expect("open").session.clone();
+    let (undone, _) = session.undo().expect("undo");
+    assert!(undone);
+    app.pick_text_run(0, at_left(&left[1].rect)).expect("picked");
+    assert!(
+        !std::rc::Rc::ptr_eq(&second, &kept(&app).expect("a picture was kept")),
+        "an undo made behind the app's back left the old picture in use"
+    );
+}
+
+/// **A page with no text objects at all is not an error.** Its reading is
+/// empty (no shapes either: a page of outlines has tens of thousands, and
+/// there is no text to bridge between them), and a click on one of its
+/// drawn words still reaches [`PagifyApp::drawn_word_at`] — the only way to
+/// edit words that are artwork — while bare paper still says there is no
+/// text there.
+#[test]
+fn a_page_with_no_text_objects_still_reaches_the_drawn_words() {
+    let _turn = one_at_a_time();
+    let (mut app, (dir, log)) = app_with_log("outlined-montserrat.pdf", "no-text");
+    let (page, _) = app.page_blocks(0).expect("an empty page reads fine");
+    assert!(
+        page.runs.is_empty() && page.frags.is_empty() && page.blocks.is_empty() && page.shapes.is_empty(),
+        "setup: this page has no text objects, so nothing is read from it"
+    );
+    let word = app
+        .drawn_words_on(0)
+        .iter()
+        .filter(|w| !w.text.trim().is_empty())
+        .max_by_key(|w| w.text.trim().chars().count())
+        .cloned()
+        .expect("a recognised word");
+
+    let (outcome, line) = click_logged(&mut app, &log, 0, centre(&word.rect));
+    assert!(outcome.expect("a drawn word").contains("drawn, not written"), "{line}");
+    assert!(app.tab().editing_run.as_ref().expect("an editor opened").drawn);
+    assert_eq!(field(&line, "path"), "drawn", "{line}");
+
+    app.tab_mut().editing_run = None;
+    let (outcome, line) = click_logged(&mut app, &log, 0, AppPoint { x: 2.0, y: 2.0 });
+    let said = outcome.expect_err("bare paper");
+    assert!(said.contains("no text there"), "{said}");
+    assert_eq!(field(&line, "path"), "none", "{line}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// -- lines drawn as shapes -------------------------------------------------
+
+/// **A paragraph with whole lines drawn as shapes opens whole, and shows
+/// where the drawn lines are.** Page 1 of the datasheet has a 19-line,
+/// 96-object block whose lines 4, 14 and 18 (counting from 0) are drawn
+/// entirely as outlines — ligature-heavy body lines the producer
+/// converted to paths — so they have no text object at all. They must be
+/// in the editor as lines (the box is one line per line of the block,
+/// or an apply would pair every later line with the wrong objects), each
+/// as the placeholder standing for words that cannot be retyped here, and
+/// the pick has to say so.
+#[test]
+fn a_block_with_whole_lines_drawn_as_shapes_opens_whole_with_a_placeholder_for_each() {
+    if !std::path::Path::new(MARINA).is_file() {
+        eprintln!("skipping: the Marina datasheet is not on this machine");
+        return;
+    }
+    let _turn = one_at_a_time();
+    let mut app = PagifyApp::new(Some(MARINA));
+    assert!(app.tab().doc.is_some(), "the datasheet is on this machine but would not open");
+    let (page, _) = app.page_blocks(0).expect("the page's blocks");
+    // **Changed for what the detector and the adapter read now, with the reason**:
+    // the thin glyphs of the page (a hyphen 2 points wide, an "l" 0.4 point wide)
+    // are members of their lines — they used to be left out of the buffer — so
+    // the line the page ends in a hyphen after a drawn word (line 14) is an
+    // outlined word *and* the hyphen glyph, a text object: the line is frozen
+    // but is no longer without an object. Lines 4 and 18 are still drawn with
+    // nothing written in them. What the test protects is unchanged: the whole
+    // block opens, with a placeholder for each line that has no text.
+    let (index, block) = page
+        .blocks
+        .iter()
+        .enumerate()
+        .find(|(_, b)| b.lines.len() == 19 && b.lines.iter().filter(|l| !l.outlined.is_empty()).count() == 3)
+        .expect("the 19-line block with three lines drawn as shapes is gone from page 1 — has the detector or the file changed?");
+    let drawn_lines: Vec<usize> =
+        block.lines.iter().enumerate().filter(|(_, l)| l.objects.is_empty()).map(|(i, _)| i).collect();
+    let frozen_lines: Vec<usize> =
+        block.lines.iter().enumerate().filter(|(_, l)| !l.outlined.is_empty()).map(|(i, _)| i).collect();
+    assert_eq!(drawn_lines, [4, 18], "setup: block {index}: the lines with no text object");
+    assert_eq!(frozen_lines, [4, 14, 18], "setup: block {index}: the lines with drawn words");
+
+    // Clicked from every one of its words, so every line is tried as the seed.
+    let (mut clicked, mut alone) = (0, 0);
+    for (line_index, line) in block.lines.iter().enumerate() {
+        for &seed in &line.objects {
+            app.tab_mut().editing_run = None;
+            let said = app.pick_text_run(0, centre(&page.runs[&seed].rect)).expect("picked");
+            let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+            clicked += 1;
+            // A word on a line that is partly drawn opens alone — see
+            // `clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block`.
+            if frozen_lines.contains(&line_index) {
+                alone += 1;
+                assert_eq!(edit.lines.len(), 1, "clicking object {seed} on a drawn line: {said}");
+                assert!(said.starts_with("opened this word alone: its line is partly drawn"), "{said}");
+                continue;
+            }
+            assert_eq!(edit.lines.len(), 19, "clicking object {seed}: {said}");
+            assert_eq!(edit.buffer.split('\n').count(), 19, "one buffer line for every line, drawn ones included");
+            for i in 0..19 {
+                assert_eq!(edit.frozen[i], frozen_lines.contains(&i), "clicking object {seed}: line {i}");
+                let drawn = drawn_lines.contains(&i);
+                assert_eq!(edit.lines[i].0.is_empty(), drawn, "clicking object {seed}: line {i}");
+                assert_eq!(
+                    edit.buffer.split('\n').nth(i) == Some(block_input::OUTLINED_PLACEHOLDER),
+                    drawn,
+                    "clicking object {seed}: line {i} of the buffer is {:?}",
+                    edit.buffer.split('\n').nth(i)
+                );
+            }
+            assert!(said.contains("editing a paragraph of 19 lines"), "{said}");
+            assert!(said.contains("3 lines hold words drawn as shapes and are left exactly as they are"), "{said}");
+        }
+    }
+    assert_eq!(clicked, 99, "every word of the block was clicked");
+    assert_eq!(alone, 1, "the one text object on a drawn line: the hyphen glyph");
+}
+
+/// **An apply never touches a line drawn as shapes.** A four-line block of
+/// page 1 — a line of text, two lines drawn entirely as outlines, and a
+/// last line of text (`given project.`) — has one text object on each of
+/// its text lines. One is retyped and the placeholder of a drawn line is
+/// typed over: only the retyped line is written, the typed-over one is
+/// reported as left alone, and every other object — and every shape on the
+/// page — is exactly as it was.
+#[test]
+fn retyping_beside_lines_drawn_as_shapes_writes_only_the_retyped_line() {
+    if !std::path::Path::new(MARINA).is_file() {
+        eprintln!("skipping: the Marina datasheet is not on this machine");
+        return;
+    }
+    let _turn = one_at_a_time();
+    let mut app = PagifyApp::new(Some(MARINA));
+    assert!(app.tab().doc.is_some(), "the datasheet is on this machine but would not open");
+    let (page, _) = app.page_blocks(0).expect("the page's blocks");
+    let block = page
+        .blocks
+        .iter()
+        // **Selected by which lines are drawn, not by which have no text object**
+        // (changed with the reason): the hyphen glyph the page ends the first drawn
+        // line with is a member of its line now, so that line has one text object
+        // (a "-", frozen like the rest of the line) where it had none.
+        .find(|b| {
+            b.lines.len() == 4
+                && b.lines[0].objects.len() == 1
+                && b.lines[0].outlined.is_empty()
+                && !b.lines[1].outlined.is_empty()
+                && !b.lines[2].outlined.is_empty()
+                && b.lines[2].objects.is_empty()
+                && b.lines[3].outlined.is_empty()
+                && b.lines[3].objects.len() == 1
+        })
+        .expect("the text / drawn / drawn / text block is gone from page 1 — has the detector or the file changed?");
+    let (first, last) = (block.lines[0].objects[0], block.lines[3].objects[0]);
+    let shapes_before = app.tab().doc.as_ref().unwrap().session.drawn_objects(0).expect("shapes").len();
+
+    let said = app.pick_text_run(0, centre(&page.runs[&first].rect)).expect("picked");
+    assert!(said.contains("2 lines hold words drawn as shapes"), "{said}");
+    let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    assert_eq!(edit.frozen, [false, true, true, false]);
+    // **The hyphen glyph that is the whole text of the first drawn line stays in
+    // the buffer, on a line of its own** — not dropped (the line would then read
+    // empty, and be taken for a line with nothing on it), not doubled, not run
+    // into the neighbouring lines. The placeholder stands for the line with no
+    // text object at all.
+    let buffer_lines: Vec<&str> = edit.buffer.split('\n').collect();
+    assert_eq!(buffer_lines.len(), 4, "{:?}", edit.buffer);
+    assert_eq!(buffer_lines[1], "-", "{:?}", edit.buffer);
+    assert_eq!(buffer_lines[2], block_input::OUTLINED_PLACEHOLDER, "{:?}", edit.buffer);
+
+    let words_before: HashMap<usize, (String, pdf_core::document::Color)> =
+        text_runs(&app, 0).into_iter().map(|r| (r.object, (r.text, r.color))).collect();
+    let mut typed: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
+    typed[0] = format!("{} RETYPED", typed[0].trim_end());
+    typed[1] = "typed over a line that is drawn".to_string();
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed.join("\n");
+    app.apply_editing_page();
+
+    let said_after = app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(
+        said_after.contains("paragraph changed; 1 line drawn as shapes was left as it is."),
+        "the apply did not say what it left alone:\n{said_after}"
+    );
+    let words_after: HashMap<usize, (String, pdf_core::document::Color)> =
+        text_runs(&app, 0).into_iter().map(|r| (r.object, (r.text, r.color))).collect();
+    assert_eq!(words_after.len(), words_before.len(), "objects were added or lost");
+    assert!(words_after[&first].0.contains("RETYPED"), "the retyped line was not written: {:?}", words_after[&first].0);
+    assert_eq!(words_after[&last], words_before[&last], "the line after the drawn ones was touched");
+    for (object, was) in &words_before {
+        if *object != first {
+            assert_eq!(&words_after[object], was, "object {object}, which is not on the retyped line, changed");
+        }
+    }
+    let shapes_after = app.tab().doc.as_ref().unwrap().session.drawn_objects(0).expect("shapes").len();
+    assert_eq!(shapes_after, shapes_before, "a shape was added or taken off the page");
+}
+
+/// **A guard, run on demand: retype one line in every paragraph of a file,
+/// and nothing else on its page may change.**
+///
+/// For every block of more than one text object on the first
+/// `PAGIFY_SWEEP_PAGES` pages (default 1) of `PAGIFY_SWEEP_PDF` (default
+/// the datasheet) — in a freshly opened copy of the file each time, so one
+/// block's edit cannot show in the next — a word of it is clicked and its
+/// first line of plain words is retyped by repeating a word it already has
+/// (so no letter the font lacks is needed), then applied. The retyped line
+/// must be its first piece holding the new words, its other pieces must be
+/// gone from the page, and every other object on the page — every piece of
+/// every other line, words, colour, box, origin and size — must be exactly
+/// as it was, the page having lost exactly the pieces removed. The engine refusing an edit — safely and whole, for
+/// text it cannot map to the operators that draw it — is counted and said,
+/// not failed on; an edit that goes through and leaves anything else
+/// different is the failure.
+///
+/// `cargo test -p pagify_app --release apply_sweep -- --ignored --nocapture`
+#[test]
+#[ignore = "a sweep that takes a minute or more: run with --ignored --nocapture"]
+fn apply_sweep() {
+    let path = std::env::var("PAGIFY_SWEEP_PDF").unwrap_or_else(|_| MARINA.to_string());
+    if !std::path::Path::new(&path).is_file() {
+        eprintln!("sweep: skipping, {path} is not on this machine");
+        return;
+    }
+    let pages: usize = std::env::var("PAGIFY_SWEEP_PAGES").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let mut app = PagifyApp::new(Some(&path));
+    let page_total = app.tab().doc.as_ref().expect("open").page_count;
+    let words = |text: &str| text.split_whitespace().find(|w| w.chars().count() > 2 && w.chars().all(char::is_alphabetic)).map(str::to_string);
+    let mut tally: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut damaged: Vec<String> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+    for page in 0..pages.min(page_total) {
+        let (page_blocks, _) = app.page_blocks(page).expect("the page's blocks");
+        for (index, block) in page_blocks.blocks.iter().enumerate().filter(|(_, b)| b.objects().len() > 1) {
+            app = PagifyApp::new(Some(&path));
+            if app.pick_text_run(page, centre(&page_blocks.runs[&block.objects()[0]].rect)).is_err() {
+                *tally.entry("the click was refused".into()).or_default() += 1;
+                continue;
+            }
+            let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+            let typed: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
+            let Some(target) = (0..typed.len()).find(|&i| !edit.frozen[i] && !edit.lines[i].0.is_empty() && words(&typed[i]).is_some()) else {
+                *tally.entry("no line of plain words to retype".into()).or_default() += 1;
+                continue;
+            };
+            let mut retyped = typed.clone();
+            retyped[target] = format!("{} {}", typed[target].trim_end(), words(&typed[target]).expect("a word"));
+            let before = tests_support::runs_on_page(&app, page);
+            app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped.join("\n");
+            let history = app.cmd.history().len();
+            app.apply_editing_page();
+            let said: Vec<String> = app.cmd.history().iter().skip(history).map(|e| e.text.clone()).collect();
+            if !said.iter().any(|s| s.contains("paragraph changed")) {
+                let why: String = said.last().map_or(String::new(), |s| s.chars().take(100).collect());
+                *tally.entry(format!("refused by the engine: {why}")).or_default() += 1;
+                refused.push(format!("page {} block {index} line {target}: {why}", page + 1));
+                continue;
+            }
+            // The retyped line is its first piece holding the new words,
+            // its other pieces are gone from the page, and every other
+            // object — every piece of every other line, and everything
+            // outside the paragraph — is as it was.
+            let after = tests_support::runs_on_page(&app, page);
+            let (first, rest) = edit.lines[target].0.split_first().expect("the line has objects");
+            match tests_support::page_after_problem(&before, &after, &[(*first, &retyped[target])], rest) {
+                None => *tally.entry("ok".into()).or_default() += 1,
+                Some(wrong) => {
+                    *tally.entry("DAMAGED".into()).or_default() += 1;
+                    damaged.push(format!("page {} block {index} line {target}: {wrong}", page + 1));
+                }
+            }
+        }
+    }
+    for (what, n) in &tally {
+        eprintln!("sweep: {n:4} {what}");
+    }
+    assert!(tally.get("ok").copied().unwrap_or(0) > 0, "the sweep retyped nothing: {tally:?}");
+    assert!(damaged.is_empty(), "{} edits changed more than the line retyped:\n{}", damaged.len(), damaged.join("\n"));
+    // On the datasheet itself — the file this was built for — not one paragraph may be refused.
+    if std::env::var("PAGIFY_SWEEP_PDF").is_err() {
+        assert!(refused.is_empty(), "{} paragraphs of the datasheet could not be retyped:\n{}", refused.len(), refused.join("\n"));
+    }
+}
+
+// -- what a click costs ------------------------------------------------------
+
+/// **A measurement, not a check: what a click costs.** Per page of the
+/// datasheet and of CAMINO: arming Edit Text, the first click on the page
+/// (which reads it), the clicks after it (which do not), and one render of
+/// the page at the sampling scale that every paragraph pick pays for. Run
+/// it alone — `cargo test -p pagify_app --release pick_timings -- --ignored
+/// --nocapture` — since the PDFium lock is one for the whole process and
+/// any other test running beside it shows up as a wait.
+#[test]
+#[ignore = "a measurement: run alone with --ignored --nocapture"]
+fn pick_timings() {
+    for (name, path) in [("datasheet", MARINA), ("CAMINO", CAMINO)] {
+        if !std::path::Path::new(path).is_file() {
+            eprintln!("timing: skipping the {name}: it is not on this machine");
+            continue;
+        }
+        let mut app = PagifyApp::new(Some(path));
+        let (dir, log) = log_into(&mut app, "timings");
+        let started = std::time::Instant::now();
+        app.submit("edittext");
+        eprintln!("timing: {name}: arming Edit Text took {:?}", started.elapsed());
+        let pages = app.tab().doc.as_ref().expect("open").page_count.min(3);
+        let mut after = 0u64;
+        for page in 0..pages {
+            let runs = text_runs(&app, page);
+            // A spread of paragraphs: every 25th run that has words in it.
+            let targets: Vec<&TextRun> =
+                runs.iter().filter(|r| r.text.trim().chars().count() > 4).step_by(25).take(24).collect();
+            let mut later: Vec<std::time::Duration> = Vec::new();
+            for (i, run) in targets.iter().enumerate() {
+                app.tab_mut().editing_run = None;
+                let started = std::time::Instant::now();
+                let _ = app.pick_text_run(page, centre(&run.rect));
+                let took = started.elapsed();
+                let line = newest_pick_line(&log, &mut after);
+                if i == 0 {
+                    eprintln!("timing: {name} page {}: first click, which reads the page: {took:?}  [{line}]", page + 1);
+                } else {
+                    later.push(took);
+                }
+            }
+            later.sort();
+            if !later.is_empty() {
+                eprintln!(
+                    "timing: {name} page {}: {} clicks after it: median {:?}, slowest {:?}",
+                    page + 1,
+                    later.len(),
+                    later[later.len() / 2],
+                    later[later.len() - 1]
+                );
+            }
+            let started = std::time::Instant::now();
+            let _ = app.tab().doc.as_ref().expect("open").session.render_page(page, PagifyApp::BACKGROUND_SAMPLE_SCALE);
+            eprintln!("timing: {name} page {}: one render at the sampling scale {:?}", page + 1, started.elapsed());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// **A measurement, not a check: what an apply costs on the user's
+/// paragraph.** The 13-line paragraph of page 1 (57 objects) — one line
+/// retyped, then every line retyped (each reversed, so no letter the font
+/// lacks is needed, as the budget tests do), then both taken back with
+/// undo. Run alone: `cargo test -p pagify_app --release apply_timings --
+/// --ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: run alone with --ignored --nocapture"]
+fn apply_timings() {
+    if !std::path::Path::new(MARINA).is_file() {
+        eprintln!("timing: skipping: the Marina datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(MARINA));
+    let runs: HashMap<usize, TextRun> = text_runs(&app, 0).into_iter().map(|r| (r.object, r)).collect();
+    let session = app.tab().doc.as_ref().expect("open").session.clone();
+    for (what, every_line) in [("one line", false), ("every line", true)] {
+        app.tab_mut().editing_run = None;
+        app.pick_text_run(0, centre(&runs[&986].rect)).expect("picked");
+        let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+        let objects: usize = edit.lines.iter().map(|(o, _)| o.len()).sum();
+        let typed: Vec<String> = edit
+            .buffer
+            .split('\n')
+            .enumerate()
+            .map(|(i, line)| {
+                if (every_line && !edit.frozen[i]) || i == 3 {
+                    line.chars().rev().collect::<String>()
+                } else {
+                    line.to_string()
+                }
+            })
+            .collect();
+        app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed.join("\n");
+        let started = std::time::Instant::now();
+        app.apply_editing_page();
+        let applied = started.elapsed();
+        let said = app.cmd.history().iter().last().map(|e| e.text.clone()).unwrap_or_default();
+        let started = std::time::Instant::now();
+        let (undone, _) = session.undo().expect("undo");
+        eprintln!(
+            "timing: retyping {what} of a 13-line, {objects}-object paragraph: apply {applied:?} ({said}); undo {:?} (undone: {undone})",
+            started.elapsed()
+        );
+        app.tab_mut().doc.as_mut().expect("open").rendered_is_stale();
+    }
+}
+
+// -- the census ------------------------------------------------------------
+
+/// What a click wrote to the log after byte `after`; moves `after` on.
+fn newest_pick_line(log: &std::path::Path, after: &mut u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(log).expect("the log file exists");
+    file.seek(SeekFrom::Start(*after)).expect("seek");
+    let mut tail = String::new();
+    file.read_to_string(&mut tail).expect("read");
+    *after += tail.len() as u64;
+    tail.lines()
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).expect("valid json"))
+        .filter(|l| l["kind"] == "pick")
+        .map(|l| l["text"].as_str().unwrap_or_default().to_string())
+        .last()
+        .expect("the click wrote no pick line")
+}
+
+/// **A measurement, not a check: what clicking every word of a file opens.**
+///
+/// Run on demand against any document —
+/// `PAGIFY_CENSUS_PDF=<file> PAGIFY_CENSUS_OUT=<file>.jsonl cargo test -p
+/// pagify_app --release paragraph_census -- --ignored --nocapture` — it
+/// clicks the middle of **every text object with area of every page** and
+/// writes one JSON line per click: the page (1-based), the object clicked
+/// and its words, the object the click actually resolved to (the smallest
+/// box under that point can be another), the way the click went
+/// (`block`, `single`, `joined`, `drawn`, `refused-rotated`, `none`),
+/// whether it opened, the message, the editor's lines as arrays of object
+/// ids with their frozen flags, the buffer, the object the box takes its
+/// look from, the time the click took, and the log line it wrote. Scoring
+/// the lines against hand-made labels is a separate job; this only reads
+/// the file the way a person with a mouse would.
+#[test]
+#[ignore = "a measurement: set PAGIFY_CENSUS_PDF and PAGIFY_CENSUS_OUT, then run with --ignored"]
+fn paragraph_census() {
+    use std::io::Write;
+    let pdf = std::env::var("PAGIFY_CENSUS_PDF").expect("PAGIFY_CENSUS_PDF: the file to click through");
+    let out = std::env::var("PAGIFY_CENSUS_OUT").expect("PAGIFY_CENSUS_OUT: where to write the lines");
+    let mut app = PagifyApp::new(Some(&pdf));
+    assert!(app.tab().doc.is_some(), "{pdf} did not open");
+    let (dir, log) = log_into(&mut app, "census");
+    let mut sink = std::io::BufWriter::new(std::fs::File::create(&out).expect("PAGIFY_CENSUS_OUT is writable"));
+    // All the pages, unless PAGIFY_CENSUS_PAGES names how many to do (from the first).
+    let pages = app.tab().doc.as_ref().expect("open").page_count;
+    let pages = std::env::var("PAGIFY_CENSUS_PAGES").ok().and_then(|n| n.parse().ok()).map_or(pages, |n: usize| pages.min(n));
+    let mut after = 0u64;
+    let mut total = 0usize;
+    for page in 0..pages {
+        // The seeds come from a reading made on the side, so the first click
+        // on each page still pays for (and logs) the app's own: the cache
+        // is not warmed for it.
+        let snapshot = match app.tab().doc.as_ref().expect("open").session.page_text_snapshot(page) {
+            Ok(snapshot) => snapshot,
+            Err(why) => {
+                eprintln!("page {} could not be read: {why}", page + 1);
+                continue;
+            }
+        };
+        let page_blocks = block_input::build_page_blocks(page, 0, 0, snapshot);
+        let mut seeds: Vec<usize> = page_blocks.runs.keys().copied().collect();
+        seeds.sort_unstable();
+        for seed in seeds {
+            let run = &page_blocks.runs[&seed];
+            let at = centre(&run.rect);
+            let resolved = block_input::pick_seed(&page_blocks, at.x as f32, at.y as f32, HIT_TOLERANCE_PT as f32)
+                .map(|(object, _)| object);
+            app.tab_mut().editing_run = None;
+            let started = std::time::Instant::now();
+            let outcome = app.pick_text_run(page, at);
+            let pick_ms = started.elapsed().as_secs_f32() * 1000.0;
+            let line = newest_pick_line(&log, &mut after);
+            let edit = app.tab().editing_run.as_ref();
+            let record = serde_json::json!({
+                "page": page + 1,
+                "seed": seed,
+                "text": run.text,
+                "resolved_seed": resolved,
+                "path": field(&line, "path"),
+                "ok": outcome.is_ok(),
+                "message": outcome.as_ref().unwrap_or_else(|e| e),
+                "lines": edit.map(|e| e.lines.iter().map(|(objects, _)| objects.clone()).collect::<Vec<_>>()),
+                "frozen": edit.map(|e| e.frozen.clone()),
+                "buffer": edit.map(|e| e.buffer.clone()),
+                "look_object": edit.map(|e| e.look_object),
+                "pick_ms": pick_ms,
+                "log": line,
+            });
+            writeln!(sink, "{record}").expect("write a census line");
+            total += 1;
+        }
+        eprintln!("census: page {} done ({total} clicks so far)", page + 1);
+    }
+    sink.flush().expect("flush");
+    // Every block the editor's guard refused, and every page that could not
+    // be read in one pass, said in words (content-free).
+    let notes = logged(&log, "pick-note");
+    for note in notes.iter().take(20) {
+        eprintln!("census: note: {note}");
+    }
+    eprintln!("census: {} notes (blocks refused by the guard, pages not readable in one pass)", notes.len());
+    let _ = std::fs::remove_dir_all(&dir);
+    eprintln!("census: {total} clicks over {pages} pages, written to {out}");
+}
