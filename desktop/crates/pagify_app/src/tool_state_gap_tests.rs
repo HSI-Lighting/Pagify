@@ -1,4 +1,4 @@
-//! Characterization tests for Phase 2 (the `Tool` state machine): three
+//! Characterization tests for Phase 2 (the `Tool` state machine): four
 //! places today's scattered tool-arming state behaves asymmetrically, found
 //! by audit while mapping it ahead of that refactor — not reported from use,
 //! and not fixed here. **Behaviour-preserving**: these pin down what the app
@@ -139,4 +139,43 @@ fn enter_with_too_few_points_says_nothing_but_done_says_so() {
         "the typed `done` command, unlike Enter, reports the same situation:\n{}",
         said(h.state())
     );
+}
+
+/// **An object-pick miss leaves `pending` completely untouched — quieter
+/// even than `resolve()`'s own quiet re-arm.** `take_pick`'s `wants_object()`
+/// branch, on a miss, calls `say_info("nothing there…")` and returns
+/// immediately (`picking.rs`): it never pushes anything onto `objects`,
+/// never calls `resolve()`, never touches `pending` at all. The existing
+/// coverage (`pointer_tests.rs`'s `picking_empty_paper_for_an_object_says_so`)
+/// only checks that the message was said, not that the state was left alone
+/// — this test pins the state invariant too, so a `Tool` migration that
+/// routes a miss through even a trivial no-op transition (which would be the
+/// natural thing to write) shows up as a failing test instead of an
+/// unnoticed behaviour change.
+#[test]
+fn an_object_pick_that_misses_leaves_pending_completely_untouched() {
+    let mut app = app("single-page.pdf");
+    app.submit("l 10,10 100,100");
+    app.submit("fillet 20");
+    assert_eq!(
+        app.tab_mut().pending.as_ref().expect("setup: fillet should have armed").objects.len(),
+        0,
+        "setup: no objects collected yet"
+    );
+
+    app.take_pick(AppPoint { x: 500.0, y: 500.0 }); // far from the drawn line
+
+    assert!(
+        said(&app).contains("nothing there"),
+        "setup: the miss should have said so:\n{}",
+        said(&app)
+    );
+    let after = app.tab_mut().pending.as_ref().expect("the tool should still be armed");
+    assert_eq!(
+        after.objects.len(),
+        0,
+        "today, a missed object pick does not even record a failed attempt — \
+         take_pick's None arm returns before resolve() or any mutation at all"
+    );
+    assert_eq!(after.points.len(), 0, "a miss on an object pick must not fall through to the points branch either");
 }
