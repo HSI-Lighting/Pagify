@@ -1533,7 +1533,13 @@ fn check_detect_contract(frags: &[Frag], shapes: &[Shape], p: &blocks::Params) -
     // bottom with strictly increasing baselines; objects left to right (ties by id); a line holds the rect of each member
     let mut by_obj: HashMap<usize, &Frag> = HashMap::new();
     for f in frags {
-        by_obj.entry(f.object).and_modify(|e| { if (f.left, f.top, f.right, f.bottom).partial_cmp(&(e.left, e.top, e.right, e.bottom)) == Some(std::cmp::Ordering::Less) && false { *e = f; } }).or_insert(f);
+        // Keeps the lowest-canonical duplicate of an id, matching the detector's
+        // own documented behaviour (see the comment above) — the condition used
+        // to be followed by `&& false`, so this branch never ran and `or_insert`
+        // alone kept whichever duplicate happened to appear first in `frags`,
+        // not the lowest. Found by clippy (`logic_bug`): an always-false
+        // expression that compiled clean and asserted nothing.
+        by_obj.entry(f.object).and_modify(|e| { if (f.left, f.top, f.right, f.bottom).partial_cmp(&(e.left, e.top, e.right, e.bottom)) == Some(std::cmp::Ordering::Less) { *e = f; } }).or_insert(f);
     }
     for w in bl.windows(2) {
         let (a, b) = (&w[0].lines[0], &w[1].lines[0]);
