@@ -619,6 +619,7 @@ fn signature_with_nothing_drawn_yet_opens_the_pad() {
         "it will not carry on to the click somebody wanted"
     );
     assert!(app.tab_mut().pending.is_none(), "it armed a click with nothing to place");
+    assert!(app.tab_mut().tool.is_none(), "it armed a click with nothing to place");
     assert!(said(&app).contains("this computer"), "{}", said(&app));
 }
 
@@ -634,7 +635,7 @@ fn a_drawn_signature_places_on_the_line_that_was_clicked() {
     app.submit("signature");
     assert!(app.pad.is_none(), "it opened the pad over a signature it already had");
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::Signature)),
+        matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Signature)),
         "the tool was not armed:\n{}",
         said(&app)
     );
@@ -695,7 +696,7 @@ fn an_uploaded_signature_places_as_a_picture_on_the_line_that_was_clicked() {
     app.submit("signature");
     assert!(app.pad.is_none(), "it opened the pad over a signature it already had");
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::Signature)),
+        matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Signature)),
         "the tool was not armed:
 {}",
         said(&app)
@@ -744,8 +745,8 @@ fn the_addimage_command_decodes_a_file_and_arms_placement() {
 
     app.submit(&format!("addimage {}", tmp.display()));
     let _ = std::fs::remove_file(&tmp);
-    let Some(PendingKind::PlaceImage { rgba, width, height }) =
-        app.tab_mut().pending.as_ref().map(|p| &p.kind)
+    let Some(Tool::PlaceImage { rgba, width, height }) =
+        app.tab_mut().tool.as_ref().map(|t| &t.kind)
     else {
         panic!("the file was not decoded and armed: {}", said(&app));
     };

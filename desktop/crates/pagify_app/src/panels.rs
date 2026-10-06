@@ -7,7 +7,7 @@
 use crate::overlay::PageView;
 use crate::{
     compact_page_spec, page_to_image, paint_signature, short, view_height, Awaiting, DetailTile, FindReplaceMode,
-    ListAction, PendingKind, RenderJob, SignaturePad,
+    ListAction, PendingKind, RenderJob, SignaturePad, Tool,
 };
 use crate::spelling;
 use crate::theme;
@@ -1030,7 +1030,7 @@ impl crate::PagifyApp {
                     // the tool wanting to sign rather than to draw.
                     if pad.then_place && self.tab_mut().doc.is_some() {
                         let page = self.tab_mut().page;
-                        self.arm(PendingKind::Signature, page);
+                        self.arm_tool(Tool::Signature, page);
                     }
                 }
                 Err(e) => {

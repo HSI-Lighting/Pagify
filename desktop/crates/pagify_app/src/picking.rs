@@ -4,10 +4,11 @@
 //! **Still in its current shape, not redesigned** — see [`crate::pending`]'s
 //! own doc for why. `resolve` in particular is still the one large dispatch
 //! match it always was, not the `Tool::on_click` that is supposed to replace
-//! it.
+//! it. `resolve_tool` is that function's first, much smaller sibling: the
+//! two kinds that have already moved out of the big match.
 
 use crate::{
-    area_between, Awaiting, DrawKind, Pending, PendingArticleBox, PendingKind,
+    area_between, ArmedTool, Awaiting, DrawKind, Pending, PendingArticleBox, PendingKind, Tool,
 };
 use pagify_shell::markup::HIT_TOLERANCE_PT;
 use pagify_shell::page_space::AppPoint;
@@ -53,7 +54,32 @@ impl crate::PagifyApp {
             self.tab_mut().group_grab = None;
         }
         self.put_down_page_editors("armed a different tool");
+        // Mutually exclusive with `tool` the same way as `object_tool`,
+        // above — see `arm_tool_without_saying`'s own clearing of `pending`
+        // for the other direction.
+        self.tab_mut().tool = None;
         self.tab_mut().pending = Some(Pending { kind, page, objects: Vec::new(), points: Vec::new() });
+    }
+
+    /// [`Self::arm`], for a [`Tool`] instead of a [`PendingKind`]. No
+    /// `_without_saying` sibling: that variant exists on `arm` only to
+    /// re-arm quietly after a failed repeating pick, and neither `Tool`
+    /// kind repeats — see [`ArmedTool`]'s own doc.
+    pub(crate) fn arm_tool(&mut self, tool: Tool, page: usize) {
+        if self.tab_mut().object_tool.take().is_some() {
+            self.tab_mut().selected = None;
+            self.tab_mut().grab = None;
+            self.tab_mut().group = Vec::new();
+            self.tab_mut().marquee = None;
+            self.tab_mut().group_grab = None;
+        }
+        self.put_down_page_editors("armed a different tool");
+        self.tab_mut().pending = None;
+        self.tab_mut().tool = Some(ArmedTool { kind: tool, page });
+        let prompt = self.tab().tool.as_ref().map(|t| t.kind.prompt());
+        if let Some(prompt) = prompt {
+            self.say_info(prompt);
+        }
     }
 
     /// A click on the page away from the open editor: **applies what was typed**,
@@ -90,6 +116,10 @@ impl crate::PagifyApp {
     // -- picks --------------------------------------------------------------
 
     pub(crate) fn take_pick(&mut self, at: AppPoint) {
+        if self.tab_mut().tool.is_some() {
+            self.resolve_tool(at);
+            return;
+        }
         let Some(pending) = &self.tab_mut().pending else { return };
         let page = pending.page;
 
@@ -130,6 +160,26 @@ impl crate::PagifyApp {
         }
     }
 
+    /// [`Self::resolve`], for a [`Tool`] instead of a [`PendingKind`].
+    /// Always exactly one point, so unlike `resolve` there is nothing to
+    /// collect across calls — the click that arrives here is the one the
+    /// tool was waiting for. Neither kind repeats, so there is no `arm`/
+    /// `arm_without_saying` tail either: a success or a failure both just
+    /// leave `tool` disarmed.
+    pub(crate) fn resolve_tool(&mut self, at: AppPoint) {
+        let Some(armed) = self.tab_mut().tool.take() else { return };
+        let outcome = match armed.kind {
+            Tool::Signature => self.place_signature(armed.page, at),
+            Tool::PlaceImage { rgba, width, height } => {
+                self.place_image_at(armed.page, at, rgba, width, height)
+            }
+        };
+        match outcome {
+            Ok(said) => self.say_info(said),
+            Err(problem) => self.say_error(problem),
+        }
+    }
+
     /// Carry out whatever has finished collecting its clicks.
     pub(crate) fn resolve(&mut self) {
         let Some(pending) = self.tab_mut().pending.take() else { return };
@@ -156,13 +206,6 @@ impl crate::PagifyApp {
                 match pending.points.first().copied() {
                     Some(at) => self.write_text_at(page, at, &text),
                     None => Err("nowhere to write.".into()),
-                }
-            }
-            PendingKind::PlaceImage { rgba, width, height } => {
-                let (rgba, width, height) = (rgba.clone(), *width, *height);
-                match pending.points.first().copied() {
-                    Some(at) => self.place_image_at(page, at, rgba, width, height),
-                    None => Err("nowhere to place the picture.".into()),
                 }
             }
             PendingKind::PlaceText => match (pending.points.first(), pending.points.get(1)) {
@@ -203,10 +246,6 @@ impl crate::PagifyApp {
                     None => Err("fill: nowhere was clicked.".into()),
                 }
             }
-            PendingKind::Signature => match pending.points.first().copied() {
-                Some(at) => self.place_signature(page, at),
-                None => Err("signature: nowhere was clicked.".into()),
-            },
             PendingKind::SignRectangle => match (pending.points.first(), pending.points.get(1)) {
                 (Some(a), Some(b)) => self.stamp_box(page, *a, *b),
                 _ => Err("rectangle: two corners are needed.".into()),

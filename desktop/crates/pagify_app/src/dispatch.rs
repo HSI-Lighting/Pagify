@@ -6,7 +6,7 @@
 use crate::hub;
 use crate::{
     signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, PendingKind, SignatureList,
-    SignaturePad, SnippetList, Tab,
+    SignaturePad, SnippetList, Tab, Tool,
 };
 use pagify_shell::command::{Dispatch, Kind};
 use pagify_shell::verbs::{self, SignatureAction, Verb};
@@ -434,7 +434,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.arm(PendingKind::Signature, page);
+                self.arm_tool(Tool::Signature, page);
             }
             Verb::Validate => {
                 let Some(doc) = &self.tab_mut().doc else {

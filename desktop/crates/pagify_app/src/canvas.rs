@@ -7,7 +7,7 @@ use crate::overlay::{self, PageView};
 use crate::theme;
 use crate::{
     icon_font, raster_scale, reveal_axis, short, view_height, Awaiting, DrawKind, Grab, Handle, OrganizeDrag,
-    PendingKind, PlacedImageSelected, Reveal, SignatureSelected, Tab, ZoomMode, GRID_GAP_PT, HANDLE_PX,
+    PendingKind, PlacedImageSelected, Reveal, SignatureSelected, Tab, Tool, ZoomMode, GRID_GAP_PT, HANDLE_PX,
     ORGANIZE_GRID_PANEL, ROTATE_HANDLE_PX,
 };
 use pagify_shell::markup::HIT_TOLERANCE_PT;
@@ -1229,6 +1229,27 @@ impl crate::PagifyApp {
         view: PageView,
         hover: Option<egui::Pos2>,
     ) {
+        // A signature previews before any point is placed — placing one is
+        // a single click, unlike every other tool here, which needs at
+        // least a first point down before there is anything to draw a
+        // rubber band from. Without this, the only way to know how much of
+        // the page a signature would cover was to place it and look.
+        // `PlaceImage` is the other `Tool` kind and has never previewed —
+        // nothing to draw before its one click either.
+        if let Some(armed) = self.tab().tool.as_ref() {
+            if armed.page == page && matches!(armed.kind, Tool::Signature) {
+                if let Some(cursor) = hover {
+                    let at = self.tab()
+                        .last_snap
+                        .as_ref()
+                        .map(|snapped| snapped.at)
+                        .unwrap_or_else(|| view.to_page(cursor));
+                    self.draw_signature_preview(ui, view, at);
+                }
+            }
+            return;
+        }
+
         let Some(pending) = &self.tab().pending else { return };
         if pending.page != page {
             return;
@@ -1242,15 +1263,6 @@ impl crate::PagifyApp {
             .map(|snapped| snapped.at)
             .unwrap_or_else(|| view.to_page(cursor));
 
-        // A signature previews before any point is placed — placing one is
-        // a single click, unlike every other tool here, which needs at
-        // least a first point down before there is anything to draw a
-        // rubber band from. Without this, the only way to know how much of
-        // the page a signature would cover was to place it and look.
-        if matches!(pending.kind, PendingKind::Signature) {
-            self.draw_signature_preview(ui, view, at);
-            return;
-        }
         if pending.points.is_empty() {
             return;
         }
@@ -1864,6 +1876,7 @@ impl crate::PagifyApp {
         // reaches the ordinary handling below.
         if self.tab_mut().object_tool.is_none()
             && self.tab_mut().pending.is_none()
+            && self.tab_mut().tool.is_none()
             && self.interact_signatures(ui, &response, page, at, view)
         {
             return;
@@ -1872,6 +1885,7 @@ impl crate::PagifyApp {
         // The same, for a plain placed picture — see `interact_placed_images`.
         if self.tab_mut().object_tool.is_none()
             && self.tab_mut().pending.is_none()
+            && self.tab_mut().tool.is_none()
             && self.interact_placed_images(ui, &response, page, at, view)
         {
             return;
@@ -1938,11 +1952,13 @@ impl crate::PagifyApp {
         // running text still reads as clickable rather than as selectable
         // prose.
         let hovering_link = self.tab_mut().pending.is_none()
+            && self.tab_mut().tool.is_none()
             && (self.foreign_at(page, at).is_some_and(|n| self.link_uri_at(page, n).is_some())
                 || self.internal_link_at(page, at).is_some());
         if hovering_link {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
         } else if self.tab_mut().pending.is_none()
+            && self.tab_mut().tool.is_none()
             // A text cursor wherever there is text under the pointer, which is
             // the other half of the same answer: on a page whose words are
             // drawn as outlines the cursor stays an arrow, and the reason
@@ -1968,7 +1984,7 @@ impl crate::PagifyApp {
         //
         // A gesture that stayed within the same tolerance used for hit-testing
         // is a click, however egui classified it.
-        if self.tab_mut().pending.is_some() {
+        if self.tab_mut().pending.is_some() || self.tab_mut().tool.is_some() {
             self.tab_mut().text_drag = None;
             // Not the click the click-away block above has already answered —
             // see `answered_above`.

@@ -72,7 +72,9 @@ pub(crate) use ribbon::{
     ribbon_overflow_at, tab_button, tab_menu_button, tabs_that_fit, tool_button, RibbonClick, Tab, DOC_TAB_FONT,
     DOC_TAB_MAX_TEXT, DOC_TAB_MENU_WIDTH, DOC_TAB_PADDING, RIBBON_MARGIN_X, RIBBON_MARGIN_Y, TOOL_HEIGHT, TOOL_WIDTH,
 };
-pub(crate) use pending::{DrawKind, MatchPropertiesSample, Pending, PendingArticleBox, PendingKind, PendingLink};
+pub(crate) use pending::{
+    ArmedTool, DrawKind, MatchPropertiesSample, Pending, PendingArticleBox, PendingKind, PendingLink, Tool,
+};
 // `spelling` and `paragraph_lines` moved to `pagify_shell` (Phase 4a: no
 // egui, so they belong where they can be tested without a window) —
 // re-exported under their old names so every existing `spelling::X` /
@@ -492,6 +494,9 @@ struct DocTab {
     markup: Markup,
     calibration: Calibration,
     pending: Option<Pending>,
+    /// A `Tool` armed outside `pending` — see [`ArmedTool`]'s own doc for why
+    /// `Signature`/`PlaceImage` live here now instead of in `PendingKind`.
+    tool: Option<ArmedTool>,
 
     page: usize,
     zoom: ZoomMode,
@@ -908,6 +913,7 @@ impl DocTab {
             markup: Markup::default(),
             calibration: Calibration::default(),
             pending: None,
+            tool: None,
             page: 0,
             zoom: ZoomMode::Fit,
             rotation: Rotation::None,
@@ -7847,6 +7853,9 @@ impl PagifyApp {
                 layer.forget_last_step();
             }
         }
+        if self.tab_mut().tool.take().is_some() {
+            self.say_info("cancelled.");
+        }
         self.cmd.escape()
     }
 
@@ -11277,7 +11286,7 @@ impl PagifyApp {
         let (width, height) = photo.dimensions();
 
         let page = self.tab_mut().page;
-        self.arm(PendingKind::PlaceImage { rgba: photo.into_raw(), width, height }, page);
+        self.arm_tool(Tool::PlaceImage { rgba: photo.into_raw(), width, height }, page);
     }
 
     /// Default width a placed picture gets on the page, in points — about two
@@ -13155,7 +13164,8 @@ impl eframe::App for PagifyApp {
                 // Which tool is in force. The pointer mode, or whichever tool
                 // is part-way through collecting its clicks — a user who armed
                 // Line and looked away needs to see that it is still armed.
-                let armed = self.tab_mut().pending.as_ref().and_then(|p| p.kind.command());
+                let armed = self.tab_mut().pending.as_ref().and_then(|p| p.kind.command())
+                    .or_else(|| self.tab_mut().tool.as_ref().and_then(|t| t.kind.command()));
                 let in_hand = self.tab_mut()
                     .markup_armed
                     .map(|k| match k {

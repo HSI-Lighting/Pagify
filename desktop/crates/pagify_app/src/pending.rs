@@ -26,6 +26,52 @@ pub(crate) struct Pending {
     pub(crate) points: Vec<AppPoint>,
 }
 
+/// A tool armed outside the big [`Pending`] dispatch — the first slice of
+/// the `Tool` state machine the mentor's review calls for (`DESIGN_REVIEW.md`
+/// §3.2). `Signature` and `PlaceImage` moved here first because they are the
+/// simplest shape there is: exactly one point, no objects, and `repeats()`
+/// already false for both — placing one disarms it, with nothing left to
+/// decide about re-arming (unlike [`PendingKind`], which still has to ask).
+/// Every other `PendingKind` variant is still exactly where it was; this is
+/// one slice, not the whole migration — `PendingKind` is deleted only once
+/// it is empty.
+pub(crate) struct ArmedTool {
+    pub(crate) kind: Tool,
+    pub(crate) page: usize,
+}
+
+pub(crate) enum Tool {
+    /// Where a drawn signature is to sit — on the line that is clicked.
+    Signature,
+    /// A decoded picture waiting for a point to be centred on.
+    PlaceImage { rgba: Vec<u8>, width: u32, height: u32 },
+}
+
+impl Tool {
+    /// Mirrors `PendingKind::prompt` for these two kinds, with no
+    /// `objects_done`/`points_done` to thread through — both ever want
+    /// exactly one point, so there is nothing for the prompt to vary on.
+    pub(crate) fn prompt(&self) -> String {
+        match self {
+            // Says where the click lands, because a signature that appears
+            // above or below the line is the thing to get right first time.
+            Tool::Signature => "signature: click the line to sign on".into(),
+            Tool::PlaceImage { .. } => "click where the picture goes".into(),
+        }
+    }
+
+    /// The ribbon command that arms this, so its button can show itself lit
+    /// while it is waiting for its one click — see `PendingKind::command`'s
+    /// own doc. `PlaceImage` has never lit a button: it names a file, not a
+    /// repeatable command.
+    pub(crate) fn command(&self) -> Option<&'static str> {
+        match self {
+            Tool::Signature => Some("signature"),
+            Tool::PlaceImage { .. } => None,
+        }
+    }
+}
+
 pub(crate) enum PendingKind {
     /// Waiting for a click on the words to change.
     PickText,
@@ -39,8 +85,6 @@ pub(crate) enum PendingKind {
     /// [`crate::NewTextBox`]. What bare `addtext` arms, as opposed to `Write`,
     /// which is `addtext <words>` and still just wants the one point.
     PlaceText,
-    /// A decoded picture waiting for a point to be centred on.
-    PlaceImage { rgba: Vec<u8>, width: u32, height: u32 },
     Draw(DrawKind),
     Modify(tools::Pick),
     Calibrate { distance: f64, unit: String },
@@ -49,8 +93,6 @@ pub(crate) enum PendingKind {
     Redact,
     /// A point to put a tick, a cross or a dot at.
     Fill(pdf_core::document::FillMark),
-    /// Where a drawn signature is to sit — on the line that is clicked.
-    Signature,
     /// Two corners of a box to draw while filling a form in.
     SignRectangle,
     /// The two ends of a line to rule while filling a form in.
@@ -137,7 +179,6 @@ impl PendingKind {
             PendingKind::PickText | PendingKind::EraseMark => (0, 1),
             PendingKind::Write(_) => (0, 1),
             PendingKind::PlaceText => (0, 2),
-            PendingKind::PlaceImage { .. } => (0, 1),
             PendingKind::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => {
                 (0, 2)
             }
@@ -146,7 +187,6 @@ impl PendingKind {
             PendingKind::Calibrate { .. } => (0, 2),
             PendingKind::Whiteout => (0, 2),
             PendingKind::Fill(_) => (0, 1),
-            PendingKind::Signature => (0, 1),
             PendingKind::SignRectangle => (0, 2),
             PendingKind::SignLine => (0, 2),
             PendingKind::Measure(MeasureKind::Distance) => (0, 2),
@@ -169,7 +209,6 @@ impl PendingKind {
             PendingKind::EraseMark => {
                 "click a highlight, underline or strike-out to erase it — Escape puts the eraser down".into()
             }
-            PendingKind::PlaceImage { .. } => "click where the picture goes".into(),
             PendingKind::PlaceText => match points_done {
                 0 => "text: first corner of the box".into(),
                 _ => "text: opposite corner".into(),
@@ -187,9 +226,6 @@ impl PendingKind {
             PendingKind::Fill(mark) => {
                 format!("fill: click where the {} goes", mark.describe())
             }
-            // Says where the click lands, because a signature that appears
-            // above or below the line is the thing to get right first time.
-            PendingKind::Signature => "signature: click the line to sign on".into(),
             // Says which of the two rectangles this is, because the other one
             // is a drawing that can be picked up again and this one is not.
             PendingKind::SignRectangle => match points_done {
@@ -274,17 +310,15 @@ impl PendingKind {
     pub(crate) fn repeats(&self) -> bool {
         !matches!(
             self,
-            PendingKind::Calibrate { .. } | PendingKind::Signature
-                // **Reported from use: placing a picture kept the tool
-                // armed, so every later click on the page stamped another
-                // copy of it.** The same reasoning as a placed signature,
-                // above: what someone wants right after placing a picture
-                // is almost always to move or resize the one just placed,
-                // not stamp a second identical one.
-                | PendingKind::PlaceImage { .. }
-                // Same reasoning again: what someone wants right after
-                // dragging out a text box is to type into the box just
-                // drawn, not immediately drag out a second one.
+            // Calibration is set once, the same reasoning a placed
+            // signature or picture used to share here before they became
+            // `Tool::Signature`/`Tool::PlaceImage` — see that type's own
+            // doc; it has no `repeats` to ask at all, since the answer was
+            // always "no" for both.
+            PendingKind::Calibrate { .. }
+                // What someone wants right after dragging out a text box is
+                // to type into the box just drawn, not immediately drag out
+                // a second one.
                 | PendingKind::PlaceText
         )
     }
@@ -308,7 +342,6 @@ impl PendingKind {
             // No ribbon button lights up per mark; the tool is one word with
             // an argument.
             PendingKind::Fill(_) => return None,
-            PendingKind::Signature => "signature",
             PendingKind::SignRectangle => "signrectangle",
             PendingKind::SignLine => "signline",
             PendingKind::Lock => "lock",
@@ -317,9 +350,6 @@ impl PendingKind {
             PendingKind::EraseMark => "erase",
             PendingKind::Write(_) => "addtext",
             PendingKind::PlaceText => "addtext",
-            // No ribbon button lights up per click: it names a file, not a
-            // repeatable command, so nothing on the ribbon says "this again".
-            PendingKind::PlaceImage { .. } => return None,
             PendingKind::Measure(MeasureKind::Distance) => "measure distance",
             PendingKind::Measure(MeasureKind::Area) => "measure area",
             PendingKind::Calibrate { .. } => "calibrate",
