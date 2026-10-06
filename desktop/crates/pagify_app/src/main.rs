@@ -27944,6 +27944,29 @@ mod ui_tests {
         false
     }
 
+    /// The same wait, for a render that is expected to come back **dropped**
+    /// rather than applied — see `a_render_started_before_an_edit_is_never_put_on_screen`.
+    ///
+    /// **A generous budget on purpose, not a race to tighten.** `collect_renders`
+    /// drops a result by comparing its epoch against the document's *current*
+    /// one — deterministic, with no window in which a stale result could slip
+    /// through regardless of when the worker thread happens to finish. The only
+    /// thing timing affects is whether the worker gets scheduled at all inside
+    /// this wait: reported flaky under a full parallel suite, where every core is
+    /// busy with other tests' own worker threads, not under one test alone. 30
+    /// seconds of real wall-clock time is still a failure worth seeing, not a
+    /// wait anybody notices pass.
+    pub(crate) fn until_a_render_drops(h: &mut Harness<'static, PagifyApp>, already: u64) -> bool {
+        for _ in 0..3000 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.run_steps(1);
+            if h.state().render_stats.dropped > already {
+                return true;
+            }
+        }
+        false
+    }
+
     /// A page of `rects` small filled squares: heavy to render at any zoom,
     /// because the cost is in how many things it draws and not how big.
     fn heavy_pdf(rects: usize) -> Vec<u8> {
@@ -28037,6 +28060,24 @@ mod ui_tests {
     }
 
     /// A render for a page that has since changed is dropped, never shown.
+    ///
+    /// **Checks the drop, not a frozen `applied` count.** This used to also
+    /// assert `after.applied == before.applied` — wrong, and proven so by
+    /// tracing a real run: `rendered_is_stale` clears every cached texture
+    /// (`main.rs`'s own doc on `Self::rendered_is_stale`), so the app's
+    /// ordinary "something has to be on screen" redraw of the current view
+    /// legitimately asks for a **fresh**, non-stale picture once the old ones
+    /// are gone — and that one is correctly applied, same as it would be after
+    /// any edit. It can land in the very same `collect_renders` batch as the
+    /// stale one being dropped (`done.image`'s `Ok` and `Err` arms both drain
+    /// from one `try_recv` loop before either is processed), so no amount of
+    /// polling can ever observe "dropped, and nothing else has applied yet" as
+    /// two separate moments — they are not separate events. Reported flaky
+    /// under a full parallel suite because contention makes that ordinary
+    /// redraw more likely to land inside the test's own polling window, not
+    /// because the drop itself is ever in doubt — `collect_renders` drops on
+    /// an unconditional epoch comparison, with no timing window in which a
+    /// stale result could slip through regardless of when the worker finishes.
     #[test]
     fn a_render_started_before_an_edit_is_never_put_on_screen() {
         let mut h = async_harness(&fixture("two-column.pdf"));
@@ -28047,16 +28088,9 @@ mod ui_tests {
         let _ = h.state_mut().texture_for(&ctx, 0, 3.0);
         // The page changes while the worker has it.
         h.state_mut().tab_mut().doc.as_mut().expect("doc").rendered_is_stale();
-        for _ in 0..600 {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            h.run_steps(1);
-            if h.state().render_stats.dropped > before.dropped {
-                break;
-            }
-        }
+        assert!(until_a_render_drops(&mut h, before.dropped), "the stale render never came back");
         let after = h.state().render_stats;
         assert_eq!(after.dropped, before.dropped + 1, "the stale render was not dropped: {after:?}");
-        assert_eq!(after.applied, before.applied, "the stale render was put on screen");
         assert!(
             h.state().tab().doc.as_ref().expect("doc").textures.keys().all(|(_, step, _)| *step < 12),
             "a picture of the page as it was is on screen"
