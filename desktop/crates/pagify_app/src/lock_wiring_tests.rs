@@ -766,7 +766,7 @@ fn the_addimage_command_decodes_a_file_and_arms_placement() {
     // annotation on the *current* page — so the picture was there, on
     // the document, and simply invisible to anything that went looking
     // for it until the page was left and returned to.
-    assert!(app.tab_mut().foreign.is_none(), "the foreign-marks cache was not invalidated");
+    assert!(app.tab_mut().doc.as_ref().unwrap().caches.foreign.is_none(), "the foreign-marks cache was not invalidated");
 
     let marks = app.tab_mut().doc.as_ref().expect("open").session.annotations(0).expect("read");
     assert_eq!(marks.len(), before + 1, "nothing was added to the page");
@@ -2804,7 +2804,7 @@ fn editing_to_letters_the_document_lacks_writes_a_font_in() {
 
     // The words are on the page.
     let mut app = app;
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(page.contains("Zwölf Ünique"), "the words are not on the page:\n{page}");
 
@@ -3171,7 +3171,7 @@ fn a_drawn_word_can_be_replaced_with_real_text() {
     );
 
     // The page really says it now, read back the way anything else reads it.
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(page.contains("REPLACED"), "the words are not on the page:\n{page}");
 }
@@ -4788,7 +4788,7 @@ fn whiteout_says_it_covers_rather_than_removes() {
     assert!(said.contains("redact"), "it did not point at the tool that destroys: {said}");
 
     // And it really did leave them.
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let after = app
         .characters(0)
         .map(pagify_shell::reader::Characters::text)
@@ -5343,7 +5343,7 @@ fn the_lock_verb_asks_for_a_selection_rather_than_arming_a_rectangle() {
 #[test]
 fn the_lock_verb_takes_the_selection_that_is_already_there() {
     let mut app = app("text-lines.pdf");
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let chars = app.characters(0).expect("characters").clone();
     app.tab_mut().text_selection = Some(0..chars.len().min(8));
     app.tab_mut().selection_page = 0;
@@ -6516,7 +6516,7 @@ fn locking_a_selection_over_an_image_is_not_refused_on_the_images_account() {
 #[test]
 fn the_selection_menu_asks_for_an_incomplete_lock() {
     let mut app = app("text-lines.pdf");
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let chars = app.characters(0).expect("characters").clone();
     app.tab_mut().text_selection = Some(0..chars.len().min(8));
     app.tab_mut().selection_page = 0;
@@ -6788,7 +6788,7 @@ fn editing_is_fast_on_a_real_busy_page() {
         "applying an edit took {apply_time:?} on a busy page"
     );
 
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(page.contains(&safe_replacement), "the edit did not land:\n{page}");
 }
@@ -6862,7 +6862,7 @@ fn editing_a_paragraph_is_fast_on_a_real_busy_page() {
         "applying a {line_count}-line paragraph took {apply_time:?} on a busy page"
     );
 
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     // Each line checked on its own, not all of them concatenated — how a
     // reader's own text extraction joins two separate runs (a space, a
@@ -6979,7 +6979,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
         tests_support::same_picture(&tests_support::picture(&app), &picture_before),
         "the page is not pixel-identical after undo"
     );
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
 
     // Second edit, on the same paragraph: pick it again by its own objects'
     // current geometry (whatever undo actually left behind, not assumed),
@@ -7320,7 +7320,7 @@ fn merging_any_two_adjacent_lines_does_not_corrupt_the_others() {
                 was.object
             );
         }
-        app.tab_mut().text = None;
+        app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     }
     assert!(
         tests_support::same_picture(&tests_support::picture(&app), &picture_start),
@@ -7439,7 +7439,7 @@ fn matching_properties_does_not_corrupt_the_page() {
     app.tab_mut().selection_page = 0;
     app.apply_match_properties_to_current_selection().expect("match should succeed");
 
-    app.tab_mut().text = None; // force a fresh read — `characters()` caches per page
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None; // force a fresh read — `characters()` caches per page
     let after_text = app.characters(0).expect("characters").text();
     let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(

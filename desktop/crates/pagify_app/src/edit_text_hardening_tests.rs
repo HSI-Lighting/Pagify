@@ -238,8 +238,8 @@ fn a_page_too_heavy_to_read_opens_the_word_alone_and_reads_nothing_else() {
     // **Nothing of the heavy read was made**: not the page's paragraphs, not the
     // picture the background colour is sampled from, and no font read for the box.
     let doc = app.tab().doc.as_ref().expect("open");
-    assert!(doc.page_blocks.borrow().is_none(), "the page was read for paragraphs");
-    assert!(doc.sampling.borrow().is_none(), "the page was rendered to sample a background");
+    assert!(doc.caches.page_blocks.borrow().is_none(), "the page was read for paragraphs");
+    assert!(doc.caches.sampling.borrow().is_none(), "the page was rendered to sample a background");
     assert_eq!(edit.background, Color { r: 255, g: 255, b: 255, a: 255 }, "the box is drawn on white");
     assert!(app.editor_face.is_none() && app.pending_face.is_none(), "a font program was asked for");
     assert!(
@@ -252,15 +252,15 @@ fn a_page_too_heavy_to_read_opens_the_word_alone_and_reads_nothing_else() {
     }
 
     // Counted once and read once: the second click costs no further walk of the page.
-    let again = doc.weight.get().expect("the count was kept");
-    let (with_words, light) = doc.rect_page.borrow().as_ref().map(|(w, p)| (*w, p.clone())).expect("the page's runs were kept");
+    let again = doc.caches.weight.get().expect("the count was kept");
+    let (with_words, light) = doc.caches.rect_page.borrow().as_ref().map(|(w, p)| (*w, p.clone())).expect("the page's runs were kept");
     assert!(with_words, "a heavy page's words are read once, for every click after the first");
     app.tab_mut().editing_run = None;
     let _ = click_logged(&mut app, &log, 0, centre(&run.rect));
     let doc = app.tab().doc.as_ref().expect("open");
-    assert_eq!(doc.weight.get(), Some(again));
+    assert_eq!(doc.caches.weight.get(), Some(again));
     assert!(
-        std::rc::Rc::ptr_eq(&light, &doc.rect_page.borrow().as_ref().expect("still kept").1),
+        std::rc::Rc::ptr_eq(&light, &doc.caches.rect_page.borrow().as_ref().expect("still kept").1),
         "the page's runs were read again"
     );
     let _ = std::fs::remove_dir_all(&dir);
@@ -284,8 +284,8 @@ fn a_page_of_ordinary_weight_is_still_read_for_its_paragraphs() {
     assert!(outcome.expect("opens").starts_with("editing a paragraph of 3 lines"), "{line}");
     assert_eq!(field(&line, "path"), "block", "{line}");
     let doc = app.tab().doc.as_ref().expect("open");
-    assert!(doc.page_blocks.borrow().is_some() && doc.weight.get().is_some());
-    assert!(doc.sampling.borrow().is_some(), "the background is still sampled from a picture of the page");
+    assert!(doc.caches.page_blocks.borrow().is_some() && doc.caches.weight.get().is_some());
+    assert!(doc.caches.sampling.borrow().is_some(), "the background is still sampled from a picture of the page");
     assert!(logged(&log, "pick-note").is_empty(), "{:?}", logged(&log, "pick-note"));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -301,7 +301,7 @@ fn a_click_on_bare_paper_of_a_heavy_page_does_not_search_it_for_drawn_words() {
     let said = outcome.expect_err("bare paper");
     assert!(said.contains("no text there") && said.contains("too many for words drawn as shapes"), "{said}");
     assert_eq!(field(&line, "path"), "none", "{line}");
-    assert!(app.tab().drawn_words.is_none(), "the page was searched for drawn words");
+    assert!(app.tab().doc.as_ref().unwrap().caches.drawn_words.is_none(), "the page was searched for drawn words");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -544,7 +544,7 @@ fn drawn_words_are_recognised_again_after_the_page_changed() {
     let mut app = app("outlined-montserrat.pdf");
     let words = app.drawn_words_on(0).to_vec();
     assert!(!words.is_empty(), "no drawn words were recognised at all");
-    let key = app.tab().drawn_words.as_ref().expect("kept").0;
+    let key = app.tab().doc.as_ref().unwrap().caches.drawn_words.as_ref().expect("kept").0;
     assert_eq!(key, app.doc_stamp(0), "kept under the stamp of the page it was made for");
     let word = words
         .iter()
@@ -567,7 +567,7 @@ fn drawn_words_are_recognised_again_after_the_page_changed() {
         return;
     }
     let now = app.drawn_words_on(0).to_vec();
-    assert_ne!(app.tab().drawn_words.as_ref().expect("kept").0, key, "the old reading was served for a changed page");
+    assert_ne!(app.tab().doc.as_ref().unwrap().caches.drawn_words.as_ref().expect("kept").0, key, "the old reading was served for a changed page");
     assert!(
         now.len() < words.len() && !now.iter().any(|w| w.text == word.text && w.rect == word.rect),
         "the redacted word is still listed: {} words then, {} now",

@@ -436,7 +436,7 @@ fn turning_the_view_does_not_change_the_proportions_of_the_page() {
     );
 
     // What is drawn in it: the texture the page is painted from.
-    let drawn: Vec<[usize; 2]> = doc.textures.values().map(|t| t.size()).collect();
+    let drawn: Vec<[usize; 2]> = doc.caches.textures.values().map(|t| t.size()).collect();
     assert!(!drawn.is_empty(), "no page was drawn, so this proves nothing");
     for size in drawn {
         let (drawn_ratio, frame_ratio) = (size[0] as f32 / size[1] as f32, frame.0 / frame.1);
@@ -564,7 +564,7 @@ fn a_thumbnail_is_rendered_at_the_size_it_is_drawn() {
         .next()
         .expect("a thumbnail");
     let doc = h.state().tab().doc.as_ref().expect("doc");
-    let bitmap = doc.thumbs.get(&0).expect("the first thumbnail").size();
+    let bitmap = doc.caches.thumbs.get(&0).expect("the first thumbnail").size();
 
     assert!(
         (bitmap[0] as f32 - drawn.width()).abs() <= 8.0,
@@ -593,11 +593,11 @@ fn only_the_thumbnails_near_the_screen_are_rendered() {
 
     let doc = h.state().tab().doc.as_ref().expect("doc");
     assert!(doc.page_count >= 41, "the pages were not added");
-    assert!(!doc.thumbs.is_empty(), "no thumbnail was rendered at all");
+    assert!(!doc.caches.thumbs.is_empty(), "no thumbnail was rendered at all");
     assert!(
-        doc.thumbs.len() < doc.page_count / 2,
+        doc.caches.thumbs.len() < doc.page_count / 2,
         "{} of {} thumbnails were rendered with only a few in view",
-        doc.thumbs.len(),
+        doc.caches.thumbs.len(),
         doc.page_count
     );
 }
@@ -1051,7 +1051,7 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
     assert_eq!(during.on_ui_thread, before.on_ui_thread, "a zoom step rendered on the UI thread");
     assert_eq!(during.requested, before.requested, "a render was started while the zoom was still moving");
     assert!(
-        !h.state().tab().doc.as_ref().expect("doc").textures.is_empty(),
+        !h.state().tab().doc.as_ref().expect("doc").caches.textures.is_empty(),
         "the page has nothing to draw meanwhile"
     );
 
@@ -1116,7 +1116,7 @@ fn a_render_started_before_an_edit_is_never_put_on_screen() {
     let after = h.state().render_stats;
     assert_eq!(after.dropped, before.dropped + 1, "the stale render was not dropped: {after:?}");
     assert!(
-        h.state().tab().doc.as_ref().expect("doc").textures.keys().all(|(_, step, _)| *step < 12),
+        h.state().tab().doc.as_ref().expect("doc").caches.textures.keys().all(|(_, step, _)| *step < 12),
         "a picture of the page as it was is on screen"
     );
 }
@@ -1189,7 +1189,7 @@ fn what_is_locked_on_a_page_is_kept_until_the_page_changes() {
     let mut app = PagifyApp::new(Some(&fixture("two-column.pdf")));
     assert!(app.locked_items_on(0).is_empty());
     let doc = app.tab().doc.as_ref().expect("doc");
-    assert!(doc.locked.borrow().contains_key(&0), "the answer was not kept");
+    assert!(doc.caches.locked.borrow().contains_key(&0), "the answer was not kept");
 
     // Planted where the engine knows nothing of it, so only a cache can
     // return it.
@@ -1199,12 +1199,12 @@ fn what_is_locked_on_a_page_is_kept_until_the_page_changes() {
         is_area: false,
         stale: false,
     };
-    doc.locked.borrow_mut().insert(0, vec![planted.clone()]);
+    doc.caches.locked.borrow_mut().insert(0, vec![planted.clone()]);
     assert_eq!(app.locked_items_on(0), vec![planted], "the engine was asked again");
 
     app.tab_mut().doc.as_mut().expect("doc").rendered_is_stale();
     assert!(
-        app.tab().doc.as_ref().expect("doc").locked.borrow().is_empty(),
+        app.tab().doc.as_ref().expect("doc").caches.locked.borrow().is_empty(),
         "a page that has changed kept its old answer"
     );
 }
@@ -2282,7 +2282,7 @@ fn locking_a_page_leaves_no_stale_thumbnail_of_it() {
 
     // The strip has drawn, so a thumbnail of the unlocked page is cached.
     assert!(
-        !h.state().tab().doc.as_ref().expect("doc").thumbs.is_empty(),
+        !h.state().tab().doc.as_ref().expect("doc").caches.thumbs.is_empty(),
         "no thumbnail was cached, so this proves nothing"
     );
 
@@ -2291,11 +2291,11 @@ fn locking_a_page_leaves_no_stale_thumbnail_of_it() {
         .expect("lock the page");
 
     assert!(
-        h.state().tab().doc.as_ref().expect("doc").thumbs.is_empty(),
+        h.state().tab().doc.as_ref().expect("doc").caches.thumbs.is_empty(),
         "the thumbnail of the locked page is still cached"
     );
     assert!(
-        h.state().tab().doc.as_ref().expect("doc").textures.is_empty(),
+        h.state().tab().doc.as_ref().expect("doc").caches.textures.is_empty(),
         "the rendered page is still cached"
     );
 }
@@ -3125,7 +3125,7 @@ fn clicking_a_run_offers_its_words_and_retyping_replaces_them() {
     h.run_steps(2);
 
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(page.contains("REPLACED"), "the words did not change:\n{page}");
     assert!(!page.contains(original.trim()), "the old words are still there");
@@ -3365,7 +3365,7 @@ fn clicking_away_from_the_editor_applies_it() {
         "the editor should have closed once its change was applied"
     );
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(page.contains("REPLACED"), "clicking away did not apply the change:\n{page}");
 }
@@ -3557,7 +3557,7 @@ fn arming_and_click_to_apply_work_on_the_real_camino_page() {
     // opened here depends on this real page's own dense layout; that the
     // old edit actually landed does not.
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(
         page.contains("REPLACED TEXT"),
@@ -3666,7 +3666,7 @@ fn pressing_enter_in_the_run_editor_does_not_apply_it() {
         "Enter should have added a line, and nothing more, still unapplied"
     );
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(
         !page.contains("TYPED"),
@@ -3699,7 +3699,7 @@ fn the_run_editor_apply_button_can_be_pressed() {
         "Apply did not finish the edit"
     );
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(
         page.contains("REPLACED"),
@@ -4036,7 +4036,7 @@ fn an_edited_run_can_be_undone() {
     h.run_steps(2);
 
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(page.contains(original.trim()), "undo did not restore the words:\n{page}");
     assert!(!page.contains("REPLACED"), "the replacement is still there");
@@ -4059,7 +4059,7 @@ fn escape_leaves_the_words_as_they_were() {
     assert!(h.state().tab().editing_run.is_none(), "escape did not stop the edit");
 
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(page.contains(original.trim()), "escape changed the words anyway");
 }
@@ -4127,12 +4127,12 @@ fn writing_words_puts_selectable_text_on_the_page() {
     // caches the moment the words land, the same way placing a picture
     // or a signature already does.
     assert!(
-        h.state().tab().foreign.is_none(),
+        h.state().tab().doc.as_ref().unwrap().caches.foreign.is_none(),
         "the foreign-marks cache was not invalidated"
     );
 
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let after = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(
         after.contains("DRAFT"),
@@ -4153,7 +4153,7 @@ fn written_words_can_be_undone() {
     h.state_mut().submit("undo");
     h.run_steps(2);
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let after = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(!after.contains("DRAFT"), "undo left the words on the page");
 }

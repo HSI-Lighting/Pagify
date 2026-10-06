@@ -13,6 +13,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod canvas;
+mod caches;
 mod dispatch;
 mod mac_open;
 mod focus;
@@ -435,91 +436,11 @@ struct Doc {
     /// Moved by every [`Doc::rendered_is_stale`], so a render started before an
     /// edit can be told from one started after it.
     render_epoch: u64,
-    /// What is sealed on each page, asked of the engine once and kept.
-    ///
-    /// **Drawing the lock badges asked every frame, for every page in view —
-    /// and every ask takes the one lock that covers all use of PDFium.** So
-    /// while a page was being rendered off the UI thread, each frame waited for
-    /// the render to finish: measured, a 270 ms frame on a page that renders in
-    /// that long, which is exactly the stall the worker exists to remove. Locks
-    /// change only through edits, and every edit goes through
-    /// [`Doc::rendered_is_stale`], which empties this.
-    locked: std::cell::RefCell<HashMap<usize, Vec<pdf_core::document::LockedItem>>>,
-    /// The one page Edit Text last looked at, read and detected into
-    /// paragraphs — see [`PagifyApp::page_blocks`].
-    ///
-    /// **Built at the first click on a page, never when the tool is armed**
-    /// (arming has to stay instant), and good only while nothing under it
-    /// moved: it is stamped with this document's `render_epoch` and the
-    /// session's undo generation and refused when either differs, and
-    /// [`Doc::rendered_is_stale`] — the one place every page-changing path
-    /// already goes through — empties it. One page at a time: a click is on
-    /// one page, and a second page's text is a second read.
-    page_blocks: std::cell::RefCell<Option<std::rc::Rc<PageBlocks>>>,
-    /// The page last rendered small to sample the colour behind a paragraph
-    /// from — see [`PagifyApp::page_raster_for_sampling`] — with the
-    /// `(page, render_epoch, undo generation)` it was made for. Kept for the
-    /// same reason, and emptied in the same place, as [`Self::page_blocks`]:
-    /// every click on a paragraph of one page asks for the same picture, and
-    /// making it is a render under the one lock that covers all use of PDFium.
-    sampling: std::cell::RefCell<Option<((usize, u64, u64), std::rc::Rc<PageRaster>)>>,
-    /// What the page Edit Text last looked at is made of — how many objects, how
-    /// many of them text — counted without reading any of it, with the
-    /// `(page, render epoch, undo generation)` it was counted under. **Asked
-    /// before the page's text is read**, so that a page too heavy to read in one
-    /// pass is refused for the price of one count — see
-    /// [`PagifyApp::page_weight`].
-    weight: std::cell::Cell<Option<((usize, u64, u64), pdf_core::document::PageScale)>>,
-    /// The page of text objects a click on a heavy page — or on a page whose text
-    /// cannot be read in one pass — is resolved against: where each one is, and
-    /// whether their words were read too (the flag; the heavy way reads them, once,
-    /// so that no click after the first opens the page again). No detector, no
-    /// fonts, no shapes. Made under the same key as [`Self::page_blocks`] and
-    /// emptied with it. Making it opens the page and walks it, which is the one
-    /// thing a click on a very large page cannot afford more than once.
-    rect_page: std::cell::RefCell<Option<(bool, std::rc::Rc<PageBlocks>)>>,
     strip: Strip,
     page_count: usize,
-    /// One texture per (page, quantised scale). Bounded by eviction of pages
-    /// that have scrolled out — a fifty-page document at full zoom would
-    /// otherwise hold fifty full-size rasters on the GPU — and, per page, to
-    /// [`SCALES_KEPT_PER_PAGE`] scales.
-    textures: HashMap<(usize, u32, u8), egui::TextureHandle>,
-    thumbs: HashMap<usize, egui::TextureHandle>,
-    /// A sharper crop of whatever's on screen, layered over the capped
-    /// whole-page texture when that cap would otherwise leave a zoomed-in
-    /// detail blurry — see [`PagifyApp::draw_detail_overlay`]. One at a time:
-    /// only the page actually being looked at closely needs this, not every
-    /// page in the document.
-    detail: Option<DetailTile>,
-}
-
-impl Doc {
-    /// Throw away everything already drawn from this document.
-    ///
-    /// **Both caches, always.** Reported from use: a locked page still showed
-    /// its contents in the thumbnail strip. Thirteen places cleared `textures`
-    /// after an edit and two cleared `thumbs`, so almost every edit left a
-    /// stale thumbnail — and for a lock or a redaction that is not a cosmetic
-    /// lag, it is the hidden content still on screen.
-    ///
-    /// One method rather than two calls at each site, because the next edit
-    /// added will call this and be right by default.
-    fn rendered_is_stale(&mut self) {
-        self.textures.clear();
-        self.thumbs.clear();
-        self.detail = None;
-        self.locked.get_mut().clear();
-        // The paragraphs Edit Text found are a reading of the page as it was:
-        // object numbers renumber when an edit adds or removes objects.
-        self.page_blocks.get_mut().take();
-        self.sampling.get_mut().take();
-        self.weight.set(None);
-        self.rect_page.get_mut().take();
-        // And whatever the render worker is part-way through: it is a picture
-        // of the page as it was.
-        self.render_epoch += 1;
-    }
+    /// Everything about this document's pages that is cheaper to keep than
+    /// to ask the engine for again — see [`caches::DocCaches`].
+    caches: caches::DocCaches,
 }
 
 /// A sharper render of one crop of a page, cached the same way the
@@ -689,15 +610,6 @@ struct DocTab {
     /// there is nothing here for a save to carry and nothing a reopen needs
     /// to restore.
     joined_groups: Vec<JoinedGroup>,
-    /// A foreign annotation the pointer is on, as its position in `marks`.
-    ///
-    /// Cached per page so hit-testing does not re-read every annotation on
-    /// every frame of a mouse move.
-    foreign: Option<(usize, Vec<(usize, Vec<pdf_core::document::Rect>)>)>,
-    /// The links on a page that go to another page, read once per page and per
-    /// state of the document's history — never per frame: hovering asks every
-    /// frame, and each read goes through the one engine lock.
-    internal_links: Option<(usize, u64, Vec<pdf_core::document::InternalLink>)>,
     /// The page the current text selection belongs to.
     ///
     /// The selection used to be dropped whenever the current page changed, and
@@ -765,9 +677,6 @@ struct DocTab {
     /// to survive in between.
     selected_image: Option<(usize, pdf_core::document::PageImage)>,
 
-    /// The current page's characters, kept because extracting them costs a
-    /// text-page load and a walk, and a selection drag asks on every frame.
-    text: Option<(usize, pagify_shell::reader::Characters)>,
     text_selection: Option<std::ops::Range<usize>>,
     /// Where a text drag began. `None` means a drag is selecting marks instead.
     text_drag: Option<AppPoint>,
@@ -786,12 +695,6 @@ struct DocTab {
     /// The markup revision at the last successful save. Anything above it is
     /// work that closing would throw away.
     saved_revision: u64,
-    /// What the current page draws, cached per page.
-    ///
-    /// Read fresh whenever the page changes or the document does: restacking
-    /// rewrites the page and renumbers its objects, so a list held over would
-    /// name things that have moved.
-    layers: Option<(usize, Vec<pdf_core::document::DrawnObject>)>,
     /// Where the last right-click landed, kept for the menu built after it.
     right_clicked_at: Option<(usize, AppPoint)>,
     /// What the right-click menu's Join/Match-font/Split actions found,
@@ -973,16 +876,6 @@ struct DocTab {
     spelling: Option<SpellCheck>,
     /// The scan feeding [`Self::spelling`], while it is still running.
     spell_scan: Option<SpellScan>,
-    /// The words a page draws rather than writes, and the state of the document
-    /// they were recognised in — `(page, render epoch, undo generation)`, see
-    /// [`PagifyApp::doc_stamp`].
-    ///
-    /// Recognising them costs real work, and a pick asks for them on every
-    /// click that lands on no text. **Good only under the stamp it was made
-    /// under**: kept by the page index alone, it went on listing a word a
-    /// redaction had taken off the page, and opened an editor for it — and
-    /// answered for another page after a page was deleted or moved.
-    drawn_words: Option<((usize, u64, u64), Vec<pdf_core::document::RecognisedWord>)>,
     /// What a drag on the page means. Set by Hand and Select.
     pointer: pagify_shell::verbs::PointerMode,
     /// **Requested from use: Hand should look like the tool in hand when a
@@ -1069,8 +962,6 @@ impl DocTab {
             bookmark_panel: None,
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
-            foreign: None,
-            internal_links: None,
             selection_page: 0,
             settling: 0,
             zoom_basis: 0,
@@ -1083,7 +974,6 @@ impl DocTab {
             scroll_to_pt: None,
             canvas_pt: egui::vec2(800.0, 600.0),
             selected_image: None,
-            text: None,
             text_selection: None,
             text_drag: None,
             find_needle: String::new(),
@@ -1091,7 +981,6 @@ impl DocTab {
             find_at: 0,
             reveal: None,
             saved_revision: 0,
-            layers: None,
             picked_layer: None,
             right_clicked_at: None,
             right_click_text_actions: None,
@@ -1125,7 +1014,6 @@ impl DocTab {
             find_replace: None,
             spelling: None,
             spell_scan: None,
-            drawn_words: None,
             pointer: Default::default(),
             hand_shown_before_any_tool_is_picked: true,
             drag_from: None,
@@ -2944,7 +2832,6 @@ impl PagifyApp {
             Closing::Document => {
                 if self.tab_mut().doc.take().is_some() {
                     self.tab_mut().markup.clear();
-                    self.tab_mut().text = None;
                     self.forget_passcode();
                     self.cmd.prompt_mut().document = None;
                     self.tab_mut().ribbon = Tab::File;
@@ -3307,7 +3194,6 @@ impl PagifyApp {
                         if let Some(doc) = &mut self.tab_mut().doc {
                             doc.rendered_is_stale();
                         }
-                        self.tab_mut().text = None;
                         self.tab_mut().text_selection = None;
                         self.tab_mut().find_hits.clear();
                     }
@@ -3517,7 +3403,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         // Says the two things somebody will otherwise learn the hard way:
         // the signature is not on disk until a save writes it, and it covers
         // the file as it now stands — an edit after this is outside it, and
@@ -3931,7 +3816,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().foreign = None;
         // **The sentence that keeps the two kinds of signature apart.** Somebody
         // who thinks this is the cryptographic one is worse off than somebody
         // with no signature at all, and this is the line they will read —
@@ -4388,7 +4272,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().layers = None;
         // Not `thing_at`: its few points of slack exist so a click just
         // outside a whole sentence still reaches it, and a dozen characters
         // only a few points wide packed edge to edge — exactly what this
@@ -4693,7 +4576,7 @@ impl PagifyApp {
             x: ((wanted.left + wanted.right) / 2.0) as f64,
             y: ((wanted.top + wanted.bottom) / 2.0) as f64,
         };
-        self.tab_mut().layers = None;
+        self.forget_layers();
         // Not a drill: `sel.what` already says what kind of thing this drag
         // moved, and re-running the letter-drill here on whatever now sits
         // at the new centre could pick a different granularity than the one
@@ -4742,7 +4625,7 @@ impl PagifyApp {
                         m
                     })
                     .collect();
-                self.tab_mut().layers = None;
+                self.forget_layers();
                 match (last_err, page) {
                     (Some(e), _) => self.say_error(format!("moved {moved} of {total} things; {e}")),
                     (None, Some(page)) => self.say_info(format!(
@@ -4783,7 +4666,7 @@ impl PagifyApp {
                         m
                     })
                     .collect();
-                self.tab_mut().layers = None;
+                self.forget_layers();
                 match last_err {
                     Some(e) => self.say_error(format!("resized {done} of {total} things; {e}")),
                     None => self.say_info(format!(
@@ -4832,7 +4715,7 @@ impl PagifyApp {
                 doc.rendered_is_stale();
             }
         }
-        self.tab_mut().layers = None;
+        self.forget_layers();
         match (last_err, page) {
             (Some(e), _) if removed == 0 => self.say_error(e),
             (Some(e), _) => self.say_error(format!("removed {removed} of {total} things; {e}")),
@@ -4856,10 +4739,8 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
-        self.tab_mut().layers = None;
         // Said the way the label says it: counter-clockwise is positive.
         Ok(format!("turned {:.0}\u{b0} on page {} — `undo` turns it back.", -degrees, page + 1))
     }
@@ -4880,10 +4761,8 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
-        self.tab_mut().layers = None;
         Ok(format!(
             "resized to {:.0}% across and {:.0}% down on page {}.",
             sx * 100.0,
@@ -5226,7 +5105,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().layers = None;
         Ok(format!("opacity {:.0}% on page {}.", opacity * 100.0, page + 1))
     }
 
@@ -5663,7 +5541,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
         Ok(format!(
@@ -5744,15 +5621,6 @@ impl PagifyApp {
         self.unsaved().is_some() || self.unsaved_password() || self.unsaved_edits()
     }
 
-
-    /// This page's characters, extracted once and kept.
-    fn characters(&mut self, page: usize) -> Option<&pagify_shell::reader::Characters> {
-        if self.tab_mut().text.as_ref().map(|(p, _)| *p) != Some(page) {
-            let chars = self.tab_mut().doc.as_ref()?.session.characters(page).ok()?;
-            self.tab_mut().text = Some((page, chars));
-        }
-        self.tab_mut().text.as_ref().map(|(_, chars)| chars)
-    }
 
     /// Rebuild this page's reading order and show the result.
     ///
@@ -5955,7 +5823,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
 
@@ -6074,7 +5941,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
 
@@ -6286,7 +6152,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         Ok(())
     }
 
@@ -6995,7 +6860,6 @@ impl PagifyApp {
                         if let Some(doc) = &mut self.tab_mut().doc {
                             doc.rendered_is_stale();
                         }
-                        self.tab_mut().foreign = None;
                         self.say_info("picture pasted — `undo` takes it back.");
                     }
                     Err(e) => self.say_error(format!("{e}")),
@@ -7127,7 +6991,6 @@ impl PagifyApp {
                         if let Some(doc) = &mut self.tab_mut().doc {
                             doc.rendered_is_stale();
                         }
-                        self.tab_mut().foreign = None;
                         self.say_info("picture pasted.");
                     }
                     Err(e) => self.say_error(format!("{e}")),
@@ -8062,7 +7925,6 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().text = None;
                 self.tab_mut().text_selection = None;
                 self.tab_mut().find_hits.clear();
                 Ok(format!(
@@ -8179,7 +8041,6 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().text = None;
                 self.tab_mut().text_selection = None;
                 self.tab_mut().find_hits.clear();
                 // Says how many were *newly* locked, which can be fewer than
@@ -8210,23 +8071,6 @@ impl PagifyApp {
             .unwrap_or_default()
     }
 
-    /// What this page draws, bottom first — read fresh when the page changes.
-    ///
-    /// **Not cached across an edit.** Restacking rewrites the content stream
-    /// and PDFium renumbers the page's objects afterwards, so a list held from
-    /// before would name things that have since moved.
-    fn layers_on(&mut self, page: usize) -> &[pdf_core::document::DrawnObject] {
-        if self.tab_mut().layers.as_ref().map(|(p, _)| *p) != Some(page) {
-            let found = self.tab_mut()
-                .doc
-                .as_ref()
-                .and_then(|d| d.session.drawn_objects(page).ok())
-                .unwrap_or_default();
-            self.tab_mut().layers = Some((page, found));
-        }
-        self.tab_mut().layers.as_ref().map(|(_, l)| l.as_slice()).unwrap_or(&[])
-    }
-
     /// Put something at the front or the back of a page's drawing order.
     fn restack(
         &mut self,
@@ -8241,19 +8085,19 @@ impl PagifyApp {
             pdf_core::document::Stacking::Down => doc.session.stacking_neighbour(page, object, false).ok().flatten(),
             _ => None,
         };
+        // What the picked layer looks like **now, before the page is
+        // rewritten** — found again afterwards by what it looked like, not
+        // by the index it happened to be at, which the restack itself moves.
+        let follow = self.tab_mut().picked_layer.and_then(|at| self.layers_on(page).get(at).cloned());
+        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
         doc.session.restack(page, object, where_to).map_err(|e| format!("layers: {e}"))?;
 
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        // The page has been rewritten, so everything read off it is stale —
-        // but a one-step move is usually the first of several, so the same
-        // thing is found again in the fresh list and stays picked.
-        let follow = {
-            let entries = self.layers_on(page).to_vec();
-            self.tab_mut().picked_layer.and_then(|at| entries.get(at).cloned())
-        };
-        self.tab_mut().layers = None;
+        // The page has been rewritten, so the fresh list is searched for the
+        // same thing by what it looked like — a one-step move is usually the
+        // first of several, so the same thing is found again and stays picked.
         self.tab_mut().picked_layer = follow.as_ref().and_then(|was| {
             let close = |a: f32, b: f32| (a - b).abs() < 0.5;
             self.layers_on(page).iter().position(|d| {
@@ -8265,7 +8109,6 @@ impl PagifyApp {
                     && close(d.rect.bottom, was.rect.bottom)
             })
         });
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
 
@@ -8405,13 +8248,13 @@ impl PagifyApp {
     /// What is sealed on a page, for drawing its padlocks.
     fn locked_items_on(&self, page: usize) -> Vec<pdf_core::document::LockedItem> {
         let Some(doc) = self.tab().doc.as_ref() else { return Vec::new() };
-        // Kept — see [`Doc::locked`]: this is asked every frame, and a call into
-        // the engine waits for any render that is under way.
-        if let Some(held) = doc.locked.borrow().get(&page) {
+        // Kept — see [`caches::DocCaches::locked`]: this is asked every frame,
+        // and a call into the engine waits for any render that is under way.
+        if let Some(held) = doc.caches.locked.borrow().get(&page) {
             return held.clone();
         }
         let items = doc.session.locked_items_on(page);
-        doc.locked.borrow_mut().insert(page, items.clone());
+        doc.caches.locked.borrow_mut().insert(page, items.clone());
         items
     }
 
@@ -8534,7 +8377,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
         self.tab_mut().selected_image = None;
@@ -8563,7 +8405,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
         Ok(format!(
@@ -8629,7 +8470,6 @@ impl PagifyApp {
                     doc.rendered_is_stale();
                 }
                 // The words are gone, so anything holding on to them is stale.
-                self.tab_mut().text = None;
                 self.tab_mut().text_selection = None;
                 self.tab_mut().find_hits.clear();
                 Ok(format!(
@@ -8847,13 +8687,11 @@ impl PagifyApp {
                 // from its split characters — so the cached list this feeds
                 // the layers rail and every hit-test from is exactly as
                 // stale as the raster this already knew to drop.
-                self.tab_mut().layers = None;
                 // The same staleness `apply_editing_page` already clears
                 // after a successful Apply — undoing (or redoing) that same
                 // edit changes exactly the same words, and a search or a
                 // selection built from the pre-undo text would otherwise
                 // keep answering as if the edit were still there.
-                self.tab_mut().text = None;
                 self.tab_mut().text_selection = None;
                 self.tab_mut().find_hits.clear();
                 // Undoing or redoing an `AddBookmark` is the one document
@@ -9608,126 +9446,6 @@ impl PagifyApp {
         trace.total_ms = started.elapsed().as_secs_f32() * 1000.0;
         self.session_log.record("pick", &block_input::format_pick_line(&trace));
         outcome
-    }
-
-    /// The page's text, read in one pass and detected into paragraphs — what a
-    /// click in Edit Text is resolved against. `true` when it came from the
-    /// cache.
-    ///
-    /// **Read at the first click on a page, never when the tool is armed**, and
-    /// cached on the document for that page. Valid only for the document as it
-    /// was read: `(page, render_epoch, undo generation)` must all match, and
-    /// [`Doc::rendered_is_stale`] empties it besides. The epoch and the
-    /// generation are taken *before* the read, so a stamp can be older than
-    /// the data it labels but never newer. Everything the click needs about
-    /// the page (words, fonts, shapes) comes out of this one
-    /// [`Session::page_text_snapshot`] call — one registry lock — instead of
-    /// the half dozen separate calls the old walk made.
-    fn page_blocks(&self, page: usize) -> Result<(std::rc::Rc<PageBlocks>, bool), String> {
-        let Some(doc) = self.tab().doc.as_ref() else { return Err("nothing open.".into()) };
-        let (epoch, generation) = (doc.render_epoch, doc.session.undo_generation());
-        if let Some(held) = doc.page_blocks.borrow().as_ref() {
-            if held.page == page && held.epoch == epoch && held.generation == generation {
-                return Ok((held.clone(), true));
-            }
-        }
-        #[cfg(test)]
-        if tests_support::SNAPSHOT_FAILS.with(|fails| fails.get()) {
-            return Err("test: the page's text is unavailable".into());
-        }
-        let read = std::time::Instant::now();
-        let snapshot = doc.session.page_text_snapshot(page).map_err(|e| format!("{e}"))?;
-        let read_ms = read.elapsed().as_secs_f32() * 1000.0;
-        let mut built = block_input::build_page_blocks(page, epoch, generation, snapshot);
-        // The detector's own time plus PDFium's.
-        built.build_ms += read_ms;
-        let built = std::rc::Rc::new(built);
-        *doc.page_blocks.borrow_mut() = Some(built.clone());
-        Ok((built, false))
-    }
-
-    /// What the page is made of — how many objects, how many of them text — and
-    /// so whether it is **heavy**: counted without reading any of it, **once per
-    /// state of the page** (`(page, render epoch, undo generation)`, as for
-    /// [`Self::page_blocks`]). `None` when the page cannot be counted (it is not
-    /// there), which is not a reason to refuse anything: the click goes on, and the
-    /// read that follows says what is wrong.
-    fn page_weight(&self, page: usize) -> Option<pdf_core::document::PageScale> {
-        let doc = self.tab().doc.as_ref()?;
-        let stamp = (page, doc.render_epoch, doc.session.undo_generation());
-        if let Some((held, weight)) = doc.weight.get() {
-            if held == stamp {
-                return Some(weight);
-            }
-        }
-        let weight = doc.session.page_scale(page).ok()?;
-        doc.weight.set(Some((stamp, weight)));
-        Some(weight)
-    }
-
-    /// **The page's text objects and nothing else** — where each one is and,
-    /// when `with_words`, what it says — for a click that must not read the whole
-    /// page for paragraphs: no fonts, no shapes, no detector. Made **once per state
-    /// of the page**, under the same key as [`Self::page_blocks`] (see
-    /// [`Doc::rect_page`]): it opens the page and walks every object on it, which on
-    /// a very large page is the whole of what a click costs, and a click after the
-    /// first then costs nothing at all.
-    ///
-    /// Read the heavy way (`with_words`) it is one pass over the page's text — linear
-    /// in the number of words — rather than a page open for every run asked for.
-    fn light_page(&self, page: usize, with_words: bool) -> Result<std::rc::Rc<PageBlocks>, String> {
-        let Some(doc) = self.tab().doc.as_ref() else { return Err("nothing open.".into()) };
-        let (epoch, generation) = (doc.render_epoch, doc.session.undo_generation());
-        let held = doc.rect_page.borrow().as_ref().and_then(|(has_words, held)| {
-            let good = (*has_words || !with_words) && held.page == page && held.epoch == epoch && held.generation == generation;
-            good.then(|| held.clone())
-        });
-        if let Some(held) = held {
-            return Ok(held);
-        }
-        let started = std::time::Instant::now();
-        let runs: Vec<pdf_core::document::TextRun> = if with_words {
-            doc.session.text_runs(page).map_err(|e| format!("{e}"))?
-        } else {
-            doc.session
-                .text_run_rects(page)
-                .map_err(|e| format!("{e}"))?
-                .into_iter()
-                .map(|(object, rect)| pdf_core::document::TextRun {
-                    object,
-                    text: String::new(),
-                    rect,
-                    origin: pdf_core::document::Point { x: rect.left, y: rect.bottom },
-                    size: 0.0,
-                    color: Color { r: 0, g: 0, b: 0, a: 255 },
-                })
-                .collect()
-        };
-        // Only what has an area can be clicked on, once each.
-        let mut by_object = HashMap::with_capacity(runs.len());
-        for run in runs {
-            if (run.rect.right - run.rect.left).abs() > 0.0 && (run.rect.bottom - run.rect.top).abs() > 0.0 {
-                by_object.entry(run.object).or_insert(run);
-            }
-        }
-        let built = std::rc::Rc::new(PageBlocks {
-            page,
-            epoch,
-            generation,
-            runs: by_object,
-            faces: HashMap::new(),
-            styles: HashMap::new(),
-            shapes: Vec::new(),
-            frags: Vec::new(),
-            blocks: Vec::new(),
-            by_object: HashMap::new(),
-            twins: HashMap::new(),
-            excluded: Default::default(),
-            build_ms: started.elapsed().as_secs_f32() * 1000.0,
-            detect_ms: 0.0,
-        });
-        *doc.rect_page.borrow_mut() = Some((with_words, built.clone()));
-        Ok(built)
     }
 
     /// The run under a click on a **page too heavy to read for paragraphs**: the
@@ -10537,33 +10255,6 @@ impl PagifyApp {
     /// either way.
     const BACKGROUND_SAMPLE_SCALE: f32 = 0.25;
 
-    /// Render the page once at [`Self::BACKGROUND_SAMPLE_SCALE`], for
-    /// [`Self::background_at`] to sample from — the render half of
-    /// [`Self::page_behind`], split out for a caller that already has (or
-    /// wants to keep) the raster separately from the one rect it samples.
-    ///
-    /// **Made once per state of the page, not once per click.** Every click on
-    /// a paragraph of one page wanted the same picture, and a render is the
-    /// bulk of what a click costs once the page has been read (12 to 19 ms on
-    /// the datasheet, a quarter of a second on a drawing of tens of thousands
-    /// of shapes), under the one lock that covers all use of PDFium. It is
-    /// kept on the document under the same key as [`Self::page_blocks`] —
-    /// `(page, render epoch, undo generation)` — and emptied in the same place,
-    /// [`Doc::rendered_is_stale`], so what it samples is always the page as it
-    /// is now.
-    fn page_raster_for_sampling(&self, page: usize) -> Option<std::rc::Rc<PageRaster>> {
-        let doc = self.tab().doc.as_ref()?;
-        let key = (page, doc.render_epoch, doc.session.undo_generation());
-        if let Some((held, raster)) = doc.sampling.borrow().as_ref() {
-            if *held == key {
-                return Some(raster.clone());
-            }
-        }
-        let raster = std::rc::Rc::new(doc.session.render_page(page, Self::BACKGROUND_SAMPLE_SCALE).ok()?);
-        *doc.sampling.borrow_mut() = Some((key, raster.clone()));
-        Some(raster)
-    }
-
     /// The commonest colour inside `rect` of an already-rendered raster —
     /// the sampling half of [`Self::page_behind`], split out so
     /// [`Self::page_raster_for_sampling`]'s one render can answer this for
@@ -10772,47 +10463,6 @@ impl PagifyApp {
              in their place, in a face that will not match. Escape to leave them."
                 .into(),
         )
-    }
-
-    /// The words this page *draws*, recognised without changing it.
-    ///
-    /// **Deliberately not `extracttext`.** That writes a transparent text layer
-    /// over the artwork so the page can be searched — and writing it re-emits
-    /// the page, which puts its paths inside a form. Objects nested in a form
-    /// cannot be taken off by a redaction at all, so extracting first is
-    /// precisely what makes a drawn word unremovable afterwards. Measured: the
-    /// same word, in the same box, came off a freshly opened document and was
-    /// refused on one that had been extracted.
-    ///
-    /// So this asks the recogniser for the words and keeps them here, in
-    /// memory. The page is not touched, and stays as removable as it was.
-    fn drawn_words_on(&mut self, page: usize) -> &[pdf_core::document::RecognisedWord] {
-        // Read under the stamp the page is in now, and good under no other.
-        let stamp = self.doc_stamp(page);
-        if self.tab_mut().drawn_words.as_ref().map(|(at, _)| *at) != Some(stamp) {
-            let faces = self.outlined_font_bytes();
-            let borrowed: Vec<&[u8]> = faces.iter().map(Vec::as_slice).collect();
-            let found = self.tab_mut()
-                .doc
-                .as_ref()
-                .and_then(|d| {
-                    d.session.recognise_drawn_words(page, &borrowed).ok()
-                })
-                .flatten()
-                .unwrap_or_default();
-            // **Not filtered for plausibility, deliberately.** Matching shapes
-            // against a face the document was not set in produces fragments —
-            // measured on a real report: 44 "words", the longest `000`. But the
-            // same is true of a *correct* match on a page the recogniser splits
-            // finely: `extru`, `Th`, `us` are what a good read of a real
-            // fixture looks like. No statistic told the two apart.
-            //
-            // So the judgement is left where it can actually be made: the
-            // editor opens holding the word as read, and somebody who sees
-            // `000` presses Escape. Nothing changes until it is applied.
-            self.tab_mut().drawn_words = Some((stamp, found));
-        }
-        self.tab_mut().drawn_words.as_ref().map(|(_, words)| words.as_slice()).unwrap_or(&[])
     }
 
     /// The face a new line grown out of `edit` should be written in.
@@ -11333,7 +10983,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().foreign = None;
 
         Ok(format!("wrote \"{text}\" on page {}.", page + 1))
     }
@@ -11577,7 +11226,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().foreign = None;
 
         match failed {
             Some(e) => self.say_error(e),
@@ -11714,7 +11362,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().foreign = None;
 
         Ok(format!("picture placed on page {}.", page + 1))
     }
@@ -11835,10 +11482,8 @@ impl PagifyApp {
         // selection belonging to a page that has moved — and the symptom
         // appears well away from the cause.
         self.refresh_after_page_change();
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
-        self.tab_mut().foreign = None;
         self.say_info(said);
     }
 
@@ -11933,43 +11578,6 @@ impl PagifyApp {
         }
     }
 
-    /// The rectangles of every annotation on a page, with its listing number.
-    ///
-    /// Rebuilt when the page changes, not on every pointer move: reading
-    /// annotations goes through PDFium and a mouse crossing a page would ask
-    /// hundreds of times a second.
-    fn foreign_marks(&mut self, page: usize) -> &[(usize, Vec<pdf_core::document::Rect>)] {
-        if self.tab_mut().foreign.as_ref().map(|(p, _)| *p) != Some(page) {
-            use pdf_core::document::Annotation as A;
-            let marks = self.tab_mut()
-                .doc
-                .as_ref()
-                .and_then(|d| d.session.annotations(page).ok())
-                .unwrap_or_default()
-                .iter()
-                .enumerate()
-                .filter_map(|(n, m)| {
-                    let rects = match &m.annotation {
-                        A::Highlight { rects, .. }
-                        | A::Underline { rects, .. }
-                        | A::StrikeOut { rects, .. }
-                        | A::Squiggly { rects, .. } => rects.clone(),
-                        A::Note { rect, .. } => vec![*rect],
-                        A::Image { rect, .. } => vec![*rect],
-                        A::Link { rect, .. } => vec![*rect],
-                        // Ink and Fill are this engine's own markup, tracked
-                        // live in `markup::Layer` rather than hit-tested here;
-                        // text is page content rather than an annotation.
-                        A::Ink { .. } | A::Text { .. } | A::Fill { .. } => return None,
-                    };
-                    Some((n + 1, rects))
-                })
-                .collect();
-            self.tab_mut().foreign = Some((page, marks));
-        }
-        self.tab_mut().foreign.as_ref().map(|(_, m)| m.as_slice()).unwrap_or(&[])
-    }
-
     /// The annotation under a point, if any.
     fn foreign_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
         let (x, y) = (at.x as f32, at.y as f32);
@@ -11984,38 +11592,6 @@ impl PagifyApp {
                 })
                 .then_some(*n)
         })
-    }
-
-    /// The page a link under `at` goes to, when it is one of this document's
-    /// own pages — a contents list entry, a "back to the index".
-    ///
-    /// **Reported from use: "links inside a PDF don't work".** Only web
-    /// addresses were ever followed; a link to a page was not even listed, so
-    /// clicking a contents entry did nothing at all.
-    fn internal_link_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
-        let (generation, session) = {
-            let doc = self.tab().doc.as_ref()?;
-            (doc.session.undo_generation(), doc.session.clone())
-        };
-        let stale = !matches!(&self.tab().internal_links, Some((p, g, _)) if *p == page && *g == generation);
-        if stale {
-            let links = session.internal_links(page).unwrap_or_default();
-            self.tab_mut().internal_links = Some((page, generation, links));
-        }
-        let (x, y) = (at.x as f32, at.y as f32);
-        let (_, _, links) = self.tab().internal_links.as_ref()?;
-        // The smallest link under the point: a button inside a larger banner
-        // link is the one that was meant.
-        links
-            .iter()
-            .filter(|l| x >= l.rect.left && x <= l.rect.right && y >= l.rect.top && y <= l.rect.bottom)
-            .min_by(|a, b| {
-                let area = |l: &pdf_core::document::InternalLink| {
-                    (l.rect.right - l.rect.left) * (l.rect.bottom - l.rect.top)
-                };
-                area(a).total_cmp(&area(b))
-            })
-            .map(|l| l.page)
     }
 
     /// The address a foreign-mark number from [`Self::foreign_at`] names,
@@ -12137,7 +11713,6 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().foreign = None;
                 self.say_info(format!("{what} removed — `undo` puts it back."));
             }
             Err(e) => self.say_error(format!("{e}")),
@@ -12176,7 +11751,6 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().foreign = None;
         Ok(format!("{what} erased — `undo` puts it back."))
     }
 
@@ -12261,7 +11835,6 @@ impl PagifyApp {
                         doc.rendered_is_stale();
                     }
                     self.tab_mut().selected = None;
-                    self.tab_mut().layers = None;
                     self.say_info(format!("{} removed from page {}.", sel.what, sel.page + 1));
                 }
                 Err(e) => self.say_error(e),
@@ -12362,7 +11935,6 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-self.tab_mut().foreign = None;
                 self.say_info(format!(
                     "{} {lines} line{}.",
                     kind.name(),
@@ -12600,7 +12172,7 @@ self.tab_mut().foreign = None;
                         image,
                         egui::TextureOptions::LINEAR,
                     );
-                    doc.textures.insert((done.page, done.step, rotation), handle);
+                    doc.caches.textures.insert((done.page, done.step, rotation), handle);
                     Self::trim_scales(doc, done.page, done.step, rotation);
                 }
                 Some(crop) => {
@@ -12609,7 +12181,7 @@ self.tab_mut().foreign = None;
                         image,
                         egui::TextureOptions::LINEAR,
                     );
-                    doc.detail = Some(DetailTile { page: done.page, zoom_step: done.step, crop, texture });
+                    doc.caches.detail = Some(DetailTile { page: done.page, zoom_step: done.step, crop, texture });
                 }
             }
             self.render_stats.applied += 1;
@@ -12632,13 +12204,14 @@ self.tab_mut().foreign = None;
     /// the nearest others.
     fn trim_scales(doc: &mut Doc, page: usize, step: u32, rotation: u8) {
         let held: Vec<u32> = doc
+            .caches
             .textures
             .keys()
             .filter(|(p, _, r)| *p == page && *r == rotation)
             .map(|(_, s, _)| *s)
             .collect();
         for gone in scales_to_drop(&held, step, SCALES_KEPT_PER_PAGE) {
-            doc.textures.remove(&(page, gone, rotation));
+            doc.caches.textures.remove(&(page, gone, rotation));
         }
     }
 
@@ -12686,7 +12259,7 @@ self.tab_mut().foreign = None;
         let async_render = self.async_render;
         let doc = self.tab_mut().doc.as_mut()?;
 
-        if let Some(existing) = doc.textures.get(&key) {
+        if let Some(existing) = doc.caches.textures.get(&key) {
             return Some(existing.clone());
         }
 
@@ -12741,7 +12314,7 @@ self.tab_mut().foreign = None;
             page_to_image(&raster),
             egui::TextureOptions::LINEAR,
         );
-        doc.textures.insert(key, handle.clone());
+        doc.caches.textures.insert(key, handle.clone());
         Self::trim_scales(doc, page, zoom_step, rotation as u8);
         self.render_stats.on_ui_thread += 1;
         // **What a stall was, written down where it can be read.** The session
@@ -12813,7 +12386,7 @@ self.tab_mut().foreign = None;
         // the pointer is released.
         let dragging = ctx.input(|i| i.pointer.any_down());
         let doc = self.tab_mut().doc.as_mut()?;
-        if let Some(existing) = doc.thumbs.get(&page) {
+        if let Some(existing) = doc.caches.thumbs.get(&page) {
             let have = existing.size()[0] as u32;
             let right_size = have.abs_diff(width_px) <= 6;
             let usable_meanwhile = have * 2 >= width_px && have <= width_px * 2;
@@ -12834,7 +12407,7 @@ self.tab_mut().foreign = None;
                 ..egui::TextureOptions::LINEAR
             },
         );
-        doc.thumbs.insert(page, handle.clone());
+        doc.caches.thumbs.insert(page, handle.clone());
         Some(handle)
     }
 
@@ -13080,6 +12653,7 @@ fn scales_to_drop(held: &[u32], step: u32, keep: usize) -> Vec<u32> {
 /// zoom's settling for.
 fn stand_in_for(doc: &Doc, page: usize, step: u32, rotation: u8) -> Option<(egui::TextureHandle, bool)> {
     let nearest = doc
+        .caches
         .textures
         .iter()
         .filter(|((p, _, r), _)| *p == page && *r == rotation)
@@ -13091,7 +12665,7 @@ fn stand_in_for(doc: &Doc, page: usize, step: u32, rotation: u8) -> Option<(egui
     }
     // The thumbnail is of the page upright, so only a view that is upright.
     if rotation == 0 {
-        return doc.thumbs.get(&page).cloned().map(|t| (t, true));
+        return doc.caches.thumbs.get(&page).cloned().map(|t| (t, true));
     }
     None
 }

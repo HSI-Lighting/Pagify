@@ -709,7 +709,6 @@ impl crate::PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().text = None;
                 self.tab_mut().text_selection = None;
                 self.tab_mut().find_hits.clear();
 
@@ -886,14 +885,12 @@ impl crate::PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
         if failed.is_none() && renumbers {
             // Every object number of the page moved. `layers` is a list read
             // before it; a join names objects by number and would now name
             // other ones.
-            self.tab_mut().layers = None;
             let page = edit.page;
             self.tab_mut().joined_groups.retain(|group| group.page != page);
         }
@@ -1147,7 +1144,6 @@ impl crate::PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text = None;
         self.tab_mut().text_selection = None;
         self.tab_mut().find_hits.clear();
         Ok(format!(

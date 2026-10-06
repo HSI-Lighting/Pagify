@@ -712,9 +712,9 @@ fn nothing_asks_for_page_text_when_there_is_nothing_to_highlight() {
     h.run_steps(3);
 
     assert!(
-        h.state().tab().text.is_none(),
+        h.state().tab().doc.as_ref().unwrap().caches.text.is_none(),
         "a frame with nothing to highlight extracted the text of page {:?}",
-        h.state().tab().text.as_ref().map(|(p, _)| *p)
+        h.state().tab().doc.as_ref().unwrap().caches.text.as_ref().map(|(p, _)| *p)
     );
 }
 
@@ -733,7 +733,7 @@ fn only_a_page_with_something_to_highlight_is_asked_for_its_text() {
 
     assert_eq!(h.state().tab().find_hits.len(), 1);
     assert_eq!(
-        h.state().tab().text.as_ref().map(|(p, _)| *p),
+        h.state().tab().doc.as_ref().unwrap().caches.text.as_ref().map(|(p, _)| *p),
         Some(0),
         "a page with no hit and no selection was asked for its text"
     );

@@ -232,7 +232,7 @@ fn a_refused_paragraph_apply_reads_as_a_refusal_too() {
 /// The page's text now, read fresh.
 fn page_text(h: &mut Harness<'static, PagifyApp>) -> String {
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     app.characters(0).map(|c| c.text()).unwrap_or_default()
 }
 
@@ -825,7 +825,7 @@ fn the_click_that_closes_an_editor_picks_once_not_twice() {
     assert!(h.query_by_label_contains("no text there").is_some(), "the miss is not on screen");
     // And the edit it closed still landed — this changes nothing about success.
     let app = h.state_mut();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let page = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(page.contains("REPLACED"), "clicking away did not apply the change:\n{page}");
 }

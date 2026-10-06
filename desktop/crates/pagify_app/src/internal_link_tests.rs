@@ -80,9 +80,9 @@ fn the_links_of_a_page_are_read_once_not_every_frame() {
     for _ in 0..50 {
         app.internal_link_at(0, AppPoint { x: 15.0, y: 40.0 });
     }
-    let (page, _, links) = app.tab().internal_links.as_ref().expect("nothing was cached");
+    let (page, _, links) = app.tab().doc.as_ref().unwrap().caches.internal_links.as_ref().expect("nothing was cached");
     assert_eq!((*page, links.len()), (0, 2));
     // Asking about another page replaces it, rather than answering from the first.
     assert_eq!(app.internal_link_at(1, AppPoint { x: 15.0, y: 40.0 }), None);
-    assert_eq!(app.tab().internal_links.as_ref().unwrap().0, 1);
+    assert_eq!(app.tab().doc.as_ref().unwrap().caches.internal_links.as_ref().unwrap().0, 1);
 }

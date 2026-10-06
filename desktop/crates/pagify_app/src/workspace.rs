@@ -7,7 +7,6 @@ use pagify_shell::measure::Calibration;
 use pagify_shell::reader::{Strip, PAGE_GAP_PT};
 use pagify_shell::Session;
 use pdf_core::error::PdfError;
-use std::collections::HashMap;
 
 impl crate::PagifyApp {
     /// The document showing right now — see [`Self::active_tab`].
@@ -200,16 +199,9 @@ impl crate::PagifyApp {
                     session: std::sync::Arc::new(session),
                     id: NEXT_DOC_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     render_epoch: 0,
-                    locked: Default::default(),
-                    page_blocks: Default::default(),
-                    sampling: Default::default(),
-                    weight: Default::default(),
-                    rect_page: Default::default(),
                     strip: Strip::new(&sizes, PAGE_GAP_PT),
                     page_count,
-                    textures: HashMap::new(),
-                    thumbs: HashMap::new(),
-                    detail: None,
+                    caches: Default::default(),
                 });
                 self.tab_mut().page = 0;
                 self.tab_mut().zoom_basis = 0;

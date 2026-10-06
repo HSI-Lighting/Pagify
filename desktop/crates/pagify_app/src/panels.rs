@@ -1404,7 +1404,7 @@ impl crate::PagifyApp {
             .tab_mut()
             .doc
             .as_ref()
-            .and_then(|d| d.detail.as_ref())
+            .and_then(|d| d.caches.detail.as_ref())
             .is_some_and(|tile| {
                 Self::detail_tile_covers(tile.page, tile.zoom_step, tile.crop, page, zoom_step, visible_crop)
             });
@@ -1464,13 +1464,13 @@ impl crate::PagifyApp {
                     page_to_image(&raster),
                     egui::TextureOptions::LINEAR,
                 );
-                doc.detail = Some(DetailTile { page, zoom_step, crop, texture });
+                doc.caches.detail = Some(DetailTile { page, zoom_step, crop, texture });
                 self.render_stats.detail_on_ui_thread += 1;
             }
         }
 
         let Some(doc) = self.tab_mut().doc.as_ref() else { return };
-        let Some(tile) = doc.detail.as_ref().filter(|t| t.page == page) else { return };
+        let Some(tile) = doc.caches.detail.as_ref().filter(|t| t.page == page) else { return };
         let screen_rect = egui::Rect::from_min_max(
             view.to_screen(AppPoint::new(tile.crop.left as f64, tile.crop.top as f64)),
             view.to_screen(AppPoint::new(tile.crop.right as f64, tile.crop.bottom as f64)),

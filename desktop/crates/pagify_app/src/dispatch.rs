@@ -146,7 +146,6 @@ impl crate::PagifyApp {
                             if let Some(doc) = &mut self.tab_mut().doc {
                                 doc.rendered_is_stale();
                             }
-                            self.tab_mut().text = None;
                             self.say_info("the marking is off. Save to write it out.");
                         }
                         Err(e) => self.say_error(e.to_string()),
@@ -162,7 +161,6 @@ impl crate::PagifyApp {
                                 if let Some(doc) = &mut self.tab_mut().doc {
                                     doc.rendered_is_stale();
                                 }
-                                self.tab_mut().text = None;
                                 // Says plainly what a marking is and is not.
                                 // Somebody reaching for it may believe it
                                 // protects the document; it does not.
@@ -292,7 +290,6 @@ impl crate::PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().foreign = None;
                 // Applied signatures are page content now, not annotations —
                 // a selection naming one by its old annotation index would
                 // be pointing at nothing, or worse, at whatever else now
@@ -669,7 +666,6 @@ impl crate::PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().text = None;
                 self.tab_mut().text_selection = None;
                 self.tab_mut().find_hits.clear();
                 if partly.is_empty() && left.is_empty() {
@@ -710,7 +706,6 @@ impl crate::PagifyApp {
                             if let Some(doc) = &mut self.tab_mut().doc {
                                 doc.rendered_is_stale();
                             }
-                            self.tab_mut().text = None;
                             self.tab_mut().text_selection = None;
                             self.tab_mut().find_hits.clear();
                             let said = done.describe();
@@ -754,7 +749,7 @@ impl crate::PagifyApp {
                 }
                 self.show_layers = !self.show_layers;
                 if self.show_layers {
-                    self.tab_mut().layers = None;
+                    self.forget_layers();
                     let page = self.tab().page;
                     let count = self.layers_on(page).len();
                     self.say_info(format!(

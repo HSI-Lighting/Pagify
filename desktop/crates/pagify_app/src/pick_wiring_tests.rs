@@ -703,7 +703,7 @@ fn edit_text_still_opens_the_run_when_the_pages_text_cannot_be_read_in_one_pass(
 fn the_background_is_sampled_from_one_picture_per_state_of_the_page() {
     let mut app = app("two-column.pdf");
     let kept = |app: &PagifyApp| {
-        app.tab().doc.as_ref().expect("open").sampling.borrow().as_ref().map(|(_, picture)| picture.clone())
+        app.tab().doc.as_ref().expect("open").caches.sampling.borrow().as_ref().map(|(_, picture)| picture.clone())
     };
     let mut left: Vec<TextRun> = text_runs(&app, 0).into_iter().filter(|r| r.rect.left < 300.0).collect();
     left.sort_by(|a, b| a.rect.top.total_cmp(&b.rect.top));

@@ -172,7 +172,7 @@ fn extract_text_does_not_duplicate_text_already_on_the_page() {
 
     app.submit("extracttext");
     app.wait_for_reading();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
 
     let after = app.characters(0).map(|c| c.text()).unwrap_or_default();
     assert_eq!(
@@ -511,7 +511,7 @@ fn extract_text_makes_an_outlined_page_selectable() {
 
     app.submit("extracttext");
     app.wait_for_reading();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let after = app.characters(0).map(|c| c.len()).unwrap_or(0);
     assert!(after > 4, "nothing became selectable:\n{}", said(&app));
 
@@ -536,12 +536,12 @@ fn an_extracted_text_layer_can_be_undone() {
     }
     app.submit("extracttext");
     app.wait_for_reading();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let added = app.characters(0).map(|c| c.len()).unwrap_or(0);
     assert!(added > 4, "nothing to undo:\n{}", said(&app));
 
     app.submit("undo");
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let after = app.characters(0).map(|c| c.len()).unwrap_or(0);
     assert!(after < added, "undo left the layer in place ({added} -> {after})");
 }
@@ -569,7 +569,7 @@ fn extract_text_on_a_same_font_outlined_page_never_touches_ocr() {
 
     app.submit("extracttext");
     app.wait_for_reading();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
 
     let after = app.characters(0).map(|c| c.len()).unwrap_or(0);
     assert!(after > 4, "nothing became selectable:\n{}", said(&app));
@@ -635,7 +635,7 @@ fn a_user_added_font_unlocks_the_fast_path_for_a_page_the_bundled_fonts_do_not_m
 
     app.submit("extracttext");
     app.wait_for_reading();
-    app.tab_mut().text = None;
+    app.tab_mut().doc.as_mut().unwrap().caches.text = None;
 
     let after = app.characters(0).map(|c| c.len()).unwrap_or(0);
     let recognised_without_ocr = app.recogniser.is_none();

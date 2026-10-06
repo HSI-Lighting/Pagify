@@ -1203,10 +1203,7 @@ impl crate::PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             let keep_from = visible.start.saturating_sub(3);
             let keep_to = visible.end + 3;
-            doc.textures.retain(|(page, _, _), _| *page >= keep_from && *page < keep_to);
-            if doc.detail.as_ref().is_some_and(|d| d.page < keep_from || d.page >= keep_to) {
-                doc.detail = None;
-            }
+            doc.caches.evict_outside(keep_from, keep_to);
         }
     }
 
@@ -1754,8 +1751,8 @@ impl crate::PagifyApp {
                             .iter()
                             .take(8)
                             .filter_map(|index| {
-                                self.tab_mut().layers
-                                    .as_ref()
+                                self.tab_mut().doc.as_ref()
+                                    .and_then(|d| d.caches.layers.as_ref())
                                     .and_then(|(_, l)| l.get(*index))
                                     .map(|d| {
                                         (
@@ -1806,7 +1803,7 @@ impl crate::PagifyApp {
                 {
                     self.show_layers = !shown;
                     if self.show_layers {
-                        self.tab_mut().layers = None;
+                        self.forget_layers();
                     }
                     ui.close();
                 }
