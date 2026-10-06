@@ -28,6 +28,8 @@ mod pending;
 mod picking;
 #[cfg(test)]
 mod edit_text_hardening_tests;
+#[cfg(test)]
+mod tool_state_gap_tests;
 #[cfg(target_os = "windows")]
 mod print_windows;
 mod ribbon;
