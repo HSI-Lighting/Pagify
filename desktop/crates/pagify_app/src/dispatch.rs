@@ -502,7 +502,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm(PendingKind::Draw(DrawKind::Arrow), page);
+                    self.arm_tool(Tool::Draw(DrawKind::Arrow), page);
                 }
             }
             Verb::ToggleFill => {
@@ -829,8 +829,11 @@ impl crate::PagifyApp {
             Verb::Pointer(mode) => {
                 // Switching tools abandons whatever was half-picked. Leaving a
                 // pending operation armed under a new tool is how a click meant
-                // for one thing lands in another.
-                if self.tab_mut().pending.take().is_some() {
+                // for one thing lands in another. `|`, not `||`: both takes
+                // must run regardless of which one actually held something.
+                let abandoned =
+                    self.tab_mut().pending.take().is_some() | self.tab_mut().tool.take().is_some();
+                if abandoned {
                     let page = self.tab().page;
                     if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
                         layer.forget_last_step();
@@ -910,15 +913,18 @@ impl crate::PagifyApp {
 
             // The typed form of pressing Enter over the page.
             Verb::Finish => {
-                let closeable = self.tab_mut()
+                let pending_closeable = self.tab_mut()
                     .pending
                     .as_ref()
                     .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
-                if closeable {
+                let tool_closeable = self.tab_mut()
+                    .tool
+                    .as_ref()
+                    .is_some_and(|t| t.kind.ends_on_enter() && t.points.len() >= 2);
+                if pending_closeable {
                     self.resolve();
-                // No `Tool` kind ends on Enter yet, so a `Tool` being armed
-                // at all means it is still waiting for more points — same
-                // as `pending` being armed but not `closeable`, above.
+                } else if tool_closeable {
+                    self.resolve_tool();
                 } else if self.tab_mut().pending.is_some() || self.tab_mut().tool.is_some() {
                     self.say_error("not enough points yet.");
                 } else {

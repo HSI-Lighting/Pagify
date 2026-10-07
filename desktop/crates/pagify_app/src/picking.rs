@@ -4,8 +4,8 @@
 //! **Still in its current shape, not redesigned** — see [`crate::pending`]'s
 //! own doc for why. `resolve` in particular is still the one large dispatch
 //! match it always was, not the `Tool::on_click` that is supposed to replace
-//! it. `resolve_tool` is that function's first, much smaller sibling: the
-//! two kinds that have already moved out of the big match.
+//! it. `resolve_tool` is that function's smaller sibling: the kinds that
+//! have already moved out of the big match.
 
 use crate::{
     area_between, ArmedTool, Awaiting, DrawKind, Pending, PendingArticleBox, PendingKind, Tool,
@@ -179,6 +179,12 @@ impl crate::PagifyApp {
     pub(crate) fn resolve_tool(&mut self) {
         let Some(armed) = self.tab_mut().tool.take() else { return };
         let page = armed.page;
+        let height = self.tab_mut()
+            .doc
+            .as_ref()
+            .and_then(|d| d.strip.size_of(page))
+            .map(|(_, h)| h as f64)
+            .unwrap_or(792.0);
         let outcome = match &armed.kind {
             Tool::Signature => match armed.points.first().copied() {
                 Some(at) => self.place_signature(page, at),
@@ -238,7 +244,104 @@ impl crate::PagifyApp {
                     None => Err("nowhere to write.".into()),
                 }
             }
+            Tool::Draw(kind) => {
+                let draw_fill = self.draw_fill;
+                let layer = self.tab_mut().markup.page(page, height);
+                layer.begin("draw");
+                let space = layer.space();
+                let p: Vec<cad_kernel::Vec2> =
+                    armed.points.iter().map(|q| space.to_kernel(*q)).collect();
+
+                match kind {
+                    DrawKind::Line => {
+                        layer.add(cad_kernel::Geom::Line(cad_kernel::Line { a: p[0], b: p[1] }));
+                        Ok("line added.".into())
+                    }
+                    DrawKind::Circle => {
+                        let radius = (p[1] - p[0]).len();
+                        if radius < 1e-6 {
+                            Err("circle: that radius is zero.".into())
+                        } else {
+                            let index = layer.add(cad_kernel::Geom::Circle(cad_kernel::Circle {
+                                center: p[0],
+                                radius,
+                            }));
+                            if draw_fill {
+                                layer.set_filled(index, true);
+                            }
+                            Ok(if draw_fill { "filled circle added." } else { "circle added." }.into())
+                        }
+                    }
+                    DrawKind::Rectangle => {
+                        let (a, b) = (p[0], p[1]);
+                        let corners = [
+                            a,
+                            cad_kernel::Vec2::new(b.x, a.y),
+                            b,
+                            cad_kernel::Vec2::new(a.x, b.y),
+                        ];
+                        let index = layer.add(cad_kernel::Geom::Polyline(cad_kernel::Polyline {
+                            vertices: corners
+                                .iter()
+                                .map(|v| cad_kernel::PolyVertex { pos: *v, bulge: 0.0 })
+                                .collect(),
+                            closed: true,
+                            widths: Vec::new(),
+                        }));
+                        if draw_fill {
+                            layer.set_filled(index, true);
+                        }
+                        Ok(if draw_fill { "filled rectangle added." } else { "rectangle added." }.into())
+                    }
+                    DrawKind::Polyline => {
+                        if p.len() < 2 {
+                            Err("polyline: needs at least two points.".into())
+                        } else {
+                            layer.add(cad_kernel::Geom::Polyline(cad_kernel::Polyline {
+                                vertices: p
+                                    .iter()
+                                    .map(|v| cad_kernel::PolyVertex { pos: *v, bulge: 0.0 })
+                                    .collect(),
+                                closed: false,
+                                widths: Vec::new(),
+                            }));
+                            Ok(format!("polyline of {} points added.", p.len()))
+                        }
+                    }
+                    DrawKind::Arrow => {
+                        let index = layer.add(cad_kernel::Geom::Line(cad_kernel::Line {
+                            a: p[0],
+                            b: p[1],
+                        }));
+                        layer.set_arrow_ends(index, false, true);
+                        Ok("arrow added.".into())
+                    }
+                    DrawKind::Spline => {
+                        // A degree-3 B-spline needs more control points than its
+                        // degree, so four is the least that makes a real curve.
+                        if p.len() < 4 {
+                            Err("spline: needs at least four points.".into())
+                        } else {
+                            let count = p.len();
+                            layer.add(cad_kernel::Geom::Spline(cad_kernel::Spline::new_bspline(
+                                3, p,
+                            )));
+                            Ok(format!("spline of {count} points added."))
+                        }
+                    }
+                }
+            }
         };
+        // Close the checkpoint a draw opened, and drop it if the draw
+        // refused — see `resolve`'s own identical tail for why.
+        if matches!(armed.kind, Tool::Draw(_)) {
+            if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
+                layer.end();
+                if outcome.is_err() {
+                    layer.forget_last_step();
+                }
+            }
+        }
         let repeats = armed.kind.repeats();
         let failed = outcome.is_err();
         match outcome {
@@ -321,94 +424,6 @@ impl crate::PagifyApp {
                 },
                 _ => Err("article box: two corners are needed.".into()),
             },
-            PendingKind::Draw(kind) => {
-                let draw_fill = self.draw_fill;
-                let layer = self.tab_mut().markup.page(page, height);
-                layer.begin("draw");
-                let space = layer.space();
-                let p: Vec<cad_kernel::Vec2> =
-                    pending.points.iter().map(|q| space.to_kernel(*q)).collect();
-
-                match kind {
-                    DrawKind::Line => {
-                        layer.add(cad_kernel::Geom::Line(cad_kernel::Line { a: p[0], b: p[1] }));
-                        Ok("line added.".into())
-                    }
-                    DrawKind::Circle => {
-                        let radius = (p[1] - p[0]).len();
-                        if radius < 1e-6 {
-                            Err("circle: that radius is zero.".into())
-                        } else {
-                            let index = layer.add(cad_kernel::Geom::Circle(cad_kernel::Circle {
-                                center: p[0],
-                                radius,
-                            }));
-                            if draw_fill {
-                                layer.set_filled(index, true);
-                            }
-                            Ok(if draw_fill { "filled circle added." } else { "circle added." }.into())
-                        }
-                    }
-                    DrawKind::Rectangle => {
-                        let (a, b) = (p[0], p[1]);
-                        let corners = [
-                            a,
-                            cad_kernel::Vec2::new(b.x, a.y),
-                            b,
-                            cad_kernel::Vec2::new(a.x, b.y),
-                        ];
-                        let index = layer.add(cad_kernel::Geom::Polyline(cad_kernel::Polyline {
-                            vertices: corners
-                                .iter()
-                                .map(|v| cad_kernel::PolyVertex { pos: *v, bulge: 0.0 })
-                                .collect(),
-                            closed: true,
-                            widths: Vec::new(),
-                        }));
-                        if draw_fill {
-                            layer.set_filled(index, true);
-                        }
-                        Ok(if draw_fill { "filled rectangle added." } else { "rectangle added." }.into())
-                    }
-                    DrawKind::Polyline => {
-                        if p.len() < 2 {
-                            Err("polyline: needs at least two points.".into())
-                        } else {
-                            layer.add(cad_kernel::Geom::Polyline(cad_kernel::Polyline {
-                                vertices: p
-                                    .iter()
-                                    .map(|v| cad_kernel::PolyVertex { pos: *v, bulge: 0.0 })
-                                    .collect(),
-                                closed: false,
-                                widths: Vec::new(),
-                            }));
-                            Ok(format!("polyline of {} points added.", p.len()))
-                        }
-                    }
-                    DrawKind::Arrow => {
-                        let index = layer.add(cad_kernel::Geom::Line(cad_kernel::Line {
-                            a: p[0],
-                            b: p[1],
-                        }));
-                        layer.set_arrow_ends(index, false, true);
-                        Ok("arrow added.".into())
-                    }
-                    DrawKind::Spline => {
-                        // A degree-3 B-spline needs more control points than its
-                        // degree, so four is the least that makes a real curve.
-                        if p.len() < 4 {
-                            Err("spline: needs at least four points.".into())
-                        } else {
-                            let count = p.len();
-                            layer.add(cad_kernel::Geom::Spline(cad_kernel::Spline::new_bspline(
-                                3, p,
-                            )));
-                            Ok(format!("spline of {count} points added."))
-                        }
-                    }
-                }
-            }
-
             PendingKind::Modify(pick) => {
                 let layer = self.tab_mut().markup.page(page, height);
                 let space = layer.space();
@@ -423,18 +438,6 @@ impl crate::PagifyApp {
                 tools::run(layer, pick.op, &objects, &points)
             }
         };
-
-        // Close the checkpoint a draw opened, and drop it if the draw refused —
-        // an undo step for an operation that changed nothing looks broken,
-        // because nothing moves.
-        if matches!(pending.kind, PendingKind::Draw(_)) {
-            if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
-                layer.end();
-                if outcome.is_err() {
-                    layer.forget_last_step();
-                }
-            }
-        }
 
         let failed = outcome.is_err();
         match outcome {

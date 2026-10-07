@@ -7726,7 +7726,7 @@ impl PagifyApp {
                     _ => None,
                 };
                 match draw {
-                    Some(kind) => self.arm(PendingKind::Draw(kind), page),
+                    Some(kind) => self.arm_tool(Tool::Draw(kind), page),
                     None => self.say_info(
                         "that tool draws from typed coordinates for now — e.g. `arc3p 0,0 50,50 100,0`.",
                     ),
@@ -12919,6 +12919,12 @@ impl eframe::App for PagifyApp {
                     .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
                 if closeable {
                     self.resolve();
+                } else if self.tab_mut()
+                    .tool
+                    .as_ref()
+                    .is_some_and(|t| t.kind.ends_on_enter() && t.points.len() >= 2)
+                {
+                    self.resolve_tool();
                 }
             }
         }
@@ -14005,8 +14011,9 @@ impl eframe::App for PagifyApp {
         if let Some(dispatch) = submitted {
             // A typed line cancels any half-collected pick. Letting it swallow
             // the click silently would mean an unrelated command finishing
-            // someone else's measurement.
-            if self.tab_mut().pending.take().is_some() {
+            // someone else's measurement. `|`, not `||`: both takes must run
+            // regardless of which one actually held something.
+            if self.tab_mut().pending.take().is_some() | self.tab_mut().tool.take().is_some() {
                 self.say_info("that pick was cancelled.");
             }
             let line = self

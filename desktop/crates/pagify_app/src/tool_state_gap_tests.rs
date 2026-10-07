@@ -95,11 +95,12 @@ fn the_central_escape_does_not_close_the_link_prompt() {
 
 /// **Enter and the typed `done` command answer "not enough points yet"
 /// differently for the same situation.** Both read the identical condition
-/// (`pending.kind.ends_on_enter() && pending.points.len() >= 2`) — Enter in
-/// `main.rs`'s own per-frame key handler, `done` as `Verb::Finish` in
-/// `dispatch.rs` — but Enter's `if closeable { self.resolve(); }` has no
-/// `else`, so with too few points it does nothing and says nothing; `done`'s
-/// `else if pending.is_some() { say_error("not enough points yet.") }` always
+/// (`kind.ends_on_enter() && points.len() >= 2`, now against `tool` since
+/// `Draw`/`pline` moved there — the shape of the check didn't change) —
+/// Enter in `main.rs`'s own per-frame key handler, `done` as `Verb::Finish`
+/// in `dispatch.rs` — but Enter's `if closeable { self.resolve_tool(); }`
+/// has no `else`, so with too few points it does nothing and says nothing;
+/// `done`'s `else if ... { say_error("not enough points yet.") }` always
 /// says something. A reader who presses Enter on a one-point polyline learns
 /// nothing happened only by watching the page not finish; a reader who types
 /// `done` is told why.
@@ -109,7 +110,7 @@ fn enter_with_too_few_points_says_nothing_but_done_says_so() {
     h.state_mut().submit("pline");
     h.state_mut().take_pick(AppPoint { x: 10.0, y: 10.0 });
     assert_eq!(
-        h.state_mut().tab_mut().pending.as_ref().expect("setup: still armed").points.len(),
+        h.state_mut().tab_mut().tool.as_ref().expect("setup: still armed").points.len(),
         1,
         "setup: exactly one point should be down"
     );
@@ -122,7 +123,7 @@ fn enter_with_too_few_points_says_nothing_but_done_says_so() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().pending.is_some(),
+        h.state().tab().tool.is_some(),
         "a one-point polyline must not finish on Enter — there are not enough points"
     );
     assert_eq!(

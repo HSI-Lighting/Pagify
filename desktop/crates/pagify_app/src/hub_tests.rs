@@ -861,7 +861,7 @@ fn escape_while_carrying_puts_the_tab_back_and_is_not_also_an_escape_elsewhere()
     let tab = tab_centre(&h, "two-column.pdf");
     // A tool in hand: an Escape that reached the rest of the window would put it down.
     h.state_mut().submit("l");
-    assert!(h.state_mut().tab_mut().pending.is_some(), "test assumption: a tool is armed");
+    assert!(h.state_mut().tab_mut().tool.is_some(), "test assumption: a tool is armed");
 
     press_and_carry(&mut h, tab, &[tab + vec2(40.0, 10.0), pos2(1700.0, 400.0)]);
     assert!(h.state().dragging_tab(1));
@@ -871,7 +871,7 @@ fn escape_while_carrying_puts_the_tab_back_and_is_not_also_an_escape_elsewhere()
     // put down without being reported — what matters is that nothing came of it.)
     assert!(h.state().win.drag.is_none(), "the tab is still lifted after Escape");
     assert!(h.state().win.out.is_none(), "Escape was reported as a release");
-    assert!(h.state_mut().tab_mut().pending.is_some(), "the Escape also put the armed tool down");
+    assert!(h.state_mut().tab_mut().tool.is_some(), "the Escape also put the armed tool down");
 
     h.drop_at(pos2(1700.0, 400.0));
     h.run_steps(2);

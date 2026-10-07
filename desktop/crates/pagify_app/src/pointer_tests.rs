@@ -34,7 +34,7 @@ fn said(app: &PagifyApp) -> String {
 fn the_line_tool_draws_from_two_clicks() {
     let mut app = app("single-page.pdf");
     app.submit("line");
-    assert!(app.tab_mut().pending.is_some(), "line did not arm:\n{}", said(&app));
+    assert!(app.tab_mut().tool.is_some(), "line did not arm:\n{}", said(&app));
 
     app.take_pick(at(10.0, 10.0));
     assert_eq!(marks(&app), 0, "one click drew a line");
@@ -44,14 +44,14 @@ fn the_line_tool_draws_from_two_clicks() {
     // **Still in hand.** A tool is something you pick up and keep using;
     // one that lets go after a single line means going back to the ribbon
     // between every line, and a box becomes four trips.
-    assert!(app.tab_mut().pending.is_some(), "the line tool let go after one line");
+    assert!(app.tab_mut().tool.is_some(), "the line tool let go after one line");
 
     app.take_pick(at(120.0, 10.0));
     app.take_pick(at(200.0, 90.0));
     assert_eq!(marks(&app), 2, "the second line needed the tool choosing again");
 
     app.escape();
-    assert!(app.tab_mut().pending.is_none(), "escape did not put the tool down");
+    assert!(app.tab_mut().tool.is_none(), "escape did not put the tool down");
 }
 
 #[test]
@@ -814,10 +814,10 @@ fn switching_to_the_pointer_abandons_a_half_finished_tool() {
     let mut app = app("single-page.pdf");
     app.submit("line");
     app.take_pick(at(10.0, 10.0));
-    assert!(app.tab_mut().pending.is_some());
+    assert!(app.tab_mut().tool.is_some());
 
     app.submit("selecttool");
-    assert!(app.tab_mut().pending.is_none(), "the line tool survived the switch");
+    assert!(app.tab_mut().tool.is_none(), "the line tool survived the switch");
 
     app.take_pick(at(100.0, 100.0));
     assert_eq!(marks(&app), 0, "a click after switching still drew something");

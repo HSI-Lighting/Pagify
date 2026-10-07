@@ -1837,13 +1837,13 @@ fn arming_a_pending_tool_puts_an_open_run_editor_down() {
     app.pick_text_run(0, at).expect("a run was here");
     assert!(app.tab_mut().editing_run.is_some(), "setup: the run editor should be open");
 
-    app.arm(PendingKind::Draw(DrawKind::Line), 0);
+    app.arm_tool(Tool::Draw(DrawKind::Line), 0);
 
     assert!(
         app.tab_mut().editing_run.is_none(),
         "arming a different tool should have put the open run editor down"
     );
-    assert!(app.tab_mut().pending.is_some(), "the newly armed tool should itself be armed");
+    assert!(app.tab_mut().tool.is_some(), "the newly armed tool should itself be armed");
 }
 
 /// **Reported from use: a selected drawn or inserted object could not

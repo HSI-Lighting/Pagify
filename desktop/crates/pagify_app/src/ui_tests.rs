@@ -1338,7 +1338,7 @@ fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
     h.run_steps(1);
     click(&mut h, view.to_screen(AppPoint { x: 100.0, y: 400.0 }));
     assert!(
-        h.state().tab().pending.is_none(),
+        h.state().tab().tool.is_none(),
         "the signature tool stayed armed after placing one, and would have swallowed \
          the very next click instead of selecting what was just placed"
     );
@@ -1395,7 +1395,7 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
     h.run_steps(1);
     click(&mut h, view.to_screen(AppPoint { x: 100.0, y: 400.0 }));
     assert!(
-        h.state().tab().pending.is_none(),
+        h.state().tab().tool.is_none(),
         "the signature tool stayed armed after placing one, and would have swallowed \
          the very next click instead of selecting what was just placed"
     );
@@ -3719,7 +3719,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
     let mut h = harness("pages-ladder.pdf");
     h.state_mut().submit("line");
     h.run_steps(2);
-    assert!(h.state().tab().pending.is_some(), "the tool was not armed");
+    assert!(h.state().tab().tool.is_some(), "the tool was not armed");
 
     // Nothing to preview before the first click.
     let view = h.state().tab().last_view.expect("the page was drawn");
@@ -3727,8 +3727,8 @@ fn a_half_placed_tool_previews_what_it_would_make() {
     click(&mut h, start);
     h.run_steps(2);
 
-    let pending = h.state().tab().pending.as_ref().expect("still collecting");
-    assert_eq!(pending.points.len(), 1, "the first click did not land");
+    let armed = h.state().tab().tool.as_ref().expect("still collecting");
+    assert_eq!(armed.points.len(), 1, "the first click did not land");
 
     // With one point placed and the pointer somewhere else, the preview has
     // something to draw. Drawing is painting, so what is checked is that it
@@ -3739,7 +3739,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
         .push(egui::Event::PointerMoved(egui::pos2(start.x + 40.0, start.y + 25.0)));
     h.run_steps(2);
     assert!(
-        h.state().tab().pending.as_ref().is_some_and(|p| p.points.len() == 1),
+        h.state().tab().tool.as_ref().is_some_and(|t| t.points.len() == 1),
         "moving the pointer finished the line by itself"
     );
 
@@ -3757,7 +3757,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
         .join("\n");
     assert!(said.contains("line added"), "the second click did not finish it:\n{said}");
     assert!(
-        h.state().tab().pending.as_ref().is_some_and(|p| p.points.is_empty()),
+        h.state().tab().tool.as_ref().is_some_and(|t| t.points.is_empty()),
         "it did not come back ready for the next line"
     );
 }
@@ -4399,9 +4399,9 @@ fn panning_with_the_middle_button_leaves_an_armed_tool_alone() {
     drag_with(&mut h, egui::PointerButton::Middle, from, from - egui::vec2(0.0, 150.0));
 
     let app = h.state();
-    assert!(app.tab().pending.is_some(), "panning disarmed the line tool");
+    assert!(app.tab().tool.is_some(), "panning disarmed the line tool");
     assert!(
-        app.tab().pending.as_ref().unwrap().points.is_empty(),
+        app.tab().tool.as_ref().unwrap().points.is_empty(),
         "panning fed a point into the tool"
     );
 }
@@ -4481,7 +4481,7 @@ fn an_armed_tool_takes_the_click_and_escape_gives_it_back() {
 
     h.state_mut().submit("line");
     h.run_steps(2);
-    assert!(h.state().tab().pending.is_some());
+    assert!(h.state().tab().tool.is_some());
 
     drag(&mut h, start, end);
     assert!(
@@ -4491,7 +4491,7 @@ fn an_armed_tool_takes_the_click_and_escape_gives_it_back() {
 
     h.state_mut().escape();
     h.run_steps(2);
-    assert!(h.state().tab().pending.is_none(), "escape did not disarm the tool");
+    assert!(h.state().tab().tool.is_none(), "escape did not disarm the tool");
 
     drag(&mut h, start, end);
     assert!(

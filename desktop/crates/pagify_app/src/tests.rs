@@ -369,7 +369,7 @@ mod tools_chain {
             app.submit(p);
         }
         assert!(marks(&app).is_empty(), "a polyline must not commit early");
-        app.resolve();
+        app.resolve_tool();
         match &marks(&app)[0].geom {
             Geom::Polyline(pl) => assert_eq!(pl.vertices.len(), 3),
             other => panic!("{other:?}"),

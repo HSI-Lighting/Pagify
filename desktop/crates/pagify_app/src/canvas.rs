@@ -1131,7 +1131,21 @@ impl crate::PagifyApp {
                                 pending.page = page;
                             }
                         }
-                        let owns = self.tab_mut().pending.as_ref().map_or(true, |p| p.page == page);
+                        // Same rule for a `Tool` — it has no `objects` to
+                        // check, but is otherwise the identical trade: a
+                        // part-way `Tool` pick stays bound to its own page,
+                        // but one that has collected nothing yet follows
+                        // whichever page is actually clicked.
+                        if let Some(armed) = &mut self.tab_mut().tool {
+                            if armed.page != page
+                                && armed.points.is_empty()
+                                && hover.is_some_and(|at| rect.contains(at))
+                            {
+                                armed.page = page;
+                            }
+                        }
+                        let owns = self.tab_mut().pending.as_ref().map_or(true, |p| p.page == page)
+                            && self.tab_mut().tool.as_ref().map_or(true, |t| t.page == page);
                         if owns {
                             self.interact(ui, rect, view, page, command_id);
                         }
@@ -1254,8 +1268,8 @@ impl crate::PagifyApp {
                 // lands.
                 Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) => {}
                 // A box, violet, the same group `PendingKind`'s own preview
-                // used to share with `Draw(Rectangle)`/`Lock`/`ArticleBox`.
-                Tool::PlaceText | Tool::Whiteout | Tool::SignRectangle => {
+                // used to share with `Lock`/`ArticleBox` (still there).
+                Tool::PlaceText | Tool::Whiteout | Tool::SignRectangle | Tool::Draw(DrawKind::Rectangle) => {
                     if let Some(first) = armed.points.first().copied() {
                         ui.painter().rect_stroke(
                             egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
@@ -1276,15 +1290,53 @@ impl crate::PagifyApp {
                         );
                     }
                 }
-                // A line, violet — the same group `PendingKind`'s own
-                // preview used to share with `Draw(Line)`/`Measure(Distance)`.
-                Tool::Calibrate { .. } | Tool::SignLine => {
+                // A line, violet.
+                Tool::Calibrate { .. } | Tool::SignLine | Tool::Draw(DrawKind::Line) => {
                     if let Some(first) = armed.points.first().copied() {
                         ui.painter().line_segment(
                             [view.to_screen(first), view.to_screen(at)],
                             egui::Stroke::new(1.0, theme::violet_bright()),
                         );
                     }
+                }
+                Tool::Draw(DrawKind::Circle) => {
+                    if let Some(first) = armed.points.first().copied() {
+                        let radius = (view.to_screen(first) - view.to_screen(at)).length();
+                        ui.painter().circle_stroke(
+                            view.to_screen(first),
+                            radius,
+                            egui::Stroke::new(1.0, theme::violet_bright()),
+                        );
+                    }
+                }
+                Tool::Draw(DrawKind::Arrow) => {
+                    if let Some(first) = armed.points.first().copied() {
+                        let (from, to) = (view.to_screen(first), view.to_screen(at));
+                        let stroke = egui::Stroke::new(1.0, theme::violet_bright());
+                        ui.painter().line_segment([from, to], stroke);
+                        if let Some(tri) = pagify_shell::commit::arrowhead_triangle(
+                            cad_kernel::Vec2::new(from.x as f64, from.y as f64),
+                            cad_kernel::Vec2::new(to.x as f64, to.y as f64),
+                        ) {
+                            let points: Vec<egui::Pos2> =
+                                tri.iter().map(|v| egui::Pos2::new(v.x as f32, v.y as f32)).collect();
+                            ui.painter().add(egui::Shape::convex_polygon(
+                                points,
+                                theme::violet_bright(),
+                                egui::Stroke::NONE,
+                            ));
+                        }
+                    }
+                }
+                // A polyline keeps what is already placed and trails the
+                // last leg. A spline's control polygon, not the curve
+                // itself — the curve isn't known until enough points exist
+                // to tessellate it.
+                Tool::Draw(DrawKind::Polyline | DrawKind::Spline) => {
+                    let mut path: Vec<egui::Pos2> =
+                        armed.points.iter().map(|p| view.to_screen(*p)).collect();
+                    path.push(view.to_screen(at));
+                    ui.painter().add(egui::Shape::line(path, egui::Stroke::new(1.0, theme::violet_bright())));
                 }
             }
             return;
@@ -1318,39 +1370,7 @@ impl crate::PagifyApp {
         };
 
         match &pending.kind {
-            PendingKind::Draw(DrawKind::Line) => {
-                painter.line_segment([on(first), on(at)], stroke);
-            }
-            PendingKind::Draw(DrawKind::Arrow) => {
-                let (from, to) = (on(first), on(at));
-                painter.line_segment([from, to], stroke);
-                if let Some(tri) = pagify_shell::commit::arrowhead_triangle(
-                    cad_kernel::Vec2::new(from.x as f64, from.y as f64),
-                    cad_kernel::Vec2::new(to.x as f64, to.y as f64),
-                ) {
-                    let points: Vec<egui::Pos2> =
-                        tri.iter().map(|v| egui::Pos2::new(v.x as f32, v.y as f32)).collect();
-                    painter.add(egui::Shape::convex_polygon(points, theme::violet_bright(), egui::Stroke::NONE));
-                }
-            }
-            PendingKind::Draw(DrawKind::Circle) => {
-                let radius = (on(first) - on(at)).length();
-                painter.circle_stroke(on(first), radius, stroke);
-            }
-            PendingKind::Draw(DrawKind::Rectangle) => {
-                painter.rect_stroke(
-                    box_between(first, at),
-                    egui::CornerRadius::ZERO,
-                    stroke,
-                    egui::StrokeKind::Inside,
-                );
-            }
-            // A polyline keeps what is already placed and trails the last leg.
-            // A spline's control polygon, not the curve itself — the curve
-            // isn't known until enough points exist to tessellate it.
-            PendingKind::Draw(DrawKind::Polyline)
-            | PendingKind::Draw(DrawKind::Spline)
-            | PendingKind::Measure(MeasureKind::Area) => {
+            PendingKind::Measure(MeasureKind::Area) => {
                 let mut path: Vec<egui::Pos2> = pending.points.iter().map(|p| on(*p)).collect();
                 path.push(on(at));
                 painter.add(egui::Shape::line(path, stroke));
@@ -1886,7 +1906,9 @@ impl crate::PagifyApp {
         }
         if snapping && self.tab_mut().last_snap.is_none() {
             if self.ortho {
-                if let Some(anchor) = self.tab_mut().pending.as_ref().and_then(|p| p.points.last().copied()) {
+                let anchor = self.tab_mut().pending.as_ref().and_then(|p| p.points.last().copied())
+                    .or_else(|| self.tab_mut().tool.as_ref().and_then(|t| t.points.last().copied()));
+                if let Some(anchor) = anchor {
                     at = tools::orthogonal(anchor, at);
                 }
             }

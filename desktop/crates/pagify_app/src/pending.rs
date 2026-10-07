@@ -28,10 +28,11 @@ pub(crate) struct Pending {
 
 /// A tool armed outside the big [`Pending`] dispatch — the `Tool` state
 /// machine the mentor's review calls for (`DESIGN_REVIEW.md` §3.2), built up
-/// one slice at a time. `Signature`/`PlaceImage`/`PlaceText`/`Calibrate`
-/// moved first, all `repeats() == false`; `Fill` is the first repeating
-/// kind to move. Every other `PendingKind` variant is still exactly where
-/// it was; `PendingKind` is deleted only once it is empty.
+/// one slice at a time. `Draw` is the first kind that ends on Enter rather
+/// than a fixed point count (see `wants_points`/`ends_on_enter`) — every
+/// kind before it wanted a fixed number of points. Every other
+/// `PendingKind` variant is still exactly where it was; `PendingKind` is
+/// deleted only once it is empty.
 pub(crate) struct ArmedTool {
     pub(crate) kind: Tool,
     pub(crate) page: usize,
@@ -67,12 +68,13 @@ pub(crate) enum Tool {
     SignLine,
     /// Words waiting for a point to be written at.
     Write(String),
+    Draw(DrawKind),
 }
 
 impl Tool {
-    /// How many points it still wants — no `usize::MAX`/"until Enter" case
-    /// here, unlike `PendingKind::wants`: nothing that ends on Enter has
-    /// moved to `Tool` yet.
+    /// How many points it still wants. `usize::MAX` means "until Enter" —
+    /// the same convention `PendingKind::wants` uses, now that `Draw` is
+    /// the first `Tool` kind to need it.
     pub(crate) fn wants_points(&self) -> usize {
         match self {
             Tool::Signature | Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) => 1,
@@ -82,7 +84,15 @@ impl Tool {
             | Tool::Whiteout
             | Tool::SignRectangle
             | Tool::SignLine => 2,
+            Tool::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => 2,
+            Tool::Draw(DrawKind::Polyline | DrawKind::Spline) => usize::MAX,
         }
+    }
+
+    /// Whether Enter can end it early — see `PendingKind::ends_on_enter`'s
+    /// own doc.
+    pub(crate) fn ends_on_enter(&self) -> bool {
+        self.wants_points() == usize::MAX
     }
 
     /// Mirrors `PendingKind::prompt` for these kinds, minus the
@@ -131,6 +141,22 @@ impl Tool {
                     if text.chars().count() > 24 { "…" } else { "" }
                 )
             }
+            Tool::Draw(kind) => match (kind, points_done) {
+                (DrawKind::Line, 0) => "line: from".into(),
+                (DrawKind::Line, _) => "line: to".into(),
+                (DrawKind::Circle, 0) => "circle: centre".into(),
+                (DrawKind::Circle, _) => "circle: a point on it".into(),
+                (DrawKind::Rectangle, 0) => "rectangle: first corner".into(),
+                (DrawKind::Rectangle, _) => "rectangle: opposite corner".into(),
+                (DrawKind::Arrow, 0) => "arrow: from".into(),
+                (DrawKind::Arrow, _) => "arrow: to — the point the head lands on".into(),
+                (DrawKind::Polyline, n) => {
+                    format!("polyline: point {} — Enter to finish", n + 1)
+                }
+                (DrawKind::Spline, n) => {
+                    format!("spline: point {} — Enter to finish", n + 1)
+                }
+            },
         }
     }
 
@@ -150,6 +176,7 @@ impl Tool {
                 | Tool::SignRectangle
                 | Tool::SignLine
                 | Tool::Write(_)
+                | Tool::Draw(_)
         )
     }
 
@@ -171,16 +198,21 @@ impl Tool {
             Tool::SignRectangle => Some("signrectangle"),
             Tool::SignLine => Some("signline"),
             Tool::Write(_) => Some("addtext"),
+            Tool::Draw(DrawKind::Line) => Some("line"),
+            Tool::Draw(DrawKind::Circle) => Some("circle"),
+            Tool::Draw(DrawKind::Polyline) => Some("pline"),
+            Tool::Draw(DrawKind::Rectangle) => None,
+            Tool::Draw(DrawKind::Arrow) => Some("arrow"),
+            Tool::Draw(DrawKind::Spline) => Some("spline"),
         }
     }
 
     /// Whether the pointer should be pulled to nearby geometry — see
-    /// `PendingKind::wants_snapping`'s own doc. The first `Tool` kind that
-    /// needs it: a calibration point is placing a point on known geometry
-    /// (the two ends of a line of known length), unlike a signature,
-    /// picture or text box's corner, which is just "about here."
+    /// `PendingKind::wants_snapping`'s own doc. A calibration or draw point
+    /// is placing a point on known geometry, unlike a signature, picture or
+    /// text box's corner, which is just "about here."
     pub(crate) fn wants_snapping(&self) -> bool {
-        matches!(self, Tool::Calibrate { .. })
+        matches!(self, Tool::Calibrate { .. } | Tool::Draw(_))
     }
 }
 
@@ -191,7 +223,6 @@ pub(crate) enum PendingKind {
     /// take it off the page — what the Eraser arms when nothing drawn is
     /// selected. Stays in hand, so a run of marks can be rubbed out in a row.
     EraseMark,
-    Draw(DrawKind),
     Modify(tools::Pick),
     Measure(MeasureKind),
     /// Two corners of an area to hide, sealed under a passcode.
@@ -268,10 +299,6 @@ impl PendingKind {
     pub(crate) fn wants(&self) -> (usize, usize) {
         match self {
             PendingKind::PickText | PendingKind::EraseMark => (0, 1),
-            PendingKind::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => {
-                (0, 2)
-            }
-            PendingKind::Draw(DrawKind::Polyline | DrawKind::Spline) => (0, usize::MAX),
             PendingKind::Modify(pick) => (pick.objects, pick.points),
             PendingKind::Measure(MeasureKind::Distance) => (0, 2),
             PendingKind::Measure(MeasureKind::Area) => (0, usize::MAX),
@@ -295,22 +322,6 @@ impl PendingKind {
             PendingKind::ArticleBox => match points_done {
                 0 => "article box: first corner".into(),
                 _ => "article box: opposite corner".into(),
-            },
-            PendingKind::Draw(kind) => match (kind, points_done) {
-                (DrawKind::Line, 0) => "line: from".into(),
-                (DrawKind::Line, _) => "line: to".into(),
-                (DrawKind::Circle, 0) => "circle: centre".into(),
-                (DrawKind::Circle, _) => "circle: a point on it".into(),
-                (DrawKind::Rectangle, 0) => "rectangle: first corner".into(),
-                (DrawKind::Rectangle, _) => "rectangle: opposite corner".into(),
-                (DrawKind::Arrow, 0) => "arrow: from".into(),
-                (DrawKind::Arrow, _) => "arrow: to — the point the head lands on".into(),
-                (DrawKind::Polyline, n) => {
-                    format!("polyline: point {} — Enter to finish", n + 1)
-                }
-                (DrawKind::Spline, n) => {
-                    format!("spline: point {} — Enter to finish", n + 1)
-                }
             },
             PendingKind::Modify(pick) => pick.prompt(objects_done, points_done),
             PendingKind::Measure(MeasureKind::Distance) => {
@@ -367,12 +378,6 @@ impl PendingKind {
     /// with no ribbon equivalent has nothing to light up.
     pub(crate) fn command(&self) -> Option<&'static str> {
         Some(match self {
-            PendingKind::Draw(DrawKind::Line) => "line",
-            PendingKind::Draw(DrawKind::Circle) => "circle",
-            PendingKind::Draw(DrawKind::Polyline) => "pline",
-            PendingKind::Draw(DrawKind::Rectangle) => return None,
-            PendingKind::Draw(DrawKind::Arrow) => "arrow",
-            PendingKind::Draw(DrawKind::Spline) => "spline",
             PendingKind::Lock => "lock",
             PendingKind::ArticleBox => "articlebox",
             PendingKind::PickText => "edittext",
@@ -394,7 +399,7 @@ impl PendingKind {
     /// Picking a run of text is not placing a point: it means "the words
     /// there", and the nearest drawn line has nothing to do with it.
     pub(crate) fn wants_snapping(&self) -> bool {
-        matches!(self, PendingKind::Draw(_) | PendingKind::Modify(_) | PendingKind::Measure(_))
+        matches!(self, PendingKind::Modify(_) | PendingKind::Measure(_))
     }
 
     pub(crate) fn ends_on_enter(&self) -> bool {
