@@ -1524,3 +1524,73 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod parse_domain_tests {
+    use super::parse;
+
+    /// Every command word the domain parsers claim, read out of this file's
+    /// own source.
+    fn claimed_words() -> Vec<(String, String)> {
+        let src = include_str!("verbs.rs");
+        let mut claims = Vec::new();
+        let mut current: Option<String> = None;
+        for line in src.lines() {
+            if let Some(name) = line.strip_prefix("fn parse_") {
+                current = Some(name.split('(').next().unwrap_or(name).to_string());
+            } else if line.starts_with("fn ") || line.starts_with("pub fn ") {
+                current = None;
+            }
+            let Some(domain) = &current else { continue };
+            let Some(rest) = line.strip_prefix("        ") else { continue };
+            if !rest.starts_with('"') {
+                continue;
+            }
+            let Some(pattern) = rest.split("=>").next() else { continue };
+            for atom in pattern.split('|') {
+                let atom = atom.trim();
+                let Some(open) = atom.find('"') else { continue };
+                let Some(close) = atom[open + 1..].find('"') else { continue };
+                claims.push((atom[open + 1..open + 1 + close].to_string(), domain.clone()));
+            }
+        }
+        claims
+    }
+
+    /// **A command word must belong to exactly one domain parser.**
+    ///
+    /// When `parse` was one `match`, a word registered twice was a hard
+    /// compile error — the second arm was unreachable and the compiler said
+    /// so. Split into seven parsers that is no longer true: the second
+    /// registration simply never runs, silently. This reads the source and
+    /// re-establishes the guarantee by hand, and also checks that every word
+    /// a parser claims is one `parse` actually reaches (a typo in a literal
+    /// would otherwise be a command that exists in the completion table and
+    /// nowhere else).
+    #[test]
+    fn no_command_is_claimed_by_two_domain_parsers() {
+        let claims = claimed_words();
+        assert!(
+            claims.len() > 100,
+            "the source scan found only {} commands — it has stopped reading the parsers: {claims:?}",
+            claims.len()
+        );
+
+        let mut seen: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+        for (word, domain) in &claims {
+            if let Some(previous) = seen.insert(word, domain) {
+                assert_eq!(
+                    previous, domain,
+                    "`{word}` is claimed by both `{previous}` and `{domain}` — whichever parser runs first wins silently"
+                );
+            }
+        }
+
+        for (word, domain) in &claims {
+            assert!(
+                parse(word).is_some(),
+                "`{word}` is claimed by `{domain}` but `parse` returns None for it"
+            );
+        }
+    }
+}

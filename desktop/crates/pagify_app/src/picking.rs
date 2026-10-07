@@ -150,40 +150,110 @@ impl crate::PagifyApp {
         let repeats = armed.kind.repeats();
 
         let outcome: Result<String, String> = match &armed.kind {
-            Tool::PickText => match armed.points.first().copied() {
+            Tool::PickText | Tool::EraseMark | Tool::Write(_) => {
+                self.resolve_point_pick(page, &armed.kind, &armed.points)
+            }
+            Tool::Measure(_) => self.resolve_measure(&armed.kind, &armed.points),
+            Tool::SignRectangle | Tool::SignLine | Tool::Lock | Tool::ArticleBox => {
+                self.resolve_form_mark(page, &armed.kind, &armed.points)
+            }
+            Tool::Draw(_) => self.resolve_draw(page, &armed.kind, &armed.points, height),
+            Tool::Modify(_) => {
+                self.resolve_modify(page, &armed.kind, &armed.objects, &armed.points, height)
+            }
+            Tool::Signature
+            | Tool::PlaceImage { .. }
+            | Tool::PlaceText
+            | Tool::Calibrate { .. }
+            | Tool::Fill(_)
+            | Tool::Redact
+            | Tool::Whiteout => self.resolve_placement(page, &armed.kind, &armed.points),
+        };
+
+        // Close the checkpoint a draw opened, and drop it if the draw refused —
+        // an undo step for an operation that changed nothing looks broken,
+        // because nothing moves.
+        if matches!(armed.kind, Tool::Draw(_)) {
+            if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
+                layer.end();
+                if outcome.is_err() {
+                    layer.forget_last_step();
+                }
+            }
+        }
+
+        let failed = outcome.is_err();
+        match outcome {
+            Ok(said) => self.say_info(said),
+            Err(problem) => self.say_error(problem),
+        }
+
+        // Back in hand, ready for the next one. Escape puts it down, and
+        // choosing another tool replaces it.
+        //
+        // **Quietly after a failure**, so the error is still the last thing
+        // said — see `arm_without_saying`. After a success the usual prompt
+        // follows, as it always did.
+        if repeats && self.tab_mut().editing_run.is_none() {
+            if failed {
+                self.arm_without_saying(armed.kind, page);
+            } else {
+                self.arm(armed.kind, page);
+            }
+        }
+    }
+
+    /// [`Self::resolve`], split by domain: One-click picks: words to edit, a mark to erase, text to write.
+    fn resolve_point_pick(&mut self, page: usize, kind: &Tool, points: &[AppPoint]) -> Result<String, String> {
+        match kind {
+            Tool::PickText => match points.first().copied() {
                 Some(at) => self.pick_text_run(page, at),
                 None => Err("nothing was clicked.".into()),
             },
-            Tool::EraseMark => match armed.points.first().copied() {
+            Tool::EraseMark => match points.first().copied() {
                 Some(at) => self.erase_mark_at(page, at),
                 None => Err("nothing was clicked.".into()),
             },
             Tool::Write(text) => {
                 let text = text.clone();
-                match armed.points.first().copied() {
+                match points.first().copied() {
                     Some(at) => self.write_text_at(page, at, &text),
                     None => Err("nowhere to write.".into()),
                 }
             }
+            _ => unreachable!("resolve_point_pick was handed a kind from another domain"),
+        }
+    }
+
+    /// [`Self::resolve`], split by domain: Distance and area measurements, rendered into words.
+    fn resolve_measure(&mut self, kind: &Tool, points: &[AppPoint]) -> Result<String, String> {
+        match kind {
             Tool::Measure(MeasureKind::Distance) => Ok(measure::measure_distance(
                 &self.tab_mut().calibration,
-                armed.points[0],
-                armed.points[1],
+                points[0],
+                points[1],
             )
             .render()),
             Tool::Measure(MeasureKind::Area) => {
-                Ok(measure::measure_area(&self.tab_mut().calibration, &armed.points).render())
+                Ok(measure::measure_area(&self.tab_mut().calibration, points).render())
             }
 
-            Tool::SignRectangle => match (armed.points.first(), armed.points.get(1)) {
+            _ => unreachable!("resolve_measure was handed a kind from another domain"),
+        }
+    }
+
+    /// [`Self::resolve`], split by domain: The two-corner form marks: signature line/rectangle, lock area, article box.
+    fn resolve_form_mark(&mut self, page: usize, kind: &Tool, points: &[AppPoint]) -> Result<String, String> {
+        match kind {
+            Tool::SignRectangle => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => self.stamp_box(page, *a, *b),
                 _ => Err("rectangle: two corners are needed.".into()),
             },
-            Tool::SignLine => match (armed.points.first(), armed.points.get(1)) {
+            Tool::SignLine => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => self.stamp_line(page, *a, *b),
                 _ => Err("line: two ends are needed.".into()),
             },
-            Tool::Lock => match (armed.points.first(), armed.points.get(1)) {
+            Tool::Lock => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => match area_between(*a, *b) {
                     Some(area) => {
                         // The passcode is asked for *after* the area is drawn, so
@@ -203,7 +273,7 @@ impl crate::PagifyApp {
                 },
                 _ => Err("lock: two corners are needed.".into()),
             },
-            Tool::ArticleBox => match (armed.points.first(), armed.points.get(1)) {
+            Tool::ArticleBox => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => match area_between(*a, *b) {
                     Some(rect) => {
                         self.tab_mut().pending_article_box = Some(PendingArticleBox {
@@ -217,13 +287,20 @@ impl crate::PagifyApp {
                 },
                 _ => Err("article box: two corners are needed.".into()),
             },
+            _ => unreachable!("resolve_form_mark was handed a kind from another domain"),
+        }
+    }
+
+    /// [`Self::resolve`], split by domain: The drawing tools, one arm per [`DrawKind`].
+    fn resolve_draw(&mut self, page: usize, kind: &Tool, points: &[AppPoint], height: f64) -> Result<String, String> {
+        match kind {
             Tool::Draw(kind) => {
                 let draw_fill = self.draw_fill;
                 let layer = self.tab_mut().markup.page(page, height);
                 layer.begin("draw");
                 let space = layer.space();
                 let p: Vec<cad_kernel::Vec2> =
-                    armed.points.iter().map(|q| space.to_kernel(*q)).collect();
+                    points.iter().map(|q| space.to_kernel(*q)).collect();
 
                 match kind {
                     DrawKind::Line => {
@@ -305,38 +382,51 @@ impl crate::PagifyApp {
                 }
             }
 
+            _ => unreachable!("resolve_draw was handed a kind from another domain"),
+        }
+    }
+
+    /// [`Self::resolve`], split by domain: The object-picking tools, run through `tools::run`.
+    fn resolve_modify(&mut self, page: usize, kind: &Tool, objects: &[(usize, AppPoint)], points: &[AppPoint], height: f64) -> Result<String, String> {
+        match kind {
             Tool::Modify(pick) => {
                 let layer = self.tab_mut().markup.page(page, height);
                 let space = layer.space();
-                let objects: Vec<(usize, cad_kernel::Vec2)> = armed
-                    .objects
+                let objects: Vec<(usize, cad_kernel::Vec2)> = objects
                     .iter()
                     .map(|(i, at)| (*i, space.to_kernel(*at)))
                     .collect();
                 let points: Vec<cad_kernel::Vec2> =
-                    armed.points.iter().map(|q| space.to_kernel(*q)).collect();
+                    points.iter().map(|q| space.to_kernel(*q)).collect();
 
                 tools::run(layer, pick.op, &objects, &points)
             }
 
-            Tool::Signature => match armed.points.first().copied() {
+            _ => unreachable!("resolve_modify was handed a kind from another domain"),
+        }
+    }
+
+    /// [`Self::resolve`], split by domain: The kinds that place something at a point: signature, picture, text box, calibration, fill, redaction, whiteout.
+    fn resolve_placement(&mut self, page: usize, kind: &Tool, points: &[AppPoint]) -> Result<String, String> {
+        match kind {
+            Tool::Signature => match points.first().copied() {
                 Some(at) => self.place_signature(page, at),
                 None => Err("signature: nowhere was clicked.".into()),
             },
             Tool::PlaceImage { rgba, width, height } => {
                 let (rgba, width, height) = (rgba.clone(), *width, *height);
-                match armed.points.first().copied() {
+                match points.first().copied() {
                     Some(at) => self.place_image_at(page, at, rgba, width, height),
                     None => Err("nowhere to place the picture.".into()),
                 }
             }
-            Tool::PlaceText => match (armed.points.first(), armed.points.get(1)) {
+            Tool::PlaceText => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => self.begin_text_box(page, *a, *b),
                 _ => Err("text: two corners are needed.".into()),
             },
             Tool::Calibrate { distance, unit } => {
                 let (distance, unit) = (*distance, unit.clone());
-                match (armed.points.first(), armed.points.get(1)) {
+                match (points.first(), points.get(1)) {
                     (Some(a), Some(b)) => match Calibration::from_two_points(*a, *b, distance, &unit) {
                         Ok(calibration) => {
                             self.tab_mut().calibration = calibration;
@@ -349,51 +439,20 @@ impl crate::PagifyApp {
             }
             Tool::Fill(mark) => {
                 let mark = *mark;
-                match armed.points.first().copied() {
+                match points.first().copied() {
                     Some(at) => self.stamp_mark(page, mark, at),
                     None => Err("fill: nowhere was clicked.".into()),
                 }
             }
-            Tool::Redact => match (armed.points.first(), armed.points.get(1)) {
+            Tool::Redact => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => self.redact(page, *a, *b),
                 _ => Err("redact: two corners are needed.".into()),
             },
-            Tool::Whiteout => match (armed.points.first(), armed.points.get(1)) {
+            Tool::Whiteout => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => self.whiteout(page, *a, *b),
                 _ => Err("whiteout: two corners are needed.".into()),
             },
-        };
-
-        // Close the checkpoint a draw opened, and drop it if the draw refused —
-        // an undo step for an operation that changed nothing looks broken,
-        // because nothing moves.
-        if matches!(armed.kind, Tool::Draw(_)) {
-            if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
-                layer.end();
-                if outcome.is_err() {
-                    layer.forget_last_step();
-                }
-            }
-        }
-
-        let failed = outcome.is_err();
-        match outcome {
-            Ok(said) => self.say_info(said),
-            Err(problem) => self.say_error(problem),
-        }
-
-        // Back in hand, ready for the next one. Escape puts it down, and
-        // choosing another tool replaces it.
-        //
-        // **Quietly after a failure**, so the error is still the last thing
-        // said — see `arm_without_saying`. After a success the usual prompt
-        // follows, as it always did.
-        if repeats && self.tab_mut().editing_run.is_none() {
-            if failed {
-                self.arm_without_saying(armed.kind, page);
-            } else {
-                self.arm(armed.kind, page);
-            }
+            _ => unreachable!("resolve_placement was handed a kind from another domain"),
         }
     }
 }
