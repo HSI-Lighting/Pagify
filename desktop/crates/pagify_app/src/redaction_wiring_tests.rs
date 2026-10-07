@@ -54,14 +54,13 @@ fn the_redaction_tool_stays_armed() {
 /// ribbon between each one. A signature is different: the click right
 /// after placing one is almost always aimed at adjusting the picture
 /// just placed, not starting another, and a tool still in hand would
-/// have taken that click for itself. `Tool::Signature` has no `repeats()`
-/// to query any more — `resolve_tool` never re-arms at all, on success or
-/// failure — so this is now a behavioural check instead of a query on
-/// the type.
+/// have taken that click for itself. `Tool::Signature.repeats()` answers
+/// `false` for exactly that reason, and `resolve` consults it before any
+/// re-arm — on success or on failure.
 #[test]
 fn the_signature_tool_does_not_stay_armed() {
     let mut app = app("single-page.pdf");
-    app.arm_tool(Tool::Signature, 0);
+    app.arm(Tool::Signature, 0);
     assert!(app.tab_mut().tool.is_some(), "setup: the tool should have armed");
 
     app.take_pick(AppPoint { x: 100.0, y: 100.0 });
@@ -70,7 +69,7 @@ fn the_signature_tool_does_not_stay_armed() {
         app.tab_mut().tool.is_none(),
         "the signature tool must not still be in hand after one click, even \
          though placing it failed (no signature saved yet) — unlike a \
-         repeating PendingKind, Tool never re-arms on failure"
+         repeating tool such as redaction, a signature never re-arms"
     );
 }
 

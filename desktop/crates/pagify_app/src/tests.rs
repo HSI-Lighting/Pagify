@@ -410,7 +410,7 @@ mod tools_chain {
 
         assert!(errors(&app).is_empty(), "errors: {:?}", errors(&app));
         assert!(
-            app.tab_mut().pending.is_some(),
+            app.tab_mut().tool.is_some(),
             "trim is a repeating tool and must still be armed"
         );
     }
@@ -431,7 +431,7 @@ mod tools_chain {
         let mut app = app();
         app.submit("l 30,250 170,250");
         app.submit("move");
-        assert!(app.tab_mut().pending.is_none(), "move armed with nothing selected");
+        assert!(app.tab_mut().tool.is_none(), "move armed with nothing selected");
         assert!(
             errors(&app).iter().any(|e| e.contains("selected")),
             "no explanation: {:?}",
@@ -569,7 +569,7 @@ mod tools_chain {
         let mut app = app();
         app.submit("fillet");
         app.submit("pick 100,250"); // misses — nothing there
-        assert!(app.tab_mut().pending.is_some(), "a miss must not cancel the tool");
+        assert!(app.tab_mut().tool.is_some(), "a miss must not cancel the tool");
         assert!(marks(&app).is_empty());
     }
 }

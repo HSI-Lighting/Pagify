@@ -95,11 +95,11 @@ fn the_central_escape_does_not_close_the_link_prompt() {
 
 /// **Enter and the typed `done` command answer "not enough points yet"
 /// differently for the same situation.** Both read the identical condition
-/// (`pending.kind.ends_on_enter() && pending.points.len() >= 2`) — Enter in
+/// (`tool.kind.ends_on_enter() && tool.points.len() >= 2`) — Enter in
 /// `main.rs`'s own per-frame key handler, `done` as `Verb::Finish` in
 /// `dispatch.rs` — but Enter's `if closeable { self.resolve(); }` has no
 /// `else`, so with too few points it does nothing and says nothing; `done`'s
-/// `else if pending.is_some() { say_error("not enough points yet.") }` always
+/// `else if tool.is_some() { say_error("not enough points yet.") }` always
 /// says something. A reader who presses Enter on a one-point polyline learns
 /// nothing happened only by watching the page not finish; a reader who types
 /// `done` is told why.
@@ -109,7 +109,7 @@ fn enter_with_too_few_points_says_nothing_but_done_says_so() {
     h.state_mut().submit("pline");
     h.state_mut().take_pick(AppPoint { x: 10.0, y: 10.0 });
     assert_eq!(
-        h.state_mut().tab_mut().pending.as_ref().expect("setup: still armed").points.len(),
+        h.state_mut().tab_mut().tool.as_ref().expect("setup: still armed").points.len(),
         1,
         "setup: exactly one point should be down"
     );
@@ -122,7 +122,7 @@ fn enter_with_too_few_points_says_nothing_but_done_says_so() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().pending.is_some(),
+        h.state().tab().tool.is_some(),
         "a one-point polyline must not finish on Enter — there are not enough points"
     );
     assert_eq!(
@@ -141,24 +141,24 @@ fn enter_with_too_few_points_says_nothing_but_done_says_so() {
     );
 }
 
-/// **An object-pick miss leaves `pending` completely untouched — quieter
-/// even than `resolve()`'s own quiet re-arm.** `take_pick`'s `wants_object()`
-/// branch, on a miss, calls `say_info("nothing there…")` and returns
-/// immediately (`picking.rs`): it never pushes anything onto `objects`,
-/// never calls `resolve()`, never touches `pending` at all. The existing
-/// coverage (`pointer_tests.rs`'s `picking_empty_paper_for_an_object_says_so`)
-/// only checks that the message was said, not that the state was left alone
-/// — this test pins the state invariant too, so a `Tool` migration that
-/// routes a miss through even a trivial no-op transition (which would be the
-/// natural thing to write) shows up as a failing test instead of an
-/// unnoticed behaviour change.
+/// **An object-pick miss leaves the armed tool completely untouched —
+/// quieter even than `resolve()`'s own quiet re-arm.** `take_pick`'s
+/// `wants_object()` branch, on a miss, calls `say_info("nothing there…")`
+/// and returns immediately (`picking.rs`): it never pushes anything onto
+/// `objects`, never calls `resolve()`, never touches the armed tool at all.
+/// The existing coverage (`pointer_tests.rs`'s
+/// `picking_empty_paper_for_an_object_says_so`) only checks that the message
+/// was said, not that the state was left alone — this test pins the state
+/// invariant too, so a `Tool` migration that routes a miss through even a
+/// trivial no-op transition (which would be the natural thing to write)
+/// shows up as a failing test instead of an unnoticed behaviour change.
 #[test]
-fn an_object_pick_that_misses_leaves_pending_completely_untouched() {
+fn an_object_pick_that_misses_leaves_the_armed_tool_completely_untouched() {
     let mut app = app("single-page.pdf");
     app.submit("l 10,10 100,100");
     app.submit("fillet 20");
     assert_eq!(
-        app.tab_mut().pending.as_ref().expect("setup: fillet should have armed").objects.len(),
+        app.tab_mut().tool.as_ref().expect("setup: fillet should have armed").objects.len(),
         0,
         "setup: no objects collected yet"
     );
@@ -170,7 +170,7 @@ fn an_object_pick_that_misses_leaves_pending_completely_untouched() {
         "setup: the miss should have said so:\n{}",
         said(&app)
     );
-    let after = app.tab_mut().pending.as_ref().expect("the tool should still be armed");
+    let after = app.tab_mut().tool.as_ref().expect("the tool should still be armed");
     assert_eq!(
         after.objects.len(),
         0,

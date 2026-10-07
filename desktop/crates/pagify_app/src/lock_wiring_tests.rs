@@ -618,7 +618,7 @@ fn signature_with_nothing_drawn_yet_opens_the_pad() {
         app.pad.as_ref().is_some_and(|p| p.then_place),
         "it will not carry on to the click somebody wanted"
     );
-    assert!(app.tab_mut().pending.is_none(), "it armed a click with nothing to place");
+    assert!(app.tab_mut().tool.is_none(), "it armed a click with nothing to place");
     assert!(app.tab_mut().tool.is_none(), "it armed a click with nothing to place");
     assert!(said(&app).contains("this computer"), "{}", said(&app));
 }
@@ -1733,7 +1733,7 @@ fn a_line_the_producer_split_across_two_runs_is_not_missing_a_chunk() {
 
 /// **Reported from use, with a screenshot: Edit Text and Edit Object
 /// both showed as active on the ribbon at once.** `take_up_object_tool`
-/// already clears `self.tab_mut().pending` when Edit Object is picked up; `arm`
+/// already clears `self.tab_mut().tool` when Edit Object is picked up; `arm`
 /// (what Edit Text and every other picked-then-clicked tool goes
 /// through) did not clear `self.tab_mut().object_tool` back — so using Edit
 /// Object and then Edit Text left both armed, and since
@@ -1751,7 +1751,7 @@ fn arming_edit_text_after_edit_object_puts_the_object_tool_down() {
 
     assert!(app.tab_mut().object_tool.is_none(), "arming Edit Text should have put the object tool down");
     assert!(
-        app.tab_mut().pending.is_some(),
+        app.tab_mut().tool.is_some(),
         "Edit Text itself should still have armed its own click-to-pick"
     );
 }
@@ -1773,7 +1773,7 @@ fn arming_any_pending_tool_after_edit_object_puts_it_down() {
             "{command}: arming it should have put the object tool down"
         );
         assert!(
-            app.tab_mut().pending.is_some() || app.tab_mut().tool.is_some(),
+            app.tab_mut().tool.is_some() || app.tab_mut().tool.is_some(),
             "{command}: should itself be armed"
         );
     }
@@ -1782,7 +1782,7 @@ fn arming_any_pending_tool_after_edit_object_puts_it_down() {
 /// **Reported from use: a run picked with Edit Text, still open,
 /// got split into individual characters the moment Edit Object was
 /// clicked without an Escape in between.** `take_up_object_tool` cleared
-/// `self.tab_mut().pending` and the object-tool's own selection state, but never
+/// `self.tab_mut().tool` and the object-tool's own selection state, but never
 /// `self.tab_mut().editing_run` — so the run Edit Text still thought it was
 /// editing sat there, orphaned, while Edit Object's own click handler
 /// went on to split whatever the next click landed on into individual
@@ -1837,13 +1837,13 @@ fn arming_a_pending_tool_puts_an_open_run_editor_down() {
     app.pick_text_run(0, at).expect("a run was here");
     assert!(app.tab_mut().editing_run.is_some(), "setup: the run editor should be open");
 
-    app.arm(PendingKind::Draw(DrawKind::Line), 0);
+    app.arm(Tool::Draw(DrawKind::Line), 0);
 
     assert!(
         app.tab_mut().editing_run.is_none(),
         "arming a different tool should have put the open run editor down"
     );
-    assert!(app.tab_mut().pending.is_some(), "the newly armed tool should itself be armed");
+    assert!(app.tab_mut().tool.is_some(), "the newly armed tool should itself be armed");
 }
 
 /// **Reported from use: a selected drawn or inserted object could not
@@ -2349,7 +2349,7 @@ fn predefined_text_keeps_the_words_and_waits_for_a_click() {
     assert!(said(&app).contains("this computer"), "{}", said(&app));
     assert_eq!(app.predefined.current(), Some("Jane Smith"));
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::Write(t)) if t == "Jane Smith"),
+        matches!(app.tab_mut().tool.as_ref().map(|p| &p.kind), Some(Tool::Write(t)) if t == "Jane Smith"),
         "it did not arm the click that writes them:\n{}",
         said(&app)
     );
@@ -4213,7 +4213,7 @@ fn the_sign_line_says_it_is_not_the_drawing_one() {
     app.submit("signline");
 
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::SignLine)),
+        matches!(app.tab_mut().tool.as_ref().map(|p| &p.kind), Some(Tool::SignLine)),
         "the tool was not armed:\n{}",
         said(&app)
     );
@@ -4272,7 +4272,7 @@ fn the_sign_rectangle_says_it_is_not_the_drawing_one() {
     app.submit("signrectangle");
 
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::SignRectangle)),
+        matches!(app.tab_mut().tool.as_ref().map(|p| &p.kind), Some(Tool::SignRectangle)),
         "the tool was not armed:\n{}",
         said(&app)
     );
@@ -5338,7 +5338,7 @@ fn the_lock_verb_asks_for_a_selection_rather_than_arming_a_rectangle() {
     let mut app = app("text-lines.pdf");
     app.submit("lock");
 
-    assert!(app.tab_mut().pending.is_none(), "it armed the rectangle tool anyway");
+    assert!(app.tab_mut().tool.is_none(), "it armed the rectangle tool anyway");
     let said = said(&app);
     assert!(said.contains("select"), "it did not say to select anything: {said}");
 }
@@ -5366,7 +5366,7 @@ fn the_lock_verb_takes_the_selection_that_is_already_there() {
 fn the_lockarea_verb_still_arms_the_rectangle() {
     let mut app = app("text-lines.pdf");
     app.submit("lockarea");
-    assert!(matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::Lock)));
+    assert!(matches!(app.tab_mut().tool.as_ref().map(|p| &p.kind), Some(Tool::Lock)));
 }
 
 /// Nothing is locked, so unlock has nothing to ask about — and asking for a
@@ -5387,8 +5387,8 @@ fn drawing_the_area_asks_for_a_passcode_and_locks_nothing_yet() {
     let mut app = app("text-lines.pdf");
     let before = page_text(&app, 0);
 
-    app.tab_mut().pending = Some(Pending {
-        kind: PendingKind::Lock,
+    app.tab_mut().tool = Some(ArmedTool {
+        kind: Tool::Lock,
         page: 0,
         objects: Vec::new(),
         points: vec![AppPoint::new(FOX.0 as f64, FOX.1 as f64), AppPoint::new(FOX.2 as f64, FOX.3 as f64)],
@@ -5770,7 +5770,7 @@ fn a_click_with_the_object_tool_selects_and_moves_nothing() {
     let before = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
     app.submit("editobject");
     assert!(app.tab_mut().object_tool.is_some(), "the tool did not arm:\n{}", said(&app));
-    assert!(app.tab_mut().pending.is_none(), "the old two-click gesture is still armed");
+    assert!(app.tab_mut().tool.is_none(), "the old two-click gesture is still armed");
 
     // Bare paper: nothing selected.
     assert!(!app.select_thing_at(0, AppPoint { x: 590.0, y: 780.0 }));

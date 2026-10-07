@@ -921,7 +921,7 @@ fn a_typed_line_the_engine_refuses_does_not_swallow_the_next_command() {
     assert!(app.cmd.history().iter().any(|e| matches!(e.kind, Kind::Error)), "{}", said(&app));
     // So the next line is a command: `edittext` arms the tool rather than becoming a word.
     app.submit("edittext");
-    assert!(app.tab().pending.is_some(), "the next line was not run as a command");
+    assert!(app.tab().tool.is_some(), "the next line was not run as a command");
     assert_eq!(runs_on(&app, 0)[0].text.trim(), "one lonely line");
 }
 

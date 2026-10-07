@@ -234,7 +234,7 @@ fn the_eraser_rubs_out_a_highlight_with_a_click_and_undo_puts_it_back() {
 
     h.state_mut().submit("erase");
     assert!(
-        matches!(h.state().tab().pending.as_ref().map(|p| &p.kind), Some(PendingKind::EraseMark)),
+        matches!(h.state().tab().tool.as_ref().map(|p| &p.kind), Some(Tool::EraseMark)),
         "the Eraser with nothing selected did not pick up the click-to-erase tool"
     );
 
@@ -267,7 +267,7 @@ fn the_eraser_still_erases_a_selected_drawing() {
     app.submit("l 10,10 100,100");
     app.submit("all");
     app.submit("erase");
-    assert!(app.tab().pending.is_none(), "a selection was erased but the click tool was armed as well");
+    assert!(app.tab().tool.is_none(), "a selection was erased but the click tool was armed as well");
     assert_eq!(app.tab().markup.existing(0).map(|l| l.len()).unwrap_or(0), 0, "the drawing is still there");
 }
 
@@ -1338,7 +1338,7 @@ fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
     h.run_steps(1);
     click(&mut h, view.to_screen(AppPoint { x: 100.0, y: 400.0 }));
     assert!(
-        h.state().tab().pending.is_none(),
+        h.state().tab().tool.is_none(),
         "the signature tool stayed armed after placing one, and would have swallowed \
          the very next click instead of selecting what was just placed"
     );
@@ -1395,7 +1395,7 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
     h.run_steps(1);
     click(&mut h, view.to_screen(AppPoint { x: 100.0, y: 400.0 }));
     assert!(
-        h.state().tab().pending.is_none(),
+        h.state().tab().tool.is_none(),
         "the signature tool stayed armed after placing one, and would have swallowed \
          the very next click instead of selecting what was just placed"
     );
@@ -2376,7 +2376,7 @@ fn selection_works_after_scrolling_into_a_long_document() {
         "nothing selected on page {} of the catalogue.\npointer: {:?}  pending: {:?}",
         landed + 1,
         app.tab().pointer,
-        app.tab().pending.is_some()
+        app.tab().tool.is_some()
     );
 }
 
@@ -3091,7 +3091,7 @@ fn an_unbuilt_button_says_so_without_opening_the_history() {
     let shown = h.state().command_open;
     assert!(!shown, "the test is not exercising the collapsed bar");
     assert!(
-        h.state().tab().pending.is_none(),
+        h.state().tab().tool.is_none(),
         "a planned verb armed something, so the bar would show that instead"
     );
 }
@@ -3719,7 +3719,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
     let mut h = harness("pages-ladder.pdf");
     h.state_mut().submit("line");
     h.run_steps(2);
-    assert!(h.state().tab().pending.is_some(), "the tool was not armed");
+    assert!(h.state().tab().tool.is_some(), "the tool was not armed");
 
     // Nothing to preview before the first click.
     let view = h.state().tab().last_view.expect("the page was drawn");
@@ -3727,7 +3727,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
     click(&mut h, start);
     h.run_steps(2);
 
-    let pending = h.state().tab().pending.as_ref().expect("still collecting");
+    let pending = h.state().tab().tool.as_ref().expect("still collecting");
     assert_eq!(pending.points.len(), 1, "the first click did not land");
 
     // With one point placed and the pointer somewhere else, the preview has
@@ -3739,7 +3739,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
         .push(egui::Event::PointerMoved(egui::pos2(start.x + 40.0, start.y + 25.0)));
     h.run_steps(2);
     assert!(
-        h.state().tab().pending.as_ref().is_some_and(|p| p.points.len() == 1),
+        h.state().tab().tool.as_ref().is_some_and(|p| p.points.len() == 1),
         "moving the pointer finished the line by itself"
     );
 
@@ -3757,7 +3757,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
         .join("\n");
     assert!(said.contains("line added"), "the second click did not finish it:\n{said}");
     assert!(
-        h.state().tab().pending.as_ref().is_some_and(|p| p.points.is_empty()),
+        h.state().tab().tool.as_ref().is_some_and(|p| p.points.is_empty()),
         "it did not come back ready for the next line"
     );
 }
@@ -3772,7 +3772,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
 ///
 /// **Bare `fillsign`, not `edittext`** — an arbitrary stand-in for "a
 /// one-click tool armed on one page": both pick a single run by its own
-/// click, through the same `PendingKind::PickText` this test means to
+/// click, through the same `Tool::PickText` this test means to
 /// exercise.
 #[test]
 fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
@@ -3783,7 +3783,7 @@ fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
 
     h.state_mut().submit("fillsign");
     h.run_steps(2);
-    let armed_for = h.state().tab().pending.as_ref().map(|p| p.page).expect("armed");
+    let armed_for = h.state().tab().tool.as_ref().map(|p| p.page).expect("armed");
 
     // Down the strip, past the page the tool was armed on.
     // Where the next page actually sits, worked out from the page the
@@ -3810,7 +3810,7 @@ fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
     let before = h.state().cmd.history().len();
     click(&mut h, target);
     h.run_steps(3);
-    let answered = h.state().tab().pending.as_ref().is_some_and(|p| p.page != armed_for)
+    let answered = h.state().tab().tool.as_ref().is_some_and(|p| p.page != armed_for)
         || h.state().cmd.history().len() > before
         || h.state().tab().editing_run.is_some();
 
@@ -4112,7 +4112,7 @@ fn writing_words_puts_selectable_text_on_the_page() {
 
     h.state_mut().submit("addtext DRAFT");
     h.run_steps(1);
-    assert!(h.state().tab().pending.is_some(), "addtext did not ask where");
+    assert!(h.state().tab().tool.is_some(), "addtext did not ask where");
     // A stale snapshot, from before the words landed — the state a
     // person looking at the page already put it in.
     let _ = h.state_mut().foreign_marks(0);
@@ -4399,9 +4399,9 @@ fn panning_with_the_middle_button_leaves_an_armed_tool_alone() {
     drag_with(&mut h, egui::PointerButton::Middle, from, from - egui::vec2(0.0, 150.0));
 
     let app = h.state();
-    assert!(app.tab().pending.is_some(), "panning disarmed the line tool");
+    assert!(app.tab().tool.is_some(), "panning disarmed the line tool");
     assert!(
-        app.tab().pending.as_ref().unwrap().points.is_empty(),
+        app.tab().tool.as_ref().unwrap().points.is_empty(),
         "panning fed a point into the tool"
     );
 }
@@ -4481,7 +4481,7 @@ fn an_armed_tool_takes_the_click_and_escape_gives_it_back() {
 
     h.state_mut().submit("line");
     h.run_steps(2);
-    assert!(h.state().tab().pending.is_some());
+    assert!(h.state().tab().tool.is_some());
 
     drag(&mut h, start, end);
     assert!(
@@ -4491,7 +4491,7 @@ fn an_armed_tool_takes_the_click_and_escape_gives_it_back() {
 
     h.state_mut().escape();
     h.run_steps(2);
-    assert!(h.state().tab().pending.is_none(), "escape did not disarm the tool");
+    assert!(h.state().tab().tool.is_none(), "escape did not disarm the tool");
 
     drag(&mut h, start, end);
     assert!(

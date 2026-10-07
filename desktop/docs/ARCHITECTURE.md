@@ -1,6 +1,6 @@
 # Pagify Desktop — Architecture
 
-Status as of 2026-10-06, build **0.1.46** (Windows). Branch `pagify-desktop-windows` in `D:\pagify desktop`, public repo `HSI-Lighting/Pagify`.
+Status as of 2026-10-07, build **0.1.46**. Branch `farzad-debug`, continuing the work on `pagify-windows-refactor` (which the design review's phases 0–3 built); public repo `HSI-Lighting/Pagify`.
 
 Pagify is a PDF editor written in Rust. The window is built with egui/eframe 0.36; PDF reading and writing goes through PDFium.
 
@@ -20,11 +20,11 @@ Pagify is a PDF editor written in Rust. The window is built with egui/eframe 0.3
 
 | Layer | Size | What it owns |
 |---|---|---|
-| `pagify_app` | `main.rs` ≈ 46,000 lines plus `overlay.rs`, `paragraph_lines.rs`, `spelling.rs`, `text_style_panel.rs`, `system_fonts.rs`, `focus.rs`, `hub.rs`, `instance.rs`, `theme.rs`, `home.rs`, `print_windows.rs` | Everything drawn, every pointer/keyboard gesture, per-tab state, the ribbon, the properties panel |
-| `pagify_shell` | ~30 modules | `session.rs` (one open document), `verbs.rs` (the typed-command language), `markup.rs`, `guides.rs` (alignment lines), `organize.rs` (page reorder maths), `reader.rs` (view anchor, characters), `blocks.rs` + `block_input.rs` (paragraph detection), `diagnose.rs` (why a file will not open), `session_log.rs` |
+| `pagify_app` | `main.rs` ≈ 15,500 lines, plus feature modules `canvas.rs`, `panels.rs`, `edit.rs`, `dispatch.rs`, `ribbon.rs`, `workspace.rs`, `view.rs`, `picking.rs`, `pending.rs`, `caches.rs`, `hub.rs`, `overlay.rs`, `home.rs`, `text_style_panel.rs`, `theme.rs`, `system_fonts.rs`, `focus.rs`, `instance.rs`, `print_windows.rs`, and ~30 test files beside them | Everything drawn, every pointer/keyboard gesture, per-tab state, the ribbon, the properties panel |
+| `pagify_shell` | ~32 modules | `session.rs` (one open document), `verbs.rs` (the typed-command language), `markup.rs`, `guides.rs` (alignment lines), `organize.rs` (page reorder maths), `reader.rs` (view anchor, characters), `blocks.rs` + `block_input.rs` (paragraph detection), `paragraph_lines.rs` and `editor.rs` (editor/paragraph arithmetic, moved out of the app in Phase 4a), `spelling.rs`, `diagnose.rs` (why a file will not open), `session_log.rs` |
 | `pdf_core` | `document/pdfium_doc.rs` ≈ 17,000 lines | The `Document` / `DocumentMut` traits, `Command` + undo, byte-safe content-stream edits, text shaping/embedding, rendering, redaction, signing |
 
-The main file is large on purpose-by-accident, not by design: new UI code lands in `main.rs` unless it is a self-contained widget (`text_style_panel.rs`, `overlay.rs`). Splitting it is a future cleanup, not a requirement.
+The main file was large by accident, not design, and is being split by the design review (`desktop/docs/DESIGN_REVIEW.md`): it went from ≈ 46,000 lines (of which 22,900 were tests squeezed into three `#[cfg(test)]` modules) to ≈ 15,500 by Phase 1's module extraction, with every test moved beside the code it tests. Phase 1's function split followed: `ui()` (960 lines) is now a 13-line frame outline over seven named methods (`draw_frame_preamble`, `handle_input`, `open_dropped_files`, `draw_title_bar`, `draw_ribbon`, `draw_command_bar`, `draw_main_area`), and `act()` (820 lines) is a router over nine per-domain handlers in `dispatch.rs` (`act_document` … `act_measurement`). The remaining structural work is named there: `interact` (420 lines), `verbs::parse` (406), `draw_main_area` (340) and `act_security` (260) are the largest functions left, the tool transitions in `picking.rs` are still one large match rather than event-returning `Tool::on_click`/`on_key` transitions, and Phase 4b (an `Effect`-returning command executor) has not started.
 
 ## 2. How an edit travels (the important path)
 
@@ -43,6 +43,8 @@ Page objects are addressed by their **index in the page's object list**. Anythin
 
 - `PagifyApp` — app-wide: tabs, theme, shared clipboards (`object_clipboard`, `page_clipboard`, `paste_ghost`), session log, font registries, update checker.
 - `DocTab` — per document: the `Doc` (session, thumbnails, textures, page strip), the selection mechanisms (`selected`, `group`, markup `Layer` selection, signature/placed-image selections), the open editors (`editing_run`, `new_text_box`), view state and `ViewSnapshot` (so the reader keeps its place).
+- **One armed tool.** `DocTab.tool: Option<ArmedTool>` is the only waiting-for-clicks state: an `ArmedTool` is a `Tool` variant plus the page and the points/objects collected so far. All the kinds — draw, modify, measure, text, sign, lock, redact, whiteout, fill, calibrate — live in the one enum (`pending.rs`), with queries (`wants`, `prompt`, `repeats`, `command`, `wants_snapping`) on `Tool`; arming and resolving live in `picking.rs`. The old split between `PendingKind`/`Pending` and a second `ArmedTool` is gone (design review Phase 2).
+- **One cache registry.** `Doc.caches: DocCaches` (`caches.rs`) holds every derived-from-the-document value — textures, thumbnails, detail tile, locked items, page blocks, sampling raster, page weight, rect page, characters, layers, foreign marks, internal links, drawn words — and `rendered_is_stale()` bumps the render epoch and empties them all through one method, so no edit path has to remember a list (design review Phase 3).
 - The **selection mechanisms are mutually exclusive** by convention; most "delete / copy" code checks them in a fixed order.
 - Documents are rendered off the UI thread by a `RenderWorker`; the page draws from the last picture it holds until the right one arrives.
 

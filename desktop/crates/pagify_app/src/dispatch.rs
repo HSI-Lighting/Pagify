@@ -5,7 +5,7 @@
 
 use crate::hub;
 use crate::{
-    signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, PendingKind, SignatureList,
+    signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, SignatureList,
     SignaturePad, SnippetList, Tab, Tool,
 };
 use pagify_shell::command::{Dispatch, Kind};
@@ -51,6 +51,117 @@ impl crate::PagifyApp {
 
     pub(crate) fn act(&mut self, verb: Verb) {
         match verb {
+            Verb::Open(..)
+            | Verb::OpenDialog
+            | Verb::Close { .. }
+            | Verb::Quit { .. }
+            | Verb::Page(..)
+            | Verb::Zoom(..)
+            | Verb::RotatePage(..)
+            | Verb::TextLayer
+            | Verb::Pdfium
+            | Verb::Version
+            | Verb::CheckUpdate
+            => self.act_document(verb),
+            Verb::Pick(..)
+            | Verb::Sensitivity(..)
+            | Verb::FillSign(..)
+            | Verb::PredefinedText(..)
+            | Verb::EditObject
+            | Verb::MoveThing
+            | Verb::SignLine
+            | Verb::SignRectangle
+            | Verb::DocumentStatus
+            => self.act_tools(verb),
+            Verb::SessionLog
+            | Verb::ApplySignatures
+            | Verb::ManageSignatures(..)
+            | Verb::Signature(..)
+            => self.act_signing(verb),
+            Verb::Validate
+            | Verb::Certify(..)
+            | Verb::Whiteout
+            | Verb::DrawArrow
+            | Verb::ToggleFill
+            | Verb::Redact
+            | Verb::Lock
+            | Verb::Secure(..)
+            | Verb::SmartRedact { .. }
+            | Verb::HiddenData { .. }
+            | Verb::Unsecure
+            => self.act_security(verb),
+            Verb::Layers
+            | Verb::RepairLocks
+            | Verb::Opacity(..)
+            | Verb::BringToFront
+            | Verb::SendToBack
+            | Verb::LockArea
+            | Verb::LockPages(..)
+            | Verb::Unlock
+            => self.act_objects(verb),
+            Verb::Undo
+            | Verb::Redo
+            | Verb::Pointer(..)
+            | Verb::CopyText
+            | Verb::Paste
+            | Verb::EditText
+            | Verb::AddText(..)
+            | Verb::AddImage(..)
+            | Verb::SetLayout(..)
+            | Verb::ReversePages
+            | Verb::Thumbnails
+            | Verb::ToggleAppearance
+            | Verb::DuplicatePages(..)
+            | Verb::CropPages { .. }
+            | Verb::ResizePages { .. }
+            | Verb::SwapPages { .. }
+            | Verb::RotatePages { .. }
+            | Verb::ExtractText(..)
+            | Verb::OutlinedFont(..)
+            | Verb::ClearHistory
+            => self.act_navigation(verb),
+            Verb::Finish
+            | Verb::Save
+            | Verb::SaveAs(..)
+            | Verb::SaveAsDialog
+            | Verb::Extract { .. }
+            | Verb::Import { .. }
+            | Verb::DeletePages(..)
+            | Verb::InsertPage
+            | Verb::MovePages { .. }
+            => self.act_files(verb),
+            Verb::Reflow
+            | Verb::Find(..)
+            | Verb::FindStep { .. }
+            | Verb::Replace
+            | Verb::Spelling
+            | Verb::Bookmark
+            | Verb::ArticleBox
+            | Verb::Weblinks
+            | Verb::JoinText
+            | Verb::MatchProperties
+            | Verb::Copy
+            | Verb::MarkText(..)
+            | Verb::ListMarks
+            | Verb::RemoveMark(..)
+            | Verb::Note(..)
+            => self.act_text_and_find(verb),
+            Verb::Calibrate { .. }
+            | Verb::Scale
+            | Verb::Measure(..)
+            | Verb::Record(..)
+            | Verb::StopRecording
+            | Verb::Replay(..)
+            | Verb::Help(..)
+            | Verb::Planned { .. }
+            => self.act_measurement(verb),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 11 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_document(&mut self, verb: Verb) {
+        match verb {
             // Opening lands in its own tab now, so it never puts this one's
             // unsaved work at risk — see `open_with`.
             Verb::Open(path) => self.open(&path.to_string_lossy()),
@@ -95,8 +206,16 @@ impl crate::PagifyApp {
                 self.spawn_update_check();
                 self.say_info("checking for a newer build…");
             }
+            _ => unreachable!("act_document was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 9 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_tools(&mut self, verb: Verb) {
+        match verb {
             Verb::Pick(at) => {
-                if self.tab_mut().pending.is_none() && self.tab_mut().tool.is_none() {
+                if self.tab_mut().tool.is_none() {
                     self.say_error("nothing is waiting for a click.");
                     return;
                 }
@@ -185,11 +304,11 @@ impl crate::PagifyApp {
                 let page = self.tab_mut().page;
                 match what.as_deref().and_then(pdf_core::document::FillMark::parse) {
                     // A tick, a cross or a dot: one click each.
-                    Some(mark) => self.arm_tool(Tool::Fill(mark), page),
+                    Some(mark) => self.arm(Tool::Fill(mark), page),
                     // Bare `fillsign` types where you click, which is the other
                     // half of filling a form in by hand.
                     None => {
-                        self.arm(PendingKind::PickText, page);
+                        self.arm(Tool::PickText, page);
                         self.say_info(
                             "fill: click a line of text to change it, or use \
                              `addtext <words>` to write somewhere new — and \
@@ -232,7 +351,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.arm(PendingKind::SignLine, page);
+                self.arm(Tool::SignLine, page);
             }
             Verb::SignRectangle => {
                 let page = self.tab_mut().page;
@@ -240,13 +359,21 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.arm(PendingKind::SignRectangle, page);
+                self.arm(Tool::SignRectangle, page);
             }
             Verb::DocumentStatus => {
                 for line in self.document_status() {
                     self.say_info(line);
                 }
             }
+            _ => unreachable!("act_tools was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 6 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_signing(&mut self, verb: Verb) {
+        match verb {
             Verb::SessionLog => match self.session_log.path() {
                 Some(path) => self.say_info(format!(
                     "recording every command and outcome to {} — send it along with a bug report.",
@@ -434,8 +561,16 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.arm_tool(Tool::Signature, page);
+                self.arm(Tool::Signature, page);
             }
+            _ => unreachable!("act_signing was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 11 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_security(&mut self, verb: Verb) {
+        match verb {
             Verb::Validate => {
                 let Some(doc) = &self.tab_mut().doc else {
                     self.say_error("nothing open.");
@@ -494,7 +629,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm_tool(Tool::Whiteout, page);
+                    self.arm(Tool::Whiteout, page);
                 }
             }
             Verb::DrawArrow => {
@@ -502,7 +637,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm(PendingKind::Draw(DrawKind::Arrow), page);
+                    self.arm(Tool::Draw(DrawKind::Arrow), page);
                 }
             }
             Verb::ToggleFill => {
@@ -518,7 +653,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm_tool(Tool::Redact, page);
+                    self.arm(Tool::Redact, page);
                 }
             }
             Verb::Lock => {
@@ -742,6 +877,14 @@ impl crate::PagifyApp {
                     Err(e) => self.say_error(e.to_string()),
                 }
             }
+            _ => unreachable!("act_security was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 8 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_objects(&mut self, verb: Verb) {
+        match verb {
             Verb::Layers => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
@@ -794,7 +937,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm(PendingKind::Lock, page);
+                    self.arm(Tool::Lock, page);
                 }
             }
             Verb::LockPages(spec) => {
@@ -824,16 +967,26 @@ impl crate::PagifyApp {
                     self.say_info("type the passcode this was locked with, or Escape to give up.");
                 }
             }
+            _ => unreachable!("act_objects was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 19 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_navigation(&mut self, verb: Verb) {
+        match verb {
             Verb::Undo | Verb::Redo => self.undo_redo(matches!(verb, Verb::Undo)),
 
             Verb::Pointer(mode) => {
                 // Switching tools abandons whatever was half-picked. Leaving a
                 // pending operation armed under a new tool is how a click meant
                 // for one thing lands in another.
-                if self.tab_mut().pending.take().is_some() {
-                    let page = self.tab().page;
-                    if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
-                        layer.forget_last_step();
+                if let Some(armed) = self.tab_mut().tool.take() {
+                    if armed.kind.cancel_drops_checkpoint() {
+                        let page = self.tab().page;
+                        if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
+                            layer.forget_last_step();
+                        }
                     }
                 }
                 self.tab_mut().pointer = mode;
@@ -908,18 +1061,25 @@ impl crate::PagifyApp {
                 }
             }
 
+            _ => unreachable!("act_navigation was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 9 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_files(&mut self, verb: Verb) {
+        match verb {
             // The typed form of pressing Enter over the page.
             Verb::Finish => {
                 let closeable = self.tab_mut()
-                    .pending
+                    .tool
                     .as_ref()
                     .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
                 if closeable {
                     self.resolve();
-                // No `Tool` kind ends on Enter yet, so a `Tool` being armed
-                // at all means it is still waiting for more points — same
-                // as `pending` being armed but not `closeable`, above.
-                } else if self.tab_mut().pending.is_some() || self.tab_mut().tool.is_some() {
+                // No multi-point kind is left with fewer than Enter needs —
+                // anything armed at this point is still waiting for more points.
+                } else if self.tab_mut().tool.is_some() {
                     self.say_error("not enough points yet.");
                 } else {
                     self.say_error("nothing to finish.");
@@ -939,6 +1099,14 @@ impl crate::PagifyApp {
             Verb::InsertPage => self.insert_page(),
             Verb::MovePages { pages, before } => self.move_pages(&pages, before),
 
+            _ => unreachable!("act_files was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 15 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_text_and_find(&mut self, verb: Verb) {
+        match verb {
             Verb::Reflow => self.reflow(),
             Verb::Find(needle) => self.find(&needle),
             Verb::FindStep { forward } => self.find_step(forward),
@@ -950,7 +1118,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm(PendingKind::ArticleBox, page);
+                    self.arm(Tool::ArticleBox, page);
                 }
             }
             Verb::Weblinks => self.begin_web_link(),
@@ -962,9 +1130,17 @@ impl crate::PagifyApp {
             Verb::RemoveMark(n) => self.remove_mark(n),
             Verb::Note(text) => self.add_note(text),
 
+            _ => unreachable!("act_text_and_find was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 7 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_measurement(&mut self, verb: Verb) {
+        match verb {
             Verb::Calibrate { distance, unit } => {
                 let page = self.tab_mut().page;
-                self.arm_tool(Tool::Calibrate { distance, unit }, page);
+                self.arm(Tool::Calibrate { distance, unit }, page);
             }
             Verb::Scale => {
                 let d = self.tab_mut().calibration.describe();
@@ -972,7 +1148,7 @@ impl crate::PagifyApp {
             }
             Verb::Measure(kind) => {
                 let page = self.tab_mut().page;
-                self.arm(PendingKind::Measure(kind), page);
+                self.arm(Tool::Measure(kind), page);
             }
 
             Verb::Record(name) => {
@@ -993,6 +1169,7 @@ impl crate::PagifyApp {
             Verb::Replay(path) => self.replay(&path),
 
             Verb::Help(_) | Verb::Planned { .. } => unreachable!("handled in run()"),
+            _ => unreachable!("act_measurement was handed a verb from another domain"),
         }
     }
 }

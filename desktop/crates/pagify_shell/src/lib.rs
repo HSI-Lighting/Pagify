@@ -19,6 +19,7 @@ pub mod blocks;
 pub mod command;
 pub mod commit;
 pub mod diagnose;
+pub mod editor;
 pub mod guides;
 pub mod markup;
 pub mod measure;
