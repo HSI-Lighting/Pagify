@@ -765,90 +765,7 @@ impl crate::PagifyApp {
         // left of it is exactly what the scroll area gets.
         let viewport = ui.available_rect_before_wrap();
         let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| viewport.contains(*p));
-        if let Some(p) = pointer {
-            // egui folds ⌘/Ctrl-scroll and a trackpad pinch into the same
-            // number, which is right: they are one gesture with two spellings.
-            let factor = ui.input(|i| i.zoom_delta());
-            if (factor - 1.0).abs() > 0.001 {
-                let before = zoom;
-                let after = (before * factor).clamp(0.05, Self::MAX_ZOOM);
-                if (after - before).abs() > f32::EPSILON {
-                    // Anchored against where the page **was actually drawn**,
-                    // not against a model of where it ought to be.
-                    //
-                    // Reconstructing the content position from the viewport,
-                    // the scroll offset and the strip padding means encoding
-                    // the layout twice, and any term missed from the copy shows
-                    // up as the page creeping away from the cursor — which it
-                    // did, vertically, by a different amount at every scale.
-                    // `last_view` is the mapping the previous frame really
-                    // used, so there is nothing left to get wrong.
-                    // The page under the pointer, or the current one when the
-                    // pointer is beside the page rather than on it — the strip
-                    // is wider than the paper.
-                    let anchor_on =
-                        self.tab_mut().hover_view.or_else(|| self.tab_mut().last_view.map(|v| (self.tab_mut().page, v)));
-                    if let Some((index, view)) = anchor_on {
-                        // Where this page sits in the strip, in strip points.
-                        //
-                        // This is the term the anchor was missing. A page's
-                        // origin on screen is
-                        //
-                        //     viewport - offset + padding + strip_position * zoom
-                        //
-                        // so changing the zoom moves it **even at a fixed
-                        // offset**, by `strip_position * (after - before)`.
-                        // Correcting only for the offset leaves exactly that
-                        // much error, and it grows with distance down the
-                        // document: on the first page `strip_position` is zero
-                        // and the anchor looks perfect, which is why every
-                        // single-page test passed while a catalogue slid 200pt.
-                        let (sx, sy) = self.tab_mut()
-                            .doc
-                            .as_ref()
-                            .map(|d| {
-                                let (w, _) = d.strip.frame_of(index).unwrap_or((0.0, 0.0));
-                                (
-                                    d.strip
-                                        .left_of(index)
-                                        .unwrap_or((d.strip.width_pt() - w) / 2.0),
-                                    d.strip.top_of(index).unwrap_or(0.0),
-                                )
-                            })
-                            .unwrap_or((0.0, 0.0));
-
-                        // `before`/`after` are the *logical* factor — right
-                        // for `ZoomMode::Factor` just below, wrong here:
-                        // `origin_after`/`with_strip` place things on screen,
-                        // which is `view`'s own job, and `view.scale` is
-                        // already the on-screen value `DISPLAY_DPI_SCALE`
-                        // produces. Found by this exact anchor test failing
-                        // once that correction landed — mixing a logical
-                        // factor into on-screen arithmetic held the wrong
-                        // point still, by exactly the 96/72 the two disagree
-                        // by.
-                        let (before_screen, after_screen) =
-                            (before * Self::DISPLAY_DPI_SCALE, after * Self::DISPLAY_DPI_SCALE);
-                        let on_page = view.to_page(p);
-                        let origin_after = egui::vec2(
-                            p.x - on_page.x as f32 * after_screen,
-                            p.y - on_page.y as f32 * after_screen,
-                        );
-                        let moved = view.origin.to_vec2() - origin_after;
-                        let with_strip = egui::vec2(sx, sy) * (after_screen - before_screen);
-                        self.tab_mut().anchor_offset = Some(self.tab_mut().scroll_offset + moved + with_strip);
-                    }
-                    self.tab_mut().zoom = ZoomMode::Factor(after);
-                    zoom = after;
-
-                    // The gesture belongs to the zoom. Left in place, the same
-                    // wheel also scrolls the strip, and the two fight for the
-                    // offset every frame — which reads as the page shuddering
-                    // rather than zooming.
-                    ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
-                }
-            }
-        }
+        zoom = self.zoom_at_pointer(ui, pointer, zoom);
 
         self.note_zoom_and_collect_renders(ctx, zoom);
 
@@ -867,74 +784,8 @@ impl crate::PagifyApp {
         let mut area =
             egui::ScrollArea::both().id_salt(("pages", scroll_id)).auto_shrink([false, false]);
         // Whether this frame dictated the offset rather than observing it.
-        let mut forced: Option<egui::Vec2> = None;
-        if let Some(by) = self.tab_mut().pan_by.take() {
-            // Clamped to what can actually be scrolled to.
-            //
-            // Without the upper bound the offset keeps growing past the end of
-            // the document while the drag continues; the scroll area clamps
-            // what it draws, and the accumulated excess springs back the moment
-            // the drag reverses. That is the bounce at the edges.
-            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
-            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let to = (self.tab_mut().scroll_offset + by).clamp(egui::Vec2::ZERO, room);
-            forced = Some(to);
-            area = area.scroll_offset(to);
-        } else if let Some(Reveal { page, rect }) = self.tab_mut().reveal.take() {
-            // A word to show, not a page: scrolled just far enough, on both
-            // axes, and never by a change of zoom. `go_to` asked for the page's
-            // top along with it — that is what a word in the first screenful
-            // settles for, and the request is taken here, or it would fire a
-            // frame late and undo this.
-            let page_top = self.tab_mut().scroll_to_pt.take();
-            self.tab_mut().anchor_offset = None;
-            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
-            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let at = self.tab().scroll_offset;
-            let place = self.tab().doc.as_ref().and_then(|d| Some((d.strip.left_of(page)?, d.strip.top_of(page)?)));
-            let to = match place {
-                Some((left, top)) => {
-                    // Content pixels, from the content's own origin: the
-                    // strip's padding, then the page, then the word on it.
-                    let pad = STRIP_PAD_PX;
-                    let (x0, x1) = (pad + (left + rect.left) * zoom, pad + (left + rect.right) * zoom);
-                    let (y0, y1) = (pad + (top + rect.top) * zoom, pad + (top + rect.bottom) * zoom);
-                    // `at` was measured at last frame's zoom, which Fit and
-                    // Width change with the page. No matter: the word's own
-                    // extent is at *this* zoom, so a window that holds it
-                    // holds it, and the answer is clamped to the new end.
-                    egui::vec2(
-                        reveal_axis(at.x, viewport.width(), room.x, x0, x1, None),
-                        reveal_axis(at.y, viewport.height(), room.y, y0, y1, page_top.map(|y| y * zoom)),
-                    )
-                }
-                None => egui::vec2(at.x, page_top.map_or(at.y, |y| y * zoom)),
-            };
-            forced = Some(to);
-            area = area.scroll_offset(to);
-        } else if let Some(y) = self.tab_mut().scroll_to_pt.take() {
-            // 12.0 is the strip's top padding, the same constant the page
-            // origins are laid out from.
-            area = area.scroll_offset(egui::vec2(self.tab_mut().scroll_offset.x, y * zoom));
-        } else if let Some(offset) = self.tab_mut().anchor_offset.take() {
-            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
-            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let to = offset.clamp(egui::Vec2::ZERO, room);
-            forced = Some(to);
-            area = area.scroll_offset(to);
-        } else if let Some(to) = {
-            // Nothing asked to go anywhere, but the zoom, the window or the
-            // pages are not what they were last frame: keep the reader at the
-            // same place on the page rather than at the same pixel offset.
-            let tab = self.tab();
-            tab.view.zip(tab.doc.as_ref()).and_then(|(seen, doc)| {
-                seen.restored(&doc.strip, zoom, (viewport.width(), viewport.height()))
-            })
-        } {
-            let to = egui::vec2(to.0, to.1);
-            forced = Some(to);
-            area = area.scroll_offset(to);
-        }
+        let (area, forced) =
+            self.take_forced_scroll(area, viewport, zoom, strip_width, strip_height);
         let scroll = area
             .show(ui, |ui| {
                 let content =
@@ -1160,6 +1011,188 @@ impl crate::PagifyApp {
             ctx, zoom, page_count, scroll.state.offset, scroll.inner_rect, &scroll.inner,
         );
     }
+
+    /// Zoom at the pointer: the point under the cursor stays under it, and
+    /// the scroll offset is anchored to it rather than to the middle of the
+    /// window — see the comments this moved away from in `draw_pages`.
+    /// Returns the (possibly corrected) zoom for the rest of the frame.
+    fn zoom_at_pointer(
+        &mut self,
+        ui: &mut egui::Ui,
+        pointer: Option<egui::Pos2>,
+        mut zoom: f32,
+    ) -> f32 {
+        if let Some(p) = pointer {
+            // egui folds ⌘/Ctrl-scroll and a trackpad pinch into the same
+            // number, which is right: they are one gesture with two spellings.
+            let factor = ui.input(|i| i.zoom_delta());
+            if (factor - 1.0).abs() > 0.001 {
+                let before = zoom;
+                let after = (before * factor).clamp(0.05, Self::MAX_ZOOM);
+                if (after - before).abs() > f32::EPSILON {
+                    // Anchored against where the page **was actually drawn**,
+                    // not against a model of where it ought to be.
+                    //
+                    // Reconstructing the content position from the viewport,
+                    // the scroll offset and the strip padding means encoding
+                    // the layout twice, and any term missed from the copy shows
+                    // up as the page creeping away from the cursor — which it
+                    // did, vertically, by a different amount at every scale.
+                    // `last_view` is the mapping the previous frame really
+                    // used, so there is nothing left to get wrong.
+                    // The page under the pointer, or the current one when the
+                    // pointer is beside the page rather than on it — the strip
+                    // is wider than the paper.
+                    let anchor_on =
+                        self.tab_mut().hover_view.or_else(|| self.tab_mut().last_view.map(|v| (self.tab_mut().page, v)));
+                    if let Some((index, view)) = anchor_on {
+                        // Where this page sits in the strip, in strip points.
+                        //
+                        // This is the term the anchor was missing. A page's
+                        // origin on screen is
+                        //
+                        //     viewport - offset + padding + strip_position * zoom
+                        //
+                        // so changing the zoom moves it **even at a fixed
+                        // offset**, by `strip_position * (after - before)`.
+                        // Correcting only for the offset leaves exactly that
+                        // much error, and it grows with distance down the
+                        // document: on the first page `strip_position` is zero
+                        // and the anchor looks perfect, which is why every
+                        // single-page test passed while a catalogue slid 200pt.
+                        let (sx, sy) = self.tab_mut()
+                            .doc
+                            .as_ref()
+                            .map(|d| {
+                                let (w, _) = d.strip.frame_of(index).unwrap_or((0.0, 0.0));
+                                (
+                                    d.strip
+                                        .left_of(index)
+                                        .unwrap_or((d.strip.width_pt() - w) / 2.0),
+                                    d.strip.top_of(index).unwrap_or(0.0),
+                                )
+                            })
+                            .unwrap_or((0.0, 0.0));
+
+                        // `before`/`after` are the *logical* factor — right
+                        // for `ZoomMode::Factor` just below, wrong here:
+                        // `origin_after`/`with_strip` place things on screen,
+                        // which is `view`'s own job, and `view.scale` is
+                        // already the on-screen value `DISPLAY_DPI_SCALE`
+                        // produces. Found by this exact anchor test failing
+                        // once that correction landed — mixing a logical
+                        // factor into on-screen arithmetic held the wrong
+                        // point still, by exactly the 96/72 the two disagree
+                        // by.
+                        let (before_screen, after_screen) =
+                            (before * Self::DISPLAY_DPI_SCALE, after * Self::DISPLAY_DPI_SCALE);
+                        let on_page = view.to_page(p);
+                        let origin_after = egui::vec2(
+                            p.x - on_page.x as f32 * after_screen,
+                            p.y - on_page.y as f32 * after_screen,
+                        );
+                        let moved = view.origin.to_vec2() - origin_after;
+                        let with_strip = egui::vec2(sx, sy) * (after_screen - before_screen);
+                        self.tab_mut().anchor_offset = Some(self.tab_mut().scroll_offset + moved + with_strip);
+                    }
+                    self.tab_mut().zoom = ZoomMode::Factor(after);
+                    zoom = after;
+
+                    // The gesture belongs to the zoom. Left in place, the same
+                    // wheel also scrolls the strip, and the two fight for the
+                    // offset every frame — which reads as the page shuddering
+                    // rather than zooming.
+                    ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                }
+            }
+        }
+        zoom
+    }
+
+
+    /// The scroll offset this frame has been told to take — a pan, a reveal,
+    /// a scroll-to, a zoom anchor or a restored view — applied to the scroll
+    /// area. Returns the area and the offset it dictated, if any; the
+    /// comments this moved away from in `draw_pages` explain each branch.
+    fn take_forced_scroll(
+        &mut self,
+        mut area: egui::ScrollArea,
+        viewport: egui::Rect,
+        zoom: f32,
+        strip_width: f32,
+        strip_height: f32,
+    ) -> (egui::ScrollArea, Option<egui::Vec2>) {
+        let mut forced: Option<egui::Vec2> = None;
+        if let Some(by) = self.tab_mut().pan_by.take() {
+            // Clamped to what can actually be scrolled to.
+            //
+            // Without the upper bound the offset keeps growing past the end of
+            // the document while the drag continues; the scroll area clamps
+            // what it draws, and the accumulated excess springs back the moment
+            // the drag reverses. That is the bounce at the edges.
+            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
+            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
+            let to = (self.tab_mut().scroll_offset + by).clamp(egui::Vec2::ZERO, room);
+            forced = Some(to);
+            area = area.scroll_offset(to);
+        } else if let Some(Reveal { page, rect }) = self.tab_mut().reveal.take() {
+            // A word to show, not a page: scrolled just far enough, on both
+            // axes, and never by a change of zoom. `go_to` asked for the page's
+            // top along with it — that is what a word in the first screenful
+            // settles for, and the request is taken here, or it would fire a
+            // frame late and undo this.
+            let page_top = self.tab_mut().scroll_to_pt.take();
+            self.tab_mut().anchor_offset = None;
+            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
+            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
+            let at = self.tab().scroll_offset;
+            let place = self.tab().doc.as_ref().and_then(|d| Some((d.strip.left_of(page)?, d.strip.top_of(page)?)));
+            let to = match place {
+                Some((left, top)) => {
+                    // Content pixels, from the content's own origin: the
+                    // strip's padding, then the page, then the word on it.
+                    let pad = STRIP_PAD_PX;
+                    let (x0, x1) = (pad + (left + rect.left) * zoom, pad + (left + rect.right) * zoom);
+                    let (y0, y1) = (pad + (top + rect.top) * zoom, pad + (top + rect.bottom) * zoom);
+                    // `at` was measured at last frame's zoom, which Fit and
+                    // Width change with the page. No matter: the word's own
+                    // extent is at *this* zoom, so a window that holds it
+                    // holds it, and the answer is clamped to the new end.
+                    egui::vec2(
+                        reveal_axis(at.x, viewport.width(), room.x, x0, x1, None),
+                        reveal_axis(at.y, viewport.height(), room.y, y0, y1, page_top.map(|y| y * zoom)),
+                    )
+                }
+                None => egui::vec2(at.x, page_top.map_or(at.y, |y| y * zoom)),
+            };
+            forced = Some(to);
+            area = area.scroll_offset(to);
+        } else if let Some(y) = self.tab_mut().scroll_to_pt.take() {
+            // 12.0 is the strip's top padding, the same constant the page
+            // origins are laid out from.
+            area = area.scroll_offset(egui::vec2(self.tab_mut().scroll_offset.x, y * zoom));
+        } else if let Some(offset) = self.tab_mut().anchor_offset.take() {
+            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
+            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
+            let to = offset.clamp(egui::Vec2::ZERO, room);
+            forced = Some(to);
+            area = area.scroll_offset(to);
+        } else if let Some(to) = {
+            // Nothing asked to go anywhere, but the zoom, the window or the
+            // pages are not what they were last frame: keep the reader at the
+            // same place on the page rather than at the same pixel offset.
+            let tab = self.tab();
+            tab.view.zip(tab.doc.as_ref()).and_then(|(seen, doc)| {
+                seen.restored(&doc.strip, zoom, (viewport.width(), viewport.height()))
+            })
+        } {
+            let to = egui::vec2(to.0, to.1);
+            forced = Some(to);
+            area = area.scroll_offset(to);
+        }
+        (area, forced)
+    }
+
 
     /// Note when the zoom last changed — what a new render waits on, see
     /// [`ZOOM_SETTLE_SECS`] — and collect whatever renders have come back.
