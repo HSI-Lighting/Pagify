@@ -876,467 +876,14 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         return Some(Ok(Verb::Planned { verb, phase }));
     }
 
-    let parsed = match head.as_str() {
-        "done" | "finish" => Ok(Verb::Finish),
-        // Not "markredact": marking and applying are one gesture here, guarded
-        // by a confirmation where anything is in the way rather than by a
-        // separate mark-then-apply pass.
-        "redact" => Ok(Verb::Redact),
-        // Bare `lock` arms the rectangle tool. With pages named — `lock all`,
-        // `lock 1-3` — it locks those pages whole, which is the only form that
-        // can lock a document whose pages are scans or outlined type.
-        "lock" => {
-            if tail.is_empty() {
-                Ok(Verb::Lock)
-            } else {
-                Ok(Verb::LockPages(tail.to_string()))
-            }
-        }
-        "lockall" => Ok(Verb::LockPages("all".into())),
-        "lockarea" => Ok(Verb::LockArea),
-        "layers" => Ok(Verb::Layers),
-        // Said the way every other program says it, because this is one of the
-        // few gestures a reader arrives already knowing.
-        "bringtofront" | "bringforward" | "tofront" => Ok(Verb::BringToFront),
-        "sendtoback" | "sendbackward" | "toback" => Ok(Verb::SendToBack),
-        "repairlocks" => Ok(Verb::RepairLocks),
-        "opacity" | "transparency" => match tail.trim().trim_end_matches('%').parse::<f32>() {
-            Ok(percent) if (0.0..=100.0).contains(&percent) => Ok(Verb::Opacity(percent)),
-            Ok(_) => Err("opacity is between 0 and 100".into()),
-            Err(_) => Err("opacity takes a percentage, 0 to 100 — `opacity 50`".into()),
-        },
-        "secure" => SecureOptions::parse(tail).map(Verb::Secure),
-        "whiteout" => Ok(Verb::Whiteout),
-        "fill" => Ok(Verb::ToggleFill),
-        "arrow" => Ok(Verb::DrawArrow),
-        "signrectangle" => Ok(Verb::SignRectangle),
-        "signline" => Ok(Verb::SignLine),
-        // **Not `move`.** That word belongs to the drawing kernel, where it
-        // moves marks and is tested doing so. Taking it would have broken a
-        // tool that works in order to name one that did not exist yet.
-        "moveobject" => Ok(Verb::MoveThing),
-        "editobject" => Ok(Verb::EditObject),
-        "predefinedtext" => Ok(Verb::PredefinedText({
-            let tail = tail.trim();
-            // Free text rather than sub-verbs: a snippet is whatever somebody
-            // types, and reserving words like `list` out of it would mean a
-            // snippet that happens to be one could never be kept.
-            (!tail.is_empty()).then(|| tail.to_string())
-        })),
-        // The same three marks `fillsign` makes, one press away — the PagiSign
-        // tab has a button for each, and each of them said "not built yet"
-        // about a mark this program had been making since `fillsign` was wired.
-        // Aliases rather than tools: one implementation, three doors.
-        "signcheck" => Ok(Verb::FillSign(Some("tick".into()))),
-        "signcross" => Ok(Verb::FillSign(Some("cross".into()))),
-        "signdot" => Ok(Verb::FillSign(Some("dot".into()))),
-        "documentstatus" | "status" => Ok(Verb::DocumentStatus),
-        "sessionlog" => Ok(Verb::SessionLog),
-        "applysignatures" => Ok(Verb::ApplySignatures),
-        "managesignatures" => {
-            let tail = tail.trim();
-            let (word, rest) = match tail.split_once(char::is_whitespace) {
-                Some((word, rest)) => (word.to_ascii_lowercase(), rest.trim()),
-                None => (tail.to_ascii_lowercase(), ""),
-            };
-            match (word.as_str(), rest) {
-                ("" | "open" | "show", "") => Ok(Verb::ManageSignatures(Signatures::Open)),
-                ("list", "") => Ok(Verb::ManageSignatures(Signatures::List)),
-                ("use" | "choose", name) if !name.is_empty() => {
-                    Ok(Verb::ManageSignatures(Signatures::Use(name.to_string())))
-                }
-                ("delete" | "remove" | "forget", name) if !name.is_empty() => {
-                    Ok(Verb::ManageSignatures(Signatures::Forget(name.to_string())))
-                }
-                ("rename" | "call", name) if !name.is_empty() => {
-                    Ok(Verb::ManageSignatures(Signatures::Rename(name.to_string())))
-                }
-                // Named without a name — the mistake worth its own sentence,
-                // because the fix is a word away rather than a different verb.
-                ("use" | "choose" | "delete" | "remove" | "forget" | "rename" | "call", "") => {
-                    Err(format!("managesignatures {word}: which one? `managesignatures list` says."))
-                }
-                _ => Err(format!(
-                    "managesignatures: don't know {tail:?} — try list, use <name>, \
-                     rename <name>, or delete <name>"
-                )),
-            }
-        }
-        "signature" => {
-            let tail = tail.trim();
-            let (head, rest) = tail.split_once(char::is_whitespace).unwrap_or((tail, ""));
-            match head.to_ascii_lowercase().as_str() {
-                "" | "place" | "put" | "sign" => Ok(Verb::Signature(SignatureAction::Place)),
-                "draw" | "new" | "create" => Ok(Verb::Signature(SignatureAction::Draw)),
-                "upload" | "image" | "file" => {
-                    let rest = rest.trim();
-                    if rest.is_empty() {
-                        Ok(Verb::Signature(SignatureAction::Upload(None)))
-                    } else {
-                        Ok(Verb::Signature(SignatureAction::Upload(Some(resolve_path(rest)))))
-                    }
-                }
-                other => Err(format!(
-                    "signature: don't know {other:?} — `signature` places the one you \
-                     have, `signature draw` makes a new one by hand, `signature upload` \
-                     adds one from a picture file"
-                )),
-            }
-        }
-        "validate" => Ok(Verb::Validate),
-        "certify" | "sign" => {
-            let tail = tail.trim();
-            if tail.is_empty() {
-                Ok(Verb::Certify(None))
-            } else {
-                Ok(Verb::Certify(Some(resolve_path(tail))))
-            }
-        }
-        "fillsign" => {
-            let tail = tail.trim();
-            if tail.is_empty() {
-                Ok(Verb::FillSign(None))
-            } else if pdf_core::document::FillMark::parse(tail).is_some() {
-                Ok(Verb::FillSign(Some(tail.to_string())))
-            } else if matches!(tail.to_ascii_lowercase().as_str(), "line" | "rule" | "strike") {
-                // As with the box: two points rather than one, so its own verb,
-                // and reachable through the tool its siblings live on.
-                Ok(Verb::SignLine)
-            } else if matches!(
-                tail.to_ascii_lowercase().as_str(),
-                "rectangle" | "box" | "rect"
-            ) {
-                // The fifth mark, which takes two corners rather than a point —
-                // so it is its own verb. Answered here rather than refused,
-                // because somebody reaching for it through `fillsign` is asking
-                // for exactly the right thing.
-                Ok(Verb::SignRectangle)
-            } else {
-                Err(format!(
-                    "fillsign: don't know {tail:?} — `fillsign` types where you \
-                     click, or try tick, cross, dot, line or rectangle"
-                ))
-            }
-        }
-        "sensitivity" => {
-            let tail = tail.trim();
-            if tail.is_empty() {
-                Ok(Verb::Sensitivity(None))
-            } else if tail.eq_ignore_ascii_case("none") || tail.eq_ignore_ascii_case("clear") {
-                Ok(Verb::Sensitivity(Some(String::new())))
-            } else if pdf_core::document::sensitivity::Sensitivity::parse(tail).is_some() {
-                Ok(Verb::Sensitivity(Some(tail.to_string())))
-            } else {
-                Err(format!(
-                    "sensitivity: don't know {tail:?} — try public, internal, \
-                     confidential, secret, or none"
-                ))
-            }
-        }
-        "smartredact" => match tail.trim().to_ascii_lowercase().as_str() {
-            "" | "find" | "scan" => Ok(Verb::SmartRedact { redact: false }),
-            "redact" | "all" | "apply" => Ok(Verb::SmartRedact { redact: true }),
-            other => Err(format!(
-                "smartredact: don't know {other:?} — `smartredact` reports what it \
-                 finds, `smartredact redact` blacks it out"
-            )),
-        },
-        "hiddendata" | "sanitize" | "sanitise" => match tail.trim().to_ascii_lowercase().as_str() {
-            "" => Ok(Verb::HiddenData { clean: false }),
-            "clean" | "remove" | "strip" => Ok(Verb::HiddenData { clean: true }),
-            other => Err(format!(
-                "hiddendata: don't know {other:?} — `hiddendata` reports what is there, \
-                 `hiddendata clean` takes it out"
-            )),
-        },
-        "unsecure" => Ok(Verb::Unsecure),
-        "unlock" => Ok(Verb::Unlock),
-        "copy" | "copytext" => Ok(Verb::CopyText),
-        "paste" => Ok(Verb::Paste),
-        "reversepages" => Ok(Verb::ReversePages),
-        "thumbnails" => Ok(Verb::Thumbnails),
-        "appearance" => Ok(Verb::ToggleAppearance),
-        // An inset rather than a rectangle. Trimming the same amount off every
-        // edge is what "crop the margins" means, and a rectangle typed into a
-        // box is four numbers nobody can picture.
-        "edittext" => Ok(Verb::EditText),
-        "addtext" | "typewriter" => Ok(Verb::AddText(tail.to_string())),
-        "addimage" => {
-            let tail = tail.trim();
-            if tail.is_empty() {
-                Ok(Verb::AddImage(None))
-            } else {
-                Ok(Verb::AddImage(Some(resolve_path(tail))))
-            }
-        }
-        "viewsingle" => Ok(Verb::SetLayout(crate::reader::Layout::Single)),
-        "viewfacing" => Ok(Verb::SetLayout(crate::reader::Layout::Facing)),
-        "viewcover" => Ok(Verb::SetLayout(crate::reader::Layout::FacingWithCover)),
-        "resizepages" => {
-            let pages = rest.first().copied().unwrap_or("all").to_string();
-            match rest.get(1).and_then(|n| paper_size(n)) {
-                Some((width_pt, height_pt)) => {
-                    Ok(Verb::ResizePages { pages, width_pt, height_pt })
-                }
-                None => Err(
-                    "resizepages: a size, as in `resizepages all a4` — or `612x792` in points."
-                        .into(),
-                ),
-            }
-        }
-        "croppages" => {
-            let pages = rest.first().copied().unwrap_or("all").to_string();
-            match rest.get(1).map(|m| m.parse::<f32>()) {
-                Some(Ok(margin)) if margin > 0.0 => Ok(Verb::CropPages { pages, margin }),
-                _ => Err("croppages: pages and an inset in points, as in `croppages all 36`.".into()),
-            }
-        }
-        "duplicatepage" => {
-            Ok(Verb::DuplicatePages(rest.first().copied().unwrap_or("").to_string()))
-        }
-        "swappages" => match (rest.first(), rest.get(1)) {
-            (Some(a), Some(b)) => match (a.parse::<usize>(), b.parse::<usize>()) {
-                (Ok(a), Ok(b)) => Ok(Verb::SwapPages { a, b }),
-                _ => Err("swappages: two page numbers, as in `swappages 2 5`.".into()),
-            },
-            // Named rather than silently defaulted: guessing which two pages
-            // somebody meant is not a service.
-            _ => Err("swappages: two page numbers, as in `swappages 2 5`.".into()),
-        },
-        "rotatepages" => {
-            let pages = rest.first().copied().unwrap_or("all").to_string();
-            let quarters = match rest.get(1) {
-                None => 1,
-                Some(q) => match q.parse::<i32>() {
-                    Ok(n) => n,
-                    Err(_) => {
-                        return Some(Err(
-                            "rotatepages: quarter-turns, as in `rotatepages all 1`.".into()
-                        ))
-                    }
-                },
-            };
-            Ok(Verb::RotatePages { pages, quarters })
-        }
-        // A page range, defaulting to the one being looked at. `extracttext
-        // all` is the whole document, which is what a scan wants.
-        "extracttext" | "extract-text" => {
-            Ok(Verb::ExtractText(rest.first().copied().unwrap_or("").to_string()))
-        }
-        // No path is a request for the file picker, exactly as `open` treats
-        // it. `remove` takes a path rather than an index because a typed or
-        // recorded `outlinedfont remove <path>` should still work once the
-        // list has moved on since it was written.
-        "outlinedfont" => {
-            let first_word = tail.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
-            if tail.is_empty() {
-                Ok(Verb::OutlinedFont(OutlinedFontAction::Dialog))
-            } else if first_word == "clear" {
-                Ok(Verb::OutlinedFont(OutlinedFontAction::Clear))
-            } else if first_word == "remove" {
-                let path = tail.split_once(char::is_whitespace).map(|(_, rest)| rest.trim()).unwrap_or("");
-                if path.is_empty() {
-                    Err("usage: outlinedfont remove <path>".into())
-                } else {
-                    Ok(Verb::OutlinedFont(OutlinedFontAction::Remove(resolve_path(path))))
-                }
-            } else {
-                Ok(Verb::OutlinedFont(OutlinedFontAction::Add(resolve_path(tail))))
-            }
-        }
-        "clearhistory" | "forgethistory" => Ok(Verb::ClearHistory),
-        "selecttool" => Ok(Verb::Pointer(PointerMode::Select)),
-        "hand" | "pan" => Ok(Verb::Pointer(PointerMode::Pan)),
-        "open" => {
-            if tail.is_empty() {
-                // No path is not an error: it is a request for the file picker,
-                // which is what someone typing `open` almost always wants.
-                Ok(Verb::OpenDialog)
-            } else {
-                Ok(Verb::Open(resolve_path(tail)))
-            }
-        }
-        "close" => Ok(Verb::Close { force: false }),
-        "close!" => Ok(Verb::Close { force: true }),
-        "save" => Ok(Verb::Save),
-        "saveas" => {
-            if tail.is_empty() {
-                // No path is not an error: it is a request for the file
-                // picker, the same as bare `open` — see `Verb::OpenDialog`.
-                Ok(Verb::SaveAsDialog)
-            } else {
-                Ok(Verb::SaveAs(resolve_path(tail)))
-            }
-        }
-
-        "page" | "p" => match rest.first().map(|s| s.to_ascii_lowercase()) {
-            None => Err("usage: page <n|next|prev|first|last>".into()),
-            Some(word) => match word.as_str() {
-                "next" | "n" => Ok(Verb::Page(PageTarget::Next)),
-                "prev" | "previous" | "p" => Ok(Verb::Page(PageTarget::Previous)),
-                "first" => Ok(Verb::Page(PageTarget::First)),
-                "last" => Ok(Verb::Page(PageTarget::Last)),
-                number => match number.parse::<usize>() {
-                    Ok(0) => Err("pages are numbered from 1".into()),
-                    Ok(n) => Ok(Verb::Page(PageTarget::Number(n))),
-                    Err(_) => Err(format!("page: expected a number or next/prev/first/last, got '{number}'")),
-                },
-            },
-        },
-        "next" => Ok(Verb::Page(PageTarget::Next)),
-
-        "zoom" | "z" => match rest.first().map(|s| s.to_ascii_lowercase()) {
-            None => Err("usage: zoom <percent|in|out|fit|width|actual>".into()),
-            Some(word) => match word.as_str() {
-                "in" => Ok(Verb::Zoom(ZoomTarget::In)),
-                "out" => Ok(Verb::Zoom(ZoomTarget::Out)),
-                "fit" => Ok(Verb::Zoom(ZoomTarget::Fit)),
-                "width" => Ok(Verb::Zoom(ZoomTarget::Width)),
-                "actual" | "1" | "100" => Ok(Verb::Zoom(ZoomTarget::Actual)),
-                number => match number.trim_end_matches('%').parse::<f32>() {
-                    Ok(pct) if pct > 0.0 => Ok(Verb::Zoom(ZoomTarget::Factor(pct / 100.0))),
-                    Ok(_) => Err("zoom: a percentage must be greater than zero".into()),
-                    Err(_) => Err(format!("zoom: expected a percentage or in/out/fit/width/actual, got '{number}'")),
-                },
-            },
-        },
-        "fit" => Ok(Verb::Zoom(ZoomTarget::Fit)),
-
-        "rotate" => match rest.first() {
-            None => Ok(Verb::RotatePage(90)),
-            Some(word) => match word.parse::<i32>() {
-                Ok(deg) if deg.rem_euclid(90) == 0 => Ok(Verb::RotatePage(deg.rem_euclid(360))),
-                Ok(_) => Err("rotate: a page turns in quarters — 90, 180, 270 or -90".into()),
-                Err(_) => Err(format!("rotate: expected an angle, got '{word}'")),
-            },
-        },
-
-        "extract" => match (rest.first(), rest.get(1)) {
-            (Some(pages), Some(dest)) => Ok(Verb::Extract {
-                pages: (*pages).to_string(),
-                dest: PathBuf::from(dest),
-            }),
-            _ => Err("usage: extract <pages> <path.pdf>   e.g. extract 1-3,7 chapter.pdf".into()),
-        },
-        // `import` takes a path *and* an optional page range, so the path is
-        // the tail minus a trailing range token — quoted if it has spaces.
-        "import" => match split_path_and_extra(tail) {
-            Some((path, extra)) => Ok(Verb::Import {
-                source: resolve_path(&path),
-                pages: if extra.is_empty() { "all".into() } else { extra },
-            }),
-            None => Err("usage: import <path.pdf> [pages]".into()),
-        },
-        // `delete` / `del` are the kernel's, and erase geometry. A page
-        // delete has to be spelt out — see the note in claimed_tokens().
-        "deletepage" | "delpage" => match rest.first() {
-            Some(pages) => Ok(Verb::DeletePages((*pages).to_string())),
-            None => Err("usage: deletepage <pages>   e.g. deletepage 4, or deletepage 2-5".into()),
-        },
-        "insertpage" => Ok(Verb::InsertPage),
-        "movepage" => match (rest.first(), rest.get(1)) {
-            (Some(pages), Some(before)) => match before.parse::<usize>() {
-                Ok(0) => Err("pages are numbered from 1".into()),
-                Ok(n) => Ok(Verb::MovePages { pages: (*pages).to_string(), before: n }),
-                Err(_) => Err(format!("movepage: '{before}' is not a page number")),
-            },
-            _ => Err("usage: movepage <pages> <before>   e.g. movepage 5 2".into()),
-        },
-
-        "highlight" | "hl" => Ok(Verb::MarkText(Markup::Highlight)),
-        "marks" | "annotations" => Ok(Verb::ListMarks),
-        "removemark" => match rest.first() {
-            Some(n) => match n.parse::<usize>() {
-                Ok(n) if n >= 1 => Ok(Verb::RemoveMark(n)),
-                _ => Err("removemark: a number from `marks`, as in `removemark 2`.".into()),
-            },
-            None => Err("removemark: a number from `marks`, as in `removemark 2`.".into()),
-        },
-        "underline" => Ok(Verb::MarkText(Markup::Underline)),
-        "strikeout" => Ok(Verb::MarkText(Markup::StrikeOut)),
-        "squiggly" => Ok(Verb::MarkText(Markup::Squiggly)),
-        // Not aliased to `f`: that is the kernel's `fillet`, and `f 25` would
-        // have become a search for "25". The guard test did not catch it,
-        // because it only exercised bare aliases and a bare `f` falls through
-        // correctly — see `an_alias_with_arguments_still_reaches_the_kernel`.
-        "find" if !tail.is_empty() => Ok(Verb::Find(tail.to_string())),
-        "find" => Err("usage: find <text>".into()),
-        "findnext" | "fn" => Ok(Verb::FindStep { forward: true }),
-        "findprev" | "fp" => Ok(Verb::FindStep { forward: false }),
-        "replace" => Ok(Verb::Replace),
-        "spelling" => Ok(Verb::Spelling),
-        "bookmark" => Ok(Verb::Bookmark),
-        "articlebox" => Ok(Verb::ArticleBox),
-        "weblinks" => Ok(Verb::Weblinks),
-        "jointext" => Ok(Verb::JoinText),
-        "matchproperties" => Ok(Verb::MatchProperties),
-        "reflow" => Ok(Verb::Reflow),
-        "note" => {
-            let text = rest.join(" ");
-            if text.trim().is_empty() {
-                Err("usage: note <what it says>".into())
-            } else {
-                Ok(Verb::Note(text))
-            }
-        }
-
-        "calibrate" | "cal" => match (rest.first(), rest.get(1)) {
-            (Some(distance), unit) => match distance.parse::<f64>() {
-                Ok(d) if d > 0.0 && d.is_finite() => Ok(Verb::Calibrate {
-                    distance: d,
-                    unit: unit.map(|u| (*u).to_string()).unwrap_or_else(|| "m".into()),
-                }),
-                Ok(_) => Err("calibrate: the real distance must be a positive number".into()),
-                Err(_) => Err(format!("calibrate: '{distance}' is not a distance")),
-            },
-            _ => Err("usage: calibrate <real distance> [unit]   then pick two points".into()),
-        },
-        "pagescale" => Ok(Verb::Scale),
-        "measure" => match rest.first().map(|s| s.to_ascii_lowercase()).as_deref() {
-            None | Some("distance") | Some("d") => Ok(Verb::Measure(MeasureKind::Distance)),
-            Some("area") | Some("a") => Ok(Verb::Measure(MeasureKind::Area)),
-            Some(other) => Err(format!("measure: expected distance or area, got '{other}'")),
-        },
-
-        "record" => Ok(Verb::Record(
-            rest.join(" ").trim().to_string(),
-        )),
-        "stop" | "endrecord" => Ok(Verb::StopRecording),
-        "replay" => {
-            if tail.is_empty() {
-                Err("usage: replay <script.json>".into())
-            } else {
-                Ok(Verb::Replay(resolve_path(tail)))
-            }
-        }
-
-        "pick" => match rest.first() {
-            Some(pair) => match pair.split_once(',') {
-                Some((x, y)) => match (x.trim().parse::<f64>(), y.trim().parse::<f64>()) {
-                    (Ok(x), Ok(y)) => Ok(Verb::Pick(AppPointArg { x, y })),
-                    _ => Err(format!("pick: expected x,y — got '{pair}'")),
-                },
-                None => Err(format!("pick: expected x,y — got '{pair}'")),
-            },
-            None => Err("usage: pick <x,y>   supplies the next click to a waiting command".into()),
-        },
-
-        "undo" => Ok(Verb::Undo),
-        "redo" => Ok(Verb::Redo),
-        "pdfium" => Ok(Verb::Pdfium),
-        "version" => Ok(Verb::Version),
-        "checkupdate" => Ok(Verb::CheckUpdate),
-        "textlayer" | "whytext" => Ok(Verb::TextLayer),
-        "quit" | "exit" => Ok(Verb::Quit { force: false }),
-        "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
-        "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
-
-        _ => return None,
-    };
-
-    Some(parsed)
+    parse_locking_and_redaction(head.as_str(), rest, tail)
+        .or_else(|| parse_fill_and_sign(head.as_str(), rest, tail))
+        .or_else(|| parse_signatures(head.as_str(), rest, tail))
+        .or_else(|| parse_security_options(head.as_str(), rest, tail))
+        .or_else(|| parse_document_edits(head.as_str(), rest, tail))
+        .or_else(|| parse_file_and_view(head.as_str(), rest, tail))
+        .or_else(|| parse_marks_and_misc(head.as_str(), rest, tail))
 }
-
 /// Resolve a path as a person typed it.
 ///
 /// Three things go wrong otherwise, and all three make a file simply refuse to
@@ -1474,4 +1021,506 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
         "Page operations are spelt out — `deletepage`, `insertpage`, `pagescale` — because".into(),
         "`delete`, `insert` and `scale` are drawing commands and keep their SIMLUX meanings.".into(),
     ]
+}
+
+
+/// One domain of [`parse`]: the 12 commands below.
+fn parse_locking_and_redaction(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
+    Some(match head {
+        "done" | "finish" => Ok(Verb::Finish),
+        // Not "markredact": marking and applying are one gesture here, guarded
+        // by a confirmation where anything is in the way rather than by a
+        // separate mark-then-apply pass.
+        "redact" => Ok(Verb::Redact),
+        // Bare `lock` arms the rectangle tool. With pages named — `lock all`,
+        // `lock 1-3` — it locks those pages whole, which is the only form that
+        // can lock a document whose pages are scans or outlined type.
+        "lock" => {
+            if tail.is_empty() {
+                Ok(Verb::Lock)
+            } else {
+                Ok(Verb::LockPages(tail.to_string()))
+            }
+        }
+        "lockall" => Ok(Verb::LockPages("all".into())),
+        "lockarea" => Ok(Verb::LockArea),
+        "layers" => Ok(Verb::Layers),
+        // Said the way every other program says it, because this is one of the
+        // few gestures a reader arrives already knowing.
+        "bringtofront" | "bringforward" | "tofront" => Ok(Verb::BringToFront),
+        "sendtoback" | "sendbackward" | "toback" => Ok(Verb::SendToBack),
+        "repairlocks" => Ok(Verb::RepairLocks),
+        "opacity" | "transparency" => match tail.trim().trim_end_matches('%').parse::<f32>() {
+            Ok(percent) if (0.0..=100.0).contains(&percent) => Ok(Verb::Opacity(percent)),
+            Ok(_) => Err("opacity is between 0 and 100".into()),
+            Err(_) => Err("opacity takes a percentage, 0 to 100 — `opacity 50`".into()),
+        },
+        "secure" => SecureOptions::parse(tail).map(Verb::Secure),
+        "whiteout" => Ok(Verb::Whiteout),
+        _ => return None,
+    })
+}
+
+/// One domain of [`parse`]: the 13 commands below.
+fn parse_fill_and_sign(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
+    Some(match head {
+        "fill" => Ok(Verb::ToggleFill),
+        "arrow" => Ok(Verb::DrawArrow),
+        "signrectangle" => Ok(Verb::SignRectangle),
+        "signline" => Ok(Verb::SignLine),
+        // **Not `move`.** That word belongs to the drawing kernel, where it
+        // moves marks and is tested doing so. Taking it would have broken a
+        // tool that works in order to name one that did not exist yet.
+        "moveobject" => Ok(Verb::MoveThing),
+        "editobject" => Ok(Verb::EditObject),
+        "predefinedtext" => Ok(Verb::PredefinedText({
+            let tail = tail.trim();
+            // Free text rather than sub-verbs: a snippet is whatever somebody
+            // types, and reserving words like `list` out of it would mean a
+            // snippet that happens to be one could never be kept.
+            (!tail.is_empty()).then(|| tail.to_string())
+        })),
+        // The same three marks `fillsign` makes, one press away — the PagiSign
+        // tab has a button for each, and each of them said "not built yet"
+        // about a mark this program had been making since `fillsign` was wired.
+        // Aliases rather than tools: one implementation, three doors.
+        "signcheck" => Ok(Verb::FillSign(Some("tick".into()))),
+        "signcross" => Ok(Verb::FillSign(Some("cross".into()))),
+        "signdot" => Ok(Verb::FillSign(Some("dot".into()))),
+        "documentstatus" | "status" => Ok(Verb::DocumentStatus),
+        "sessionlog" => Ok(Verb::SessionLog),
+        "applysignatures" => Ok(Verb::ApplySignatures),
+        _ => return None,
+    })
+}
+
+/// One domain of [`parse`]: the 2 commands below.
+fn parse_signatures(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
+    Some(match head {
+        "managesignatures" => {
+            let tail = tail.trim();
+            let (word, rest) = match tail.split_once(char::is_whitespace) {
+                Some((word, rest)) => (word.to_ascii_lowercase(), rest.trim()),
+                None => (tail.to_ascii_lowercase(), ""),
+            };
+            match (word.as_str(), rest) {
+                ("" | "open" | "show", "") => Ok(Verb::ManageSignatures(Signatures::Open)),
+                ("list", "") => Ok(Verb::ManageSignatures(Signatures::List)),
+                ("use" | "choose", name) if !name.is_empty() => {
+                    Ok(Verb::ManageSignatures(Signatures::Use(name.to_string())))
+                }
+                ("delete" | "remove" | "forget", name) if !name.is_empty() => {
+                    Ok(Verb::ManageSignatures(Signatures::Forget(name.to_string())))
+                }
+                ("rename" | "call", name) if !name.is_empty() => {
+                    Ok(Verb::ManageSignatures(Signatures::Rename(name.to_string())))
+                }
+                // Named without a name — the mistake worth its own sentence,
+                // because the fix is a word away rather than a different verb.
+                ("use" | "choose" | "delete" | "remove" | "forget" | "rename" | "call", "") => {
+                    Err(format!("managesignatures {word}: which one? `managesignatures list` says."))
+                }
+                _ => Err(format!(
+                    "managesignatures: don't know {tail:?} — try list, use <name>, \
+                     rename <name>, or delete <name>"
+                )),
+            }
+        }
+        "signature" => {
+            let tail = tail.trim();
+            let (head, rest) = tail.split_once(char::is_whitespace).unwrap_or((tail, ""));
+            match head.to_ascii_lowercase().as_str() {
+                "" | "place" | "put" | "sign" => Ok(Verb::Signature(SignatureAction::Place)),
+                "draw" | "new" | "create" => Ok(Verb::Signature(SignatureAction::Draw)),
+                "upload" | "image" | "file" => {
+                    let rest = rest.trim();
+                    if rest.is_empty() {
+                        Ok(Verb::Signature(SignatureAction::Upload(None)))
+                    } else {
+                        Ok(Verb::Signature(SignatureAction::Upload(Some(resolve_path(rest)))))
+                    }
+                }
+                other => Err(format!(
+                    "signature: don't know {other:?} — `signature` places the one you \
+                     have, `signature draw` makes a new one by hand, `signature upload` \
+                     adds one from a picture file"
+                )),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// One domain of [`parse`]: the 8 commands below.
+fn parse_security_options(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
+    Some(match head {
+        "validate" => Ok(Verb::Validate),
+        "certify" | "sign" => {
+            let tail = tail.trim();
+            if tail.is_empty() {
+                Ok(Verb::Certify(None))
+            } else {
+                Ok(Verb::Certify(Some(resolve_path(tail))))
+            }
+        }
+        "fillsign" => {
+            let tail = tail.trim();
+            if tail.is_empty() {
+                Ok(Verb::FillSign(None))
+            } else if pdf_core::document::FillMark::parse(tail).is_some() {
+                Ok(Verb::FillSign(Some(tail.to_string())))
+            } else if matches!(tail.to_ascii_lowercase().as_str(), "line" | "rule" | "strike") {
+                // As with the box: two points rather than one, so its own verb,
+                // and reachable through the tool its siblings live on.
+                Ok(Verb::SignLine)
+            } else if matches!(
+                tail.to_ascii_lowercase().as_str(),
+                "rectangle" | "box" | "rect"
+            ) {
+                // The fifth mark, which takes two corners rather than a point —
+                // so it is its own verb. Answered here rather than refused,
+                // because somebody reaching for it through `fillsign` is asking
+                // for exactly the right thing.
+                Ok(Verb::SignRectangle)
+            } else {
+                Err(format!(
+                    "fillsign: don't know {tail:?} — `fillsign` types where you \
+                     click, or try tick, cross, dot, line or rectangle"
+                ))
+            }
+        }
+        "sensitivity" => {
+            let tail = tail.trim();
+            if tail.is_empty() {
+                Ok(Verb::Sensitivity(None))
+            } else if tail.eq_ignore_ascii_case("none") || tail.eq_ignore_ascii_case("clear") {
+                Ok(Verb::Sensitivity(Some(String::new())))
+            } else if pdf_core::document::sensitivity::Sensitivity::parse(tail).is_some() {
+                Ok(Verb::Sensitivity(Some(tail.to_string())))
+            } else {
+                Err(format!(
+                    "sensitivity: don't know {tail:?} — try public, internal, \
+                     confidential, secret, or none"
+                ))
+            }
+        }
+        "smartredact" => match tail.trim().to_ascii_lowercase().as_str() {
+            "" | "find" | "scan" => Ok(Verb::SmartRedact { redact: false }),
+            "redact" | "all" | "apply" => Ok(Verb::SmartRedact { redact: true }),
+            other => Err(format!(
+                "smartredact: don't know {other:?} — `smartredact` reports what it \
+                 finds, `smartredact redact` blacks it out"
+            )),
+        },
+        "hiddendata" | "sanitize" | "sanitise" => match tail.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(Verb::HiddenData { clean: false }),
+            "clean" | "remove" | "strip" => Ok(Verb::HiddenData { clean: true }),
+            other => Err(format!(
+                "hiddendata: don't know {other:?} — `hiddendata` reports what is there, \
+                 `hiddendata clean` takes it out"
+            )),
+        },
+        "unsecure" => Ok(Verb::Unsecure),
+        "unlock" => Ok(Verb::Unlock),
+        _ => return None,
+    })
+}
+
+/// One domain of [`parse`]: the 19 commands below.
+fn parse_document_edits(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
+    Some(match head {
+        "copy" | "copytext" => Ok(Verb::CopyText),
+        "paste" => Ok(Verb::Paste),
+        "reversepages" => Ok(Verb::ReversePages),
+        "thumbnails" => Ok(Verb::Thumbnails),
+        "appearance" => Ok(Verb::ToggleAppearance),
+        // An inset rather than a rectangle. Trimming the same amount off every
+        // edge is what "crop the margins" means, and a rectangle typed into a
+        // box is four numbers nobody can picture.
+        "edittext" => Ok(Verb::EditText),
+        "addtext" | "typewriter" => Ok(Verb::AddText(tail.to_string())),
+        "addimage" => {
+            let tail = tail.trim();
+            if tail.is_empty() {
+                Ok(Verb::AddImage(None))
+            } else {
+                Ok(Verb::AddImage(Some(resolve_path(tail))))
+            }
+        }
+        "viewsingle" => Ok(Verb::SetLayout(crate::reader::Layout::Single)),
+        "viewfacing" => Ok(Verb::SetLayout(crate::reader::Layout::Facing)),
+        "viewcover" => Ok(Verb::SetLayout(crate::reader::Layout::FacingWithCover)),
+        "resizepages" => {
+            let pages = rest.first().copied().unwrap_or("all").to_string();
+            match rest.get(1).and_then(|n| paper_size(n)) {
+                Some((width_pt, height_pt)) => {
+                    Ok(Verb::ResizePages { pages, width_pt, height_pt })
+                }
+                None => Err(
+                    "resizepages: a size, as in `resizepages all a4` — or `612x792` in points."
+                        .into(),
+                ),
+            }
+        }
+        "croppages" => {
+            let pages = rest.first().copied().unwrap_or("all").to_string();
+            match rest.get(1).map(|m| m.parse::<f32>()) {
+                Some(Ok(margin)) if margin > 0.0 => Ok(Verb::CropPages { pages, margin }),
+                _ => Err("croppages: pages and an inset in points, as in `croppages all 36`.".into()),
+            }
+        }
+        "duplicatepage" => {
+            Ok(Verb::DuplicatePages(rest.first().copied().unwrap_or("").to_string()))
+        }
+        "swappages" => match (rest.first(), rest.get(1)) {
+            (Some(a), Some(b)) => match (a.parse::<usize>(), b.parse::<usize>()) {
+                (Ok(a), Ok(b)) => Ok(Verb::SwapPages { a, b }),
+                _ => Err("swappages: two page numbers, as in `swappages 2 5`.".into()),
+            },
+            // Named rather than silently defaulted: guessing which two pages
+            // somebody meant is not a service.
+            _ => Err("swappages: two page numbers, as in `swappages 2 5`.".into()),
+        },
+        "rotatepages" => {
+            let pages = rest.first().copied().unwrap_or("all").to_string();
+            let quarters = match rest.get(1) {
+                None => 1,
+                Some(q) => match q.parse::<i32>() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        return Some(Err(
+                            "rotatepages: quarter-turns, as in `rotatepages all 1`.".into()
+                        ))
+                    }
+                },
+            };
+            Ok(Verb::RotatePages { pages, quarters })
+        }
+        // A page range, defaulting to the one being looked at. `extracttext
+        // all` is the whole document, which is what a scan wants.
+        "extracttext" | "extract-text" => {
+            Ok(Verb::ExtractText(rest.first().copied().unwrap_or("").to_string()))
+        }
+        // No path is a request for the file picker, exactly as `open` treats
+        // it. `remove` takes a path rather than an index because a typed or
+        // recorded `outlinedfont remove <path>` should still work once the
+        // list has moved on since it was written.
+        "outlinedfont" => {
+            let first_word = tail.split_whitespace().next().unwrap_or("").to_ascii_lowercase();
+            if tail.is_empty() {
+                Ok(Verb::OutlinedFont(OutlinedFontAction::Dialog))
+            } else if first_word == "clear" {
+                Ok(Verb::OutlinedFont(OutlinedFontAction::Clear))
+            } else if first_word == "remove" {
+                let path = tail.split_once(char::is_whitespace).map(|(_, rest)| rest.trim()).unwrap_or("");
+                if path.is_empty() {
+                    Err("usage: outlinedfont remove <path>".into())
+                } else {
+                    Ok(Verb::OutlinedFont(OutlinedFontAction::Remove(resolve_path(path))))
+                }
+            } else {
+                Ok(Verb::OutlinedFont(OutlinedFontAction::Add(resolve_path(tail))))
+            }
+        }
+        "clearhistory" | "forgethistory" => Ok(Verb::ClearHistory),
+        _ => return None,
+    })
+}
+
+/// One domain of [`parse`]: the 17 commands below.
+fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
+    Some(match head {
+        "selecttool" => Ok(Verb::Pointer(PointerMode::Select)),
+        "hand" | "pan" => Ok(Verb::Pointer(PointerMode::Pan)),
+        "open" => {
+            if tail.is_empty() {
+                // No path is not an error: it is a request for the file picker,
+                // which is what someone typing `open` almost always wants.
+                Ok(Verb::OpenDialog)
+            } else {
+                Ok(Verb::Open(resolve_path(tail)))
+            }
+        }
+        "close" => Ok(Verb::Close { force: false }),
+        "close!" => Ok(Verb::Close { force: true }),
+        "save" => Ok(Verb::Save),
+        "saveas" => {
+            if tail.is_empty() {
+                // No path is not an error: it is a request for the file
+                // picker, the same as bare `open` — see `Verb::OpenDialog`.
+                Ok(Verb::SaveAsDialog)
+            } else {
+                Ok(Verb::SaveAs(resolve_path(tail)))
+            }
+        }
+
+        "page" | "p" => match rest.first().map(|s| s.to_ascii_lowercase()) {
+            None => Err("usage: page <n|next|prev|first|last>".into()),
+            Some(word) => match word.as_str() {
+                "next" | "n" => Ok(Verb::Page(PageTarget::Next)),
+                "prev" | "previous" | "p" => Ok(Verb::Page(PageTarget::Previous)),
+                "first" => Ok(Verb::Page(PageTarget::First)),
+                "last" => Ok(Verb::Page(PageTarget::Last)),
+                number => match number.parse::<usize>() {
+                    Ok(0) => Err("pages are numbered from 1".into()),
+                    Ok(n) => Ok(Verb::Page(PageTarget::Number(n))),
+                    Err(_) => Err(format!("page: expected a number or next/prev/first/last, got '{number}'")),
+                },
+            },
+        },
+        "next" => Ok(Verb::Page(PageTarget::Next)),
+
+        "zoom" | "z" => match rest.first().map(|s| s.to_ascii_lowercase()) {
+            None => Err("usage: zoom <percent|in|out|fit|width|actual>".into()),
+            Some(word) => match word.as_str() {
+                "in" => Ok(Verb::Zoom(ZoomTarget::In)),
+                "out" => Ok(Verb::Zoom(ZoomTarget::Out)),
+                "fit" => Ok(Verb::Zoom(ZoomTarget::Fit)),
+                "width" => Ok(Verb::Zoom(ZoomTarget::Width)),
+                "actual" | "1" | "100" => Ok(Verb::Zoom(ZoomTarget::Actual)),
+                number => match number.trim_end_matches('%').parse::<f32>() {
+                    Ok(pct) if pct > 0.0 => Ok(Verb::Zoom(ZoomTarget::Factor(pct / 100.0))),
+                    Ok(_) => Err("zoom: a percentage must be greater than zero".into()),
+                    Err(_) => Err(format!("zoom: expected a percentage or in/out/fit/width/actual, got '{number}'")),
+                },
+            },
+        },
+        "fit" => Ok(Verb::Zoom(ZoomTarget::Fit)),
+
+        "rotate" => match rest.first() {
+            None => Ok(Verb::RotatePage(90)),
+            Some(word) => match word.parse::<i32>() {
+                Ok(deg) if deg.rem_euclid(90) == 0 => Ok(Verb::RotatePage(deg.rem_euclid(360))),
+                Ok(_) => Err("rotate: a page turns in quarters — 90, 180, 270 or -90".into()),
+                Err(_) => Err(format!("rotate: expected an angle, got '{word}'")),
+            },
+        },
+
+        "extract" => match (rest.first(), rest.get(1)) {
+            (Some(pages), Some(dest)) => Ok(Verb::Extract {
+                pages: (*pages).to_string(),
+                dest: PathBuf::from(dest),
+            }),
+            _ => Err("usage: extract <pages> <path.pdf>   e.g. extract 1-3,7 chapter.pdf".into()),
+        },
+        // `import` takes a path *and* an optional page range, so the path is
+        // the tail minus a trailing range token — quoted if it has spaces.
+        "import" => match split_path_and_extra(tail) {
+            Some((path, extra)) => Ok(Verb::Import {
+                source: resolve_path(&path),
+                pages: if extra.is_empty() { "all".into() } else { extra },
+            }),
+            None => Err("usage: import <path.pdf> [pages]".into()),
+        },
+        // `delete` / `del` are the kernel's, and erase geometry. A page
+        // delete has to be spelt out — see the note in claimed_tokens().
+        "deletepage" | "delpage" => match rest.first() {
+            Some(pages) => Ok(Verb::DeletePages((*pages).to_string())),
+            None => Err("usage: deletepage <pages>   e.g. deletepage 4, or deletepage 2-5".into()),
+        },
+        "insertpage" => Ok(Verb::InsertPage),
+        "movepage" => match (rest.first(), rest.get(1)) {
+            (Some(pages), Some(before)) => match before.parse::<usize>() {
+                Ok(0) => Err("pages are numbered from 1".into()),
+                Ok(n) => Ok(Verb::MovePages { pages: (*pages).to_string(), before: n }),
+                Err(_) => Err(format!("movepage: '{before}' is not a page number")),
+            },
+            _ => Err("usage: movepage <pages> <before>   e.g. movepage 5 2".into()),
+        },
+        _ => return None,
+    })
+}
+
+/// One domain of [`parse`]: the 35 commands below.
+fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
+    Some(match head {
+        "highlight" | "hl" => Ok(Verb::MarkText(Markup::Highlight)),
+        "marks" | "annotations" => Ok(Verb::ListMarks),
+        "removemark" => match rest.first() {
+            Some(n) => match n.parse::<usize>() {
+                Ok(n) if n >= 1 => Ok(Verb::RemoveMark(n)),
+                _ => Err("removemark: a number from `marks`, as in `removemark 2`.".into()),
+            },
+            None => Err("removemark: a number from `marks`, as in `removemark 2`.".into()),
+        },
+        "underline" => Ok(Verb::MarkText(Markup::Underline)),
+        "strikeout" => Ok(Verb::MarkText(Markup::StrikeOut)),
+        "squiggly" => Ok(Verb::MarkText(Markup::Squiggly)),
+        // Not aliased to `f`: that is the kernel's `fillet`, and `f 25` would
+        // have become a search for "25". The guard test did not catch it,
+        // because it only exercised bare aliases and a bare `f` falls through
+        // correctly — see `an_alias_with_arguments_still_reaches_the_kernel`.
+        "find" if !tail.is_empty() => Ok(Verb::Find(tail.to_string())),
+        "find" => Err("usage: find <text>".into()),
+        "findnext" | "fn" => Ok(Verb::FindStep { forward: true }),
+        "findprev" | "fp" => Ok(Verb::FindStep { forward: false }),
+        "replace" => Ok(Verb::Replace),
+        "spelling" => Ok(Verb::Spelling),
+        "bookmark" => Ok(Verb::Bookmark),
+        "articlebox" => Ok(Verb::ArticleBox),
+        "weblinks" => Ok(Verb::Weblinks),
+        "jointext" => Ok(Verb::JoinText),
+        "matchproperties" => Ok(Verb::MatchProperties),
+        "reflow" => Ok(Verb::Reflow),
+        "note" => {
+            let text = rest.join(" ");
+            if text.trim().is_empty() {
+                Err("usage: note <what it says>".into())
+            } else {
+                Ok(Verb::Note(text))
+            }
+        }
+
+        "calibrate" | "cal" => match (rest.first(), rest.get(1)) {
+            (Some(distance), unit) => match distance.parse::<f64>() {
+                Ok(d) if d > 0.0 && d.is_finite() => Ok(Verb::Calibrate {
+                    distance: d,
+                    unit: unit.map(|u| (*u).to_string()).unwrap_or_else(|| "m".into()),
+                }),
+                Ok(_) => Err("calibrate: the real distance must be a positive number".into()),
+                Err(_) => Err(format!("calibrate: '{distance}' is not a distance")),
+            },
+            _ => Err("usage: calibrate <real distance> [unit]   then pick two points".into()),
+        },
+        "pagescale" => Ok(Verb::Scale),
+        "measure" => match rest.first().map(|s| s.to_ascii_lowercase()).as_deref() {
+            None | Some("distance") | Some("d") => Ok(Verb::Measure(MeasureKind::Distance)),
+            Some("area") | Some("a") => Ok(Verb::Measure(MeasureKind::Area)),
+            Some(other) => Err(format!("measure: expected distance or area, got '{other}'")),
+        },
+
+        "record" => Ok(Verb::Record(
+            rest.join(" ").trim().to_string(),
+        )),
+        "stop" | "endrecord" => Ok(Verb::StopRecording),
+        "replay" => {
+            if tail.is_empty() {
+                Err("usage: replay <script.json>".into())
+            } else {
+                Ok(Verb::Replay(resolve_path(tail)))
+            }
+        }
+
+        "pick" => match rest.first() {
+            Some(pair) => match pair.split_once(',') {
+                Some((x, y)) => match (x.trim().parse::<f64>(), y.trim().parse::<f64>()) {
+                    (Ok(x), Ok(y)) => Ok(Verb::Pick(AppPointArg { x, y })),
+                    _ => Err(format!("pick: expected x,y — got '{pair}'")),
+                },
+                None => Err(format!("pick: expected x,y — got '{pair}'")),
+            },
+            None => Err("usage: pick <x,y>   supplies the next click to a waiting command".into()),
+        },
+
+        "undo" => Ok(Verb::Undo),
+        "redo" => Ok(Verb::Redo),
+        "pdfium" => Ok(Verb::Pdfium),
+        "version" => Ok(Verb::Version),
+        "checkupdate" => Ok(Verb::CheckUpdate),
+        "textlayer" | "whytext" => Ok(Verb::TextLayer),
+        "quit" | "exit" => Ok(Verb::Quit { force: false }),
+        "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
+        "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
+        _ => return None,
+    })
 }
