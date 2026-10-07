@@ -344,6 +344,17 @@ impl crate::PagifyApp {
                 Some(at) => self.pick_text_run(page, at),
                 None => Err("nothing was clicked.".into()),
             },
+            // Resolved by a text-selection drag, not by `take_pick`'s
+            // click/object collection — `canvas.rs`'s own drag_stopped
+            // handling calls `mark_selection`/`open_link_prompt_from_
+            // selection`/`match_properties_sample_from_current_selection`/
+            // `apply_match_properties_to_current_selection` directly, and
+            // `take_pick`'s own click path excludes anything
+            // `wants_selection()` for exactly this reason. `resolve_tool`
+            // should never see one of these three.
+            Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. } => {
+                unreachable!("Markup/Link/MatchProperties resolve by selection, never by take_pick")
+            }
         };
         // Close the checkpoint a draw opened, and drop it if the draw
         // refused, so a failed draw leaves no half-made step in the undo

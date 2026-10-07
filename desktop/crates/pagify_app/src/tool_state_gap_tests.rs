@@ -1,15 +1,19 @@
 //! Characterization tests for Phase 2 (the `Tool` state machine): four
 //! places today's scattered tool-arming state behaves asymmetrically, found
-//! by audit while mapping it ahead of that refactor — not reported from use,
-//! and not fixed here. **Behaviour-preserving**: these pin down what the app
-//! does *today*, on purpose, so a migration that quietly makes one of them
-//! symmetric (which a unified `Tool` enum would do very easily, in either
-//! direction, without anyone noticing) shows up as a failing test instead of
-//! a silent behaviour change.
+//! by audit while mapping it ahead of that refactor — not reported from use.
+//! **Behaviour-preserving when written**: these pinned down what the app did
+//! *before* the migration, on purpose, so a slice that quietly made one of
+//! them symmetric (which a unified `Tool` enum would do very easily, in
+//! either direction, without anyone noticing) would show up as a failing
+//! test instead of a silent behaviour change.
 //!
 //! Each test's assertion message says which asymmetry it is pinning down and
 //! why, so a future change that deliberately resolves one of them can delete
-//! the right test with a clear conscience instead of wondering why it broke.
+//! or rewrite the right test with a clear conscience instead of wondering
+//! why it broke. The first one below has since been rewritten this way —
+//! folding `Markup`/`Link`/`MatchProperties` into `Tool` fixed that
+//! particular asymmetry as a side effect, not a goal in itself, and the
+//! test now proves the fix instead of the bug.
 
 use super::ui_tests::harness;
 use super::*;
@@ -31,40 +35,39 @@ fn said(app: &PagifyApp) -> String {
     app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n")
 }
 
-/// **Arming a markup tool does not put down the object tool already in
-/// hand.** `mark_selection`'s own "nothing selected, pick the tool up"
-/// branch clears `link_armed`/`match_properties_armed`/`match_properties_
-/// sample` and calls `put_down_page_editors` — never `object_tool` or
-/// anything it owns. The only thing keeping this harmless today is that
-/// `interact` checks `object_tool.is_some()` first and returns before ever
-/// reaching the markup-selection drag handling: the armed highlighter sits
-/// inert, not disarmed, for as long as the object tool stays in hand.
-///
-/// The other direction is not symmetric: `take_up_object_tool` *does* clear
-/// `markup_armed` (and `link_armed`, `match_properties_*`) when the object
-/// tool is taken up second — this test's order (object tool first, markup
-/// second) is the one direction where both end up armed at once.
+/// **Arming a markup tool now puts down the object tool already in
+/// hand — the asymmetry this test used to pin down is fixed, not just
+/// documented.** `mark_selection`'s own "nothing selected, pick the tool
+/// up" branch used to clear `link_armed`/`match_properties_armed`/
+/// `match_properties_sample` and call `put_down_page_editors`, but never
+/// `object_tool` — unlike `take_up_object_tool`, which did clear
+/// `markup_armed` the other way round. Since `Markup`/`Link`/
+/// `MatchProperties` folded into `Tool`, `mark_selection` arms through
+/// `arm_tool`, the same mutual-exclusion choke point every other kind
+/// already went through — which does clear `object_tool`. Both directions
+/// are symmetric now; this test was rewritten (not deleted) to prove it,
+/// per this file's own stated policy for a migration that deliberately
+/// resolves one of these asymmetries.
 #[test]
-fn arming_a_markup_tool_does_not_put_down_the_object_tool_already_in_hand() {
+fn arming_a_markup_tool_now_puts_down_the_object_tool_already_in_hand() {
     let mut app = app("two-column.pdf");
     app.submit("editobject");
     assert!(app.tab_mut().object_tool.is_some(), "setup: the object tool should have armed");
 
     app.submit("highlight");
-    assert!(app.tab_mut().markup_armed.is_some(), "setup: the markup tool should have armed");
+    assert!(app.tab_mut().tool.is_some(), "setup: the markup tool should have armed");
     assert!(
-        app.tab_mut().object_tool.is_some(),
-        "today, arming a markup tool after the object tool leaves both armed \
-         at once — mark_selection never touches object_tool, unlike \
-         take_up_object_tool, which does clear markup_armed the other way round"
+        app.tab_mut().object_tool.is_none(),
+        "arming a markup tool after the object tool should put the object \
+         tool down, the same way every other Tool kind already does"
     );
 }
 
 /// **The central `Escape` handler never touches `pending_link`.** `escape()`
 /// walks a long, explicit list of what to put down — `paste_ghost`,
 /// `editing_run`, `new_text_box`, `object_tool`, `signature_selected`,
-/// `placed_image_selected`, `markup_armed`, `link_armed`,
-/// `match_properties_*`, `pending` — and `pending_link` (and
+/// `placed_image_selected`, `tool` (which now covers the armed `Link`
+/// tool itself, folded in from `link_armed`) — and `pending_link` (and
 /// `pending_article_box`) are not on it. The Link prompt closes on Escape
 /// anyway, but only because `draw_link_prompt` reads `ctx.input(|i|
 /// i.key_pressed(Key::Escape))` itself, independently, every frame it is

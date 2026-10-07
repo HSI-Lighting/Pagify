@@ -474,7 +474,7 @@ fn marking_with_nothing_selected_picks_the_tool_up() {
     let mut app = app("text-lines.pdf");
     app.submit("underline");
 
-    assert!(app.tab_mut().markup_armed.is_some(), "the tool was not picked up:\n{}", said(&app));
+    assert!(app.tab_mut().tool.is_some(), "the tool was not picked up:\n{}", said(&app));
     assert!(
         said(&app).contains("drag across the text"),
         "it did not say what to do next:\n{}",

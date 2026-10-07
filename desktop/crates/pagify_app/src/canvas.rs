@@ -1339,6 +1339,11 @@ impl crate::PagifyApp {
                     path.push(view.to_screen(at));
                     ui.painter().add(egui::Shape::line(path, egui::Stroke::new(1.0, theme::violet_bright())));
                 }
+                // Resolved by a text-selection drag, which egui already
+                // draws its own selection highlight for — nothing to add on
+                // top of it, the same way Eraser/PickText/Modify never
+                // preview a point not yet placed.
+                Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. } => {}
             }
         }
     }
@@ -1947,12 +1952,17 @@ impl crate::PagifyApp {
         // checked ahead of the text cursor below so a link drawn over
         // running text still reads as clickable rather than as selectable
         // prose.
-        let hovering_link = self.tab_mut().tool.is_none()
+        // A selection-resolved tool (Markup/Link/MatchProperties) leaves the
+        // pointer behaving exactly as if nothing were armed here — it takes
+        // the whole gesture only once a drag actually starts (below), not
+        // while just hovering.
+        let no_click_tool_armed = self.tab_mut().tool.as_ref().map_or(true, |t| t.kind.wants_selection());
+        let hovering_link = no_click_tool_armed
             && (self.foreign_at(page, at).is_some_and(|n| self.link_uri_at(page, n).is_some())
                 || self.internal_link_at(page, at).is_some());
         if hovering_link {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
-        } else if self.tab_mut().tool.is_none()
+        } else if no_click_tool_armed
             // A text cursor wherever there is text under the pointer, which is
             // the other half of the same answer: on a page whose words are
             // drawn as outlines the cursor stays an arrow, and the reason
@@ -1978,7 +1988,15 @@ impl crate::PagifyApp {
         //
         // A gesture that stayed within the same tolerance used for hit-testing
         // is a click, however egui classified it.
-        if self.tab_mut().tool.is_some() {
+        //
+        // **Except a selection-resolved tool** (Markup/Link/MatchProperties
+        // — see `Tool::wants_selection`): those are not waiting for a click
+        // or a point at all, they are waiting for an ordinary text-selection
+        // drag, the same gesture the code below already handles when no
+        // tool is armed. Taking the whole gesture here the way a point/
+        // object tool does would swallow that drag as a wandered-click pick
+        // instead.
+        if self.tab_mut().tool.as_ref().is_some_and(|t| !t.kind.wants_selection()) {
             self.tab_mut().text_drag = None;
             // Not the click the click-away block above has already answered —
             // see `answered_above`.
@@ -2086,36 +2104,44 @@ impl crate::PagifyApp {
         }
 
         if response.drag_stopped() {
-            // A tool in hand marks what was just selected.
-            if let (Some(kind), true) = (self.tab_mut().markup_armed, self.tab_mut().text_drag.is_some()) {
-                if self.tab_mut().text_selection.is_some() {
+            let selecting = self.tab_mut().text_drag.is_some() && self.tab_mut().text_selection.is_some();
+            // A tool in hand marks what was just selected. `mark_selection`
+            // only touches `tool` when nothing was selected (its own
+            // "arm and wait" branch) — here a selection already exists, so
+            // it takes its other branch and marks at once, leaving `tool`
+            // exactly as it was: still in hand, the same `Markup` kind,
+            // ready for the next selection without a trip back to the
+            // ribbon.
+            if let Some(Tool::Markup(kind)) = self.tab_mut().tool.as_ref().map(|t| &t.kind) {
+                let kind = *kind;
+                if selecting {
                     self.mark_selection(kind);
-                    // Still in hand: a highlighter is not put down after one
-                    // sentence. The selection goes, because the mark is now the
-                    // thing on the page.
-                    self.tab_mut().markup_armed = Some(kind);
                     self.tab_mut().text_selection = None;
                 }
             }
             // Same shape as the highlighter above, but a link needs the
             // address before it can be written — the selection becomes a
             // pending link waiting on that, rather than a mark made at once.
-            if self.tab_mut().link_armed && self.tab_mut().text_drag.is_some() && self.tab_mut().text_selection.is_some() {
+            if selecting && matches!(self.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Link)) {
                 self.open_link_prompt_from_selection();
             }
             // Match Properties: the first selection made while armed becomes
             // the sample; every one after that, while the sample is held, is
             // matched to it at once and the tool stays in hand for the next.
-            if self.tab_mut().text_drag.is_some() && self.tab_mut().text_selection.is_some() {
-                if self.tab_mut().match_properties_armed {
-                    if let Err(e) = self.match_properties_sample_from_current_selection() {
-                        self.say_error(e);
+            if selecting {
+                match self.tab_mut().tool.as_ref().map(|t| &t.kind) {
+                    Some(Tool::MatchProperties { sample: None }) => {
+                        if let Err(e) = self.match_properties_sample_from_current_selection() {
+                            self.say_error(e);
+                        }
                     }
-                } else if self.tab_mut().match_properties_sample.is_some() {
-                    match self.apply_match_properties_to_current_selection() {
-                        Ok(message) => self.say_info(message),
-                        Err(e) => self.say_error(e),
+                    Some(Tool::MatchProperties { sample: Some(_) }) => {
+                        match self.apply_match_properties_to_current_selection() {
+                            Ok(message) => self.say_info(message),
+                            Err(e) => self.say_error(e),
+                        }
                     }
+                    _ => {}
                 }
             }
             self.tab_mut().text_drag = None;
@@ -2138,7 +2164,7 @@ impl crate::PagifyApp {
         }
 
         if response.clicked() {
-            if self.tab_mut().tool.is_some() {
+            if self.tab_mut().tool.as_ref().is_some_and(|t| !t.kind.wants_selection()) {
                 self.take_pick(at);
             } else if let Some(target) = self.internal_link_at(page, at) {
                 self.act(Verb::Page(PageTarget::Number(target + 1)));

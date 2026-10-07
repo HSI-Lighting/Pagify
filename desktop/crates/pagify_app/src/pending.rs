@@ -3,15 +3,21 @@
 //!
 //! **Still in its current shape, not redesigned.** This is the state the
 //! mentor's review calls tool-state sprawl — the fields `Tool` belongs with
-//! (`markup_armed`, `editing_run`, `grab`, `handle`, `selected_*`, and the
+//! (`editing_run`, `grab`, `handle`, `selected_*`, and the
 //! rest) are still on `PagifyApp`/`DocTab`, not folded in here. `Tool`
 //! itself was built up one slice at a time, from the big `PendingKind`
 //! dispatch this file used to also define: `Draw` was the first kind that
 //! ends on Enter rather than a fixed point count (see
 //! `wants_points`/`ends_on_enter`); `Modify` was the first that wants
-//! *objects* too (see `wants_objects`); `PickText`, the last variant,
-//! finished the migration and took `PendingKind`/`Pending` down with it —
-//! there is nothing left to dispatch through them.
+//! *objects* too (see `wants_objects`); `PickText`, the last of the
+//! original 17 `PendingKind` variants, finished that migration and took
+//! `PendingKind`/`Pending` down with it. `Markup`/`Link`/`MatchProperties`
+//! moved in afterward from their own scattered fields (`markup_armed`,
+//! `link_armed`, `match_properties_armed`/`match_properties_sample`) — the
+//! first kinds resolved by a text selection rather than by collecting
+//! clicks (see `wants_selection`), so `canvas.rs`'s own selection-drag
+//! handling resolves them directly instead of through `take_pick`/
+//! `resolve_tool`.
 //!
 //! `resolve_tool` (`picking.rs`) is still one large match over `Tool`, not
 //! the `Tool::on_click` returning a `ToolEffect` that is supposed to
@@ -20,7 +26,7 @@
 
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::tools;
-use pagify_shell::verbs::MeasureKind;
+use pagify_shell::verbs::{MeasureKind, Markup};
 
 pub(crate) struct ArmedTool {
     pub(crate) kind: Tool,
@@ -73,6 +79,22 @@ pub(crate) enum Tool {
     /// variant to move — `PendingKind`/`Pending` are gone now that it is
     /// empty.
     PickText,
+    /// A highlighter, underline, strike-out or squiggle waiting for a text
+    /// selection — resolved by a drag, not a click, so it never goes
+    /// through `wants_points`/`take_pick` at all; see
+    /// [`Self::wants_selection`].
+    Markup(Markup),
+    /// Waiting for a text selection to link. A selection already made is
+    /// linked at once instead of arming this — see `begin_web_link`.
+    Link,
+    /// Waiting for a text selection to serve as Match Properties' own
+    /// sample, once picked. While `sample` is held, completing a further
+    /// selection is matched to it at once and the tool stays armed for the
+    /// next one — carrying the sample here, rather than in a field beside
+    /// `tool`, is what lets `tool.is_some()` alone answer "is Match
+    /// Properties still in hand" across both the "waiting for a sample"
+    /// and "has one, applying it" phases.
+    MatchProperties { sample: Option<MatchPropertiesSample> },
 }
 
 impl Tool {
@@ -98,6 +120,7 @@ impl Tool {
             Tool::Measure(MeasureKind::Distance) => 2,
             Tool::Measure(MeasureKind::Area) => usize::MAX,
             Tool::Modify(pick) => pick.points,
+            Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. } => 0,
         }
     }
 
@@ -202,6 +225,24 @@ impl Tool {
                 _ => "article box: opposite corner".into(),
             },
             Tool::PickText => "click the words to change".into(),
+            Tool::Markup(kind) => format!(
+                "{} — drag across the text to mark it. Escape puts it down.",
+                match kind {
+                    Markup::Highlight => "highlighter",
+                    Markup::Underline => "underline",
+                    Markup::StrikeOut => "strikeout",
+                    Markup::Squiggly => "squiggly",
+                }
+            ),
+            Tool::Link => "web link — drag across the text to link it (typed text works too, \
+                            once it is on the page). Escape puts it down."
+                .into(),
+            Tool::MatchProperties { sample: None } => {
+                "match properties — drag across the sample text to copy from. Escape puts it down.".into()
+            }
+            Tool::MatchProperties { sample: Some(_) } => {
+                "match properties — drag across text to change it. Escape puts it down.".into()
+            }
         }
     }
 
@@ -265,7 +306,26 @@ impl Tool {
             Tool::Lock => Some("lock"),
             Tool::ArticleBox => Some("articlebox"),
             Tool::PickText => Some("edittext"),
+            Tool::Markup(kind) => Some(match kind {
+                Markup::Highlight => "highlight",
+                Markup::Underline => "underline",
+                Markup::StrikeOut => "strikeout",
+                Markup::Squiggly => "squiggly",
+            }),
+            Tool::Link => Some("weblinks"),
+            Tool::MatchProperties { .. } => Some("matchproperties"),
         }
+    }
+
+    /// Resolved by a text selection (a drag), not by collecting clicks —
+    /// `Markup`/`Link`/`MatchProperties`, the three kinds `canvas.rs`'s own
+    /// selection-drag handling resolves directly rather than through
+    /// `take_pick`/`resolve_tool`. Used to keep those three out of the
+    /// click/drag-to-points gesture handling built for every other kind,
+    /// and to exempt them from the page-binding a part-way point/object
+    /// pick needs (they never collect either, so there is nothing to bind).
+    pub(crate) fn wants_selection(&self) -> bool {
+        matches!(self, Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. })
     }
 
     /// Whether the pointer should be pulled to nearby geometry.
@@ -305,7 +365,7 @@ pub(crate) struct PendingLink {
 }
 
 /// The sample "Match Properties" copies from — see
-/// [`crate::PagifyApp::match_properties_sample`].
+/// [`Tool::MatchProperties`].
 ///
 /// Built once, when the sample is picked, rather than re-read before every
 /// target: `alternate_objects` is one pass over the whole page, and running

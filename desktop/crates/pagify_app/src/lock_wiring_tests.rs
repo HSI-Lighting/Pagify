@@ -1355,7 +1355,10 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
     app.tab_mut().text_selection = Some(sample_range);
     app.tab_mut().selection_page = 0;
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
-    assert!(app.tab_mut().match_properties_sample.is_some(), "the sample should be held");
+    assert!(
+        matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::MatchProperties { sample: Some(_) })),
+        "the sample should be held"
+    );
 
     // The target: a separate selection over `b` alone.
     let target_range = app
@@ -1366,7 +1369,10 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
     app.tab_mut().selection_page = 0;
     let message = app.apply_match_properties_to_current_selection().expect("match should succeed");
     assert!(message.contains("matched"), "unexpected message: {message}");
-    assert!(app.tab_mut().match_properties_sample.is_some(), "the tool should stay in hand");
+    assert!(
+        matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::MatchProperties { sample: Some(_) })),
+        "the tool should stay in hand"
+    );
 
     let after = app.tab_mut().doc.as_ref().unwrap().session.text_runs(0).expect("runs");
     let b_after = after.iter().find(|r| r.object == b.object).expect("b should still be there");
@@ -1396,7 +1402,13 @@ fn an_empty_selection_is_refused_by_both_match_properties_steps() {
 
     let runs = app.tab_mut().doc.as_ref().unwrap().session.text_runs(0).expect("runs");
     let a = &runs[0];
-    app.tab_mut().match_properties_sample = Some(app.build_match_properties_sample(0, a));
+    let sample = app.build_match_properties_sample(0, a);
+    app.tab_mut().tool = Some(ArmedTool {
+        kind: Tool::MatchProperties { sample: Some(sample) },
+        page: 0,
+        objects: Vec::new(),
+        points: Vec::new(),
+    });
     app.tab_mut().text_selection = Some(0..0);
     app.tab_mut().selection_page = 0;
     assert!(
@@ -2474,7 +2486,7 @@ fn undoing_a_bookmark_removes_it_from_the_document() {
 fn weblinks_arms_when_nothing_is_selected() {
     let mut app = app("two-column.pdf");
     app.submit("weblinks");
-    assert!(app.tab_mut().link_armed, "the tool was not armed");
+    assert!(app.tab_mut().tool.is_some(), "the tool was not armed");
     assert!(app.tab_mut().pending_link.is_none());
 }
 
@@ -2489,7 +2501,7 @@ fn weblinks_opens_the_prompt_when_text_is_already_selected() {
 
     assert!(app.tab_mut().pending_link.is_some(), "the prompt did not open");
     assert!(app.tab_mut().text_selection.is_none(), "the selection should have been consumed");
-    assert!(!app.tab_mut().link_armed, "arming is only for when nothing was selected yet");
+    assert!(app.tab_mut().tool.is_none(), "arming is only for when nothing was selected yet");
 }
 
 /// **The ribbon's "Link & Join Text" button, reported as missing its
@@ -7529,7 +7541,10 @@ fn matching_properties_finds_the_sample_the_selection_only_starts_inside() {
     app.tab_mut().selection_page = 0;
 
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
-    let sample = app.tab_mut().match_properties_sample.as_ref().expect("sample should be held");
+    let sample = match app.tab_mut().tool.as_ref().map(|t| &t.kind) {
+        Some(Tool::MatchProperties { sample: Some(s) }) => s,
+        _ => panic!("sample should be held"),
+    };
     assert!(
         (sample.size - a.size).abs() < 0.01,
         "should have found `a` even though the selection only barely starts inside it: \

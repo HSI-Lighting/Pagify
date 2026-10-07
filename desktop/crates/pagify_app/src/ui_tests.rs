@@ -4182,7 +4182,7 @@ fn a_markup_tool_can_be_picked_up_and_then_used() {
     let mut h = harness("text-lines.pdf");
     h.state_mut().submit("highlight");
     h.run_steps(1);
-    assert!(h.state().tab().markup_armed.is_some(), "the tool was not picked up");
+    assert!(h.state().tab().tool.is_some(), "the tool was not picked up");
     assert_eq!(
         h.state().tab().doc.as_ref().unwrap().session.annotations(0).unwrap().len(),
         0,
@@ -4219,11 +4219,11 @@ fn escape_puts_the_tool_down() {
     let mut h = harness("text-lines.pdf");
     h.state_mut().submit("underline");
     h.run_steps(1);
-    assert!(h.state().tab().markup_armed.is_some());
+    assert!(h.state().tab().tool.is_some());
 
     h.state_mut().escape();
     h.run_steps(1);
-    assert!(h.state().tab().markup_armed.is_none(), "escape did not put it down");
+    assert!(h.state().tab().tool.is_none(), "escape did not put it down");
 
     let start = a_character_on_screen(&mut h);
     drag(&mut h, start, start + egui::vec2(150.0, 0.0));
@@ -4244,7 +4244,7 @@ fn a_tool_pressed_with_text_already_selected_marks_it_at_once() {
 
     let marks = h.state().tab().doc.as_ref().unwrap().session.annotations(0).expect("read");
     assert_eq!(marks.len(), 1, "an existing selection was not marked");
-    assert!(h.state().tab().markup_armed.is_none(), "it should not also be left in hand");
+    assert!(h.state().tab().tool.is_none(), "it should not also be left in hand");
 }
 
 /// Zoom a few steps at a screen position, the way a pinch arrives.

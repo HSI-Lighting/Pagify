@@ -536,34 +536,14 @@ struct DocTab {
     /// other line with it. Well clear of `TEXT_LAYER_ID`, which recognition
     /// owns.
     next_text_id: i32,
-    /// A markup tool waiting for text to be selected.
-    ///
-    /// A highlighter is a thing you pick up and then use, not a thing you
-    /// reach for after the fact. Requiring the selection first means the tool
-    /// can only ever be applied once per selection, and reads as a button that
-    /// scolds you.
-    markup_armed: Option<pagify_shell::verbs::Markup>,
-    /// Waiting for a text selection to link — the same shape as
-    /// `markup_armed`, kept as its own field rather than folded into it
-    /// because linking needs an extra step (the address) `mark_selection`
-    /// has no use for, and adds one anyway.
-    link_armed: bool,
-    /// A text selection, once made, waiting for the address to link it to.
+    /// A text selection, once made, waiting for the address to link it to —
+    /// set once `Tool::Link` resolves a drag. `Tool::Link` itself (not this
+    /// field) is what says the web-link tool is still armed: it stays
+    /// armed through this dialog being open, closed, or never opened at
+    /// all, which is why the two are separate.
     pending_link: Option<PendingLink>,
     /// The Extract dialog, while it is open on this tab.
     extract_ask: Option<ExtractAsk>,
-    /// Waiting for a text selection to serve as Match Properties' own
-    /// sample — the same shape `link_armed` is, and for the same reason:
-    /// once the sample is in hand every further selection is matched to it
-    /// at once, which `mark_selection`'s own one-shot shape has no use for.
-    match_properties_armed: bool,
-    /// The sample Match Properties is copying from, once picked. While this
-    /// is held, completing another text selection retypes it to match
-    /// rather than arming the tool over again — the same "stays in hand"
-    /// shape `markup_armed` already has, so a whole page's worth of
-    /// mismatched runs can be fixed one selection after another without
-    /// going back to the ribbon.
-    match_properties_sample: Option<MatchPropertiesSample>,
     /// A drawn Article Box rectangle, waiting for its title.
     pending_article_box: Option<PendingArticleBox>,
     /// The Bookmarks panel, while it is open.
@@ -923,12 +903,8 @@ impl DocTab {
             editing_run: None,
             new_text_box: None,
             next_text_id: 0x0100_0000,
-            markup_armed: None,
-            link_armed: false,
             pending_link: None,
             extract_ask: None,
-            match_properties_armed: false,
-            match_properties_sample: None,
             pending_article_box: None,
             bookmark_panel: None,
             bookmarked_pages: std::collections::HashSet::new(),
@@ -4122,10 +4098,6 @@ impl PagifyApp {
             return;
         }
         self.tab_mut().tool = None;
-        self.tab_mut().markup_armed = None;
-        self.tab_mut().link_armed = false;
-        self.tab_mut().match_properties_armed = false;
-        self.tab_mut().match_properties_sample = None;
         self.put_down_page_editors("switched to Edit Object");
         self.tab_mut().object_tool = Some(pictures_first);
         self.tab_mut().selected = None;
@@ -6201,15 +6173,8 @@ impl PagifyApp {
         if self.tab_mut().text_selection.is_some() {
             self.open_link_prompt_from_selection();
         } else {
-            self.put_down_page_editors("armed a web link");
-            self.tab_mut().markup_armed = None;
-            self.tab_mut().match_properties_armed = false;
-            self.tab_mut().match_properties_sample = None;
-            self.tab_mut().link_armed = true;
-            self.say_info(
-                "web link — drag across the text to link it (typed text works too, once it \
-                 is on the page). Escape puts it down.",
-            );
+            let page = self.tab_mut().page;
+            self.arm_tool(Tool::Link, page);
         }
     }
 
@@ -7826,18 +7791,6 @@ impl PagifyApp {
         if self.tab_mut().placed_image_selected.take().is_some() {
             self.tab_mut().placed_image_grab = None;
             self.say_info("picture deselected.");
-        }
-        if self.tab_mut().markup_armed.take().is_some() {
-            self.say_info("tool put down.");
-        }
-        if std::mem::take(&mut self.tab_mut().link_armed) {
-            self.say_info("tool put down.");
-        }
-        if std::mem::take(&mut self.tab_mut().match_properties_armed) {
-            self.say_info("tool put down.");
-        }
-        if self.tab_mut().match_properties_sample.take().is_some() {
-            self.say_info("tool put down.");
         }
         if let Some(reading) = &self.tab_mut().reading {
             // A real stop: the worker checks this between lines and puts the
@@ -9830,7 +9783,11 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        if self.tab_mut().match_properties_sample.is_some() {
+        let has_sample = matches!(
+            self.tab_mut().tool.as_ref().map(|t| &t.kind),
+            Some(Tool::MatchProperties { sample: Some(_) })
+        );
+        if has_sample {
             match self.apply_match_properties_to_current_selection() {
                 Ok(message) => self.say_info(message),
                 Err(e) => self.say_error(e),
@@ -9843,20 +9800,14 @@ impl PagifyApp {
                 Err(e) => self.say_error(e),
             }
         } else {
-            self.put_down_page_editors("armed match properties");
-            self.tab_mut().markup_armed = None;
-            self.tab_mut().link_armed = false;
-            self.tab_mut().match_properties_armed = true;
-            self.say_info(
-                "match properties — drag across the sample text to copy from. Escape puts \
-                 it down.",
-            );
+            let page = self.tab_mut().page;
+            self.arm_tool(Tool::MatchProperties { sample: None }, page);
         }
     }
 
     /// Take the current selection as Match Properties' own sample, and arm
     /// it to match every selection made from here on — see
-    /// [`Self::match_properties_sample`].
+    /// [`Tool::MatchProperties`].
     fn match_properties_sample_from_current_selection(&mut self) -> Result<String, String> {
         let Some(range) = self.tab_mut().text_selection.clone() else {
             return Err("select the sample text first.".into());
@@ -9868,9 +9819,20 @@ impl PagifyApp {
         let Some(first) = self.run_at_selection_start(page, range.start) else {
             return Err("could not tell which run the selection starts in.".into());
         };
-        self.tab_mut().match_properties_armed = false;
         self.tab_mut().text_selection = None;
-        self.tab_mut().match_properties_sample = Some(self.build_match_properties_sample(page, &first));
+        let sample = self.build_match_properties_sample(page, &first);
+        // Set directly rather than through `arm_tool`: reachable either
+        // already armed (the usual "waiting for a sample" case) or not
+        // (`begin_match_properties`'s "a selection already exists" fast
+        // path, which never armed anything first) — either way, the tool
+        // must be in hand with this sample afterward, said or not.
+        let page_armed = self.tab_mut().tool.as_ref().map_or(page, |t| t.page);
+        self.tab_mut().tool = Some(ArmedTool {
+            kind: Tool::MatchProperties { sample: Some(sample) },
+            page: page_armed,
+            objects: Vec::new(),
+            points: Vec::new(),
+        });
         Ok(
             "match properties — sample set. Now drag across text to change; each selection \
              is matched right away. Escape puts the tool down."
@@ -9959,7 +9921,11 @@ impl PagifyApp {
     /// asking for both in one `TextStyle` would fall through to PDFium's
     /// slower, riskier whole-page regeneration instead of either.
     fn apply_match_properties_to_current_selection(&mut self) -> Result<String, String> {
-        let Some(sample) = self.tab_mut().match_properties_sample.clone() else {
+        let sample = self.tab_mut().tool.as_ref().and_then(|t| match &t.kind {
+            Tool::MatchProperties { sample: Some(s) } => Some(s.clone()),
+            _ => None,
+        });
+        let Some(sample) = sample else {
             return Err("select the sample text first.".into());
         };
         let Some(range) = self.tab_mut().text_selection.clone() else {
@@ -11826,20 +11792,8 @@ impl PagifyApp {
             // Nothing selected: pick the tool up rather than refuse. It stays
             // in hand until Escape or another tool, so a run of passages can be
             // marked without going back to the ribbon between each.
-            self.put_down_page_editors("armed a markup tool");
-            self.tab_mut().link_armed = false;
-            self.tab_mut().match_properties_armed = false;
-            self.tab_mut().match_properties_sample = None;
-            self.tab_mut().markup_armed = Some(kind);
-            self.say_info(format!(
-                "{} — drag across the text to mark it. Escape puts it down.",
-                match kind {
-                    Markup::Highlight => "highlighter",
-                    Markup::Underline => "underline",
-                    Markup::StrikeOut => "strikeout",
-                    Markup::Squiggly => "squiggly",
-                }
-            ));
+            let page = self.tab_mut().page;
+            self.arm_tool(Tool::Markup(kind), page);
             return;
         };
         let page = self.tab_mut().selection_page;
@@ -13156,19 +13110,11 @@ impl eframe::App for PagifyApp {
                 // is part-way through collecting its clicks — a user who armed
                 // Line and looked away needs to see that it is still armed.
                 let armed = self.tab_mut().tool.as_ref().and_then(|t| t.kind.command());
-                let in_hand = self.tab_mut()
-                    .markup_armed
-                    .map(|k| match k {
-                        pagify_shell::verbs::Markup::Highlight => "highlight",
-                        pagify_shell::verbs::Markup::Underline => "underline",
-                        pagify_shell::verbs::Markup::StrikeOut => "strikeout",
-                        pagify_shell::verbs::Markup::Squiggly => "squiggly",
-                    })
-                    .or(match self.tab().object_tool {
-                        Some(true) => Some("editobject"),
-                        Some(false) => Some("moveobject"),
-                        None => None,
-                    });
+                let in_hand = match self.tab().object_tool {
+                    Some(true) => Some("editobject"),
+                    Some(false) => Some("moveobject"),
+                    None => None,
+                };
                 let show_hand_by_default =
                     self.tab().hand_shown_before_any_tool_is_picked
                         && self.tab().pointer == pagify_shell::verbs::PointerMode::Select;
