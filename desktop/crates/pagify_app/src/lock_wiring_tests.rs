@@ -4213,7 +4213,7 @@ fn the_sign_line_says_it_is_not_the_drawing_one() {
     app.submit("signline");
 
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::SignLine)),
+        matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::SignLine)),
         "the tool was not armed:\n{}",
         said(&app)
     );
@@ -4272,7 +4272,7 @@ fn the_sign_rectangle_says_it_is_not_the_drawing_one() {
     app.submit("signrectangle");
 
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::SignRectangle)),
+        matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::SignRectangle)),
         "the tool was not armed:\n{}",
         said(&app)
     );

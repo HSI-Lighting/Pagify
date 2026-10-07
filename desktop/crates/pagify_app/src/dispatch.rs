@@ -232,7 +232,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.arm(PendingKind::SignLine, page);
+                self.arm_tool(Tool::SignLine, page);
             }
             Verb::SignRectangle => {
                 let page = self.tab_mut().page;
@@ -240,7 +240,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.arm(PendingKind::SignRectangle, page);
+                self.arm_tool(Tool::SignRectangle, page);
             }
             Verb::DocumentStatus => {
                 for line in self.document_status() {

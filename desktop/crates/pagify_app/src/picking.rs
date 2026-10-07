@@ -223,6 +223,14 @@ impl crate::PagifyApp {
                 (Some(a), Some(b)) => self.whiteout(page, *a, *b),
                 _ => Err("whiteout: two corners are needed.".into()),
             },
+            Tool::SignRectangle => match (armed.points.first(), armed.points.get(1)) {
+                (Some(a), Some(b)) => self.stamp_box(page, *a, *b),
+                _ => Err("rectangle: two corners are needed.".into()),
+            },
+            Tool::SignLine => match (armed.points.first(), armed.points.get(1)) {
+                (Some(a), Some(b)) => self.stamp_line(page, *a, *b),
+                _ => Err("line: two ends are needed.".into()),
+            },
         };
         let repeats = armed.kind.repeats();
         let failed = outcome.is_err();
@@ -279,14 +287,6 @@ impl crate::PagifyApp {
                 Ok(measure::measure_area(&self.tab_mut().calibration, &pending.points).render())
             }
 
-            PendingKind::SignRectangle => match (pending.points.first(), pending.points.get(1)) {
-                (Some(a), Some(b)) => self.stamp_box(page, *a, *b),
-                _ => Err("rectangle: two corners are needed.".into()),
-            },
-            PendingKind::SignLine => match (pending.points.first(), pending.points.get(1)) {
-                (Some(a), Some(b)) => self.stamp_line(page, *a, *b),
-                _ => Err("line: two ends are needed.".into()),
-            },
             PendingKind::Lock => match (pending.points.first(), pending.points.get(1)) {
                 (Some(a), Some(b)) => match area_between(*a, *b) {
                     Some(area) => {

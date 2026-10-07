@@ -1249,8 +1249,12 @@ impl crate::PagifyApp {
                 .unwrap_or_else(|| view.to_page(cursor));
             match &armed.kind {
                 Tool::Signature => self.draw_signature_preview(ui, view, at),
-                Tool::PlaceImage { .. } => {}
-                Tool::PlaceText => {
+                // A tick, cross or dot, or an image, is placed on a single
+                // click — nothing to draw before it lands.
+                Tool::PlaceImage { .. } | Tool::Fill(_) => {}
+                // A box, violet, the same group `PendingKind`'s own preview
+                // used to share with `Draw(Rectangle)`/`Lock`/`ArticleBox`.
+                Tool::PlaceText | Tool::Whiteout | Tool::SignRectangle => {
                     if let Some(first) = armed.points.first().copied() {
                         ui.painter().rect_stroke(
                             egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
@@ -1260,20 +1264,7 @@ impl crate::PagifyApp {
                         );
                     }
                 }
-                Tool::Calibrate { .. } => {
-                    if let Some(first) = armed.points.first().copied() {
-                        ui.painter().line_segment(
-                            [view.to_screen(first), view.to_screen(at)],
-                            egui::Stroke::new(1.0, theme::violet_bright()),
-                        );
-                    }
-                }
-                // A tick, cross or dot is placed on a single click, same as
-                // `PlaceImage` — nothing to draw before it lands.
-                Tool::Fill(_) => {}
-                // The ones that take an area, each in the colour of what it
-                // does — same split as `PendingKind`'s own preview used to
-                // draw.
+                // The one that destroys, in its own colour.
                 Tool::Redact => {
                     if let Some(first) = armed.points.first().copied() {
                         ui.painter().rect_stroke(
@@ -1284,13 +1275,13 @@ impl crate::PagifyApp {
                         );
                     }
                 }
-                Tool::Whiteout => {
+                // A line, violet — the same group `PendingKind`'s own
+                // preview used to share with `Draw(Line)`/`Measure(Distance)`.
+                Tool::Calibrate { .. } | Tool::SignLine => {
                     if let Some(first) = armed.points.first().copied() {
-                        ui.painter().rect_stroke(
-                            egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
-                            egui::CornerRadius::ZERO,
+                        ui.painter().line_segment(
+                            [view.to_screen(first), view.to_screen(at)],
                             egui::Stroke::new(1.0, theme::violet_bright()),
-                            egui::StrokeKind::Inside,
                         );
                     }
                 }
@@ -1326,7 +1317,7 @@ impl crate::PagifyApp {
         };
 
         match &pending.kind {
-            PendingKind::Draw(DrawKind::Line) | PendingKind::SignLine => {
+            PendingKind::Draw(DrawKind::Line) => {
                 painter.line_segment([on(first), on(at)], stroke);
             }
             PendingKind::Draw(DrawKind::Arrow) => {
@@ -1345,7 +1336,7 @@ impl crate::PagifyApp {
                 let radius = (on(first) - on(at)).length();
                 painter.circle_stroke(on(first), radius, stroke);
             }
-            PendingKind::Draw(DrawKind::Rectangle) | PendingKind::SignRectangle => {
+            PendingKind::Draw(DrawKind::Rectangle) => {
                 painter.rect_stroke(
                     box_between(first, at),
                     egui::CornerRadius::ZERO,

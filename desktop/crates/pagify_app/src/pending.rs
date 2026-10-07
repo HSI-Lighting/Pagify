@@ -61,6 +61,10 @@ pub(crate) enum Tool {
     /// reason the verbs are: the difference is the whole point, and a flag
     /// on one is how somebody ends up with the other.
     Whiteout,
+    /// Two corners of a box to draw while filling a form in.
+    SignRectangle,
+    /// The two ends of a line to rule while filling a form in.
+    SignLine,
 }
 
 impl Tool {
@@ -70,7 +74,12 @@ impl Tool {
     pub(crate) fn wants_points(&self) -> usize {
         match self {
             Tool::Signature | Tool::PlaceImage { .. } | Tool::Fill(_) => 1,
-            Tool::PlaceText | Tool::Calibrate { .. } | Tool::Redact | Tool::Whiteout => 2,
+            Tool::PlaceText
+            | Tool::Calibrate { .. }
+            | Tool::Redact
+            | Tool::Whiteout
+            | Tool::SignRectangle
+            | Tool::SignLine => 2,
         }
     }
 
@@ -102,17 +111,32 @@ impl Tool {
                 0 => "whiteout: first corner — this covers, it does not remove".into(),
                 _ => "whiteout: opposite corner".into(),
             },
+            // Says which of the two rectangles/lines this is, because the
+            // other one is a drawing that can be picked up again and this
+            // one is not.
+            Tool::SignRectangle => match points_done {
+                0 => "rectangle: first corner — a mark on the form, not a drawing".into(),
+                _ => "rectangle: opposite corner".into(),
+            },
+            Tool::SignLine => match points_done {
+                0 => "line: from — a mark on the form, not a drawing".into(),
+                _ => "line: to".into(),
+            },
         }
     }
 
     /// Whether finishing it should arm it again — see `PendingKind::
     /// repeats`'s own doc for the full reasoning. `Fill`/`Redact`/
-    /// `Whiteout` are a straight port of it (a run of stamps, or redactions,
-    /// should not mean a trip to the ribbon between each one). The other
-    /// three `Tool` kinds answer a question or place one thing to
-    /// immediately adjust, not stamp a mark, so they stay `false`.
+    /// `Whiteout`/`SignRectangle`/`SignLine` are a straight port of it (a
+    /// run of stamps, redactions or form marks should not mean a trip to
+    /// the ribbon between each one). The other three `Tool` kinds answer a
+    /// question or place one thing to immediately adjust, not stamp a
+    /// mark, so they stay `false`.
     pub(crate) fn repeats(&self) -> bool {
-        matches!(self, Tool::Fill(_) | Tool::Redact | Tool::Whiteout)
+        matches!(
+            self,
+            Tool::Fill(_) | Tool::Redact | Tool::Whiteout | Tool::SignRectangle | Tool::SignLine
+        )
     }
 
     /// The ribbon command that arms this, so its button can show itself lit
@@ -130,6 +154,8 @@ impl Tool {
             Tool::Fill(_) => None,
             Tool::Redact => Some("redact"),
             Tool::Whiteout => Some("whiteout"),
+            Tool::SignRectangle => Some("signrectangle"),
+            Tool::SignLine => Some("signline"),
         }
     }
 
@@ -155,10 +181,6 @@ pub(crate) enum PendingKind {
     Draw(DrawKind),
     Modify(tools::Pick),
     Measure(MeasureKind),
-    /// Two corners of a box to draw while filling a form in.
-    SignRectangle,
-    /// The two ends of a line to rule while filling a form in.
-    SignLine,
     /// Two corners of an area to hide, sealed under a passcode.
     Lock,
     /// Two corners of a labelled region — see [`PendingArticleBox`] for the
@@ -239,8 +261,6 @@ impl PendingKind {
             }
             PendingKind::Draw(DrawKind::Polyline | DrawKind::Spline) => (0, usize::MAX),
             PendingKind::Modify(pick) => (pick.objects, pick.points),
-            PendingKind::SignRectangle => (0, 2),
-            PendingKind::SignLine => (0, 2),
             PendingKind::Measure(MeasureKind::Distance) => (0, 2),
             PendingKind::Measure(MeasureKind::Area) => (0, usize::MAX),
             PendingKind::Lock => (0, 2),
@@ -263,14 +283,6 @@ impl PendingKind {
             }
             // Says which of the two rectangles this is, because the other one
             // is a drawing that can be picked up again and this one is not.
-            PendingKind::SignRectangle => match points_done {
-                0 => "rectangle: first corner — a mark on the form, not a drawing".into(),
-                _ => "rectangle: opposite corner".into(),
-            },
-            PendingKind::SignLine => match points_done {
-                0 => "line: from — a mark on the form, not a drawing".into(),
-                _ => "line: to".into(),
-            },
             PendingKind::Lock => match points_done {
                 0 => "lock: first corner of the area to hide".into(),
                 _ => "lock: opposite corner".into(),
@@ -356,8 +368,6 @@ impl PendingKind {
             PendingKind::Draw(DrawKind::Rectangle) => return None,
             PendingKind::Draw(DrawKind::Arrow) => "arrow",
             PendingKind::Draw(DrawKind::Spline) => "spline",
-            PendingKind::SignRectangle => "signrectangle",
-            PendingKind::SignLine => "signline",
             PendingKind::Lock => "lock",
             PendingKind::ArticleBox => "articlebox",
             PendingKind::PickText => "edittext",
