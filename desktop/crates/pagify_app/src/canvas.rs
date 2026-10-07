@@ -1780,6 +1780,17 @@ impl crate::PagifyApp {
         // checked ahead of the text cursor below so a link drawn over
         // running text still reads as clickable rather than as selectable
         // prose.
+        self.update_pointer_cursor(ui, page, at);
+        if self.armed_tool_gesture(&response, at, answered_above) {
+            return;
+        }
+        self.page_drag(ui, &response, view, page, at);
+    }
+
+    /// A pointing hand over a link, a text cursor over words — the same
+    /// signals a browser gives, checked in that order so a link drawn over
+    /// running text still reads as clickable rather than selectable prose.
+    fn update_pointer_cursor(&mut self, ui: &mut egui::Ui, page: usize, at: AppPoint) {
         let hovering_link = self.tab_mut().tool.is_none()
             && (self.foreign_at(page, at).is_some_and(|n| self.link_uri_at(page, n).is_some())
                 || self.internal_link_at(page, at).is_some());
@@ -1798,19 +1809,19 @@ impl crate::PagifyApp {
         {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Text);
         }
+    }
 
-        // An armed tool owns the pointer, and takes the whole gesture.
-        //
-        // Two defects in one. A drag while a tool was waiting for clicks used
-        // to *also* select text, so one gesture did two things at once. And
-        // egui calls a press-move-release a drag rather than a click even when
-        // the movement is a pixel or two — which mice do constantly — so a
-        // click that wandered was thrown away and the tool appeared not to
-        // respond. That is what "the tools do not work" looks like from the
-        // outside: most clicks land, some vanish, and nothing says why.
-        //
-        // A gesture that stayed within the same tolerance used for hit-testing
-        // is a click, however egui classified it.
+    /// The armed tool takes the whole gesture — see the comment this moved
+    /// away from in `interact` for why a wandered click still counts.
+    fn armed_tool_gesture(
+        &mut self,
+        response: &egui::Response,
+        at: AppPoint,
+        answered_above: bool,
+    ) -> bool {
+        if self.tab_mut().tool.is_none() {
+            return false;
+        }
         if self.tab_mut().tool.is_some() {
             self.tab_mut().text_drag = None;
             // Not the click the click-away block above has already answered —
@@ -1830,9 +1841,22 @@ impl crate::PagifyApp {
             if response.clicked() && !answered_above {
                 self.take_pick(at);
             }
-            return;
+            return true;
         }
+        true
+    }
 
+    /// Everything a drag on the page does when no armed tool owns it: the
+    /// rotate handle, a markup grab, a text selection or a marquee — see the
+    /// comments this moved away from in `interact`.
+    fn page_drag(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        view: PageView,
+        page: usize,
+        at: AppPoint,
+    ) {
         if response.drag_started() {
             // The rotate handle, if a markup shape is already selected here,
             // wins over everything else a drag could mean at this point —
@@ -2001,6 +2025,7 @@ impl crate::PagifyApp {
             }
         }
     }
+
 
     /// The right-click menu, offered wherever the pointer is on the page —
     /// including on frames where the pointer has left the page widget, which
