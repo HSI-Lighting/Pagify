@@ -3229,26 +3229,7 @@ impl PagifyApp {
 
         bar.show(ui, |ui| {
             if self.command_open {
-                // The history claims whatever the panel was dragged to, less
-                // the three fixed rows below it.
-                let rows = 74.0;
-                let height = (ui.available_height() - rows).max(24.0);
-                egui::ScrollArea::vertical()
-                    .max_height(height)
-                    .stick_to_bottom(true)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_min_height(height);
-                        for entry in self.cmd.history() {
-                            let (colour, text) = match entry.kind {
-                                Kind::Echo => (theme::ink_dim(), format!("› {}", entry.text)),
-                                Kind::Info => (theme::ink(), entry.text.clone()),
-                                Kind::Error => (theme::danger(), entry.text.clone()),
-                            };
-                            ui.colored_label(colour, text);
-                        }
-                    });
-                ui.separator();
+                self.draw_command_history(ui);
             }
 
             // The name and what is wanted are drawn separately so the name can
@@ -3446,6 +3427,31 @@ impl PagifyApp {
             }
         });
     }
+
+    /// The command history above the open box, newest at the bottom: echo,
+    /// info and error lines, coloured by kind. Moved out of
+    /// `draw_command_bar` so the bar itself is about the box.
+    fn draw_command_history(&mut self, ui: &mut egui::Ui) {
+        let rows = 74.0;
+        let height = (ui.available_height() - rows).max(24.0);
+        egui::ScrollArea::vertical()
+            .max_height(height)
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_min_height(height);
+                for entry in self.cmd.history() {
+                    let (colour, text) = match entry.kind {
+                        Kind::Echo => (theme::ink_dim(), format!("› {}", entry.text)),
+                        Kind::Info => (theme::ink(), entry.text.clone()),
+                        Kind::Error => (theme::danger(), entry.text.clone()),
+                    };
+                    ui.colored_label(colour, text);
+                }
+            });
+        ui.separator();
+    }
+
 
     /// Everything below the command bar: the File backstage flag, the
     /// thumbnail rail or the Organize grid, the layers window, the properties
