@@ -1632,237 +1632,7 @@ impl crate::PagifyApp {
             }
         }
 
-        // Right-click, which is where a reader looks for Copy first.
-        //
-        // **Before the early return, not after it.** Moving the pointer towards
-        // the menu takes it off the page, so the page stops being hovered, so
-        // the function returned before re-declaring the menu — and the menu
-        // vanished as you reached for it. A popup has to be offered on every
-        // frame it is open, including the frames where the pointer has left the
-        // widget that opened it.
-        // What the pointer is over, kept before the menu opens: a right-click
-        // is a press and a release, and the menu is built on a later frame than
-        // the one that knew where the pointer was.
-        if response.secondary_clicked() {
-            if let Some(spot) = response.interact_pointer_pos() {
-                let at = view.to_page(spot);
-                self.tab_mut().selected_image = self
-                    .images_on(page)
-                    .into_iter()
-                    .find(|i| {
-                        at.x >= i.rect.left as f64
-                            && at.x <= i.rect.right as f64
-                            && at.y >= i.rect.top as f64
-                            && at.y <= i.rect.bottom as f64
-                    })
-                    .map(|i| (page, i));
-                // Where the pointer was, kept for the menu built on a later
-                // frame — the same reason `selected_image` is kept.
-                self.tab_mut().right_clicked_at = Some((page, at));
-                // See `right_click_text_actions`'s own doc: computed once,
-                // here, rather than by the menu on every frame it is open.
-                self.tab_mut().right_click_text_actions = Some(self.compute_right_click_text_actions(page, at));
-            }
-        }
-
-        let over_text = self.tab_mut().text_selection.is_some() && page == self.tab_mut().selection_page;
-        let over_image = self.tab_mut().selected_image.as_ref().is_some_and(|(p, _)| *p == page);
-        // **Offered wherever the pointer is**, not only over a selection.
-        //
-        // It used to appear only over selected text or a picture, so a
-        // right-click on a panel, a rule or bare paper produced nothing at all
-        // — which is where somebody whose picture has gone behind something is
-        // most likely to be clicking. Reported from use as the layer option not
-        // being there.
-        if self.tab_mut().doc.is_some() {
-            response.context_menu(|ui| {
-                // A link under the right-click gets its own two actions,
-                // ahead of everything else here — asking whether to follow
-                // it or take it off is what a link's own menu is for, and
-                // "wherever the pointer is" (see below) already means a link
-                // is reached the same way any other page content is.
-                let link_here = self.tab_mut()
-                    .right_clicked_at
-                    .filter(|(p, _)| *p == page)
-                    .and_then(|(_, at)| self.foreign_at(page, at))
-                    .and_then(|n| self.link_uri_at(page, n).map(|uri| (n, uri)));
-                if let Some((n, uri)) = link_here {
-                    if ui.button(format!("Open {}", short(&uri))).clicked() {
-                        self.open_or_report_link(n, &uri);
-                        ui.close();
-                    }
-                    if ui.button("Remove the link").clicked() {
-                        self.remove_mark(n);
-                        ui.close();
-                    }
-                    ui.separator();
-                }
-                if over_text && ui.button("Copy").clicked() {
-                    self.tab_mut().copy_wanted = true;
-                    ui.close();
-                }
-
-                // Read from the cache the click itself filled in — see
-                // `right_click_text_actions`'s own doc for why this menu
-                // must never recompute these on its own account: it is
-                // rebuilt on every repaint of an open popup.
-                let actions_here = self.tab_mut()
-                    .right_clicked_at
-                    .filter(|(p, _)| *p == page)
-                    .and_then(|_| self.tab_mut().right_click_text_actions);
-
-                // A selection spanning more than one line or block can be
-                // declared one paragraph — see `join_selected_text`'s own
-                // doc for why this exists alongside the automatic
-                // heuristic rather than instead of it.
-                //
-                // **Shown disabled, not hidden, when it does not apply** —
-                // the same "Choose one above first" shape the layer buttons
-                // below already use. Reported from use: hiding it outright
-                // whenever the selection was too small to qualify made the
-                // feature itself unfindable — a selection covering only one
-                // run never showed so much as a hint that joining needed a
-                // bigger one.
-                if over_text {
-                    let joinable = actions_here.is_some_and(|a| a.joinable);
-                    if ui.add_enabled(joinable, egui::Button::new("Join into one paragraph")).clicked() {
-                        match self.join_selected_text() {
-                            Ok(message) => self.say_info(message),
-                            Err(e) => self.say_error(e),
-                        }
-                        ui.close();
-                    }
-                    if !joinable {
-                        ui.small("Select text spanning more than one line or block first.");
-                    }
-                }
-                // The other half of the same feature: undeclaring a join,
-                // wherever the right-click landed on one of its runs —
-                // not gated on a selection, since splitting one back apart
-                // is done by pointing at it, not by selecting it first.
-                let split_here = actions_here.and_then(|a| a.split_object);
-                if let Some(object) = split_here {
-                    if ui.button("Split the joined text").clicked() {
-                        self.split_group(page, object);
-                        self.say_info("split — these lines are edited on their own again.");
-                        ui.close();
-                    }
-                }
-                // Locking is a Protect operation, so it is offered where the
-                // Protect tools are rather than on every tab — the same reason
-                // the ribbon has tabs at all.
-                if self.tab_mut().ribbon == Tab::Protect {
-                    if over_image {
-                        if ui.button("🔒 Lock this image").clicked() {
-                            if let Some((page, image)) = self.tab_mut().selected_image.clone() {
-                                self.ask_or_reuse_passcode(
-                                    Awaiting::LockImage { page, object: image.object },
-                                    "type a passcode to lock this image with, or Escape to give up.",
-                                );
-                            }
-                            ui.close();
-                        }
-                    }
-                    if over_text && ui.button("🔒 Lock the selection").clicked() {
-                        self.lock_selection();
-                        ui.close();
-                    }
-                }
-
-                // **The drawing order, where somebody looks for it.** A picture
-                // that has gone behind a panel is not reachable from a ribbon
-                // button, because the thing to act on is the thing under the
-                // pointer.
-                ui.separator();
-                let spot = self.tab_mut().right_clicked_at.filter(|(p, _)| *p == page).map(|(_, at)| at);
-                if let Some(at) = spot {
-                    // **A lock badge is not a layer, and says so.** The
-                    // chequerboard over a locked picture reads as a grey panel,
-                    // and somebody trying to send it back was pointing at the
-                    // one thing on the page the drawing order cannot touch.
-                    let badge = self.locked_items_on(page).into_iter().find(|i| {
-                        at.x >= i.rect.left as f64
-                            && at.x <= i.rect.right as f64
-                            && at.y >= i.rect.top as f64
-                            && at.y <= i.rect.bottom as f64
-                    });
-                    if let Some(badge) = badge {
-                        ui.weak(if badge.is_area {
-                            "🔒 Locked words — not a layer. The padlock brings them back."
-                        } else if badge.stale {
-                            "🔒 A lock badge over a picture that was never taken off — `repairlocks` finishes it."
-                        } else {
-                            "🔒 A locked picture — not a layer. The padlock brings it back."
-                        });
-                        ui.separator();
-                    }
-                    let under = self.layers_under(page, at);
-                    if under.is_empty() {
-                        ui.weak("Nothing is drawn here.");
-                    } else {
-                        ui.weak("Layers here — topmost first");
-                        let listed: Vec<(usize, String, bool)> = under
-                            .iter()
-                            .take(8)
-                            .filter_map(|index| {
-                                self.tab_mut().doc.as_ref()
-                                    .and_then(|d| d.caches.layers.as_ref())
-                                    .and_then(|(_, l)| l.get(*index))
-                                    .map(|d| {
-                                        (
-                                            *index,
-                                            format!("{}  {}", d.kind.describe(), d.label),
-                                            !d.movable,
-                                        )
-                                    })
-                            })
-                            .collect();
-                        for (index, label, grouped) in listed {
-                            let picked = self.tab_mut().picked_layer == Some(index);
-                            let row = ui.selectable_label(
-                                picked,
-                                if grouped { format!("{label}   (in a group)") } else { label },
-                            );
-                            if row.clicked() {
-                                self.pick_layer(page, index);
-                                ui.close();
-                            }
-                        }
-                        ui.separator();
-                        // These act on what has been picked, so somebody can
-                        // choose the thing that is *behind* and raise that,
-                        // rather than the thing on top of it.
-                        let armed = self.tab_mut().picked_layer.is_some();
-                        for (label, to) in [
-                            ("\u{E5D8}  Move the picked one up", pdf_core::document::Stacking::Up),
-                            ("\u{E5DB}  Move the picked one down", pdf_core::document::Stacking::Down),
-                            ("\u{E883}  Bring the picked one to front", pdf_core::document::Stacking::Front),
-                            ("\u{E882}  Send the picked one to back", pdf_core::document::Stacking::Back),
-                        ] {
-                            if ui.add_enabled(armed, egui::Button::new(label)).clicked() {
-                                self.restack_picked(to);
-                                ui.close();
-                            }
-                        }
-                        if !armed {
-                            ui.small("Choose one above first.");
-                        }
-                    }
-                    ui.separator();
-                }
-                let shown = self.show_layers;
-                if ui
-                    .button(if shown { "Hide the layer list" } else { "Show all layers" })
-                    .clicked()
-                {
-                    self.show_layers = !shown;
-                    if self.show_layers {
-                        self.forget_layers();
-                    }
-                    ui.close();
-                }
-            });
-        }
+        self.show_page_context_menu(ui, &response, page, view);
 
         let Some(pointer) = response.interact_pointer_pos().or_else(|| response.hover_pos()) else {
             self.tab_mut().last_snap = None;
@@ -2212,4 +1982,248 @@ impl crate::PagifyApp {
             }
         }
     }
+
+    /// The right-click menu, offered wherever the pointer is on the page —
+    /// including on frames where the pointer has left the page widget, which
+    /// is why it is declared before `interact`'s own early return.
+    fn show_page_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        page: usize,
+        view: PageView,
+    ) {
+        // Right-click, which is where a reader looks for Copy first.
+        //
+        // **Before the early return, not after it.** Moving the pointer towards
+        // the menu takes it off the page, so the page stops being hovered, so
+        // the function returned before re-declaring the menu — and the menu
+        // vanished as you reached for it. A popup has to be offered on every
+        // frame it is open, including the frames where the pointer has left the
+        // widget that opened it.
+        // What the pointer is over, kept before the menu opens: a right-click
+        // is a press and a release, and the menu is built on a later frame than
+        // the one that knew where the pointer was.
+        if response.secondary_clicked() {
+            if let Some(spot) = response.interact_pointer_pos() {
+                let at = view.to_page(spot);
+                self.tab_mut().selected_image = self
+                    .images_on(page)
+                    .into_iter()
+                    .find(|i| {
+                        at.x >= i.rect.left as f64
+                            && at.x <= i.rect.right as f64
+                            && at.y >= i.rect.top as f64
+                            && at.y <= i.rect.bottom as f64
+                    })
+                    .map(|i| (page, i));
+                // Where the pointer was, kept for the menu built on a later
+                // frame — the same reason `selected_image` is kept.
+                self.tab_mut().right_clicked_at = Some((page, at));
+                // See `right_click_text_actions`'s own doc: computed once,
+                // here, rather than by the menu on every frame it is open.
+                self.tab_mut().right_click_text_actions = Some(self.compute_right_click_text_actions(page, at));
+            }
+        }
+
+        let over_text = self.tab_mut().text_selection.is_some() && page == self.tab_mut().selection_page;
+        let over_image = self.tab_mut().selected_image.as_ref().is_some_and(|(p, _)| *p == page);
+        // **Offered wherever the pointer is**, not only over a selection.
+        //
+        // It used to appear only over selected text or a picture, so a
+        // right-click on a panel, a rule or bare paper produced nothing at all
+        // — which is where somebody whose picture has gone behind something is
+        // most likely to be clicking. Reported from use as the layer option not
+        // being there.
+        if self.tab_mut().doc.is_some() {
+            response.context_menu(|ui| {
+                // A link under the right-click gets its own two actions,
+                // ahead of everything else here — asking whether to follow
+                // it or take it off is what a link's own menu is for, and
+                // "wherever the pointer is" (see below) already means a link
+                // is reached the same way any other page content is.
+                let link_here = self.tab_mut()
+                    .right_clicked_at
+                    .filter(|(p, _)| *p == page)
+                    .and_then(|(_, at)| self.foreign_at(page, at))
+                    .and_then(|n| self.link_uri_at(page, n).map(|uri| (n, uri)));
+                if let Some((n, uri)) = link_here {
+                    if ui.button(format!("Open {}", short(&uri))).clicked() {
+                        self.open_or_report_link(n, &uri);
+                        ui.close();
+                    }
+                    if ui.button("Remove the link").clicked() {
+                        self.remove_mark(n);
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+                if over_text && ui.button("Copy").clicked() {
+                    self.tab_mut().copy_wanted = true;
+                    ui.close();
+                }
+
+                // Read from the cache the click itself filled in — see
+                // `right_click_text_actions`'s own doc for why this menu
+                // must never recompute these on its own account: it is
+                // rebuilt on every repaint of an open popup.
+                let actions_here = self.tab_mut()
+                    .right_clicked_at
+                    .filter(|(p, _)| *p == page)
+                    .and_then(|_| self.tab_mut().right_click_text_actions);
+
+                // A selection spanning more than one line or block can be
+                // declared one paragraph — see `join_selected_text`'s own
+                // doc for why this exists alongside the automatic
+                // heuristic rather than instead of it.
+                //
+                // **Shown disabled, not hidden, when it does not apply** —
+                // the same "Choose one above first" shape the layer buttons
+                // below already use. Reported from use: hiding it outright
+                // whenever the selection was too small to qualify made the
+                // feature itself unfindable — a selection covering only one
+                // run never showed so much as a hint that joining needed a
+                // bigger one.
+                if over_text {
+                    let joinable = actions_here.is_some_and(|a| a.joinable);
+                    if ui.add_enabled(joinable, egui::Button::new("Join into one paragraph")).clicked() {
+                        match self.join_selected_text() {
+                            Ok(message) => self.say_info(message),
+                            Err(e) => self.say_error(e),
+                        }
+                        ui.close();
+                    }
+                    if !joinable {
+                        ui.small("Select text spanning more than one line or block first.");
+                    }
+                }
+                // The other half of the same feature: undeclaring a join,
+                // wherever the right-click landed on one of its runs —
+                // not gated on a selection, since splitting one back apart
+                // is done by pointing at it, not by selecting it first.
+                let split_here = actions_here.and_then(|a| a.split_object);
+                if let Some(object) = split_here {
+                    if ui.button("Split the joined text").clicked() {
+                        self.split_group(page, object);
+                        self.say_info("split — these lines are edited on their own again.");
+                        ui.close();
+                    }
+                }
+                // Locking is a Protect operation, so it is offered where the
+                // Protect tools are rather than on every tab — the same reason
+                // the ribbon has tabs at all.
+                if self.tab_mut().ribbon == Tab::Protect {
+                    if over_image {
+                        if ui.button("🔒 Lock this image").clicked() {
+                            if let Some((page, image)) = self.tab_mut().selected_image.clone() {
+                                self.ask_or_reuse_passcode(
+                                    Awaiting::LockImage { page, object: image.object },
+                                    "type a passcode to lock this image with, or Escape to give up.",
+                                );
+                            }
+                            ui.close();
+                        }
+                    }
+                    if over_text && ui.button("🔒 Lock the selection").clicked() {
+                        self.lock_selection();
+                        ui.close();
+                    }
+                }
+
+                // **The drawing order, where somebody looks for it.** A picture
+                // that has gone behind a panel is not reachable from a ribbon
+                // button, because the thing to act on is the thing under the
+                // pointer.
+                ui.separator();
+                let spot = self.tab_mut().right_clicked_at.filter(|(p, _)| *p == page).map(|(_, at)| at);
+                if let Some(at) = spot {
+                    // **A lock badge is not a layer, and says so.** The
+                    // chequerboard over a locked picture reads as a grey panel,
+                    // and somebody trying to send it back was pointing at the
+                    // one thing on the page the drawing order cannot touch.
+                    let badge = self.locked_items_on(page).into_iter().find(|i| {
+                        at.x >= i.rect.left as f64
+                            && at.x <= i.rect.right as f64
+                            && at.y >= i.rect.top as f64
+                            && at.y <= i.rect.bottom as f64
+                    });
+                    if let Some(badge) = badge {
+                        ui.weak(if badge.is_area {
+                            "🔒 Locked words — not a layer. The padlock brings them back."
+                        } else if badge.stale {
+                            "🔒 A lock badge over a picture that was never taken off — `repairlocks` finishes it."
+                        } else {
+                            "🔒 A locked picture — not a layer. The padlock brings it back."
+                        });
+                        ui.separator();
+                    }
+                    let under = self.layers_under(page, at);
+                    if under.is_empty() {
+                        ui.weak("Nothing is drawn here.");
+                    } else {
+                        ui.weak("Layers here — topmost first");
+                        let listed: Vec<(usize, String, bool)> = under
+                            .iter()
+                            .take(8)
+                            .filter_map(|index| {
+                                self.tab_mut().doc.as_ref()
+                                    .and_then(|d| d.caches.layers.as_ref())
+                                    .and_then(|(_, l)| l.get(*index))
+                                    .map(|d| {
+                                        (
+                                            *index,
+                                            format!("{}  {}", d.kind.describe(), d.label),
+                                            !d.movable,
+                                        )
+                                    })
+                            })
+                            .collect();
+                        for (index, label, grouped) in listed {
+                            let picked = self.tab_mut().picked_layer == Some(index);
+                            let row = ui.selectable_label(
+                                picked,
+                                if grouped { format!("{label}   (in a group)") } else { label },
+                            );
+                            if row.clicked() {
+                                self.pick_layer(page, index);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        // These act on what has been picked, so somebody can
+                        // choose the thing that is *behind* and raise that,
+                        // rather than the thing on top of it.
+                        let armed = self.tab_mut().picked_layer.is_some();
+                        for (label, to) in [
+                            ("\u{E5D8}  Move the picked one up", pdf_core::document::Stacking::Up),
+                            ("\u{E5DB}  Move the picked one down", pdf_core::document::Stacking::Down),
+                            ("\u{E883}  Bring the picked one to front", pdf_core::document::Stacking::Front),
+                            ("\u{E882}  Send the picked one to back", pdf_core::document::Stacking::Back),
+                        ] {
+                            if ui.add_enabled(armed, egui::Button::new(label)).clicked() {
+                                self.restack_picked(to);
+                                ui.close();
+                            }
+                        }
+                        if !armed {
+                            ui.small("Choose one above first.");
+                        }
+                    }
+                    ui.separator();
+                }
+                let shown = self.show_layers;
+                if ui
+                    .button(if shown { "Hide the layer list" } else { "Show all layers" })
+                    .clicked()
+                {
+                    self.show_layers = !shown;
+                    if self.show_layers {
+                        self.forget_layers();
+                    }
+                    ui.close();
+                }
+            });
+        }
+    }
+
 }
