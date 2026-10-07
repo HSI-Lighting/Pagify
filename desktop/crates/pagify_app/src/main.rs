@@ -14318,11 +14318,7 @@ impl PagifyApp {
         // just above that deliberately overflows instead of cutting a word
         // in half. Reported from use, before wrapping existed at all, as
         // text cut off at the box's own edge.
-        let text_width = edit
-            .buffer
-            .split('\n')
-            .map(|line| ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), font_id.clone(), ink)).size().x)
-            .fold(0.0f32, f32::max);
+        let text_width = Self::run_editor_text_width(edit, ui, &font_id, ink);
         let width = max_width.max(text_width + 8.0);
         // **As tall as the lines it holds.** The first line stays where the run
         // is and the others fall below it, so the box grows downwards — it used
@@ -14581,6 +14577,19 @@ fn wrap_typed_last_line(
             egui::FontId::proportional(glyph_size)
         };
         (paper, ink, font_id, glyph_size)
+    }
+
+    /// The widest of the buffer's own lines, measured as it will be drawn.
+    fn run_editor_text_width(
+        edit: &EditingRun,
+        ui: &mut egui::Ui,
+        font_id: &egui::FontId,
+        ink: egui::Color32,
+    ) -> f32 {
+        edit.buffer
+            .split('\n')
+            .map(|line| ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), font_id.clone(), ink)).size().x)
+            .fold(0.0f32, f32::max)
     }
 
     /// How wide the box is allowed to get: an explicit resize wins, otherwise

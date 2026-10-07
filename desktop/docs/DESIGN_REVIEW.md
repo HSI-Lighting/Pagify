@@ -9,6 +9,35 @@
 
 ---
 
+## Status (2026-10-07, branch `farzad-debug`)
+
+**Done.** Phase 0: clippy compiles, fixture and `.gitattributes` fixes in, check
+commands documented in `desktop/README.md` (no CI workflow yet). Phase 1:
+`main.rs` ≈ 15.4k lines (from 46.5k), all 22.9k test lines out in files beside
+their code, and the function split — `ui()`, `act()`, `verbs::parse`,
+`resolve`, `draw_main_area`, `canvas::interact`, `draw_pages` and
+`Tab::buttons` are all decomposed; no `pagify_app` function is over ≈135 lines.
+Phase 2: one `Tool` enum and one `ArmedTool` (`PendingKind`/`Pending` deleted);
+transition functions still live in `picking.rs`. Phase 3: `DocCaches`, one
+invalidation entry point. Phase 4a: `paragraph_lines`, `spelling`, editor
+arithmetic in `pagify_shell` (`editor.rs`).
+
+**Remaining.** `ToolId` (tool identity is still strings); `DocTab` (≈89 fields)
+and `PagifyApp` (≈53) state sub-structs, against the §5 targets of 25/15; the
+rest of `main.rs` (≈15.4k lines) and the >2k-line test files (`lock_wiring_tests`
+7.5k, `ui_tests` 4.5k); event-returning `Tool::on_click`/`on_key`; the `Effect`
+executor; the `blocks.rs`/`block_input.rs` (5.3k lines) and `session.rs`
+(1.8k/116 methods) splits; `clippy.toml` and CI gates.
+
+**Verification note.** On this Linux machine the suite is red at exactly 12
+pre-existing, machine-specific tests (3 `hub`, 4 `lock_wiring`, 5
+`paragraph_apply`), which fail identically at the refactor's base commit
+`e3585d1`; `instance::tests::a_child_process_does_not_keep_the_lock_alive` is
+flaky under parallel load and passes in isolation. Green on the owner's
+Windows machine has not been re-checked and is required before release.
+
+---
+
 ## 0. How to use this document
 
 The review found that the desktop app is not badly written line-by-line — it is
