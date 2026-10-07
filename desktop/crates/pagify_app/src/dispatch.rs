@@ -494,7 +494,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm(PendingKind::Whiteout, page);
+                    self.arm_tool(Tool::Whiteout, page);
                 }
             }
             Verb::DrawArrow => {
@@ -518,7 +518,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm(PendingKind::Redact, page);
+                    self.arm_tool(Tool::Redact, page);
                 }
             }
             Verb::Lock => {

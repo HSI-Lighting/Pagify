@@ -215,6 +215,14 @@ impl crate::PagifyApp {
                     None => Err("fill: nowhere was clicked.".into()),
                 }
             }
+            Tool::Redact => match (armed.points.first(), armed.points.get(1)) {
+                (Some(a), Some(b)) => self.redact(page, *a, *b),
+                _ => Err("redact: two corners are needed.".into()),
+            },
+            Tool::Whiteout => match (armed.points.first(), armed.points.get(1)) {
+                (Some(a), Some(b)) => self.whiteout(page, *a, *b),
+                _ => Err("whiteout: two corners are needed.".into()),
+            },
         };
         let repeats = armed.kind.repeats();
         let failed = outcome.is_err();
@@ -271,14 +279,6 @@ impl crate::PagifyApp {
                 Ok(measure::measure_area(&self.tab_mut().calibration, &pending.points).render())
             }
 
-            PendingKind::Redact => match (pending.points.first(), pending.points.get(1)) {
-                (Some(a), Some(b)) => self.redact(page, *a, *b),
-                _ => Err("redact: two corners are needed.".into()),
-            },
-            PendingKind::Whiteout => match (pending.points.first(), pending.points.get(1)) {
-                (Some(a), Some(b)) => self.whiteout(page, *a, *b),
-                _ => Err("whiteout: two corners are needed.".into()),
-            },
             PendingKind::SignRectangle => match (pending.points.first(), pending.points.get(1)) {
                 (Some(a), Some(b)) => self.stamp_box(page, *a, *b),
                 _ => Err("rectangle: two corners are needed.".into()),

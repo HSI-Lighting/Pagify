@@ -53,6 +53,14 @@ pub(crate) enum Tool {
     Calibrate { distance: f64, unit: String },
     /// A point to put a tick, a cross or a dot at.
     Fill(pdf_core::document::FillMark),
+    /// Two corners of an area whose contents are to be destroyed.
+    Redact,
+    /// Two corners of an area to paint over.
+    ///
+    /// **Covers; does not remove.** Kept apart from `Redact` for the same
+    /// reason the verbs are: the difference is the whole point, and a flag
+    /// on one is how somebody ends up with the other.
+    Whiteout,
 }
 
 impl Tool {
@@ -62,7 +70,7 @@ impl Tool {
     pub(crate) fn wants_points(&self) -> usize {
         match self {
             Tool::Signature | Tool::PlaceImage { .. } | Tool::Fill(_) => 1,
-            Tool::PlaceText | Tool::Calibrate { .. } => 2,
+            Tool::PlaceText | Tool::Calibrate { .. } | Tool::Redact | Tool::Whiteout => 2,
         }
     }
 
@@ -86,17 +94,25 @@ impl Tool {
                 }
             }
             Tool::Fill(mark) => format!("fill: click where the {} goes", mark.describe()),
+            Tool::Redact => match points_done {
+                0 => "redact: first corner of the area to destroy".into(),
+                _ => "redact: opposite corner".into(),
+            },
+            Tool::Whiteout => match points_done {
+                0 => "whiteout: first corner — this covers, it does not remove".into(),
+                _ => "whiteout: opposite corner".into(),
+            },
         }
     }
 
     /// Whether finishing it should arm it again — see `PendingKind::
-    /// repeats`'s own doc for the full reasoning; `Fill` is a straight
-    /// port of it (a run of stamps should not mean a trip to the ribbon
-    /// between each one). The other three `Tool` kinds answer a question
-    /// or place one thing to immediately adjust, not stamp a mark, so they
-    /// stay `false`.
+    /// repeats`'s own doc for the full reasoning. `Fill`/`Redact`/
+    /// `Whiteout` are a straight port of it (a run of stamps, or redactions,
+    /// should not mean a trip to the ribbon between each one). The other
+    /// three `Tool` kinds answer a question or place one thing to
+    /// immediately adjust, not stamp a mark, so they stay `false`.
     pub(crate) fn repeats(&self) -> bool {
-        matches!(self, Tool::Fill(_))
+        matches!(self, Tool::Fill(_) | Tool::Redact | Tool::Whiteout)
     }
 
     /// The ribbon command that arms this, so its button can show itself lit
@@ -112,6 +128,8 @@ impl Tool {
             // No ribbon button lights up per mark; the tool is one word
             // with an argument — see `PendingKind::command`'s own doc.
             Tool::Fill(_) => None,
+            Tool::Redact => Some("redact"),
+            Tool::Whiteout => Some("whiteout"),
         }
     }
 
@@ -137,18 +155,10 @@ pub(crate) enum PendingKind {
     Draw(DrawKind),
     Modify(tools::Pick),
     Measure(MeasureKind),
-    /// Two corners of an area whose contents are to be destroyed.
-    Redact,
     /// Two corners of a box to draw while filling a form in.
     SignRectangle,
     /// The two ends of a line to rule while filling a form in.
     SignLine,
-    /// Two corners of an area to paint over.
-    ///
-    /// **Covers; does not remove.** Kept apart from `Redact` for the same
-    /// reason the verbs are: the difference is the whole point, and a flag on
-    /// one is how somebody ends up with the other.
-    Whiteout,
     /// Two corners of an area to hide, sealed under a passcode.
     Lock,
     /// Two corners of a labelled region — see [`PendingArticleBox`] for the
@@ -229,12 +239,11 @@ impl PendingKind {
             }
             PendingKind::Draw(DrawKind::Polyline | DrawKind::Spline) => (0, usize::MAX),
             PendingKind::Modify(pick) => (pick.objects, pick.points),
-            PendingKind::Whiteout => (0, 2),
             PendingKind::SignRectangle => (0, 2),
             PendingKind::SignLine => (0, 2),
             PendingKind::Measure(MeasureKind::Distance) => (0, 2),
             PendingKind::Measure(MeasureKind::Area) => (0, usize::MAX),
-            PendingKind::Redact | PendingKind::Lock => (0, 2),
+            PendingKind::Lock => (0, 2),
             PendingKind::ArticleBox => (0, 2),
         }
     }
@@ -252,16 +261,6 @@ impl PendingKind {
             PendingKind::EraseMark => {
                 "click a highlight, underline or strike-out to erase it — Escape puts the eraser down".into()
             }
-            PendingKind::Redact => match points_done {
-                0 => "redact: first corner of the area to destroy".into(),
-                _ => "redact: opposite corner".into(),
-            },
-            // Says what it does *not* do, because that is the thing somebody
-            // reaching for it might be wrong about.
-            PendingKind::Whiteout => match points_done {
-                0 => "whiteout: first corner — this covers, it does not remove".into(),
-                _ => "whiteout: opposite corner".into(),
-            },
             // Says which of the two rectangles this is, because the other one
             // is a drawing that can be picked up again and this one is not.
             PendingKind::SignRectangle => match points_done {
@@ -357,8 +356,6 @@ impl PendingKind {
             PendingKind::Draw(DrawKind::Rectangle) => return None,
             PendingKind::Draw(DrawKind::Arrow) => "arrow",
             PendingKind::Draw(DrawKind::Spline) => "spline",
-            PendingKind::Redact => "redact",
-            PendingKind::Whiteout => "whiteout",
             PendingKind::SignRectangle => "signrectangle",
             PendingKind::SignLine => "signline",
             PendingKind::Lock => "lock",

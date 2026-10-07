@@ -1772,7 +1772,10 @@ fn arming_any_pending_tool_after_edit_object_puts_it_down() {
             app.tab_mut().object_tool.is_none(),
             "{command}: arming it should have put the object tool down"
         );
-        assert!(app.tab_mut().pending.is_some(), "{command}: should itself be armed");
+        assert!(
+            app.tab_mut().pending.is_some() || app.tab_mut().tool.is_some(),
+            "{command}: should itself be armed"
+        );
     }
 }
 
@@ -4768,7 +4771,7 @@ fn whiteout_says_it_covers_rather_than_removes() {
 
     let armed = said(&app);
     assert!(
-        app.tab_mut().pending.is_some(),
+        app.tab_mut().tool.is_some(),
         "the tool was not armed:\n{armed}"
     );
 

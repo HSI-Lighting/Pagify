@@ -4124,6 +4124,7 @@ impl PagifyApp {
             return;
         }
         self.tab_mut().pending = None;
+        self.tab_mut().tool = None;
         self.tab_mut().markup_armed = None;
         self.tab_mut().link_armed = false;
         self.tab_mut().match_properties_armed = false;

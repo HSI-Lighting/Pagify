@@ -36,7 +36,7 @@ fn the_redact_verb_arms_the_tool_rather_than_refusing() {
     let mut app = app("text-lines.pdf");
     app.submit("redact");
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::Redact)),
+        matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Redact)),
         "redact did not arm anything:\n{}",
         said(&app)
     );
@@ -46,7 +46,7 @@ fn the_redact_verb_arms_the_tool_rather_than_refusing() {
 /// The tool stays in hand until it is put down, like every other tool.
 #[test]
 fn the_redaction_tool_stays_armed() {
-    assert!(PendingKind::Redact.repeats());
+    assert!(Tool::Redact.repeats());
 }
 
 /// **The signature tool is the odd one out.** Every other one-point
@@ -78,7 +78,7 @@ fn the_signature_tool_does_not_stay_armed() {
 /// nearest drawn line has nothing to do with where the words are.
 #[test]
 fn the_redaction_tool_does_not_snap_to_geometry() {
-    assert!(!PendingKind::Redact.wants_snapping());
+    assert!(!Tool::Redact.wants_snapping());
 }
 
 /// A clean redaction goes straight through, and the words are gone.

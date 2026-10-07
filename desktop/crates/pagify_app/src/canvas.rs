@@ -1271,6 +1271,29 @@ impl crate::PagifyApp {
                 // A tick, cross or dot is placed on a single click, same as
                 // `PlaceImage` — nothing to draw before it lands.
                 Tool::Fill(_) => {}
+                // The ones that take an area, each in the colour of what it
+                // does — same split as `PendingKind`'s own preview used to
+                // draw.
+                Tool::Redact => {
+                    if let Some(first) = armed.points.first().copied() {
+                        ui.painter().rect_stroke(
+                            egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
+                            egui::CornerRadius::ZERO,
+                            egui::Stroke::new(1.0, theme::danger()),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+                Tool::Whiteout => {
+                    if let Some(first) = armed.points.first().copied() {
+                        ui.painter().rect_stroke(
+                            egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
+                            egui::CornerRadius::ZERO,
+                            egui::Stroke::new(1.0, theme::violet_bright()),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
             }
             return;
         }
@@ -1343,16 +1366,7 @@ impl crate::PagifyApp {
             PendingKind::Measure(MeasureKind::Distance) => {
                 painter.line_segment([on(first), on(at)], stroke);
             }
-            // The ones that take an area, each in the colour of what it does.
-            PendingKind::Redact => {
-                painter.rect_stroke(
-                    box_between(first, at),
-                    egui::CornerRadius::ZERO,
-                    egui::Stroke::new(1.0, theme::danger()),
-                    egui::StrokeKind::Inside,
-                );
-            }
-            PendingKind::Whiteout | PendingKind::Lock | PendingKind::ArticleBox => {
+            PendingKind::Lock | PendingKind::ArticleBox => {
                 painter.rect_stroke(
                     box_between(first, at),
                     egui::CornerRadius::ZERO,
