@@ -78,17 +78,18 @@ impl Tab {
         if self == Tab::File { &[] } else { ALWAYS }
     }
 
-    pub(crate) fn buttons(self) -> &'static [Tool] {
-        match self {
-            Tab::File => &[
+    /// The File tab's ribbon buttons, in order.
+    const FILE_BUTTONS: &[Tool] = &[
                 ("\u{E2C8}", "Open…", "open"),
                 ("\u{E5CD}", "Close", "close"),
                 ("\u{E161}", "Save", "save"),
                 ("\u{E161}", "Save As…", "saveas"),
                 ("\u{E8B8}", "PDFium", "pdfium"),
                 ("\u{F8C7}", "Quit", "quit"),
-            ],
-            Tab::Home => &[
+    ];
+
+    /// The Home tab's ribbon buttons, in order.
+    const HOME_BUTTONS: &[Tool] = &[
                 ("\u{E412}", "Snapshot", "snapshot"),
                 ("\u{E14D}", "Copy", "copy"),
                 ("\u{E8E7}", "Bookmark", "bookmark"),
@@ -113,8 +114,10 @@ impl Tab {
                 // The two a form actually asks for, one press away.
                 ("\u{E668}", "Tick", "fillsign tick"),
                 ("\u{E5CD}", "Cross", "fillsign cross"),
-            ],
-            Tab::Convert => &[
+    ];
+
+    /// The Convert tab's ribbon buttons, in order.
+    const CONVERT_BUTTONS: &[Tool] = &[
                 ("\u{E873}", "From Files", "fromfiles"),
                 ("\u{E329}", "From Scanner", "fromscanner"),
                 ("\u{E14F}", "From Clipboard", "fromclipboard"),
@@ -129,8 +132,10 @@ impl Tab {
                 ("\u{EB7E}", "To HTML", "tohtml"),
                 ("\u{F720}", "To Other", "toother"),
                 ("\u{F0C5}", "Preflight", "preflight"),
-            ],
-            Tab::Edit => &[
+    ];
+
+    /// The Edit tab's ribbon buttons, in order.
+    const EDIT_BUTTONS: &[Tool] = &[
                 ("\u{E262}", "Edit Text", "edittext"),
                 ("\u{E162}", "Edit Object", "editobject"),
                 ("\u{E236}", "Link & Join Text", "jointext"),
@@ -150,8 +155,10 @@ impl Tab {
                 ("\u{EA07}", "Web Links", "weblinks"),
                 ("\u{E8E7}", "Bookmark", "bookmark"),
                 ("\u{F184}", "Cross Reference", "crossref"),
-            ],
-            Tab::Organize => &[
+    ];
+
+    /// The Organize tab's ribbon buttons, in order.
+    const ORGANIZE_BUTTONS: &[Tool] = &[
                 ("\u{E9B0}", "Thumbnail View", "thumbnails"),
                 ("\u{E145}", "Insert", "insertpage"),
                 ("\u{E92E}", "Delete", "deletepage"),
@@ -169,8 +176,10 @@ impl Tab {
                 ("\u{E85B}", "Resize Pages", "resizepages all "),
                 ("\u{E53C}", "Flatten", "flatten"),
                 ("\u{E41C}", "Page Marks", "pagemarks"),
-            ],
-            Tab::Comment => &[
+    ];
+
+    /// The Comment tab's ribbon buttons, in order.
+    const COMMENT_BUTTONS: &[Tool] = &[
                 ("\u{F82B}", "Highlight", "highlight"),
                 ("\u{E249}", "Underline", "underline"),
                 ("\u{E246}", "Strikeout", "strikeout"),
@@ -194,8 +203,10 @@ impl Tab {
                 ("\u{E668}", "TickMark", "tickmark"),
                 ("\u{E8AF}", "Manage Comments", "managecomments"),
                 ("\u{F10D}", "Keep Tool Selected", "keeptool"),
-            ],
-            Tab::View => &[
+    ];
+
+    /// The View tab's ribbon buttons, in order.
+    const VIEW_BUTTONS: &[Tool] = &[
                 // `\u{E793}` (Segoe Fluent's own "DarkTheme" glyph) was tried
                 // first and failed `every_ribbon_glyph_can_actually_be_drawn`
                 // — not in this font's own subset. This codepoint is
@@ -223,8 +234,10 @@ impl Tab {
                 ("\u{E3B9}", "Compare", "compare"),
                 ("\u{EAC7}", "Word Count", "wordcount"),
                 ("\u{E429}", "View Setting", "viewsetting"),
-            ],
-            Tab::Form => &[
+    ];
+
+    /// The Form tab's ribbon buttons, in order.
+    const FORM_BUTTONS: &[Tool] = &[
                 ("\u{F04C}", "Run Form Field Recognition", "formrecognise"),
                 ("\u{F10A}", "Designer Assistant", "formdesigner"),
                 ("\u{F1C1}", "Push Button", "fieldbutton"),
@@ -247,8 +260,10 @@ impl Tab {
                 ("\u{F09B}", "Export", "formexport"),
                 ("\u{E86F}", "JavaScript", "javascript"),
                 ("\u{E8B9}", "Tool Settings", "toolsettings"),
-            ],
-            Tab::Protect => &[
+    ];
+
+    /// The Protect tab's ribbon buttons, in order.
+    const PROTECT_BUTTONS: &[Tool] = &[
                 // First, because it is the one that works and the one the tab is
                 // for. "Mark for Redaction" beside it would be two names for the
                 // same intention where only one of them destroys anything.
@@ -292,8 +307,10 @@ impl Tab {
                 ("\u{E746}", "Fill & Sign", "fillsign"),
                 ("\u{E7AF}", "Sign & Certify", "certify"),
                 ("\u{F013}", "Validate", "validate"),
-            ],
-            Tab::PagiSign => &[
+    ];
+
+    /// The PagiSign tab's ribbon buttons, in order.
+    const PAGISIGN_BUTTONS: &[Tool] = &[
                 ("\u{F603}", "Signature", "signature"),
                 ("\u{E43E}", "Upload Signature", "signature upload"),
                 ("\u{F775}", "Manage Signatures", "managesignatures"),
@@ -311,16 +328,20 @@ impl Tab {
                 ("\u{F728}", "Create Online Form", "onlineform"),
                 ("\u{EF3E}", "Document Status", "documentstatus"),
                 ("\u{E06B}", "Add E-Sign Branding", "signbranding"),
-            ],
-            Tab::Share => &[
+    ];
+
+    /// The Share tab's ribbon buttons, in order.
+    const SHARE_BUTTONS: &[Tool] = &[
                 ("\u{E159}", "Email", "email"),
                 ("\u{EA5E}", "Attach to Email", "emailattach"),
                 ("\u{E80D}", "Share Link", "sharelink"),
                 ("\u{E560}", "Send for Review", "sendreview"),
                 ("\u{E8E1}", "Track Reviews", "trackreviews"),
                 ("\u{F15C}", "Cloud Storage", "cloudstorage"),
-            ],
-            Tab::Accessibility => &[
+    ];
+
+    /// The Accessibility tab's ribbon buttons, in order.
+    const ACCESSIBILITY_BUTTONS: &[Tool] = &[
                 ("\u{E6B1}", "Full Check", "accesscheck"),
                 ("\u{F071}", "Accessibility Report", "accessreport"),
                 ("\u{E893}", "Autotag Document", "autotag"),
@@ -328,16 +349,20 @@ impl Tab {
                 ("\u{E43F}", "Set Alternate Text", "alttext"),
                 ("\u{F05B}", "Tags Panel", "tagspanel"),
                 ("\u{E92C}", "Reading Options", "readingoptions"),
-            ],
-            Tab::Help => &[
+    ];
+
+    /// The Help tab's ribbon buttons, in order.
+    const HELP_BUTTONS: &[Tool] = &[
                 ("\u{EA19}", "User Manual", "help"),
                 ("\u{EB9B}", "Quick Start", "quickstart"),
                 ("\u{EAE7}", "Keyboard Shortcuts", "shortcuts"),
                 ("\u{E923}", "Check for Updates", "checkupdates"),
                 ("\u{E868}", "Report an Issue", "reportissue"),
                 ("\u{E88E}", "About Pagify", "about"),
-            ],
-            Tab::Draw => &[
+    ];
+
+    /// The Draw tab's ribbon buttons, in order.
+    const DRAW_BUTTONS: &[Tool] = &[
                 ("\u{F108}", "Line", "line"),
                 ("\u{EF4A}", "Circle", "circle"),
                 ("\u{EB54}", "Rectangle", "rectangle"),
@@ -356,12 +381,32 @@ impl Tab {
                 ("\u{EB95}", "Distance", "measure distance"),
                 ("\u{EA49}", "Area", "measure area"),
                 ("\u{EAF6}", "Page Scale", "pagescale"),
-            ],
-            Tab::Automate => &[
+    ];
+
+    /// The Automate tab's ribbon buttons, in order.
+    const AUTOMATE_BUTTONS: &[Tool] = &[
                 ("\u{E837}", "Record", "record"),
                 ("\u{EF71}", "Stop", "stop"),
                 ("\u{E037}", "Replay", "replay "),
-            ],
+    ];
+
+    pub(crate) fn buttons(self) -> &'static [Tool] {
+        match self {
+            Tab::File => Self::FILE_BUTTONS,
+            Tab::Home => Self::HOME_BUTTONS,
+            Tab::Convert => Self::CONVERT_BUTTONS,
+            Tab::Edit => Self::EDIT_BUTTONS,
+            Tab::Organize => Self::ORGANIZE_BUTTONS,
+            Tab::Comment => Self::COMMENT_BUTTONS,
+            Tab::View => Self::VIEW_BUTTONS,
+            Tab::Form => Self::FORM_BUTTONS,
+            Tab::Protect => Self::PROTECT_BUTTONS,
+            Tab::PagiSign => Self::PAGISIGN_BUTTONS,
+            Tab::Share => Self::SHARE_BUTTONS,
+            Tab::Accessibility => Self::ACCESSIBILITY_BUTTONS,
+            Tab::Help => Self::HELP_BUTTONS,
+            Tab::Draw => Self::DRAW_BUTTONS,
+            Tab::Automate => Self::AUTOMATE_BUTTONS,
         }
     }
 
