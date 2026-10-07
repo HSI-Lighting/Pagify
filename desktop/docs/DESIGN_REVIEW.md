@@ -16,12 +16,15 @@ commands documented in `desktop/README.md` (no CI workflow yet). Phase 1:
 `main.rs` ≈ 15.4k lines (from 46.5k), all 22.9k test lines out in files beside
 their code, and the function split — `ui()`, `act()`, `verbs::parse`,
 `resolve`, `draw_main_area`, `canvas::interact`, `draw_pages` and
-`Tab::buttons` are all decomposed. Clippy's measure (non-comment lines) at
-2026-10-07: the largest `pagify_app` functions are `interact` 257, `draw_pages`
-220, `pick_text_run_traced` 205, `draw_signature_list` 184, `draw_command_bar`
-181, `draw_spell_check` 170, `act_security` 170, `act_signing` 168,
-`show_page_context_menu` 166 — down from `ui` 959 and `act` 818, but **49
-functions are still over 100 lines and the 150-line invariant is not met yet**.
+`Tab::buttons` are all decomposed, along with `canvas::interact` (split
+into cursor, armed-gesture and drag methods), `draw_pages` (split into
+forced-scroll and zoom-at-pointer) and the big arms of `act_signing`/
+`act_security`/`act_tools`. Clippy's measure (non-comment lines) at
+2026-10-07: the largest functions left are `pick_text_run_traced` 205,
+`signature_extract::extract_signature` 196, `draw_signature_list` 184,
+`draw_command_bar` 181, `draw_spell_check` 170 and `show_page_context_menu`
+166 — down from `ui` 959 and `act` 818; 48 functions are still over 100
+lines and the 150-line invariant is not met everywhere yet.
 Phase 2: one `Tool` enum and one `ArmedTool` (`PendingKind`/`Pending` deleted);
 transition functions still live in `picking.rs`. Phase 3: `DocCaches`, one
 invalidation entry point. Phase 4a: `paragraph_lines`, `spelling`, editor
