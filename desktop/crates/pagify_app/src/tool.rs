@@ -32,6 +32,9 @@
 //! collides with `pagify_shell::tools`, already imported everywhere in
 //! `main.rs`).
 
+use crate::{area_between, Awaiting, PagifyApp};
+use pagify_shell::command::Kind;
+use pagify_shell::measure::{self, Calibration};
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::tools;
 use pagify_shell::verbs::{MeasureKind, Markup};
@@ -43,7 +46,7 @@ pub(crate) struct ArmedTool {
     pub(crate) points: Vec<AppPoint>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Tool {
     /// Where a drawn signature is to sit — on the line that is clicked.
     Signature,
@@ -355,6 +358,290 @@ impl Tool {
     /// line has nothing to do with it.
     pub(crate) fn wants_snapping(&self) -> bool {
         matches!(self, Tool::Calibrate { .. } | Tool::Draw(_) | Tool::Measure(_) | Tool::Modify(_))
+    }
+}
+
+/// What resolving a tool's pick, or cancelling it, should cause — the
+/// `on_click`/`on_cancel` this file does not have yet (DESIGN_REVIEW.md
+/// §3.2) are meant to return this instead of each `resolve_tool` arm
+/// calling `self.say_info`/`self.say_error`/`arm_tool` directly. The
+/// caller that applies a `ToolEffect` — today still `resolve_tool`
+/// itself, mid-migration — is meant to be the *only* place left that
+/// does any of those four things, so a misapplied effect is one bug to
+/// find instead of twenty arms to re-audit.
+///
+/// **Not yet produced or consumed by anything.** This is step 1 of
+/// `Pagify-Phase2-BigTasks.md` §2.3 only — the enum, sized to exactly
+/// what `resolve_tool`'s current tail already does. Kept deliberately
+/// short: add a variant only once a specific arm's migration proves the
+/// existing ones can't carry its data. Most of today's arms reduce to
+/// "said an outcome, maybe re-armed" — `Say`/`Rearm`/`RearmQuietly`
+/// already cover all of those; only `Lock` and `ArticleBox` hand off to
+/// a dialog instead of saying anything.
+#[derive(Debug)]
+pub(crate) enum ToolEffect {
+    /// A result to say — `Kind::Info` for `Ok`, `Kind::Error` for `Err`,
+    /// exactly as `resolve_tool`'s tail does today.
+    Say(Kind, String),
+    /// Re-arm this (repeating) tool and announce its prompt — what
+    /// `arm_tool` does today, called after a successful resolution.
+    Rearm(Tool),
+    /// Re-arm this (repeating) tool without announcing its prompt — what
+    /// `arm_tool_without_saying` does today, called after a failed
+    /// resolution so the error stays the last thing said.
+    RearmQuietly(Tool),
+    /// Put the tool down and say "cancelled." — `on_cancel`'s default,
+    /// for every kind that does not need its own wording.
+    Cancelled,
+    /// Lock's hand-off: an area is drawn, and a passcode to seal it under
+    /// is asked for before anything is actually locked. Carries the same
+    /// `Awaiting::Lock` value `ask_or_reuse_passcode` already takes today
+    /// — reused rather than re-split into its own fields, since nothing
+    /// else needs those fields apart from that call.
+    OpenPasscodePrompt(Awaiting),
+    /// ArticleBox's hand-off: an area is drawn, and the title that names
+    /// it is asked for next, in `pending_article_box`.
+    OpenArticleBoxPrompt(PendingArticleBox),
+}
+
+impl Tool {
+    /// Carries out whatever `take_pick` has finished collecting objects and
+    /// points for — `resolve_tool`'s own match (`picking.rs`), moved here
+    /// per `Pagify-Phase2-BigTasks.md` §2.3 steps 2–3. Takes `self` by
+    /// value, not `&self`: every arm that used to clone out of `&armed.kind`
+    /// (`PlaceImage`'s `rgba`, `Calibrate`/`Write`'s `String`) now just
+    /// binds it directly.
+    ///
+    /// **Does not decide whether to re-arm.** `repeats()`/"quietly after a
+    /// failure" is the same generic check for every kind alike — not this
+    /// arm's own business — so it stays in `resolve_tool`'s own tail, which
+    /// keeps its own clone of the armed `Tool` from before calling this,
+    /// taken for exactly that purpose. Only `Say`'s `Kind::Error` vs
+    /// everything else tells that tail whether the click failed.
+    ///
+    /// `Lock`/`ArticleBox` return early with their dialog hand-off instead
+    /// of falling through to the final `Say` — they have nothing to say
+    /// themselves (today's arms produce `Ok(String::new())` for exactly
+    /// this reason), and the resolve_tool tail's rearm step still runs
+    /// after either effect, unconditioned on which one came back.
+    pub(crate) fn on_click(
+        self,
+        app: &mut PagifyApp,
+        page: usize,
+        objects: Vec<(usize, AppPoint)>,
+        points: Vec<AppPoint>,
+    ) -> ToolEffect {
+        let height = app
+            .tab_mut()
+            .doc
+            .as_ref()
+            .and_then(|d| d.strip.size_of(page))
+            .map(|(_, h)| h as f64)
+            .unwrap_or(792.0);
+        let outcome: Result<String, String> = match self {
+            Tool::Signature => match points.first().copied() {
+                Some(at) => app.place_signature(page, at),
+                None => Err("signature: nowhere was clicked.".into()),
+            },
+            Tool::PlaceImage { rgba, width, height: img_height } => match points.first().copied() {
+                Some(at) => app.place_image_at(page, at, rgba, width, img_height),
+                None => Err("nowhere to place the picture.".into()),
+            },
+            Tool::PlaceText => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => app.begin_text_box(page, *a, *b),
+                _ => Err("text: two corners are needed.".into()),
+            },
+            Tool::Calibrate { distance, unit } => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => match Calibration::from_two_points(*a, *b, distance, &unit) {
+                    Ok(calibration) => {
+                        app.tab_mut().calibration = calibration;
+                        Ok(app.tab_mut().calibration.describe())
+                    }
+                    Err(e) => Err(e),
+                },
+                _ => Err("calibrate: two points are needed.".into()),
+            },
+            Tool::Fill(mark) => match points.first().copied() {
+                Some(at) => app.stamp_mark(page, mark, at),
+                None => Err("fill: nowhere was clicked.".into()),
+            },
+            Tool::Redact => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => app.redact(page, *a, *b),
+                _ => Err("redact: two corners are needed.".into()),
+            },
+            Tool::Whiteout => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => app.whiteout(page, *a, *b),
+                _ => Err("whiteout: two corners are needed.".into()),
+            },
+            Tool::SignRectangle => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => app.stamp_box(page, *a, *b),
+                _ => Err("rectangle: two corners are needed.".into()),
+            },
+            Tool::SignLine => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => app.stamp_line(page, *a, *b),
+                _ => Err("line: two ends are needed.".into()),
+            },
+            Tool::Write(text) => match points.first().copied() {
+                Some(at) => app.write_text_at(page, at, &text),
+                None => Err("nowhere to write.".into()),
+            },
+            Tool::Draw(kind) => {
+                let draw_fill = app.draw_fill;
+                let layer = app.tab_mut().markup.page(page, height);
+                layer.begin("draw");
+                let space = layer.space();
+                let p: Vec<cad_kernel::Vec2> = points.iter().map(|q| space.to_kernel(*q)).collect();
+                let draw_outcome: Result<String, String> = match kind {
+                    DrawKind::Line => {
+                        layer.add(cad_kernel::Geom::Line(cad_kernel::Line { a: p[0], b: p[1] }));
+                        Ok("line added.".into())
+                    }
+                    DrawKind::Circle => {
+                        let radius = (p[1] - p[0]).len();
+                        if radius < 1e-6 {
+                            Err("circle: that radius is zero.".into())
+                        } else {
+                            let index = layer.add(cad_kernel::Geom::Circle(cad_kernel::Circle {
+                                center: p[0],
+                                radius,
+                            }));
+                            if draw_fill {
+                                layer.set_filled(index, true);
+                            }
+                            Ok(if draw_fill { "filled circle added." } else { "circle added." }.into())
+                        }
+                    }
+                    DrawKind::Rectangle => {
+                        let (a, b) = (p[0], p[1]);
+                        let corners = [
+                            a,
+                            cad_kernel::Vec2::new(b.x, a.y),
+                            b,
+                            cad_kernel::Vec2::new(a.x, b.y),
+                        ];
+                        let index = layer.add(cad_kernel::Geom::Polyline(cad_kernel::Polyline {
+                            vertices: corners
+                                .iter()
+                                .map(|v| cad_kernel::PolyVertex { pos: *v, bulge: 0.0 })
+                                .collect(),
+                            closed: true,
+                            widths: Vec::new(),
+                        }));
+                        if draw_fill {
+                            layer.set_filled(index, true);
+                        }
+                        Ok(if draw_fill { "filled rectangle added." } else { "rectangle added." }.into())
+                    }
+                    DrawKind::Polyline => {
+                        if p.len() < 2 {
+                            Err("polyline: needs at least two points.".into())
+                        } else {
+                            layer.add(cad_kernel::Geom::Polyline(cad_kernel::Polyline {
+                                vertices: p
+                                    .iter()
+                                    .map(|v| cad_kernel::PolyVertex { pos: *v, bulge: 0.0 })
+                                    .collect(),
+                                closed: false,
+                                widths: Vec::new(),
+                            }));
+                            Ok(format!("polyline of {} points added.", p.len()))
+                        }
+                    }
+                    DrawKind::Arrow => {
+                        let index = layer
+                            .add(cad_kernel::Geom::Line(cad_kernel::Line { a: p[0], b: p[1] }));
+                        layer.set_arrow_ends(index, false, true);
+                        Ok("arrow added.".into())
+                    }
+                    DrawKind::Spline => {
+                        // A degree-3 B-spline needs more control points than
+                        // its degree, so four is the least that makes a real
+                        // curve.
+                        if p.len() < 4 {
+                            Err("spline: needs at least four points.".into())
+                        } else {
+                            let count = p.len();
+                            layer.add(cad_kernel::Geom::Spline(cad_kernel::Spline::new_bspline(
+                                3, p,
+                            )));
+                            Ok(format!("spline of {count} points added."))
+                        }
+                    }
+                };
+                // Close the checkpoint a draw opened, and drop it if the
+                // draw refused, so a failed draw leaves no half-made step
+                // in the undo history.
+                if let Some(layer) = app.tab_mut().markup.existing_mut(page) {
+                    layer.end();
+                    if draw_outcome.is_err() {
+                        layer.forget_last_step();
+                    }
+                }
+                draw_outcome
+            }
+            Tool::EraseMark => match points.first().copied() {
+                Some(at) => app.erase_mark_at(page, at),
+                None => Err("nothing was clicked.".into()),
+            },
+            Tool::Measure(MeasureKind::Distance) => {
+                Ok(measure::measure_distance(&app.tab_mut().calibration, points[0], points[1]).render())
+            }
+            Tool::Measure(MeasureKind::Area) => {
+                Ok(measure::measure_area(&app.tab_mut().calibration, &points).render())
+            }
+            Tool::Modify(pick) => {
+                let layer = app.tab_mut().markup.page(page, height);
+                let space = layer.space();
+                let objects: Vec<(usize, cad_kernel::Vec2)> =
+                    objects.iter().map(|(i, at)| (*i, space.to_kernel(*at))).collect();
+                let points: Vec<cad_kernel::Vec2> =
+                    points.iter().map(|q| space.to_kernel(*q)).collect();
+                tools::run(layer, pick.op, &objects, &points)
+            }
+            Tool::Lock => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => match area_between(*a, *b) {
+                    // The passcode is asked for *after* the area is drawn,
+                    // so it is typed once and used immediately rather than
+                    // being held while the user aims.
+                    Some(area) => {
+                        return ToolEffect::OpenPasscodePrompt(Awaiting::Lock {
+                            page,
+                            shapes: vec![area],
+                            require_complete: true,
+                        });
+                    }
+                    None => Err("lock: that area has no size.".into()),
+                },
+                _ => Err("lock: two corners are needed.".into()),
+            },
+            Tool::ArticleBox => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => match area_between(*a, *b) {
+                    Some(rect) => {
+                        return ToolEffect::OpenArticleBoxPrompt(PendingArticleBox {
+                            page,
+                            rect,
+                            title: String::new(),
+                        });
+                    }
+                    None => Err("article box: that area has no size.".into()),
+                },
+                _ => Err("article box: two corners are needed.".into()),
+            },
+            Tool::PickText => match points.first().copied() {
+                Some(at) => app.pick_text_run(page, at),
+                None => Err("nothing was clicked.".into()),
+            },
+            // Resolved by a text-selection drag, not by `take_pick`'s
+            // click/object collection — see `wants_selection`'s own doc.
+            // `on_click` should never see one of these three.
+            Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. } => {
+                unreachable!("Markup/Link/MatchProperties resolve by selection, never by on_click")
+            }
+        };
+        match outcome {
+            Ok(said) => ToolEffect::Say(Kind::Info, said),
+            Err(problem) => ToolEffect::Say(Kind::Error, problem),
+        }
     }
 }
 

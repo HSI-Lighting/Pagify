@@ -75,7 +75,7 @@ pub(crate) use ribbon::{
     DOC_TAB_MAX_TEXT, DOC_TAB_MENU_WIDTH, DOC_TAB_PADDING, RIBBON_MARGIN_X, RIBBON_MARGIN_Y, TOOL_HEIGHT, TOOL_WIDTH,
 };
 pub(crate) use tool::{
-    ArmedTool, DrawKind, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool,
+    ArmedTool, DrawKind, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool, ToolEffect,
 };
 // `spelling` and `paragraph_lines` moved to `pagify_shell` (Phase 4a: no
 // egui, so they belong where they can be tested without a window) —
