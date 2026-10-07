@@ -1234,17 +1234,31 @@ impl crate::PagifyApp {
         // least a first point down before there is anything to draw a
         // rubber band from. Without this, the only way to know how much of
         // the page a signature would cover was to place it and look.
-        // `PlaceImage` is the other `Tool` kind and has never previewed —
-        // nothing to draw before its one click either.
+        // `PlaceImage` has never previewed — nothing to draw before its one
+        // click either. `PlaceText` previews the same rubber-band box
+        // `PendingKind::PlaceText` used to, once its first corner is down.
         if let Some(armed) = self.tab().tool.as_ref() {
-            if armed.page == page && matches!(armed.kind, Tool::Signature) {
-                if let Some(cursor) = hover {
-                    let at = self.tab()
-                        .last_snap
-                        .as_ref()
-                        .map(|snapped| snapped.at)
-                        .unwrap_or_else(|| view.to_page(cursor));
-                    self.draw_signature_preview(ui, view, at);
+            if armed.page != page {
+                return;
+            }
+            let Some(cursor) = hover else { return };
+            let at = self.tab()
+                .last_snap
+                .as_ref()
+                .map(|snapped| snapped.at)
+                .unwrap_or_else(|| view.to_page(cursor));
+            match &armed.kind {
+                Tool::Signature => self.draw_signature_preview(ui, view, at),
+                Tool::PlaceImage { .. } => {}
+                Tool::PlaceText => {
+                    if let Some(first) = armed.points.first().copied() {
+                        ui.painter().rect_stroke(
+                            egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
+                            egui::CornerRadius::ZERO,
+                            egui::Stroke::new(1.0, theme::violet_bright()),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
                 }
             }
             return;
@@ -1297,7 +1311,7 @@ impl crate::PagifyApp {
                 let radius = (on(first) - on(at)).length();
                 painter.circle_stroke(on(first), radius, stroke);
             }
-            PendingKind::Draw(DrawKind::Rectangle) | PendingKind::SignRectangle | PendingKind::PlaceText => {
+            PendingKind::Draw(DrawKind::Rectangle) | PendingKind::SignRectangle => {
                 painter.rect_stroke(
                     box_between(first, at),
                     egui::CornerRadius::ZERO,

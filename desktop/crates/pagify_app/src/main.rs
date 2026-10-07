@@ -10904,7 +10904,7 @@ impl PagifyApp {
         // kept exactly as it was, for a script or anyone who prefers typing
         // the words first and placing them with one click.
         if text.is_empty() {
-            self.arm(PendingKind::PlaceText, page);
+            self.arm_tool(Tool::PlaceText, page);
             return;
         }
         self.arm(PendingKind::Write(text), page);

@@ -1564,7 +1564,7 @@ fn clicking_add_text_arms_the_box_tool_rather_than_filling_the_command_box() {
         h.state().cmd.input()
     );
     assert!(
-        matches!(h.state().tab().pending.as_ref().map(|p| &p.kind), Some(PendingKind::PlaceText)),
+        matches!(h.state().tab().tool.as_ref().map(|t| &t.kind), Some(Tool::PlaceText)),
         "clicking Add Text should have armed the text-box tool"
     );
     let history: Vec<String> =
@@ -4168,7 +4168,7 @@ fn bare_addtext_arms_the_box_tool_not_an_empty_mark() {
     h.state_mut().submit("addtext");
     h.run_steps(1);
     assert!(
-        matches!(h.state().tab().pending.as_ref().map(|p| &p.kind), Some(PendingKind::PlaceText)),
+        matches!(h.state().tab().tool.as_ref().map(|t| &t.kind), Some(Tool::PlaceText)),
         "an empty string should arm the text-box tool, not refuse or place an empty mark"
     );
 }

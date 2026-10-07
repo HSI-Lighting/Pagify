@@ -26,18 +26,18 @@ pub(crate) struct Pending {
     pub(crate) points: Vec<AppPoint>,
 }
 
-/// A tool armed outside the big [`Pending`] dispatch — the first slice of
-/// the `Tool` state machine the mentor's review calls for (`DESIGN_REVIEW.md`
-/// §3.2). `Signature` and `PlaceImage` moved here first because they are the
-/// simplest shape there is: exactly one point, no objects, and `repeats()`
-/// already false for both — placing one disarms it, with nothing left to
-/// decide about re-arming (unlike [`PendingKind`], which still has to ask).
-/// Every other `PendingKind` variant is still exactly where it was; this is
-/// one slice, not the whole migration — `PendingKind` is deleted only once
-/// it is empty.
+/// A tool armed outside the big [`Pending`] dispatch — the `Tool` state
+/// machine the mentor's review calls for (`DESIGN_REVIEW.md` §3.2), built up
+/// one slice at a time. `Signature`/`PlaceImage` moved first (one point, no
+/// objects); `PlaceText` second (two points, still no objects, still never
+/// repeats). Every other `PendingKind` variant is still exactly where it
+/// was; `PendingKind` is deleted only once it is empty.
 pub(crate) struct ArmedTool {
     pub(crate) kind: Tool,
     pub(crate) page: usize,
+    /// Collected so far — unlike [`Pending`], never objects: no `Tool` kind
+    /// has needed one yet.
+    pub(crate) points: Vec<AppPoint>,
 }
 
 pub(crate) enum Tool {
@@ -45,29 +45,46 @@ pub(crate) enum Tool {
     Signature,
     /// A decoded picture waiting for a point to be centred on.
     PlaceImage { rgba: Vec<u8>, width: u32, height: u32 },
+    /// Two corners of a box brand new text is composed into — see
+    /// [`crate::NewTextBox`].
+    PlaceText,
 }
 
 impl Tool {
-    /// Mirrors `PendingKind::prompt` for these two kinds, with no
-    /// `objects_done`/`points_done` to thread through — both ever want
-    /// exactly one point, so there is nothing for the prompt to vary on.
-    pub(crate) fn prompt(&self) -> String {
+    /// How many points it still wants — no `usize::MAX`/"until Enter" case
+    /// here, unlike `PendingKind::wants`: nothing that ends on Enter has
+    /// moved to `Tool` yet.
+    pub(crate) fn wants_points(&self) -> usize {
+        match self {
+            Tool::Signature | Tool::PlaceImage { .. } => 1,
+            Tool::PlaceText => 2,
+        }
+    }
+
+    /// Mirrors `PendingKind::prompt` for these kinds, minus the
+    /// `objects_done` there is never anything to thread through.
+    pub(crate) fn prompt(&self, points_done: usize) -> String {
         match self {
             // Says where the click lands, because a signature that appears
             // above or below the line is the thing to get right first time.
             Tool::Signature => "signature: click the line to sign on".into(),
             Tool::PlaceImage { .. } => "click where the picture goes".into(),
+            Tool::PlaceText => match points_done {
+                0 => "text: first corner of the box".into(),
+                _ => "text: opposite corner".into(),
+            },
         }
     }
 
     /// The ribbon command that arms this, so its button can show itself lit
-    /// while it is waiting for its one click — see `PendingKind::command`'s
-    /// own doc. `PlaceImage` has never lit a button: it names a file, not a
+    /// while it is waiting for its clicks — see `PendingKind::command`'s own
+    /// doc. `PlaceImage` has never lit a button: it names a file, not a
     /// repeatable command.
     pub(crate) fn command(&self) -> Option<&'static str> {
         match self {
             Tool::Signature => Some("signature"),
             Tool::PlaceImage { .. } => None,
+            Tool::PlaceText => Some("addtext"),
         }
     }
 }
@@ -81,10 +98,6 @@ pub(crate) enum PendingKind {
     EraseMark,
     /// Words waiting for a point to be written at.
     Write(String),
-    /// Two corners of a box brand new text is composed into — see
-    /// [`crate::NewTextBox`]. What bare `addtext` arms, as opposed to `Write`,
-    /// which is `addtext <words>` and still just wants the one point.
-    PlaceText,
     Draw(DrawKind),
     Modify(tools::Pick),
     Calibrate { distance: f64, unit: String },
@@ -178,7 +191,6 @@ impl PendingKind {
         match self {
             PendingKind::PickText | PendingKind::EraseMark => (0, 1),
             PendingKind::Write(_) => (0, 1),
-            PendingKind::PlaceText => (0, 2),
             PendingKind::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => {
                 (0, 2)
             }
@@ -209,10 +221,6 @@ impl PendingKind {
             PendingKind::EraseMark => {
                 "click a highlight, underline or strike-out to erase it — Escape puts the eraser down".into()
             }
-            PendingKind::PlaceText => match points_done {
-                0 => "text: first corner of the box".into(),
-                _ => "text: opposite corner".into(),
-            },
             PendingKind::Redact => match points_done {
                 0 => "redact: first corner of the area to destroy".into(),
                 _ => "redact: opposite corner".into(),
@@ -308,19 +316,11 @@ impl PendingKind {
     /// that lands on bare paper instead of another run, rather than putting
     /// the tool down right back where `edittext` would have to undo it.
     pub(crate) fn repeats(&self) -> bool {
-        !matches!(
-            self,
-            // Calibration is set once, the same reasoning a placed
-            // signature or picture used to share here before they became
-            // `Tool::Signature`/`Tool::PlaceImage` — see that type's own
-            // doc; it has no `repeats` to ask at all, since the answer was
-            // always "no" for both.
-            PendingKind::Calibrate { .. }
-                // What someone wants right after dragging out a text box is
-                // to type into the box just drawn, not immediately drag out
-                // a second one.
-                | PendingKind::PlaceText
-        )
+        // Calibration is set once — the same reasoning that used to live
+        // here for a placed signature, picture and text box before they
+        // became `Tool::Signature`/`PlaceImage`/`PlaceText`: none of them
+        // has a `repeats` to ask any more, since the answer was always "no".
+        !matches!(self, PendingKind::Calibrate { .. })
     }
 
     /// Whether Enter can end it early.
@@ -349,7 +349,6 @@ impl PendingKind {
             PendingKind::PickText => "edittext",
             PendingKind::EraseMark => "erase",
             PendingKind::Write(_) => "addtext",
-            PendingKind::PlaceText => "addtext",
             PendingKind::Measure(MeasureKind::Distance) => "measure distance",
             PendingKind::Measure(MeasureKind::Area) => "measure area",
             PendingKind::Calibrate { .. } => "calibrate",

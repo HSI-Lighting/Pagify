@@ -75,8 +75,8 @@ impl crate::PagifyApp {
         }
         self.put_down_page_editors("armed a different tool");
         self.tab_mut().pending = None;
-        self.tab_mut().tool = Some(ArmedTool { kind: tool, page });
-        let prompt = self.tab().tool.as_ref().map(|t| t.kind.prompt());
+        self.tab_mut().tool = Some(ArmedTool { kind: tool, page, points: Vec::new() });
+        let prompt = self.tab().tool.as_ref().map(|t| t.kind.prompt(0));
         if let Some(prompt) = prompt {
             self.say_info(prompt);
         }
@@ -116,8 +116,15 @@ impl crate::PagifyApp {
     // -- picks --------------------------------------------------------------
 
     pub(crate) fn take_pick(&mut self, at: AppPoint) {
-        if self.tab_mut().tool.is_some() {
-            self.resolve_tool(at);
+        if let Some(armed) = self.tab_mut().tool.as_mut() {
+            armed.points.push(at);
+            let ready = armed.points.len() >= armed.kind.wants_points();
+            if ready {
+                self.resolve_tool();
+            } else if let Some(armed) = self.tab_mut().tool.as_ref() {
+                let prompt = armed.kind.prompt(armed.points.len());
+                self.say_info(prompt);
+            }
             return;
         }
         let Some(pending) = &self.tab_mut().pending else { return };
@@ -160,19 +167,25 @@ impl crate::PagifyApp {
         }
     }
 
-    /// [`Self::resolve`], for a [`Tool`] instead of a [`PendingKind`].
-    /// Always exactly one point, so unlike `resolve` there is nothing to
-    /// collect across calls — the click that arrives here is the one the
-    /// tool was waiting for. Neither kind repeats, so there is no `arm`/
-    /// `arm_without_saying` tail either: a success or a failure both just
-    /// leave `tool` disarmed.
-    pub(crate) fn resolve_tool(&mut self, at: AppPoint) {
+    /// [`Self::resolve`], for a [`Tool`] instead of a [`PendingKind`]. Called
+    /// once `take_pick` has collected as many points as `Tool::wants_points`
+    /// asks for. No kind repeats, so there is no `arm`/`arm_without_saying`
+    /// tail either: a success or a failure both just leave `tool` disarmed.
+    pub(crate) fn resolve_tool(&mut self) {
         let Some(armed) = self.tab_mut().tool.take() else { return };
         let outcome = match armed.kind {
-            Tool::Signature => self.place_signature(armed.page, at),
-            Tool::PlaceImage { rgba, width, height } => {
-                self.place_image_at(armed.page, at, rgba, width, height)
-            }
+            Tool::Signature => match armed.points.first().copied() {
+                Some(at) => self.place_signature(armed.page, at),
+                None => Err("signature: nowhere was clicked.".into()),
+            },
+            Tool::PlaceImage { rgba, width, height } => match armed.points.first().copied() {
+                Some(at) => self.place_image_at(armed.page, at, rgba, width, height),
+                None => Err("nowhere to place the picture.".into()),
+            },
+            Tool::PlaceText => match (armed.points.first(), armed.points.get(1)) {
+                (Some(a), Some(b)) => self.begin_text_box(armed.page, *a, *b),
+                _ => Err("text: two corners are needed.".into()),
+            },
         };
         match outcome {
             Ok(said) => self.say_info(said),
@@ -208,10 +221,6 @@ impl crate::PagifyApp {
                     None => Err("nowhere to write.".into()),
                 }
             }
-            PendingKind::PlaceText => match (pending.points.first(), pending.points.get(1)) {
-                (Some(a), Some(b)) => self.begin_text_box(page, *a, *b),
-                _ => Err("text: two corners are needed.".into()),
-            },
             PendingKind::Calibrate { distance, unit } => {
                 match Calibration::from_two_points(pending.points[0], pending.points[1], *distance, unit) {
                     Ok(calibration) => {
