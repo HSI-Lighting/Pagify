@@ -75,6 +75,11 @@ pub(crate) enum Tool {
     EraseMark,
     Measure(MeasureKind),
     Modify(tools::Pick),
+    /// Two corners of an area to hide, sealed under a passcode.
+    Lock,
+    /// Two corners of a labelled region — see [`PendingArticleBox`] for the
+    /// title, asked for once the area is drawn.
+    ArticleBox,
 }
 
 impl Tool {
@@ -89,7 +94,9 @@ impl Tool {
             | Tool::Redact
             | Tool::Whiteout
             | Tool::SignRectangle
-            | Tool::SignLine => 2,
+            | Tool::SignLine
+            | Tool::Lock
+            | Tool::ArticleBox => 2,
             Tool::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => 2,
             Tool::Draw(DrawKind::Polyline | DrawKind::Spline) => usize::MAX,
             Tool::Measure(MeasureKind::Distance) => 2,
@@ -190,6 +197,14 @@ impl Tool {
                 format!("measure area: corner {} — Enter to close", points_done + 1)
             }
             Tool::Modify(pick) => pick.prompt(objects_done, points_done),
+            Tool::Lock => match points_done {
+                0 => "lock: first corner of the area to hide".into(),
+                _ => "lock: opposite corner".into(),
+            },
+            Tool::ArticleBox => match points_done {
+                0 => "article box: first corner".into(),
+                _ => "article box: opposite corner".into(),
+            },
         }
     }
 
@@ -213,6 +228,8 @@ impl Tool {
                 | Tool::EraseMark
                 | Tool::Measure(_)
                 | Tool::Modify(_)
+                | Tool::Lock
+                | Tool::ArticleBox
         )
     }
 
@@ -244,6 +261,8 @@ impl Tool {
             Tool::Measure(MeasureKind::Distance) => Some("measure distance"),
             Tool::Measure(MeasureKind::Area) => Some("measure area"),
             Tool::Modify(_) => None,
+            Tool::Lock => Some("lock"),
+            Tool::ArticleBox => Some("articlebox"),
         }
     }
 
@@ -259,11 +278,6 @@ impl Tool {
 pub(crate) enum PendingKind {
     /// Waiting for a click on the words to change.
     PickText,
-    /// Two corners of an area to hide, sealed under a passcode.
-    Lock,
-    /// Two corners of a labelled region — see [`PendingArticleBox`] for the
-    /// title, asked for once the area is drawn.
-    ArticleBox,
 }
 
 /// A drawn Article Box rectangle, waiting for the title that names it.
@@ -333,24 +347,12 @@ impl PendingKind {
     pub(crate) fn wants(&self) -> (usize, usize) {
         match self {
             PendingKind::PickText => (0, 1),
-            PendingKind::Lock => (0, 2),
-            PendingKind::ArticleBox => (0, 2),
         }
     }
 
-    pub(crate) fn prompt(&self, points_done: usize) -> String {
+    pub(crate) fn prompt(&self, _points_done: usize) -> String {
         match self {
             PendingKind::PickText => "click the words to change".into(),
-            // Says which of the two rectangles this is, because the other one
-            // is a drawing that can be picked up again and this one is not.
-            PendingKind::Lock => match points_done {
-                0 => "lock: first corner of the area to hide".into(),
-                _ => "lock: opposite corner".into(),
-            },
-            PendingKind::ArticleBox => match points_done {
-                0 => "article box: first corner".into(),
-                _ => "article box: opposite corner".into(),
-            },
         }
     }
 
@@ -399,8 +401,6 @@ impl PendingKind {
     /// with no ribbon equivalent has nothing to light up.
     pub(crate) fn command(&self) -> Option<&'static str> {
         Some(match self {
-            PendingKind::Lock => "lock",
-            PendingKind::ArticleBox => "articlebox",
             PendingKind::PickText => "edittext",
         })
     }
@@ -423,8 +423,12 @@ impl PendingKind {
     }
 
     pub(crate) fn ends_on_enter(&self) -> bool {
-        let (_, points) = self.wants();
-        points == usize::MAX
+        // Nothing left here wants a variable number of points — `Draw`,
+        // `Measure` and `Modify` (the only three that ever did) have all
+        // moved to `Tool`. Kept as a real method, not inlined at its call
+        // sites, so a future `PendingKind` variant that does end on Enter
+        // does not have to go looking for them.
+        false
     }
 }
 

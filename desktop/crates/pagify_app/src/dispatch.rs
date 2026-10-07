@@ -794,7 +794,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm(PendingKind::Lock, page);
+                    self.arm_tool(Tool::Lock, page);
                 }
             }
             Verb::LockPages(spec) => {
@@ -956,7 +956,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 } else {
                     let page = self.tab_mut().page;
-                    self.arm(PendingKind::ArticleBox, page);
+                    self.arm_tool(Tool::ArticleBox, page);
                 }
             }
             Verb::Weblinks => self.begin_web_link(),

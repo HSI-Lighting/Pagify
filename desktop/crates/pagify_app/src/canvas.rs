@@ -1270,9 +1270,13 @@ impl crate::PagifyApp {
                 // Modify picks existing geometry rather than drawing new
                 // geometry, so it never previewed either.
                 Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) | Tool::EraseMark | Tool::Modify(_) => {}
-                // A box, violet, the same group `PendingKind`'s own preview
-                // used to share with `Lock`/`ArticleBox` (still there).
-                Tool::PlaceText | Tool::Whiteout | Tool::SignRectangle | Tool::Draw(DrawKind::Rectangle) => {
+                // A box, violet.
+                Tool::PlaceText
+                | Tool::Whiteout
+                | Tool::SignRectangle
+                | Tool::Draw(DrawKind::Rectangle)
+                | Tool::Lock
+                | Tool::ArticleBox => {
                     if let Some(first) = armed.points.first().copied() {
                         ui.painter().rect_stroke(
                             egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
@@ -1349,51 +1353,11 @@ impl crate::PagifyApp {
             return;
         }
 
-        let Some(pending) = &self.tab().pending else { return };
-        if pending.page != page {
-            return;
-        }
-        let Some(cursor) = hover else { return };
-        // Where a click would land, which is not the pointer when a snap has
-        // taken it.
-        let at = self.tab()
-            .last_snap
-            .as_ref()
-            .map(|snapped| snapped.at)
-            .unwrap_or_else(|| view.to_page(cursor));
-
-        if pending.points.is_empty() {
-            return;
-        }
-
-        let painter = ui.painter();
-        let on = |p: AppPoint| view.to_screen(p);
-        let stroke = egui::Stroke::new(1.0, theme::violet_bright());
-        let first = pending.points[0];
-        let last = *pending.points.last().expect("checked");
-
-        let box_between = |a: AppPoint, b: AppPoint| {
-            egui::Rect::from_two_pos(on(a), on(b))
-        };
-
-        match &pending.kind {
-            PendingKind::Lock | PendingKind::ArticleBox => {
-                painter.rect_stroke(
-                    box_between(first, at),
-                    egui::CornerRadius::ZERO,
-                    stroke,
-                    egui::StrokeKind::Inside,
-                );
-            }
-            _ => {}
-        }
-
-        // Where the placed points are, so a long drag still shows what it is
-        // anchored to.
-        for point in &pending.points {
-            painter.circle_filled(on(*point), 2.5, theme::violet_bright());
-        }
-        let _ = last;
+        // `PendingKind` has nothing left to preview: `PickText`, its only
+        // remaining variant, wants one point and resolves on it immediately
+        // in the same `take_pick` call — there is never a frame where it is
+        // still armed with a point already collected to draw a rubber band
+        // from.
     }
 
     /// A padlock over every sealed object on this page, and the click that

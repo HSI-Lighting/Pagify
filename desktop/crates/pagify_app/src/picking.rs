@@ -384,6 +384,40 @@ impl crate::PagifyApp {
                     armed.points.iter().map(|q| space.to_kernel(*q)).collect();
                 tools::run(layer, pick.op, &objects, &points)
             }
+            Tool::Lock => match (armed.points.first(), armed.points.get(1)) {
+                (Some(a), Some(b)) => match area_between(*a, *b) {
+                    Some(area) => {
+                        // The passcode is asked for *after* the area is drawn, so
+                        // it is typed once and used immediately rather than being
+                        // held while the user aims.
+                        self.ask_or_reuse_passcode(
+                            Awaiting::Lock {
+                                page,
+                                shapes: vec![area],
+                                require_complete: true,
+                            },
+                            "type a passcode to lock it with, or Escape to give up.",
+                        );
+                        Ok(String::new())
+                    }
+                    None => Err("lock: that area has no size.".into()),
+                },
+                _ => Err("lock: two corners are needed.".into()),
+            },
+            Tool::ArticleBox => match (armed.points.first(), armed.points.get(1)) {
+                (Some(a), Some(b)) => match area_between(*a, *b) {
+                    Some(rect) => {
+                        self.tab_mut().pending_article_box = Some(PendingArticleBox {
+                            page,
+                            rect,
+                            title: String::new(),
+                        });
+                        Ok(String::new())
+                    }
+                    None => Err("article box: that area has no size.".into()),
+                },
+                _ => Err("article box: two corners are needed.".into()),
+            },
         };
         // Close the checkpoint a draw opened, and drop it if the draw
         // refused — see `resolve`'s own identical tail for why.
@@ -422,40 +456,6 @@ impl crate::PagifyApp {
             PendingKind::PickText => match pending.points.first().copied() {
                 Some(at) => self.pick_text_run(page, at),
                 None => Err("nothing was clicked.".into()),
-            },
-            PendingKind::Lock => match (pending.points.first(), pending.points.get(1)) {
-                (Some(a), Some(b)) => match area_between(*a, *b) {
-                    Some(area) => {
-                        // The passcode is asked for *after* the area is drawn, so
-                        // it is typed once and used immediately rather than being
-                        // held while the user aims.
-                        self.ask_or_reuse_passcode(
-                            Awaiting::Lock {
-                                page,
-                                shapes: vec![area],
-                                require_complete: true,
-                            },
-                            "type a passcode to lock it with, or Escape to give up.",
-                        );
-                        Ok(String::new())
-                    }
-                    None => Err("lock: that area has no size.".into()),
-                },
-                _ => Err("lock: two corners are needed.".into()),
-            },
-            PendingKind::ArticleBox => match (pending.points.first(), pending.points.get(1)) {
-                (Some(a), Some(b)) => match area_between(*a, *b) {
-                    Some(rect) => {
-                        self.tab_mut().pending_article_box = Some(PendingArticleBox {
-                            page,
-                            rect,
-                            title: String::new(),
-                        });
-                        Ok(String::new())
-                    }
-                    None => Err("article box: that area has no size.".into()),
-                },
-                _ => Err("article box: two corners are needed.".into()),
             },
         };
 

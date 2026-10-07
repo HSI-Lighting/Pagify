@@ -5366,7 +5366,7 @@ fn the_lock_verb_takes_the_selection_that_is_already_there() {
 fn the_lockarea_verb_still_arms_the_rectangle() {
     let mut app = app("text-lines.pdf");
     app.submit("lockarea");
-    assert!(matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::Lock)));
+    assert!(matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Lock)));
 }
 
 /// Nothing is locked, so unlock has nothing to ask about — and asking for a
@@ -5387,13 +5387,13 @@ fn drawing_the_area_asks_for_a_passcode_and_locks_nothing_yet() {
     let mut app = app("text-lines.pdf");
     let before = page_text(&app, 0);
 
-    app.tab_mut().pending = Some(Pending {
-        kind: PendingKind::Lock,
+    app.tab_mut().tool = Some(ArmedTool {
+        kind: Tool::Lock,
         page: 0,
         objects: Vec::new(),
         points: vec![AppPoint::new(FOX.0 as f64, FOX.1 as f64), AppPoint::new(FOX.2 as f64, FOX.3 as f64)],
     });
-    app.resolve();
+    app.resolve_tool();
 
     assert!(
         matches!(app.tab_mut().awaiting_password, Some(Awaiting::Lock { page: 0, .. })),
