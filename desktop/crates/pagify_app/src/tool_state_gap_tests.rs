@@ -142,24 +142,25 @@ fn enter_with_too_few_points_says_nothing_but_done_says_so() {
     );
 }
 
-/// **An object-pick miss leaves `pending` completely untouched — quieter
-/// even than `resolve()`'s own quiet re-arm.** `take_pick`'s `wants_object()`
-/// branch, on a miss, calls `say_info("nothing there…")` and returns
-/// immediately (`picking.rs`): it never pushes anything onto `objects`,
-/// never calls `resolve()`, never touches `pending` at all. The existing
-/// coverage (`pointer_tests.rs`'s `picking_empty_paper_for_an_object_says_so`)
-/// only checks that the message was said, not that the state was left alone
-/// — this test pins the state invariant too, so a `Tool` migration that
-/// routes a miss through even a trivial no-op transition (which would be the
-/// natural thing to write) shows up as a failing test instead of an
-/// unnoticed behaviour change.
+/// **An object-pick miss leaves the armed tool completely untouched —
+/// quieter even than `resolve_tool`'s own quiet re-arm.** `take_pick`'s
+/// `wants_object` branch, on a miss, calls `say_info("nothing there…")` and
+/// returns immediately (`picking.rs`): it never pushes anything onto
+/// `objects`, never calls `resolve_tool`, never touches the armed tool at
+/// all. The existing coverage (`pointer_tests.rs`'s
+/// `picking_empty_paper_for_an_object_says_so`) only checks that the
+/// message was said, not that the state was left alone — this test pins
+/// the state invariant too. Originally written against `pending`
+/// (`Modify` was still a `PendingKind` then); now against `tool`, since
+/// `Modify` is the migration this test's own doc predicted — it moved
+/// through this exact no-op-miss transition with nothing to change.
 #[test]
-fn an_object_pick_that_misses_leaves_pending_completely_untouched() {
+fn an_object_pick_that_misses_leaves_the_armed_tool_completely_untouched() {
     let mut app = app("single-page.pdf");
     app.submit("l 10,10 100,100");
     app.submit("fillet 20");
     assert_eq!(
-        app.tab_mut().pending.as_ref().expect("setup: fillet should have armed").objects.len(),
+        app.tab_mut().tool.as_ref().expect("setup: fillet should have armed").objects.len(),
         0,
         "setup: no objects collected yet"
     );
@@ -171,7 +172,7 @@ fn an_object_pick_that_misses_leaves_pending_completely_untouched() {
         "setup: the miss should have said so:\n{}",
         said(&app)
     );
-    let after = app.tab_mut().pending.as_ref().expect("the tool should still be armed");
+    let after = app.tab_mut().tool.as_ref().expect("the tool should still be armed");
     assert_eq!(
         after.objects.len(),
         0,

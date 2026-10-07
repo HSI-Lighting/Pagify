@@ -978,7 +978,7 @@ impl crate::PagifyApp {
             }
             Verb::Measure(kind) => {
                 let page = self.tab_mut().page;
-                self.arm(PendingKind::Measure(kind), page);
+                self.arm_tool(Tool::Measure(kind), page);
             }
 
             Verb::Record(name) => {

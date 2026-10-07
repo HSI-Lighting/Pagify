@@ -7745,7 +7745,7 @@ impl PagifyApp {
                         return;
                     }
                 }
-                self.arm(PendingKind::Modify(pick), page);
+                self.arm_tool(Tool::Modify(pick), page);
             }
         }
     }
@@ -13392,7 +13392,7 @@ impl eframe::App for PagifyApp {
             let wants = match &self.tab_mut().pending {
                 Some(p) => p.prompt(),
                 None => match &self.tab_mut().tool {
-                    Some(t) => t.kind.prompt(t.points.len()),
+                    Some(t) => t.kind.prompt(t.objects.len(), t.points.len()),
                     None => self.cmd.prompt().wants.clone(),
                 },
             };

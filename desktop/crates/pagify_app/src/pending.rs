@@ -28,16 +28,15 @@ pub(crate) struct Pending {
 
 /// A tool armed outside the big [`Pending`] dispatch — the `Tool` state
 /// machine the mentor's review calls for (`DESIGN_REVIEW.md` §3.2), built up
-/// one slice at a time. `Draw` is the first kind that ends on Enter rather
-/// than a fixed point count (see `wants_points`/`ends_on_enter`) — every
-/// kind before it wanted a fixed number of points. Every other
-/// `PendingKind` variant is still exactly where it was; `PendingKind` is
-/// deleted only once it is empty.
+/// one slice at a time. `Draw` was the first kind that ends on Enter rather
+/// than a fixed point count (see `wants_points`/`ends_on_enter`); `Modify`
+/// is the first that wants *objects* too (see `wants_objects`) — every kind
+/// before it wanted only points. Every other `PendingKind` variant is still
+/// exactly where it was; `PendingKind` is deleted only once it is empty.
 pub(crate) struct ArmedTool {
     pub(crate) kind: Tool,
     pub(crate) page: usize,
-    /// Collected so far — unlike [`Pending`], never objects: no `Tool` kind
-    /// has needed one yet.
+    pub(crate) objects: Vec<(usize, AppPoint)>,
     pub(crate) points: Vec<AppPoint>,
 }
 
@@ -74,6 +73,8 @@ pub(crate) enum Tool {
     /// nothing drawn is selected. Stays in hand, so a run of marks can be
     /// rubbed out in a row.
     EraseMark,
+    Measure(MeasureKind),
+    Modify(tools::Pick),
 }
 
 impl Tool {
@@ -91,6 +92,21 @@ impl Tool {
             | Tool::SignLine => 2,
             Tool::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => 2,
             Tool::Draw(DrawKind::Polyline | DrawKind::Spline) => usize::MAX,
+            Tool::Measure(MeasureKind::Distance) => 2,
+            Tool::Measure(MeasureKind::Area) => usize::MAX,
+            Tool::Modify(pick) => pick.points,
+        }
+    }
+
+    /// How many objects it still wants, clicked before any points — see
+    /// [`ArmedTool::objects`]'s own doc. Zero for every kind except
+    /// `Modify`: fillet wants two objects clicked on, move wants two
+    /// points, offset wants an object and then a point saying which side —
+    /// the same distinction [`Pending::wants_object`] draws.
+    pub(crate) fn wants_objects(&self) -> usize {
+        match self {
+            Tool::Modify(pick) => pick.objects,
+            _ => 0,
         }
     }
 
@@ -100,9 +116,11 @@ impl Tool {
         self.wants_points() == usize::MAX
     }
 
-    /// Mirrors `PendingKind::prompt` for these kinds, minus the
-    /// `objects_done` there is never anything to thread through.
-    pub(crate) fn prompt(&self, points_done: usize) -> String {
+    /// Mirrors `PendingKind::prompt`. `objects_done` only ever varies
+    /// `Modify`'s own answer — every other kind ignores it, the same way
+    /// `PendingKind::prompt`'s own arms mostly did before `Modify` was its
+    /// last remaining consumer of the parameter too.
+    pub(crate) fn prompt(&self, objects_done: usize, points_done: usize) -> String {
         match self {
             // Says where the click lands, because a signature that appears
             // above or below the line is the thing to get right first time.
@@ -165,6 +183,13 @@ impl Tool {
             Tool::EraseMark => {
                 "click a highlight, underline or strike-out to erase it — Escape puts the eraser down".into()
             }
+            Tool::Measure(MeasureKind::Distance) => {
+                if points_done == 0 { "measure: from".into() } else { "measure: to".into() }
+            }
+            Tool::Measure(MeasureKind::Area) => {
+                format!("measure area: corner {} — Enter to close", points_done + 1)
+            }
+            Tool::Modify(pick) => pick.prompt(objects_done, points_done),
         }
     }
 
@@ -186,6 +211,8 @@ impl Tool {
                 | Tool::Write(_)
                 | Tool::Draw(_)
                 | Tool::EraseMark
+                | Tool::Measure(_)
+                | Tool::Modify(_)
         )
     }
 
@@ -214,23 +241,24 @@ impl Tool {
             Tool::Draw(DrawKind::Arrow) => Some("arrow"),
             Tool::Draw(DrawKind::Spline) => Some("spline"),
             Tool::EraseMark => Some("erase"),
+            Tool::Measure(MeasureKind::Distance) => Some("measure distance"),
+            Tool::Measure(MeasureKind::Area) => Some("measure area"),
+            Tool::Modify(_) => None,
         }
     }
 
     /// Whether the pointer should be pulled to nearby geometry — see
-    /// `PendingKind::wants_snapping`'s own doc. A calibration or draw point
-    /// is placing a point on known geometry, unlike a signature, picture or
-    /// text box's corner, which is just "about here."
+    /// `PendingKind::wants_snapping`'s own doc. A calibration, draw or
+    /// measure point is placing a point on known geometry, unlike a
+    /// signature, picture or text box's corner, which is just "about here."
     pub(crate) fn wants_snapping(&self) -> bool {
-        matches!(self, Tool::Calibrate { .. } | Tool::Draw(_))
+        matches!(self, Tool::Calibrate { .. } | Tool::Draw(_) | Tool::Measure(_) | Tool::Modify(_))
     }
 }
 
 pub(crate) enum PendingKind {
     /// Waiting for a click on the words to change.
     PickText,
-    Modify(tools::Pick),
-    Measure(MeasureKind),
     /// Two corners of an area to hide, sealed under a passcode.
     Lock,
     /// Two corners of a labelled region — see [`PendingArticleBox`] for the
@@ -305,15 +333,12 @@ impl PendingKind {
     pub(crate) fn wants(&self) -> (usize, usize) {
         match self {
             PendingKind::PickText => (0, 1),
-            PendingKind::Modify(pick) => (pick.objects, pick.points),
-            PendingKind::Measure(MeasureKind::Distance) => (0, 2),
-            PendingKind::Measure(MeasureKind::Area) => (0, usize::MAX),
             PendingKind::Lock => (0, 2),
             PendingKind::ArticleBox => (0, 2),
         }
     }
 
-    pub(crate) fn prompt(&self, objects_done: usize, points_done: usize) -> String {
+    pub(crate) fn prompt(&self, points_done: usize) -> String {
         match self {
             PendingKind::PickText => "click the words to change".into(),
             // Says which of the two rectangles this is, because the other one
@@ -326,13 +351,6 @@ impl PendingKind {
                 0 => "article box: first corner".into(),
                 _ => "article box: opposite corner".into(),
             },
-            PendingKind::Modify(pick) => pick.prompt(objects_done, points_done),
-            PendingKind::Measure(MeasureKind::Distance) => {
-                if points_done == 0 { "measure: from".into() } else { "measure: to".into() }
-            }
-            PendingKind::Measure(MeasureKind::Area) => {
-                format!("measure area: corner {} — Enter to close", points_done + 1)
-            }
         }
     }
 
@@ -384,9 +402,6 @@ impl PendingKind {
             PendingKind::Lock => "lock",
             PendingKind::ArticleBox => "articlebox",
             PendingKind::PickText => "edittext",
-            PendingKind::Measure(MeasureKind::Distance) => "measure distance",
-            PendingKind::Measure(MeasureKind::Area) => "measure area",
-            PendingKind::Modify(_) => return None,
         })
     }
 
@@ -401,7 +416,10 @@ impl PendingKind {
     /// Picking a run of text is not placing a point: it means "the words
     /// there", and the nearest drawn line has nothing to do with it.
     pub(crate) fn wants_snapping(&self) -> bool {
-        matches!(self, PendingKind::Modify(_) | PendingKind::Measure(_))
+        // Modify, the last variant that wanted this, has moved to `Tool` —
+        // see its own `wants_snapping`. Picking a run of text, or drawing
+        // an area to hide or label, is not placing a point on geometry.
+        false
     }
 
     pub(crate) fn ends_on_enter(&self) -> bool {
@@ -426,6 +444,6 @@ impl Pending {
     }
 
     pub(crate) fn prompt(&self) -> String {
-        self.kind.prompt(self.objects.len(), self.points.len())
+        self.kind.prompt(self.points.len())
     }
 }

@@ -236,13 +236,13 @@ fn a_click_that_only_fills_the_box_is_not_recorded_and_keeps_the_armed_tool() {
     let mut h = on_organize("pages-ladder.pdf");
     h.state_mut().submit("record g1test");
     h.state_mut().submit("measure");
-    assert!(h.state().tab().pending.is_some(), "measure did not arm");
+    assert!(h.state().tab().tool.is_some(), "measure did not arm");
     let steps = h.state().recorder.steps();
 
     click_label(&mut h, "Delete");
 
     assert_eq!(h.state().recorder.steps(), steps, "the fill was recorded");
-    assert!(h.state().tab().pending.is_some(), "the fill cancelled the armed tool");
+    assert!(h.state().tab().tool.is_some(), "the fill cancelled the armed tool");
     assert!(
         !h.state().cmd.history().iter().any(|e| e.text.contains("cancelled")),
         "the fill said it cancelled a pick"

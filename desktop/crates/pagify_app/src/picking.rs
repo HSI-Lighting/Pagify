@@ -63,7 +63,7 @@ impl crate::PagifyApp {
 
     pub(crate) fn arm_tool(&mut self, tool: Tool, page: usize) {
         self.arm_tool_without_saying(tool, page);
-        let prompt = self.tab().tool.as_ref().map(|t| t.kind.prompt(0));
+        let prompt = self.tab().tool.as_ref().map(|t| t.kind.prompt(0, 0));
         if let Some(prompt) = prompt {
             self.say_info(prompt);
         }
@@ -83,7 +83,7 @@ impl crate::PagifyApp {
         }
         self.put_down_page_editors("armed a different tool");
         self.tab_mut().pending = None;
-        self.tab_mut().tool = Some(ArmedTool { kind: tool, page, points: Vec::new() });
+        self.tab_mut().tool = Some(ArmedTool { kind: tool, page, objects: Vec::new(), points: Vec::new() });
     }
 
     /// A click on the page away from the open editor: **applies what was typed**,
@@ -120,13 +120,40 @@ impl crate::PagifyApp {
     // -- picks --------------------------------------------------------------
 
     pub(crate) fn take_pick(&mut self, at: AppPoint) {
-        if let Some(armed) = self.tab_mut().tool.as_mut() {
-            armed.points.push(at);
-            let ready = armed.points.len() >= armed.kind.wants_points();
+        if let Some(armed) = self.tab_mut().tool.as_ref() {
+            let page = armed.page;
+            let wants_object = armed.objects.len() < armed.kind.wants_objects();
+            if wants_object {
+                // Same generous tolerance as the `pending` path below, for
+                // the same reason — you are aiming at a line with a mouse,
+                // and a miss here costs the whole operation.
+                let hit = self.tab_mut()
+                    .markup
+                    .existing(page)
+                    .and_then(|layer| layer.hit(at, HIT_TOLERANCE_PT * 3.0));
+                match hit {
+                    Some(index) => {
+                        if let Some(armed) = self.tab_mut().tool.as_mut() {
+                            armed.objects.push((index, at));
+                        }
+                    }
+                    // Quietest possible miss, same as `pending`'s own: `tool`
+                    // is not touched at all, not even to record the attempt.
+                    None => {
+                        self.say_info("nothing there — click on a mark.");
+                        return;
+                    }
+                }
+            } else if let Some(armed) = self.tab_mut().tool.as_mut() {
+                armed.points.push(at);
+            }
+            let ready = self.tab_mut().tool.as_ref().is_some_and(|t| {
+                t.objects.len() >= t.kind.wants_objects() && t.points.len() >= t.kind.wants_points()
+            });
             if ready {
                 self.resolve_tool();
             } else if let Some(armed) = self.tab_mut().tool.as_ref() {
-                let prompt = armed.kind.prompt(armed.points.len());
+                let prompt = armed.kind.prompt(armed.objects.len(), armed.points.len());
                 self.say_info(prompt);
             }
             return;
@@ -172,10 +199,11 @@ impl crate::PagifyApp {
     }
 
     /// [`Self::resolve`], for a [`Tool`] instead of a [`PendingKind`]. Called
-    /// once `take_pick` has collected as many points as `Tool::wants_points`
-    /// asks for. Matches on `&armed.kind` rather than taking it, the same
-    /// way `resolve` matches on `&pending.kind` — a repeating kind needs its
-    /// own `kind` intact afterward, to re-arm with.
+    /// once `take_pick` has collected as many objects and points as
+    /// `Tool::wants_objects`/`wants_points` ask for. Matches on `&armed.kind`
+    /// rather than taking it, the same way `resolve` matches on
+    /// `&pending.kind` — a repeating kind needs its own `kind` intact
+    /// afterward, to re-arm with.
     pub(crate) fn resolve_tool(&mut self) {
         let Some(armed) = self.tab_mut().tool.take() else { return };
         let page = armed.page;
@@ -335,6 +363,27 @@ impl crate::PagifyApp {
                 Some(at) => self.erase_mark_at(page, at),
                 None => Err("nothing was clicked.".into()),
             },
+            Tool::Measure(MeasureKind::Distance) => Ok(measure::measure_distance(
+                &self.tab_mut().calibration,
+                armed.points[0],
+                armed.points[1],
+            )
+            .render()),
+            Tool::Measure(MeasureKind::Area) => {
+                Ok(measure::measure_area(&self.tab_mut().calibration, &armed.points).render())
+            }
+            Tool::Modify(pick) => {
+                let layer = self.tab_mut().markup.page(page, height);
+                let space = layer.space();
+                let objects: Vec<(usize, cad_kernel::Vec2)> = armed
+                    .objects
+                    .iter()
+                    .map(|(i, at)| (*i, space.to_kernel(*at)))
+                    .collect();
+                let points: Vec<cad_kernel::Vec2> =
+                    armed.points.iter().map(|q| space.to_kernel(*q)).collect();
+                tools::run(layer, pick.op, &objects, &points)
+            }
         };
         // Close the checkpoint a draw opened, and drop it if the draw
         // refused — see `resolve`'s own identical tail for why.
@@ -367,12 +416,6 @@ impl crate::PagifyApp {
     pub(crate) fn resolve(&mut self) {
         let Some(pending) = self.tab_mut().pending.take() else { return };
         let page = pending.page;
-        let height = self.tab_mut()
-            .doc
-            .as_ref()
-            .and_then(|d| d.strip.size_of(page))
-            .map(|(_, h)| h as f64)
-            .unwrap_or(792.0);
         let repeats = pending.kind.repeats();
 
         let outcome: Result<String, String> = match &pending.kind {
@@ -380,16 +423,6 @@ impl crate::PagifyApp {
                 Some(at) => self.pick_text_run(page, at),
                 None => Err("nothing was clicked.".into()),
             },
-            PendingKind::Measure(MeasureKind::Distance) => Ok(measure::measure_distance(
-                &self.tab_mut().calibration,
-                pending.points[0],
-                pending.points[1],
-            )
-            .render()),
-            PendingKind::Measure(MeasureKind::Area) => {
-                Ok(measure::measure_area(&self.tab_mut().calibration, &pending.points).render())
-            }
-
             PendingKind::Lock => match (pending.points.first(), pending.points.get(1)) {
                 (Some(a), Some(b)) => match area_between(*a, *b) {
                     Some(area) => {
@@ -424,19 +457,6 @@ impl crate::PagifyApp {
                 },
                 _ => Err("article box: two corners are needed.".into()),
             },
-            PendingKind::Modify(pick) => {
-                let layer = self.tab_mut().markup.page(page, height);
-                let space = layer.space();
-                let objects: Vec<(usize, cad_kernel::Vec2)> = pending
-                    .objects
-                    .iter()
-                    .map(|(i, at)| (*i, space.to_kernel(*at)))
-                    .collect();
-                let points: Vec<cad_kernel::Vec2> =
-                    pending.points.iter().map(|q| space.to_kernel(*q)).collect();
-
-                tools::run(layer, pick.op, &objects, &points)
-            }
         };
 
         let failed = outcome.is_err();

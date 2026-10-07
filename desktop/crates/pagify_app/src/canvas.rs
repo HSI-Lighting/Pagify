@@ -1267,7 +1267,9 @@ impl crate::PagifyApp {
                 // placed on a single click — nothing to draw before it
                 // lands. Eraser is a click-to-pick, the same as `PickText`
                 // (which stayed in `pending` and never previewed either).
-                Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) | Tool::EraseMark => {}
+                // Modify picks existing geometry rather than drawing new
+                // geometry, so it never previewed either.
+                Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) | Tool::EraseMark | Tool::Modify(_) => {}
                 // A box, violet, the same group `PendingKind`'s own preview
                 // used to share with `Lock`/`ArticleBox` (still there).
                 Tool::PlaceText | Tool::Whiteout | Tool::SignRectangle | Tool::Draw(DrawKind::Rectangle) => {
@@ -1292,7 +1294,10 @@ impl crate::PagifyApp {
                     }
                 }
                 // A line, violet.
-                Tool::Calibrate { .. } | Tool::SignLine | Tool::Draw(DrawKind::Line) => {
+                Tool::Calibrate { .. }
+                | Tool::SignLine
+                | Tool::Draw(DrawKind::Line)
+                | Tool::Measure(MeasureKind::Distance) => {
                     if let Some(first) = armed.points.first().copied() {
                         ui.painter().line_segment(
                             [view.to_screen(first), view.to_screen(at)],
@@ -1332,8 +1337,9 @@ impl crate::PagifyApp {
                 // A polyline keeps what is already placed and trails the
                 // last leg. A spline's control polygon, not the curve
                 // itself — the curve isn't known until enough points exist
-                // to tessellate it.
-                Tool::Draw(DrawKind::Polyline | DrawKind::Spline) => {
+                // to tessellate it. An area measurement is the same shape:
+                // the boundary so far, trailing to the pointer.
+                Tool::Draw(DrawKind::Polyline | DrawKind::Spline) | Tool::Measure(MeasureKind::Area) => {
                     let mut path: Vec<egui::Pos2> =
                         armed.points.iter().map(|p| view.to_screen(*p)).collect();
                     path.push(view.to_screen(at));
@@ -1371,14 +1377,6 @@ impl crate::PagifyApp {
         };
 
         match &pending.kind {
-            PendingKind::Measure(MeasureKind::Area) => {
-                let mut path: Vec<egui::Pos2> = pending.points.iter().map(|p| on(*p)).collect();
-                path.push(on(at));
-                painter.add(egui::Shape::line(path, stroke));
-            }
-            PendingKind::Measure(MeasureKind::Distance) => {
-                painter.line_segment([on(first), on(at)], stroke);
-            }
             PendingKind::Lock | PendingKind::ArticleBox => {
                 painter.rect_stroke(
                     box_between(first, at),
