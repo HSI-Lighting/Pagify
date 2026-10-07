@@ -331,6 +331,10 @@ impl crate::PagifyApp {
                     }
                 }
             }
+            Tool::EraseMark => match armed.points.first().copied() {
+                Some(at) => self.erase_mark_at(page, at),
+                None => Err("nothing was clicked.".into()),
+            },
         };
         // Close the checkpoint a draw opened, and drop it if the draw
         // refused — see `resolve`'s own identical tail for why.
@@ -374,10 +378,6 @@ impl crate::PagifyApp {
         let outcome: Result<String, String> = match &pending.kind {
             PendingKind::PickText => match pending.points.first().copied() {
                 Some(at) => self.pick_text_run(page, at),
-                None => Err("nothing was clicked.".into()),
-            },
-            PendingKind::EraseMark => match pending.points.first().copied() {
-                Some(at) => self.erase_mark_at(page, at),
                 None => Err("nothing was clicked.".into()),
             },
             PendingKind::Measure(MeasureKind::Distance) => Ok(measure::measure_distance(

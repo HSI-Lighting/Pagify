@@ -234,7 +234,7 @@ fn the_eraser_rubs_out_a_highlight_with_a_click_and_undo_puts_it_back() {
 
     h.state_mut().submit("erase");
     assert!(
-        matches!(h.state().tab().pending.as_ref().map(|p| &p.kind), Some(PendingKind::EraseMark)),
+        matches!(h.state().tab().tool.as_ref().map(|t| &t.kind), Some(Tool::EraseMark)),
         "the Eraser with nothing selected did not pick up the click-to-erase tool"
     );
 

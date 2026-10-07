@@ -69,6 +69,11 @@ pub(crate) enum Tool {
     /// Words waiting for a point to be written at.
     Write(String),
     Draw(DrawKind),
+    /// Waiting for a click on a highlight, underline, strike-out or
+    /// squiggle to take it off the page — what the Eraser arms when
+    /// nothing drawn is selected. Stays in hand, so a run of marks can be
+    /// rubbed out in a row.
+    EraseMark,
 }
 
 impl Tool {
@@ -77,7 +82,7 @@ impl Tool {
     /// the first `Tool` kind to need it.
     pub(crate) fn wants_points(&self) -> usize {
         match self {
-            Tool::Signature | Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) => 1,
+            Tool::Signature | Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) | Tool::EraseMark => 1,
             Tool::PlaceText
             | Tool::Calibrate { .. }
             | Tool::Redact
@@ -157,6 +162,9 @@ impl Tool {
                     format!("spline: point {} — Enter to finish", n + 1)
                 }
             },
+            Tool::EraseMark => {
+                "click a highlight, underline or strike-out to erase it — Escape puts the eraser down".into()
+            }
         }
     }
 
@@ -177,6 +185,7 @@ impl Tool {
                 | Tool::SignLine
                 | Tool::Write(_)
                 | Tool::Draw(_)
+                | Tool::EraseMark
         )
     }
 
@@ -204,6 +213,7 @@ impl Tool {
             Tool::Draw(DrawKind::Rectangle) => None,
             Tool::Draw(DrawKind::Arrow) => Some("arrow"),
             Tool::Draw(DrawKind::Spline) => Some("spline"),
+            Tool::EraseMark => Some("erase"),
         }
     }
 
@@ -219,10 +229,6 @@ impl Tool {
 pub(crate) enum PendingKind {
     /// Waiting for a click on the words to change.
     PickText,
-    /// Waiting for a click on a highlight, underline, strike-out or squiggle to
-    /// take it off the page — what the Eraser arms when nothing drawn is
-    /// selected. Stays in hand, so a run of marks can be rubbed out in a row.
-    EraseMark,
     Modify(tools::Pick),
     Measure(MeasureKind),
     /// Two corners of an area to hide, sealed under a passcode.
@@ -298,7 +304,7 @@ pub(crate) enum DrawKind {
 impl PendingKind {
     pub(crate) fn wants(&self) -> (usize, usize) {
         match self {
-            PendingKind::PickText | PendingKind::EraseMark => (0, 1),
+            PendingKind::PickText => (0, 1),
             PendingKind::Modify(pick) => (pick.objects, pick.points),
             PendingKind::Measure(MeasureKind::Distance) => (0, 2),
             PendingKind::Measure(MeasureKind::Area) => (0, usize::MAX),
@@ -310,9 +316,6 @@ impl PendingKind {
     pub(crate) fn prompt(&self, objects_done: usize, points_done: usize) -> String {
         match self {
             PendingKind::PickText => "click the words to change".into(),
-            PendingKind::EraseMark => {
-                "click a highlight, underline or strike-out to erase it — Escape puts the eraser down".into()
-            }
             // Says which of the two rectangles this is, because the other one
             // is a drawing that can be picked up again and this one is not.
             PendingKind::Lock => match points_done {
@@ -381,7 +384,6 @@ impl PendingKind {
             PendingKind::Lock => "lock",
             PendingKind::ArticleBox => "articlebox",
             PendingKind::PickText => "edittext",
-            PendingKind::EraseMark => "erase",
             PendingKind::Measure(MeasureKind::Distance) => "measure distance",
             PendingKind::Measure(MeasureKind::Area) => "measure area",
             PendingKind::Modify(_) => return None,

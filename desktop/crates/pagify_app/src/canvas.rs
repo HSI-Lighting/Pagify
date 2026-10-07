@@ -1265,8 +1265,9 @@ impl crate::PagifyApp {
                 Tool::Signature => self.draw_signature_preview(ui, view, at),
                 // A tick, cross or dot, an image, or written words, is
                 // placed on a single click — nothing to draw before it
-                // lands.
-                Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) => {}
+                // lands. Eraser is a click-to-pick, the same as `PickText`
+                // (which stayed in `pending` and never previewed either).
+                Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) | Tool::EraseMark => {}
                 // A box, violet, the same group `PendingKind`'s own preview
                 // used to share with `Lock`/`ArticleBox` (still there).
                 Tool::PlaceText | Tool::Whiteout | Tool::SignRectangle | Tool::Draw(DrawKind::Rectangle) => {

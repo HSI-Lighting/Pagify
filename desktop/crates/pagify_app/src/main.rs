@@ -7710,7 +7710,7 @@ impl PagifyApp {
             // highlights and other text marks (see `erase_mark_at`) instead of
             // just saying nothing is selected.
             tools::Applied::Nothing(_) if matches!(command, cad_kernel::parser::Command::DeleteSelected) => {
-                self.arm(PendingKind::EraseMark, page);
+                self.arm_tool(Tool::EraseMark, page);
             }
             tools::Applied::Nothing(why) => self.say_info(why),
             tools::Applied::Failed(why) => self.say_error(why),
