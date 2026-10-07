@@ -6,15 +6,16 @@
 use crate::overlay::{self, PageView};
 use crate::theme;
 use crate::{
-    icon_font, raster_scale, reveal_axis, short, view_height, Awaiting, DrawKind, Grab, Handle, OrganizeDrag,
-    PlacedImageSelected, Reveal, SignatureSelected, Tab, Tool, ZoomMode, GRID_GAP_PT, HANDLE_PX,
-    ORGANIZE_GRID_PANEL, ROTATE_HANDLE_PX,
+    icon_font, raster_scale, reveal_axis, short, view_height, Awaiting, Grab, Handle, OrganizeDrag,
+    PlacedImageSelected, Reveal, SignatureSelected, Tab, Tool, ToolEffect, ZoomMode, GRID_GAP_PT,
+    HANDLE_PX, ORGANIZE_GRID_PANEL, ROTATE_HANDLE_PX,
 };
+use pagify_shell::command::Kind;
 use pagify_shell::markup::HIT_TOLERANCE_PT;
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::reader::{prefetch_targets, STRIP_PAD_PX};
 use pagify_shell::tools;
-use pagify_shell::verbs::{MeasureKind, PageTarget, Verb};
+use pagify_shell::verbs::{PageTarget, Verb};
 
 impl crate::PagifyApp {
     /// The reference lines, **only while something is being moved** — not while it
@@ -1237,115 +1238,23 @@ impl crate::PagifyApp {
         // `PlaceImage` has never previewed — nothing to draw before its one
         // click either. `PlaceText` previews a rubber-band box once its
         // first corner is down.
-        if let Some(armed) = self.tab().tool.as_ref() {
-            if armed.page != page {
-                return;
-            }
-            let Some(cursor) = hover else { return };
-            let at = self.tab()
-                .last_snap
-                .as_ref()
-                .map(|snapped| snapped.at)
-                .unwrap_or_else(|| view.to_page(cursor));
-            match &armed.kind {
-                Tool::Signature => self.draw_signature_preview(ui, view, at),
-                // A tick, cross or dot, an image, or written words, is
-                // placed on a single click — nothing to draw before it
-                // lands. Eraser and PickText are both click-to-pick against
-                // existing geometry, not a shape drawn fresh, so neither
-                // previews. Modify picks existing geometry too.
-                Tool::PlaceImage { .. }
-                | Tool::Fill(_)
-                | Tool::Write(_)
-                | Tool::EraseMark
-                | Tool::Modify(_)
-                | Tool::PickText => {}
-                // A box, violet.
-                Tool::PlaceText
-                | Tool::Whiteout
-                | Tool::SignRectangle
-                | Tool::Draw(DrawKind::Rectangle)
-                | Tool::Lock
-                | Tool::ArticleBox => {
-                    if let Some(first) = armed.points.first().copied() {
-                        ui.painter().rect_stroke(
-                            egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
-                            egui::CornerRadius::ZERO,
-                            egui::Stroke::new(1.0, theme::violet_bright()),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                }
-                // The one that destroys, in its own colour.
-                Tool::Redact => {
-                    if let Some(first) = armed.points.first().copied() {
-                        ui.painter().rect_stroke(
-                            egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
-                            egui::CornerRadius::ZERO,
-                            egui::Stroke::new(1.0, theme::danger()),
-                            egui::StrokeKind::Inside,
-                        );
-                    }
-                }
-                // A line, violet.
-                Tool::Calibrate { .. }
-                | Tool::SignLine
-                | Tool::Draw(DrawKind::Line)
-                | Tool::Measure(MeasureKind::Distance) => {
-                    if let Some(first) = armed.points.first().copied() {
-                        ui.painter().line_segment(
-                            [view.to_screen(first), view.to_screen(at)],
-                            egui::Stroke::new(1.0, theme::violet_bright()),
-                        );
-                    }
-                }
-                Tool::Draw(DrawKind::Circle) => {
-                    if let Some(first) = armed.points.first().copied() {
-                        let radius = (view.to_screen(first) - view.to_screen(at)).length();
-                        ui.painter().circle_stroke(
-                            view.to_screen(first),
-                            radius,
-                            egui::Stroke::new(1.0, theme::violet_bright()),
-                        );
-                    }
-                }
-                Tool::Draw(DrawKind::Arrow) => {
-                    if let Some(first) = armed.points.first().copied() {
-                        let (from, to) = (view.to_screen(first), view.to_screen(at));
-                        let stroke = egui::Stroke::new(1.0, theme::violet_bright());
-                        ui.painter().line_segment([from, to], stroke);
-                        if let Some(tri) = pagify_shell::commit::arrowhead_triangle(
-                            cad_kernel::Vec2::new(from.x as f64, from.y as f64),
-                            cad_kernel::Vec2::new(to.x as f64, to.y as f64),
-                        ) {
-                            let points: Vec<egui::Pos2> =
-                                tri.iter().map(|v| egui::Pos2::new(v.x as f32, v.y as f32)).collect();
-                            ui.painter().add(egui::Shape::convex_polygon(
-                                points,
-                                theme::violet_bright(),
-                                egui::Stroke::NONE,
-                            ));
-                        }
-                    }
-                }
-                // A polyline keeps what is already placed and trails the
-                // last leg. A spline's control polygon, not the curve
-                // itself — the curve isn't known until enough points exist
-                // to tessellate it. An area measurement is the same shape:
-                // the boundary so far, trailing to the pointer.
-                Tool::Draw(DrawKind::Polyline | DrawKind::Spline) | Tool::Measure(MeasureKind::Area) => {
-                    let mut path: Vec<egui::Pos2> =
-                        armed.points.iter().map(|p| view.to_screen(*p)).collect();
-                    path.push(view.to_screen(at));
-                    ui.painter().add(egui::Shape::line(path, egui::Stroke::new(1.0, theme::violet_bright())));
-                }
-                // Resolved by a text-selection drag, which egui already
-                // draws its own selection highlight for — nothing to add on
-                // top of it, the same way Eraser/PickText/Modify never
-                // preview a point not yet placed.
-                Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. } => {}
-            }
+        //
+        // The actual shape, per `Tool` kind, is `Tool::preview` now
+        // (`tool.rs`) — `Pagify-Phase2-BigTasks.md` §2.3 step 4.
+        let tab = self.tab();
+        let Some(armed) = tab.tool.as_ref() else { return };
+        if armed.page != page {
+            return;
         }
+        let Some(cursor) = hover else { return };
+        let at = tab
+            .last_snap
+            .as_ref()
+            .map(|snapped| snapped.at)
+            .unwrap_or_else(|| view.to_page(cursor));
+        let kind = armed.kind.clone();
+        let points = armed.points.clone();
+        kind.preview(self, ui, view, &points, at);
     }
 
     /// A padlock over every sealed object on this page, and the click that
@@ -2105,43 +2014,18 @@ impl crate::PagifyApp {
 
         if response.drag_stopped() {
             let selecting = self.tab_mut().text_drag.is_some() && self.tab_mut().text_selection.is_some();
-            // A tool in hand marks what was just selected. `mark_selection`
-            // only touches `tool` when nothing was selected (its own
-            // "arm and wait" branch) — here a selection already exists, so
-            // it takes its other branch and marks at once, leaving `tool`
-            // exactly as it was: still in hand, the same `Markup` kind,
-            // ready for the next selection without a trip back to the
-            // ribbon.
-            if let Some(Tool::Markup(kind)) = self.tab_mut().tool.as_ref().map(|t| &t.kind) {
-                let kind = *kind;
-                if selecting {
-                    self.mark_selection(kind);
-                    self.tab_mut().text_selection = None;
-                }
-            }
-            // Same shape as the highlighter above, but a link needs the
-            // address before it can be written — the selection becomes a
-            // pending link waiting on that, rather than a mark made at once.
-            if selecting && matches!(self.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Link)) {
-                self.open_link_prompt_from_selection();
-            }
-            // Match Properties: the first selection made while armed becomes
-            // the sample; every one after that, while the sample is held, is
-            // matched to it at once and the tool stays in hand for the next.
+            // What a completed selection means to whichever of
+            // `Markup`/`Link`/`MatchProperties` is armed (every other kind
+            // is untouched by a text-selection drag) is `Tool::on_pointer`
+            // now — `Pagify-Phase2-BigTasks.md` §2.3 step 5.
             if selecting {
-                match self.tab_mut().tool.as_ref().map(|t| &t.kind) {
-                    Some(Tool::MatchProperties { sample: None }) => {
-                        if let Err(e) = self.match_properties_sample_from_current_selection() {
-                            self.say_error(e);
-                        }
+                if let Some(kind) = self.tab_mut().tool.as_ref().map(|t| t.kind.clone()) {
+                    match kind.on_pointer(self) {
+                        ToolEffect::None => {}
+                        ToolEffect::Say(Kind::Error, text) => self.say_error(text),
+                        ToolEffect::Say(_, text) => self.say_info(text),
+                        other => unreachable!("on_pointer only returns None or Say, got {other:?}"),
                     }
-                    Some(Tool::MatchProperties { sample: Some(_) }) => {
-                        match self.apply_match_properties_to_current_selection() {
-                            Ok(message) => self.say_info(message),
-                            Err(e) => self.say_error(e),
-                        }
-                    }
-                    _ => {}
                 }
             }
             self.tab_mut().text_drag = None;

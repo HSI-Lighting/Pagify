@@ -146,8 +146,11 @@ impl crate::PagifyApp {
             ToolEffect::OpenArticleBoxPrompt(pending) => {
                 self.tab_mut().pending_article_box = Some(pending);
             }
-            ToolEffect::Rearm(_) | ToolEffect::RearmQuietly(_) | ToolEffect::Cancelled => {
-                unreachable!("on_click never returns these yet — only resolve_tool's own tail rearms")
+            ToolEffect::None
+            | ToolEffect::Rearm(_)
+            | ToolEffect::RearmQuietly(_)
+            | ToolEffect::Cancelled => {
+                unreachable!("on_click never returns these — only on_pointer/on_cancel do")
             }
         }
         // Back in hand, ready for the next one, quietly after a failure so

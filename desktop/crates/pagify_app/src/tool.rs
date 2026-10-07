@@ -19,10 +19,11 @@
 //! handling resolves them directly instead of through `take_pick`/
 //! `resolve_tool`.
 //!
-//! `resolve_tool` (`picking.rs`) is still one large match over `Tool`, not
-//! the `Tool::on_click` returning a `ToolEffect` that is supposed to
-//! replace it — collapsing *how* transitions are expressed is later work;
-//! this phase only collapsed *where* the state lives. [`ToolId`] is a
+//! `resolve_tool`'s own match over `Tool` moved into [`Tool::on_click`],
+//! returning a [`ToolEffect`] for `picking.rs`'s `resolve_tool` to apply —
+//! `canvas.rs`'s `draw_pending_preview` and its `drag_stopped` selection
+//! block still match over `Tool` directly, the next two pieces of
+//! `Pagify-Phase2-BigTasks.md` §2.3. [`ToolId`] is a
 //! first, partial step on the *how*: `Tool::id()` returns it instead of a
 //! bare ribbon-command string, so the ribbon-side half of "which button is
 //! lit" is now the one place left that has to know the matching literal —
@@ -32,7 +33,8 @@
 //! collides with `pagify_shell::tools`, already imported everywhere in
 //! `main.rs`).
 
-use crate::{area_between, Awaiting, PagifyApp};
+use crate::overlay::PageView;
+use crate::{area_between, theme, Awaiting, PagifyApp};
 use pagify_shell::command::Kind;
 use pagify_shell::measure::{self, Calibration};
 use pagify_shell::page_space::AppPoint;
@@ -380,6 +382,14 @@ impl Tool {
 /// a dialog instead of saying anything.
 #[derive(Debug)]
 pub(crate) enum ToolEffect {
+    /// Nothing to say, nothing to open — added once `on_pointer`'s
+    /// `Markup`/`Link` arms proved `Say` alone could not express "do the
+    /// thing, which already handles its own error, and say nothing more."
+    /// Forcing those through `Say(Kind::Info, String::new())` instead would
+    /// have called `say_info("")`, which is not the same as not calling it
+    /// — the collapsed command bar prints the last thing said, and an
+    /// empty one would blank out whatever was there before.
+    None,
     /// A result to say — `Kind::Info` for `Ok`, `Kind::Error` for `Err`,
     /// exactly as `resolve_tool`'s tail does today.
     Say(Kind, String),
@@ -641,6 +651,163 @@ impl Tool {
         match outcome {
             Ok(said) => ToolEffect::Say(Kind::Info, said),
             Err(problem) => ToolEffect::Say(Kind::Error, problem),
+        }
+    }
+
+    /// The shape a half-finished tool would make, following the pointer —
+    /// `canvas.rs`'s own `draw_pending_preview` match, moved here per
+    /// `Pagify-Phase2-BigTasks.md` §2.3 step 4. Reads `self` rather than
+    /// consuming it, unlike `on_click`: nothing here needs to move data out
+    /// of a kind, only look at it. `app` is only for the one arm
+    /// (`Signature`) that calls back into an existing `&mut self` method
+    /// rather than drawing directly.
+    pub(crate) fn preview(
+        &self,
+        app: &mut PagifyApp,
+        ui: &mut egui::Ui,
+        view: PageView,
+        points: &[AppPoint],
+        at: AppPoint,
+    ) {
+        match self {
+            Tool::Signature => app.draw_signature_preview(ui, view, at),
+            // A tick, cross or dot, an image, or written words, is placed
+            // on a single click — nothing to draw before it lands. Eraser
+            // and PickText are both click-to-pick against existing
+            // geometry, not a shape drawn fresh, so neither previews.
+            // Modify picks existing geometry too.
+            Tool::PlaceImage { .. }
+            | Tool::Fill(_)
+            | Tool::Write(_)
+            | Tool::EraseMark
+            | Tool::Modify(_)
+            | Tool::PickText => {}
+            // A box, violet.
+            Tool::PlaceText
+            | Tool::Whiteout
+            | Tool::SignRectangle
+            | Tool::Draw(DrawKind::Rectangle)
+            | Tool::Lock
+            | Tool::ArticleBox => {
+                if let Some(first) = points.first().copied() {
+                    ui.painter().rect_stroke(
+                        egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
+                        egui::CornerRadius::ZERO,
+                        egui::Stroke::new(1.0, theme::violet_bright()),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+            // The one that destroys, in its own colour.
+            Tool::Redact => {
+                if let Some(first) = points.first().copied() {
+                    ui.painter().rect_stroke(
+                        egui::Rect::from_two_pos(view.to_screen(first), view.to_screen(at)),
+                        egui::CornerRadius::ZERO,
+                        egui::Stroke::new(1.0, theme::danger()),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+            // A line, violet.
+            Tool::Calibrate { .. }
+            | Tool::SignLine
+            | Tool::Draw(DrawKind::Line)
+            | Tool::Measure(MeasureKind::Distance) => {
+                if let Some(first) = points.first().copied() {
+                    ui.painter().line_segment(
+                        [view.to_screen(first), view.to_screen(at)],
+                        egui::Stroke::new(1.0, theme::violet_bright()),
+                    );
+                }
+            }
+            Tool::Draw(DrawKind::Circle) => {
+                if let Some(first) = points.first().copied() {
+                    let radius = (view.to_screen(first) - view.to_screen(at)).length();
+                    ui.painter().circle_stroke(
+                        view.to_screen(first),
+                        radius,
+                        egui::Stroke::new(1.0, theme::violet_bright()),
+                    );
+                }
+            }
+            Tool::Draw(DrawKind::Arrow) => {
+                if let Some(first) = points.first().copied() {
+                    let (from, to) = (view.to_screen(first), view.to_screen(at));
+                    let stroke = egui::Stroke::new(1.0, theme::violet_bright());
+                    ui.painter().line_segment([from, to], stroke);
+                    if let Some(tri) = pagify_shell::commit::arrowhead_triangle(
+                        cad_kernel::Vec2::new(from.x as f64, from.y as f64),
+                        cad_kernel::Vec2::new(to.x as f64, to.y as f64),
+                    ) {
+                        let poly: Vec<egui::Pos2> =
+                            tri.iter().map(|v| egui::Pos2::new(v.x as f32, v.y as f32)).collect();
+                        ui.painter().add(egui::Shape::convex_polygon(
+                            poly,
+                            theme::violet_bright(),
+                            egui::Stroke::NONE,
+                        ));
+                    }
+                }
+            }
+            // A polyline keeps what is already placed and trails the last
+            // leg. A spline's control polygon, not the curve itself — the
+            // curve isn't known until enough points exist to tessellate
+            // it. An area measurement is the same shape: the boundary so
+            // far, trailing to the pointer.
+            Tool::Draw(DrawKind::Polyline | DrawKind::Spline) | Tool::Measure(MeasureKind::Area) => {
+                let mut path: Vec<egui::Pos2> = points.iter().map(|p| view.to_screen(*p)).collect();
+                path.push(view.to_screen(at));
+                ui.painter().add(egui::Shape::line(path, egui::Stroke::new(1.0, theme::violet_bright())));
+            }
+            // Resolved by a text-selection drag, which egui already draws
+            // its own selection highlight for — nothing to add on top of
+            // it, the same way Eraser/PickText/Modify never preview a
+            // point not yet placed.
+            Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. } => {}
+        }
+    }
+
+    /// Resolved by a text-selection drag's release, not a click —
+    /// `canvas.rs`'s `drag_stopped` selection block, moved here per
+    /// `Pagify-Phase2-BigTasks.md` §2.3 step 5. Named `on_pointer` rather
+    /// than a new fifth method: the mentor's own sketch
+    /// (DESIGN_REVIEW.md §3.2) names exactly four —
+    /// `on_click`/`on_key`/`on_pointer`/`on_cancel` — and a drag's release
+    /// is a pointer event, not a click.
+    ///
+    /// Every kind outside `wants_selection()` returns `ToolEffect::None`:
+    /// the caller only calls this once a selection has actually completed,
+    /// but doesn't first check *which* kind is armed — this match is that
+    /// check, same as `on_click`'s is. `Markup`/`Link` call back into an
+    /// existing method that already handles its own error and its own
+    /// state cleanup (and, for `Markup` with nothing selected, its own
+    /// re-arm) — nothing here duplicates that, only `MatchProperties`'s
+    /// two phases produce something this method itself needs to say.
+    pub(crate) fn on_pointer(&self, app: &mut PagifyApp) -> ToolEffect {
+        match self {
+            Tool::Markup(kind) => {
+                app.mark_selection(*kind);
+                app.tab_mut().text_selection = None;
+                ToolEffect::None
+            }
+            Tool::Link => {
+                app.open_link_prompt_from_selection();
+                ToolEffect::None
+            }
+            Tool::MatchProperties { sample: None } => {
+                match app.match_properties_sample_from_current_selection() {
+                    Ok(said) => ToolEffect::Say(Kind::Info, said),
+                    Err(e) => ToolEffect::Say(Kind::Error, e),
+                }
+            }
+            Tool::MatchProperties { sample: Some(_) } => {
+                match app.apply_match_properties_to_current_selection() {
+                    Ok(said) => ToolEffect::Say(Kind::Info, said),
+                    Err(e) => ToolEffect::Say(Kind::Error, e),
+                }
+            }
+            _ => ToolEffect::None,
         }
     }
 }
