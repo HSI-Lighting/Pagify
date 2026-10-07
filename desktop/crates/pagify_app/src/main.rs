@@ -14252,27 +14252,7 @@ impl PagifyApp {
         //
         // Instead: the page's own colour behind, the run's own ink and size in
         // front, and the box kept off the words themselves.
-        let paper = egui::Color32::from_rgb(
-            edit.background.r,
-            edit.background.g,
-            edit.background.b,
-        );
-        let ink = edit
-            .style
-            .color
-            .filter(|c| c.a > 0)
-            .map(|c| egui::Color32::from_rgb(c.r, c.g, c.b))
-            .unwrap_or(egui::Color32::BLACK);
-
-        // See `run_editor_glyph_size`'s own doc for why this is not clamped
-        // to a fixed pixel range — reported from use as the preview's own
-        // scale changing as the page was zoomed in and out.
-        let glyph_size = run_editor_glyph_size(on_screen);
-        let font_id = if face_ready {
-            egui::FontId::new(glyph_size, egui::FontFamily::Name(RUN_FAMILY.into()))
-        } else {
-            egui::FontId::proportional(glyph_size)
-        };
+        let (paper, ink, font_id, glyph_size) = Self::run_editor_skin(edit, on_screen, face_ready);
         let id = egui::Id::new(("run-editor", page, edit.object));
 
         // **Typing past the run's own edge starts a new line, rather than
@@ -14322,18 +14302,8 @@ impl PagifyApp {
         // not once anything was retyped. Measuring however wide the
         // original words already need in this font, once, keeps that case
         // silent — wrapping only kicks in once typing pushes *past* that.
-        let original_last_line = edit.original.rsplit('\n').next().unwrap_or("");
-        let original_width = ui
-            .fonts_mut(|f| f.layout_no_wrap(original_last_line.to_string(), font_id.clone(), ink))
-            .size()
-            .x;
-        // A width the reader dragged the box to is the width, exactly: no
-        // floor at what the unedited words measured, or it could never be
-        // dragged narrower than the run it opened on.
-        let max_width = match edit.box_resize.width_pt {
-            Some(width_pt) => (width_pt * view.scale).max(1.0),
-            None => (base_screen_width * grow).max(original_width),
-        };
+        let max_width =
+            Self::run_editor_max_width(edit, ui, &font_id, ink, base_screen_width, grow, view.scale);
         // Resized since last frame: the lines are joined, then wrapped afresh to
         // the new width by the loop below. One byte each way (`\n` for ` `), so
         // the caret does not move.
@@ -14578,6 +14548,68 @@ fn wrap_typed_last_line(
             }
         }
 }
+
+
+    /// The skin values the run editor draws with: the page's own paper colour
+    /// behind, the run's own ink in front, the font the buffer is set in — the
+    /// run's embedded face where one is ready, the program's own proportional
+    /// font otherwise — and the on-screen glyph size the fallback face uses.
+    fn run_editor_skin(
+        edit: &EditingRun,
+        on_screen: f32,
+        face_ready: bool,
+    ) -> (egui::Color32, egui::Color32, egui::FontId, f32) {
+        let paper = egui::Color32::from_rgb(
+            edit.background.r,
+            edit.background.g,
+            edit.background.b,
+        );
+        let ink = edit
+            .style
+            .color
+            .filter(|c| c.a > 0)
+            .map(|c| egui::Color32::from_rgb(c.r, c.g, c.b))
+            .unwrap_or(egui::Color32::BLACK);
+
+        // See `run_editor_glyph_size`'s own doc for why this is not clamped
+        // to a fixed pixel range — reported from use as the preview's own
+        // scale changing as the page was zoomed in and out.
+        let glyph_size = run_editor_glyph_size(on_screen);
+        let font_id = if face_ready {
+            egui::FontId::new(glyph_size, egui::FontFamily::Name(RUN_FAMILY.into()))
+        } else {
+            egui::FontId::proportional(glyph_size)
+        };
+        (paper, ink, font_id, glyph_size)
+    }
+
+    /// How wide the box is allowed to get: an explicit resize wins, otherwise
+    /// the run's own measured width — see the comments this moved away from
+    /// in `draw_run_editor` for why it grows with the size slider.
+    fn run_editor_max_width(
+        edit: &EditingRun,
+        ui: &mut egui::Ui,
+        font_id: &egui::FontId,
+        ink: egui::Color32,
+        base_screen_width: f32,
+        grow: f32,
+        view_scale: f32,
+    ) -> f32 {
+        let original_last_line = edit.original.rsplit('\n').next().unwrap_or("");
+        let original_width = ui
+            .fonts_mut(|f| f.layout_no_wrap(original_last_line.to_string(), font_id.clone(), ink))
+            .size()
+            .x;
+        // A width the reader dragged the box to is the width, exactly: no
+        // floor at what the unedited words measured, or it could never be
+        // dragged narrower than the run it opened on.
+        let max_width = match edit.box_resize.width_pt {
+            Some(width_pt) => (width_pt * view_scale).max(1.0),
+            None => (base_screen_width * grow).max(original_width),
+        };
+        max_width
+    }
+
 
 
     /// The box [`Self::begin_text_box`] opened, being typed into.
