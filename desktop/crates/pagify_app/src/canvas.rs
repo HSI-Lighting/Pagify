@@ -7,7 +7,7 @@ use crate::overlay::{self, PageView};
 use crate::theme;
 use crate::{
     icon_font, raster_scale, reveal_axis, short, view_height, Awaiting, DrawKind, Grab, Handle, OrganizeDrag,
-    PendingKind, PlacedImageSelected, Reveal, SignatureSelected, Tab, Tool, ZoomMode, GRID_GAP_PT, HANDLE_PX,
+    PlacedImageSelected, Reveal, SignatureSelected, Tab, Tool, ZoomMode, GRID_GAP_PT, HANDLE_PX,
     ORGANIZE_GRID_PANEL, ROTATE_HANDLE_PX,
 };
 use pagify_shell::markup::HIT_TOLERANCE_PT;
@@ -1122,30 +1122,16 @@ impl crate::PagifyApp {
                         // nothing whatever: no mark, no message, nothing to
                         // read. So a pick holding no points and no objects yet
                         // starts on whichever page is actually clicked.
-                        if let Some(pending) = &mut self.tab_mut().pending {
-                            if pending.page != page
-                                && pending.points.is_empty()
-                                && pending.objects.is_empty()
-                                && hover.is_some_and(|at| rect.contains(at))
-                            {
-                                pending.page = page;
-                            }
-                        }
-                        // Same rule for a `Tool` — it has no `objects` to
-                        // check, but is otherwise the identical trade: a
-                        // part-way `Tool` pick stays bound to its own page,
-                        // but one that has collected nothing yet follows
-                        // whichever page is actually clicked.
                         if let Some(armed) = &mut self.tab_mut().tool {
                             if armed.page != page
                                 && armed.points.is_empty()
+                                && armed.objects.is_empty()
                                 && hover.is_some_and(|at| rect.contains(at))
                             {
                                 armed.page = page;
                             }
                         }
-                        let owns = self.tab_mut().pending.as_ref().map_or(true, |p| p.page == page)
-                            && self.tab_mut().tool.as_ref().map_or(true, |t| t.page == page);
+                        let owns = self.tab_mut().tool.as_ref().map_or(true, |t| t.page == page);
                         if owns {
                             self.interact(ui, rect, view, page, command_id);
                         }
@@ -1249,8 +1235,8 @@ impl crate::PagifyApp {
         // rubber band from. Without this, the only way to know how much of
         // the page a signature would cover was to place it and look.
         // `PlaceImage` has never previewed — nothing to draw before its one
-        // click either. `PlaceText` previews the same rubber-band box
-        // `PendingKind::PlaceText` used to, once its first corner is down.
+        // click either. `PlaceText` previews a rubber-band box once its
+        // first corner is down.
         if let Some(armed) = self.tab().tool.as_ref() {
             if armed.page != page {
                 return;
@@ -1265,11 +1251,15 @@ impl crate::PagifyApp {
                 Tool::Signature => self.draw_signature_preview(ui, view, at),
                 // A tick, cross or dot, an image, or written words, is
                 // placed on a single click — nothing to draw before it
-                // lands. Eraser is a click-to-pick, the same as `PickText`
-                // (which stayed in `pending` and never previewed either).
-                // Modify picks existing geometry rather than drawing new
-                // geometry, so it never previewed either.
-                Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) | Tool::EraseMark | Tool::Modify(_) => {}
+                // lands. Eraser and PickText are both click-to-pick against
+                // existing geometry, not a shape drawn fresh, so neither
+                // previews. Modify picks existing geometry too.
+                Tool::PlaceImage { .. }
+                | Tool::Fill(_)
+                | Tool::Write(_)
+                | Tool::EraseMark
+                | Tool::Modify(_)
+                | Tool::PickText => {}
                 // A box, violet.
                 Tool::PlaceText
                 | Tool::Whiteout
@@ -1350,14 +1340,7 @@ impl crate::PagifyApp {
                     ui.painter().add(egui::Shape::line(path, egui::Stroke::new(1.0, theme::violet_bright())));
                 }
             }
-            return;
         }
-
-        // `PendingKind` has nothing left to preview: `PickText`, its only
-        // remaining variant, wants one point and resolves on it immediately
-        // in the same `take_pick` call — there is never a frame where it is
-        // still armed with a point already collected to draw a rubber band
-        // from.
     }
 
     /// A padlock over every sealed object on this page, and the click that
@@ -1590,15 +1573,15 @@ impl crate::PagifyApp {
                     // the person would see nothing — the refusal is the
                     // answer to this gesture. The tool is put back in hand
                     // quietly, for the next click.
-                    self.arm_without_saying(PendingKind::PickText, page);
+                    self.arm_tool_without_saying(Tool::PickText, page);
                     answered_above = true;
                 } else if let Some(spot) = response.interact_pointer_pos() {
                     let at = view.to_page(spot);
-                    self.arm(PendingKind::PickText, page);
-                    if let Some(p) = self.tab_mut().pending.as_mut() {
-                        p.points.push(at);
+                    self.arm_tool(Tool::PickText, page);
+                    if let Some(armed) = self.tab_mut().tool.as_mut() {
+                        armed.points.push(at);
                     }
-                    self.resolve();
+                    self.resolve_tool();
                     answered_above = true;
                 }
             }
@@ -1856,10 +1839,8 @@ impl crate::PagifyApp {
         // explicit request for a specific point and must not then be nudged off
         // it by a constraint.
         self.tab_mut().last_snap = None;
-        let snapping = self.tab().pending.as_ref().is_some_and(|p| p.kind.wants_snapping())
-            || self.tab().tool.as_ref().is_some_and(|t| t.kind.wants_snapping());
-        let first_point = self.tab().pending.as_ref().and_then(|p| p.points.first().copied())
-            .or_else(|| self.tab().tool.as_ref().and_then(|t| t.points.first().copied()));
+        let snapping = self.tab().tool.as_ref().is_some_and(|t| t.kind.wants_snapping());
+        let first_point = self.tab().tool.as_ref().and_then(|t| t.points.first().copied());
         if let Some(layer) = self.tab().markup.existing(page).filter(|_| snapping) {
             let radius = HIT_TOLERANCE_PT * 3.0;
             if let Some(snapped) = tools::snap_at(layer, at, radius, self.snaps, None, first_point) {
@@ -1869,8 +1850,7 @@ impl crate::PagifyApp {
         }
         if snapping && self.tab_mut().last_snap.is_none() {
             if self.ortho {
-                let anchor = self.tab_mut().pending.as_ref().and_then(|p| p.points.last().copied())
-                    .or_else(|| self.tab_mut().tool.as_ref().and_then(|t| t.points.last().copied()));
+                let anchor = self.tab_mut().tool.as_ref().and_then(|t| t.points.last().copied());
                 if let Some(anchor) = anchor {
                     at = tools::orthogonal(anchor, at);
                 }
@@ -1886,14 +1866,13 @@ impl crate::PagifyApp {
 
         // A placed-but-unapplied signature, picked with **no tool armed** —
         // before the object tool's own check, and gated the same way: an
-        // armed tool (the object tool, or anything pending) owns the
-        // pointer outright, and a signature sitting under it is reached the
-        // way any other page content is, not by this path. Unlike the
-        // object tool, this only takes the gesture when it actually found
-        // something to do with it — a click on bare paper or on text still
-        // reaches the ordinary handling below.
+        // armed tool (the object tool, or any `Tool`) owns the pointer
+        // outright, and a signature sitting under it is reached the way any
+        // other page content is, not by this path. Unlike the object tool,
+        // this only takes the gesture when it actually found something to
+        // do with it — a click on bare paper or on text still reaches the
+        // ordinary handling below.
         if self.tab_mut().object_tool.is_none()
-            && self.tab_mut().pending.is_none()
             && self.tab_mut().tool.is_none()
             && self.interact_signatures(ui, &response, page, at, view)
         {
@@ -1902,7 +1881,6 @@ impl crate::PagifyApp {
 
         // The same, for a plain placed picture — see `interact_placed_images`.
         if self.tab_mut().object_tool.is_none()
-            && self.tab_mut().pending.is_none()
             && self.tab_mut().tool.is_none()
             && self.interact_placed_images(ui, &response, page, at, view)
         {
@@ -1969,14 +1947,12 @@ impl crate::PagifyApp {
         // checked ahead of the text cursor below so a link drawn over
         // running text still reads as clickable rather than as selectable
         // prose.
-        let hovering_link = self.tab_mut().pending.is_none()
-            && self.tab_mut().tool.is_none()
+        let hovering_link = self.tab_mut().tool.is_none()
             && (self.foreign_at(page, at).is_some_and(|n| self.link_uri_at(page, n).is_some())
                 || self.internal_link_at(page, at).is_some());
         if hovering_link {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
-        } else if self.tab_mut().pending.is_none()
-            && self.tab_mut().tool.is_none()
+        } else if self.tab_mut().tool.is_none()
             // A text cursor wherever there is text under the pointer, which is
             // the other half of the same answer: on a page whose words are
             // drawn as outlines the cursor stays an arrow, and the reason
@@ -2002,7 +1978,7 @@ impl crate::PagifyApp {
         //
         // A gesture that stayed within the same tolerance used for hit-testing
         // is a click, however egui classified it.
-        if self.tab_mut().pending.is_some() || self.tab_mut().tool.is_some() {
+        if self.tab_mut().tool.is_some() {
             self.tab_mut().text_drag = None;
             // Not the click the click-away block above has already answered —
             // see `answered_above`.
@@ -2162,7 +2138,7 @@ impl crate::PagifyApp {
         }
 
         if response.clicked() {
-            if self.tab_mut().pending.is_some() {
+            if self.tab_mut().tool.is_some() {
                 self.take_pick(at);
             } else if let Some(target) = self.internal_link_at(page, at) {
                 self.act(Verb::Page(PageTarget::Number(target + 1)));

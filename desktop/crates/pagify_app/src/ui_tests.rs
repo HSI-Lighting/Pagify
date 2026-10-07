@@ -267,7 +267,7 @@ fn the_eraser_still_erases_a_selected_drawing() {
     app.submit("l 10,10 100,100");
     app.submit("all");
     app.submit("erase");
-    assert!(app.tab().pending.is_none(), "a selection was erased but the click tool was armed as well");
+    assert!(app.tab().tool.is_none(), "a selection was erased but the click tool was armed as well");
     assert_eq!(app.tab().markup.existing(0).map(|l| l.len()).unwrap_or(0), 0, "the drawing is still there");
 }
 
@@ -2373,10 +2373,10 @@ fn selection_works_after_scrolling_into_a_long_document() {
     let app = h.state();
     assert!(
         app.tab().text_selection.is_some(),
-        "nothing selected on page {} of the catalogue.\npointer: {:?}  pending: {:?}",
+        "nothing selected on page {} of the catalogue.\npointer: {:?}  tool armed: {:?}",
         landed + 1,
         app.tab().pointer,
-        app.tab().pending.is_some()
+        app.tab().tool.is_some()
     );
 }
 
@@ -3091,7 +3091,7 @@ fn an_unbuilt_button_says_so_without_opening_the_history() {
     let shown = h.state().command_open;
     assert!(!shown, "the test is not exercising the collapsed bar");
     assert!(
-        h.state().tab().pending.is_none(),
+        h.state().tab().tool.is_none(),
         "a planned verb armed something, so the bar would show that instead"
     );
 }
@@ -3772,8 +3772,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
 ///
 /// **Bare `fillsign`, not `edittext`** — an arbitrary stand-in for "a
 /// one-click tool armed on one page": both pick a single run by its own
-/// click, through the same `PendingKind::PickText` this test means to
-/// exercise.
+/// click, through the same `Tool::PickText` this test means to exercise.
 #[test]
 fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
     let mut h = harness("pages-ladder.pdf");
@@ -3783,7 +3782,7 @@ fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
 
     h.state_mut().submit("fillsign");
     h.run_steps(2);
-    let armed_for = h.state().tab().pending.as_ref().map(|p| p.page).expect("armed");
+    let armed_for = h.state().tab().tool.as_ref().map(|t| t.page).expect("armed");
 
     // Down the strip, past the page the tool was armed on.
     // Where the next page actually sits, worked out from the page the
@@ -3810,7 +3809,7 @@ fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
     let before = h.state().cmd.history().len();
     click(&mut h, target);
     h.run_steps(3);
-    let answered = h.state().tab().pending.as_ref().is_some_and(|p| p.page != armed_for)
+    let answered = h.state().tab().tool.as_ref().is_some_and(|t| t.page != armed_for)
         || h.state().cmd.history().len() > before
         || h.state().tab().editing_run.is_some();
 

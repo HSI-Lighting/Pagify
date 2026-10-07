@@ -7,7 +7,7 @@
 use crate::overlay::PageView;
 use crate::{
     compact_page_spec, page_to_image, paint_signature, short, view_height, Awaiting, DetailTile, FindReplaceMode,
-    ListAction, PendingKind, RenderJob, SignaturePad, Tool,
+    ListAction, RenderJob, SignaturePad, Tool,
 };
 use crate::spelling;
 use crate::theme;

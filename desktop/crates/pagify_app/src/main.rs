@@ -73,7 +73,7 @@ pub(crate) use ribbon::{
     DOC_TAB_MAX_TEXT, DOC_TAB_MENU_WIDTH, DOC_TAB_PADDING, RIBBON_MARGIN_X, RIBBON_MARGIN_Y, TOOL_HEIGHT, TOOL_WIDTH,
 };
 pub(crate) use pending::{
-    ArmedTool, DrawKind, MatchPropertiesSample, Pending, PendingArticleBox, PendingKind, PendingLink, Tool,
+    ArmedTool, DrawKind, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool,
 };
 // `spelling` and `paragraph_lines` moved to `pagify_shell` (Phase 4a: no
 // egui, so they belong where they can be tested without a window) —
@@ -493,9 +493,8 @@ struct DocTab {
     doc: Option<Doc>,
     markup: Markup,
     calibration: Calibration,
-    pending: Option<Pending>,
-    /// A `Tool` armed outside `pending` — see [`ArmedTool`]'s own doc for why
-    /// `Signature`/`PlaceImage` live here now instead of in `PendingKind`.
+    /// A `Tool` armed and part-way through collecting its objects/points —
+    /// see [`ArmedTool`]'s own doc.
     tool: Option<ArmedTool>,
 
     page: usize,
@@ -912,7 +911,6 @@ impl DocTab {
             doc: None,
             markup: Markup::default(),
             calibration: Calibration::default(),
-            pending: None,
             tool: None,
             page: 0,
             zoom: ZoomMode::Fit,
@@ -4123,7 +4121,6 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        self.tab_mut().pending = None;
         self.tab_mut().tool = None;
         self.tab_mut().markup_armed = None;
         self.tab_mut().link_armed = false;
@@ -6743,7 +6740,7 @@ impl PagifyApp {
     fn start_paste_ghost(&mut self, pasted: Option<String>) -> bool {
         let in_hand = self.tab().object_tool.is_some()
             || self.tab().editing_run.is_some()
-            || self.tab().pending.as_ref().is_some_and(|p| matches!(p.kind, PendingKind::PickText));
+            || self.tab().tool.as_ref().is_some_and(|t| matches!(t.kind, Tool::PickText));
         if !in_hand {
             return false;
         }
@@ -7846,13 +7843,6 @@ impl PagifyApp {
             // A real stop: the worker checks this between lines and puts the
             // page down.
             reading.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        if self.tab_mut().pending.take().is_some() {
-            self.say_info("cancelled.");
-            let page = self.tab().page;
-            if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
-                layer.forget_last_step();
-            }
         }
         if self.tab_mut().tool.take().is_some() {
             self.say_info("cancelled.");
@@ -9399,7 +9389,7 @@ impl PagifyApp {
             return;
         }
         let page = self.tab_mut().page;
-        self.arm(PendingKind::PickText, page);
+        self.arm_tool(Tool::PickText, page);
     }
 
     /// The run of text under a point, offered for retyping — and, when the
@@ -12914,16 +12904,10 @@ impl eframe::App for PagifyApp {
             // measurement, or a polyline. `done` is the same thing typed.
             if keys.enter {
                 let closeable = self.tab_mut()
-                    .pending
-                    .as_ref()
-                    .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
-                if closeable {
-                    self.resolve();
-                } else if self.tab_mut()
                     .tool
                     .as_ref()
-                    .is_some_and(|t| t.kind.ends_on_enter() && t.points.len() >= 2)
-                {
+                    .is_some_and(|t| t.kind.ends_on_enter() && t.points.len() >= 2);
+                if closeable {
                     self.resolve_tool();
                 }
             }
@@ -13171,8 +13155,7 @@ impl eframe::App for PagifyApp {
                 // Which tool is in force. The pointer mode, or whichever tool
                 // is part-way through collecting its clicks — a user who armed
                 // Line and looked away needs to see that it is still armed.
-                let armed = self.tab_mut().pending.as_ref().and_then(|p| p.kind.command())
-                    .or_else(|| self.tab_mut().tool.as_ref().and_then(|t| t.kind.command()));
+                let armed = self.tab_mut().tool.as_ref().and_then(|t| t.kind.command());
                 let in_hand = self.tab_mut()
                     .markup_armed
                     .map(|k| match k {
@@ -13389,12 +13372,9 @@ impl eframe::App for PagifyApp {
                 .document
                 .clone()
                 .unwrap_or_else(|| "pagify".to_string());
-            let wants = match &self.tab_mut().pending {
-                Some(p) => p.prompt(),
-                None => match &self.tab_mut().tool {
-                    Some(t) => t.kind.prompt(t.objects.len(), t.points.len()),
-                    None => self.cmd.prompt().wants.clone(),
-                },
+            let wants = match &self.tab_mut().tool {
+                Some(t) => t.kind.prompt(t.objects.len(), t.points.len()),
+                None => self.cmd.prompt().wants.clone(),
             };
 
             if self.command_open {
@@ -13434,7 +13414,7 @@ impl eframe::App for PagifyApp {
                     // A tool that is waiting for clicks must say so even with
                     // the history folded away. Without this, arming a tool
                     // looked exactly like nothing happening.
-                    if self.tab_mut().pending.is_some() || self.tab_mut().tool.is_some() {
+                    if self.tab_mut().tool.is_some() {
                         // **An error that has just been said stays, with the
                         // prompt after it.** Reported from use: a click that
                         // found no text, or an apply that was refused, said
@@ -14011,9 +13991,8 @@ impl eframe::App for PagifyApp {
         if let Some(dispatch) = submitted {
             // A typed line cancels any half-collected pick. Letting it swallow
             // the click silently would mean an unrelated command finishing
-            // someone else's measurement. `|`, not `||`: both takes must run
-            // regardless of which one actually held something.
-            if self.tab_mut().pending.take().is_some() | self.tab_mut().tool.take().is_some() {
+            // someone else's measurement.
+            if self.tab_mut().tool.take().is_some() {
                 self.say_info("that pick was cancelled.");
             }
             let line = self

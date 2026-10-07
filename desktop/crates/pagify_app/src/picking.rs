@@ -2,14 +2,10 @@
 //! that leaves an open run editor.
 //!
 //! **Still in its current shape, not redesigned** — see [`crate::pending`]'s
-//! own doc for why. `resolve` in particular is still the one large dispatch
-//! match it always was, not the `Tool::on_click` that is supposed to replace
-//! it. `resolve_tool` is that function's smaller sibling: the kinds that
-//! have already moved out of the big match.
+//! own doc for why. `resolve_tool` is still one large dispatch match, not
+//! the `Tool::on_click` that is supposed to replace it.
 
-use crate::{
-    area_between, ArmedTool, Awaiting, DrawKind, Pending, PendingArticleBox, PendingKind, Tool,
-};
+use crate::{area_between, ArmedTool, Awaiting, DrawKind, PendingArticleBox, Tool};
 use pagify_shell::markup::HIT_TOLERANCE_PT;
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::verbs::MeasureKind;
@@ -17,50 +13,6 @@ use pagify_shell::{measure, tools};
 use pagify_shell::measure::Calibration;
 
 impl crate::PagifyApp {
-    pub(crate) fn arm(&mut self, kind: PendingKind, page: usize) {
-        self.arm_without_saying(kind, page);
-        let prompt = self.tab().pending.as_ref().map(Pending::prompt);
-        if let Some(prompt) = prompt {
-            self.say_info(prompt);
-        }
-    }
-
-    /// [`Self::arm`] without the announcement — for putting a repeating tool
-    /// back in hand *after something the person has to read*.
-    ///
-    /// **Reported from use: the red line never showed.** A click that found no
-    /// text said so and then, in the same frame, the tool re-armed itself and
-    /// said "click the words to change" over it, so the error was only ever in
-    /// the history — which is folded away by default. The bar still says a
-    /// tool is armed (see the command bar), with the prompt after the error
-    /// instead of in place of it.
-    pub(crate) fn arm_without_saying(&mut self, kind: PendingKind, page: usize) {
-        // The object tool and an armed pick are mutually exclusive — see
-        // `take_up_object_tool`'s own clearing of `self.tab_mut().pending` for the
-        // other direction. **Reported from use, with a screenshot: after
-        // using Edit Object, arming Edit Text left both ribbon buttons lit
-        // at once.** Worse than the cosmetic double-highlight: every click
-        // kept reaching the object tool's own click-to-select instead of
-        // resolving the pick this was arming, because `interact_page`
-        // checks `self.tab_mut().object_tool.is_some()` first and takes the pointer
-        // outright when it is — so Edit Text, or any other tool armed
-        // through here, went silently inert the moment Edit Object had
-        // ever been picked up and not explicitly put down.
-        if self.tab_mut().object_tool.take().is_some() {
-            self.tab_mut().selected = None;
-            self.tab_mut().grab = None;
-            self.tab_mut().group = Vec::new();
-            self.tab_mut().marquee = None;
-            self.tab_mut().group_grab = None;
-        }
-        self.put_down_page_editors("armed a different tool");
-        // Mutually exclusive with `tool` the same way as `object_tool`,
-        // above — see `arm_tool_without_saying`'s own clearing of `pending`
-        // for the other direction.
-        self.tab_mut().tool = None;
-        self.tab_mut().pending = Some(Pending { kind, page, objects: Vec::new(), points: Vec::new() });
-    }
-
     pub(crate) fn arm_tool(&mut self, tool: Tool, page: usize) {
         self.arm_tool_without_saying(tool, page);
         let prompt = self.tab().tool.as_ref().map(|t| t.kind.prompt(0, 0));
@@ -69,11 +21,25 @@ impl crate::PagifyApp {
         }
     }
 
-    /// [`Self::arm_tool`] without the announcement — see [`Self::
-    /// arm_without_saying`]'s own doc for when that matters: `resolve_tool`
-    /// uses it to put a repeating `Tool` (so far, only `Fill`) back in hand
-    /// quietly after a failure, the same way `resolve` does for `pending`.
+    /// [`Self::arm_tool`] without the announcement — for putting a
+    /// repeating tool back in hand *after something the person has to
+    /// read*. `resolve_tool` uses it to re-arm quietly after a failure,
+    /// so the error stays the last thing said instead of being covered by
+    /// the tool's own prompt in the same frame (reported from use: a
+    /// click that found no text said so, and the tool re-armed itself and
+    /// said "click the words to change" over it in the same frame, so the
+    /// error only ever showed in the history, which is folded away by
+    /// default).
     pub(crate) fn arm_tool_without_saying(&mut self, tool: Tool, page: usize) {
+        // The object tool and an armed `Tool` are mutually exclusive — see
+        // `take_up_object_tool`'s own clearing of `self.tab_mut().tool` for
+        // the other direction. **Reported from use, with a screenshot:
+        // after using Edit Object, arming Edit Text left both ribbon
+        // buttons lit at once.** Worse than the cosmetic double-highlight:
+        // every click kept reaching the object tool's own click-to-select
+        // instead of resolving the pick this was arming, because
+        // `interact` checks `self.tab_mut().object_tool.is_some()` first
+        // and takes the pointer outright when it is.
         if self.tab_mut().object_tool.take().is_some() {
             self.tab_mut().selected = None;
             self.tab_mut().grab = None;
@@ -82,7 +48,6 @@ impl crate::PagifyApp {
             self.tab_mut().group_grab = None;
         }
         self.put_down_page_editors("armed a different tool");
-        self.tab_mut().pending = None;
         self.tab_mut().tool = Some(ArmedTool { kind: tool, page, objects: Vec::new(), points: Vec::new() });
     }
 
@@ -124,9 +89,8 @@ impl crate::PagifyApp {
             let page = armed.page;
             let wants_object = armed.objects.len() < armed.kind.wants_objects();
             if wants_object {
-                // Same generous tolerance as the `pending` path below, for
-                // the same reason — you are aiming at a line with a mouse,
-                // and a miss here costs the whole operation.
+                // A generous tolerance: you are aiming at a line with a
+                // mouse, and a miss here costs the whole operation.
                 let hit = self.tab_mut()
                     .markup
                     .existing(page)
@@ -137,8 +101,8 @@ impl crate::PagifyApp {
                             armed.objects.push((index, at));
                         }
                     }
-                    // Quietest possible miss, same as `pending`'s own: `tool`
-                    // is not touched at all, not even to record the attempt.
+                    // Quietest possible miss: `tool` is not touched at all,
+                    // not even to record the attempt.
                     None => {
                         self.say_info("nothing there — click on a mark.");
                         return;
@@ -156,54 +120,12 @@ impl crate::PagifyApp {
                 let prompt = armed.kind.prompt(armed.objects.len(), armed.points.len());
                 self.say_info(prompt);
             }
-            return;
-        }
-        let Some(pending) = &self.tab_mut().pending else { return };
-        let page = pending.page;
-
-        if pending.wants_object() {
-            // A generous tolerance: you are aiming at a line with a mouse, and
-            // a miss here costs the whole operation.
-            let hit = self.tab_mut()
-                .markup
-                .existing(page)
-                .and_then(|layer| layer.hit(at, HIT_TOLERANCE_PT * 3.0));
-
-            match hit {
-                Some(index) => {
-                    if let Some(p) = self.tab_mut().pending.as_mut() {
-                        p.objects.push((index, at));
-                    }
-                }
-                None => {
-                    self.say_info("nothing there — click on a mark.");
-                    return;
-                }
-            }
-        } else {
-            // **The first click of a move has to land on something, and says
-            // what.** A point recorded over bare paper meant the second click
-            // moved nothing and explained nothing. Reported from use as "once
-            // I click it, it should be selected".
-            if let Some(p) = self.tab_mut().pending.as_mut() {
-                p.points.push(at);
-            }
-        }
-
-        if self.tab_mut().pending.as_ref().is_some_and(Pending::ready) {
-            self.resolve();
-        } else if let Some(p) = &self.tab_mut().pending {
-            let prompt = p.prompt();
-            self.say_info(prompt);
         }
     }
 
-    /// [`Self::resolve`], for a [`Tool`] instead of a [`PendingKind`]. Called
-    /// once `take_pick` has collected as many objects and points as
-    /// `Tool::wants_objects`/`wants_points` ask for. Matches on `&armed.kind`
-    /// rather than taking it, the same way `resolve` matches on
-    /// `&pending.kind` — a repeating kind needs its own `kind` intact
-    /// afterward, to re-arm with.
+    /// Carries out whatever `take_pick` has finished collecting objects and
+    /// points for. Matches on `&armed.kind` rather than taking it, because a
+    /// repeating kind needs its own `kind` intact afterward, to re-arm with.
     pub(crate) fn resolve_tool(&mut self) {
         let Some(armed) = self.tab_mut().tool.take() else { return };
         let page = armed.page;
@@ -418,9 +340,14 @@ impl crate::PagifyApp {
                 },
                 _ => Err("article box: two corners are needed.".into()),
             },
+            Tool::PickText => match armed.points.first().copied() {
+                Some(at) => self.pick_text_run(page, at),
+                None => Err("nothing was clicked.".into()),
+            },
         };
         // Close the checkpoint a draw opened, and drop it if the draw
-        // refused — see `resolve`'s own identical tail for why.
+        // refused, so a failed draw leaves no half-made step in the undo
+        // history.
         if matches!(armed.kind, Tool::Draw(_)) {
             if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
                 layer.end();
@@ -435,47 +362,14 @@ impl crate::PagifyApp {
             Ok(said) => self.say_info(said),
             Err(problem) => self.say_error(problem),
         }
-        // Quietly after a failure, same reasoning as `resolve`'s own tail —
-        // see `arm_without_saying`'s doc.
+        // Back in hand, ready for the next one, quietly after a failure so
+        // the error stays the last thing said — see `arm_tool_without_saying`'s
+        // doc.
         if repeats && self.tab_mut().editing_run.is_none() {
             if failed {
                 self.arm_tool_without_saying(armed.kind, page);
             } else {
                 self.arm_tool(armed.kind, page);
-            }
-        }
-    }
-
-    /// Carry out whatever has finished collecting its clicks.
-    pub(crate) fn resolve(&mut self) {
-        let Some(pending) = self.tab_mut().pending.take() else { return };
-        let page = pending.page;
-        let repeats = pending.kind.repeats();
-
-        let outcome: Result<String, String> = match &pending.kind {
-            PendingKind::PickText => match pending.points.first().copied() {
-                Some(at) => self.pick_text_run(page, at),
-                None => Err("nothing was clicked.".into()),
-            },
-        };
-
-        let failed = outcome.is_err();
-        match outcome {
-            Ok(said) => self.say_info(said),
-            Err(problem) => self.say_error(problem),
-        }
-
-        // Back in hand, ready for the next one. Escape puts it down, and
-        // choosing another tool replaces it.
-        //
-        // **Quietly after a failure**, so the error is still the last thing
-        // said — see `arm_without_saying`. After a success the usual prompt
-        // follows, as it always did.
-        if repeats && self.tab_mut().editing_run.is_none() {
-            if failed {
-                self.arm_without_saying(pending.kind, page);
-            } else {
-                self.arm(pending.kind, page);
             }
         }
     }

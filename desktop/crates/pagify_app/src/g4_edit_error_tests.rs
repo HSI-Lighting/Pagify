@@ -767,7 +767,7 @@ fn a_click_on_bare_paper_stays_on_screen_beside_the_prompt_while_the_tool_is_arm
 
     let last = history(&h).pop().expect("nothing was said");
     assert!(last.1 && last.0.contains("no text there"), "the error was not the last thing said: {last:?}");
-    assert!(h.state().tab().pending.is_some(), "the tool should still be in hand");
+    assert!(h.state().tab().tool.is_some(), "the tool should still be in hand");
     assert!(
         h.query_by_label_contains("no text there").is_some(),
         "the error is not on screen — the bar shows only the prompt"
@@ -854,14 +854,14 @@ fn a_refused_click_away_apply_leaves_its_refusal_on_screen_and_the_tool_armed() 
     assert_eq!(said.len(), 1, "one click, one error — the refusal: {said:?}");
     assert!(said[0].starts_with("that text is drawn in a way this cannot edit"), "{said:?}");
     assert!(h.query_all_by_label_contains("refuses rather than risk").next().is_some(), "the refusal is not on screen");
-    assert!(h.state().tab().pending.is_none(), "nothing was picked under the click, so no pick is waiting");
+    assert!(h.state().tab().tool.is_none(), "nothing was picked under the click, so no pick is waiting");
 
     // The second click away from the same refused edit lets it go, and picks.
     click(&mut h, away);
     h.run_steps(2);
     assert!(h.state().tab().editing_run.is_none(), "the same refused edit was kept a second time");
     assert!(h.state().text_to_offer.is_none() || h.state().text_to_offer.as_deref() == Some("Jello"));
-    assert!(h.state().tab().pending.is_some(), "the tool should be back in hand for the next click");
+    assert!(h.state().tab().tool.is_some(), "the tool should be back in hand for the next click");
     assert!(
         h.query_all_by_label_contains("click the words to change").next().is_some()
             || h.query_all_by_label_contains("no text there").next().is_some(),

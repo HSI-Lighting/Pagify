@@ -1,38 +1,27 @@
-//! The tool that is waiting for clicks: what it still wants, what to say about
-//! it, and whether it stays armed once it has what it wanted.
+//! The tool that is waiting for clicks: what it still wants, what to say
+//! about it, and whether it stays armed once it has what it wanted.
 //!
 //! **Still in its current shape, not redesigned.** This is the state the
-//! mentor's review calls tool-state sprawl — the fields it belongs with
-//! (`pending`, `markup_armed`, `editing_run`, `grab`, `handle`, `selected_*`,
-//! and the rest) are still on `PagifyApp`/`DocTab`, and the transition
-//! functions (`arm`, `resolve`, `leave_editor_by_click`, …) are still where
-//! they were. Collapsing all of that into one `Tool` enum with its own
-//! transitions is later work; this is only the file it moves to first.
+//! mentor's review calls tool-state sprawl — the fields `Tool` belongs with
+//! (`markup_armed`, `editing_run`, `grab`, `handle`, `selected_*`, and the
+//! rest) are still on `PagifyApp`/`DocTab`, not folded in here. `Tool`
+//! itself was built up one slice at a time, from the big `PendingKind`
+//! dispatch this file used to also define: `Draw` was the first kind that
+//! ends on Enter rather than a fixed point count (see
+//! `wants_points`/`ends_on_enter`); `Modify` was the first that wants
+//! *objects* too (see `wants_objects`); `PickText`, the last variant,
+//! finished the migration and took `PendingKind`/`Pending` down with it —
+//! there is nothing left to dispatch through them.
+//!
+//! `resolve_tool` (`picking.rs`) is still one large match over `Tool`, not
+//! the `Tool::on_click` returning a `ToolEffect` that is supposed to
+//! replace it — collapsing *how* transitions are expressed is later work;
+//! this phase only collapsed *where* the state lives.
 
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::tools;
 use pagify_shell::verbs::MeasureKind;
 
-/// What a command is still waiting for from the pointer.
-///
-/// Objects and points are collected separately because they are not the same
-/// thing: fillet wants two *objects* clicked on, move wants two *points*, and
-/// offset wants an object and then a point saying which side. Treating both as
-/// "clicks" is what made fillet perform a move.
-pub(crate) struct Pending {
-    pub(crate) kind: PendingKind,
-    pub(crate) page: usize,
-    pub(crate) objects: Vec<(usize, AppPoint)>,
-    pub(crate) points: Vec<AppPoint>,
-}
-
-/// A tool armed outside the big [`Pending`] dispatch — the `Tool` state
-/// machine the mentor's review calls for (`DESIGN_REVIEW.md` §3.2), built up
-/// one slice at a time. `Draw` was the first kind that ends on Enter rather
-/// than a fixed point count (see `wants_points`/`ends_on_enter`); `Modify`
-/// is the first that wants *objects* too (see `wants_objects`) — every kind
-/// before it wanted only points. Every other `PendingKind` variant is still
-/// exactly where it was; `PendingKind` is deleted only once it is empty.
 pub(crate) struct ArmedTool {
     pub(crate) kind: Tool,
     pub(crate) page: usize,
@@ -80,15 +69,22 @@ pub(crate) enum Tool {
     /// Two corners of a labelled region — see [`PendingArticleBox`] for the
     /// title, asked for once the area is drawn.
     ArticleBox,
+    /// Waiting for a click on the words to change. The last `PendingKind`
+    /// variant to move — `PendingKind`/`Pending` are gone now that it is
+    /// empty.
+    PickText,
 }
 
 impl Tool {
-    /// How many points it still wants. `usize::MAX` means "until Enter" —
-    /// the same convention `PendingKind::wants` uses, now that `Draw` is
-    /// the first `Tool` kind to need it.
+    /// How many points it still wants. `usize::MAX` means "until Enter".
     pub(crate) fn wants_points(&self) -> usize {
         match self {
-            Tool::Signature | Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) | Tool::EraseMark => 1,
+            Tool::Signature
+            | Tool::PlaceImage { .. }
+            | Tool::Fill(_)
+            | Tool::Write(_)
+            | Tool::EraseMark
+            | Tool::PickText => 1,
             Tool::PlaceText
             | Tool::Calibrate { .. }
             | Tool::Redact
@@ -105,11 +101,12 @@ impl Tool {
         }
     }
 
-    /// How many objects it still wants, clicked before any points — see
-    /// [`ArmedTool::objects`]'s own doc. Zero for every kind except
-    /// `Modify`: fillet wants two objects clicked on, move wants two
-    /// points, offset wants an object and then a point saying which side —
-    /// the same distinction [`Pending::wants_object`] draws.
+    /// How many objects it still wants, clicked before any points. Zero
+    /// for every kind except `Modify`: fillet wants two objects clicked
+    /// on, move wants two points, offset wants an object and then a point
+    /// saying which side — objects and points are collected separately
+    /// because they are not the same thing, and treating both as "clicks"
+    /// is what made fillet perform a move.
     pub(crate) fn wants_objects(&self) -> usize {
         match self {
             Tool::Modify(pick) => pick.objects,
@@ -117,16 +114,15 @@ impl Tool {
         }
     }
 
-    /// Whether Enter can end it early — see `PendingKind::ends_on_enter`'s
-    /// own doc.
+    /// Whether Enter can end it early — true exactly when there is no
+    /// fixed number of points to wait for.
     pub(crate) fn ends_on_enter(&self) -> bool {
         self.wants_points() == usize::MAX
     }
 
-    /// Mirrors `PendingKind::prompt`. `objects_done` only ever varies
-    /// `Modify`'s own answer — every other kind ignores it, the same way
-    /// `PendingKind::prompt`'s own arms mostly did before `Modify` was its
-    /// last remaining consumer of the parameter too.
+    /// What to say about what it is still waiting for. `objects_done`
+    /// only ever varies `Modify`'s own answer — every other kind ignores
+    /// it.
     pub(crate) fn prompt(&self, objects_done: usize, points_done: usize) -> String {
         match self {
             // Says where the click lands, because a signature that appears
@@ -205,38 +201,43 @@ impl Tool {
                 0 => "article box: first corner".into(),
                 _ => "article box: opposite corner".into(),
             },
+            Tool::PickText => "click the words to change".into(),
         }
     }
 
-    /// Whether finishing it should arm it again — see `PendingKind::
-    /// repeats`'s own doc for the full reasoning. `Fill`/`Redact`/
-    /// `Whiteout`/`SignRectangle`/`SignLine` are a straight port of it (a
-    /// run of stamps, redactions or form marks should not mean a trip to
-    /// the ribbon between each one). The other three `Tool` kinds answer a
-    /// question or place one thing to immediately adjust, not stamp a
-    /// mark, so they stay `false`.
+    /// Whether finishing it should arm it again — nearly all kinds do. A
+    /// tool is something you pick up and keep using until you put it down;
+    /// one that let go after a single line would mean a trip to the ribbon
+    /// between every line, and a box would become four trips.
+    /// `Fill`/`Redact`/`Whiteout`/`SignRectangle`/`SignLine`/`Lock`/
+    /// `ArticleBox` all follow this: a run of stamps, redactions or form
+    /// marks should not mean a trip to the ribbon between each one.
+    ///
+    /// The exceptions — `Signature`, `PlaceImage`, `PlaceText`, `Calibrate`
+    /// — answer a question or place one thing to immediately adjust, not
+    /// stamp a mark, so they stay `false`.
+    ///
+    /// **`PickText` is a deliberate reversal, not an exception.** It used
+    /// to be one-shot, on the reasoning that picking a run opens an editor
+    /// where the attention now belongs — but the attention belongs there
+    /// only until the *next* word someone means to change, and every one
+    /// after the first needed `edittext` retyped by hand to reach.
+    /// Reported from use: editing a column of a datasheet field by field
+    /// took a fresh `edittext` before every single one. Repeating here only
+    /// matters together with `canvas.rs`'s own click-elsewhere handler,
+    /// which re-arms and resolves a fresh pick at that same click — this
+    /// is what lets that re-arm survive a click that lands on bare paper
+    /// instead of another run, rather than putting the tool down right
+    /// back where `edittext` would have to undo it.
     pub(crate) fn repeats(&self) -> bool {
-        matches!(
-            self,
-            Tool::Fill(_)
-                | Tool::Redact
-                | Tool::Whiteout
-                | Tool::SignRectangle
-                | Tool::SignLine
-                | Tool::Write(_)
-                | Tool::Draw(_)
-                | Tool::EraseMark
-                | Tool::Measure(_)
-                | Tool::Modify(_)
-                | Tool::Lock
-                | Tool::ArticleBox
-        )
+        !matches!(self, Tool::Signature | Tool::PlaceImage { .. } | Tool::PlaceText | Tool::Calibrate { .. })
     }
 
     /// The ribbon command that arms this, so its button can show itself lit
-    /// while it is waiting for its clicks — see `PendingKind::command`'s own
-    /// doc. `PlaceImage` has never lit a button: it names a file, not a
-    /// repeatable command.
+    /// while it is waiting for its clicks. `None` where no button arms it
+    /// — a pick started from a typed command with no ribbon equivalent has
+    /// nothing to light up. `PlaceImage` has never lit a button: it names
+    /// a file, not a repeatable command.
     pub(crate) fn command(&self) -> Option<&'static str> {
         match self {
             Tool::Signature => Some("signature"),
@@ -244,7 +245,7 @@ impl Tool {
             Tool::PlaceText => Some("addtext"),
             Tool::Calibrate { .. } => Some("calibrate"),
             // No ribbon button lights up per mark; the tool is one word
-            // with an argument — see `PendingKind::command`'s own doc.
+            // with an argument.
             Tool::Fill(_) => None,
             Tool::Redact => Some("redact"),
             Tool::Whiteout => Some("whiteout"),
@@ -263,21 +264,25 @@ impl Tool {
             Tool::Modify(_) => None,
             Tool::Lock => Some("lock"),
             Tool::ArticleBox => Some("articlebox"),
+            Tool::PickText => Some("edittext"),
         }
     }
 
-    /// Whether the pointer should be pulled to nearby geometry — see
-    /// `PendingKind::wants_snapping`'s own doc. A calibration, draw or
-    /// measure point is placing a point on known geometry, unlike a
-    /// signature, picture or text box's corner, which is just "about here."
+    /// Whether the pointer should be pulled to nearby geometry.
+    ///
+    /// **Only while a tool is placing points.** Snapping, ortho and the
+    /// grid exist to put a line exactly on the end of another line;
+    /// applied to ordinary clicking they drag the pointer away from
+    /// whatever the user was aiming at — a word, a run to edit, somebody
+    /// else's highlight — and the page feels like it is fighting them. A
+    /// calibration, draw or measure point is placing a point on known
+    /// geometry, unlike a signature, picture or text box's corner, which
+    /// is just "about here" — and picking a run of text is not placing a
+    /// point at all: it means "the words there", and the nearest drawn
+    /// line has nothing to do with it.
     pub(crate) fn wants_snapping(&self) -> bool {
         matches!(self, Tool::Calibrate { .. } | Tool::Draw(_) | Tool::Measure(_) | Tool::Modify(_))
     }
-}
-
-pub(crate) enum PendingKind {
-    /// Waiting for a click on the words to change.
-    PickText,
 }
 
 /// A drawn Article Box rectangle, waiting for the title that names it.
@@ -342,112 +347,3 @@ pub(crate) enum DrawKind {
     Spline,
 }
 
-/// How many of each a pick still wants. `usize::MAX` means "until Enter".
-impl PendingKind {
-    pub(crate) fn wants(&self) -> (usize, usize) {
-        match self {
-            PendingKind::PickText => (0, 1),
-        }
-    }
-
-    pub(crate) fn prompt(&self, _points_done: usize) -> String {
-        match self {
-            PendingKind::PickText => "click the words to change".into(),
-        }
-    }
-
-    /// Whether finishing it should arm it again — trim and extend are used on
-    /// one piece after another and re-arming by hand each time is miserable.
-    /// Whether the tool stays in hand after it has been used.
-    ///
-    /// **Nearly all of them do.** A tool is something you pick up and keep
-    /// using until you put it down; one that lets go after a single line means
-    /// going back to the ribbon between every line, and drawing four sides of a
-    /// box becomes four trips.
-    ///
-    /// The exceptions are the ones that answer a question rather than make
-    /// a mark, or whose mark is immediately the thing to keep working on
-    /// rather than repeat: calibration is set once; and a placed signature
-    /// is the same — what someone wants right after placing one is almost
-    /// always to move, resize or turn the one just placed, not stamp
-    /// another, and a tool left in hand would swallow that very click,
-    /// reading it as the start of a second signature instead of a pick on
-    /// the first (reported from use: "the scaling and rotating isn't
-    /// working" was this, not the drag math).
-    ///
-    /// **`PickText` used to be a third exception, on the reasoning that
-    /// picking a run opens an editor where the attention now belongs — but
-    /// the attention belongs there only until the *next* word someone means
-    /// to change, and every one after the first needed `edittext` retyped by
-    /// hand to reach.** Reported from use: editing a column of a datasheet
-    /// field by field took a fresh `edittext` before every single one.
-    /// Repeating here only matters together with `interact_page`'s own
-    /// click-elsewhere handler, which re-arms and resolves a fresh pick at
-    /// that same click — this flag is what lets that re-arm survive a click
-    /// that lands on bare paper instead of another run, rather than putting
-    /// the tool down right back where `edittext` would have to undo it.
-    pub(crate) fn repeats(&self) -> bool {
-        // Every exception — calibration, a placed signature, picture and
-        // text box — has moved to `Tool`, which never re-arms at all (see
-        // its own doc), so there is nothing left here that does not repeat.
-        true
-    }
-
-    /// Whether Enter can end it early.
-    /// The ribbon command that arms this, so the button can show itself lit
-    /// while it is collecting clicks.
-    ///
-    /// `None` where no button arms it — a pick started from a typed command
-    /// with no ribbon equivalent has nothing to light up.
-    pub(crate) fn command(&self) -> Option<&'static str> {
-        Some(match self {
-            PendingKind::PickText => "edittext",
-        })
-    }
-
-    /// Whether the pointer should be pulled to nearby geometry.
-    ///
-    /// **Only while a tool is placing points.** Snapping, ortho and the grid
-    /// exist to put a line exactly on the end of another line; applied to
-    /// ordinary clicking they drag the pointer away from whatever the user was
-    /// aiming at — a word, a run to edit, somebody else's highlight — and the
-    /// page feels like it is fighting them.
-    ///
-    /// Picking a run of text is not placing a point: it means "the words
-    /// there", and the nearest drawn line has nothing to do with it.
-    pub(crate) fn wants_snapping(&self) -> bool {
-        // Modify, the last variant that wanted this, has moved to `Tool` —
-        // see its own `wants_snapping`. Picking a run of text, or drawing
-        // an area to hide or label, is not placing a point on geometry.
-        false
-    }
-
-    pub(crate) fn ends_on_enter(&self) -> bool {
-        // Nothing left here wants a variable number of points — `Draw`,
-        // `Measure` and `Modify` (the only three that ever did) have all
-        // moved to `Tool`. Kept as a real method, not inlined at its call
-        // sites, so a future `PendingKind` variant that does end on Enter
-        // does not have to go looking for them.
-        false
-    }
-}
-
-impl Pending {
-    pub(crate) fn ready(&self) -> bool {
-        let (objects, points) = self.kind.wants();
-        objects != usize::MAX
-            && points != usize::MAX
-            && self.objects.len() >= objects
-            && self.points.len() >= points
-    }
-
-    /// Whether the next click should pick an object rather than a free point.
-    pub(crate) fn wants_object(&self) -> bool {
-        let (objects, _) = self.kind.wants();
-        self.objects.len() < objects
-    }
-
-    pub(crate) fn prompt(&self) -> String {
-        self.kind.prompt(self.points.len())
-    }
-}

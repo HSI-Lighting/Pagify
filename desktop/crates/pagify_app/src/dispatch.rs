@@ -5,7 +5,7 @@
 
 use crate::hub;
 use crate::{
-    signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, PendingKind, SignatureList,
+    signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, SignatureList,
     SignaturePad, SnippetList, Tab, Tool,
 };
 use pagify_shell::command::{Dispatch, Kind};
@@ -96,7 +96,7 @@ impl crate::PagifyApp {
                 self.say_info("checking for a newer build…");
             }
             Verb::Pick(at) => {
-                if self.tab_mut().pending.is_none() && self.tab_mut().tool.is_none() {
+                if self.tab_mut().tool.is_none() {
                     self.say_error("nothing is waiting for a click.");
                     return;
                 }
@@ -189,7 +189,7 @@ impl crate::PagifyApp {
                     // Bare `fillsign` types where you click, which is the other
                     // half of filling a form in by hand.
                     None => {
-                        self.arm(PendingKind::PickText, page);
+                        self.arm_tool(Tool::PickText, page);
                         self.say_info(
                             "fill: click a line of text to change it, or use \
                              `addtext <words>` to write somewhere new — and \
@@ -828,12 +828,9 @@ impl crate::PagifyApp {
 
             Verb::Pointer(mode) => {
                 // Switching tools abandons whatever was half-picked. Leaving a
-                // pending operation armed under a new tool is how a click meant
-                // for one thing lands in another. `|`, not `||`: both takes
-                // must run regardless of which one actually held something.
-                let abandoned =
-                    self.tab_mut().pending.take().is_some() | self.tab_mut().tool.take().is_some();
-                if abandoned {
+                // tool armed under a new one is how a click meant for one
+                // thing lands in another.
+                if self.tab_mut().tool.take().is_some() {
                     let page = self.tab().page;
                     if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
                         layer.forget_last_step();
@@ -913,19 +910,13 @@ impl crate::PagifyApp {
 
             // The typed form of pressing Enter over the page.
             Verb::Finish => {
-                let pending_closeable = self.tab_mut()
-                    .pending
-                    .as_ref()
-                    .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
                 let tool_closeable = self.tab_mut()
                     .tool
                     .as_ref()
                     .is_some_and(|t| t.kind.ends_on_enter() && t.points.len() >= 2);
-                if pending_closeable {
-                    self.resolve();
-                } else if tool_closeable {
+                if tool_closeable {
                     self.resolve_tool();
-                } else if self.tab_mut().pending.is_some() || self.tab_mut().tool.is_some() {
+                } else if self.tab_mut().tool.is_some() {
                     self.say_error("not enough points yet.");
                 } else {
                     self.say_error("nothing to finish.");

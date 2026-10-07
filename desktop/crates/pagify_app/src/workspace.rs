@@ -234,7 +234,6 @@ impl crate::PagifyApp {
                 // reader to work out.
                 self.report_text_layer(false);
                 self.tab_mut().scroll_pt = 0.0;
-                self.tab_mut().pending = None;
                 self.tab_mut().tool = None;
                 // A fresh document's own bookmarks, not whatever the last
                 // one left behind — the panel is closed already (nothing
