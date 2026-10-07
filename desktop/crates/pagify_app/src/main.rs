@@ -14340,46 +14340,7 @@ impl PagifyApp {
         if std::mem::take(&mut edit.box_resize.reflow) && edit.lines.len() <= 1 {
             edit.buffer = edit.buffer.replace('\n', " ");
         }
-        if edit.lines.len() <= 1 {
-            for _ in 0..64 {
-                let last_start = edit.buffer.rfind('\n').map(|i| i + 1).unwrap_or(0);
-                let last_line = &edit.buffer[last_start..];
-                let last_width = ui
-                    .fonts_mut(|f| f.layout_no_wrap(last_line.to_string(), font_id.clone(), ink))
-                    .size()
-                    .x;
-                if last_width <= max_width {
-                    break;
-                }
-                let tokens: Vec<&str> = last_line.split_inclusive(' ').collect();
-                if tokens.len() < 2 {
-                    break;
-                }
-                let mut acc_len = 0usize;
-                let mut break_at = None;
-                for (i, token) in tokens.iter().enumerate() {
-                    let candidate = &last_line[..acc_len + token.len()];
-                    let candidate_width = ui
-                        .fonts_mut(|f| {
-                            f.layout_no_wrap(candidate.trim_end().to_string(), font_id.clone(), ink)
-                        })
-                        .size()
-                        .x;
-                    if candidate_width > max_width && i > 0 {
-                        break_at = Some(acc_len);
-                        break;
-                    }
-                    acc_len += token.len();
-                }
-                let Some(break_at) = break_at else { break };
-                let insert_at = last_start + break_at;
-                if edit.buffer.as_bytes().get(insert_at.wrapping_sub(1)) == Some(&b' ') {
-                    edit.buffer.replace_range(insert_at - 1..insert_at, "\n");
-                } else {
-                    edit.buffer.insert(insert_at, '\n');
-                }
-            }
-        }
+        Self::wrap_typed_last_line(edit, ui, &font_id, ink, max_width);
 
         // **Wide enough for what is actually typed, not just what the run
         // started at.** Ordinarily `max_width` above already keeps every
@@ -14563,6 +14524,61 @@ impl PagifyApp {
         // says "apply this" — reported from use. Escape still leaves
         // whatever was typed here alone.
     }
+
+
+/// Wrap the editor buffer's own last line at the widest word gap that still
+/// fits `max_width`, up to 64 times. Correct only for a single-run editor —
+/// see the full reasoning in `draw_run_editor`'s own comments — and kept
+/// here so the drawing function is about the box, not the buffer.
+fn wrap_typed_last_line(
+    edit: &mut EditingRun,
+    ui: &mut egui::Ui,
+    font_id: &egui::FontId,
+    ink: egui::Color32,
+    max_width: f32,
+) {
+        if edit.lines.len() <= 1 {
+            for _ in 0..64 {
+                let last_start = edit.buffer.rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let last_line = &edit.buffer[last_start..];
+                let last_width = ui
+                    .fonts_mut(|f| f.layout_no_wrap(last_line.to_string(), font_id.clone(), ink))
+                    .size()
+                    .x;
+                if last_width <= max_width {
+                    break;
+                }
+                let tokens: Vec<&str> = last_line.split_inclusive(' ').collect();
+                if tokens.len() < 2 {
+                    break;
+                }
+                let mut acc_len = 0usize;
+                let mut break_at = None;
+                for (i, token) in tokens.iter().enumerate() {
+                    let candidate = &last_line[..acc_len + token.len()];
+                    let candidate_width = ui
+                        .fonts_mut(|f| {
+                            f.layout_no_wrap(candidate.trim_end().to_string(), font_id.clone(), ink)
+                        })
+                        .size()
+                        .x;
+                    if candidate_width > max_width && i > 0 {
+                        break_at = Some(acc_len);
+                        break;
+                    }
+                    acc_len += token.len();
+                }
+                let Some(break_at) = break_at else { break };
+                let insert_at = last_start + break_at;
+                if edit.buffer.as_bytes().get(insert_at.wrapping_sub(1)) == Some(&b' ') {
+                    edit.buffer.replace_range(insert_at - 1..insert_at, "\n");
+                } else {
+                    edit.buffer.insert(insert_at, '\n');
+                }
+            }
+        }
+}
+
 
     /// The box [`Self::begin_text_box`] opened, being typed into.
     ///
