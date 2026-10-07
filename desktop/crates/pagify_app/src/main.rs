@@ -10908,7 +10908,7 @@ impl PagifyApp {
             self.arm_tool(Tool::PlaceText, page);
             return;
         }
-        self.arm(PendingKind::Write(text), page);
+        self.arm_tool(Tool::Write(text), page);
     }
 
     /// Put words on the page at `at`.

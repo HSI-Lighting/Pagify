@@ -65,6 +65,8 @@ pub(crate) enum Tool {
     SignRectangle,
     /// The two ends of a line to rule while filling a form in.
     SignLine,
+    /// Words waiting for a point to be written at.
+    Write(String),
 }
 
 impl Tool {
@@ -73,7 +75,7 @@ impl Tool {
     /// moved to `Tool` yet.
     pub(crate) fn wants_points(&self) -> usize {
         match self {
-            Tool::Signature | Tool::PlaceImage { .. } | Tool::Fill(_) => 1,
+            Tool::Signature | Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) => 1,
             Tool::PlaceText
             | Tool::Calibrate { .. }
             | Tool::Redact
@@ -122,6 +124,13 @@ impl Tool {
                 0 => "line: from — a mark on the form, not a drawing".into(),
                 _ => "line: to".into(),
             },
+            Tool::Write(text) => {
+                let short: String = text.chars().take(24).collect();
+                format!(
+                    "click where \"{short}{}\" goes",
+                    if text.chars().count() > 24 { "…" } else { "" }
+                )
+            }
         }
     }
 
@@ -135,7 +144,12 @@ impl Tool {
     pub(crate) fn repeats(&self) -> bool {
         matches!(
             self,
-            Tool::Fill(_) | Tool::Redact | Tool::Whiteout | Tool::SignRectangle | Tool::SignLine
+            Tool::Fill(_)
+                | Tool::Redact
+                | Tool::Whiteout
+                | Tool::SignRectangle
+                | Tool::SignLine
+                | Tool::Write(_)
         )
     }
 
@@ -156,6 +170,7 @@ impl Tool {
             Tool::Whiteout => Some("whiteout"),
             Tool::SignRectangle => Some("signrectangle"),
             Tool::SignLine => Some("signline"),
+            Tool::Write(_) => Some("addtext"),
         }
     }
 
@@ -176,8 +191,6 @@ pub(crate) enum PendingKind {
     /// take it off the page — what the Eraser arms when nothing drawn is
     /// selected. Stays in hand, so a run of marks can be rubbed out in a row.
     EraseMark,
-    /// Words waiting for a point to be written at.
-    Write(String),
     Draw(DrawKind),
     Modify(tools::Pick),
     Measure(MeasureKind),
@@ -255,7 +268,6 @@ impl PendingKind {
     pub(crate) fn wants(&self) -> (usize, usize) {
         match self {
             PendingKind::PickText | PendingKind::EraseMark => (0, 1),
-            PendingKind::Write(_) => (0, 1),
             PendingKind::Draw(DrawKind::Line | DrawKind::Circle | DrawKind::Rectangle | DrawKind::Arrow) => {
                 (0, 2)
             }
@@ -270,13 +282,6 @@ impl PendingKind {
 
     pub(crate) fn prompt(&self, objects_done: usize, points_done: usize) -> String {
         match self {
-            PendingKind::Write(text) => {
-                let short: String = text.chars().take(24).collect();
-                format!(
-                    "click where \"{short}{}\" goes",
-                    if text.chars().count() > 24 { "…" } else { "" }
-                )
-            }
             PendingKind::PickText => "click the words to change".into(),
             PendingKind::EraseMark => {
                 "click a highlight, underline or strike-out to erase it — Escape puts the eraser down".into()
@@ -372,7 +377,6 @@ impl PendingKind {
             PendingKind::ArticleBox => "articlebox",
             PendingKind::PickText => "edittext",
             PendingKind::EraseMark => "erase",
-            PendingKind::Write(_) => "addtext",
             PendingKind::Measure(MeasureKind::Distance) => "measure distance",
             PendingKind::Measure(MeasureKind::Area) => "measure area",
             PendingKind::Modify(_) => return None,

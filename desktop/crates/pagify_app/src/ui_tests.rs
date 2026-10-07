@@ -4112,7 +4112,7 @@ fn writing_words_puts_selectable_text_on_the_page() {
 
     h.state_mut().submit("addtext DRAFT");
     h.run_steps(1);
-    assert!(h.state().tab().pending.is_some(), "addtext did not ask where");
+    assert!(h.state().tab().tool.is_some(), "addtext did not ask where");
     // A stale snapshot, from before the words landed — the state a
     // person looking at the page already put it in.
     let _ = h.state_mut().foreign_marks(0);

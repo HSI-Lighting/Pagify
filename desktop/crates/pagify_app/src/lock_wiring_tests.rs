@@ -2349,7 +2349,7 @@ fn predefined_text_keeps_the_words_and_waits_for_a_click() {
     assert!(said(&app).contains("this computer"), "{}", said(&app));
     assert_eq!(app.predefined.current(), Some("Jane Smith"));
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::Write(t)) if t == "Jane Smith"),
+        matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Write(t)) if t == "Jane Smith"),
         "it did not arm the click that writes them:\n{}",
         said(&app)
     );

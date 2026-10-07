@@ -1249,9 +1249,10 @@ impl crate::PagifyApp {
                 .unwrap_or_else(|| view.to_page(cursor));
             match &armed.kind {
                 Tool::Signature => self.draw_signature_preview(ui, view, at),
-                // A tick, cross or dot, or an image, is placed on a single
-                // click — nothing to draw before it lands.
-                Tool::PlaceImage { .. } | Tool::Fill(_) => {}
+                // A tick, cross or dot, an image, or written words, is
+                // placed on a single click — nothing to draw before it
+                // lands.
+                Tool::PlaceImage { .. } | Tool::Fill(_) | Tool::Write(_) => {}
                 // A box, violet, the same group `PendingKind`'s own preview
                 // used to share with `Draw(Rectangle)`/`Lock`/`ArticleBox`.
                 Tool::PlaceText | Tool::Whiteout | Tool::SignRectangle => {

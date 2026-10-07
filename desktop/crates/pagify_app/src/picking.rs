@@ -231,6 +231,13 @@ impl crate::PagifyApp {
                 (Some(a), Some(b)) => self.stamp_line(page, *a, *b),
                 _ => Err("line: two ends are needed.".into()),
             },
+            Tool::Write(text) => {
+                let text = text.clone();
+                match armed.points.first().copied() {
+                    Some(at) => self.write_text_at(page, at, &text),
+                    None => Err("nowhere to write.".into()),
+                }
+            }
         };
         let repeats = armed.kind.repeats();
         let failed = outcome.is_err();
@@ -270,13 +277,6 @@ impl crate::PagifyApp {
                 Some(at) => self.erase_mark_at(page, at),
                 None => Err("nothing was clicked.".into()),
             },
-            PendingKind::Write(text) => {
-                let text = text.clone();
-                match pending.points.first().copied() {
-                    Some(at) => self.write_text_at(page, at, &text),
-                    None => Err("nowhere to write.".into()),
-                }
-            }
             PendingKind::Measure(MeasureKind::Distance) => Ok(measure::measure_distance(
                 &self.tab_mut().calibration,
                 pending.points[0],
