@@ -372,14 +372,13 @@ impl Tool {
 /// does any of those four things, so a misapplied effect is one bug to
 /// find instead of twenty arms to re-audit.
 ///
-/// **Not yet produced or consumed by anything.** This is step 1 of
-/// `Pagify-Phase2-BigTasks.md` §2.3 only — the enum, sized to exactly
-/// what `resolve_tool`'s current tail already does. Kept deliberately
-/// short: add a variant only once a specific arm's migration proves the
-/// existing ones can't carry its data. Most of today's arms reduce to
-/// "said an outcome, maybe re-armed" — `Say`/`Rearm`/`RearmQuietly`
-/// already cover all of those; only `Lock` and `ArticleBox` hand off to
-/// a dialog instead of saying anything.
+/// The re-arm decision (`repeats()`, quietly after a failure) is generic
+/// across every kind alike, so it is not one of these — it stays in
+/// `resolve_tool`'s own tail, which keeps its own clone of the armed
+/// `Tool` from before calling `on_click` for exactly that purpose. Most
+/// of today's arms reduce to "said an outcome" — `Say` alone covers all
+/// of those; only `Lock` and `ArticleBox` hand off to a dialog instead
+/// of saying anything.
 #[derive(Debug)]
 pub(crate) enum ToolEffect {
     /// Nothing to say, nothing to open — added once `on_pointer`'s
@@ -393,13 +392,6 @@ pub(crate) enum ToolEffect {
     /// A result to say — `Kind::Info` for `Ok`, `Kind::Error` for `Err`,
     /// exactly as `resolve_tool`'s tail does today.
     Say(Kind, String),
-    /// Re-arm this (repeating) tool and announce its prompt — what
-    /// `arm_tool` does today, called after a successful resolution.
-    Rearm(Tool),
-    /// Re-arm this (repeating) tool without announcing its prompt — what
-    /// `arm_tool_without_saying` does today, called after a failed
-    /// resolution so the error stays the last thing said.
-    RearmQuietly(Tool),
     /// Put the tool down and say "cancelled." — `on_cancel`'s default,
     /// for every kind that does not need its own wording.
     Cancelled,
@@ -832,7 +824,7 @@ impl Tool {
 /// string, which is what the ribbon's "which button is lit" query used to
 /// do directly (DESIGN_REVIEW.md §2.8.4 names this: `PendingKind::command()
 /// -> &'static str`, now `Tool::id() -> Option<ToolId>`, compared against
-/// the ribbon table's string through [`Self::ribbon_command`]).
+/// the ribbon table's own `ToolId` by equality (`ribbon.rs`'s `Command::lit_by`)).
 ///
 /// **Only a partial fix, by design — not the full §2.8.4 ask.** The ribbon
 /// tables themselves (`ribbon.rs`'s many `const` button arrays) still store
@@ -844,8 +836,7 @@ impl Tool {
 /// `Tool`-side half of the comparison is now exhaustively enumerated and
 /// checked by the compiler — a newly added `Tool` variant that should
 /// light a ribbon button cannot compile without a matching `ToolId`
-/// arm in [`Tool::id`], and [`Self::ribbon_command`] is the one place
-/// left that still has to know the literal the ribbon table uses for it.
+/// arm in [`Tool::id`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolId {
     Signature,
@@ -872,41 +863,6 @@ pub(crate) enum ToolId {
     Squiggly,
     Link,
     MatchProperties,
-}
-
-impl ToolId {
-    /// The ribbon table's own command string for this identity — the one
-    /// place left that has to know it matches the table's literal, now
-    /// that every caller compares through here rather than against a bare
-    /// string of its own.
-    pub(crate) fn ribbon_command(&self) -> &'static str {
-        match self {
-            ToolId::Signature => "signature",
-            ToolId::AddText => "addtext",
-            ToolId::Calibrate => "calibrate",
-            ToolId::Redact => "redact",
-            ToolId::Whiteout => "whiteout",
-            ToolId::SignRectangle => "signrectangle",
-            ToolId::SignLine => "signline",
-            ToolId::Line => "line",
-            ToolId::Circle => "circle",
-            ToolId::Polyline => "pline",
-            ToolId::Arrow => "arrow",
-            ToolId::Spline => "spline",
-            ToolId::EraseMark => "erase",
-            ToolId::MeasureDistance => "measure distance",
-            ToolId::MeasureArea => "measure area",
-            ToolId::Lock => "lock",
-            ToolId::ArticleBox => "articlebox",
-            ToolId::EditText => "edittext",
-            ToolId::Highlight => "highlight",
-            ToolId::Underline => "underline",
-            ToolId::StrikeOut => "strikeout",
-            ToolId::Squiggly => "squiggly",
-            ToolId::Link => "weblinks",
-            ToolId::MatchProperties => "matchproperties",
-        }
-    }
 }
 
 /// A drawn Article Box rectangle, waiting for the title that names it.

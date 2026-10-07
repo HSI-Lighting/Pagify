@@ -95,14 +95,26 @@ fn polyline_spline_and_area_end_on_enter_and_repeat() {
     }
 }
 
-/// **`ToolId` round-trips to the exact ribbon command literal `Tool::id`
-/// was already using as a bare string before this migration** — for every
-/// kind that lights a button at all. Pinned here so a future `Tool`
-/// variant that forgets its `ToolId` arm, or a `ToolId` arm that forgets
-/// its `ribbon_command` arm, is a compile error (non-exhaustive match)
-/// long before it is a silently-dark ribbon button.
+/// **`Tool::id` lights the exact ribbon button its own kind should** — for
+/// every kind that lights a button at all. Checked against the live
+/// ribbon tables (`Tab::leading`/`Tab::buttons`) rather than a second,
+/// hand-written copy of the same mapping that could silently drift from
+/// them. `.trim()` accounts for `Calibrate`'s own button text ending in a
+/// trailing space (see `ribbon.rs`'s own doc on `Command`) — a rendering
+/// quirk, not a different identity.
 #[test]
 fn every_tool_ids_ribbon_command_matches_what_the_ribbon_table_expects() {
+    let literal_for = |id: ToolId| -> &'static str {
+        Tab::ALL
+            .iter()
+            .flat_map(|t| t.leading().iter().chain(t.buttons()))
+            .find_map(|(_, _, command)| match command {
+                crate::ribbon::Command::Tool(found, text) if *found == id => Some(text.trim()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{id:?} lights no ribbon button"))
+    };
+
     let cases: &[(Tool, &str)] = &[
         (Tool::Signature, "signature"),
         (Tool::PlaceText, "addtext"),
@@ -132,7 +144,7 @@ fn every_tool_ids_ribbon_command_matches_what_the_ribbon_table_expects() {
     ];
     for (tool, expected) in cases {
         let id = tool.id().unwrap_or_else(|| panic!("{tool:?} should light a ribbon button"));
-        assert_eq!(id.ribbon_command(), *expected, "{tool:?}");
+        assert_eq!(literal_for(id), *expected, "{tool:?}");
     }
 
     // The kinds that never light a button at all — a file name, a mark

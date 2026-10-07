@@ -9,12 +9,11 @@ use pagify_shell::command::Dispatch;
 /// (`lit_by`), not by a string that could drift between this table and
 /// `Tool::id`'s own match.
 ///
-/// **Carries the dispatch text itself, not derived from
-/// `ToolId::ribbon_command()`.** They can genuinely differ: `Calibrate`'s
-/// own button fills the box and waits ("calibrate ", trailing space, see
-/// `ribbon_click`'s own "ends with a space" rule), while
-/// `ribbon_command()` is the trimmed form the old string comparison used
-/// — kept that way since other callers still compare against it.
+/// **Carries the dispatch text itself, trailing space and all.**
+/// `Calibrate`'s own button fills the box and waits ("calibrate ",
+/// trailing space, see `ribbon_click`'s own "ends with a space" rule) —
+/// a rendering quirk of that one button, not a second identity to keep
+/// in sync by hand.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Command {
     Tool(ToolId, &'static str),
