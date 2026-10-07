@@ -1,7 +1,7 @@
 //! Arming a tool, resolving a pick once it has what it wants, and the click
 //! that leaves an open run editor.
 //!
-//! **Still in its current shape, not redesigned** — see [`crate::pending`]'s
+//! **Still in its current shape, not redesigned** — see [`crate::tool`]'s
 //! own doc for why. `resolve_tool` is still one large dispatch match, not
 //! the `Tool::on_click` that is supposed to replace it.
 

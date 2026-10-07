@@ -24,12 +24,14 @@ mod logo;
 mod overlay;
 mod edit;
 mod panels;
-mod pending;
 mod picking;
+mod tool;
 #[cfg(test)]
 mod edit_text_hardening_tests;
 #[cfg(test)]
 mod tool_state_gap_tests;
+#[cfg(test)]
+mod tool_transition_tests;
 #[cfg(target_os = "windows")]
 mod print_windows;
 mod ribbon;
@@ -72,7 +74,7 @@ pub(crate) use ribbon::{
     ribbon_overflow_at, tab_button, tab_menu_button, tabs_that_fit, tool_button, RibbonClick, Tab, DOC_TAB_FONT,
     DOC_TAB_MAX_TEXT, DOC_TAB_MENU_WIDTH, DOC_TAB_PADDING, RIBBON_MARGIN_X, RIBBON_MARGIN_Y, TOOL_HEIGHT, TOOL_WIDTH,
 };
-pub(crate) use pending::{
+pub(crate) use tool::{
     ArmedTool, DrawKind, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool,
 };
 // `spelling` and `paragraph_lines` moved to `pagify_shell` (Phase 4a: no
@@ -13109,7 +13111,7 @@ impl eframe::App for PagifyApp {
                 // Which tool is in force. The pointer mode, or whichever tool
                 // is part-way through collecting its clicks — a user who armed
                 // Line and looked away needs to see that it is still armed.
-                let armed = self.tab_mut().tool.as_ref().and_then(|t| t.kind.command());
+                let armed = self.tab_mut().tool.as_ref().and_then(|t| t.kind.id());
                 let in_hand = match self.tab().object_tool {
                     Some(true) => Some("editobject"),
                     Some(false) => Some("moveobject"),
@@ -13121,7 +13123,7 @@ impl eframe::App for PagifyApp {
                 let live = |command: &str| -> bool {
                     let c = command.trim();
                     in_hand == Some(c)
-                        || armed.as_deref() == Some(c)
+                        || armed.is_some_and(|id| id.ribbon_command() == c)
                         || (c == "fill" && self.draw_fill)
                         || (c == "appearance" && theme::mode() == theme::Mode::Light)
                         || (c == "hand" && show_hand_by_default)

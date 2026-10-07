@@ -22,7 +22,15 @@
 //! `resolve_tool` (`picking.rs`) is still one large match over `Tool`, not
 //! the `Tool::on_click` returning a `ToolEffect` that is supposed to
 //! replace it — collapsing *how* transitions are expressed is later work;
-//! this phase only collapsed *where* the state lives.
+//! this phase only collapsed *where* the state lives. [`ToolId`] is a
+//! first, partial step on the *how*: `Tool::id()` returns it instead of a
+//! bare ribbon-command string, so the ribbon-side half of "which button is
+//! lit" is now the one place left that has to know the matching literal —
+//! see its own doc for exactly how partial. This file used to be
+//! `pending.rs`; renamed once `PendingKind`/`Pending` were gone and the
+//! name no longer fit (and `tools.rs`, the mentor's own suggested name,
+//! collides with `pagify_shell::tools`, already imported everywhere in
+//! `main.rs`).
 
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::tools;
@@ -35,6 +43,7 @@ pub(crate) struct ArmedTool {
     pub(crate) points: Vec<AppPoint>,
 }
 
+#[derive(Debug)]
 pub(crate) enum Tool {
     /// Where a drawn signature is to sit — on the line that is clicked.
     Signature,
@@ -274,46 +283,50 @@ impl Tool {
         !matches!(self, Tool::Signature | Tool::PlaceImage { .. } | Tool::PlaceText | Tool::Calibrate { .. })
     }
 
-    /// The ribbon command that arms this, so its button can show itself lit
-    /// while it is waiting for its clicks. `None` where no button arms it
-    /// — a pick started from a typed command with no ribbon equivalent has
-    /// nothing to light up. `PlaceImage` has never lit a button: it names
-    /// a file, not a repeatable command.
-    pub(crate) fn command(&self) -> Option<&'static str> {
+    /// The identity that arms this, so its ribbon button can show itself
+    /// lit while it is waiting for its clicks. `None` where no button arms
+    /// it — a pick started from a typed command with no ribbon equivalent
+    /// has nothing to light up. `PlaceImage` has never lit a button: it
+    /// names a file, not a repeatable command.
+    ///
+    /// Returns a [`ToolId`], not a bare string — see its own doc for why
+    /// (DESIGN_REVIEW.md §2.8.4: comparing bare strings between here and
+    /// the ribbon table let either side drift with a typo nothing caught).
+    pub(crate) fn id(&self) -> Option<ToolId> {
         match self {
-            Tool::Signature => Some("signature"),
+            Tool::Signature => Some(ToolId::Signature),
             Tool::PlaceImage { .. } => None,
-            Tool::PlaceText => Some("addtext"),
-            Tool::Calibrate { .. } => Some("calibrate"),
+            Tool::PlaceText => Some(ToolId::AddText),
+            Tool::Calibrate { .. } => Some(ToolId::Calibrate),
             // No ribbon button lights up per mark; the tool is one word
             // with an argument.
             Tool::Fill(_) => None,
-            Tool::Redact => Some("redact"),
-            Tool::Whiteout => Some("whiteout"),
-            Tool::SignRectangle => Some("signrectangle"),
-            Tool::SignLine => Some("signline"),
-            Tool::Write(_) => Some("addtext"),
-            Tool::Draw(DrawKind::Line) => Some("line"),
-            Tool::Draw(DrawKind::Circle) => Some("circle"),
-            Tool::Draw(DrawKind::Polyline) => Some("pline"),
+            Tool::Redact => Some(ToolId::Redact),
+            Tool::Whiteout => Some(ToolId::Whiteout),
+            Tool::SignRectangle => Some(ToolId::SignRectangle),
+            Tool::SignLine => Some(ToolId::SignLine),
+            Tool::Write(_) => Some(ToolId::AddText),
+            Tool::Draw(DrawKind::Line) => Some(ToolId::Line),
+            Tool::Draw(DrawKind::Circle) => Some(ToolId::Circle),
+            Tool::Draw(DrawKind::Polyline) => Some(ToolId::Polyline),
             Tool::Draw(DrawKind::Rectangle) => None,
-            Tool::Draw(DrawKind::Arrow) => Some("arrow"),
-            Tool::Draw(DrawKind::Spline) => Some("spline"),
-            Tool::EraseMark => Some("erase"),
-            Tool::Measure(MeasureKind::Distance) => Some("measure distance"),
-            Tool::Measure(MeasureKind::Area) => Some("measure area"),
+            Tool::Draw(DrawKind::Arrow) => Some(ToolId::Arrow),
+            Tool::Draw(DrawKind::Spline) => Some(ToolId::Spline),
+            Tool::EraseMark => Some(ToolId::EraseMark),
+            Tool::Measure(MeasureKind::Distance) => Some(ToolId::MeasureDistance),
+            Tool::Measure(MeasureKind::Area) => Some(ToolId::MeasureArea),
             Tool::Modify(_) => None,
-            Tool::Lock => Some("lock"),
-            Tool::ArticleBox => Some("articlebox"),
-            Tool::PickText => Some("edittext"),
+            Tool::Lock => Some(ToolId::Lock),
+            Tool::ArticleBox => Some(ToolId::ArticleBox),
+            Tool::PickText => Some(ToolId::EditText),
             Tool::Markup(kind) => Some(match kind {
-                Markup::Highlight => "highlight",
-                Markup::Underline => "underline",
-                Markup::StrikeOut => "strikeout",
-                Markup::Squiggly => "squiggly",
+                Markup::Highlight => ToolId::Highlight,
+                Markup::Underline => ToolId::Underline,
+                Markup::StrikeOut => ToolId::StrikeOut,
+                Markup::Squiggly => ToolId::Squiggly,
             }),
-            Tool::Link => Some("weblinks"),
-            Tool::MatchProperties { .. } => Some("matchproperties"),
+            Tool::Link => Some(ToolId::Link),
+            Tool::MatchProperties { .. } => Some(ToolId::MatchProperties),
         }
     }
 
@@ -342,6 +355,88 @@ impl Tool {
     /// line has nothing to do with it.
     pub(crate) fn wants_snapping(&self) -> bool {
         matches!(self, Tool::Calibrate { .. } | Tool::Draw(_) | Tool::Measure(_) | Tool::Modify(_))
+    }
+}
+
+/// A ribbon-visible tool identity — the typed replacement for comparing
+/// bare strings between [`Tool::id`] and the ribbon table's own command
+/// string, which is what the ribbon's "which button is lit" query used to
+/// do directly (DESIGN_REVIEW.md §2.8.4 names this: `PendingKind::command()
+/// -> &'static str`, now `Tool::id() -> Option<ToolId>`, compared against
+/// the ribbon table's string through [`Self::ribbon_command`]).
+///
+/// **Only a partial fix, by design — not the full §2.8.4 ask.** The ribbon
+/// tables themselves (`ribbon.rs`'s many `const` button arrays) still store
+/// their third field as a bare `&'static str`, not a `ToolId` — rewriting
+/// every one of those literals (most of which are one-shot commands with
+/// no `Tool` behind them at all, like `"save"` or `"import"`, and were
+/// never the actual problem) was judged a materially bigger, separate
+/// piece of work than this slice's scope. What this *does* fix: the
+/// `Tool`-side half of the comparison is now exhaustively enumerated and
+/// checked by the compiler — a newly added `Tool` variant that should
+/// light a ribbon button cannot compile without a matching `ToolId`
+/// arm in [`Tool::id`], and [`Self::ribbon_command`] is the one place
+/// left that still has to know the literal the ribbon table uses for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolId {
+    Signature,
+    AddText,
+    Calibrate,
+    Redact,
+    Whiteout,
+    SignRectangle,
+    SignLine,
+    Line,
+    Circle,
+    Polyline,
+    Arrow,
+    Spline,
+    EraseMark,
+    MeasureDistance,
+    MeasureArea,
+    Lock,
+    ArticleBox,
+    EditText,
+    Highlight,
+    Underline,
+    StrikeOut,
+    Squiggly,
+    Link,
+    MatchProperties,
+}
+
+impl ToolId {
+    /// The ribbon table's own command string for this identity — the one
+    /// place left that has to know it matches the table's literal, now
+    /// that every caller compares through here rather than against a bare
+    /// string of its own.
+    pub(crate) fn ribbon_command(&self) -> &'static str {
+        match self {
+            ToolId::Signature => "signature",
+            ToolId::AddText => "addtext",
+            ToolId::Calibrate => "calibrate",
+            ToolId::Redact => "redact",
+            ToolId::Whiteout => "whiteout",
+            ToolId::SignRectangle => "signrectangle",
+            ToolId::SignLine => "signline",
+            ToolId::Line => "line",
+            ToolId::Circle => "circle",
+            ToolId::Polyline => "pline",
+            ToolId::Arrow => "arrow",
+            ToolId::Spline => "spline",
+            ToolId::EraseMark => "erase",
+            ToolId::MeasureDistance => "measure distance",
+            ToolId::MeasureArea => "measure area",
+            ToolId::Lock => "lock",
+            ToolId::ArticleBox => "articlebox",
+            ToolId::EditText => "edittext",
+            ToolId::Highlight => "highlight",
+            ToolId::Underline => "underline",
+            ToolId::StrikeOut => "strikeout",
+            ToolId::Squiggly => "squiggly",
+            ToolId::Link => "weblinks",
+            ToolId::MatchProperties => "matchproperties",
+        }
     }
 }
 
