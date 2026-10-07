@@ -3472,6 +3472,77 @@ impl PagifyApp {
         // belongs and where someone with no document needs to be.
         let backstage = self.tab_mut().ribbon == Tab::File;
 
+        let jump_to = self.draw_left_rail(ctx, ui, backstage);
+
+        self.draw_layers_window(ctx, backstage);
+
+        // Claims its space before the central panel takes the rest — same
+        // rule as the ribbon and the command bar above.
+        self.draw_properties_panel(ui);
+
+        let home_command = self.draw_page_canvas(ctx, ui, backstage, command_id);
+        if let Some(page) = jump_to {
+            self.act(Verb::Page(PageTarget::Number(page + 1)));
+        }
+        if let Some(command) = home_command.or(ribbon_command) {
+            // The default-Hand illusion (see `hand_shown_before_any_tool_is_picked`)
+            // only holds until the first real pick — from here on the ribbon
+            // shows whichever tool is actually armed.
+            self.tab_mut().hand_shown_before_any_tool_is_picked = false;
+            match ribbon_click(&command) {
+                // With nothing open a click that needs a document or its
+                // pages has nothing to work on: say so, once and calmly,
+                // rather than run it into a red usage error.
+                RibbonClick::PickFile | RibbonClick::Extract | RibbonClick::Fill(Some(_))
+                    if self.tab().doc.is_none() =>
+                {
+                    self.say_info("open a PDF first.");
+                }
+                RibbonClick::PickFile => self.import_pages_dialog(),
+                RibbonClick::Extract => self.open_extract_dialog(),
+                // Put it in the box rather than running it silently, so the
+                // user sees the words the button stands for — which is the
+                // whole claim.
+                RibbonClick::Run => {
+                    self.cmd.input_mut().clear();
+                    self.cmd.input_mut().push_str(&command);
+                    *submitted = self.cmd.submit(Submit::Button);
+                }
+                RibbonClick::Fill(usage) => {
+                    self.cmd.input_mut().clear();
+                    self.cmd.input_mut().push_str(command.trim_end());
+                    self.cmd.input_mut().push(' ');
+                    if let Some(usage) = usage {
+                        self.say_info(usage);
+                    }
+                    ctx.memory_mut(|m| m.request_focus(command_id));
+                    self.caret_to_end_of_command_box(ctx, command_id);
+                }
+            }
+        }
+        if let Some(dispatch) = submitted.take() {
+            // A typed line cancels any half-collected pick. Letting it swallow
+            // the click silently would mean an unrelated command finishing
+            // someone else's measurement.
+            if self.tab_mut().tool.take().is_some() {
+                self.say_info("that pick was cancelled.");
+            }
+            let line = self
+                .cmd
+                .history()
+                .last()
+                .map(|e| e.text.clone())
+                .unwrap_or_default();
+            self.recorder.observe(&line);
+            self.session_log.record("command", &line);
+            self.run(dispatch);
+        }
+    }
+
+    /// The thumbnail rail or the Organize grid, whichever is showing.
+    /// Returns a page the reader asked to jump to — deferred to the caller,
+    /// because the panel borrows `ui` for its own duration.
+    fn draw_left_rail(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, backstage: bool) -> Option<usize> {
         // -- thumbnails ----------------------------------------------------------
         let mut jump_to = None;
         // Nothing open means nothing to thumbnail — an empty rail is a strip of
@@ -3615,7 +3686,12 @@ impl PagifyApp {
                     });
                 });
         }
+        jump_to
+    }
 
+    /// The floating Layers window, and the restack/opacity changes it asked
+    /// for — applied once the window's own closure has ended.
+    fn draw_layers_window(&mut self, ctx: &egui::Context, backstage: bool) {
         // -- layers ------------------------------------------------------------
         //
         // **A floating window, not a rail.** Asked for from use as a popup
@@ -3781,11 +3857,18 @@ impl PagifyApp {
             // same thing.
             self.tab_mut().picked_layer = kept;
         }
+    }
 
-        // Claims its space before the central panel takes the rest — same
-        // rule as the ribbon and the command bar above.
-        self.draw_properties_panel(ui);
-
+    /// The page canvas: the central panel, which is also where the Home
+    /// wizard and the File backstage are drawn. Returns the command the
+    /// wizard asked for.
+    fn draw_page_canvas(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        backstage: bool,
+        command_id: egui::Id,
+    ) -> Option<String> {
         // -- the pages ---------------------------------------------------------
         let mut home_command: Option<String> = None;
         egui::CentralPanel::default_margins().show(ui, |ui| {
@@ -3849,64 +3932,9 @@ impl PagifyApp {
 
             self.draw_pages(ui, ctx, command_id);
         });
-
-        if let Some(page) = jump_to {
-            self.act(Verb::Page(PageTarget::Number(page + 1)));
-        }
-        if let Some(command) = home_command.or(ribbon_command) {
-            // The default-Hand illusion (see `hand_shown_before_any_tool_is_picked`)
-            // only holds until the first real pick — from here on the ribbon
-            // shows whichever tool is actually armed.
-            self.tab_mut().hand_shown_before_any_tool_is_picked = false;
-            match ribbon_click(&command) {
-                // With nothing open a click that needs a document or its
-                // pages has nothing to work on: say so, once and calmly,
-                // rather than run it into a red usage error.
-                RibbonClick::PickFile | RibbonClick::Extract | RibbonClick::Fill(Some(_))
-                    if self.tab().doc.is_none() =>
-                {
-                    self.say_info("open a PDF first.");
-                }
-                RibbonClick::PickFile => self.import_pages_dialog(),
-                RibbonClick::Extract => self.open_extract_dialog(),
-                // Put it in the box rather than running it silently, so the
-                // user sees the words the button stands for — which is the
-                // whole claim.
-                RibbonClick::Run => {
-                    self.cmd.input_mut().clear();
-                    self.cmd.input_mut().push_str(&command);
-                    *submitted = self.cmd.submit(Submit::Button);
-                }
-                RibbonClick::Fill(usage) => {
-                    self.cmd.input_mut().clear();
-                    self.cmd.input_mut().push_str(command.trim_end());
-                    self.cmd.input_mut().push(' ');
-                    if let Some(usage) = usage {
-                        self.say_info(usage);
-                    }
-                    ctx.memory_mut(|m| m.request_focus(command_id));
-                    self.caret_to_end_of_command_box(ctx, command_id);
-                }
-            }
-        }
-        if let Some(dispatch) = submitted.take() {
-            // A typed line cancels any half-collected pick. Letting it swallow
-            // the click silently would mean an unrelated command finishing
-            // someone else's measurement.
-            if self.tab_mut().tool.take().is_some() {
-                self.say_info("that pick was cancelled.");
-            }
-            let line = self
-                .cmd
-                .history()
-                .last()
-                .map(|e| e.text.clone())
-                .unwrap_or_default();
-            self.recorder.observe(&line);
-            self.session_log.record("command", &line);
-            self.run(dispatch);
-        }
+        home_command
     }
+
 
     fn new(path: Option<&str>) -> Self {
         Self::build(path, false)

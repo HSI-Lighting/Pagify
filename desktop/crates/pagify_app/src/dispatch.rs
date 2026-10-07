@@ -708,7 +708,66 @@ impl crate::PagifyApp {
                      Anyone opening the file will be asked for it — {allowed}."
                 ));
             }
-            Verb::SmartRedact { redact } => {
+            Verb::SmartRedact { redact } => self.act_smart_redact(redact),
+            Verb::HiddenData { clean } => {
+                let Some(doc) = &self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                if clean {
+                    // **What is printed is what a second survey of the cleaned
+                    // bytes found**, not what the first survey listed. The line
+                    // used to print the findings as removals — and for the
+                    // attachment and the script, which the clean left alone,
+                    // that was a claim with nothing behind it. Found by audit.
+                    match doc.session.remove_hidden_data() {
+                        Ok(done) => {
+                            if let Some(doc) = &mut self.tab_mut().doc {
+                                doc.rendered_is_stale();
+                            }
+                            self.tab_mut().text_selection = None;
+                            self.tab_mut().find_hits.clear();
+                            let said = done.describe();
+                            if done.is_clean() {
+                                self.say_info(if done.removed().is_empty() {
+                                    format!("{said}.")
+                                } else {
+                                    format!("{said}. Save to write it out.")
+                                });
+                            } else {
+                                self.say_error(format!("{said}. Save to write out what was removed."));
+                            }
+                        }
+                        Err(e) => self.say_error(e.to_string()),
+                    }
+                } else {
+                    match doc.session.hidden_data() {
+                        Ok(found) => self.say_info(if found.is_empty() {
+                            found.describe()
+                        } else {
+                            format!("{} — `hiddendata clean` takes it out.", found.describe())
+                        }),
+                        Err(e) => self.say_error(e.to_string()),
+                    }
+                }
+            }
+            Verb::Unsecure => {
+                let Some(doc) = &mut self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                match doc.session.unsecure_document() {
+                    Ok(()) => self.say_info("the password is off; save to write it out."),
+                    Err(e) => self.say_error(e.to_string()),
+                }
+            }
+            _ => unreachable!("act_security was handed a verb from another domain"),
+        }
+    }
+
+    /// The whole Smart Redact pass, moved out of `act_security`: it is a page
+    /// walk with its own confirmation and result message, not a dispatch arm.
+    fn act_smart_redact(&mut self, redact: bool) {
                 let Some(doc) = &self.tab_mut().doc else {
                     self.say_error("nothing open.");
                     return;
@@ -824,62 +883,8 @@ impl crate::PagifyApp {
                     }
                     self.say_error(format!("{}. Save to write out what was removed.", said.join("; ")));
                 }
-            }
-            Verb::HiddenData { clean } => {
-                let Some(doc) = &self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                if clean {
-                    // **What is printed is what a second survey of the cleaned
-                    // bytes found**, not what the first survey listed. The line
-                    // used to print the findings as removals — and for the
-                    // attachment and the script, which the clean left alone,
-                    // that was a claim with nothing behind it. Found by audit.
-                    match doc.session.remove_hidden_data() {
-                        Ok(done) => {
-                            if let Some(doc) = &mut self.tab_mut().doc {
-                                doc.rendered_is_stale();
-                            }
-                            self.tab_mut().text_selection = None;
-                            self.tab_mut().find_hits.clear();
-                            let said = done.describe();
-                            if done.is_clean() {
-                                self.say_info(if done.removed().is_empty() {
-                                    format!("{said}.")
-                                } else {
-                                    format!("{said}. Save to write it out.")
-                                });
-                            } else {
-                                self.say_error(format!("{said}. Save to write out what was removed."));
-                            }
-                        }
-                        Err(e) => self.say_error(e.to_string()),
-                    }
-                } else {
-                    match doc.session.hidden_data() {
-                        Ok(found) => self.say_info(if found.is_empty() {
-                            found.describe()
-                        } else {
-                            format!("{} — `hiddendata clean` takes it out.", found.describe())
-                        }),
-                        Err(e) => self.say_error(e.to_string()),
-                    }
-                }
-            }
-            Verb::Unsecure => {
-                let Some(doc) = &mut self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                match doc.session.unsecure_document() {
-                    Ok(()) => self.say_info("the password is off; save to write it out."),
-                    Err(e) => self.say_error(e.to_string()),
-                }
-            }
-            _ => unreachable!("act_security was handed a verb from another domain"),
-        }
     }
+
 
     /// One domain of [`Self::act`]: 8 verbs, moved out
     /// whole so the router above stays a table of contents.
