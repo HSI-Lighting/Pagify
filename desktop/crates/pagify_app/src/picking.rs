@@ -61,11 +61,19 @@ impl crate::PagifyApp {
         self.tab_mut().pending = Some(Pending { kind, page, objects: Vec::new(), points: Vec::new() });
     }
 
-    /// [`Self::arm`], for a [`Tool`] instead of a [`PendingKind`]. No
-    /// `_without_saying` sibling: that variant exists on `arm` only to
-    /// re-arm quietly after a failed repeating pick, and neither `Tool`
-    /// kind repeats — see [`ArmedTool`]'s own doc.
     pub(crate) fn arm_tool(&mut self, tool: Tool, page: usize) {
+        self.arm_tool_without_saying(tool, page);
+        let prompt = self.tab().tool.as_ref().map(|t| t.kind.prompt(0));
+        if let Some(prompt) = prompt {
+            self.say_info(prompt);
+        }
+    }
+
+    /// [`Self::arm_tool`] without the announcement — see [`Self::
+    /// arm_without_saying`]'s own doc for when that matters: `resolve_tool`
+    /// uses it to put a repeating `Tool` (so far, only `Fill`) back in hand
+    /// quietly after a failure, the same way `resolve` does for `pending`.
+    pub(crate) fn arm_tool_without_saying(&mut self, tool: Tool, page: usize) {
         if self.tab_mut().object_tool.take().is_some() {
             self.tab_mut().selected = None;
             self.tab_mut().grab = None;
@@ -76,10 +84,6 @@ impl crate::PagifyApp {
         self.put_down_page_editors("armed a different tool");
         self.tab_mut().pending = None;
         self.tab_mut().tool = Some(ArmedTool { kind: tool, page, points: Vec::new() });
-        let prompt = self.tab().tool.as_ref().map(|t| t.kind.prompt(0));
-        if let Some(prompt) = prompt {
-            self.say_info(prompt);
-        }
     }
 
     /// A click on the page away from the open editor: **applies what was typed**,
@@ -169,37 +173,63 @@ impl crate::PagifyApp {
 
     /// [`Self::resolve`], for a [`Tool`] instead of a [`PendingKind`]. Called
     /// once `take_pick` has collected as many points as `Tool::wants_points`
-    /// asks for. No kind repeats, so there is no `arm`/`arm_without_saying`
-    /// tail either: a success or a failure both just leave `tool` disarmed.
+    /// asks for. Matches on `&armed.kind` rather than taking it, the same
+    /// way `resolve` matches on `&pending.kind` — a repeating kind needs its
+    /// own `kind` intact afterward, to re-arm with.
     pub(crate) fn resolve_tool(&mut self) {
         let Some(armed) = self.tab_mut().tool.take() else { return };
-        let outcome = match armed.kind {
+        let page = armed.page;
+        let outcome = match &armed.kind {
             Tool::Signature => match armed.points.first().copied() {
-                Some(at) => self.place_signature(armed.page, at),
+                Some(at) => self.place_signature(page, at),
                 None => Err("signature: nowhere was clicked.".into()),
             },
-            Tool::PlaceImage { rgba, width, height } => match armed.points.first().copied() {
-                Some(at) => self.place_image_at(armed.page, at, rgba, width, height),
-                None => Err("nowhere to place the picture.".into()),
-            },
+            Tool::PlaceImage { rgba, width, height } => {
+                let (rgba, width, height) = (rgba.clone(), *width, *height);
+                match armed.points.first().copied() {
+                    Some(at) => self.place_image_at(page, at, rgba, width, height),
+                    None => Err("nowhere to place the picture.".into()),
+                }
+            }
             Tool::PlaceText => match (armed.points.first(), armed.points.get(1)) {
-                (Some(a), Some(b)) => self.begin_text_box(armed.page, *a, *b),
+                (Some(a), Some(b)) => self.begin_text_box(page, *a, *b),
                 _ => Err("text: two corners are needed.".into()),
             },
-            Tool::Calibrate { distance, unit } => match (armed.points.first(), armed.points.get(1)) {
-                (Some(a), Some(b)) => match Calibration::from_two_points(*a, *b, distance, &unit) {
-                    Ok(calibration) => {
-                        self.tab_mut().calibration = calibration;
-                        Ok(self.tab_mut().calibration.describe())
-                    }
-                    Err(e) => Err(e),
-                },
-                _ => Err("calibrate: two points are needed.".into()),
-            },
+            Tool::Calibrate { distance, unit } => {
+                let (distance, unit) = (*distance, unit.clone());
+                match (armed.points.first(), armed.points.get(1)) {
+                    (Some(a), Some(b)) => match Calibration::from_two_points(*a, *b, distance, &unit) {
+                        Ok(calibration) => {
+                            self.tab_mut().calibration = calibration;
+                            Ok(self.tab_mut().calibration.describe())
+                        }
+                        Err(e) => Err(e),
+                    },
+                    _ => Err("calibrate: two points are needed.".into()),
+                }
+            }
+            Tool::Fill(mark) => {
+                let mark = *mark;
+                match armed.points.first().copied() {
+                    Some(at) => self.stamp_mark(page, mark, at),
+                    None => Err("fill: nowhere was clicked.".into()),
+                }
+            }
         };
+        let repeats = armed.kind.repeats();
+        let failed = outcome.is_err();
         match outcome {
             Ok(said) => self.say_info(said),
             Err(problem) => self.say_error(problem),
+        }
+        // Quietly after a failure, same reasoning as `resolve`'s own tail —
+        // see `arm_without_saying`'s doc.
+        if repeats && self.tab_mut().editing_run.is_none() {
+            if failed {
+                self.arm_tool_without_saying(armed.kind, page);
+            } else {
+                self.arm_tool(armed.kind, page);
+            }
         }
     }
 
@@ -249,13 +279,6 @@ impl crate::PagifyApp {
                 (Some(a), Some(b)) => self.whiteout(page, *a, *b),
                 _ => Err("whiteout: two corners are needed.".into()),
             },
-            PendingKind::Fill(mark) => {
-                let mark = *mark;
-                match pending.points.first().copied() {
-                    Some(at) => self.stamp_mark(page, mark, at),
-                    None => Err("fill: nowhere was clicked.".into()),
-                }
-            }
             PendingKind::SignRectangle => match (pending.points.first(), pending.points.get(1)) {
                 (Some(a), Some(b)) => self.stamp_box(page, *a, *b),
                 _ => Err("rectangle: two corners are needed.".into()),

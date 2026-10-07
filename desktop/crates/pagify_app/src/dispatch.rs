@@ -185,7 +185,7 @@ impl crate::PagifyApp {
                 let page = self.tab_mut().page;
                 match what.as_deref().and_then(pdf_core::document::FillMark::parse) {
                     // A tick, a cross or a dot: one click each.
-                    Some(mark) => self.arm(PendingKind::Fill(mark), page),
+                    Some(mark) => self.arm_tool(Tool::Fill(mark), page),
                     // Bare `fillsign` types where you click, which is the other
                     // half of filling a form in by hand.
                     None => {

@@ -28,10 +28,10 @@ pub(crate) struct Pending {
 
 /// A tool armed outside the big [`Pending`] dispatch — the `Tool` state
 /// machine the mentor's review calls for (`DESIGN_REVIEW.md` §3.2), built up
-/// one slice at a time. `Signature`/`PlaceImage` moved first (one point, no
-/// objects); `PlaceText` second (two points, still no objects, still never
-/// repeats). Every other `PendingKind` variant is still exactly where it
-/// was; `PendingKind` is deleted only once it is empty.
+/// one slice at a time. `Signature`/`PlaceImage`/`PlaceText`/`Calibrate`
+/// moved first, all `repeats() == false`; `Fill` is the first repeating
+/// kind to move. Every other `PendingKind` variant is still exactly where
+/// it was; `PendingKind` is deleted only once it is empty.
 pub(crate) struct ArmedTool {
     pub(crate) kind: Tool,
     pub(crate) page: usize,
@@ -51,6 +51,8 @@ pub(crate) enum Tool {
     /// Two points a known real-world distance apart, used to scale every
     /// later measurement on this document.
     Calibrate { distance: f64, unit: String },
+    /// A point to put a tick, a cross or a dot at.
+    Fill(pdf_core::document::FillMark),
 }
 
 impl Tool {
@@ -59,7 +61,7 @@ impl Tool {
     /// moved to `Tool` yet.
     pub(crate) fn wants_points(&self) -> usize {
         match self {
-            Tool::Signature | Tool::PlaceImage { .. } => 1,
+            Tool::Signature | Tool::PlaceImage { .. } | Tool::Fill(_) => 1,
             Tool::PlaceText | Tool::Calibrate { .. } => 2,
         }
     }
@@ -83,7 +85,18 @@ impl Tool {
                     "calibrate: second point".into()
                 }
             }
+            Tool::Fill(mark) => format!("fill: click where the {} goes", mark.describe()),
         }
+    }
+
+    /// Whether finishing it should arm it again — see `PendingKind::
+    /// repeats`'s own doc for the full reasoning; `Fill` is a straight
+    /// port of it (a run of stamps should not mean a trip to the ribbon
+    /// between each one). The other three `Tool` kinds answer a question
+    /// or place one thing to immediately adjust, not stamp a mark, so they
+    /// stay `false`.
+    pub(crate) fn repeats(&self) -> bool {
+        matches!(self, Tool::Fill(_))
     }
 
     /// The ribbon command that arms this, so its button can show itself lit
@@ -96,6 +109,9 @@ impl Tool {
             Tool::PlaceImage { .. } => None,
             Tool::PlaceText => Some("addtext"),
             Tool::Calibrate { .. } => Some("calibrate"),
+            // No ribbon button lights up per mark; the tool is one word
+            // with an argument — see `PendingKind::command`'s own doc.
+            Tool::Fill(_) => None,
         }
     }
 
@@ -123,8 +139,6 @@ pub(crate) enum PendingKind {
     Measure(MeasureKind),
     /// Two corners of an area whose contents are to be destroyed.
     Redact,
-    /// A point to put a tick, a cross or a dot at.
-    Fill(pdf_core::document::FillMark),
     /// Two corners of a box to draw while filling a form in.
     SignRectangle,
     /// The two ends of a line to rule while filling a form in.
@@ -216,7 +230,6 @@ impl PendingKind {
             PendingKind::Draw(DrawKind::Polyline | DrawKind::Spline) => (0, usize::MAX),
             PendingKind::Modify(pick) => (pick.objects, pick.points),
             PendingKind::Whiteout => (0, 2),
-            PendingKind::Fill(_) => (0, 1),
             PendingKind::SignRectangle => (0, 2),
             PendingKind::SignLine => (0, 2),
             PendingKind::Measure(MeasureKind::Distance) => (0, 2),
@@ -249,9 +262,6 @@ impl PendingKind {
                 0 => "whiteout: first corner — this covers, it does not remove".into(),
                 _ => "whiteout: opposite corner".into(),
             },
-            PendingKind::Fill(mark) => {
-                format!("fill: click where the {} goes", mark.describe())
-            }
             // Says which of the two rectangles this is, because the other one
             // is a drawing that can be picked up again and this one is not.
             PendingKind::SignRectangle => match points_done {
@@ -349,9 +359,6 @@ impl PendingKind {
             PendingKind::Draw(DrawKind::Spline) => "spline",
             PendingKind::Redact => "redact",
             PendingKind::Whiteout => "whiteout",
-            // No ribbon button lights up per mark; the tool is one word with
-            // an argument.
-            PendingKind::Fill(_) => return None,
             PendingKind::SignRectangle => "signrectangle",
             PendingKind::SignLine => "signline",
             PendingKind::Lock => "lock",

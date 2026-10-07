@@ -4249,8 +4249,8 @@ fn the_pagisign_mark_buttons_arm_the_tool_they_name() {
         app.submit(verb);
         assert!(
             matches!(
-                app.tab_mut().pending.as_ref().map(|p| &p.kind),
-                Some(PendingKind::Fill(armed)) if *armed == mark
+                app.tab_mut().tool.as_ref().map(|t| &t.kind),
+                Some(Tool::Fill(armed)) if *armed == mark
             ),
             "{verb} did not arm the mark it names:\n{}",
             said(&app)
@@ -4685,7 +4685,7 @@ fn fillsign_puts_a_mark_where_it_was_clicked() {
     let mut app = app("pages-ladder.pdf");
     app.submit("fillsign tick");
     assert!(
-        matches!(app.tab_mut().pending.as_ref().map(|p| &p.kind), Some(PendingKind::Fill(_))),
+        matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Fill(_))),
         "the tool was not armed:\n{}",
         said(&app)
     );

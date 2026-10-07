@@ -1268,6 +1268,9 @@ impl crate::PagifyApp {
                         );
                     }
                 }
+                // A tick, cross or dot is placed on a single click, same as
+                // `PlaceImage` — nothing to draw before it lands.
+                Tool::Fill(_) => {}
             }
             return;
         }
