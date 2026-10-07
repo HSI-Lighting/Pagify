@@ -1260,6 +1260,14 @@ impl crate::PagifyApp {
                         );
                     }
                 }
+                Tool::Calibrate { .. } => {
+                    if let Some(first) = armed.points.first().copied() {
+                        ui.painter().line_segment(
+                            [view.to_screen(first), view.to_screen(at)],
+                            egui::Stroke::new(1.0, theme::violet_bright()),
+                        );
+                    }
+                }
             }
             return;
         }
@@ -1329,7 +1337,7 @@ impl crate::PagifyApp {
                 path.push(on(at));
                 painter.add(egui::Shape::line(path, stroke));
             }
-            PendingKind::Measure(MeasureKind::Distance) | PendingKind::Calibrate { .. } => {
+            PendingKind::Measure(MeasureKind::Distance) => {
                 painter.line_segment([on(first), on(at)], stroke);
             }
             // The ones that take an area, each in the colour of what it does.
@@ -1856,8 +1864,10 @@ impl crate::PagifyApp {
         // explicit request for a specific point and must not then be nudged off
         // it by a constraint.
         self.tab_mut().last_snap = None;
-        let snapping = self.tab().pending.as_ref().is_some_and(|p| p.kind.wants_snapping());
-        let first_point = self.tab().pending.as_ref().and_then(|p| p.points.first().copied());
+        let snapping = self.tab().pending.as_ref().is_some_and(|p| p.kind.wants_snapping())
+            || self.tab().tool.as_ref().is_some_and(|t| t.kind.wants_snapping());
+        let first_point = self.tab().pending.as_ref().and_then(|p| p.points.first().copied())
+            .or_else(|| self.tab().tool.as_ref().and_then(|t| t.points.first().copied()));
         if let Some(layer) = self.tab().markup.existing(page).filter(|_| snapping) {
             let radius = HIT_TOLERANCE_PT * 3.0;
             if let Some(snapped) = tools::snap_at(layer, at, radius, self.snaps, None, first_point) {

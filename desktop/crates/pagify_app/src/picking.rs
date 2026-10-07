@@ -186,6 +186,16 @@ impl crate::PagifyApp {
                 (Some(a), Some(b)) => self.begin_text_box(armed.page, *a, *b),
                 _ => Err("text: two corners are needed.".into()),
             },
+            Tool::Calibrate { distance, unit } => match (armed.points.first(), armed.points.get(1)) {
+                (Some(a), Some(b)) => match Calibration::from_two_points(*a, *b, distance, &unit) {
+                    Ok(calibration) => {
+                        self.tab_mut().calibration = calibration;
+                        Ok(self.tab_mut().calibration.describe())
+                    }
+                    Err(e) => Err(e),
+                },
+                _ => Err("calibrate: two points are needed.".into()),
+            },
         };
         match outcome {
             Ok(said) => self.say_info(said),
@@ -219,15 +229,6 @@ impl crate::PagifyApp {
                 match pending.points.first().copied() {
                     Some(at) => self.write_text_at(page, at, &text),
                     None => Err("nowhere to write.".into()),
-                }
-            }
-            PendingKind::Calibrate { distance, unit } => {
-                match Calibration::from_two_points(pending.points[0], pending.points[1], *distance, unit) {
-                    Ok(calibration) => {
-                        self.tab_mut().calibration = calibration;
-                        Ok(self.tab_mut().calibration.describe())
-                    }
-                    Err(e) => Err(e),
                 }
             }
             PendingKind::Measure(MeasureKind::Distance) => Ok(measure::measure_distance(

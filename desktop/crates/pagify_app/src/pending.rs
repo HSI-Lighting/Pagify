@@ -48,6 +48,9 @@ pub(crate) enum Tool {
     /// Two corners of a box brand new text is composed into — see
     /// [`crate::NewTextBox`].
     PlaceText,
+    /// Two points a known real-world distance apart, used to scale every
+    /// later measurement on this document.
+    Calibrate { distance: f64, unit: String },
 }
 
 impl Tool {
@@ -57,7 +60,7 @@ impl Tool {
     pub(crate) fn wants_points(&self) -> usize {
         match self {
             Tool::Signature | Tool::PlaceImage { .. } => 1,
-            Tool::PlaceText => 2,
+            Tool::PlaceText | Tool::Calibrate { .. } => 2,
         }
     }
 
@@ -73,6 +76,13 @@ impl Tool {
                 0 => "text: first corner of the box".into(),
                 _ => "text: opposite corner".into(),
             },
+            Tool::Calibrate { .. } => {
+                if points_done == 0 {
+                    "calibrate: first of the two points".into()
+                } else {
+                    "calibrate: second point".into()
+                }
+            }
         }
     }
 
@@ -85,7 +95,17 @@ impl Tool {
             Tool::Signature => Some("signature"),
             Tool::PlaceImage { .. } => None,
             Tool::PlaceText => Some("addtext"),
+            Tool::Calibrate { .. } => Some("calibrate"),
         }
+    }
+
+    /// Whether the pointer should be pulled to nearby geometry — see
+    /// `PendingKind::wants_snapping`'s own doc. The first `Tool` kind that
+    /// needs it: a calibration point is placing a point on known geometry
+    /// (the two ends of a line of known length), unlike a signature,
+    /// picture or text box's corner, which is just "about here."
+    pub(crate) fn wants_snapping(&self) -> bool {
+        matches!(self, Tool::Calibrate { .. })
     }
 }
 
@@ -100,7 +120,6 @@ pub(crate) enum PendingKind {
     Write(String),
     Draw(DrawKind),
     Modify(tools::Pick),
-    Calibrate { distance: f64, unit: String },
     Measure(MeasureKind),
     /// Two corners of an area whose contents are to be destroyed.
     Redact,
@@ -196,7 +215,6 @@ impl PendingKind {
             }
             PendingKind::Draw(DrawKind::Polyline | DrawKind::Spline) => (0, usize::MAX),
             PendingKind::Modify(pick) => (pick.objects, pick.points),
-            PendingKind::Calibrate { .. } => (0, 2),
             PendingKind::Whiteout => (0, 2),
             PendingKind::Fill(_) => (0, 1),
             PendingKind::SignRectangle => (0, 2),
@@ -269,13 +287,6 @@ impl PendingKind {
                 }
             },
             PendingKind::Modify(pick) => pick.prompt(objects_done, points_done),
-            PendingKind::Calibrate { .. } => {
-                if points_done == 0 {
-                    "calibrate: first of the two points".into()
-                } else {
-                    "calibrate: second point".into()
-                }
-            }
             PendingKind::Measure(MeasureKind::Distance) => {
                 if points_done == 0 { "measure: from".into() } else { "measure: to".into() }
             }
@@ -316,11 +327,10 @@ impl PendingKind {
     /// that lands on bare paper instead of another run, rather than putting
     /// the tool down right back where `edittext` would have to undo it.
     pub(crate) fn repeats(&self) -> bool {
-        // Calibration is set once — the same reasoning that used to live
-        // here for a placed signature, picture and text box before they
-        // became `Tool::Signature`/`PlaceImage`/`PlaceText`: none of them
-        // has a `repeats` to ask any more, since the answer was always "no".
-        !matches!(self, PendingKind::Calibrate { .. })
+        // Every exception — calibration, a placed signature, picture and
+        // text box — has moved to `Tool`, which never re-arms at all (see
+        // its own doc), so there is nothing left here that does not repeat.
+        true
     }
 
     /// Whether Enter can end it early.
@@ -351,7 +361,6 @@ impl PendingKind {
             PendingKind::Write(_) => "addtext",
             PendingKind::Measure(MeasureKind::Distance) => "measure distance",
             PendingKind::Measure(MeasureKind::Area) => "measure area",
-            PendingKind::Calibrate { .. } => "calibrate",
             PendingKind::Modify(_) => return None,
         })
     }
@@ -367,13 +376,7 @@ impl PendingKind {
     /// Picking a run of text is not placing a point: it means "the words
     /// there", and the nearest drawn line has nothing to do with it.
     pub(crate) fn wants_snapping(&self) -> bool {
-        matches!(
-            self,
-            PendingKind::Draw(_)
-                | PendingKind::Modify(_)
-                | PendingKind::Measure(_)
-                | PendingKind::Calibrate { .. }
-        )
+        matches!(self, PendingKind::Draw(_) | PendingKind::Modify(_) | PendingKind::Measure(_))
     }
 
     pub(crate) fn ends_on_enter(&self) -> bool {

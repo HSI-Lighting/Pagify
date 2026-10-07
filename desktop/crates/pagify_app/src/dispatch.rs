@@ -96,7 +96,7 @@ impl crate::PagifyApp {
                 self.say_info("checking for a newer build…");
             }
             Verb::Pick(at) => {
-                if self.tab_mut().pending.is_none() {
+                if self.tab_mut().pending.is_none() && self.tab_mut().tool.is_none() {
                     self.say_error("nothing is waiting for a click.");
                     return;
                 }
@@ -916,7 +916,10 @@ impl crate::PagifyApp {
                     .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
                 if closeable {
                     self.resolve();
-                } else if self.tab_mut().pending.is_some() {
+                // No `Tool` kind ends on Enter yet, so a `Tool` being armed
+                // at all means it is still waiting for more points — same
+                // as `pending` being armed but not `closeable`, above.
+                } else if self.tab_mut().pending.is_some() || self.tab_mut().tool.is_some() {
                     self.say_error("not enough points yet.");
                 } else {
                     self.say_error("nothing to finish.");
@@ -961,7 +964,7 @@ impl crate::PagifyApp {
 
             Verb::Calibrate { distance, unit } => {
                 let page = self.tab_mut().page;
-                self.arm(PendingKind::Calibrate { distance, unit }, page);
+                self.arm_tool(Tool::Calibrate { distance, unit }, page);
             }
             Verb::Scale => {
                 let d = self.tab_mut().calibration.describe();

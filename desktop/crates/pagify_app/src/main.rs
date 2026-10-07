@@ -13384,7 +13384,10 @@ impl eframe::App for PagifyApp {
                 .unwrap_or_else(|| "pagify".to_string());
             let wants = match &self.tab_mut().pending {
                 Some(p) => p.prompt(),
-                None => self.cmd.prompt().wants.clone(),
+                None => match &self.tab_mut().tool {
+                    Some(t) => t.kind.prompt(t.points.len()),
+                    None => self.cmd.prompt().wants.clone(),
+                },
             };
 
             if self.command_open {
@@ -13424,7 +13427,7 @@ impl eframe::App for PagifyApp {
                     // A tool that is waiting for clicks must say so even with
                     // the history folded away. Without this, arming a tool
                     // looked exactly like nothing happening.
-                    if self.tab_mut().pending.is_some() {
+                    if self.tab_mut().pending.is_some() || self.tab_mut().tool.is_some() {
                         // **An error that has just been said stays, with the
                         // prompt after it.** Reported from use: a click that
                         // found no text, or an apply that was refused, said
