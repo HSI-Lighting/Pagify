@@ -75,7 +75,7 @@ pub(crate) use ribbon::{
     DOC_TAB_MAX_TEXT, DOC_TAB_MENU_WIDTH, DOC_TAB_PADDING, RIBBON_MARGIN_X, RIBBON_MARGIN_Y, TOOL_HEIGHT, TOOL_WIDTH,
 };
 pub(crate) use tool::{
-    ArmedTool, DrawKind, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool, ToolEffect,
+    ArmedTool, DrawKind, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool, ToolEffect, ToolId,
 };
 // `spelling` and `paragraph_lines` moved to `pagify_shell` (Phase 4a: no
 // egui, so they belong where they can be tested without a window) —
@@ -13125,10 +13125,10 @@ impl eframe::App for PagifyApp {
                 let show_hand_by_default =
                     self.tab().hand_shown_before_any_tool_is_picked
                         && self.tab().pointer == pagify_shell::verbs::PointerMode::Select;
-                let live = |command: &str| -> bool {
-                    let c = command.trim();
-                    in_hand == Some(c)
-                        || armed.is_some_and(|id| id.ribbon_command() == c)
+                let live = |command: &ribbon::Command| -> bool {
+                    let c = command.text().trim();
+                    command.lit_by(armed)
+                        || in_hand == Some(c)
                         || (c == "fill" && self.draw_fill)
                         || (c == "appearance" && theme::mode() == theme::Mode::Light)
                         || (c == "hand" && show_hand_by_default)
@@ -13160,8 +13160,8 @@ impl eframe::App for PagifyApp {
                 const DIVIDER_WIDTH: f32 = 12.0;
                 ui.horizontal(|ui| {
                     for (glyph, label, command) in tab.leading() {
-                        if tool_button(ui, glyph, label, command, live(command)).clicked() {
-                            ribbon_command = Some((*command).to_string());
+                        if tool_button(ui, glyph, label, command.text(), live(command)).clicked() {
+                            ribbon_command = Some(command.text().to_string());
                         }
                     }
                     // The reference toolbar divides the two standing tools from
@@ -13188,12 +13188,12 @@ impl eframe::App for PagifyApp {
                             ui.separator();
                             ui.add_space(4.0);
                         }
-                        let response = tool_button(ui, glyph, label, command, live(command));
+                        let response = tool_button(ui, glyph, label, command.text(), live(command));
                         // The one button on the ribbon that is a standing
                         // choice rather than a tool or an action: nothing
                         // about a small icon says what it means, or which way
                         // it is currently set, without this.
-                        let response = if *command == "fill" {
+                        let response = if command.text() == "fill" {
                             response.on_hover_text(if self.draw_fill {
                                 "Fill: on — the next rectangle or circle is drawn filled. \
                                  Click to draw hollow instead."
@@ -13201,7 +13201,7 @@ impl eframe::App for PagifyApp {
                                 "Fill: off — the next rectangle or circle is drawn hollow. \
                                  Click to draw it filled instead."
                             })
-                        } else if *command == "appearance" {
+                        } else if command.text() == "appearance" {
                             response.on_hover_text(if theme::mode() == theme::Mode::Light {
                                 "Light theme — click for dark."
                             } else {
@@ -13212,7 +13212,7 @@ impl eframe::App for PagifyApp {
                         };
                         if response.clicked() {
                             // Every button runs a command string — §7.
-                            ribbon_command = Some((*command).to_string());
+                            ribbon_command = Some(command.text().to_string());
                         }
                     }
                     let popup_id = egui::Id::new("ribbon_more_tools");
@@ -13259,8 +13259,8 @@ impl eframe::App for PagifyApp {
                                             ui.separator();
                                             ui.add_space(4.0);
                                         }
-                                        if tool_button(ui, glyph, label, command, live(command)).clicked() {
-                                            ribbon_command = Some((*command).to_string());
+                                        if tool_button(ui, glyph, label, command.text(), live(command)).clicked() {
+                                            ribbon_command = Some(command.text().to_string());
                                             egui::Popup::close_id(ui.ctx(), popup_id);
                                         }
                                     }

@@ -537,6 +537,7 @@ fn the_rest_of_the_ribbon_drops_down_as_the_ribbons_own_tiles() {
 
     // Choosing one runs it and folds the panel away.
     let (_, label, command) = buttons.iter().find(|b| b.1 == held_back[0]).expect("a held-back button");
+    let command = command.text();
     let tile = tiles(&h, label)[0].center();
     click(&mut h, tile);
     h.run_steps(3);

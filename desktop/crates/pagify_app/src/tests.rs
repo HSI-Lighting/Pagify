@@ -755,6 +755,7 @@ fn only_draw_has_grouped_tools() {
 fn every_ribbon_button_runs_a_command_the_box_understands() {
     for tab in Tab::ALL {
         for (_glyph, label, command) in tab.leading().iter().chain(tab.buttons()) {
+            let command = command.text();
             let line = command.trim();
             // A trailing space means the button pre-fills the box for the
             // user to complete — those are checked as their bare verb.
@@ -785,9 +786,10 @@ fn every_ribbon_button_runs_a_command_the_box_understands() {
 fn add_text_buttons_submit_bare_and_arm_the_box_tool() {
     for tab in Tab::ALL {
         for (_glyph, label, command) in tab.leading().iter().chain(tab.buttons()) {
+            let command = command.text();
             if command.trim() == "addtext" {
                 assert_eq!(
-                    *command, "addtext",
+                    command, "addtext",
                     "{}/{label} runs `{command}`, not bare `addtext`",
                     tab.label()
                 );

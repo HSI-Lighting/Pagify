@@ -314,10 +314,10 @@ fn only_delete_extract_and_move_run_a_bare_command_the_parser_refuses() {
     for tab in Tab::ALL {
         for (_glyph, _label, command) in tab.leading().iter().chain(tab.buttons()) {
             if matches!(
-                ribbon_click(command),
+                ribbon_click(command.text()),
                 RibbonClick::Fill(Some(_)) | RibbonClick::PickFile | RibbonClick::Extract
             ) {
-                asked.push(command);
+                asked.push(command.text());
             }
         }
     }

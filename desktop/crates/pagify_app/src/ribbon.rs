@@ -1,12 +1,50 @@
-use crate::{hub, icon_font, theme};
+use crate::{hub, icon_font, theme, ToolId};
 use pagify_shell::command::Dispatch;
+
+/// What a ribbon button's own third field means: its literal dispatch
+/// text always, and, where it corresponds to one of `Tool::id`'s own
+/// identities, the `ToolId` itself — DESIGN_REVIEW.md §2.8.4 /
+/// `Pagify-Phase2-BigTasks.md` §4, finishing what `Tool::id`/`ToolId`
+/// started. `armed` is compared against this by `ToolId` equality now
+/// (`lit_by`), not by a string that could drift between this table and
+/// `Tool::id`'s own match.
+///
+/// **Carries the dispatch text itself, not derived from
+/// `ToolId::ribbon_command()`.** They can genuinely differ: `Calibrate`'s
+/// own button fills the box and waits ("calibrate ", trailing space, see
+/// `ribbon_click`'s own "ends with a space" rule), while
+/// `ribbon_command()` is the trimmed form the old string comparison used
+/// — kept that way since other callers still compare against it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Command {
+    Tool(ToolId, &'static str),
+    /// Everything else — an ordinary verb with no `Tool` behind it at all
+    /// (`"save"`, `"import"`, …), or a tool-shaped command with no
+    /// ribbon-lit identity of its own (`Draw(Rectangle)`'s `"rectangle"`,
+    /// `PlaceImage`, every `tools::Op` verb like `fillet`/`trim`/`offset`).
+    Verb(&'static str),
+}
+
+impl Command {
+    pub(crate) fn text(&self) -> &'static str {
+        match self {
+            Command::Tool(_, text) | Command::Verb(text) => text,
+        }
+    }
+
+    /// Whether `armed` is this button's own tool. Always `false` for a
+    /// `Verb` — it has no `ToolId` to be lit by in the first place.
+    pub(crate) fn lit_by(&self, armed: Option<ToolId>) -> bool {
+        matches!(self, Command::Tool(id, _) if Some(*id) == armed)
+    }
+}
 
 /// One ribbon button: the glyph, the name under it, and the command it runs.
 ///
 /// A command string rather than a callback, because §7 makes the command box
 /// the single way anything happens — a button that did something the box could
 /// not would be a second, undiscoverable interface.
-pub type Tool = (&'static str, &'static str, &'static str);
+pub type Tool = (&'static str, &'static str, Command);
 
 /// Hand and Select, which the reference toolbar repeats at the head of every
 /// tab.
@@ -16,8 +54,8 @@ pub type Tool = (&'static str, &'static str, &'static str);
 /// to drift apart. The File tab is the exception — it is a backstage, not a
 /// toolbar.
 const ALWAYS: &[Tool] = &[
-    ("\u{E925}", "Hand", "hand"),
-    ("\u{EF52}", "Select", "selecttool"),
+    ("\u{E925}", "Hand", Command::Verb("hand")),
+    ("\u{EF52}", "Select", Command::Verb("selecttool")),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,119 +119,119 @@ impl Tab {
     pub(crate) fn buttons(self) -> &'static [Tool] {
         match self {
             Tab::File => &[
-                ("\u{E2C8}", "Open…", "open"),
-                ("\u{E5CD}", "Close", "close"),
-                ("\u{E161}", "Save", "save"),
-                ("\u{E161}", "Save As…", "saveas"),
-                ("\u{E8B8}", "PDFium", "pdfium"),
-                ("\u{F8C7}", "Quit", "quit"),
+                ("\u{E2C8}", "Open…", Command::Verb("open")),
+                ("\u{E5CD}", "Close", Command::Verb("close")),
+                ("\u{E161}", "Save", Command::Verb("save")),
+                ("\u{E161}", "Save As…", Command::Verb("saveas")),
+                ("\u{E8B8}", "PDFium", Command::Verb("pdfium")),
+                ("\u{F8C7}", "Quit", Command::Verb("quit")),
             ],
             Tab::Home => &[
-                ("\u{E412}", "Snapshot", "snapshot"),
-                ("\u{E14D}", "Copy", "copy"),
-                ("\u{E8E7}", "Bookmark", "bookmark"),
-                ("\u{E8FF}", "Zoom In", "zoom in"),
-                ("\u{E900}", "Zoom Out", "zoom out"),
-                ("\u{EA10}", "Fit Page", "zoom fit"),
-                ("\u{F779}", "Fit Width", "zoom width"),
-                ("\u{E3F4}", "Actual Size", "zoom actual"),
-                ("\u{E5FA}", "Extract Text", "extracttext"),
-                ("\u{E41A}", "Rotate View", "rotate"),
-                ("\u{E262}", "Edit Text", "edittext"),
-                ("\u{E162}", "Edit Object", "editobject"),
-                ("\u{E53B}", "Layers", "layers"),
-                ("\u{E883}", "Bring to Front", "bringtofront"),
-                ("\u{E882}", "Send to Back", "sendtoback"),
-                ("\u{E89F}", "Move", "moveobject"),
-                ("\u{F82B}", "Highlight", "highlight"),
-                ("\u{E418}", "Rotate Pages", "rotatepages"),
-                ("\u{E145}", "Insert", "insertpage"),
-                ("\u{E329}", "From Scanner", "fromscanner"),
-                ("\u{E746}", "Fill & Sign", "fillsign"),
+                ("\u{E412}", "Snapshot", Command::Verb("snapshot")),
+                ("\u{E14D}", "Copy", Command::Verb("copy")),
+                ("\u{E8E7}", "Bookmark", Command::Verb("bookmark")),
+                ("\u{E8FF}", "Zoom In", Command::Verb("zoom in")),
+                ("\u{E900}", "Zoom Out", Command::Verb("zoom out")),
+                ("\u{EA10}", "Fit Page", Command::Verb("zoom fit")),
+                ("\u{F779}", "Fit Width", Command::Verb("zoom width")),
+                ("\u{E3F4}", "Actual Size", Command::Verb("zoom actual")),
+                ("\u{E5FA}", "Extract Text", Command::Verb("extracttext")),
+                ("\u{E41A}", "Rotate View", Command::Verb("rotate")),
+                ("\u{E262}", "Edit Text", Command::Tool(ToolId::EditText, "edittext")),
+                ("\u{E162}", "Edit Object", Command::Verb("editobject")),
+                ("\u{E53B}", "Layers", Command::Verb("layers")),
+                ("\u{E883}", "Bring to Front", Command::Verb("bringtofront")),
+                ("\u{E882}", "Send to Back", Command::Verb("sendtoback")),
+                ("\u{E89F}", "Move", Command::Verb("moveobject")),
+                ("\u{F82B}", "Highlight", Command::Tool(ToolId::Highlight, "highlight")),
+                ("\u{E418}", "Rotate Pages", Command::Verb("rotatepages")),
+                ("\u{E145}", "Insert", Command::Verb("insertpage")),
+                ("\u{E329}", "From Scanner", Command::Verb("fromscanner")),
+                ("\u{E746}", "Fill & Sign", Command::Verb("fillsign")),
                 // The two a form actually asks for, one press away.
-                ("\u{E668}", "Tick", "fillsign tick"),
-                ("\u{E5CD}", "Cross", "fillsign cross"),
+                ("\u{E668}", "Tick", Command::Verb("fillsign tick")),
+                ("\u{E5CD}", "Cross", Command::Verb("fillsign cross")),
             ],
             Tab::Convert => &[
-                ("\u{E873}", "From Files", "fromfiles"),
-                ("\u{E329}", "From Scanner", "fromscanner"),
-                ("\u{E14F}", "From Clipboard", "fromclipboard"),
-                ("\u{E0EE}", "Form", "createform"),
-                ("\u{EBBD}", "PDF Portfolio", "portfolio"),
-                ("\u{EB98}", "Combine Files", "combine"),
-                ("\u{E66D}", "Blank", "blankdoc"),
-                ("\u{E99B}", "From Template", "fromtemplate"),
-                ("\u{EFA2}", "Export All Images", "exportimages"),
-                ("\u{F1BE}", "To MS Office", "tooffice"),
-                ("\u{E3F4}", "To Image", "toimage"),
-                ("\u{EB7E}", "To HTML", "tohtml"),
-                ("\u{F720}", "To Other", "toother"),
-                ("\u{F0C5}", "Preflight", "preflight"),
+                ("\u{E873}", "From Files", Command::Verb("fromfiles")),
+                ("\u{E329}", "From Scanner", Command::Verb("fromscanner")),
+                ("\u{E14F}", "From Clipboard", Command::Verb("fromclipboard")),
+                ("\u{E0EE}", "Form", Command::Verb("createform")),
+                ("\u{EBBD}", "PDF Portfolio", Command::Verb("portfolio")),
+                ("\u{EB98}", "Combine Files", Command::Verb("combine")),
+                ("\u{E66D}", "Blank", Command::Verb("blankdoc")),
+                ("\u{E99B}", "From Template", Command::Verb("fromtemplate")),
+                ("\u{EFA2}", "Export All Images", Command::Verb("exportimages")),
+                ("\u{F1BE}", "To MS Office", Command::Verb("tooffice")),
+                ("\u{E3F4}", "To Image", Command::Verb("toimage")),
+                ("\u{EB7E}", "To HTML", Command::Verb("tohtml")),
+                ("\u{F720}", "To Other", Command::Verb("toother")),
+                ("\u{F0C5}", "Preflight", Command::Verb("preflight")),
             ],
             Tab::Edit => &[
-                ("\u{E262}", "Edit Text", "edittext"),
-                ("\u{E162}", "Edit Object", "editobject"),
-                ("\u{E236}", "Link & Join Text", "jointext"),
+                ("\u{E262}", "Edit Text", Command::Tool(ToolId::EditText, "edittext")),
+                ("\u{E162}", "Edit Object", Command::Verb("editobject")),
+                ("\u{E236}", "Link & Join Text", Command::Verb("jointext")),
                 // Drag the sample text, then drag whatever needs to match it
                 // — see `begin_match_properties`'s own doc for the two-step
                 // shape and why the tool stays in hand between selections.
-                ("\u{E262}", "Match Properties", "matchproperties"),
-                ("\u{E8CE}", "Check Spelling", "spelling"),
-                ("\u{E881}", "Search & Replace", "replace"),
+                ("\u{E262}", "Match Properties", Command::Tool(ToolId::MatchProperties, "matchproperties")),
+                ("\u{E8CE}", "Check Spelling", Command::Verb("spelling")),
+                ("\u{E881}", "Search & Replace", Command::Verb("replace")),
                 // Bare, not pre-filled: this drags out a box to type into
                 // (see `begin_text_box`), the same click-and-place shape Add
                 // Images already has, rather than asking for the words in
                 // the command line first.
-                ("\u{EAE2}", "Add Text", "addtext"),
-                ("\u{E43E}", "Add Images", "addimage"),
-                ("\u{E8EC}", "Add Article Box", "articlebox"),
-                ("\u{EA07}", "Web Links", "weblinks"),
-                ("\u{E8E7}", "Bookmark", "bookmark"),
-                ("\u{F184}", "Cross Reference", "crossref"),
+                ("\u{EAE2}", "Add Text", Command::Tool(ToolId::AddText, "addtext")),
+                ("\u{E43E}", "Add Images", Command::Verb("addimage")),
+                ("\u{E8EC}", "Add Article Box", Command::Tool(ToolId::ArticleBox, "articlebox")),
+                ("\u{EA07}", "Web Links", Command::Tool(ToolId::Link, "weblinks")),
+                ("\u{E8E7}", "Bookmark", Command::Verb("bookmark")),
+                ("\u{F184}", "Cross Reference", Command::Verb("crossref")),
             ],
             Tab::Organize => &[
-                ("\u{E9B0}", "Thumbnail View", "thumbnails"),
-                ("\u{E145}", "Insert", "insertpage"),
-                ("\u{E92E}", "Delete", "deletepage"),
-                ("\u{E14E}", "Extract", "extract"),
-                ("\u{E8D5}", "Reverse", "reversepages"),
-                ("\u{E8FE}", "Rearrange", "rearrange"),
-                ("\u{E89F}", "Move", "movepage"),
-                ("\u{E173}", "Duplicate", "duplicatepage"),
-                ("\u{F232}", "Replace", "replacepage"),
-                ("\u{E0B6}", "Split", "split"),
-                ("\u{E8D4}", "Swap", "swappages "),
-                ("\u{EAF4}", "Interleaving", "interleave"),
-                ("\u{E418}", "Rotate Pages", "rotatepages"),
-                ("\u{E3BE}", "Crop Pages", "croppages all "),
-                ("\u{E85B}", "Resize Pages", "resizepages all "),
-                ("\u{E53C}", "Flatten", "flatten"),
-                ("\u{E41C}", "Page Marks", "pagemarks"),
+                ("\u{E9B0}", "Thumbnail View", Command::Verb("thumbnails")),
+                ("\u{E145}", "Insert", Command::Verb("insertpage")),
+                ("\u{E92E}", "Delete", Command::Verb("deletepage")),
+                ("\u{E14E}", "Extract", Command::Verb("extract")),
+                ("\u{E8D5}", "Reverse", Command::Verb("reversepages")),
+                ("\u{E8FE}", "Rearrange", Command::Verb("rearrange")),
+                ("\u{E89F}", "Move", Command::Verb("movepage")),
+                ("\u{E173}", "Duplicate", Command::Verb("duplicatepage")),
+                ("\u{F232}", "Replace", Command::Verb("replacepage")),
+                ("\u{E0B6}", "Split", Command::Verb("split")),
+                ("\u{E8D4}", "Swap", Command::Verb("swappages ")),
+                ("\u{EAF4}", "Interleaving", Command::Verb("interleave")),
+                ("\u{E418}", "Rotate Pages", Command::Verb("rotatepages")),
+                ("\u{E3BE}", "Crop Pages", Command::Verb("croppages all ")),
+                ("\u{E85B}", "Resize Pages", Command::Verb("resizepages all ")),
+                ("\u{E53C}", "Flatten", Command::Verb("flatten")),
+                ("\u{E41C}", "Page Marks", Command::Verb("pagemarks")),
             ],
             Tab::Comment => &[
-                ("\u{F82B}", "Highlight", "highlight"),
-                ("\u{E249}", "Underline", "underline"),
-                ("\u{E246}", "Strikeout", "strikeout"),
-                ("\u{E155}", "Squiggly", "squiggly"),
-                ("\u{E0D7}", "Replace Text", "replacetext"),
-                ("\u{F735}", "Insert Text", "inserttext"),
-                ("\u{F1FC}", "Note", "note "),
-                ("\u{E2BC}", "File", "attachcomment"),
-                ("\u{E312}", "Typewriter", "addtext"),
-                ("\u{E3BC}", "Textbox", "textbox"),
-                ("\u{E0CB}", "Callout", "callout"),
-                ("\u{EBBB}", "Drawing", "drawing"),
-                ("\u{F097}", "Pencil", "pencil"),
-                ("\u{E6D0}", "Eraser", "erase"),
-                ("\u{E162}", "Area Highlight", "areahighlight"),
-                ("\u{F02F}", "Search & Highlight", "searchhighlight"),
-                ("\u{EA5F}", "Accounting Calculator", "calculator"),
-                ("\u{EA49}", "Measure", "measure distance"),
-                ("\u{E982}", "Stamp", "stamp"),
-                ("\u{EF76}", "Custom Stamp", "customstamp"),
-                ("\u{E668}", "TickMark", "tickmark"),
-                ("\u{E8AF}", "Manage Comments", "managecomments"),
-                ("\u{F10D}", "Keep Tool Selected", "keeptool"),
+                ("\u{F82B}", "Highlight", Command::Tool(ToolId::Highlight, "highlight")),
+                ("\u{E249}", "Underline", Command::Tool(ToolId::Underline, "underline")),
+                ("\u{E246}", "Strikeout", Command::Tool(ToolId::StrikeOut, "strikeout")),
+                ("\u{E155}", "Squiggly", Command::Tool(ToolId::Squiggly, "squiggly")),
+                ("\u{E0D7}", "Replace Text", Command::Verb("replacetext")),
+                ("\u{F735}", "Insert Text", Command::Verb("inserttext")),
+                ("\u{F1FC}", "Note", Command::Verb("note ")),
+                ("\u{E2BC}", "File", Command::Verb("attachcomment")),
+                ("\u{E312}", "Typewriter", Command::Tool(ToolId::AddText, "addtext")),
+                ("\u{E3BC}", "Textbox", Command::Verb("textbox")),
+                ("\u{E0CB}", "Callout", Command::Verb("callout")),
+                ("\u{EBBB}", "Drawing", Command::Verb("drawing")),
+                ("\u{F097}", "Pencil", Command::Verb("pencil")),
+                ("\u{E6D0}", "Eraser", Command::Tool(ToolId::EraseMark, "erase")),
+                ("\u{E162}", "Area Highlight", Command::Verb("areahighlight")),
+                ("\u{F02F}", "Search & Highlight", Command::Verb("searchhighlight")),
+                ("\u{EA5F}", "Accounting Calculator", Command::Verb("calculator")),
+                ("\u{EA49}", "Measure", Command::Tool(ToolId::MeasureDistance, "measure distance")),
+                ("\u{E982}", "Stamp", Command::Verb("stamp")),
+                ("\u{EF76}", "Custom Stamp", Command::Verb("customstamp")),
+                ("\u{E668}", "TickMark", Command::Verb("tickmark")),
+                ("\u{E8AF}", "Manage Comments", Command::Verb("managecomments")),
+                ("\u{F10D}", "Keep Tool Selected", Command::Verb("keeptool")),
             ],
             Tab::View => &[
                 // `\u{E793}` (Segoe Fluent's own "DarkTheme" glyph) was tried
@@ -204,163 +242,163 @@ impl Tab {
                 // exact pictograph wasn't verified beyond that, so swap it
                 // for another confirmed-present codepoint if it doesn't read
                 // as "appearance" on screen.
-                ("\u{E226}", "Light Theme", "appearance"),
-                ("\u{E40A}", "Change Color", "changecolor"),
-                ("\u{E3E8}", "Reverse View", "reverseview"),
-                ("\u{E41A}", "Rotate View", "rotate"),
-                ("\u{E41C}", "Toggle Ruler", "ruler"),
-                ("\u{E3C5}", "Single Page", "viewsingle"),
-                ("\u{E0E0}", "Facing", "viewfacing"),
-                ("\u{E8ED}", "Continuous", "viewcontinuous"),
-                ("\u{E666}", "Continuous Facing", "viewcontinuousfacing"),
-                ("\u{E86E}", "Separate Cover", "viewcover"),
-                ("\u{E0B6}", "Split", "viewsplit"),
-                ("\u{E235}", "Reflow", "reflow"),
-                ("\u{E71C}", "Page Transitions", "transitions"),
-                ("\u{E258}", "AutoScroll", "autoscroll"),
-                ("\u{E87A}", "Assistant", "assistant"),
-                ("\u{E050}", "Read", "readaloud"),
-                ("\u{E3B9}", "Compare", "compare"),
-                ("\u{EAC7}", "Word Count", "wordcount"),
-                ("\u{E429}", "View Setting", "viewsetting"),
+                ("\u{E226}", "Light Theme", Command::Verb("appearance")),
+                ("\u{E40A}", "Change Color", Command::Verb("changecolor")),
+                ("\u{E3E8}", "Reverse View", Command::Verb("reverseview")),
+                ("\u{E41A}", "Rotate View", Command::Verb("rotate")),
+                ("\u{E41C}", "Toggle Ruler", Command::Verb("ruler")),
+                ("\u{E3C5}", "Single Page", Command::Verb("viewsingle")),
+                ("\u{E0E0}", "Facing", Command::Verb("viewfacing")),
+                ("\u{E8ED}", "Continuous", Command::Verb("viewcontinuous")),
+                ("\u{E666}", "Continuous Facing", Command::Verb("viewcontinuousfacing")),
+                ("\u{E86E}", "Separate Cover", Command::Verb("viewcover")),
+                ("\u{E0B6}", "Split", Command::Verb("viewsplit")),
+                ("\u{E235}", "Reflow", Command::Verb("reflow")),
+                ("\u{E71C}", "Page Transitions", Command::Verb("transitions")),
+                ("\u{E258}", "AutoScroll", Command::Verb("autoscroll")),
+                ("\u{E87A}", "Assistant", Command::Verb("assistant")),
+                ("\u{E050}", "Read", Command::Verb("readaloud")),
+                ("\u{E3B9}", "Compare", Command::Verb("compare")),
+                ("\u{EAC7}", "Word Count", Command::Verb("wordcount")),
+                ("\u{E429}", "View Setting", Command::Verb("viewsetting")),
             ],
             Tab::Form => &[
-                ("\u{F04C}", "Run Form Field Recognition", "formrecognise"),
-                ("\u{F10A}", "Designer Assistant", "formdesigner"),
-                ("\u{F1C1}", "Push Button", "fieldbutton"),
-                ("\u{E9DE}", "Check Box", "fieldcheckbox"),
-                ("\u{E837}", "Radio Button", "fieldradio"),
-                ("\u{E262}", "Text Field", "fieldtext"),
-                ("\u{E896}", "List Box", "fieldlist"),
-                ("\u{E5C6}", "Combo Box", "fieldcombo"),
-                ("\u{E3F4}", "Image Field", "fieldimage"),
-                ("\u{EBCC}", "Date Field", "fielddate"),
-                ("\u{F74C}", "Signature Field", "fieldsignature"),
-                ("\u{E70B}", "Barcode", "fieldbarcode"),
-                ("\u{E66B}", "Page Templates", "pagetemplates"),
-                ("\u{F88C}", "Edit Static XFA Form", "editxfa"),
-                ("\u{E24A}", "Calculation Order", "calcorder"),
-                ("\u{E8FD}", "Add Tooltip", "tooltip"),
-                ("\u{F053}", "Reset Form", "resetform"),
-                ("\u{E265}", "Form to sheet", "formtosheet"),
-                ("\u{F090}", "Import", "formimport"),
-                ("\u{F09B}", "Export", "formexport"),
-                ("\u{E86F}", "JavaScript", "javascript"),
-                ("\u{E8B9}", "Tool Settings", "toolsettings"),
+                ("\u{F04C}", "Run Form Field Recognition", Command::Verb("formrecognise")),
+                ("\u{F10A}", "Designer Assistant", Command::Verb("formdesigner")),
+                ("\u{F1C1}", "Push Button", Command::Verb("fieldbutton")),
+                ("\u{E9DE}", "Check Box", Command::Verb("fieldcheckbox")),
+                ("\u{E837}", "Radio Button", Command::Verb("fieldradio")),
+                ("\u{E262}", "Text Field", Command::Verb("fieldtext")),
+                ("\u{E896}", "List Box", Command::Verb("fieldlist")),
+                ("\u{E5C6}", "Combo Box", Command::Verb("fieldcombo")),
+                ("\u{E3F4}", "Image Field", Command::Verb("fieldimage")),
+                ("\u{EBCC}", "Date Field", Command::Verb("fielddate")),
+                ("\u{F74C}", "Signature Field", Command::Verb("fieldsignature")),
+                ("\u{E70B}", "Barcode", Command::Verb("fieldbarcode")),
+                ("\u{E66B}", "Page Templates", Command::Verb("pagetemplates")),
+                ("\u{F88C}", "Edit Static XFA Form", Command::Verb("editxfa")),
+                ("\u{E24A}", "Calculation Order", Command::Verb("calcorder")),
+                ("\u{E8FD}", "Add Tooltip", Command::Verb("tooltip")),
+                ("\u{F053}", "Reset Form", Command::Verb("resetform")),
+                ("\u{E265}", "Form to sheet", Command::Verb("formtosheet")),
+                ("\u{F090}", "Import", Command::Verb("formimport")),
+                ("\u{F09B}", "Export", Command::Verb("formexport")),
+                ("\u{E86F}", "JavaScript", Command::Verb("javascript")),
+                ("\u{E8B9}", "Tool Settings", Command::Verb("toolsettings")),
             ],
             Tab::Protect => &[
                 // First, because it is the one that works and the one the tab is
                 // for. "Mark for Redaction" beside it would be two names for the
                 // same intention where only one of them destroys anything.
-                ("\u{E243}", "Redact", "redact"),
+                ("\u{E243}", "Redact", Command::Tool(ToolId::Redact, "redact")),
                 // Named beside Redact rather than under Secure Document, because
                 // the choice between them is the one a user actually makes and
                 // they need to be read together. Lock hides; Redact destroys.
-                ("\u{E63F}", "Lock Text", "lock"),
-                ("\u{E3C2}", "Lock Area", "lockarea"),
+                ("\u{E63F}", "Lock Text", Command::Tool(ToolId::Lock, "lock")),
+                ("\u{E3C2}", "Lock Area", Command::Verb("lockarea")),
                 // Beside Lock Area because it is the same promise at a
                 // different scale, and because area locking refuses the scanned
                 // and outlined pages this one takes — a reader turned away by
                 // the first needs to see the second without hunting for it.
-                ("\u{F686}", "Lock Pages", "lock all"),
-                ("\u{E898}", "Unlock", "unlock"),
+                ("\u{F686}", "Lock Pages", Command::Verb("lock all")),
+                ("\u{E898}", "Unlock", Command::Verb("unlock")),
                 // Grouped with the three above rather than after the stubs:
                 // this is what makes Redact and Lock Area actually succeed on
                 // a page whose words are drawn as outlines instead of falling
                 // back to slow OCR — the tool a reader needs at the exact
                 // moment one of those two does not work the way they expect.
-                ("\u{E167}", "Outlined-Text Fonts", "outlinedfont"),
-                ("\u{E8F5}", "Smart Redact", "smartredact"),
+                ("\u{E167}", "Outlined-Text Fonts", Command::Verb("outlinedfont")),
+                ("\u{E8F5}", "Smart Redact", Command::Verb("smartredact")),
                 // Beside it, because finding is the safe half and acting is
                 // the one people came for — and because redaction destroys.
-                ("\u{F74F}", "Redact Found", "smartredact redact"),
-                ("\u{E23B}", "Whiteout", "whiteout"),
-                ("\u{EA17}", "Hidden Data", "hiddendata"),
+                ("\u{F74F}", "Redact Found", Command::Verb("smartredact redact")),
+                ("\u{E23B}", "Whiteout", Command::Tool(ToolId::Whiteout, "whiteout")),
+                ("\u{EA17}", "Hidden Data", Command::Verb("hiddendata")),
                 // Beside the survey rather than hidden behind it: reporting is
                 // the safe half and removing is the one people came for.
-                ("\u{E16C}", "Remove Hidden Data", "hiddendata clean"),
-                ("\u{E899}", "Secure Document", "secure"),
+                ("\u{E16C}", "Remove Hidden Data", Command::Verb("hiddendata clean")),
+                ("\u{E899}", "Secure Document", Command::Verb("secure")),
                 // Beside it because it is the same action with the permissions
                 // turned down, and because a reader who wants "they can read it
                 // but not lift the artwork" should not have to find the words.
-                ("\u{E593}", "Secure Read-only", "secure readonly"),
-                ("\u{F03F}", "Remove Password", "unsecure"),
-                ("\u{F0C6}", "Sensitivity", "sensitivity"),
+                ("\u{E593}", "Secure Read-only", Command::Verb("secure readonly")),
+                ("\u{F03F}", "Remove Password", Command::Verb("unsecure")),
+                ("\u{F0C6}", "Sensitivity", Command::Verb("sensitivity")),
                 // The one most people reach for, one press away — and the verb
                 // takes the others.
-                ("\u{E948}", "Mark Confidential", "sensitivity confidential"),
-                ("\u{E746}", "Fill & Sign", "fillsign"),
-                ("\u{E7AF}", "Sign & Certify", "certify"),
-                ("\u{F013}", "Validate", "validate"),
+                ("\u{E948}", "Mark Confidential", Command::Verb("sensitivity confidential")),
+                ("\u{E746}", "Fill & Sign", Command::Verb("fillsign")),
+                ("\u{E7AF}", "Sign & Certify", Command::Verb("certify")),
+                ("\u{F013}", "Validate", Command::Verb("validate")),
             ],
             Tab::PagiSign => &[
-                ("\u{F603}", "Signature", "signature"),
-                ("\u{E43E}", "Upload Signature", "signature upload"),
-                ("\u{F775}", "Manage Signatures", "managesignatures"),
-                ("\u{E877}", "Apply All Signatures", "applysignatures"),
-                ("\u{EAE2}", "Add Text", "addtext"),
-                ("\u{E8F3}", "Comb Field", "combfield"),
-                ("\u{EF6C}", "Predefined Text", "predefinedtext"),
-                ("\u{EB54}", "Rectangle", "signrectangle"),
-                ("\u{E668}", "Check", "signcheck"),
-                ("\u{EF4A}", "Dot", "signdot"),
-                ("\u{E5CD}", "Cross", "signcross"),
-                ("\u{F108}", "Line", "signline"),
-                ("\u{F0D2}", "Request Signature", "requestsignature"),
-                ("\u{F187}", "Send in Bulk", "sendbulk"),
-                ("\u{F728}", "Create Online Form", "onlineform"),
-                ("\u{EF3E}", "Document Status", "documentstatus"),
-                ("\u{E06B}", "Add E-Sign Branding", "signbranding"),
+                ("\u{F603}", "Signature", Command::Tool(ToolId::Signature, "signature")),
+                ("\u{E43E}", "Upload Signature", Command::Verb("signature upload")),
+                ("\u{F775}", "Manage Signatures", Command::Verb("managesignatures")),
+                ("\u{E877}", "Apply All Signatures", Command::Verb("applysignatures")),
+                ("\u{EAE2}", "Add Text", Command::Tool(ToolId::AddText, "addtext")),
+                ("\u{E8F3}", "Comb Field", Command::Verb("combfield")),
+                ("\u{EF6C}", "Predefined Text", Command::Verb("predefinedtext")),
+                ("\u{EB54}", "Rectangle", Command::Tool(ToolId::SignRectangle, "signrectangle")),
+                ("\u{E668}", "Check", Command::Verb("signcheck")),
+                ("\u{EF4A}", "Dot", Command::Verb("signdot")),
+                ("\u{E5CD}", "Cross", Command::Verb("signcross")),
+                ("\u{F108}", "Line", Command::Tool(ToolId::SignLine, "signline")),
+                ("\u{F0D2}", "Request Signature", Command::Verb("requestsignature")),
+                ("\u{F187}", "Send in Bulk", Command::Verb("sendbulk")),
+                ("\u{F728}", "Create Online Form", Command::Verb("onlineform")),
+                ("\u{EF3E}", "Document Status", Command::Verb("documentstatus")),
+                ("\u{E06B}", "Add E-Sign Branding", Command::Verb("signbranding")),
             ],
             Tab::Share => &[
-                ("\u{E159}", "Email", "email"),
-                ("\u{EA5E}", "Attach to Email", "emailattach"),
-                ("\u{E80D}", "Share Link", "sharelink"),
-                ("\u{E560}", "Send for Review", "sendreview"),
-                ("\u{E8E1}", "Track Reviews", "trackreviews"),
-                ("\u{F15C}", "Cloud Storage", "cloudstorage"),
+                ("\u{E159}", "Email", Command::Verb("email")),
+                ("\u{EA5E}", "Attach to Email", Command::Verb("emailattach")),
+                ("\u{E80D}", "Share Link", Command::Verb("sharelink")),
+                ("\u{E560}", "Send for Review", Command::Verb("sendreview")),
+                ("\u{E8E1}", "Track Reviews", Command::Verb("trackreviews")),
+                ("\u{F15C}", "Cloud Storage", Command::Verb("cloudstorage")),
             ],
             Tab::Accessibility => &[
-                ("\u{E6B1}", "Full Check", "accesscheck"),
-                ("\u{F071}", "Accessibility Report", "accessreport"),
-                ("\u{E893}", "Autotag Document", "autotag"),
-                ("\u{E242}", "Reading Order", "readingorder"),
-                ("\u{E43F}", "Set Alternate Text", "alttext"),
-                ("\u{F05B}", "Tags Panel", "tagspanel"),
-                ("\u{E92C}", "Reading Options", "readingoptions"),
+                ("\u{E6B1}", "Full Check", Command::Verb("accesscheck")),
+                ("\u{F071}", "Accessibility Report", Command::Verb("accessreport")),
+                ("\u{E893}", "Autotag Document", Command::Verb("autotag")),
+                ("\u{E242}", "Reading Order", Command::Verb("readingorder")),
+                ("\u{E43F}", "Set Alternate Text", Command::Verb("alttext")),
+                ("\u{F05B}", "Tags Panel", Command::Verb("tagspanel")),
+                ("\u{E92C}", "Reading Options", Command::Verb("readingoptions")),
             ],
             Tab::Help => &[
-                ("\u{EA19}", "User Manual", "help"),
-                ("\u{EB9B}", "Quick Start", "quickstart"),
-                ("\u{EAE7}", "Keyboard Shortcuts", "shortcuts"),
-                ("\u{E923}", "Check for Updates", "checkupdates"),
-                ("\u{E868}", "Report an Issue", "reportissue"),
-                ("\u{E88E}", "About Pagify", "about"),
+                ("\u{EA19}", "User Manual", Command::Verb("help")),
+                ("\u{EB9B}", "Quick Start", Command::Verb("quickstart")),
+                ("\u{EAE7}", "Keyboard Shortcuts", Command::Verb("shortcuts")),
+                ("\u{E923}", "Check for Updates", Command::Verb("checkupdates")),
+                ("\u{E868}", "Report an Issue", Command::Verb("reportissue")),
+                ("\u{E88E}", "About Pagify", Command::Verb("about")),
             ],
             Tab::Draw => &[
-                ("\u{F108}", "Line", "line"),
-                ("\u{EF4A}", "Circle", "circle"),
-                ("\u{EB54}", "Rectangle", "rectangle"),
+                ("\u{F108}", "Line", Command::Tool(ToolId::Line, "line")),
+                ("\u{EF4A}", "Circle", Command::Tool(ToolId::Circle, "circle")),
+                ("\u{EB54}", "Rectangle", Command::Verb("rectangle")),
                 // Chosen before drawing: whether Rectangle and Circle come out
                 // filled solid or hollow. Lit up while on, like every other
                 // standing choice on this ribbon.
-                ("\u{F82B}", "Fill", "fill"),
-                ("\u{E922}", "Polyline", "pline"),
-                ("\u{E5C8}", "Arrow", "arrow"),
-                ("\u{F757}", "Spline", "spline"),
-                ("\u{E14E}", "Trim", "trim"),
-                ("\u{E920}", "Fillet", "fillet"),
-                ("\u{E2EC}", "Offset", "offset"),
-                ("\u{E6D0}", "Erase", "erase"),
-                ("\u{E41C}", "Calibrate", "calibrate "),
-                ("\u{EB95}", "Distance", "measure distance"),
-                ("\u{EA49}", "Area", "measure area"),
-                ("\u{EAF6}", "Page Scale", "pagescale"),
+                ("\u{F82B}", "Fill", Command::Verb("fill")),
+                ("\u{E922}", "Polyline", Command::Tool(ToolId::Polyline, "pline")),
+                ("\u{E5C8}", "Arrow", Command::Tool(ToolId::Arrow, "arrow")),
+                ("\u{F757}", "Spline", Command::Tool(ToolId::Spline, "spline")),
+                ("\u{E14E}", "Trim", Command::Verb("trim")),
+                ("\u{E920}", "Fillet", Command::Verb("fillet")),
+                ("\u{E2EC}", "Offset", Command::Verb("offset")),
+                ("\u{E6D0}", "Erase", Command::Tool(ToolId::EraseMark, "erase")),
+                ("\u{E41C}", "Calibrate", Command::Tool(ToolId::Calibrate, "calibrate ")),
+                ("\u{EB95}", "Distance", Command::Tool(ToolId::MeasureDistance, "measure distance")),
+                ("\u{EA49}", "Area", Command::Tool(ToolId::MeasureArea, "measure area")),
+                ("\u{EAF6}", "Page Scale", Command::Verb("pagescale")),
             ],
             Tab::Automate => &[
-                ("\u{E837}", "Record", "record"),
-                ("\u{EF71}", "Stop", "stop"),
-                ("\u{E037}", "Replay", "replay "),
+                ("\u{E837}", "Record", Command::Verb("record")),
+                ("\u{EF71}", "Stop", Command::Verb("stop")),
+                ("\u{E037}", "Replay", Command::Verb("replay ")),
             ],
         }
     }
