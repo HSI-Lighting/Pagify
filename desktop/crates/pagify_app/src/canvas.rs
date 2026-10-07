@@ -850,21 +850,7 @@ impl crate::PagifyApp {
             }
         }
 
-        // When the zoom last changed, which is what a new render waits on — see
-        // [`ZOOM_SETTLE_SECS`]. Watched on the zoom itself rather than on the
-        // events that move it, so a wheel, a pinch, a button and a window being
-        // dragged while the page fits it all count alike. And collected here,
-        // before anything asks for a texture, so one that has just come back is
-        // used this frame.
-        {
-            let now = ctx.input(|i| i.time);
-            let tab = self.tab_mut();
-            if (tab.last_drawn_zoom - zoom).abs() > 1e-4 {
-                tab.last_drawn_zoom = zoom;
-                tab.zoom_changed_at = now;
-            }
-        }
-        self.collect_renders(ctx);
+        self.note_zoom_and_collect_renders(ctx, zoom);
 
         // Every use of `zoom` above this line needed the *logical* value —
         // the pinch handling just above reads and writes `ZoomMode::Factor`
@@ -1169,6 +1155,41 @@ impl crate::PagifyApp {
                 visible
             });
 
+        let _ = forced;
+        self.settle_strip_after_scroll(
+            ctx, zoom, page_count, scroll.state.offset, scroll.inner_rect, &scroll.inner,
+        );
+    }
+
+    /// Note when the zoom last changed — what a new render waits on, see
+    /// [`ZOOM_SETTLE_SECS`] — and collect whatever renders have come back.
+    /// The comment above the call site in `draw_pages` explains why it is
+    /// watched on the zoom itself rather than on the events that move it.
+    fn note_zoom_and_collect_renders(&mut self, ctx: &egui::Context, zoom: f32) {
+        let now = ctx.input(|i| i.time);
+        let tab = self.tab_mut();
+        if (tab.last_drawn_zoom - zoom).abs() > 1e-4 {
+            tab.last_drawn_zoom = zoom;
+            tab.zoom_changed_at = now;
+        }
+        self.collect_renders(ctx);
+    }
+
+    /// Prefetch the neighbouring pages and evict rasters for the ones the
+    /// reader has scrolled away from, then record where the strip ended up.
+    ///
+    /// Observed, not the value asked for — the next zoom anchors from it, and
+    /// mixing an intended offset with an observed origin makes the page slide
+    /// away as you zoom.
+    fn settle_strip_after_scroll(
+        &mut self,
+        ctx: &egui::Context,
+        zoom: f32,
+        page_count: usize,
+        offset: egui::Vec2,
+        inner_rect: egui::Rect,
+        visible: &std::ops::Range<usize>,
+    ) {
         // Prefetch the neighbours, so a scroll onto them is a copy rather than a
         // render. One per frame: the point is to be ready, not to stall now.
         // Where the strip ended up, so the next zoom can anchor from it.
@@ -1178,21 +1199,19 @@ impl crate::PagifyApp {
         // the page was *actually drawn* this frame. Mixing an intended offset
         // with an observed origin means the two describe different moments, and
         // the difference accumulates into the page sliding away as you zoom.
-        let _ = forced;
-        self.tab_mut().scroll_offset = scroll.state.offset;
-        self.tab_mut().viewport_rect = Some(scroll.inner_rect);
+        self.tab_mut().scroll_offset = offset;
+        self.tab_mut().viewport_rect = Some(inner_rect);
         // Where the reader is looking now, for the next frame to compare with.
         let seen = self.tab().doc.as_ref().and_then(|doc| {
             pagify_shell::reader::ViewSnapshot::capture(
                 &doc.strip,
                 zoom,
-                (scroll.inner_rect.width(), scroll.inner_rect.height()),
-                (scroll.state.offset.x, scroll.state.offset.y),
+                (inner_rect.width(), inner_rect.height()),
+                (offset.x, offset.y),
             )
         });
         self.tab_mut().view = seen;
-        let visible = scroll.inner;
-        if let Some(target) = prefetch_targets(&visible, page_count, 2).first().copied() {
+                if let Some(target) = prefetch_targets(visible, page_count, 2).first().copied() {
             // The same quantised scale the draw uses. Prefetching at the raw
             // zoom would warm a texture the next frame does not ask for.
             let device_scale = raster_scale(zoom * ctx.pixels_per_point());
