@@ -8,11 +8,13 @@
 //! cites exactly where rather than duplicating a harness-driven test here.
 //!
 //! The sixth task in that list — a property test that `on_cancel` returns
-//! to `Tool::None` and clears the ribbon for every variant — cannot be
-//! written yet. There is no `on_cancel` method until the `ToolEffect`
-//! architecture (task 3 of the same list) exists; see
-//! `Pagify-Phase2-Handoff.md`'s "big tasks" companion document for why
-//! that is deliberately deferred to its own session.
+//! to "nothing armed" for every variant — is below
+//! (`on_cancel_always_leaves_nothing_armed_and_no_ribbon_button_lit`).
+//! Read loosely rather than literally: there is no `Tool::None` variant
+//! (`tool: Option<ArmedTool>` already says "nothing armed" without one —
+//! see `Pagify-Phase2-BigTasks.md` §2.3 step 6 for why one was not added),
+//! so this tests `tool.is_none()` and `id()` rather than a variant that
+//! does not exist.
 
 use super::*;
 
@@ -142,5 +144,70 @@ fn every_tool_ids_ribbon_command_matches_what_the_ribbon_table_expects() {
         Tool::Draw(DrawKind::Rectangle),
     ] {
         assert!(tool.id().is_none(), "{tool:?} should not light a ribbon button");
+    }
+}
+
+/// **Task 6's property test: `on_cancel` leaves nothing armed and no
+/// ribbon button lit, for every variant.** Read loosely, not literally —
+/// see this file's own module doc for why there is no `Tool::None` to
+/// assert a return value against.
+///
+/// What is actually checked here, since a bare `Tool` has no app or
+/// window behind it to ask "is the ribbon button still lit": every
+/// variant's `on_cancel` says `Cancelled`, never one of the re-arming
+/// effects (`Rearm`/`RearmQuietly`) or a dialog hand-off
+/// (`OpenPasscodePrompt`/`OpenArticleBoxPrompt`) — the ones that would
+/// leave something behind for `escape()` to act on beyond putting the
+/// tool down. "Nothing armed" itself is structural, not something
+/// `on_cancel`'s return decides: `escape()` (`main.rs`) calls
+/// `self.tab_mut().tool.take()` *before* calling `on_cancel`, so `tool`
+/// is already `None` by the time any variant's own answer is read — this
+/// test exists to pin that no variant's answer undoes that by asking to
+/// re-arm. "No ribbon button lit" follows from the same `take()`, and
+/// from `Tool::id()`'s own exhaustive match requiring every new variant
+/// to say which button (if any) it lights — both already covered at the
+/// interaction level by `ui_tests::escape_puts_the_tool_down`, cited above.
+#[test]
+fn on_cancel_always_leaves_nothing_armed_and_no_ribbon_button_lit() {
+    let every_kind = [
+        Tool::Signature,
+        Tool::PlaceImage { rgba: Vec::new(), width: 0, height: 0 },
+        Tool::PlaceText,
+        Tool::Calibrate { distance: 1.0, unit: "m".into() },
+        Tool::Fill(pdf_core::document::FillMark::Tick),
+        Tool::Redact,
+        Tool::Whiteout,
+        Tool::SignRectangle,
+        Tool::SignLine,
+        Tool::Write(String::new()),
+        Tool::Draw(DrawKind::Line),
+        Tool::Draw(DrawKind::Circle),
+        Tool::Draw(DrawKind::Rectangle),
+        Tool::Draw(DrawKind::Polyline),
+        Tool::Draw(DrawKind::Arrow),
+        Tool::Draw(DrawKind::Spline),
+        Tool::EraseMark,
+        Tool::Measure(MeasureKind::Distance),
+        Tool::Measure(MeasureKind::Area),
+        Tool::Modify(pagify_shell::tools::Pick {
+            op: pagify_shell::tools::Op::Move,
+            objects: 1,
+            points: 1,
+            needs_selection: false,
+            repeating: false,
+        }),
+        Tool::Lock,
+        Tool::ArticleBox,
+        Tool::PickText,
+        Tool::Markup(pagify_shell::verbs::Markup::Highlight),
+        Tool::Link,
+        Tool::MatchProperties { sample: None },
+    ];
+    for tool in every_kind {
+        let described = format!("{tool:?}");
+        assert!(
+            matches!(tool.on_cancel(), ToolEffect::Cancelled),
+            "{described} should just say \"cancelled.\", not re-arm or open a dialog"
+        );
     }
 }

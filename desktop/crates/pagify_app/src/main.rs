@@ -7799,8 +7799,13 @@ impl PagifyApp {
             // page down.
             reading.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        if self.tab_mut().tool.take().is_some() {
-            self.say_info("cancelled.");
+        if let Some(armed) = self.tab_mut().tool.take() {
+            match armed.kind.on_cancel() {
+                ToolEffect::Cancelled => self.say_info("cancelled."),
+                ToolEffect::Say(Kind::Error, text) => self.say_error(text),
+                ToolEffect::Say(_, text) => self.say_info(text),
+                other => unreachable!("on_cancel only returns Cancelled or Say, got {other:?}"),
+            }
         }
         self.cmd.escape()
     }

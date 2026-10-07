@@ -810,6 +810,21 @@ impl Tool {
             _ => ToolEffect::None,
         }
     }
+
+    /// Escape, or switching to a different tool — what to say about
+    /// putting this one down. Always `Cancelled` today: every kind says
+    /// the same "cancelled.", the same way every arm of `on_click` used
+    /// to call `self.say_info`/`self.say_error` directly before `Say`
+    /// existed to carry that out of the match instead. Kept as its own
+    /// method (`escape()`, `main.rs`, applies the effect) rather than
+    /// inlined there so the property test below has something to call for
+    /// every variant, and so a kind that one day needs its own wording —
+    /// DESIGN_REVIEW.md §3.2's own sketch names `Lock`/`ArticleBox` as
+    /// candidates — has a home to add it in without `escape()` itself
+    /// needing to know which kind it was.
+    pub(crate) fn on_cancel(self) -> ToolEffect {
+        ToolEffect::Cancelled
+    }
 }
 
 /// A ribbon-visible tool identity — the typed replacement for comparing
