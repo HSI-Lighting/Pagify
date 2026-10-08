@@ -3855,6 +3855,45 @@ fn deleting_the_group_removes_every_member() {
     assert!(said(&app).contains("2 things removed"), "{}", said(&app));
 }
 
+/// **Reported from use: copying a group left the clipboard untouched, so
+/// `paste` quietly put down whatever had been copied before it instead.**
+/// `copy_object_selection` had a branch for the single-item `selected` but
+/// none for `DocTab::group`, so copying more than one thing fell all the
+/// way through to the text-selection fallback's "nothing selected" and a
+/// stale `object_clipboard` from an earlier copy survived, unreplaced.
+#[test]
+fn copying_a_group_overwrites_whatever_was_copied_before_it() {
+    let mut app = app("pictures.pdf");
+    app.submit("editobject");
+    let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
+    assert_eq!(pictures.len(), 2);
+
+    // An earlier, single-item copy — the "previously selected object" that
+    // must not survive the group copy below.
+    app.tab_mut().selected =
+        Some(Selected { page: 0, object: pictures[0].object, rect: pictures[0].rect, what: "the picture" });
+    assert!(app.copy_object_selection(), "the first, single copy should succeed");
+
+    app.tab_mut().selected = None;
+    app.tab_mut().group = pictures
+        .iter()
+        .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
+        .collect();
+
+    assert!(app.copy_object_selection(), "copying a multi-object group must succeed, not silently do nothing");
+
+    app.paste_object_selection();
+    app.place_paste_ghost(0, AppPoint { x: 500.0, y: 500.0 });
+
+    let placed = app.tab_mut().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks");
+    assert_eq!(placed.len(), 2, "both group members should have been pasted, not just the one copied earlier");
+    assert!(
+        (placed[0].rect.left - placed[1].rect.left).abs() > 1.0 || (placed[0].rect.top - placed[1].rect.top).abs() > 1.0,
+        "the group's own two members should not have landed on top of each other: {:?}",
+        placed
+    );
+}
+
 /// smaller thing is what was aimed at.
 #[test]
 fn a_run_of_words_can_be_moved_across_the_page() {

@@ -2151,6 +2151,11 @@ enum ObjectClipboard {
     /// Words — a run or a paragraph, one entry per line — with what they were
     /// drawn in. Pasted as new text, so it stays text.
     Text { lines: Vec<String>, size: f32, color: pdf_core::document::Color, face: Option<String> },
+    /// A multi-object Edit Object selection (a marquee over more than one
+    /// thing) — each member's own content, with its centre's offset (page
+    /// points) from the whole group's centre, so pasting puts every member
+    /// down in the same arrangement they were copied in.
+    Group(Vec<(ObjectClipboard, f32, f32)>),
 }
 
 /// What the system clipboard is given after a copy that is not text, so the
@@ -6623,6 +6628,37 @@ impl PagifyApp {
                 }
             }
         }
+        // A marquee over more than one thing. Tried before the single-item
+        // `selected` below — the two are mutually exclusive in this app
+        // (`select_group_in` always sets one and clears the other) — and,
+        // until this branch existed, copying a group fell all the way
+        // through to `copy_selection`'s "nothing selected", leaving whatever
+        // `object_clipboard` already held from an earlier copy untouched:
+        // `paste` then put the *previous* copy down again, silently.
+        let members: Vec<Selected> = self.tab().group.iter().filter(|s| s.page == page).cloned().collect();
+        if !members.is_empty() {
+            let Some(bounds) = self.group_bounds(page) else { return false };
+            let cx = (bounds.left + bounds.right) / 2.0;
+            let cy = (bounds.top + bounds.bottom) / 2.0;
+            let items: Vec<(ObjectClipboard, f32, f32)> = members
+                .iter()
+                .filter_map(|sel| {
+                    let content = self.content_for_selected(sel)?;
+                    let scx = (sel.rect.left + sel.rect.right) / 2.0;
+                    let scy = (sel.rect.top + sel.rect.bottom) / 2.0;
+                    Some((content, scx - cx, scy - cy))
+                })
+                .collect();
+            if items.is_empty() {
+                return false;
+            }
+            let n = items.len();
+            self.put_on_clipboard(
+                ObjectClipboard::Group(items),
+                format!("{n} things copied — Ctrl+V picks them up, a click puts them down."),
+            );
+            return true;
+        }
         // A picture, shape or run of words picked with Edit Object.
         if let Some(sel) = self.tab().selected.clone().filter(|s| s.page == page) {
             return self.copy_page_object(&sel);
@@ -6649,29 +6685,34 @@ impl PagifyApp {
     /// paper around a shape made see-through (see [`clear_paper_around`]) so
     /// that it can be set down over other things.
     fn copy_page_object(&mut self, sel: &Selected) -> bool {
+        let Some(content) = self.content_for_selected(sel) else { return false };
+        let what = sel.what.strip_prefix("the ").unwrap_or(sel.what);
+        self.put_on_clipboard(content, format!("{what} copied — Ctrl+V picks it up, a click puts it down."));
+        true
+    }
+
+    /// The clipboard content for one thing Edit Object has picked — the part
+    /// of [`Self::copy_page_object`] shared with the multi-object path in
+    /// [`Self::copy_object_selection`].
+    fn content_for_selected(&self, sel: &Selected) -> Option<ObjectClipboard> {
         let page = sel.page;
-        let content = if sel.what == "the words" {
+        if sel.what == "the words" {
             let run = self
                 .tab()
                 .doc
                 .as_ref()
                 .and_then(|d| d.session.text_runs(page).ok())
-                .and_then(|runs| runs.into_iter().find(|r| r.object == sel.object));
-            let Some(run) = run else { return false };
+                .and_then(|runs| runs.into_iter().find(|r| r.object == sel.object))?;
             let face = self.registered_face_of_object(page, sel.object);
-            ObjectClipboard::Text { lines: vec![run.text.trim().to_string()], size: run.size, color: run.color, face }
+            Some(ObjectClipboard::Text { lines: vec![run.text.trim().to_string()], size: run.size, color: run.color, face })
         } else {
-            let raster = self.tab().doc.as_ref().and_then(|d| d.session.render_page_region(page, sel.rect, 3.0).ok());
-            let Some(raster) = raster else { return false };
+            let raster = self.tab().doc.as_ref().and_then(|d| d.session.render_page_region(page, sel.rect, 3.0).ok())?;
             let mut rgba = raster.pixels;
             if sel.what == "the shape" {
                 clear_paper_around(&mut rgba, raster.width as usize, raster.height as usize);
             }
-            ObjectClipboard::Image { rgba, width: raster.width, height: raster.height, rect: sel.rect }
-        };
-        let what = sel.what.strip_prefix("the ").unwrap_or(sel.what);
-        self.put_on_clipboard(content, format!("{what} copied — Ctrl+V picks it up, a click puts it down."));
-        true
+            Some(ObjectClipboard::Image { rgba, width: raster.width, height: raster.height, rect: sel.rect })
+        }
     }
 
     /// ⌘C in the run/paragraph editor with **nothing selected inside its box**:
@@ -6734,7 +6775,20 @@ impl PagifyApp {
     /// One undo step, however many lines.
     fn place_paste_ghost(&mut self, page: usize, at: AppPoint) {
         let Some(ghost) = self.paste_ghost.take() else { return };
-        match ghost.content {
+        self.place_clipboard_content(page, at, ghost.content);
+    }
+
+    /// The actual per-kind placement [`Self::place_paste_ghost`] does at
+    /// `at` — pulled out so [`ObjectClipboard::Group`] can call it once per
+    /// member, each at its own offset from the point clicked.
+    fn place_clipboard_content(&mut self, page: usize, at: AppPoint, content: ObjectClipboard) {
+        match content {
+            ObjectClipboard::Group(items) => {
+                for (item, dx, dy) in items {
+                    let at = AppPoint { x: at.x + dx as f64, y: at.y + dy as f64 };
+                    self.place_clipboard_content(page, at, item);
+                }
+            }
             ObjectClipboard::Text { lines, size, color, face } => {
                 let gap = size * 1.2;
                 let mut baseline = at.y as f32 + size * 0.8;
@@ -6870,6 +6924,40 @@ impl PagifyApp {
                 let ink = egui::Color32::from_rgb(40, 40, 40).gamma_multiply(0.5);
                 overlay::draw_ghost(&painter, objects, layer, view, by, ink);
             }
+            ObjectClipboard::Group(items) => {
+                for (item, dx, dy) in items {
+                    let at = pointer + egui::vec2(*dx * view.scale, *dy * view.scale);
+                    match item {
+                        ObjectClipboard::Text { lines, size, color, .. } => {
+                            let font = egui::FontId::proportional((size * view.scale).max(4.0));
+                            let ink = egui::Color32::from_rgb(color.r, color.g, color.b).gamma_multiply(0.5);
+                            for (i, line) in lines.iter().enumerate() {
+                                let at = at + egui::vec2(0.0, i as f32 * size * 1.2 * view.scale);
+                                painter.text(at, egui::Align2::LEFT_TOP, line, font.clone(), ink);
+                            }
+                        }
+                        // ponytail: outline only, not the actual pixels — a
+                        // group ghost can hold several pictures, and there is
+                        // nowhere to cache one texture per member the way the
+                        // single-`Image` arm above does; loading one fresh
+                        // every frame per member would leak a GPU texture a
+                        // frame. Upgrade to real previews if that matters.
+                        ObjectClipboard::Image { rect: source, .. } => {
+                            let size = egui::vec2(
+                                (source.right - source.left) * view.scale,
+                                (source.bottom - source.top) * view.scale,
+                            );
+                            painter.rect_stroke(
+                                egui::Rect::from_center_size(at, size),
+                                egui::CornerRadius::ZERO,
+                                egui::Stroke::new(1.5, egui::Color32::from_white_alpha(160)),
+                                egui::StrokeKind::Middle,
+                            );
+                        }
+                        ObjectClipboard::Shapes(_) | ObjectClipboard::Group(_) => {}
+                    }
+                }
+            }
         }
         self.paste_ghost = Some(ghost);
     }
@@ -6893,8 +6981,10 @@ impl PagifyApp {
 
         match clip {
             // Words have no place of their own to be copied beside: they are
-            // picked up and put down where the reader clicks.
-            ObjectClipboard::Text { .. } => {
+            // picked up and put down where the reader clicks. A multi-object
+            // group is the same — it has no single source rect to step away
+            // from, so it also waits for a click.
+            ObjectClipboard::Text { .. } | ObjectClipboard::Group(_) => {
                 self.paste_ghost = Some(PasteGhost { content: clip, texture: None });
                 self.say_info("pasting — move to where it goes and click to put it down. Escape cancels.");
             }
