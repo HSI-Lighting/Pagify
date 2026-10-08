@@ -1230,3 +1230,45 @@ fn paragraph_census() {
     let _ = std::fs::remove_dir_all(&dir);
     eprintln!("census: {total} clicks over {pages} pages, written to {out}");
 }
+
+/// **Reported from use: a pasted copy of a word wasn't the same word when
+/// read back** — specifically, a letter narrow enough in this font (a
+/// capital "I", 0.41pt wide at 8pt) silently vanished from
+/// `session.text_runs()` after being pasted, though it was drawn correctly.
+/// Root cause: `write_text` gives a paste one PDF text object per glyph, and
+/// `text_runs()`'s own "nothing to have clicked on" filter dropped any
+/// object under 0.5pt wide or tall — meant for genuinely empty objects, but
+/// a real letter that thin got caught by the same net. Fixed by lowering the
+/// filter to `HAS_AREA_PT` (`pdf_core::document::pdfium_doc`), which still
+/// excludes zero-area objects without excluding real ink.
+#[test]
+fn a_pasted_words_own_narrow_letters_read_back_the_same_as_the_original() {
+    if !std::path::Path::new(MARINA).is_file() {
+        eprintln!("skipping: the Marina datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(MARINA));
+    app.submit("editobject");
+    app.tab_mut().page = 1;
+    let before: std::collections::HashSet<usize> = text_runs(&app, 1).iter().map(|r| r.object).collect();
+    let src = text_runs(&app, 1).into_iter().find(|r| r.object == 2844).expect("the Power Input: label");
+    assert_eq!(src.text, "Power Input:", "setup: the fixture's own label changed under this test");
+
+    app.tab_mut().selected = Some(Selected { page: 1, object: src.object, rect: src.rect, what: "the words" });
+    assert!(app.copy_object_selection(), "copy should succeed");
+    assert!(app.start_paste_ghost(None), "should have a paste in hand");
+    // A blank margin, away from any other text on the page, so nothing else
+    // could be mistaken for part of the pasted word.
+    app.place_paste_ghost(1, AppPoint { x: 400.0, y: 15.0 });
+
+    let after = text_runs(&app, 1);
+    let mut new_runs: Vec<TextRun> = after.into_iter().filter(|r| !before.contains(&r.object)).collect();
+    new_runs.sort_by(|a, b| a.rect.left.total_cmp(&b.rect.left));
+    let read_back: String = new_runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(
+        read_back.replace(' ', ""),
+        src.text.replace(' ', ""),
+        "the pasted word did not read back the same letters it was copied with: {read_back:?} vs {:?}",
+        src.text
+    );
+}

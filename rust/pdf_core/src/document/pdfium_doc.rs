@@ -1251,11 +1251,7 @@ impl Document for PdfiumDocument {
         Ok(self
             .text_runs_all(page_index)?
             .into_iter()
-            .filter(|run| {
-                let wide = (run.rect.right - run.rect.left).abs() > 0.5;
-                let tall = (run.rect.top - run.rect.bottom).abs() > 0.5;
-                wide && tall
-            })
+            .filter(|run| has_area(run.rect.left, run.rect.top, run.rect.right, run.rect.bottom))
             .collect())
     }
 
@@ -1299,9 +1295,7 @@ impl Document for PdfiumDocument {
             // Same area filter as `text_runs()` — nothing to have clicked on
             // otherwise.
             let Ok(bounds) = object.bounds() else { continue };
-            let wide = (bounds.right().value - bounds.left().value).abs() > 0.5;
-            let tall = (bounds.top().value - bounds.bottom().value).abs() > 0.5;
-            if !wide || !tall {
+            if !has_area(bounds.left().value, bounds.top().value, bounds.right().value, bounds.bottom().value) {
                 continue;
             }
             let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
@@ -1369,9 +1363,7 @@ impl Document for PdfiumDocument {
         drop(text_page);
 
         let Ok(bounds) = object_ref.bounds() else { return Ok(None) };
-        let wide = (bounds.right().value - bounds.left().value).abs() > 0.5;
-        let tall = (bounds.top().value - bounds.bottom().value).abs() > 0.5;
-        if !wide || !tall {
+        if !has_area(bounds.left().value, bounds.top().value, bounds.right().value, bounds.bottom().value) {
             return Ok(None);
         }
         let (left, top) = space.to_top_left(bounds.left().value, bounds.top().value);
@@ -3694,6 +3686,30 @@ impl PdfiumDocument {
 /// proved. At 1,500 objects the per-object read costs about 66 ms; the datasheet's
 /// pages (883, 1,488 and 1,394 objects) stay on PDFium's own call.
 const LINEAR_TEXT_READ_FROM: usize = 1500;
+
+/// Below this, in PDF points, a text object's bounding box is treated as
+/// having no area at all — the "nothing to have clicked on" rule
+/// `text_runs()`, `text_run_rects()` and `text_run_at()` each apply to leave
+/// out truly degenerate objects.
+///
+/// **Not a legibility cutoff.** This used to be `0.5`, chosen generously
+/// rather than measured, and it silently dropped real, readable glyphs along
+/// with the genuinely empty objects it was meant for: a capital "I" in a
+/// condensed 8pt font measured at 0.41pt wide — real ink, a real character —
+/// and `text_runs()`'s own 0.5pt floor excluded it from every pasted copy of
+/// that font's text that put each glyph in its own object (`write_text`'s
+/// "one text object per glyph"). Reported from use as "the pasted text isn't
+/// what I copied" — the word was right there on the page, just unreadable to
+/// Pagify's own text model. Set low enough to still catch what is actually
+/// zero, or close enough to it to be pixel-rounding noise, and nothing a real
+/// glyph could ever measure.
+const HAS_AREA_PT: f32 = 0.05;
+
+/// Whether a text object's bounds are wide and tall enough to mean it drew
+/// something — see [`HAS_AREA_PT`].
+fn has_area(left: f32, top: f32, right: f32, bottom: f32) -> bool {
+    (right - left).abs() > HAS_AREA_PT && (top - bottom).abs() > HAS_AREA_PT
+}
 
 /// The words of every text object of an open page, in one pass over the page's
 /// characters: the same strings `FPDFTextObj_GetText` gives for each, without
