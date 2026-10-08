@@ -24,7 +24,7 @@
 ; SIGNING_THUMBPRINT in build.ps1, which this can be pointed at the same way.
 
 #define MyAppName "Pagify"
-#define MyAppVersion "0.1.52"
+#define MyAppVersion "0.1.53"
 #define MyAppPublisher "HSI Lighting"
 #define MyAppExeName "Pagify.exe"
 
