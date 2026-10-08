@@ -3894,6 +3894,48 @@ fn copying_a_group_overwrites_whatever_was_copied_before_it() {
     );
 }
 
+/// **Reported from use: a short label PDFium reports as several adjacent
+/// word-runs came back out of copy/paste as visual noise, each run
+/// overlapping its neighbour.** `copy_object_selection`'s group branch
+/// offset every member from its own rect's *centre*, regardless of kind —
+/// right for a picture or shape, since `place_clipboard_content` centres
+/// those on the point given, but `Text` starts from its own top-left (the
+/// pen's origin), so every pasted run landed shifted left by about half its
+/// own width, crowding into whatever sat to its left. Proven directly on
+/// the stored offsets — not by reading glyph pixels back — since that is
+/// exactly where the mismatch lived.
+#[test]
+fn a_text_groups_own_offsets_are_each_members_left_edge_not_its_centre() {
+    let mut app = app("two-column.pdf");
+    app.submit("editobject");
+    let mut runs = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+    runs.retain(|r| r.text.trim().chars().count() >= 2);
+    runs.sort_by(|a, b| a.rect.left.total_cmp(&b.rect.left));
+    let (a, b) = (runs[0].clone(), runs[1].clone());
+    assert!(
+        (a.rect.right - a.rect.left - (b.rect.right - b.rect.left)).abs() > 0.5,
+        "need two differently-sized runs for a centre-vs-edge mix-up to show: {a:?} {b:?}"
+    );
+
+    app.tab_mut().group = vec![
+        Selected { page: 0, object: a.object, rect: a.rect, what: "the words" },
+        Selected { page: 0, object: b.object, rect: b.rect, what: "the words" },
+    ];
+    let bounds = app.group_bounds(0).expect("bounds");
+    let (cx, cy) = ((bounds.left + bounds.right) / 2.0, (bounds.top + bounds.bottom) / 2.0);
+
+    assert!(app.copy_object_selection());
+    let Some(ObjectClipboard::Group(items)) = app.object_clipboard.clone() else {
+        panic!("expected a Group on the clipboard");
+    };
+    assert_eq!(items.len(), 2);
+    for (sel, (content, dx, dy)) in [a, b].iter().zip(&items) {
+        assert!(matches!(content, ObjectClipboard::Text { .. }), "expected text");
+        assert!((*dx - (sel.rect.left - cx)).abs() < 0.01, "offset {dx} is not the left edge {}: centred instead?", sel.rect.left - cx);
+        assert!((*dy - (sel.rect.top - cy)).abs() < 0.01, "offset {dy} is not the top edge {}: centred instead?", sel.rect.top - cy);
+    }
+}
+
 /// **Copying and pasting words each leave one content-free log line** — the
 /// same rule `pick` lines already follow
 /// (`pick_wiring_tests::every_click_writes_exactly_one_content_free_pick_line_to_the_session_log`):

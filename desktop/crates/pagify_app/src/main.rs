@@ -6668,9 +6668,22 @@ impl PagifyApp {
                 .iter()
                 .filter_map(|sel| {
                     let content = self.content_for_selected(sel)?;
-                    let scx = (sel.rect.left + sel.rect.right) / 2.0;
-                    let scy = (sel.rect.top + sel.rect.bottom) / 2.0;
-                    Some((content, scx - cx, scy - cy))
+                    // The offset has to be taken from whichever point that
+                    // member's own kind places *from* — `place_clipboard_content`
+                    // starts `Text` at its top-left (the pen's origin) but
+                    // centres `Image`/`Shapes` on the point given. Centring
+                    // every kind here, regardless, shifted each pasted text
+                    // run left by about half its own width — invisible for
+                    // one run alone, but a label PDFium reports as several
+                    // adjacent word-runs (see `content_for_selected`'s own
+                    // "the words" branch) came back overlapping itself,
+                    // reported from use as copy/paste turning a short label
+                    // into visual noise.
+                    let (ax, ay) = match &content {
+                        ObjectClipboard::Text { .. } => (sel.rect.left, sel.rect.top),
+                        _ => ((sel.rect.left + sel.rect.right) / 2.0, (sel.rect.top + sel.rect.bottom) / 2.0),
+                    };
+                    Some((content, ax - cx, ay - cy))
                 })
                 .collect();
             if items.is_empty() {
