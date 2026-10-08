@@ -122,4 +122,86 @@ impl Session {
                 .repair_locks()
         })
     }
+    pub fn lock_pages(&self, pages: &[usize], passcode: &[u8]) -> Result<usize> {
+        registry::with_session(self.handle, |s| {
+            let newly = s
+                .document
+                .as_document_mut()
+                .ok_or(pdf_core::PdfError::Unsupported("locking this document"))?
+                .lock_pages(pages, passcode)?;
+            // See `lock_shapes`'s own note on why this bypasses `execute`'s
+            // usual cache invalidation and has to clear it directly.
+            s.cache.clear();
+            Ok(newly)
+        })
+    }
+
+    /// Every image on a page, for offering one as something to lock.
+    pub fn images_on(&self, page_index: usize) -> Result<Vec<pdf_core::document::PageImage>> {
+        registry::with_session(self.handle, |s| s.document.images_on(page_index))
+    }
+
+    /// Take one image off its page and seal it. Returns the id naming the seal.
+    pub fn lock_image(&self, page_index: usize, object: usize, passcode: &[u8]) -> Result<String> {
+        registry::with_session(self.handle, |s| {
+            let id = s
+                .document
+                .as_document_mut()
+                .ok_or(pdf_core::PdfError::Unsupported("locking this document"))?
+                .lock_image(page_index, object, passcode)?;
+            // See `lock_shapes`'s own note.
+            s.cache.clear();
+            Ok(id)
+        })
+    }
+
+    /// Put one sealed object back, leaving every other seal alone.
+    pub fn unlock_item(&self, id: &str, passcode: &[u8]) -> Result<()> {
+        registry::with_session(self.handle, |s| {
+            s.document
+                .as_document_mut()
+                .ok_or(pdf_core::PdfError::Unsupported("unlocking this document"))?
+                .unlock_item(id, passcode)?;
+            // See `lock_shapes`'s own note.
+            s.cache.clear();
+            Ok(())
+        })
+    }
+
+    /// What is sealed on one page, for drawing its badges.
+    ///
+    /// Reached through `as_document_mut` for the same reason `locked_pages` is:
+    /// the vault lives beside the writes, even though asking what is in it does
+    /// not change anything.
+    pub fn locked_items_on(&self, page_index: usize) -> Vec<pdf_core::document::LockedItem> {
+        registry::with_session(self.handle, |s| {
+            Ok(s.document
+                .as_document_mut()
+                .and_then(|d| d.locked_items_on(page_index).ok())
+                .unwrap_or_default())
+        })
+        .unwrap_or_default()
+    }
+
+    /// Every locked page's original, decrypted and verified. Writes nothing —
+    /// the caller puts them back through the command stack so undo works.
+    pub fn open_lock(&self, passcode: &[u8]) -> Result<Vec<(usize, Vec<u8>)>> {
+        registry::with_session(self.handle, |s| {
+            s.document
+                .as_document_mut()
+                .ok_or(pdf_core::PdfError::Unsupported("unlocking this document"))?
+                .open_lock(passcode)
+        })
+    }
+
+    /// Which pages have a sealed original in this document.
+    pub fn locked_pages(&self) -> Vec<usize> {
+        registry::with_session(self.handle, |s| {
+            Ok(s.document
+                .as_document_mut()
+                .and_then(|d| d.locked_pages().ok())
+                .unwrap_or_default())
+        })
+        .unwrap_or_default()
+    }
 }
