@@ -114,4 +114,15 @@ impl Session {
         let request = RenderRequest { scale, ..Default::default() };
         registry::with_session(self.handle, |s| engine::prefetch_page(s, index, &request))
     }
+    /// A page's current rotation, in quarter-turns clockwise.
+    ///
+    /// Needed because `SetPageRotation` is absolute and rotating is relative: a
+    /// document can arrive with pages already at different angles — a landscape
+    /// drawing among portrait sheets — and setting them all to one value
+    /// straightens some and turns others sideways.
+    pub fn page_rotation(&self, index: usize) -> Result<u8> {
+        registry::with_session(self.handle, |s| {
+            s.document.as_document_mut().map_or(Ok(0), |d| d.page_rotation(index))
+        })
+    }
 }

@@ -42,6 +42,8 @@ mod reading;
 mod history;
 mod security;
 mod typing;
+mod markup;
+mod save;
 
 use std::path::{Path, PathBuf};
 
@@ -431,86 +433,11 @@ impl Session {
 
     // -- markup -------------------------------------------------------------
 
-    /// Write a page's markup into the document: real ink for anyone to see,
-    /// plus the live geometry so it is still editable when reopened.
-    pub fn commit_markup(
-        &self,
-        page: usize,
-        layer: &crate::markup::Layer,
-        colour: pdf_core::document::Color,
-        width: f32,
-    ) -> Result<crate::commit::Committed> {
-        registry::with_session(self.handle, |s| {
-            crate::commit::commit_page(s, page, layer, colour, width)
-        })
-    }
 
-    /// Read a page's markup back, rebuilt as a live layer.
-    ///
-    /// `Ok(None)` means this page has no Pagify markup — which is the ordinary
-    /// case for a document nobody has marked up, and not an error.
-    pub fn restore_markup(&self, page: usize) -> Result<Option<crate::markup::Layer>> {
-        registry::with_session(self.handle, |s| {
-            match crate::commit::restore_page(&*s.document, page) {
-                Ok(Some(stored)) => Ok(Some(crate::commit::to_layer(&stored))),
-                Ok(None) => Ok(None),
-                Err(problem) => Err(pdf_core::PdfError::InvalidArgument(problem)),
-            }
-        })
-    }
-
-    /// Whether anything has been changed since the document was opened.
-    pub fn is_dirty(&self) -> Result<bool> {
-        registry::with_session(self.handle, |s| {
-            Ok(s.document.as_document_mut().map(|d| d.is_dirty()).unwrap_or(false))
-        })
-    }
-
-    /// Write the document out.
-    ///
-    /// `incremental` appends a delta and leaves the original bytes untouched,
-    /// which is what keeps an existing digital signature valid. A full copy
-    /// rewrites and compacts the file and destroys every signature over it, so
-    /// it is an explicit choice and never the default.
-    ///
-    /// ## Why this writes somewhere else first
-    ///
-    /// Saving over the document that is open is the ordinary case — it is what
-    /// ⌘S means — and writing straight to that path **destroys it**. The file
-    /// is what PDFium is reading the document from, and creating it for writing
-    /// truncates it to nothing before a byte of output is produced. PDFium then
-    /// refuses the save, having had its source pulled out from under it, and
-    /// what is left on disk is an empty file where the document was.
-    ///
-    /// Measured, not reasoned about: `save` on an open fixture reduced it to
-    /// zero bytes and reported "PDFium refused to save". Every earlier test
-    /// passed because they all saved to a *different* path.
-    ///
-    /// So the output goes to a sibling temporary file and is renamed over the
-    /// target once it is complete. That fixes the truncation, and it makes the
-    /// save atomic as a side effect: a crash or a full disk halfway through
-    /// leaves the original document exactly as it was, rather than half of a
-    /// new one.
-    pub fn save_to(&self, path: &Path, incremental: bool) -> Result<()> {
-        write_then_rename(path, |file| {
-            registry::with_session(self.handle, |s| pdf_core::engine::save(s, file, incremental))
-        })
-    }
 
     // -- editing ------------------------------------------------------------
 
 
-    /// A page's current rotation, in quarter-turns clockwise.
-    ///
-    /// Needed because `SetPageRotation` is absolute and rotating is relative: a
-    /// document can arrive with pages already at different angles — a landscape
-    /// drawing among portrait sheets — and setting them all to one value
-    /// straightens some and turns others sideways.
-    pub fn page_rotation(&self, index: usize) -> Result<u8> {
-        registry::with_session(self.handle, |s| {
-            s.document.as_document_mut().map_or(Ok(0), |d| d.page_rotation(index))
-        })
-    }
 
 
 
