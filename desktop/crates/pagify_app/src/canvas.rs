@@ -2119,6 +2119,27 @@ impl crate::PagifyApp {
                 // it or take it off is what a link's own menu is for, and
                 // "wherever the pointer is" (see below) already means a link
                 // is reached the same way any other page content is.
+                self.context_menu_link(ui, page);
+                self.context_menu_text(ui, page, over_text);
+                self.context_menu_protect(ui, over_text, over_image);
+                self.context_menu_layers(ui, page);
+                let shown = self.show_layers;
+                if ui
+                    .button(if shown { "Hide the layer list" } else { "Show all layers" })
+                    .clicked()
+                {
+                    self.show_layers = !shown;
+                    if self.show_layers {
+                        self.forget_layers();
+                    }
+                    ui.close();
+                }
+            });
+        }
+    }
+    /// The link half of the page context menu: open or remove the link under
+    /// the pointer. Moved out of `show_page_context_menu` whole.
+    fn context_menu_link(&mut self, ui: &mut egui::Ui, page: usize) {
                 let link_here = self.tab_mut()
                     .right_clicked_at
                     .filter(|(p, _)| *p == page)
@@ -2135,6 +2156,11 @@ impl crate::PagifyApp {
                     }
                     ui.separator();
                 }
+    }
+
+    /// The text half of the page context menu: Copy, Join into one paragraph
+    /// and Split the joined text. Moved out whole.
+    fn context_menu_text(&mut self, ui: &mut egui::Ui, page: usize, over_text: bool) {
                 if over_text && ui.button("Copy").clicked() {
                     self.tab_mut().copy_wanted = true;
                     ui.close();
@@ -2189,6 +2215,11 @@ impl crate::PagifyApp {
                 // Locking is a Protect operation, so it is offered where the
                 // Protect tools are rather than on every tab — the same reason
                 // the ribbon has tabs at all.
+    }
+
+    /// The Protect-tab half of the page context menu: lock the image or the
+    /// selection. Moved out whole.
+    fn context_menu_protect(&mut self, ui: &mut egui::Ui, over_text: bool, over_image: bool) {
                 if self.tab_mut().ribbon == Tab::Protect {
                     if over_image {
                         if ui.button("🔒 Lock this image").clicked() {
@@ -2212,6 +2243,11 @@ impl crate::PagifyApp {
                 // button, because the thing to act on is the thing under the
                 // pointer.
                 ui.separator();
+    }
+
+    /// The layer half of the page context menu: the lock badge line, the
+    /// topmost-first layer list and the stacking buttons. Moved out whole.
+    fn context_menu_layers(&mut self, ui: &mut egui::Ui, page: usize) {
                 let spot = self.tab_mut().right_clicked_at.filter(|(p, _)| *p == page).map(|(_, at)| at);
                 if let Some(at) = spot {
                     // **A lock badge is not a layer, and says so.** The
@@ -2288,19 +2324,8 @@ impl crate::PagifyApp {
                     }
                     ui.separator();
                 }
-                let shown = self.show_layers;
-                if ui
-                    .button(if shown { "Hide the layer list" } else { "Show all layers" })
-                    .clicked()
-                {
-                    self.show_layers = !shown;
-                    if self.show_layers {
-                        self.forget_layers();
-                    }
-                    ui.close();
-                }
-            });
-        }
     }
+
+
 
 }
