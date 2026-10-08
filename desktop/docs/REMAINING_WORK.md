@@ -92,7 +92,7 @@ Current >150 (clippy non-comment lines), with a suggested first cut:
 | `extract_signature` | `shell/signature_extract.rs:78` | 196 | Pipeline stages: (luma + inset + histogram + strict mask), (components + keep + clusters + winner), (window + loose mask + crop). Each needs a small struct or tuple — this is a design job, not a slice |
 | `draw_signature_list` | `panels.rs:727` | 184 | Per-entry row out to a method taking `&mut panel.renaming` and `&mut action` |
 | `draw_spell_check` | `panels.rs:230` | 170 | Suggestion list / controls blocks |
-| `draw_command_bar` | `main.rs:3224` | 164 | TextEdit + submit block (history is already out) |
+| `draw_command_bar` | `main.rs:3226` | 181 | TextEdit + submit block (history is already out) |
 | `draw_ribbon_actions` | `main.rs:3039` | ~150 | Overflow dropdown out of the row |
 | `replace_outlined_word` | `edit.rs:940` | 152 | Find/plan/apply stages |
 | `segment` | `shell/blocks.rs:2031` | 151 | Piece/link/furniture grouping stages |
@@ -106,23 +106,22 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
 
 ### 2.2 Structural tier (the bigger jobs)
 
-1. **`ToolId` enums.** Tool identity is still strings: `type Tool = (&str, &str, &str)`
-  in `ribbon.rs`, the per-tab `*_BUTTONS` consts, `Tool::command() -> Option<&'static str>`,
-  `ribbon_click(&str)`, `tool_button(..., command: &str)`. Introduce a `ToolId`
-  enum, map the tables and `Tool::command`, and keep the command-box string
-  parser as the boundary where strings become ids.
-2. **State sub-structs.** `DocTab` has ~89 fields, `PagifyApp` ~53; targets are
-  25 and 15 (DESIGN_REVIEW §5). Suggested first groups: `ViewState`
-  (page/zoom/scroll/hover/anchor/settling), `ToolState` (already partly
-  `ArmedTool`, plus `markup_armed`/`object_tool`/`grab`/`handle`/selections),
-  `EditState` (`editing_run`, `new_text_box`, `paste_ghost`), `PanelsState`
-  (dialogs, find, spell, bookmarks). `Doc` already delegates caches.
-3. **Event-returning tool transitions.** DESIGN_REVIEW §3.2 sketch: `Tool`
-  variants own their sub-state and `on_click`/`on_key`/`on_cancel` return a
-  `ToolEffect` the canvas/dispatch applies. Today `picking.rs` still matches,
-  and `canvas::armed_tool_gesture`/`page_drag` take the pointer. Do this only
-  with the interaction tests (`pointer_tests`, `ui_tests`, `tool_state_gap_tests`)
-  as the harness; add the cancel/ribbon property test the review asks for.
+1. **`ToolId` — DONE** on the refactor line (`fe97c64`): the ribbon tables
+  carry `Command::Verb(...)`/`ToolId` instead of bare strings, and
+  `Tool::id()`/`ToolId` are in `tool.rs`. Keep the command-box string parser
+  as the boundary where strings become ids.
+2. **State sub-structs and folding into `Tool`.** `DocTab` has ~84 fields,
+  `PagifyApp` ~53; targets are 25 and 15 (DESIGN_REVIEW §5). The tool-kind
+  migration itself is finished — the remaining Phase 2 work is moving the
+  *fields* `Tool` belongs with (`editing_run`, `new_text_box`, `paste_ghost`,
+  `grab`, `handle`, `markup_armed`/`object_tool`, the selections) into `Tool`
+  or a `ToolState`, then grouping the rest into `ViewState`/`EditState`/
+  `PanelsState`. `Doc` already delegates caches.
+3. **Event-returning transitions — MOSTLY DONE.** `ToolEffect` +
+  `Tool::on_click`/`on_pointer`/`on_cancel`/`preview` exist in `tool.rs`, and
+  `canvas::draw_pending_preview`/`drag_stopped` already delegate to them.
+  Remaining: a keyboard `Tool::on_key` (does not exist yet) and the
+  cancel/ribbon property test the review asks for.
 4. **`Effect`-returning command executor (Phase 4b).** Move command semantics
   into the shell: `execute(verb, ...) -> Vec<Effect>` with `Effect` covering
   Say/ScrollTo/OpenDialog/Refresh/AskUnsaved/Quit; `pagify_app::dispatch`
@@ -153,11 +152,18 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   sites across `main.rs`/`dispatch.rs`. A `doc_mut()` helper is tempting but
   the `let ... else` borrow must compile; only do it if a confirming pattern
   is found, otherwise leave it.
+- **Merging parallel refactors re-verifies nothing by itself.** The
+  `82d44d9` merge compiled and passed the suite while silently reverting the
+  `ui` split and the per-tab consts: the extracted methods stayed in the file,
+  dead, while the merged `ui` inlined everything again. After any merge,
+  re-measure (`clippy` inventory), check that extracted methods actually have
+  call sites, and re-run the docs comparison. Repairs: `3fc46fa`, `3ec8898`.
 - **Untracked files, deliberately not committed:** `.obsidian/` and
   `desktop/docs/SECURITY_AUDIT.md`.
-- **Merge topology:** `farzad-debug` sits on `pagify-windows-refactor`, which
-  sits on `pagify-desktop-windows` @ `e3585d1`. Decide whether the refactor
-  branch merges first or this branch carries everything.
+- **Merge topology:** `farzad-debug` is already merged into
+  `pagify-windows-refactor` (`82d44d9`), which sits on
+  `pagify-desktop-windows` @ `e3585d1`. Continue on the refactor branch;
+  `farzad-debug` is history.
 
 ---
 
@@ -184,5 +190,7 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
 3. Work §2.1 top-down, one function per commit, running
    `cargo test -p pagify_app --release --bin pagify_app` before committing.
 4. Re-run the clippy inventory every few functions and keep the docs current.
-5. When the suite is green on Windows, start §2.2 with `ToolId`, then the
-   state sub-structs; leave CI gates (`clippy.toml` + workflow) until last.
+5. When the suite is green on Windows, start §2.2 by folding the tool state
+   fields into `Tool` (item 2), then the command `Effect` executor; `ToolId`
+   and the click/pointer transitions are already done. Leave CI gates
+   (`clippy.toml` + workflow) until last.

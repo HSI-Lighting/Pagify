@@ -14,29 +14,37 @@
 **Done.** Phase 0: clippy compiles, fixture and `.gitattributes` fixes in, check
 commands documented in `desktop/README.md` (no CI workflow yet). Phase 1:
 `main.rs` ≈ 15.4k lines (from 46.5k), all 22.9k test lines out in files beside
-their code, and the function split — `ui()`, `act()`, `verbs::parse`,
-`resolve`, `draw_main_area`, `canvas::interact`, `draw_pages` and
-`Tab::buttons` are all decomposed, along with `canvas::interact`, `draw_pages`,
-`show_page_context_menu` (split into link/text/protect/layer sections),
-`draw_ribbon` (action row out to `draw_ribbon_actions`) and the big arms of
-`act_signing`/`act_security`/`act_tools`. Clippy's measure (non-comment lines)
-at 2026-10-08: the largest functions left are `pick_text_run_traced` 205,
+their code, and the function split — `ui()`, `act()`, `verbs::parse`, `resolve`,
+`draw_main_area`, `canvas::interact`, `draw_pages`, `show_page_context_menu`,
+`draw_ribbon`, `Tab::buttons` and the big `act_*` arms — is done on the
+`farzad-debug` line. The parallel `pagify-windows-refactor` line added
+`ToolId`/`Command`-carrying ribbon tables, `ToolEffect`,
+`Tool::on_click`/`on_pointer`/`on_cancel`/`preview`, transition tests and bug
+fixes, then merged (`82d44d9`, 0.1.50). That merge left `ui` inline again with
+its extracted methods dead; repair commits `3fc46fa` (ui re-split over the
+merged body) and `3ec8898` (per-tab consts restored) put it back. Clippy's
+measure (non-comment lines) at 2026-10-08 after the repair: the largest
+functions left are `pick_text_run_traced` 205,
 `signature_extract::extract_signature` 196, `draw_signature_list` 184,
-`draw_spell_check` 170, `draw_command_bar` 164 and `replace_outlined_word` 152,
-plus shell test helpers (178/173/159) — down from `ui` 959 and `act` 818; 47
-functions are still over 100 lines and the 150-line invariant is not met
-everywhere yet.
-Phase 2: one `Tool` enum and one `ArmedTool` (`PendingKind`/`Pending` deleted);
-transition functions still live in `picking.rs`. Phase 3: `DocCaches`, one
+`draw_command_bar` 181, `draw_spell_check` 170, `replace_outlined_word` 152 and
+`blocks::segment` 151, plus shell test helpers (178/173/159); 47 functions are
+still over 100 lines.
+Phase 2: one `Tool` enum and one `ArmedTool` (`PendingKind`/`Pending` deleted),
+with click/pointer/cancel/preview transitions in `tool.rs` and the thin
+`picking.rs` apply path; the state fields (`editing_run`, `grab`, `handle`,
+selections) are still on `PagifyApp`/`DocTab`. Phase 3: `DocCaches`, one
 invalidation entry point. Phase 4a: `paragraph_lines`, `spelling`, editor
 arithmetic in `pagify_shell` (`editor.rs`).
 
-**Remaining.** `ToolId` (tool identity is still strings); `DocTab` (≈89 fields)
-and `PagifyApp` (≈53) state sub-structs, against the §5 targets of 25/15; the
-rest of `main.rs` (≈15.4k lines) and the >2k-line test files (`lock_wiring_tests`
-7.5k, `ui_tests` 4.5k); event-returning `Tool::on_click`/`on_key`; the `Effect`
-executor; the `blocks.rs`/`block_input.rs` (5.3k lines) and `session.rs`
-(1.8k/116 methods) splits; `clippy.toml` and CI gates.
+**Remaining.** `DocTab` (≈84 fields) and `PagifyApp` (≈53) state sub-structs,
+against the §5 targets of 25/15 — including folding `editing_run`, `grab`,
+`handle` and the selections into `Tool`; the rest of `main.rs` (≈16.9k lines)
+and the >2k-line test files (`lock_wiring_tests` 7.5k, `ui_tests` 4.5k);
+keyboard transitions (`Tool::on_key` does not exist yet — clicks, pointer,
+cancel and preview do); the shell `Effect` executor for commands (tool-level
+`ToolEffect` exists, command-level does not); the `blocks.rs`/`block_input.rs`
+(5.3k lines) and `session.rs` (1.8k/116 methods) splits; `clippy.toml` and CI
+gates.
 
 **Verification note.** On this Linux machine the suite is red at exactly 12
 pre-existing, machine-specific tests (3 `hub`, 4 `lock_wiring`, 5
