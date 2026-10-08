@@ -115,17 +115,18 @@ impl Tab {
         if self == Tab::File { &[] } else { ALWAYS }
     }
 
-    pub(crate) fn buttons(self) -> &'static [Tool] {
-        match self {
-            Tab::File => &[
+    /// The File tab's ribbon buttons, in order.
+    const FILE_BUTTONS: &[Tool] = &[
                 ("\u{E2C8}", "Open…", Command::Verb("open")),
                 ("\u{E5CD}", "Close", Command::Verb("close")),
                 ("\u{E161}", "Save", Command::Verb("save")),
                 ("\u{E161}", "Save As…", Command::Verb("saveas")),
                 ("\u{E8B8}", "PDFium", Command::Verb("pdfium")),
                 ("\u{F8C7}", "Quit", Command::Verb("quit")),
-            ],
-            Tab::Home => &[
+    ];
+
+    /// The Home tab's ribbon buttons, in order.
+    const HOME_BUTTONS: &[Tool] = &[
                 ("\u{E412}", "Snapshot", Command::Verb("snapshot")),
                 ("\u{E14D}", "Copy", Command::Verb("copy")),
                 ("\u{E8E7}", "Bookmark", Command::Verb("bookmark")),
@@ -150,8 +151,10 @@ impl Tab {
                 // The two a form actually asks for, one press away.
                 ("\u{E668}", "Tick", Command::Verb("fillsign tick")),
                 ("\u{E5CD}", "Cross", Command::Verb("fillsign cross")),
-            ],
-            Tab::Convert => &[
+    ];
+
+    /// The Convert tab's ribbon buttons, in order.
+    const CONVERT_BUTTONS: &[Tool] = &[
                 ("\u{E873}", "From Files", Command::Verb("fromfiles")),
                 ("\u{E329}", "From Scanner", Command::Verb("fromscanner")),
                 ("\u{E14F}", "From Clipboard", Command::Verb("fromclipboard")),
@@ -166,8 +169,10 @@ impl Tab {
                 ("\u{EB7E}", "To HTML", Command::Verb("tohtml")),
                 ("\u{F720}", "To Other", Command::Verb("toother")),
                 ("\u{F0C5}", "Preflight", Command::Verb("preflight")),
-            ],
-            Tab::Edit => &[
+    ];
+
+    /// The Edit tab's ribbon buttons, in order.
+    const EDIT_BUTTONS: &[Tool] = &[
                 ("\u{E262}", "Edit Text", Command::Tool(ToolId::EditText, "edittext")),
                 ("\u{E162}", "Edit Object", Command::Verb("editobject")),
                 ("\u{E236}", "Link & Join Text", Command::Verb("jointext")),
@@ -187,8 +192,10 @@ impl Tab {
                 ("\u{EA07}", "Web Links", Command::Tool(ToolId::Link, "weblinks")),
                 ("\u{E8E7}", "Bookmark", Command::Verb("bookmark")),
                 ("\u{F184}", "Cross Reference", Command::Verb("crossref")),
-            ],
-            Tab::Organize => &[
+    ];
+
+    /// The Organize tab's ribbon buttons, in order.
+    const ORGANIZE_BUTTONS: &[Tool] = &[
                 ("\u{E9B0}", "Thumbnail View", Command::Verb("thumbnails")),
                 ("\u{E145}", "Insert", Command::Verb("insertpage")),
                 ("\u{E92E}", "Delete", Command::Verb("deletepage")),
@@ -206,8 +213,10 @@ impl Tab {
                 ("\u{E85B}", "Resize Pages", Command::Verb("resizepages all ")),
                 ("\u{E53C}", "Flatten", Command::Verb("flatten")),
                 ("\u{E41C}", "Page Marks", Command::Verb("pagemarks")),
-            ],
-            Tab::Comment => &[
+    ];
+
+    /// The Comment tab's ribbon buttons, in order.
+    const COMMENT_BUTTONS: &[Tool] = &[
                 ("\u{F82B}", "Highlight", Command::Tool(ToolId::Highlight, "highlight")),
                 ("\u{E249}", "Underline", Command::Tool(ToolId::Underline, "underline")),
                 ("\u{E246}", "Strikeout", Command::Tool(ToolId::StrikeOut, "strikeout")),
@@ -231,8 +240,10 @@ impl Tab {
                 ("\u{E668}", "TickMark", Command::Verb("tickmark")),
                 ("\u{E8AF}", "Manage Comments", Command::Verb("managecomments")),
                 ("\u{F10D}", "Keep Tool Selected", Command::Verb("keeptool")),
-            ],
-            Tab::View => &[
+    ];
+
+    /// The View tab's ribbon buttons, in order.
+    const VIEW_BUTTONS: &[Tool] = &[
                 // `\u{E793}` (Segoe Fluent's own "DarkTheme" glyph) was tried
                 // first and failed `every_ribbon_glyph_can_actually_be_drawn`
                 // — not in this font's own subset. This codepoint is
@@ -260,8 +271,10 @@ impl Tab {
                 ("\u{E3B9}", "Compare", Command::Verb("compare")),
                 ("\u{EAC7}", "Word Count", Command::Verb("wordcount")),
                 ("\u{E429}", "View Setting", Command::Verb("viewsetting")),
-            ],
-            Tab::Form => &[
+    ];
+
+    /// The Form tab's ribbon buttons, in order.
+    const FORM_BUTTONS: &[Tool] = &[
                 ("\u{F04C}", "Run Form Field Recognition", Command::Verb("formrecognise")),
                 ("\u{F10A}", "Designer Assistant", Command::Verb("formdesigner")),
                 ("\u{F1C1}", "Push Button", Command::Verb("fieldbutton")),
@@ -284,8 +297,10 @@ impl Tab {
                 ("\u{F09B}", "Export", Command::Verb("formexport")),
                 ("\u{E86F}", "JavaScript", Command::Verb("javascript")),
                 ("\u{E8B9}", "Tool Settings", Command::Verb("toolsettings")),
-            ],
-            Tab::Protect => &[
+    ];
+
+    /// The Protect tab's ribbon buttons, in order.
+    const PROTECT_BUTTONS: &[Tool] = &[
                 // First, because it is the one that works and the one the tab is
                 // for. "Mark for Redaction" beside it would be two names for the
                 // same intention where only one of them destroys anything.
@@ -329,8 +344,10 @@ impl Tab {
                 ("\u{E746}", "Fill & Sign", Command::Verb("fillsign")),
                 ("\u{E7AF}", "Sign & Certify", Command::Verb("certify")),
                 ("\u{F013}", "Validate", Command::Verb("validate")),
-            ],
-            Tab::PagiSign => &[
+    ];
+
+    /// The PagiSign tab's ribbon buttons, in order.
+    const PAGISIGN_BUTTONS: &[Tool] = &[
                 ("\u{F603}", "Signature", Command::Tool(ToolId::Signature, "signature")),
                 ("\u{E43E}", "Upload Signature", Command::Verb("signature upload")),
                 ("\u{F775}", "Manage Signatures", Command::Verb("managesignatures")),
@@ -348,16 +365,20 @@ impl Tab {
                 ("\u{F728}", "Create Online Form", Command::Verb("onlineform")),
                 ("\u{EF3E}", "Document Status", Command::Verb("documentstatus")),
                 ("\u{E06B}", "Add E-Sign Branding", Command::Verb("signbranding")),
-            ],
-            Tab::Share => &[
+    ];
+
+    /// The Share tab's ribbon buttons, in order.
+    const SHARE_BUTTONS: &[Tool] = &[
                 ("\u{E159}", "Email", Command::Verb("email")),
                 ("\u{EA5E}", "Attach to Email", Command::Verb("emailattach")),
                 ("\u{E80D}", "Share Link", Command::Verb("sharelink")),
                 ("\u{E560}", "Send for Review", Command::Verb("sendreview")),
                 ("\u{E8E1}", "Track Reviews", Command::Verb("trackreviews")),
                 ("\u{F15C}", "Cloud Storage", Command::Verb("cloudstorage")),
-            ],
-            Tab::Accessibility => &[
+    ];
+
+    /// The Accessibility tab's ribbon buttons, in order.
+    const ACCESSIBILITY_BUTTONS: &[Tool] = &[
                 ("\u{E6B1}", "Full Check", Command::Verb("accesscheck")),
                 ("\u{F071}", "Accessibility Report", Command::Verb("accessreport")),
                 ("\u{E893}", "Autotag Document", Command::Verb("autotag")),
@@ -365,16 +386,20 @@ impl Tab {
                 ("\u{E43F}", "Set Alternate Text", Command::Verb("alttext")),
                 ("\u{F05B}", "Tags Panel", Command::Verb("tagspanel")),
                 ("\u{E92C}", "Reading Options", Command::Verb("readingoptions")),
-            ],
-            Tab::Help => &[
+    ];
+
+    /// The Help tab's ribbon buttons, in order.
+    const HELP_BUTTONS: &[Tool] = &[
                 ("\u{EA19}", "User Manual", Command::Verb("help")),
                 ("\u{EB9B}", "Quick Start", Command::Verb("quickstart")),
                 ("\u{EAE7}", "Keyboard Shortcuts", Command::Verb("shortcuts")),
                 ("\u{E923}", "Check for Updates", Command::Verb("checkupdates")),
                 ("\u{E868}", "Report an Issue", Command::Verb("reportissue")),
                 ("\u{E88E}", "About Pagify", Command::Verb("about")),
-            ],
-            Tab::Draw => &[
+    ];
+
+    /// The Draw tab's ribbon buttons, in order.
+    const DRAW_BUTTONS: &[Tool] = &[
                 ("\u{F108}", "Line", Command::Tool(ToolId::Line, "line")),
                 ("\u{EF4A}", "Circle", Command::Tool(ToolId::Circle, "circle")),
                 ("\u{EB54}", "Rectangle", Command::Verb("rectangle")),
@@ -393,12 +418,32 @@ impl Tab {
                 ("\u{EB95}", "Distance", Command::Tool(ToolId::MeasureDistance, "measure distance")),
                 ("\u{EA49}", "Area", Command::Tool(ToolId::MeasureArea, "measure area")),
                 ("\u{EAF6}", "Page Scale", Command::Verb("pagescale")),
-            ],
-            Tab::Automate => &[
+    ];
+
+    /// The Automate tab's ribbon buttons, in order.
+    const AUTOMATE_BUTTONS: &[Tool] = &[
                 ("\u{E837}", "Record", Command::Verb("record")),
                 ("\u{EF71}", "Stop", Command::Verb("stop")),
                 ("\u{E037}", "Replay", Command::Verb("replay ")),
-            ],
+    ];
+
+    pub(crate) fn buttons(self) -> &'static [Tool] {
+        match self {
+            Tab::File => Self::FILE_BUTTONS,
+            Tab::Home => Self::HOME_BUTTONS,
+            Tab::Convert => Self::CONVERT_BUTTONS,
+            Tab::Edit => Self::EDIT_BUTTONS,
+            Tab::Organize => Self::ORGANIZE_BUTTONS,
+            Tab::Comment => Self::COMMENT_BUTTONS,
+            Tab::View => Self::VIEW_BUTTONS,
+            Tab::Form => Self::FORM_BUTTONS,
+            Tab::Protect => Self::PROTECT_BUTTONS,
+            Tab::PagiSign => Self::PAGISIGN_BUTTONS,
+            Tab::Share => Self::SHARE_BUTTONS,
+            Tab::Accessibility => Self::ACCESSIBILITY_BUTTONS,
+            Tab::Help => Self::HELP_BUTTONS,
+            Tab::Draw => Self::DRAW_BUTTONS,
+            Tab::Automate => Self::AUTOMATE_BUTTONS,
         }
     }
 
