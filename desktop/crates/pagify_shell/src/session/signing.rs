@@ -215,4 +215,11 @@ impl Session {
                 .sign_document(pkcs12, password, about)
         })
     }
+    /// How many signatures this document carries.
+    pub fn signature_count(&self) -> usize {
+        registry::with_session(self.handle, |s| {
+            Ok(s.document.as_document_mut().map(|d| d.signature_count()).unwrap_or(0))
+        })
+        .unwrap_or(0)
+    }
 }
