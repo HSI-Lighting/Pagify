@@ -41,9 +41,9 @@ arithmetic in `pagify_shell` (`editor.rs`).
 against the §5 targets of 25/15 — including folding `editing_run`, `grab`,
 `handle` and the selections into `Tool`; the rest of `main.rs` (≈16.9k lines)
 and the >2k-line test files (`lock_wiring_tests` 7.5k, `ui_tests` 4.5k);
-keyboard transitions (`Tool::on_key` does not exist yet — clicks, pointer,
-cancel and preview do); the shell `Effect` executor for commands (tool-level
-`ToolEffect` exists, command-level does not); the `blocks.rs`/`block_input.rs`
+keyboard transitions are done (`Tool::on_key`/`ToolKey` own the Enter/Escape
+rules, with a property test); the shell `Effect` executor for commands
+(tool-level `ToolEffect` exists, command-level does not); the `blocks.rs`/`block_input.rs`
 (5.3k lines) and `session.rs` (1.8k/116 methods) splits; `clippy.toml` and CI
 gates.
 

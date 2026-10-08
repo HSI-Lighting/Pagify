@@ -115,11 +115,11 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   `grab`, `handle`, `markup_armed`/`object_tool`, the selections) into `Tool`
   or a `ToolState`, then grouping the rest into `ViewState`/`EditState`/
   `PanelsState`. `Doc` already delegates caches.
-3. **Event-returning transitions — MOSTLY DONE.** `ToolEffect` +
-  `Tool::on_click`/`on_pointer`/`on_cancel`/`preview` exist in `tool.rs`, and
-  `canvas::draw_pending_preview`/`drag_stopped` already delegate to them.
-  Remaining: a keyboard `Tool::on_key` (does not exist yet) and the
-  cancel/ribbon property test the review asks for.
+3. **Event-returning transitions — DONE.** `ToolEffect` +
+  `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
+  `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
+  the Enter/Escape rules live in `Tool::on_key`; both property tests are in
+  `tool_transition_tests.rs` (cancel, and the `on_key` matrix).
 4. **`Effect`-returning command executor (Phase 4b).** Move command semantics
   into the shell: `execute(verb, ...) -> Vec<Effect>` with `Effect` covering
   Say/ScrollTo/OpenDialog/Refresh/AskUnsaved/Quit; `pagify_app::dispatch`
