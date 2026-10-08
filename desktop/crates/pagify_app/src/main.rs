@@ -75,7 +75,7 @@ pub(crate) use ribbon::{
     DOC_TAB_MAX_TEXT, DOC_TAB_MENU_WIDTH, DOC_TAB_PADDING, RIBBON_MARGIN_X, RIBBON_MARGIN_Y, TOOL_HEIGHT, TOOL_WIDTH,
 };
 pub(crate) use tool::{
-    ArmedTool, DrawKind, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool, ToolEffect, ToolId,
+    ArmedTool, DrawKind, MatchPropertiesSample, PendingArticleBox, PendingLink, Tool, ToolEffect, ToolId, ToolKey,
 };
 // `spelling` and `paragraph_lines` moved to `pagify_shell` (Phase 4a: no
 // egui, so they belong where they can be tested without a window) —
@@ -2994,13 +2994,15 @@ impl PagifyApp {
             }
             // Enter closes a pick that has no fixed number of points — an area
             // measurement, or a polyline. `done` is the same thing typed.
+            // The tool itself answers whether Enter applies: `Tool::on_key`.
             if keys.enter {
-                let closeable = self.tab_mut()
-                    .tool
-                    .as_ref()
-                    .is_some_and(|t| t.kind.ends_on_enter() && t.points.len() >= 2);
-                if closeable {
-                    self.resolve_tool();
+                let armed = self.tab().tool.as_ref().map(|t| (t.kind.clone(), t.points.len()));
+                if let Some((kind, points)) = armed {
+                    match kind.on_key(ToolKey::Finish, points) {
+                        ToolEffect::Finish => self.resolve_tool(),
+                        ToolEffect::None => {}
+                        other => unreachable!("on_key(Finish) returned {other:?}"),
+                    }
                 }
             }
         }

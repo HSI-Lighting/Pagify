@@ -422,6 +422,22 @@ pub(crate) enum ToolEffect {
     /// ArticleBox's hand-off: an area is drawn, and the title that names
     /// it is asked for next, in `pending_article_box`.
     OpenArticleBoxPrompt(PendingArticleBox),
+    /// Enter on a kind that ends on it, once it has the points it needs:
+    /// the caller runs the same `resolve_tool` a click would. Returned only
+    /// by [`Tool::on_key`]; `on_click` never produces it.
+    Finish,
+}
+
+/// A key a tool answers to beyond the frame's global shortcuts — the last
+/// piece of DESIGN_REVIEW.md §3.2's `on_key`/`on_cancel` pair. `Cancel`
+/// maps onto [`Tool::on_cancel`]; `Finish` is the `closeable` check
+/// `main.rs` used to make inline against `ends_on_enter()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolKey {
+    /// Enter — finish a shape whose point count is open-ended.
+    Finish,
+    /// Escape — put the tool down.
+    Cancel,
 }
 
 impl Tool {
@@ -862,6 +878,19 @@ impl Tool {
     /// needing to know which kind it was.
     pub(crate) fn on_cancel(self) -> ToolEffect {
         ToolEffect::Cancelled
+    }
+
+    /// What the frame's key handling asks the armed tool about a key it saw.
+    /// Enter finishes a kind that ends on it once it has two points — the
+    /// exact check `main.rs` used to make inline — and Escape answers with
+    /// [`Self::on_cancel`]. Every other combination says `None`, which here
+    /// means "not this key", not "nothing to say".
+    pub(crate) fn on_key(&self, key: ToolKey, points: usize) -> ToolEffect {
+        match key {
+            ToolKey::Finish if self.ends_on_enter() && points >= 2 => ToolEffect::Finish,
+            ToolKey::Finish => ToolEffect::None,
+            ToolKey::Cancel => self.clone().on_cancel(),
+        }
     }
 }
 
