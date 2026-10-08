@@ -84,14 +84,18 @@ Regenerate the list any time with the clippy command above and:
 grep -E 'this function has too many lines' clippy.txt | sort -t'(' -k2 -rn
 ```
 
-Current >150 (clippy non-comment lines), with a suggested first cut:
+Current >150 (clippy non-comment lines) — **shell test helpers only**:
 
-| Function | Where | Size | Suggested split |
-|---|---|---|---|
-| `extract_signature` | `shell/signature_extract.rs:78` | 196 | Pipeline stages: (luma + inset + histogram + strict mask), (components + keep + clusters + winner), (window + loose mask + crop). Each needs a small struct or tuple — this is a design job, not a slice |
-| `segment` | `shell/blocks.rs:2031` | 151 | Per-head phases (item detection + margins, run splitting, typography) need a small scratch struct: another design job |
-| `draw_ribbon` | `main.rs:2533` | 147 | The action-row half is separable again (it was before the merge) if wanted |
-| test helpers | `shell/tests/blocks_synthetic.rs` 178/159/119/108/106/108, `blocks_review_fuzz.rs` 136/121/112/103, `replace_lines_sweep.rs:364` 173, `pick_wiring_tests.rs:92` 133, `lock_wiring_tests.rs:6914` 117, `ui_tests.rs:3183` 108 | | Split only when you touch those files; tests are not the priority |
+| Function | Where | Size |
+|---|---|---|
+| `mode_bin`-area test helpers | `shell/tests/blocks_synthetic.rs` | 178 and 159 (plus several 100–125) |
+| a sweep helper | `shell/tests/replace_lines_sweep.rs:364` | 173 |
+| fuzz helpers | `shell/tests/blocks_review_fuzz.rs` | 136/121/112/103 |
+
+No production function exceeds 150 lines. The nearest are `draw_ribbon` 147
+(its action-row half is separable again), `draw_passcode_dialog` 145,
+`main.rs:3728` 139, `draw_pages` 138, `blocks::segment` 136 and
+`draw_signature_list` 136. Split test helpers only when touching those files.
 
 Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105/103/102,
 `main.rs` 139/135/123/118/108/105/102/102/102, `panels.rs` 136/123/102/102,

@@ -24,10 +24,12 @@ fixes, then merged (`82d44d9`, 0.1.50). That merge left `ui` inline again with
 its extracted methods dead; repair commits `3fc46fa` (ui re-split over the
 merged body) and `3ec8898` (per-tab consts restored) put it back. Clippy's
 measure (non-comment lines) at 2026-10-08 after the repair: the largest
-functions left are `signature_extract::extract_signature` 196 and
-`blocks::segment` 151 — both stage-struct design jobs — plus shell test
-helpers (178/173/159); everything else in the app is 147 or under. 46
-functions are still over 100 lines.
+functions left are shell test helpers only (`blocks_synthetic` 178/159,
+`replace_lines_sweep` 173) — **no production function exceeds the
+150-line target**. The largest production functions are `draw_ribbon` 147,
+`draw_passcode_dialog` 145, `main.rs:3728` 139, `draw_pages` 138,
+`blocks::segment` 136 and `draw_signature_list` 136; 46 functions in
+total are still over 100 lines, most of them between 100 and 140.
 Phase 2: one `Tool` enum and one `ArmedTool` (`PendingKind`/`Pending` deleted),
 with click/pointer/cancel/preview transitions in `tool.rs` and the thin
 `picking.rs` apply path; the state fields (`editing_run`, `grab`, `handle`,
