@@ -3027,6 +3027,17 @@ impl PagifyApp {
             )
             .show(ui, |ui| {
                 let tab = self.tab_mut().ribbon;
+                ribbon_command = self.draw_ribbon_actions(ui, tab);
+            });
+        ribbon_command
+    }
+
+    /// The action row under the ribbon tabs: the leading buttons, the rest of
+    /// the tab's tools with their grouping dividers, the overflow dropdown and
+    /// every tooltip, returning the command a button asked to run. Moved out
+    /// of `draw_ribbon` whole so the panel itself is a frame.
+    fn draw_ribbon_actions(&mut self, ui: &mut egui::Ui, tab: Tab) -> Option<String> {
+        let mut ribbon_command: Option<String> = None;
 
                 // Tight horizontally, loose vertically. The buttons already
                 // carry their own padding, so spacing between them only adds
@@ -3203,9 +3214,9 @@ impl PagifyApp {
                     }
                 });
 
-            });
         ribbon_command
     }
+
 
     /// The command bar, bottom panel: the single line, or the opened box with
     /// its history above it. A submit lands in `submitted` for the caller to
