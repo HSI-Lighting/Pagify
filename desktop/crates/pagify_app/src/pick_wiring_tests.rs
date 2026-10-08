@@ -3,6 +3,7 @@ use pdf_core::document::{Rect, TextRun};
 
 const MARINA: &str = r"C:\Users\hsili\Desktop\test pdf for pgify\Datasheets - Editors market - Marina mall.pdf";
 const CAMINO: &str = r"C:\Users\hsili\Downloads\CAMINO elitee-plus 3.0.pdf";
+const DATASHEET: &str = r"C:\Users\hsili\Desktop\test pdf for pgify\TECHNICAL DATASHEET Q-2075-REV.pdf";
 
 fn fixture(name: &str) -> String {
     format!("{}/../../../rust/pdf_core/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -1384,5 +1385,74 @@ fn a_pasted_fragments_own_width_matches_the_original_not_a_bare_reshape() {
         "pasted width {pasted_width:.2} does not match the original {original_width:.2} \
          (ratio {:.4}) — the track correction is not being applied",
         pasted_width / original_width
+    );
+}
+
+/// **Reported from use: deleting a dense selection froze the app for
+/// minutes, and "select all" on the same page looked like a crash.**
+/// `delete_group` used to call `Command::RemoveObject` once per member, and
+/// each one of those re-saves and re-parses the *whole* document just to
+/// locate and splice out one object — about 400ms on this real 49-page
+/// file, measured directly. A few hundred objects at that rate is minutes,
+/// which is what reached the user as a freeze and then a force-close.
+/// `Command::RemoveObjects` pays the save/parse cost once for the whole
+/// batch, so removing 40 objects through `delete_group` should cost close
+/// to what removing *one* object costs, not forty times that.
+#[test]
+fn deleting_a_dense_selection_does_not_cost_once_per_object() {
+    if !std::path::Path::new(DATASHEET).is_file() {
+        eprintln!("skipping: the technical datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(DATASHEET));
+    app.submit("editobject");
+
+    let page = 5; // page 6, the dense specs-table page reported from use.
+    let drawn = {
+        let doc = app.tab_mut().doc.as_ref().expect("open");
+        doc.session.drawn_objects(page).expect("objects")
+    };
+    assert!(drawn.len() >= 40, "expected the dense page to still have plenty of objects: {}", drawn.len());
+
+    // Time removing ONE object the old, single-object way, for comparison.
+    let one = drawn[0].object;
+    let t0 = std::time::Instant::now();
+    {
+        let doc = app.tab_mut().doc.as_ref().expect("open");
+        doc.session
+            .execute(pdf_core::command::Command::RemoveObject { page_index: page, object: one })
+            .expect("single remove");
+    }
+    let single_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    {
+        let doc = app.tab_mut().doc.as_ref().expect("open");
+        let (undone, _) = doc.session.undo().expect("undo");
+        assert!(undone, "the single removal should be undoable");
+    }
+
+    // Now batch-delete 40 objects through the real `delete_group` path.
+    let batch: Vec<&pdf_core::document::DrawnObject> = drawn.iter().skip(1).take(40).collect();
+    app.tab_mut().group =
+        batch.iter().map(|d| Selected { page, object: d.object, rect: d.rect, what: "the thing" }).collect();
+    let batch_len = batch.len();
+
+    let before = {
+        let doc = app.tab_mut().doc.as_ref().expect("open");
+        doc.session.drawn_objects(page).expect("objects").len()
+    };
+    let t1 = std::time::Instant::now();
+    app.delete_group();
+    let batch_ms = t1.elapsed().as_secs_f64() * 1000.0;
+    let after = {
+        let doc = app.tab_mut().doc.as_ref().expect("open");
+        doc.session.drawn_objects(page).expect("objects").len()
+    };
+
+    eprintln!("timing: single remove {single_ms:.1}ms, batch of {batch_len} {batch_ms:.1}ms");
+    assert_eq!(before - after, batch_len, "every member of the batch should have been removed, in one pass");
+    assert!(
+        batch_ms < single_ms * 5.0 + 500.0,
+        "batching {batch_len} objects took {batch_ms:.1}ms against a single object's {single_ms:.1}ms — \
+         this should cost roughly one save+parse, not one per object",
     );
 }

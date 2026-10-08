@@ -5895,26 +5895,42 @@ impl PagifyApp {
     /// after any edit, just now happening mid-batch instead of between one
     /// drag and the next.
     fn delete_group(&mut self) {
-        let mut members = std::mem::take(&mut self.tab_mut().group);
-        members.sort_by(|a, b| b.object.cmp(&a.object));
+        let members = std::mem::take(&mut self.tab_mut().group);
         let total = members.len();
-        let page = members.first().map(|m| m.page);
+
+        // One `RemoveObjects` call per page, not one `RemoveObject` call per
+        // member — the old per-member loop paid a full document save+reparse
+        // for every single thing removed, which froze the app for minutes on
+        // a dense selection (see `Command::RemoveObjects`'s doc comment). A
+        // group almost always lives on one page, but grouping here instead of
+        // assuming it keeps a cross-page selection working too.
+        let mut by_page: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        for member in &members {
+            by_page.entry(member.page).or_default().push(member.object);
+        }
+
         let mut removed = 0;
         let mut last_err = None;
-        for member in &members {
+        let mut last_page = None;
+        for (page, mut objects) in by_page {
+            objects.sort_unstable_by(|a, b| b.cmp(a));
+            let count = objects.len();
             let result = match &self.tab_mut().doc {
                 Some(doc) => doc
                     .session
-                    .execute(pdf_core::command::Command::RemoveObject {
-                        page_index: member.page,
-                        object: member.object,
+                    .execute(pdf_core::command::Command::RemoveObjects {
+                        page_index: page,
+                        objects,
                     })
                     .map(|_| ())
                     .map_err(|e| e.to_string()),
                 None => Err("nothing open.".into()),
             };
             match result {
-                Ok(()) => removed += 1,
+                Ok(()) => {
+                    removed += count;
+                    last_page = Some(page);
+                }
                 Err(e) => last_err = Some(e),
             }
         }
@@ -5924,7 +5940,7 @@ impl PagifyApp {
             }
         }
         self.forget_layers();
-        match (last_err, page) {
+        match (last_err, last_page) {
             (Some(e), _) if removed == 0 => self.say_error(e),
             (Some(e), _) => self.say_error(format!("removed {removed} of {total} things; {e}")),
             (None, Some(page)) => self.say_info(format!("{removed} things removed from page {}.", page + 1)),

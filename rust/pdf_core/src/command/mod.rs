@@ -181,6 +181,26 @@ pub enum Command {
         page_index: usize,
         object: usize,
     },
+    /// Take several objects off one page in a single pass — see
+    /// [`crate::document::Document::remove_objects_mut`].
+    ///
+    /// **Not** `object` repeated through [`Command::Batch`]: each one of
+    /// those still fully re-serialises and re-parses the whole document, one
+    /// `RemoveObject` at a time, which is what this exists to avoid. A
+    /// marquee selection over a few hundred things on a busy page — this is
+    /// precisely the delete a "select all" produces — measured at roughly
+    /// 400ms *per object* the single-object path, since every one of them
+    /// pays for a full save and re-parse of a document only one of them
+    /// actually touches. Reported from use as the whole app freezing for
+    /// minutes, then being force-closed as if it had crashed, on a page with
+    /// under a thousand objects. This command pays that full-document cost
+    /// once for the whole selection, however large, not once per thing in
+    /// it. Undoes by one page snapshot, the same as [`Command::RemoveObject`]
+    /// — one undo brings every member back, not one press per object.
+    RemoveObjects {
+        page_index: usize,
+        objects: Vec<usize>,
+    },
     /// Turn one run of words into one object per character — see
     /// [`crate::document::Document::split_run_into_characters`].
     ///
@@ -649,6 +669,11 @@ impl Command {
                 doc.remove_object_mut(*page_index, *object)?;
                 Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
             }
+            Command::RemoveObjects { page_index, objects } => {
+                let page = doc.snapshot_page(*page_index)?;
+                doc.remove_objects_mut(*page_index, objects)?;
+                Ok(UndoRecord::RestoreRedactedPage { index: *page_index, page })
+            }
             Command::SplitRunIntoCharacters { page_index, object } => {
                 let page = doc.snapshot_page(*page_index)?;
                 doc.split_run_into_characters_mut(*page_index, *object)?;
@@ -807,6 +832,9 @@ impl Command {
             Command::ScaleObject { page_index, .. } => format!("Resize on page {}", page_index + 1),
             Command::RotateObject { page_index, .. } => format!("Rotate on page {}", page_index + 1),
             Command::RemoveObject { page_index, .. } => format!("Delete on page {}", page_index + 1),
+            Command::RemoveObjects { page_index, objects } => {
+                format!("Delete {} things on page {}", objects.len(), page_index + 1)
+            }
             Command::SplitRunIntoCharacters { page_index, .. } => {
                 format!("Split into characters on page {}", page_index + 1)
             }
@@ -866,6 +894,7 @@ impl Command {
             | Command::ScaleObject { page_index, .. }
             | Command::RotateObject { page_index, .. }
             | Command::RemoveObject { page_index, .. }
+            | Command::RemoveObjects { page_index, .. }
             | Command::SplitRunIntoCharacters { page_index, .. }
             // Invisible text changes no pixels, but the cache is not only for
             // pixels: a raster kept from before the layer existed would hand

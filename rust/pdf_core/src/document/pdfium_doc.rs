@@ -1852,6 +1852,134 @@ impl Document for PdfiumDocument {
         self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
     }
 
+    /// See [`crate::document::Document::remove_objects`].
+    ///
+    /// [`Self::remove_object`] run once per object costs a full
+    /// `save_to_bytes` + content-stream reparse *per object* — the thing
+    /// this exists to avoid (see that method's doc comment, and
+    /// [`crate::command::Command::RemoveObjects`]). Everything expensive —
+    /// `edit_base`, `File::parse`, the content stream, its parsed operations
+    /// and the page's picture/shape operator tables — is done exactly once
+    /// here, up front; only the per-object span lookup (which of those
+    /// already-parsed operators belongs to *this* object) repeats per
+    /// object. One `content::splice` call removes every span at once, and
+    /// one write-back commits the result.
+    fn remove_objects(&mut self, page_index: usize, objects: &[usize]) -> Result<()> {
+        use crate::pdf::content;
+
+        if objects.is_empty() {
+            return Ok(());
+        }
+
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+
+        let pictures = self.images_on(page_index)?;
+        let names = self.image_names(&file, &page)?;
+        let drawn = image_operators(&operations, &names);
+
+        let painted = path_operators(&operations);
+
+        let height = self.page_size(page_index)?.height_pt;
+        let fonts = self.page_fonts(&file, &page);
+        let codes_in = |p: &content::Placed| -> usize {
+            let width = p
+                .font
+                .as_ref()
+                .zip(fonts.as_ref())
+                .and_then(|(name, dict)| code_width(&file, dict, name))
+                .unwrap_or(1)
+                .max(1);
+            content::pieces(&operations[p.origin.operation])
+                .iter()
+                .map(|piece| match piece {
+                    content::Piece::Codes(bytes) => bytes.len() / width,
+                    content::Piece::Kern(_) => 0,
+                })
+                .sum()
+        };
+
+        let mut byte_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(objects.len());
+
+        for &object in objects {
+            let span: std::ops::Range<usize> = 'span: {
+                if let Some(which) = pictures.iter().position(|i| i.object == object) {
+                    if drawn.len() != pictures.len() {
+                        return Err(PdfError::Unsupported(
+                            "this page draws its pictures in a way this cannot follow",
+                        ));
+                    }
+                    let at = drawn[which];
+                    break 'span match frame_scope(&operations, at..at + 1) {
+                        Some((open, close)) => match placeholder_before(&operations, open) {
+                            Some(first) => first..close + 1,
+                            None => open..close + 1,
+                        },
+                        None => at..at + 1,
+                    };
+                }
+
+                if let Some((which, paths)) = self.path_ordinal(page_index, object)? {
+                    if painted.len() != paths {
+                        return Err(PdfError::Unsupported(
+                            "this page paints its shapes in a way this cannot follow",
+                        ));
+                    }
+                    let (pspan, clips) = painted
+                        .get(which)
+                        .cloned()
+                        .ok_or(PdfError::Unsupported("that shape is not painted on this page"))?;
+                    if clips {
+                        return Err(PdfError::Unsupported(
+                            "this shape also sets a clipping path, which cannot be removed alone",
+                        ));
+                    }
+                    break 'span match frame_scope(&operations, pspan.clone()) {
+                        Some((open, close)) => open..close + 1,
+                        None => pspan,
+                    };
+                }
+
+                if let Some(run) = self.text_run_at(page_index, object)? {
+                    let order = self.text_order(page_index, object);
+                    let (first, last, _) =
+                        run_operators(&run, height, &placed, &operations, &codes_in, order)?;
+                    break 'span first..last + 1;
+                }
+
+                return Err(PdfError::Unsupported("that is not something this can remove"));
+            };
+
+            let from = operations[span.start].span.start;
+            let to = operations[span.end - 1].span.end;
+            byte_ranges.push(from..to);
+        }
+
+        let edits: Vec<(std::ops::Range<usize>, Vec<u8>)> =
+            byte_ranges.into_iter().map(|r| (r, Vec::new())).collect();
+        let edited = content::splice(&stream, &edits);
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        self.adopt_edit(&base, rewritten, was_secured, plus, permissions)
+    }
+
     /// See [`crate::document::Document::split_run_into_characters`].
     ///
     /// Each character keeps the run's own font, size and rotation — only
@@ -4550,6 +4678,10 @@ impl DocumentMut for PdfiumDocument {
 
     fn remove_object_mut(&mut self, page_index: usize, object: usize) -> Result<()> {
         <Self as Document>::remove_object(self, page_index, object)
+    }
+
+    fn remove_objects_mut(&mut self, page_index: usize, objects: &[usize]) -> Result<()> {
+        <Self as Document>::remove_objects(self, page_index, objects)
     }
 
     fn split_run_into_characters_mut(&mut self, page_index: usize, object: usize) -> Result<()> {

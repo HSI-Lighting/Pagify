@@ -911,6 +911,30 @@ pub trait Document: Send + Sync {
         Err(PdfError::Unsupported("removing an object from this page"))
     }
 
+    /// Take several objects off one page in a single pass.
+    ///
+    /// Not [`Self::remove_object`] called once per object: each one of those
+    /// re-saves and re-parses the whole document to locate and splice out just
+    /// one object's operators, which is fine for one object and ruinous for a
+    /// marquee selection of hundreds. The default here just does that anyway
+    /// (so nothing but the real engine needs to care this method exists);
+    /// [`crate::document::pdfium_doc::PdfiumDocument`] overrides it to pay the
+    /// save/parse cost once for the whole batch instead of once per object.
+    fn remove_objects(&mut self, page_index: usize, objects: &[usize]) -> Result<()> {
+        // Highest object index first, same reason `delete_group` already sorted
+        // its own loop this way: removing one object shifts nothing's *index*
+        // (objects are addressed by content-stream position, not by a list that
+        // shrinks), so order would not matter for correctness — but matching the
+        // established convention costs nothing and keeps this and the override
+        // trivially comparable in tests.
+        let mut sorted: Vec<usize> = objects.to_vec();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        for object in sorted {
+            self.remove_object(page_index, object)?;
+        }
+        Ok(())
+    }
+
     /// Turn one run of words into one object per character — the same run,
     /// drawn the same way, just no longer as a single object a click can
     /// only take or leave whole.
@@ -1312,6 +1336,11 @@ pub trait DocumentMut {
     /// See [`Document::remove_object`].
     fn remove_object_mut(&mut self, _page_index: usize, _object: usize) -> Result<()> {
         Err(PdfError::Unsupported("removing an object from this page"))
+    }
+
+    /// See [`Document::remove_objects`].
+    fn remove_objects_mut(&mut self, _page_index: usize, _objects: &[usize]) -> Result<()> {
+        Err(PdfError::Unsupported("removing objects from this page"))
     }
 
     /// See [`Document::split_run_into_characters`].
