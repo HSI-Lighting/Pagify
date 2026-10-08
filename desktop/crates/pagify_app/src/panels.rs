@@ -7,7 +7,7 @@
 use crate::overlay::PageView;
 use crate::{
     compact_page_spec, page_to_image, paint_signature, short, view_height, Awaiting, DetailTile, FindReplaceMode,
-    ListAction, RenderJob, SignaturePad, Tool,
+    ListAction, RenderJob, SignatureList, SignaturePad, Tool,
 };
 use crate::spelling;
 use crate::theme;
@@ -875,6 +875,21 @@ impl crate::PagifyApp {
             done = true;
         }
 
+        if self.apply_signature_list_action(&mut panel, action) {
+            return;
+        }
+
+        if done {
+            return;
+        }
+        self.signature_list = Some(panel);
+    }
+
+    /// What the signature list asked for once its dialog closed: use, forget,
+    /// rename or draw. `true` means the caller must return before restoring
+    /// the panel — the Draw arm opens the pad instead. Moved out of
+    /// `draw_signature_list`.
+    fn apply_signature_list_action(&mut self, panel: &mut SignatureList, action: Option<ListAction>) -> bool {
         match action {
             Some(ListAction::Use(name)) => {
                 if self.signatures.choose(&name) {
@@ -913,16 +928,13 @@ impl crate::PagifyApp {
                     then_place: false,
                     ..SignaturePad::default()
                 });
-                return;
+                return true;
             }
             None => {}
         }
-
-        if done {
-            return;
-        }
-        self.signature_list = Some(panel);
+        false
     }
+
 
     /// The pad a signature is drawn on.
     ///
