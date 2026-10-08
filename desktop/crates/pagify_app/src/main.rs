@@ -3242,26 +3242,7 @@ impl PagifyApp {
 
         bar.show(ui, |ui| {
             if self.command_open {
-                // The history claims whatever the panel was dragged to, less
-                // the three fixed rows below it.
-                let rows = 74.0;
-                let height = (ui.available_height() - rows).max(24.0);
-                egui::ScrollArea::vertical()
-                    .max_height(height)
-                    .stick_to_bottom(true)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_min_height(height);
-                        for entry in self.cmd.history() {
-                            let (colour, text) = match entry.kind {
-                                Kind::Echo => (theme::ink_dim(), format!("› {}", entry.text)),
-                                Kind::Info => (theme::ink(), entry.text.clone()),
-                                Kind::Error => (theme::danger(), entry.text.clone()),
-                            };
-                            ui.colored_label(colour, text);
-                        }
-                    });
-                ui.separator();
+                self.draw_command_history(ui);
             }
 
             // The name and what is wanted are drawn separately so the name can
@@ -3290,6 +3271,53 @@ impl PagifyApp {
                 });
             }
 
+            self.draw_command_row(ui, command_id, submitted, &name, &wants);
+
+            if self.command_open {
+                ui.horizontal(|ui| {
+                    if ui.button("Run").clicked()
+                        && !self.consume_password_line()
+                       
+                    {
+                        *submitted = self.cmd.submit(Submit::Button);
+                    }
+                    let page = self.tab().page;
+                    let marks = self.tab().markup.existing(page).map(|l| l.len()).unwrap_or(0);
+                    let page_count = self.tab().doc.as_ref().map(|d| d.page_count);
+                    let calibrated = self.tab().calibration.is_calibrated();
+                    let zoom_pct = self.resolved_zoom() * 100.0;
+                    ui.small(match page_count {
+                        Some(page_count) => format!(
+                            "page {} of {}   ·   {:.0}%   ·   {marks} mark{}{}{}",
+                            page + 1,
+                            page_count,
+                            zoom_pct,
+                            if marks == 1 { "" } else { "s" },
+                            if calibrated { "   ·   calibrated" } else { "" },
+                            if self.recorder.is_recording() {
+                                format!("   ·   recording ({})", self.recorder.steps())
+                            } else {
+                                String::new()
+                            },
+                        ),
+                        None => "no document".to_string(),
+                    });
+                });
+            }
+        });
+    }
+
+    /// The command bar's one row: the closed-state page/error line and the
+    /// input field with its history toggle. Moved out of `draw_command_bar`
+    /// whole, wrapper and all.
+    fn draw_command_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        command_id: egui::Id,
+        submitted: &mut Option<Dispatch>,
+        name: &str,
+        wants: &str,
+    ) {
             ui.horizontal(|ui| {
                 if !self.command_open {
                     // The mockup's own status bar carries a couple of
@@ -3307,7 +3335,7 @@ impl PagifyApp {
                         ui.add_space(8.0);
                     }
                     ui.label(
-                        egui::RichText::new(&name)
+                        egui::RichText::new(name)
                             .color(theme::violet_bright())
                             .font(egui::FontId::monospace(13.0)),
                     );
@@ -3347,7 +3375,7 @@ impl PagifyApp {
                                 ui.add(egui::Label::new(job).truncate());
                             }
                             None => {
-                                ui.colored_label(theme::snap(), &wants);
+                                ui.colored_label(theme::snap(), wants);
                             }
                         }
                     } else if let Some(last) = self.cmd.history().last() {
@@ -3425,63 +3453,33 @@ impl PagifyApp {
                     self.command_open = !self.command_open;
                 }
             });
-
-            if self.command_open {
-                ui.horizontal(|ui| {
-                    if ui.button("Run").clicked()
-                        && !self.consume_password_line()
-                       
-                    {
-                        *submitted = self.cmd.submit(Submit::Button);
-                    }
-                    let page = self.tab().page;
-                    let marks = self.tab().markup.existing(page).map(|l| l.len()).unwrap_or(0);
-                    let page_count = self.tab().doc.as_ref().map(|d| d.page_count);
-                    let calibrated = self.tab().calibration.is_calibrated();
-                    let zoom_pct = self.resolved_zoom() * 100.0;
-                    ui.small(match page_count {
-                        Some(page_count) => format!(
-                            "page {} of {}   ·   {:.0}%   ·   {marks} mark{}{}{}",
-                            page + 1,
-                            page_count,
-                            zoom_pct,
-                            if marks == 1 { "" } else { "s" },
-                            if calibrated { "   ·   calibrated" } else { "" },
-                            if self.recorder.is_recording() {
-                                format!("   ·   recording ({})", self.recorder.steps())
-                            } else {
-                                String::new()
-                            },
-                        ),
-                        None => "no document".to_string(),
-                    });
-                });
-            }
-        });
     }
+
 
     /// The command history above the open box, newest at the bottom: echo,
     /// info and error lines, coloured by kind. Moved out of
     /// `draw_command_bar` so the bar itself is about the box.
     fn draw_command_history(&mut self, ui: &mut egui::Ui) {
-        let rows = 74.0;
-        let height = (ui.available_height() - rows).max(24.0);
-        egui::ScrollArea::vertical()
-            .max_height(height)
-            .stick_to_bottom(true)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_min_height(height);
-                for entry in self.cmd.history() {
-                    let (colour, text) = match entry.kind {
-                        Kind::Echo => (theme::ink_dim(), format!("› {}", entry.text)),
-                        Kind::Info => (theme::ink(), entry.text.clone()),
-                        Kind::Error => (theme::danger(), entry.text.clone()),
-                    };
-                    ui.colored_label(colour, text);
-                }
-            });
-        ui.separator();
+                // The history claims whatever the panel was dragged to, less
+                // the three fixed rows below it.
+                let rows = 74.0;
+                let height = (ui.available_height() - rows).max(24.0);
+                egui::ScrollArea::vertical()
+                    .max_height(height)
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_min_height(height);
+                        for entry in self.cmd.history() {
+                            let (colour, text) = match entry.kind {
+                                Kind::Echo => (theme::ink_dim(), format!("› {}", entry.text)),
+                                Kind::Info => (theme::ink(), entry.text.clone()),
+                                Kind::Error => (theme::danger(), entry.text.clone()),
+                            };
+                            ui.colored_label(colour, text);
+                        }
+                    });
+                ui.separator();
     }
 
 
