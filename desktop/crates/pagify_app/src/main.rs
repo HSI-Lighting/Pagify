@@ -14662,9 +14662,16 @@ impl PagifyApp {
             return;
         }
 
+        // **Capped, as the pages rail beside it is**: half the window at most, so a
+        // row that ever again sizes itself from the room it is given cannot take
+        // the page away — the failure that was reported, a panel as wide as the
+        // window that came back when dragged narrower. (The cap is the backstop;
+        // the cause was in `text_style_panel::first_row`.)
+        let widest = (ui.ctx().content_rect().width() * 0.5).clamp(320.0, 720.0);
         egui::Panel::right("properties_panel")
             .resizable(true)
             .default_size(220.0)
+            .size_range(200.0..=widest)
             .frame(
                 egui::Frame::new()
                     .fill(theme::paper())

@@ -945,3 +945,83 @@ fn a_click_on_the_drawn_letters_themselves_still_gets_the_typeface_advice() {
         assert!(said.contains(THE_ADVICE), "{name}: drawn letters were not given the advice: {said}");
     }
 }
+
+// ---- the Properties panel keeps the width it is given ----
+
+fn properties_width(h: &Harness<'static, PagifyApp>) -> f32 {
+    egui::PanelState::load(&h.ctx, egui::Id::new("properties_panel"))
+        .expect("the properties panel")
+        .outer_rect
+        .width()
+}
+
+/// **The panel does not grow by itself.** Reported from use: opening Edit Text
+/// made the Properties panel take the whole window, and dragging it narrower
+/// put it straight back. A panel is as wide as its content, and the Text
+/// Style's first row fills "what is left" after items whose size it assumed:
+/// the colour button was 14 pt wider than assumed, so the content outgrew the
+/// panel by that much on every frame, for as long as the window had room.
+#[test]
+fn the_properties_panel_does_not_grow_by_itself() {
+    let mut h = editing_first_thing_of(WORDS);
+    h.run_steps(3);
+    let settled = properties_width(&h);
+    h.run_steps(40);
+    let later = properties_width(&h);
+    assert!((later - settled).abs() < 0.5, "the panel grew from {settled} to {later} in 40 frames with nothing touched");
+    assert!(later < 1400.0 * 0.4, "the panel is {later} pt wide in a 1400 pt window");
+}
+
+/// **The colour button is on the panel, at the size the row is laid out for.**
+/// It was egui's own 40 pt button where 26 was assumed, which is what pushed
+/// it past the panel's edge (and past the window's) and widened the panel.
+#[test]
+fn the_colour_button_is_the_size_the_row_was_laid_out_for_and_inside_the_panel() {
+    let mut h = editing_first_thing_of(WORDS);
+    h.run_steps(5);
+    let panel = egui::PanelState::load(&h.ctx, egui::Id::new("properties_panel")).unwrap().outer_rect;
+    let colour = h
+        .get_all_by_role(egui::accesskit::Role::ColorWell)
+        .map(|node| node.rect())
+        .find(|rect| rect.center().x > panel.left())
+        .expect("the colour button is in the panel");
+    assert!((colour.width() - 26.0).abs() < 0.5, "the colour button is {} pt wide, not the 26 the row is laid out for", colour.width());
+    assert!(panel.contains_rect(colour), "the colour button {colour:?} is not inside the panel {panel:?}");
+}
+
+/// The same for a new text box, which shows the same Text Style.
+#[test]
+fn the_new_box_properties_panel_does_not_grow_by_itself_either() {
+    let mut h = harness("text-lines.pdf");
+    h.state_mut().begin_text_box(0, AppPoint { x: 20.0, y: 100.0 }, AppPoint { x: 120.0, y: 160.0 }).expect("a box");
+    h.run_steps(3);
+    let settled = properties_width(&h);
+    h.run_steps(40);
+    assert!((properties_width(&h) - settled).abs() < 0.5, "the panel grew from {settled} to {}", properties_width(&h));
+}
+
+/// **A width the person drags it to stays.** Wider, then back to what it was:
+/// each is where it was put, and neither is undone a few frames later.
+#[test]
+fn a_width_dragged_to_stays() {
+    let mut h = editing_first_thing_of(WORDS);
+    h.run_steps(5);
+    let start = properties_width(&h);
+    let edge_y = 500.0;
+    let edge = |h: &Harness<'static, PagifyApp>| {
+        egui::PanelState::load(&h.ctx, egui::Id::new("properties_panel")).unwrap().outer_rect.left()
+    };
+
+    let from = egui::pos2(edge(&h), edge_y);
+    drag(&mut h, from, from - egui::vec2(100.0, 0.0));
+    h.run_steps(30);
+    let wider = properties_width(&h);
+    assert!((wider - (start + 100.0)).abs() < 3.0, "dragged 100 pt wider from {start}, now {wider}");
+
+    let from = egui::pos2(edge(&h), edge_y);
+    drag(&mut h, from, from + egui::vec2(100.0, 0.0));
+    h.run_steps(30);
+    let back = properties_width(&h);
+    assert!((back - start).abs() < 3.0, "dragged back by 100 pt from {wider}, expected about {start}, now {back}");
+}
+
