@@ -129,10 +129,12 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   helpers, `PageRaster`/`PageTextSnapshot`, `with_engine`) plus fourteen
   families of `impl Session` methods: `io`, `render`, `reading`, `runs`,
   `save`, `markup`, `locking`, `signing`, `security`, `annotate`, `objects`,
-  `pages`, `history`, `typing` (36–225 lines each). Shell suite green
-  (631/0) after every commit. Remaining splits: `shell/src/blocks.rs`
-  (2,292) and `block_input.rs` (2,985) into families the same way, and the
-  big shell test files. Move behaviour-free, one module per commit.
+  `pages`, `history`, `typing` (36–225 lines each). `blocks.rs` is likewise
+  now `blocks/`: `mod.rs` 900 (public API, shared types, `Params`, tests)
+  plus `furniture.rs` 268, `rows.rs` 542, `link.rs` 211, `layout.rs` 143,
+  `segment.rs` 298. Shell suite green (631/0) after every commit. Remaining
+  split: `shell/src/block_input.rs` (2,985) into families the same way, and
+  the big shell test files. Move behaviour-free, one module per commit.
 6. **CI gates.** Only once the Windows suite is green: add a workflow running
   `cargo test` (Windows runner, with `PAGIFY_PDFIUM_LIB`) plus clippy without
   `-D warnings`; add `clippy.toml` (`too-many-lines-threshold = 150`,
