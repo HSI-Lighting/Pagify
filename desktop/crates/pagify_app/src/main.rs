@@ -2147,7 +2147,14 @@ enum ObjectClipboard {
     Image { rgba: Vec<u8>, width: u32, height: u32, rect: pdf_core::document::Rect },
     /// Words — a run or a paragraph, one entry per line — with what they were
     /// drawn in. Pasted as new text, so it stays text.
-    Text { lines: Vec<String>, size: f32, color: pdf_core::document::Color, face: Option<String> },
+    ///
+    /// `track` is a per-copy horizontal correction, multiplied into every
+    /// glyph's advance when it is placed again — see
+    /// [`PagifyApp::content_for_selected`]'s own doc for why a plain reshape
+    /// of the font alone is not enough. `1.0` (no correction) wherever the
+    /// source was not a single page run with a rect to measure against — an
+    /// Edit Text copy with no selection, or text pasted in from elsewhere.
+    Text { lines: Vec<String>, size: f32, color: pdf_core::document::Color, face: Option<String>, track: f32 },
     /// A multi-object Edit Object selection (a marquee over more than one
     /// thing) — each member's own content, with its centre's offset (page
     /// points) from the whole group's centre, so pasting puts every member
@@ -2166,8 +2173,8 @@ enum ObjectClipboard {
 /// without ever needing the words themselves.
 fn describe_clipboard(content: &ObjectClipboard) -> String {
     match content {
-        ObjectClipboard::Text { lines, size, color, face } => format!(
-            "text lines={} chars={} size={size} color=rgba({},{},{},{}) face={}",
+        ObjectClipboard::Text { lines, size, color, face, track } => format!(
+            "text lines={} chars={} size={size} color=rgba({},{},{},{}) face={} track={track:.4}",
             lines.len(),
             lines.iter().map(|l| l.chars().count()).sum::<usize>(),
             color.r,
@@ -8002,7 +8009,9 @@ impl PagifyApp {
                 .and_then(|d| d.session.text_runs(page).ok())
                 .and_then(|runs| runs.into_iter().find(|r| r.object == sel.object))?;
             let face = self.registered_face_of_object(page, sel.object);
-            Some(ObjectClipboard::Text { lines: vec![run.text.trim().to_string()], size: run.size, color: run.color, face })
+            let text = run.text.trim().to_string();
+            let track = Self::measured_track(face.as_deref(), &text, run.size, run.rect);
+            Some(ObjectClipboard::Text { lines: vec![text], size: run.size, color: run.color, face, track })
         } else {
             let raster = self.tab().doc.as_ref().and_then(|d| d.session.render_page_region(page, sel.rect, 3.0).ok())?;
             let mut rgba = raster.pixels;
@@ -8011,6 +8020,46 @@ impl PagifyApp {
             }
             Some(ObjectClipboard::Image { rgba, width: raster.width, height: raster.height, rect: sel.rect })
         }
+    }
+
+    /// How much narrower (or wider) a run's own words were actually drawn
+    /// than a plain reshape of its font says they should be — see
+    /// [`ObjectClipboard::Text`]'s own `track` field.
+    ///
+    /// **Reported from use: a pasted word came back visibly wider than the
+    /// original, letters spaced apart that sat close together in the
+    /// source** (not the baseline-jump bug above — this showed up even on a
+    /// single run, alone on a blank page). Measured directly against a real
+    /// document: this font's own GPOS carries no kerning at all (confirmed),
+    /// and the run's own text matrix shows no `Tz` either (confirmed) — yet
+    /// reshaping its exact text in its exact font, at its exact size,
+    /// consistently comes out 8–15% *wider* than the rect the source run
+    /// actually drew. The only thing left that could explain a gap neither
+    /// the font nor the text state carries is bespoke, per-instance
+    /// positioning baked into the page's own content stream by whatever
+    /// authored it — hand-tuned tracking a font file cannot carry back out
+    /// through a fresh shape, however exactly that shape is done.
+    ///
+    /// This does not reproduce that hand-tuning pair by pair — doing that
+    /// exactly would mean reading every individual glyph's own drawn
+    /// position out of the content stream instead of the font it was drawn
+    /// with, a larger change than one copy needs. It corrects the one thing
+    /// that was actually visible: the pasted run's *overall* width no longer
+    /// matches the original's, which is what "wider, oddly spaced" was.
+    fn measured_track(face: Option<&str>, text: &str, size: f32, rect: pdf_core::document::Rect) -> f32 {
+        let Some(face) = face else { return 1.0 };
+        let Ok(shaped) = pdf_core::text::shape(face, text) else { return 1.0 };
+        let natural_em = shaped.width();
+        if !(natural_em > 0.001) {
+            return 1.0;
+        }
+        let actual_em = (rect.right - rect.left) / size;
+        let track = actual_em / natural_em;
+        // A generous band around 1.0: wide enough for genuine hand-tuned
+        // tracking, narrow enough that a run this does not apply to (a
+        // rotated run, one whose rect means something else entirely) falls
+        // back to no correction rather than a wild one.
+        if track.is_finite() && (0.5..=1.5).contains(&track) { track } else { 1.0 }
     }
 
     /// ⌘C in the run/paragraph editor with **nothing selected inside its box**:
@@ -8031,6 +8080,10 @@ impl PagifyApp {
             size: edit.style.size.or(edit.was.size).unwrap_or(12.0),
             color: edit.style.color.or(edit.was.color).unwrap_or(pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 }),
             face: self.registered_face_of(&edit),
+            // No single source rect to measure a correction against — the
+            // editor's buffer is whatever was typed or retyped, not one
+            // page run with its own original width.
+            track: 1.0,
         };
         self.put_on_clipboard(content, "text copied — Ctrl+V picks it up, a click puts it down.".into());
         true
@@ -8057,6 +8110,7 @@ impl PagifyApp {
                 size: 12.0,
                 color: pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 },
                 face: None,
+                track: 1.0,
             },
             None => match self.object_clipboard.clone() {
                 Some(content) => content,
@@ -8092,13 +8146,13 @@ impl PagifyApp {
                     self.place_clipboard_content(page, at, item);
                 }
             }
-            ObjectClipboard::Text { lines, size, color, face } => {
+            ObjectClipboard::Text { lines, size, color, face, track } => {
                 let gap = size * 1.2;
                 let mut baseline = at.y as f32 + size * 0.8;
                 let mut commands = Vec::new();
                 for line in &lines {
                     if !line.trim().is_empty() {
-                        match self.styled_line_command(page, (at.x as f32, baseline), line, size, color, face.as_deref()) {
+                        match self.styled_line_command(page, (at.x as f32, baseline), line, size, color, face.as_deref(), track) {
                             Ok(command) => commands.push(command),
                             Err(e) => {
                                 self.say_error(e);
@@ -12405,7 +12459,7 @@ impl PagifyApp {
         color: pdf_core::document::Color,
         face: Option<&str>,
     ) -> Result<(), String> {
-        let command = self.styled_line_command(page, origin, text, size, color, face)?;
+        let command = self.styled_line_command(page, origin, text, size, color, face, 1.0)?;
         let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
         doc.session.execute(command).map_err(|e| format!("{e}"))?;
         Ok(())
@@ -12413,6 +12467,10 @@ impl PagifyApp {
 
     /// The command [`Self::write_styled_line_at`] executes, **not yet run**, so
     /// that several lines can go in as one `Command::Batch` and undo as one.
+    ///
+    /// `track` is [`ObjectClipboard::Text::track`]'s own correction — `1.0`
+    /// for words someone typed, where a plain reshape of the font *is* the
+    /// whole answer; a copy's own measured value otherwise.
     fn styled_line_command(
         &mut self,
         page: usize,
@@ -12421,6 +12479,7 @@ impl PagifyApp {
         size: f32,
         color: pdf_core::document::Color,
         face: Option<&str>,
+        track: f32,
     ) -> Result<pdf_core::command::Command, String> {
         use pdf_core::document::{Annotation, Glyph};
 
@@ -12446,11 +12505,11 @@ impl PagifyApp {
                     placed.push(Glyph {
                         ch: text.get(from..to).unwrap_or_default().to_string(),
                         id: glyph.id,
-                        x: pen + glyph.offset_x * size,
+                        x: pen + glyph.offset_x * size * track,
                         y: origin.1 - glyph.offset_y * size,
                         radians: 0.0,
                     });
-                    pen += glyph.advance * size;
+                    pen += glyph.advance * size * track;
                 }
                 (name.to_string(), Some(name.to_string()), placed)
             }

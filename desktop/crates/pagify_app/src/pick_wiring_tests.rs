@@ -1,7 +1,7 @@
 use super::*;
 use pdf_core::document::{Rect, TextRun};
 
-const MARINA: &str = r"C:\Users\hsili\Desktop\Datasheets - Editors market - Marina mall.pdf";
+const MARINA: &str = r"C:\Users\hsili\Desktop\test pdf for pgify\Datasheets - Editors market - Marina mall.pdf";
 const CAMINO: &str = r"C:\Users\hsili\Downloads\CAMINO elitee-plus 3.0.pdf";
 
 fn fixture(name: &str) -> String {
@@ -1329,5 +1329,60 @@ fn a_split_words_own_fragments_share_one_baseline_not_each_fragments_own_ascent(
         dys.iter().all(|&dy| (dy - dys[0]).abs() < 0.01),
         "every fragment of one split word must share the same vertical offset \
          (one baseline), not each fragment's own box top: {dys:?}"
+    );
+}
+
+/// **Reported from use: a pasted word came back visibly *wider* than the
+/// original, letters spaced apart that sat close together in the source —
+/// seen even alone on a blank page, with nothing to overlap and the
+/// baseline bug above already fixed.** Measured directly: this font's own
+/// GPOS carries no kerning at all and the run's text matrix shows no `Tz`
+/// either, yet reshaping this exact fragment in its own font at its own
+/// size consistently came out noticeably wider than the rect the source
+/// actually drew — bespoke, per-instance positioning baked into the page's
+/// own content stream, which no font file can carry back out through a
+/// fresh shape. Fixed with a measured correction
+/// (`ObjectClipboard::Text::track`) applied to every glyph's advance.
+///
+/// **A single fragment, not the whole group**, because the group's own
+/// fragment-to-fragment positions are pinned to each fragment's *original*
+/// rect (the baseline-anchor fix above) independent of `track` — pasting
+/// the whole word can still measure close to the original's overall width
+/// even without this fix, since neighbouring fragments' pinned positions
+/// absorb some of the stretch. "ipti" alone has nothing to absorb it into.
+#[test]
+fn a_pasted_fragments_own_width_matches_the_original_not_a_bare_reshape() {
+    if !std::path::Path::new(MARINA).is_file() {
+        eprintln!("skipping: the Marina datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(MARINA));
+    app.submit("editobject");
+    let runs = text_runs(&app, 0);
+    // "ipti" — four characters, no kerning in this font's GPOS, no `Tz`,
+    // and measured at 12% wider than its own rect from a bare reshape.
+    let run = runs.iter().find(|r| r.object == 6).cloned().expect("the ipti fragment");
+    let original_width = run.rect.right - run.rect.left;
+
+    app.tab_mut().selected = Some(Selected { page: 0, object: run.object, rect: run.rect, what: "the words" });
+    assert!(app.copy_object_selection());
+    assert!(app.start_paste_ghost(None));
+    app.submit("insertpage");
+    let before: std::collections::HashSet<usize> = text_runs(&app, 0).iter().map(|r| r.object).collect();
+    app.place_paste_ghost(0, AppPoint { x: 150.0, y: 150.0 });
+
+    let after = text_runs(&app, 0);
+    let new_runs: Vec<&TextRun> = after.iter().filter(|r| !before.contains(&r.object)).collect();
+    assert!(!new_runs.is_empty(), "nothing was pasted");
+    let pasted_width = new_runs.iter().map(|r| r.rect.right).fold(f32::MIN, f32::max)
+        - new_runs.iter().map(|r| r.rect.left).fold(f32::MAX, f32::min);
+
+    // A bare reshape (no `track`) measured about 12% too wide on this exact
+    // fragment; the fix should land within a fraction of a point.
+    assert!(
+        (pasted_width - original_width).abs() < 1.0,
+        "pasted width {pasted_width:.2} does not match the original {original_width:.2} \
+         (ratio {:.4}) — the track correction is not being applied",
+        pasted_width / original_width
     );
 }
