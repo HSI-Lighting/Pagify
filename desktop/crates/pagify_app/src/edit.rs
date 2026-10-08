@@ -24,6 +24,16 @@ enum PickRun {
     NoText(String),
 }
 
+/// What [`PagifyApp::try_open_block`] found: the message to return when the
+/// block opened, or the reason only the run can be picked, plus whether its
+/// line is partly drawn lettering.
+struct BlockOpen {
+    opened: Option<String>,
+    alone: Option<&'static str>,
+    seed_is_drawn_lettering: bool,
+}
+
+
 impl crate::PagifyApp {
     /// The body of [`Self::pick_text_run`], filling `trace` as it goes.
     ///
@@ -159,37 +169,17 @@ impl crate::PagifyApp {
         // never a mystery.
         let mut alone: Option<&str> = heavy.map(|_| "this page is very large, so its paragraphs are not read");
         let mut seed_is_drawn_lettering = false;
+        let mut alone: Option<&str> = heavy.map(|_| "this page is very large, so its paragraphs are not read");
+        let mut seed_is_drawn_lettering = false;
         if let Some(pb) = pb.as_ref().filter(|_| !unreadable && run.color.a != 0) {
-            if let Some(&(block, line)) = pb.by_object.get(&run.object) {
-                trace.block_facts(pb, block);
-                if trace.objects > 1 {
-                    if pb.blocks[block].lines[line].outlined.is_empty() {
-                        match self.open_block(page, pb, block) {
-                            Ok(message) => {
-                                trace.path = PickPath::Block;
-                                return Ok(message);
-                            }
-                            Err(why) => {
-                                self.session_log.record(
-                                    "pick-note",
-                                    &format!("block {block} not opened ({why}); picking the run alone"),
-                                );
-                                alone = Some("the block could not be read safely");
-                            }
-                        }
-                    } else {
-                        seed_is_drawn_lettering = true;
-                        alone = Some("its line is partly drawn as shapes, which cannot be retyped here");
-                        self.session_log.record(
-                            "pick-note",
-                            &format!(
-                                "block {block} not opened (the clicked words are on line {line}, which has drawn \
-                                 lettering in it); picking the run alone"
-                            ),
-                        );
-                    }
-                }
+            let found = self.try_open_block(page, pb, &run, trace);
+            if let Some(message) = found.opened {
+                return Ok(message);
             }
+            if found.alone.is_some() {
+                alone = found.alone;
+            }
+            seed_is_drawn_lettering = found.seed_is_drawn_lettering;
         }
 
         trace.path = PickPath::Single;
@@ -321,6 +311,53 @@ impl crate::PagifyApp {
             ),
         })
     }
+
+    /// Open the whole paragraph the clicked run belongs to when the page's
+    /// blocks say so; otherwise say why only the run can be picked — a line
+    /// partly drawn as shapes, or a block that would not read safely. Moved
+    /// out of `pick_text_run_traced`.
+    fn try_open_block(
+        &mut self,
+        page: usize,
+        pb: &PageBlocks,
+        run: &pdf_core::document::TextRun,
+        trace: &mut PickTrace,
+    ) -> BlockOpen {
+        let mut alone: Option<&'static str> = None;
+        let mut seed_is_drawn_lettering = false;
+            if let Some(&(block, line)) = pb.by_object.get(&run.object) {
+                trace.block_facts(pb, block);
+                if trace.objects > 1 {
+                    if pb.blocks[block].lines[line].outlined.is_empty() {
+                        match self.open_block(page, pb, block) {
+                            Ok(message) => {
+                                trace.path = PickPath::Block;
+                                return BlockOpen { opened: Some(message), alone: None, seed_is_drawn_lettering: false };
+                            }
+                            Err(why) => {
+                                self.session_log.record(
+                                    "pick-note",
+                                    &format!("block {block} not opened ({why}); picking the run alone"),
+                                );
+                                alone = Some("the block could not be read safely");
+                            }
+                        }
+                    } else {
+                        seed_is_drawn_lettering = true;
+                        alone = Some("its line is partly drawn as shapes, which cannot be retyped here");
+                        self.session_log.record(
+                            "pick-note",
+                            &format!(
+                                "block {block} not opened (the clicked words are on line {line}, which has drawn \
+                                 lettering in it); picking the run alone"
+                            ),
+                        );
+                    }
+                }
+            }
+        BlockOpen { opened: None, alone, seed_is_drawn_lettering }
+    }
+
 
 /// What [`PagifyApp::pick_run_under`] found: the clicked run (with the page
 /// blocks it came from when the paragraph-aware path produced them), or the
