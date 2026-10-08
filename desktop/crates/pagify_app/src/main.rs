@@ -2158,6 +2158,39 @@ enum ObjectClipboard {
     Group(Vec<(ObjectClipboard, f32, f32)>),
 }
 
+/// Every detail of a clipboard payload *except the document's own words* —
+/// the session log stays content-free the same way a `pick` line does (see
+/// `pick_wiring_tests::every_click_writes_exactly_one_content_free_pick_line_to_the_session_log`):
+/// never the text itself, which a PDF someone is editing may hold in
+/// confidence, but exactly the shape of it — character count, line count,
+/// size, colour, the registered face name, source rect — which is what a
+/// "the paste doesn't look like what I copied" report needs to diagnose
+/// (a mismatched face or size between what was copied and what landed)
+/// without ever needing the words themselves.
+fn describe_clipboard(content: &ObjectClipboard) -> String {
+    match content {
+        ObjectClipboard::Text { lines, size, color, face } => format!(
+            "text lines={} chars={} size={size} color=rgba({},{},{},{}) face={}",
+            lines.len(),
+            lines.iter().map(|l| l.chars().count()).sum::<usize>(),
+            color.r,
+            color.g,
+            color.b,
+            color.a,
+            face.as_deref().unwrap_or("<none registered — falls back to Helvetica>")
+        ),
+        ObjectClipboard::Image { width, height, rect, .. } => {
+            format!("image {width}x{height}px rect={rect:?}")
+        }
+        ObjectClipboard::Shapes(objects) => format!("{} drawn shape(s)", objects.len()),
+        ObjectClipboard::Group(items) => {
+            let parts: Vec<String> =
+                items.iter().map(|(c, dx, dy)| format!("[offset {dx:.1},{dy:.1}] {}", describe_clipboard(c))).collect();
+            format!("group of {}: {}", items.len(), parts.join(" | "))
+        }
+    }
+}
+
 /// What the system clipboard is given after a copy that is not text, so the
 /// ⌘V that follows has something to paste — see
 /// [`PagifyApp::clipboard_mirror_wanted`]. Also how a paste tells "my own copy
@@ -6585,16 +6618,8 @@ impl PagifyApp {
                 .and_then(|d| d.session.placed_image_marks(page).ok())
                 .and_then(|marks| marks.into_iter().find(|m| m.index == sel.index));
             let Some(mark) = mark else { return false };
-            self.object_clipboard = Some(ObjectClipboard::Image {
-                rgba: mark.rgba,
-                width: mark.width,
-                height: mark.height,
-                rect: mark.rect,
-            });
-            self.paste_count = 0;
-            self.clipboard_mirror_wanted = true;
-            self.forget_copied_pages();
-            self.say_info("picture copied — `paste` puts a copy down.");
+            let content = ObjectClipboard::Image { rgba: mark.rgba, width: mark.width, height: mark.height, rect: mark.rect };
+            self.put_on_clipboard(content, "picture copied — `paste` puts a copy down.".into());
             return true;
         }
         if let Some(layer) = self.tab_mut().markup.existing(page) {
@@ -6615,15 +6640,14 @@ impl PagifyApp {
                     .collect();
                 if !objects.is_empty() {
                     let n = objects.len();
-                    self.object_clipboard = Some(ObjectClipboard::Shapes(objects));
-                    self.paste_count = 0;
-                    self.clipboard_mirror_wanted = true;
-                    self.forget_copied_pages();
-                    self.say_info(format!(
-                        "{n} shape{} copied — `paste` puts {} down.",
-                        if n == 1 { "" } else { "s" },
-                        if n == 1 { "a copy" } else { "copies" }
-                    ));
+                    self.put_on_clipboard(
+                        ObjectClipboard::Shapes(objects),
+                        format!(
+                            "{n} shape{} copied — `paste` puts {} down.",
+                            if n == 1 { "" } else { "s" },
+                            if n == 1 { "a copy" } else { "copies" }
+                        ),
+                    );
                     return true;
                 }
             }
@@ -6669,6 +6693,11 @@ impl PagifyApp {
     /// Fill the clipboard from a copy that is not text, and say how to put it
     /// down.
     fn put_on_clipboard(&mut self, content: ObjectClipboard, said: String) {
+        // Full detail (the actual text, size, face, rect — never shown in
+        // `said`, which stays short for the command bar) goes only to the
+        // session log, so a "doesn't look like what I copied" report is
+        // readable from the log alone instead of needing a live repro.
+        self.session_log.record("copy", &describe_clipboard(&content));
         self.object_clipboard = Some(content);
         self.paste_count = 0;
         self.clipboard_mirror_wanted = true;
@@ -6686,6 +6715,13 @@ impl PagifyApp {
     /// that it can be set down over other things.
     fn copy_page_object(&mut self, sel: &Selected) -> bool {
         let Some(content) = self.content_for_selected(sel) else { return false };
+        // The source rect only — never logged by `put_on_clipboard` itself,
+        // since `ObjectClipboard` carries no rect for `Text`. Matched up
+        // against the `paste` line's own `at=` by eye: a paste that landed
+        // inside (or very near) this rect is pasting over itself, which
+        // reads as a font/size mismatch but is really two renders of the
+        // same words a pixel apart.
+        self.session_log.record("copy-source", &format!("what={} object={} rect={:?}", sel.what, sel.object, sel.rect));
         let what = sel.what.strip_prefix("the ").unwrap_or(sel.what);
         self.put_on_clipboard(content, format!("{what} copied — Ctrl+V picks it up, a click puts it down."));
         true
@@ -6782,6 +6818,11 @@ impl PagifyApp {
     /// `at` — pulled out so [`ObjectClipboard::Group`] can call it once per
     /// member, each at its own offset from the point clicked.
     fn place_clipboard_content(&mut self, page: usize, at: AppPoint, content: ObjectClipboard) {
+        // Logged before the match, not after: a `styled_line_command` error
+        // returns early, and the log should still show what was *attempted*,
+        // not just what succeeded. Recurses once per `Group` member, so each
+        // one's own placement point and content are on their own log line.
+        self.session_log.record("paste", &format!("at=({:.1},{:.1}) {}", at.x, at.y, describe_clipboard(&content)));
         match content {
             ObjectClipboard::Group(items) => {
                 for (item, dx, dy) in items {

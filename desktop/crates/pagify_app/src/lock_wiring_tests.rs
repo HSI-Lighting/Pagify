@@ -3894,6 +3894,58 @@ fn copying_a_group_overwrites_whatever_was_copied_before_it() {
     );
 }
 
+/// **Copying and pasting words each leave one content-free log line** — the
+/// same rule `pick` lines already follow
+/// (`pick_wiring_tests::every_click_writes_exactly_one_content_free_pick_line_to_the_session_log`):
+/// a PDF someone is editing may hold confidential text, so the session log
+/// — which gets read back to diagnose a report like "the paste doesn't look
+/// like what I copied" — must carry the *shape* of what moved (character
+/// count, size, face) and never the words themselves.
+#[test]
+fn copying_and_pasting_words_logs_their_shape_but_never_their_text() {
+    let mut app = app("two-column.pdf");
+    let dir = std::env::temp_dir().join(format!("pagify-test-copy-paste-log-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let log_path = app.session_log.path().expect("the temp dir is writable").to_path_buf();
+
+    app.submit("editobject");
+    let runs = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+    let target = runs.iter().find(|r| r.text.trim().chars().count() > 5).cloned().expect("a run with words");
+    app.tab_mut().selected = Some(Selected { page: 0, object: target.object, rect: target.rect, what: "the words" });
+
+    assert!(app.copy_object_selection(), "the selected run should have been copied");
+    assert!(app.start_paste_ghost(None), "a copy should have something to pick up");
+    app.place_paste_ghost(0, AppPoint { x: 500.0, y: 500.0 });
+
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(&log_path)
+        .expect("the log file exists")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("valid json"))
+        .collect();
+    let copy_line = lines.iter().find(|l| l["kind"] == "copy").expect("a copy line").clone();
+    let paste_line = lines.iter().find(|l| l["kind"] == "paste").expect("a paste line").clone();
+
+    let words: Vec<&str> = target.text.split_whitespace().filter(|w| w.chars().count() >= 4).collect();
+    for line in [&copy_line, &paste_line] {
+        let text = line["text"].as_str().expect("text field");
+        for word in &words {
+            assert!(!text.contains(word), "the log line holds the page's own word {word:?}: {text}");
+        }
+    }
+    let chars = target.text.trim().chars().count().to_string();
+    assert!(
+        copy_line["text"].as_str().unwrap().contains(&format!("chars={chars}")),
+        "the copy line should carry the character count, content-free: {copy_line}"
+    );
+    assert!(
+        paste_line["text"].as_str().unwrap().contains(&format!("chars={chars}")),
+        "the paste line should carry the character count, content-free: {paste_line}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// smaller thing is what was aimed at.
 #[test]
 fn a_run_of_words_can_be_moved_across_the_page() {
