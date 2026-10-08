@@ -16,6 +16,14 @@ use pagify_shell::page_space::AppPoint;
 use pagify_shell::PageRaster;
 use pdf_core::document::Color;
 
+/// What [`PagifyApp::pick_run_under`] found: the clicked run (with the page
+/// blocks it came from when the paragraph-aware path produced them), or the
+/// "nothing written here" message `no_text_here` already composed.
+enum PickRun {
+    Run(Option<std::rc::Rc<PageBlocks>>, pdf_core::document::TextRun),
+    NoText(String),
+}
+
 impl crate::PagifyApp {
     /// The body of [`Self::pick_text_run`], filling `trace` as it goes.
     ///
@@ -67,74 +75,10 @@ impl crate::PagifyApp {
         // froze the whole window for seconds (and, at 877 000 shapes, for tens of
         // seconds) with nothing on screen to say why.
         let heavy = self.page_weight(page).filter(page_is_heavy);
-
-        // **One read of the page for the whole click**, cached — see
-        // `page_blocks`. If it cannot be made, the tool still works on the
-        // run alone.
         let (pb, run): (Option<std::rc::Rc<PageBlocks>>, pdf_core::document::TextRun) =
-            if let Some(weight) = heavy {
-                self.session_log.record(
-                    "pick-note",
-                    &format!(
-                        "page {} holds {} objects, {} of them text: too many to read for paragraphs; picking the run alone",
-                        page + 1,
-                        weight.page_objects,
-                        weight.text_objects
-                    ),
-                );
-                match self.heavy_run_under(page, x, y)? {
-                    Some((run, rule)) => {
-                        trace.seed = Some(run.object);
-                        trace.rule = Some(rule);
-                        (None, run)
-                    }
-                    None => return self.no_text_here(page, at, trace),
-                }
-            } else {
-            match self.page_blocks(page) {
-                Ok((pb, hit)) => {
-                    trace.page_facts(&pb);
-                    trace.cache_hit = hit;
-                    if hit {
-                        // The cost of the reading the click found waiting is not
-                        // a cost of this click (`page_facts` carries the cost of
-                        // the one that made it): a hit's line says it cost nothing.
-                        trace.build_ms = 0.0;
-                        trace.detect_ms = 0.0;
-                    }
-                    // **How far outside its own box a run will still answer
-                    // to a click** (`HIT_TOLERANCE_PT`): the target is a few
-                    // pixels tall. Measured at the zoom these documents open
-                    // at: the median run is 5.1 pixels high in one and 6.7 in
-                    // the other. Asking somebody to land inside a five-pixel
-                    // band is not a reasonable thing to ask, and missing it
-                    // looks exactly like the tool being broken.
-                    let Some((seed, rule)) = block_input::pick_seed(&pb, x, y, HIT_TOLERANCE_PT as f32)
-                    else {
-                        return self.no_text_here(page, at, trace);
-                    };
-                    trace.seed = Some(seed);
-                    trace.rule = Some(rule);
-                    let Some(run) = pb.runs.get(&seed).cloned() else {
-                        return Err("no text there — click on some words.".into());
-                    };
-                    (Some(pb), run)
-                }
-                Err(why) => {
-                    self.session_log.record(
-                        "pick-note",
-                        &format!("the page's text could not be read in one pass ({why}); picking the run alone"),
-                    );
-                    match self.legacy_run_under(page, x, y)? {
-                        Some((run, rule)) => {
-                            trace.seed = Some(run.object);
-                            trace.rule = Some(rule);
-                            (None, run)
-                        }
-                        None => return self.no_text_here(page, at, trace),
-                    }
-                }
-            }
+            match self.pick_run_under(page, x, y, at, trace)? {
+                PickRun::Run(pb, run) => (pb, run),
+                PickRun::NoText(said) => return Ok(said),
             };
         let unreadable = run.text.trim().is_empty();
 
@@ -377,6 +321,95 @@ impl crate::PagifyApp {
             ),
         })
     }
+
+/// What [`PagifyApp::pick_run_under`] found: the clicked run (with the page
+/// blocks it came from when the paragraph-aware path produced them), or the
+/// "nothing written here" message `no_text_here` already composed.
+    /// Which run a click picked: the paragraph-aware path, the heavy-page
+    /// shortcut or the legacy fallback — or the "no text" answer from
+    /// `no_text_here`. Moved out of `pick_text_run_traced` whole; the enum
+    /// above carries the two kinds of success so the early-outs keep working.
+    fn pick_run_under(
+        &mut self,
+        page: usize,
+        x: f32,
+        y: f32,
+        at: AppPoint,
+        trace: &mut PickTrace,
+    ) -> Result<PickRun, String> {
+        let heavy = self.page_weight(page).filter(page_is_heavy);
+
+        // **One read of the page for the whole click**, cached — see
+        // `page_blocks`. If it cannot be made, the tool still works on the
+        // run alone.
+        let (pb, run) =
+            if let Some(weight) = heavy {
+                self.session_log.record(
+                    "pick-note",
+                    &format!(
+                        "page {} holds {} objects, {} of them text: too many to read for paragraphs; picking the run alone",
+                        page + 1,
+                        weight.page_objects,
+                        weight.text_objects
+                    ),
+                );
+                match self.heavy_run_under(page, x, y)? {
+                    Some((run, rule)) => {
+                        trace.seed = Some(run.object);
+                        trace.rule = Some(rule);
+                        (None, run)
+                    }
+                    None => return self.no_text_here(page, at, trace).map(PickRun::NoText),
+                }
+            } else {
+            match self.page_blocks(page) {
+                Ok((pb, hit)) => {
+                    trace.page_facts(&pb);
+                    trace.cache_hit = hit;
+                    if hit {
+                        // The cost of the reading the click found waiting is not
+                        // a cost of this click (`page_facts` carries the cost of
+                        // the one that made it): a hit's line says it cost nothing.
+                        trace.build_ms = 0.0;
+                        trace.detect_ms = 0.0;
+                    }
+                    // **How far outside its own box a run will still answer
+                    // to a click** (`HIT_TOLERANCE_PT`): the target is a few
+                    // pixels tall. Measured at the zoom these documents open
+                    // at: the median run is 5.1 pixels high in one and 6.7 in
+                    // the other. Asking somebody to land inside a five-pixel
+                    // band is not a reasonable thing to ask, and missing it
+                    // looks exactly like the tool being broken.
+                    let Some((seed, rule)) = block_input::pick_seed(&pb, x, y, HIT_TOLERANCE_PT as f32)
+                    else {
+                        return self.no_text_here(page, at, trace).map(PickRun::NoText);
+                    };
+                    trace.seed = Some(seed);
+                    trace.rule = Some(rule);
+                    let Some(run) = pb.runs.get(&seed).cloned() else {
+                        return Err("no text there — click on some words.".into());
+                    };
+                    (Some(pb), run)
+                }
+                Err(why) => {
+                    self.session_log.record(
+                        "pick-note",
+                        &format!("the page's text could not be read in one pass ({why}); picking the run alone"),
+                    );
+                    match self.legacy_run_under(page, x, y)? {
+                        Some((run, rule)) => {
+                            trace.seed = Some(run.object);
+                            trace.rule = Some(rule);
+                            (None, run)
+                        }
+                        None => return self.no_text_here(page, at, trace).map(PickRun::NoText),
+                    }
+                }
+            }
+            };
+        Ok(PickRun::Run(pb, run))
+    }
+
 
     /// The editor for lines that are already decided — **including frozen
     /// ones**: lines that carry words the page draws as shapes, which applying
