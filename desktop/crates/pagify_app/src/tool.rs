@@ -361,6 +361,24 @@ impl Tool {
     pub(crate) fn wants_snapping(&self) -> bool {
         matches!(self, Tool::Calibrate { .. } | Tool::Draw(_) | Tool::Measure(_) | Tool::Modify(_))
     }
+
+    /// Whether cancelling this kind mid-collection should drop the markup
+    /// undo step it opened (see `Layer::forget_last_step`) — true for every
+    /// kind that writes into the markup layer as it collects points/objects,
+    /// false for the kinds that only ever produce a single committed write
+    /// at the end (nothing opened yet to forget).
+    pub(crate) fn cancel_drops_checkpoint(&self) -> bool {
+        !matches!(
+            self,
+            Tool::Signature
+                | Tool::PlaceImage { .. }
+                | Tool::PlaceText
+                | Tool::Calibrate { .. }
+                | Tool::Fill(_)
+                | Tool::Redact
+                | Tool::Whiteout
+        )
+    }
 }
 
 /// What resolving a tool's pick, or cancelling it, should cause — the
@@ -757,6 +775,12 @@ impl Tool {
             // it, the same way Eraser/PickText/Modify never preview a
             // point not yet placed.
             Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. } => {}
+        }
+        // Where the placed points are, so a long drag still shows what it
+        // is anchored to — independent of which shape above, since every
+        // multi-point kind benefits and nothing above draws it.
+        for point in points {
+            ui.painter().circle_filled(view.to_screen(*point), 2.5, theme::violet_bright());
         }
     }
 

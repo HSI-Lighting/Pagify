@@ -1069,57 +1069,7 @@ impl crate::PagifyApp {
         // A rule applies only where one is being chosen.
         let ruled = !using;
 
-        let heading = match &waiting {
-            Awaiting::Open(_) => "This document needs a password".to_string(),
-            Awaiting::Unlock | Awaiting::UnlockItem(_) => "Unlock".to_string(),
-            Awaiting::LockAgain { .. } | Awaiting::SecureAgain { .. } => {
-                "Type it again".to_string()
-            }
-            Awaiting::Certificate(_) => "Sign this document".to_string(),
-            Awaiting::SecureCurrent(_) => "Change this document's password".to_string(),
-            Awaiting::Secure(_) => "Choose a password for this file".to_string(),
-            _ if using => "Unlock to add to this document".to_string(),
-            _ => "Choose a passcode for this document".to_string(),
-        };
-        let explains = match &waiting {
-            Awaiting::Open(path) => std::path::Path::new(path)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.clone()),
-            Awaiting::Unlock | Awaiting::UnlockItem(_) => {
-                "The passcode this document was locked with.".into()
-            }
-            Awaiting::LockAgain { .. } | Awaiting::SecureAgain { .. } => {
-                "The same one, so a slip cannot lock you out.".into()
-            }
-            Awaiting::Certificate(path) => format!(
-                "The password on {}. The signature covers the file as it is now.",
-                std::path::Path::new(path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.display().to_string())
-            ),
-            Awaiting::SecureCurrent(_) => {
-                "Type the password it has now. The new one comes next.".into()
-            }
-            Awaiting::Secure(_) => {
-                "It encrypts the whole file. Nobody can open it without this — \
-                 in Pagify or anywhere else."
-                    .into()
-            }
-            _ if using => "The passcode this document is already locked with.".into(),
-            _ => "It locks the text and the pictures alike, and it is the only way \
-                  back to what is hidden."
-                .into(),
-        };
-        let act = match &waiting {
-            Awaiting::Open(_) => "Open",
-            Awaiting::Unlock | Awaiting::UnlockItem(_) => "Unlock document",
-            Awaiting::Certificate(_) => "Sign",
-            Awaiting::SecureCurrent(_) => "Continue",
-            Awaiting::Secure(_) | Awaiting::SecureAgain { .. } => "Set password",
-            _ => "Lock document",
-        };
+        let (heading, explains, act) = passcode_wording(&waiting, using);
 
         let mut submitted = false;
         let mut gave_up = false;
@@ -1603,4 +1553,64 @@ impl crate::PagifyApp {
             });
         }
     }
+}
+
+/// The three pieces of wording the passcode dialog needs for whatever it is
+/// asking: the heading, the line under it, and the confirm button's label.
+/// Pure over what is being asked and whether the passcode is being *used* on
+/// an already-locked document (`using` at the call site) — it used to be
+/// three long matches inline in `draw_passcode_dialog`.
+fn passcode_wording(waiting: &Awaiting, using: bool) -> (String, String, &'static str) {
+        let heading = match &waiting {
+            Awaiting::Open(_) => "This document needs a password".to_string(),
+            Awaiting::Unlock | Awaiting::UnlockItem(_) => "Unlock".to_string(),
+            Awaiting::LockAgain { .. } | Awaiting::SecureAgain { .. } => {
+                "Type it again".to_string()
+            }
+            Awaiting::Certificate(_) => "Sign this document".to_string(),
+            Awaiting::SecureCurrent(_) => "Change this document's password".to_string(),
+            Awaiting::Secure(_) => "Choose a password for this file".to_string(),
+            _ if using => "Unlock to add to this document".to_string(),
+            _ => "Choose a passcode for this document".to_string(),
+        };
+        let explains = match &waiting {
+            Awaiting::Open(path) => std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.clone()),
+            Awaiting::Unlock | Awaiting::UnlockItem(_) => {
+                "The passcode this document was locked with.".into()
+            }
+            Awaiting::LockAgain { .. } | Awaiting::SecureAgain { .. } => {
+                "The same one, so a slip cannot lock you out.".into()
+            }
+            Awaiting::Certificate(path) => format!(
+                "The password on {}. The signature covers the file as it is now.",
+                std::path::Path::new(path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string())
+            ),
+            Awaiting::SecureCurrent(_) => {
+                "Type the password it has now. The new one comes next.".into()
+            }
+            Awaiting::Secure(_) => {
+                "It encrypts the whole file. Nobody can open it without this — \
+                 in Pagify or anywhere else."
+                    .into()
+            }
+            _ if using => "The passcode this document is already locked with.".into(),
+            _ => "It locks the text and the pictures alike, and it is the only way \
+                  back to what is hidden."
+                .into(),
+        };
+        let act = match &waiting {
+            Awaiting::Open(_) => "Open",
+            Awaiting::Unlock | Awaiting::UnlockItem(_) => "Unlock document",
+            Awaiting::Certificate(_) => "Sign",
+            Awaiting::SecureCurrent(_) => "Continue",
+            Awaiting::Secure(_) | Awaiting::SecureAgain { .. } => "Set password",
+            _ => "Lock document",
+        };
+    (heading, explains, act)
 }

@@ -87,6 +87,14 @@ pub(crate) use pagify_shell::paragraph_lines::{
     majority_look, paragraph_should_justify, wrap_hyphen_marks, LineEnd,
 };
 pub(crate) use pagify_shell::reader::{reveal_axis, REVEAL_AIR_PX, STRIP_PAD_PX};
+// The run editor's own arithmetic — size fallbacks, box growth, face
+// sectioning, background quantisation — moved to `pagify_shell::editor`
+// (design review Phase 4a): all of it is a function of numbers and text, and
+// none of it needs a window to be tested. Re-exported under the old names so
+// every call and test import keeps resolving.
+pub(crate) use pagify_shell::editor::{
+    editor_sections, quantize_to_nearest_8, run_editor_box_grow, run_editor_font_size, run_editor_glyph_size,
+};
 
 /// Switches a test flips to make part of the app fail on purpose, and the
 /// helpers the tests that edit a page share.
@@ -1223,17 +1231,6 @@ fn read_update_manifest(dir: &std::path::Path) -> Option<String> {
     // `.trim()` alone leaves it sitting in front of the first digit.
     let version = text.trim().trim_start_matches('\u{FEFF}').trim();
     (!version.is_empty()).then(|| version.to_string())
-}
-
-/// Round to the nearest multiple of 8, not always down — see
-/// [`PagifyApp::page_behind`], which uses this to group "near-identical
-/// shades of one background" together while sampling. A plain `& 0xF8` sends
-/// 255 (true white, the single most common page background there is) to
-/// 248, so a run editor opened over a plain white page sat on a visibly
-/// darker patch than the real page around it — reported from use as the
-/// editor still looking boxed after its frame was already fixed.
-fn quantize_to_nearest_8(c: u8) -> u8 {
-    (((c as u16 + 4) / 8 * 8).min(255)) as u8
 }
 
 /// What identifies a font program among the faces the app has been handed: a
@@ -2528,6 +2525,1232 @@ const SIGNATURE_WIDTH_PT: f32 = 144.0;
 
 
 impl PagifyApp {
+
+    /// Every frame's opening: theme sync, the face that was asked for last
+    /// frame, every dialog and prompt, the close-request guard, and the
+    /// collect-* polls. Split out of `ui` so that the frame function reads as
+    /// the outline of a frame (design review Phase 1).
+    fn draw_frame_preamble(&mut self, ctx: &egui::Context) {
+        // Recomputed every frame rather than only when the View-tab toggle is
+        // pressed, the same reasoning as `resolved_zoom` a few lines into
+        // `draw_pages`: `theme::set_mode` has no `&egui::Context` of its own
+        // to call `apply` with (`fn act` doesn't carry one), so the flag it
+        // flips is picked up here, the one place every frame already passes
+        // through, instead.
+        theme::apply(ctx);
+
+        // Escape while a tab is being dragged puts it back, and is not also
+        // an Escape for everything else — see `hub`.
+        self.cancel_tab_drag_on_escape(ctx);
+
+        // Once a frame, so two separate actions landing between one undo
+        // press and the next are still told apart in the order they actually
+        // happened — see `track_undo_recency`'s own doc for why polling only
+        // when `undo` is pressed loses exactly that ordering.
+        self.track_undo_recency();
+
+        if self.mark.is_none() {
+            install_icons(ctx);
+            self.mark = logo::texture(ctx);
+        }
+
+        // A face asked for while picking a run is installed here, at the top of
+        // the frame after it was asked for — and marked usable only on the
+        // frame after *that*, when egui has rebuilt its atlas. Drawing in a
+        // family that does not exist yet panics; see `install_fonts`.
+        if let Some(face) = self.pending_face.take() {
+            install_fonts(ctx, Some(face));
+        } else if self.editor_face.is_some() {
+            self.editor_face_ready = true;
+        }
+
+        // A document that wants a password asks for it in a window, not in the
+        // command box — see `draw_password_dialog`.
+        self.draw_passcode_dialog(ctx);
+        self.draw_signature_pad(ctx);
+        self.draw_signature_list(ctx);
+        self.draw_snippet_list(ctx);
+        self.draw_find_replace(ctx);
+        self.draw_spell_check(ctx);
+        self.draw_bookmark_panel(ctx);
+        self.draw_link_prompt(ctx);
+        self.draw_extract_dialog(ctx);
+        self.draw_article_box_prompt(ctx);
+
+        // The close button is how people actually quit, and it bypasses every
+        // verb. Without this the whole guard is decoration: `quit` refuses
+        // politely while the red button throws the work away.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if let Some(index) = self.tab_with_unsaved_work() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.active_tab = index;
+                self.tab_mut().closing = Some(Closing::Program);
+                // This window's button closes this window; whether that is
+                // also the end of the program is the `Hub`'s to say.
+                self.win.closing_leaves = hub::Leaving::Window;
+            } else {
+                self.leave(hub::Leaving::Window);
+            }
+        }
+        self.ask_about_unsaved(ctx);
+        self.ask_about_securing(ctx);
+        self.ask_about_redaction(ctx);
+        self.collect_reading(ctx);
+        self.collect_spell_scan(ctx);
+        self.collect_update_check(ctx);
+        self.draw_update_prompt(ctx);
+    }
+
+    /// The keyboard half of a frame: the focus guard, Escape, copy/paste, the
+    /// submit gate, document keys and the shortcuts. `command_id` and `frame`
+    /// are passed in because widgets drawn later in the same frame need them
+    /// too.
+    fn handle_input(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame, command_id: egui::Id) {
+        // The focus guard — §5.5. Read once, before any widget runs.
+        let focus = Focus::capture(ctx);
+
+        // **Space is a space.** It used to be a second Enter here — swallowed
+        // from the box and the line run as it stood — on the strength of a
+        // `Mode::TextContent` that nothing ever set. Reported from use as
+        // "Extract only works as the raw command": `extract` and then a Space
+        // ran `extract` before any page could follow it, so no line of more
+        // than one word could be typed, and the ribbon's prefill-and-wait
+        // buttons (Swap, Note, Calibrate…) could not be completed. Enter, the
+        // Run button and the ribbon are the only ways to submit.
+
+        let keys = ctx.input(|i| Keys {
+            escape: i.key_pressed(egui::Key::Escape),
+            enter: i.key_pressed(egui::Key::Enter),
+            up: i.key_pressed(egui::Key::ArrowUp),
+            down: i.key_pressed(egui::Key::ArrowDown),
+            left: i.key_pressed(egui::Key::ArrowLeft),
+            right: i.key_pressed(egui::Key::ArrowRight),
+            zoom_in: i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals),
+            zoom_out: i.key_pressed(egui::Key::Minus),
+            delete: i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+            // **Not a raw key press — confirmed against egui-winit 0.36.1's
+            // own source.** On ⌘C/⌘V, `is_copy_command`/`is_paste_command`
+            // match first and the translator pushes `Event::Copy`/
+            // `Event::Paste` and returns *without* ever also emitting a
+            // `Key::C`/`Key::V` press — so `i.key_pressed(egui::Key::C)` can
+            // never be true for a real keyboard. It only looked like it
+            // worked in this app's own tests because the test harness
+            // constructs a synthetic `Event::Key` directly, skipping that
+            // translation entirely. Reported from use: ⌘C/⌘V did nothing at
+            // all, not even a "nothing selected" fallback — the dispatch
+            // code below was simply never reached.
+            copy: i.events.iter().any(|e| matches!(e, egui::Event::Copy)),
+            // `Event::Paste` carries whatever text was already on the *system*
+            // clipboard, and egui-winit only pushes it when that clipboard
+            // already holds non-empty text — unrelated to whether this app
+            // has anything of its own to paste. `copy_organize_selection`/
+            // `copy_object_selection` mirror a short placeholder into the
+            // system clipboard for exactly this reason, so the ⌘V that
+            // follows a ⌘C always has *something* there to trigger this.
+            paste: i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))),
+            find_next: i.key_pressed(egui::Key::Enter) && i.modifiers.command,
+            open: i.modifiers.command && i.key_pressed(egui::Key::O),
+            save: i.modifiers.command && i.key_pressed(egui::Key::S),
+            undo: i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z),
+            redo: i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z),
+            search: i.modifiers.command && i.key_pressed(egui::Key::F),
+            close_tab: i.modifiers.command && i.key_pressed(egui::Key::W),
+            next_tab: i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Tab),
+            prev_tab: i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Tab),
+            print: i.modifiers.command && i.key_pressed(egui::Key::P),
+        });
+
+        if keys.escape && self.escape() == Escaped::ReturnedToPointer {
+            ctx.memory_mut(|m| m.surrender_focus(command_id));
+            let page = self.tab().page;
+            if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
+                layer.clear_selection();
+            }
+        }
+
+        // ⌘C and ⌘Enter are not gated on focus. The guard exists so that
+        // *typing* cannot reach the document — Enter and Delete fired while a
+        // number is being entered into a field. Copying takes nothing and
+        // changes nothing, and a reader who has just dragged out a selection
+        // has not necessarily clicked away from the command box first.
+        // Taken once. Reading it inside a short-circuiting condition consumed
+        // it before the branch that reports the empty case could see it, so
+        // `copy` with nothing selected did nothing and said nothing.
+        //
+        // A shape or placed picture is tried first, and only while nothing
+        // has focus — a text field with focus means ⌘C is meant for it, or
+        // for `copy_selection`'s own text-selection path below, not for
+        // whatever happens to be sitting selected on the page.
+        if keys.copy && focus.allows_clipboard_keys(command_id) && self.copy_organize_selection() {
+            // handled — pages were copied out of the thumbnail rail (or the
+            // wider Organize grid — both share one selection, and
+            // `copy_organize_selection` itself is a no-op when it's empty,
+            // so this falls through to object/text copy exactly as before
+            // whenever no page is selected).
+        } else if keys.copy && focus.allows_clipboard_keys(command_id) && self.copy_object_selection() {
+            // handled — an object was copied, not text.
+        } else if keys.copy && self.copy_editing_run(ctx) {
+            // handled — the run or paragraph open in the editor, copied whole
+            // because nothing inside its box was selected.
+        } else if keys.copy || std::mem::take(&mut self.tab_mut().copy_wanted) {
+            self.copy_selection(ctx);
+        }
+        // See `clipboard_mirror_wanted`'s own doc comment: a page/object copy
+        // has nothing to do with the *system* clipboard, but ⌘V's
+        // `Event::Paste` only ever fires when that clipboard already holds
+        // non-empty text, so this gives it something right after every
+        // successful copy — the one place in the app that actually has the
+        // `egui::Context` a real write needs.
+        if std::mem::take(&mut self.clipboard_mirror_wanted) {
+            ctx.copy_text(COPIED_IN_PAGIFY.to_string());
+        }
+        if keys.find_next && !self.tab_mut().find_hits.is_empty() {
+            self.find_step(true);
+        }
+
+        // The shortcuts a Mac expects. Command-modified keys are not gated on
+        // focus: ⌘S while the cursor is in the command box still means save,
+        // and the guard exists for *unmodified* Enter and Delete, which are the
+        // ones a numeric field would otherwise swallow into the document.
+        if keys.open {
+            self.act(Verb::OpenDialog);
+        }
+        if keys.save {
+            self.act(Verb::Save);
+        }
+        if keys.print {
+            self.print_current_document(frame);
+        }
+        if keys.undo {
+            self.undo_redo(true);
+        }
+        if keys.redo {
+            self.undo_redo(false);
+        }
+        if keys.close_tab {
+            self.close_tab(self.active_tab);
+        }
+        if keys.next_tab && self.tabs.len() > 1 {
+            self.active_tab = (self.active_tab + 1) % self.tabs.len();
+        }
+        if keys.prev_tab && self.tabs.len() > 1 {
+            self.active_tab = (self.active_tab + self.tabs.len() - 1) % self.tabs.len();
+        }
+        if keys.search {
+            // Puts the cursor in the box with `find ` typed, which is the
+            // nearest thing to a search field in an app whose interface is a
+            // command line.
+            self.cmd.input_mut().clear();
+            self.cmd.input_mut().push_str("find ");
+            self.command_open = true;
+            ctx.memory_mut(|m| m.request_focus(command_id));
+            self.caret_to_end_of_command_box(ctx, command_id);
+        }
+
+        if focus.allows_submit(command_id) {
+            // The box is drawn after this, in the same frame, and a one-line
+            // text field takes Up/Down as "caret to the start/end" — so the
+            // key is consumed here, or it moves the caret again right after
+            // the recall put it at the end of the recalled line.
+            if keys.up {
+                self.cmd.recall_previous();
+                self.caret_to_end_of_command_box(ctx, command_id);
+                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp));
+            }
+            if keys.down {
+                self.cmd.recall_next();
+                self.caret_to_end_of_command_box(ctx, command_id);
+                ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown));
+            }
+        }
+
+        // Document keys. Deny by default — see focus.rs.
+        if focus.allows_document_keys() && self.tab_mut().doc.is_some() {
+            if keys.right {
+                self.act(Verb::Page(PageTarget::Next));
+            }
+            if keys.left {
+                self.act(Verb::Page(PageTarget::Previous));
+            }
+            if keys.zoom_in {
+                self.set_zoom(ZoomTarget::In);
+            }
+            if keys.zoom_out {
+                self.set_zoom(ZoomTarget::Out);
+            }
+            if keys.delete {
+                // Pages selected in the rail (or the wider Organize grid —
+                // one selection, shared) take priority, the same precedence
+                // copy already gives pages over objects above.
+                if !self.tab_mut().organize_selected.is_empty() {
+                    self.delete_organize_selection();
+                } else {
+                    self.delete_selection();
+                }
+            }
+            // Enter closes a pick that has no fixed number of points — an area
+            // measurement, or a polyline. `done` is the same thing typed.
+            if keys.enter {
+                let closeable = self.tab_mut()
+                    .tool
+                    .as_ref()
+                    .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
+                if closeable {
+                    self.resolve_tool();
+                }
+            }
+        }
+
+        // Paste shares ⌘C's own clipboard-keys gate, not the strict
+        // document-keys one above: it is one half of the same shortcut the
+        // command box legitimately re-focuses itself after (see
+        // Focus::allows_clipboard_keys), so it needs to keep working right
+        // after a typed `copy`/`paste`, not just once focus is empty.
+        if keys.paste && focus.allows_clipboard_keys(command_id) && self.tab_mut().doc.is_some() {
+            let pasted = ctx.input(|i| {
+                i.events.iter().find_map(|e| match e {
+                    egui::Event::Paste(text) => Some(text.clone()),
+                    _ => None,
+                })
+            });
+            if self.current_page_clipboard().is_some() {
+                self.paste_organize_selection();
+            } else if !self.start_paste_ghost(pasted) {
+                self.paste_object_selection();
+            }
+        }
+    }
+
+    /// A file dropped on the window, and a document Finder handed over.
+    fn open_dropped_files(&mut self, ctx: &egui::Context) {
+        // A file dropped on the window is the other way people open things,
+        // and the one they try after the menu.
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect()
+        });
+        if let Some(path) = dropped.first() {
+            self.open(&path.to_string_lossy());
+        }
+
+        // And a document Finder handed over, which arrives by Apple Event
+        // rather than in `argv` — drained here rather than in the handler,
+        // because a document that wants a password has to be able to ask for
+        // one, and an Apple Event handler is no place to hold that
+        // conversation.
+        if let Some(path) = mac_open::taken().first() {
+            self.open(&path.to_string_lossy());
+        }
+    }
+
+    /// The title bar and its document tabs, including the deferred switch,
+    /// close and strip-publishing that have to happen after the panel's own
+    /// closure has ended.
+    fn draw_title_bar(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        // -- title bar --------------------------------------------------------
+        // Document tabs share the titlebar's own row, right beside the logo
+        // — the compact mockup's own layout (`pagify_pdf_compact_dark_theme/
+        // code.html:108-130`), rather than a second row of their own. Always
+        // shown, even with one tab open: a strip that pops in and out of
+        // existence as tabs come and go is more surprising than one that's
+        // just always there, one pill wide.
+        let mut switch_to: Option<usize> = None;
+        let mut close_clicked: Option<usize> = None;
+        let mut tab_rects: Vec<egui::Rect> = Vec::new();
+        // How many tabs the strip had room for this frame.
+        let mut visible_tabs = usize::MAX;
+        let title_bar = egui::Panel::top("titlebar")
+            .frame(egui::Frame::new().fill(theme::chrome()).inner_margin(egui::Margin::symmetric(16, 10)))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // The row is as tall as a document tab from the start, so
+                    // the logo, the name and the checkboxes — placed before
+                    // any tab — are centred on the line the tabs will be on.
+                    ui.set_min_height(doc_tab_height(ui));
+                    // Shrunk from 32/24pt toward the mockup's own compact
+                    // mark — a titlebar logo does not need to compete with
+                    // the document tabs now sharing its row for width.
+                    let (rect, logo) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                    // Not an `Image`: the tests that look for the page thumbnails
+                    // look for the Image role, and the logo is not one.
+                    logo.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, "Pagify logo"));
+                    match &self.mark {
+                        Some(mark) => {
+                            // Rounded to match the tiles elsewhere. The mark's
+                            // own square corners would be the only hard ones in
+                            // the whole window.
+                            ui.painter().image(
+                                mark.id(),
+                                rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                        // A failed decode costs a nicer mark, not a title bar.
+                        None => {
+                            theme::icon_tile(ui.painter(), rect, theme::violet_bright(), theme::violet_deep());
+                            ui.painter().text(
+                                rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                "Pa",
+                                egui::FontId::proportional(10.0),
+                                egui::Color32::WHITE,
+                            );
+                        }
+                    }
+                    ui.add_space(5.0);
+                    ui.label(
+                        egui::RichText::new("Pagify")
+                            .color(theme::ink())
+                            .font(egui::FontId::proportional(15.0)),
+                    );
+                    ui.add_space(8.0);
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // **The build number, at the far right of the bar** —
+                        // asked for so that a tester's report can say which
+                        // build it is about without anyone opening a log.
+                        // First in a right-to-left row, so it is the rightmost.
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(format!("v{}", pagify_shell::VERSION))
+                                    .size(11.0)
+                                    .color(theme::ink_dim()),
+                            )
+                            .selectable(false),
+                        )
+                        .on_hover_text("The build of Pagify you are running.");
+                        if self.tab_mut().doc.is_some() {
+                            ui.checkbox(&mut self.ortho, "Ortho");
+                            ui.checkbox(&mut self.show_thumbs, "Pages");
+                        }
+
+                        // **One row of tabs, the newest on the left.** Reported
+                        // from use: with a dozen documents open the tabs
+                        // wrapped onto five rows and took the page's space. The
+                        // ones that fit are drawn; the rest are behind the small
+                        // triangle, which sits just left of the checkboxes — in
+                        // this layout the first thing placed after them.
+                        let names: Vec<String> = self
+                            .tabs
+                            .iter()
+                            .map(|tab| {
+                                tab.doc
+                                    .as_ref()
+                                    .and_then(|d| d.session.path().file_name().map(|n| n.to_string_lossy().into_owned()))
+                                    .unwrap_or_else(|| "Untitled".to_string())
+                            })
+                            .collect();
+                        let widths: Vec<f32> = names.iter().map(|n| doc_tab_width(ui, n)).collect();
+                        let visible = tabs_that_fit(&widths, ui.spacing().item_spacing.x, ui.available_width(), DOC_TAB_MENU_WIDTH);
+                        visible_tabs = visible;
+                        if visible < names.len() {
+                            let menu = tab_menu_button(ui, names.len() - visible);
+                            egui::Popup::menu(&menu).align(egui::RectAlign::BOTTOM_END).show(|ui| {
+                                ui.set_min_width(280.0);
+                                for (i, name) in names.iter().enumerate().skip(visible) {
+                                    let shown = fit_tab_label(ui, name, DOC_TAB_MAX_TEXT * 2.0);
+                                    if ui.button(shown).on_hover_text(name).clicked() {
+                                        switch_to = Some(i);
+                                        ui.close();
+                                    }
+                                }
+                            });
+                        }
+
+                        // The tabs fill whatever room is left between the
+                        // logo and the checkboxes above — never wrapped, so
+                        // the strip stays one row however many are open.
+                        //
+                        // **This `left_to_right` wrapper is not redundant, and
+                        // taking it out put the tabs on the wrong side.**
+                        // `horizontal_wrapped` does not always lay out left to
+                        // right: it follows the direction of the layout it is
+                        // inside, and that one is right-to-left (to keep the
+                        // checkboxes at the far edge). Without this, the strip
+                        // hugged the right of the bar *and* listed the tabs
+                        // in reverse — "why are the tabs aligned to right?".
+                        // Measured, not reasoned about: see
+                        // `the_title_bar_reads_left_to_right_and_sits_on_one_line`.
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            // A wrapped row starts as tall as `interact_size`
+                            // says and places its first widget at its own top —
+                            // so a tab taller than that, in a row centred around
+                            // it, sat lower than everything else on the line
+                            // (measured: 38.0 against 32.5). Starting the row as
+                            // tall as a tab fills the line instead.
+                            ui.spacing_mut().interact_size.y = doc_tab_height(ui);
+                            ui.horizontal(|ui| {
+                                for (i, name) in names.iter().enumerate().take(visible) {
+                                    let button = doc_tab_button(ui, name, i == self.active_tab, self.dragging_tab(i));
+                                    tab_rects.push(button.response.rect);
+                                    // A tab can be picked up and carried to
+                                    // another window, or out into a window of
+                                    // its own — see `hub`.
+                                    self.tab_drag_event(ctx, i, &button, name);
+                                    if button.select {
+                                        switch_to = Some(i);
+                                    }
+                                    if button.close {
+                                        close_clicked = Some(i);
+                                    }
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+        self.publish_strip(ctx, title_bar.response.rect, tab_rects);
+        // Deferred past the panel's own closure, same as every other
+        // click-to-select in this file — the panel borrows `ui` for its own
+        // duration, so nothing inside it can also call back into `self`.
+        if let Some(i) = switch_to {
+            self.active_tab = i;
+        }
+        // The tab showing is always one of the tabs in the strip: one chosen from
+        // the menu, or left showing when another was closed, takes the place of
+        // the last one that fits.
+        if let Some(i) = close_clicked {
+            self.close_tab(i);
+        }
+        self.bring_active_tab_into_the_strip(visible_tabs);
+    }
+
+
+    /// The command bar, bottom panel: the single line, or the opened box with
+    /// its history above it. A submit lands in `submitted` for the caller to
+    /// dispatch once the whole frame has been laid out.
+    fn draw_command_bar(&mut self, ui: &mut egui::Ui, command_id: egui::Id, submitted: &mut Option<Dispatch>) {
+        // -- command bar ------------------------------------------------------
+        //
+        // Two shapes: the single line the mockup draws, and an opened box with
+        // the history above it. Resizable while open, because how much history
+        // you want to see is not something this can know.
+        let bar_frame = egui::Frame::new()
+            .fill(theme::chrome())
+            .inner_margin(egui::Margin::symmetric(14, 8));
+
+        let mut bar = egui::Panel::bottom("command_bar").frame(bar_frame);
+        bar = if self.command_open {
+            bar.resizable(true).default_size(210.0).size_range(96.0..=520.0)
+        } else {
+            bar.resizable(false)
+        };
+
+        bar.show(ui, |ui| {
+            if self.command_open {
+                self.draw_command_history(ui);
+            }
+
+            // The name and what is wanted are drawn separately so the name can
+            // be violet. `Prompt::render` joins them for callers that want one
+            // string — using it here as well is what printed "pagify › pagify ›".
+            let name = self
+                .cmd
+                .prompt()
+                .document
+                .clone()
+                .unwrap_or_else(|| "pagify".to_string());
+            let wants = match &self.tab_mut().tool {
+                Some(armed) => armed.kind.prompt(armed.objects.len(), armed.points.len()),
+                None => self.cmd.prompt().wants.clone(),
+            };
+
+            if self.command_open {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(&name)
+                            .color(theme::violet_bright())
+                            .font(egui::FontId::monospace(13.0)),
+                    );
+                    ui.colored_label(theme::ink_faint(), "›");
+                    ui.colored_label(theme::ink_dim(), &wants);
+                });
+            }
+
+            ui.horizontal(|ui| {
+                if !self.command_open {
+                    // The mockup's own status bar carries a couple of
+                    // document stats beside the command line (`code.html:578
+                    // -588`). Page count only, not its own searchable-
+                    // character count too: that number comes from
+                    // `Session::classify`, which walks the page's own
+                    // content — fine once, when `textlayer`/`extracttext`
+                    // already asks for it, but not something to recompute on
+                    // every one of sixty frames a second for a passive
+                    // readout nobody asked to see live.
+                    if let Some(page_count) = self.tab_mut().doc.as_ref().map(|d| d.page_count) {
+                        let page = self.tab_mut().page;
+                        ui.colored_label(theme::ink_faint(), format!("page {} of {page_count}", page + 1));
+                        ui.add_space(8.0);
+                    }
+                    ui.label(
+                        egui::RichText::new(&name)
+                            .color(theme::violet_bright())
+                            .font(egui::FontId::monospace(13.0)),
+                    );
+                    ui.colored_label(theme::ink_faint(), ">");
+                    // A tool that is waiting for clicks must say so even with
+                    // the history folded away. Without this, arming a tool
+                    // looked exactly like nothing happening.
+                    if self.tab_mut().tool.is_some() {
+                        // **An error that has just been said stays, with the
+                        // prompt after it.** Reported from use: a click that
+                        // found no text, or an apply that was refused, said
+                        // so in red and was then covered by this very line in
+                        // the same frame — nothing showed unless the history
+                        // happened to be open. Only an error that is *still
+                        // the last thing said* counts, so it goes the moment
+                        // anything else is said, arming a tool again included.
+                        let error = self
+                            .cmd
+                            .history()
+                            .last()
+                            .filter(|last| matches!(last.kind, Kind::Error))
+                            .map(|last| last.text.clone());
+                        match error {
+                            Some(error) => {
+                                let font = egui::FontId::proportional(12.0);
+                                let mut job = egui::text::LayoutJob::default();
+                                job.append(
+                                    &error,
+                                    0.0,
+                                    egui::TextFormat::simple(font.clone(), theme::danger()),
+                                );
+                                job.append(
+                                    &format!("   {wants}"),
+                                    0.0,
+                                    egui::TextFormat::simple(font, theme::snap()),
+                                );
+                                ui.add(egui::Label::new(job).truncate());
+                            }
+                            None => {
+                                ui.colored_label(theme::snap(), &wants);
+                            }
+                        }
+                    } else if let Some(last) = self.cmd.history().last() {
+                        // **What the program just said**, with the history
+                        // folded away — which it is by default.
+                        //
+                        // Without this, every button that is not built yet
+                        // looked broken rather than unbuilt: the reply saying
+                        // so went straight into a panel nobody had open, and a
+                        // whole tab of them read as a tab that does nothing.
+                        // The one place a user is guaranteed to be looking
+                        // after pressing a button is the line under it.
+                        let (colour, text) = match last.kind {
+                            Kind::Error => (theme::danger(), last.text.as_str()),
+                            Kind::Echo => (theme::ink_faint(), last.text.as_str()),
+                            _ => (theme::ink_dim(), last.text.as_str()),
+                        };
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(text)
+                                    .color(colour)
+                                    .font(egui::FontId::proportional(12.0)),
+                            )
+                            .truncate(),
+                        );
+                    }
+                }
+
+                // The toggle sits at the right so the input keeps the width it
+                // has, rather than jumping when the arrow changes direction.
+                let toggle_width = 26.0;
+                let input_width = (ui.available_width() - toggle_width - 8.0).max(80.0);
+
+                let is_password = self.tab().awaiting_password.is_some();
+                let command_open = self.command_open;
+                let hint_text = match &self.tab().awaiting_password {
+                    Some(
+                        Awaiting::Lock { .. }
+                        | Awaiting::LockPages(_)
+                        | Awaiting::LockImage { .. },
+                    ) => "a passcode to lock with",
+                    Some(Awaiting::UnlockItem(_)) => "the passcode this was locked with",
+                    Some(Awaiting::Unlock) => "the passcode this was locked with",
+                    Some(Awaiting::Secure(_)) => "a password for this document",
+                    Some(Awaiting::SecureAgain { .. }) => "the same password again",
+                    Some(Awaiting::LockAgain { .. }) => "the same passcode again",
+                    Some(Awaiting::SecureCurrent(_)) => "this document's password",
+                    Some(Awaiting::Certificate(_)) => "the certificate's password",
+                    // Opening asks in a window of its own, so the box
+                    // is free for what it is usually for.
+                    Some(Awaiting::Open(_)) if command_open => "type a command",
+                    Some(Awaiting::Open(_)) => "type a command...",
+                    None if command_open => "type a command",
+                    None => "type a command...",
+                };
+                let response = ui.add_sized(
+                    egui::vec2(input_width, 22.0),
+                    egui::TextEdit::singleline(self.cmd.input_mut())
+                        .id(command_id)
+                        .font(egui::FontId::monospace(13.0))
+                        .password(is_password)
+                        .hint_text(hint_text),
+                );
+                if response.changed() {
+                    self.cmd.note_edited();
+                }
+                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if !self.consume_password_line() {
+                        *submitted = self.cmd.submit(Submit::Enter);
+                    }
+                    response.request_focus();
+                }
+
+                if history_toggle(ui, egui::vec2(toggle_width, 22.0), self.command_open).clicked() {
+                    self.command_open = !self.command_open;
+                }
+            });
+
+            if self.command_open {
+                ui.horizontal(|ui| {
+                    if ui.button("Run").clicked()
+                        && !self.consume_password_line()
+                       
+                    {
+                        *submitted = self.cmd.submit(Submit::Button);
+                    }
+                    let page = self.tab().page;
+                    let marks = self.tab().markup.existing(page).map(|l| l.len()).unwrap_or(0);
+                    let page_count = self.tab().doc.as_ref().map(|d| d.page_count);
+                    let calibrated = self.tab().calibration.is_calibrated();
+                    let zoom_pct = self.resolved_zoom() * 100.0;
+                    ui.small(match page_count {
+                        Some(page_count) => format!(
+                            "page {} of {}   ·   {:.0}%   ·   {marks} mark{}{}{}",
+                            page + 1,
+                            page_count,
+                            zoom_pct,
+                            if marks == 1 { "" } else { "s" },
+                            if calibrated { "   ·   calibrated" } else { "" },
+                            if self.recorder.is_recording() {
+                                format!("   ·   recording ({})", self.recorder.steps())
+                            } else {
+                                String::new()
+                            },
+                        ),
+                        None => "no document".to_string(),
+                    });
+                });
+            }
+        });
+    }
+
+    /// The command history above the open box, newest at the bottom: echo,
+    /// info and error lines, coloured by kind. Moved out of
+    /// `draw_command_bar` so the bar itself is about the box.
+    fn draw_command_history(&mut self, ui: &mut egui::Ui) {
+        let rows = 74.0;
+        let height = (ui.available_height() - rows).max(24.0);
+        egui::ScrollArea::vertical()
+            .max_height(height)
+            .stick_to_bottom(true)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_min_height(height);
+                for entry in self.cmd.history() {
+                    let (colour, text) = match entry.kind {
+                        Kind::Echo => (theme::ink_dim(), format!("› {}", entry.text)),
+                        Kind::Info => (theme::ink(), entry.text.clone()),
+                        Kind::Error => (theme::danger(), entry.text.clone()),
+                    };
+                    ui.colored_label(colour, text);
+                }
+            });
+        ui.separator();
+    }
+
+
+    /// Everything below the command bar: the File backstage flag, the
+    /// thumbnail rail or the Organize grid, the layers window, the properties
+    /// panel, the page canvas — and the deferred handling of a rail jump, a
+    /// ribbon/home command and a submitted command line.
+    fn draw_main_area(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        command_id: egui::Id,
+        ribbon_command: Option<String>,
+        submitted: &mut Option<Dispatch>,
+    ) {
+        // The File tab is *backstage*: it covers the document rather than
+        // sitting beside it, the way File does in every ribbon application. So
+        // the thumbnail rail and the page canvas both stand down while it is
+        // showing, and the document stays open behind it untouched.
+        //
+        // **Only** the File tab. This used to also fire when nothing was open,
+        // which meant every tab showed the wizard and the tab highlight was
+        // lying about what you were looking at. Having no document is not a
+        // reason to replace Home with File — it is a reason for Home to say it
+        // is empty. The app opens *on* File instead, which is where the wizard
+        // belongs and where someone with no document needs to be.
+        let backstage = self.tab_mut().ribbon == Tab::File;
+
+        let jump_to = self.draw_left_rail(ctx, ui, backstage);
+
+        self.draw_layers_window(ctx, backstage);
+
+        // Claims its space before the central panel takes the rest — same
+        // rule as the ribbon and the command bar above.
+        self.draw_properties_panel(ui);
+
+        let home_command = self.draw_page_canvas(ctx, ui, backstage, command_id);
+        if let Some(page) = jump_to {
+            self.act(Verb::Page(PageTarget::Number(page + 1)));
+        }
+        if let Some(command) = home_command.or(ribbon_command) {
+            // The default-Hand illusion (see `hand_shown_before_any_tool_is_picked`)
+            // only holds until the first real pick — from here on the ribbon
+            // shows whichever tool is actually armed.
+            self.tab_mut().hand_shown_before_any_tool_is_picked = false;
+            match ribbon_click(&command) {
+                // With nothing open a click that needs a document or its
+                // pages has nothing to work on: say so, once and calmly,
+                // rather than run it into a red usage error.
+                RibbonClick::PickFile | RibbonClick::Extract | RibbonClick::Fill(Some(_))
+                    if self.tab().doc.is_none() =>
+                {
+                    self.say_info("open a PDF first.");
+                }
+                RibbonClick::PickFile => self.import_pages_dialog(),
+                RibbonClick::Extract => self.open_extract_dialog(),
+                // Put it in the box rather than running it silently, so the
+                // user sees the words the button stands for — which is the
+                // whole claim.
+                RibbonClick::Run => {
+                    self.cmd.input_mut().clear();
+                    self.cmd.input_mut().push_str(&command);
+                    *submitted = self.cmd.submit(Submit::Button);
+                }
+                RibbonClick::Fill(usage) => {
+                    self.cmd.input_mut().clear();
+                    self.cmd.input_mut().push_str(command.trim_end());
+                    self.cmd.input_mut().push(' ');
+                    if let Some(usage) = usage {
+                        self.say_info(usage);
+                    }
+                    ctx.memory_mut(|m| m.request_focus(command_id));
+                    self.caret_to_end_of_command_box(ctx, command_id);
+                }
+            }
+        }
+        if let Some(dispatch) = submitted.take() {
+            // A typed line cancels any half-collected pick. Letting it swallow
+            // the click silently would mean an unrelated command finishing
+            // someone else's measurement.
+            if self.tab_mut().tool.take().is_some() {
+                self.say_info("that pick was cancelled.");
+            }
+            let line = self
+                .cmd
+                .history()
+                .last()
+                .map(|e| e.text.clone())
+                .unwrap_or_default();
+            self.recorder.observe(&line);
+            self.session_log.record("command", &line);
+            self.run(dispatch);
+        }
+    }
+
+    /// The thumbnail rail or the Organize grid, whichever is showing.
+    /// Returns a page the reader asked to jump to — deferred to the caller,
+    /// because the panel borrows `ui` for its own duration.
+    fn draw_left_rail(&mut self, ctx: &egui::Context, ui: &mut egui::Ui, backstage: bool) -> Option<usize> {
+        // -- thumbnails ----------------------------------------------------------
+        let mut jump_to = None;
+        // Nothing open means nothing to thumbnail — an empty rail is a strip of
+        // furniture that does not do anything.
+        if self.organize_open && !backstage && self.tab_mut().doc.is_some() {
+            self.draw_organize_grid(ctx, ui);
+        } else if self.show_thumbs && !backstage && self.tab_mut().doc.is_some() {
+            let modifiers = ctx.input(|i| i.modifiers);
+            let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
+            let released = ctx.input(|i| i.pointer.any_released());
+            let mut cell_rects: Vec<(usize, egui::Rect)> = Vec::new();
+            let mut import_pages = false;
+            egui::Panel::left("thumbs")
+                .resizable(true)
+                .default_size(148.0)
+                .size_range(104.0..=420.0)
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::paper())
+                        .inner_margin(egui::Margin::symmetric(8, 8)),
+                )
+                .show(ui, |ui| {
+                // The rail's own header row — view-switcher icons on the
+                // left (today, just the one view this rail has; `Bookmark`
+                // sits beside it rather than off in the ribbon, matching the
+                // mockup's own rail header, `code.html:296-322`), a collapse
+                // chevron on the right so hiding the rail doesn't require
+                // hunting for the titlebar's own "Pages" checkbox.
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("\u{E9B0}").font(icon_font(16.0)).color(theme::violet()),
+                        )
+                        .selectable(false),
+                    )
+                    .on_hover_text("Thumbnails");
+                    if ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new("\u{E8E7}").font(icon_font(16.0)).color(theme::ink_dim()),
+                            )
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Bookmarks")
+                        .clicked()
+                    {
+                        self.toggle_bookmark_panel();
+                    }
+                    // Pages from another PDF, put into this one. The file
+                    // dialog opens after the panel is drawn, not inside it.
+                    let import = ui.add(
+                        egui::Label::new(
+                            egui::RichText::new("\u{E2C8}").font(icon_font(16.0)).color(theme::ink_dim()),
+                        )
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                    );
+                    import.widget_info(|| {
+                        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "Insert pages from another PDF")
+                    });
+                    if import.on_hover_text("Insert pages from another PDF").clicked() {
+                        import_pages = true;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // A plain Unicode character, not the custom icon
+                        // font — same choice the command bar's own
+                        // expand/collapse chevron already makes, and for the
+                        // same reason: this needs to be in whatever font
+                        // backs it with certainty, not a guess at the icon
+                        // font's own Private Use Area coverage.
+                        if ui
+                            .add(
+                                egui::Label::new(egui::RichText::new("‹").size(16.0).color(theme::ink_dim()))
+                                    .selectable(false)
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Hide the Pages rail")
+                            .clicked()
+                        {
+                            self.show_thumbs = false;
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    let count = self.tab_mut().doc.as_ref().map(|d| d.page_count).unwrap_or(0);
+                    for page in 0..count {
+                        ui.vertical_centered(|ui| {
+                            let width = ui.available_width();
+                            if let Some(page) =
+                                self.draw_thumbnail_cell(ctx, ui, page, modifiers, &mut cell_rects, width)
+                            {
+                                jump_to = Some(page);
+                            }
+                        });
+                        ui.add_space(6.0);
+                    }
+                    Self::draw_drop_indicator(
+                        ui,
+                        self.tab_mut().organize_drag.is_some(),
+                        &cell_rects,
+                        pointer_pos,
+                    );
+                });
+            });
+            self.finish_thumbnail_drag(&cell_rects, pointer_pos, released);
+            if import_pages {
+                self.import_pages_dialog();
+            }
+        } else if !backstage && self.tab_mut().doc.is_some() {
+            // **Reported from use: "once the thumbnail is hidden there's no
+            // way to bring it back."** The collapse chevron above only ever
+            // relied on the titlebar's own "Pages" checkbox for the way
+            // back — but an *unchecked* checkbox has no visible outline in
+            // this theme's flat style (`widgets.inactive.bg_stroke` is
+            // `Stroke::NONE`, see theme.rs), so it reads as plain text, not
+            // as something to click. This puts the way back in the one place
+            // a reader's eye actually goes looking for it: exactly where the
+            // rail used to be.
+            egui::Panel::left("thumbs_collapsed")
+                .resizable(false)
+                .default_size(18.0)
+                .frame(egui::Frame::new().fill(theme::paper()))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(8.0);
+                        if ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new("\u{203A}").size(16.0).color(theme::ink_dim()),
+                                )
+                                .selectable(false)
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Show the Pages rail")
+                            .clicked()
+                        {
+                            self.show_thumbs = true;
+                        }
+                    });
+                });
+        }
+        jump_to
+    }
+
+    /// The floating Layers window, and the restack/opacity changes it asked
+    /// for — applied once the window's own closure has ended.
+    fn draw_layers_window(&mut self, ctx: &egui::Context, backstage: bool) {
+        // -- layers ------------------------------------------------------------
+        //
+        // **A floating window, not a rail.** Asked for from use as a popup
+        // with the order in it and the means to move things up and down — and
+        // a window can be dragged next to the thing being re-ordered, where a
+        // rail on the far side of the page cannot.
+        let mut restack_to: Option<(usize, pdf_core::document::Stacking)> = None;
+        let mut opacity_to: Option<(usize, f32)> = None;
+        if self.show_layers && !backstage && self.tab_mut().doc.is_some() {
+            let page = self.tab_mut().page;
+            let picked = self.tab_mut().picked_layer;
+            let entries: Vec<pdf_core::document::DrawnObject> = self.layers_on(page).to_vec();
+            let mut pick: Option<usize> = None;
+            let chosen_entry = picked.and_then(|at| entries.get(at));
+            let armed = chosen_entry.is_some();
+            let grouped = chosen_entry.is_some_and(|e| !e.movable);
+            let mut open = true;
+
+            egui::Window::new(format!("Layers — page {}", page + 1))
+                .id(egui::Id::new("layers-window"))
+                .open(&mut open)
+                .default_size(egui::vec2(300.0, 380.0))
+                .resizable(true)
+                .collapsible(false)
+                .show(ctx, |ui| {
+                    // Said once, here, because "later is on top" is the one fact
+                    // that makes the list make sense and nothing else on screen
+                    // says it.
+                    ui.small("Topmost first — what is listed above covers what is below.");
+                    ui.add_space(4.0);
+
+                    if entries.is_empty() {
+                        ui.label("Nothing this page draws could be listed.");
+                        return;
+                    }
+
+                    let object = chosen_entry.map(|e| e.object);
+                    ui.horizontal(|ui| {
+                        use pdf_core::document::Stacking;
+                        for (glyph, tip, to) in [
+                            ("\u{E5D8}", "Move up one", Stacking::Up),
+                            ("\u{E5DB}", "Move down one", Stacking::Down),
+                            ("\u{E883}", "Bring to front", Stacking::Front),
+                            ("\u{E882}", "Send to back", Stacking::Back),
+                        ] {
+                            let button = egui::Button::new(
+                                egui::RichText::new(glyph).font(icon_font(18.0)),
+                            )
+                            .min_size(egui::vec2(34.0, 28.0));
+                            if ui.add_enabled(armed, button).on_hover_text(tip).clicked() {
+                                if let Some(object) = object {
+                                    restack_to = Some((object, to));
+                                }
+                            }
+                        }
+                    });
+                    if grouped {
+                        ui.small(if chosen_entry.is_some_and(|e| e.label == "placeholder") {
+                            "The picture's placeholder — it moves with the picture."
+                        } else {
+                            "Drawn inside a group — the whole group moves."
+                        });
+                    } else if !armed {
+                        ui.small("Pick a row, or click something on the page with Edit Object.");
+                    }
+
+                    // **Opacity, applied when the slider is let go** — not on
+                    // every frame of the drag, which would rewrite the page
+                    // sixty times a second.
+                    if let Some(entry) = chosen_entry.filter(|e| e.movable) {
+                        let mut alpha = self.tab_mut().opacity_draft.unwrap_or(entry.opacity);
+                        ui.add_space(6.0);
+                        let slider = ui.add(
+                            egui::Slider::new(&mut alpha, 0.0..=1.0)
+                                .text("opacity")
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0))
+                                .custom_parser(|t| t.trim_end_matches('%').parse::<f64>().ok().map(|p| p / 100.0)),
+                        );
+                        if slider.changed() {
+                            self.tab_mut().opacity_draft = Some(alpha);
+                        }
+                        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                            if (alpha - entry.opacity).abs() > 0.005 {
+                                opacity_to = Some((entry.object, alpha));
+                            }
+                            self.tab_mut().opacity_draft = None;
+                        }
+                    }
+                    ui.add_space(6.0);
+                    ui.separator();
+
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        // Drawn last is on top, so the list reads the other way
+                        // round from the page's own order.
+                        for (at, entry) in entries.iter().enumerate().rev() {
+                            let chosen = picked == Some(at);
+                            let row = ui
+                                .horizontal(|ui| {
+                                    // What a group draws is stepped in under it,
+                                    // so a page laid out as one panel reads as
+                                    // the panel and its contents rather than as
+                                    // a single unreadable entry.
+                                    ui.add_space(entry.depth as f32 * 14.0);
+                                    ui.selectable_label(
+                                        chosen,
+                                        format!(
+                                            "{}  {}",
+                                            match entry.kind {
+                                                pdf_core::document::DrawnKind::Words => "\u{E262}",
+                                                pdf_core::document::DrawnKind::Picture => "\u{E3F4}",
+                                                pdf_core::document::DrawnKind::Shape => "\u{E3C6}",
+                                                pdf_core::document::DrawnKind::Group => "\u{E2C7}",
+                                            },
+                                            entry.label
+                                        ),
+                                    )
+                                })
+                                .inner;
+                            if row.clicked() {
+                                pick = Some(at);
+                            }
+                            row.on_hover_text(format!(
+                                "{} — {:.0} × {:.0} pt at {:.0}, {:.0}{}",
+                                entry.kind.describe(),
+                                entry.rect.right - entry.rect.left,
+                                entry.rect.bottom - entry.rect.top,
+                                entry.rect.left,
+                                entry.rect.top,
+                                if entry.movable {
+                                    ""
+                                } else if entry.label == "placeholder" {
+                                    "\nthe picture's placeholder — moves with the picture"
+                                } else {
+                                    "\ndrawn inside a group — the group is what moves"
+                                },
+                            ));
+                        }
+                    });
+                });
+
+            if !open {
+                self.show_layers = false;
+            }
+            if let Some(at) = pick {
+                self.tab_mut().picked_layer = Some(at);
+            }
+        }
+        if let Some((object, where_to)) = restack_to {
+            let page = self.tab_mut().page;
+            match self.restack(page, object, where_to) {
+                Ok(said) => self.say_info(said),
+                Err(e) => self.say_error(e),
+            }
+        }
+        if let Some((object, alpha)) = opacity_to {
+            let page = self.tab_mut().page;
+            let kept = self.tab_mut().picked_layer;
+            match self.set_opacity_of(page, object, alpha) {
+                Ok(said) => self.say_info(said),
+                Err(e) => self.say_error(e),
+            }
+            // The page was rewritten, but nothing moved: the same row is the
+            // same thing.
+            self.tab_mut().picked_layer = kept;
+        }
+    }
+
+    /// The page canvas: the central panel, which is also where the Home
+    /// wizard and the File backstage are drawn. Returns the command the
+    /// wizard asked for.
+    fn draw_page_canvas(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        backstage: bool,
+        command_id: egui::Id,
+    ) -> Option<String> {
+        // -- the pages ---------------------------------------------------------
+        let mut home_command: Option<String> = None;
+        egui::CentralPanel::default_margins().show(ui, |ui| {
+            self.tab_mut().canvas_pt = ui.available_size();
+
+            // **The command box's own placeholder says "type a command" —
+            // make that literally true from the first frame.** Nothing on
+            // either "nothing open" screen (the File-tab backstage a fresh
+            // launch lands on, or this Home tab) takes keyboard focus by
+            // default, so typing right after launch went nowhere: not even
+            // into the box, just silently discarded, with no widget to
+            // route it to. Reported from use as `status` "trying to open a
+            // file" — what actually happened was a click aimed at finding
+            // somewhere to type landing on a button instead, because
+            // nothing told the thin command bar apart from the rest of an
+            // empty screen. Only when nothing has already claimed focus: a
+            // real click anywhere else must still win.
+            if self.tab_mut().doc.is_none() && ctx.memory(|m| m.focused()).is_none() {
+                ctx.memory_mut(|m| m.request_focus(command_id));
+            }
+
+            if backstage {
+                // **Its own id, not the page strip's.** Both scroll areas are
+                // made on this panel's ui, and egui keeps a scroll position
+                // under the area's id alone — with the default one for both,
+                // a frame of File stored a zero over where the reader was in
+                // the document, and coming back landed on the first page.
+                // Reported from use as the view jumping after Save or Open.
+                let chosen = egui::ScrollArea::vertical()
+                    .id_salt("backstage")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| home::show(ui, &self.recent, &self.outlined_fonts))
+                    .inner;
+                if let Some(command) = chosen {
+                    home_command = Some(command);
+                }
+                return;
+            }
+
+            if self.tab_mut().doc.is_none() {
+                // Not the wizard. This tab has nothing to show because there is
+                // nothing open, and it should say so rather than quietly
+                // becoming a different tab.
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(ui.available_height() * 0.35);
+                        ui.colored_label(theme::ink_faint(), "No document open.");
+                        ui.add_space(10.0);
+                        if ui.button("Open a PDF…").clicked() {
+                            home_command = Some("open".to_string());
+                        }
+                        ui.add_space(6.0);
+                        ui.small(
+                            egui::RichText::new("or drop one on the window")
+                                .color(theme::ink_faint()),
+                        );
+                    });
+                });
+                return;
+            }
+
+            self.draw_pages(ui, ctx, command_id);
+        });
+        home_command
+    }
+
+
     fn new(path: Option<&str>) -> Self {
         Self::build(path, false)
     }
@@ -7944,11 +9167,18 @@ impl PagifyApp {
             reading.stop.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         if let Some(armed) = self.tab_mut().tool.take() {
+            let drops_checkpoint = armed.kind.cancel_drops_checkpoint();
             match armed.kind.on_cancel() {
                 ToolEffect::Cancelled => self.say_info("cancelled."),
                 ToolEffect::Say(Kind::Error, text) => self.say_error(text),
                 ToolEffect::Say(_, text) => self.say_info(text),
                 other => unreachable!("on_cancel only returns Cancelled or Say, got {other:?}"),
+            }
+            if drops_checkpoint {
+                let page = self.tab().page;
+                if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
+                    layer.forget_last_step();
+                }
             }
         }
         self.cmd.escape()
@@ -14103,6 +15333,7 @@ impl eframe::App for PagifyApp {
             self.run(dispatch);
         }
     }
+
 }
 
 impl PagifyApp {
@@ -14265,27 +15496,7 @@ impl PagifyApp {
         //
         // Instead: the page's own colour behind, the run's own ink and size in
         // front, and the box kept off the words themselves.
-        let paper = egui::Color32::from_rgb(
-            edit.background.r,
-            edit.background.g,
-            edit.background.b,
-        );
-        let ink = edit
-            .style
-            .color
-            .filter(|c| c.a > 0)
-            .map(|c| egui::Color32::from_rgb(c.r, c.g, c.b))
-            .unwrap_or(egui::Color32::BLACK);
-
-        // See `run_editor_glyph_size`'s own doc for why this is not clamped
-        // to a fixed pixel range — reported from use as the preview's own
-        // scale changing as the page was zoomed in and out.
-        let glyph_size = run_editor_glyph_size(on_screen);
-        let font_id = if face_ready {
-            egui::FontId::new(glyph_size, egui::FontFamily::Name(RUN_FAMILY.into()))
-        } else {
-            egui::FontId::proportional(glyph_size)
-        };
+        let (paper, ink, font_id, glyph_size) = Self::run_editor_skin(edit, on_screen, face_ready);
         let id = egui::Id::new(("run-editor", page, edit.object));
 
         // **Typing past the run's own edge starts a new line, rather than
@@ -14335,64 +15546,15 @@ impl PagifyApp {
         // not once anything was retyped. Measuring however wide the
         // original words already need in this font, once, keeps that case
         // silent — wrapping only kicks in once typing pushes *past* that.
-        let original_last_line = edit.original.rsplit('\n').next().unwrap_or("");
-        let original_width = ui
-            .fonts_mut(|f| f.layout_no_wrap(original_last_line.to_string(), font_id.clone(), ink))
-            .size()
-            .x;
-        // A width the reader dragged the box to is the width, exactly: no
-        // floor at what the unedited words measured, or it could never be
-        // dragged narrower than the run it opened on.
-        let max_width = match edit.box_resize.width_pt {
-            Some(width_pt) => (width_pt * view.scale).max(1.0),
-            None => (base_screen_width * grow).max(original_width),
-        };
+        let max_width =
+            Self::run_editor_max_width(edit, ui, &font_id, ink, base_screen_width, grow, view.scale);
         // Resized since last frame: the lines are joined, then wrapped afresh to
         // the new width by the loop below. One byte each way (`\n` for ` `), so
         // the caret does not move.
         if std::mem::take(&mut edit.box_resize.reflow) && edit.lines.len() <= 1 {
             edit.buffer = edit.buffer.replace('\n', " ");
         }
-        if edit.lines.len() <= 1 {
-            for _ in 0..64 {
-                let last_start = edit.buffer.rfind('\n').map(|i| i + 1).unwrap_or(0);
-                let last_line = &edit.buffer[last_start..];
-                let last_width = ui
-                    .fonts_mut(|f| f.layout_no_wrap(last_line.to_string(), font_id.clone(), ink))
-                    .size()
-                    .x;
-                if last_width <= max_width {
-                    break;
-                }
-                let tokens: Vec<&str> = last_line.split_inclusive(' ').collect();
-                if tokens.len() < 2 {
-                    break;
-                }
-                let mut acc_len = 0usize;
-                let mut break_at = None;
-                for (i, token) in tokens.iter().enumerate() {
-                    let candidate = &last_line[..acc_len + token.len()];
-                    let candidate_width = ui
-                        .fonts_mut(|f| {
-                            f.layout_no_wrap(candidate.trim_end().to_string(), font_id.clone(), ink)
-                        })
-                        .size()
-                        .x;
-                    if candidate_width > max_width && i > 0 {
-                        break_at = Some(acc_len);
-                        break;
-                    }
-                    acc_len += token.len();
-                }
-                let Some(break_at) = break_at else { break };
-                let insert_at = last_start + break_at;
-                if edit.buffer.as_bytes().get(insert_at.wrapping_sub(1)) == Some(&b' ') {
-                    edit.buffer.replace_range(insert_at - 1..insert_at, "\n");
-                } else {
-                    edit.buffer.insert(insert_at, '\n');
-                }
-            }
-        }
+        Self::wrap_typed_last_line(edit, ui, &font_id, ink, max_width);
 
         // **Wide enough for what is actually typed, not just what the run
         // started at.** Ordinarily `max_width` above already keeps every
@@ -14400,11 +15562,7 @@ impl PagifyApp {
         // just above that deliberately overflows instead of cutting a word
         // in half. Reported from use, before wrapping existed at all, as
         // text cut off at the box's own edge.
-        let text_width = edit
-            .buffer
-            .split('\n')
-            .map(|line| ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), font_id.clone(), ink)).size().x)
-            .fold(0.0f32, f32::max);
+        let text_width = Self::run_editor_text_width(edit, ui, &font_id, ink);
         let width = max_width.max(text_width + 8.0);
         // **As tall as the lines it holds.** The first line stays where the run
         // is and the others fall below it, so the box grows downwards — it used
@@ -14576,6 +15734,136 @@ impl PagifyApp {
         // says "apply this" — reported from use. Escape still leaves
         // whatever was typed here alone.
     }
+
+
+/// Wrap the editor buffer's own last line at the widest word gap that still
+/// fits `max_width`, up to 64 times. Correct only for a single-run editor —
+/// see the full reasoning in `draw_run_editor`'s own comments — and kept
+/// here so the drawing function is about the box, not the buffer.
+fn wrap_typed_last_line(
+    edit: &mut EditingRun,
+    ui: &mut egui::Ui,
+    font_id: &egui::FontId,
+    ink: egui::Color32,
+    max_width: f32,
+) {
+        if edit.lines.len() <= 1 {
+            for _ in 0..64 {
+                let last_start = edit.buffer.rfind('\n').map(|i| i + 1).unwrap_or(0);
+                let last_line = &edit.buffer[last_start..];
+                let last_width = ui
+                    .fonts_mut(|f| f.layout_no_wrap(last_line.to_string(), font_id.clone(), ink))
+                    .size()
+                    .x;
+                if last_width <= max_width {
+                    break;
+                }
+                let tokens: Vec<&str> = last_line.split_inclusive(' ').collect();
+                if tokens.len() < 2 {
+                    break;
+                }
+                let mut acc_len = 0usize;
+                let mut break_at = None;
+                for (i, token) in tokens.iter().enumerate() {
+                    let candidate = &last_line[..acc_len + token.len()];
+                    let candidate_width = ui
+                        .fonts_mut(|f| {
+                            f.layout_no_wrap(candidate.trim_end().to_string(), font_id.clone(), ink)
+                        })
+                        .size()
+                        .x;
+                    if candidate_width > max_width && i > 0 {
+                        break_at = Some(acc_len);
+                        break;
+                    }
+                    acc_len += token.len();
+                }
+                let Some(break_at) = break_at else { break };
+                let insert_at = last_start + break_at;
+                if edit.buffer.as_bytes().get(insert_at.wrapping_sub(1)) == Some(&b' ') {
+                    edit.buffer.replace_range(insert_at - 1..insert_at, "\n");
+                } else {
+                    edit.buffer.insert(insert_at, '\n');
+                }
+            }
+        }
+}
+
+
+    /// The skin values the run editor draws with: the page's own paper colour
+    /// behind, the run's own ink in front, the font the buffer is set in — the
+    /// run's embedded face where one is ready, the program's own proportional
+    /// font otherwise — and the on-screen glyph size the fallback face uses.
+    fn run_editor_skin(
+        edit: &EditingRun,
+        on_screen: f32,
+        face_ready: bool,
+    ) -> (egui::Color32, egui::Color32, egui::FontId, f32) {
+        let paper = egui::Color32::from_rgb(
+            edit.background.r,
+            edit.background.g,
+            edit.background.b,
+        );
+        let ink = edit
+            .style
+            .color
+            .filter(|c| c.a > 0)
+            .map(|c| egui::Color32::from_rgb(c.r, c.g, c.b))
+            .unwrap_or(egui::Color32::BLACK);
+
+        // See `run_editor_glyph_size`'s own doc for why this is not clamped
+        // to a fixed pixel range — reported from use as the preview's own
+        // scale changing as the page was zoomed in and out.
+        let glyph_size = run_editor_glyph_size(on_screen);
+        let font_id = if face_ready {
+            egui::FontId::new(glyph_size, egui::FontFamily::Name(RUN_FAMILY.into()))
+        } else {
+            egui::FontId::proportional(glyph_size)
+        };
+        (paper, ink, font_id, glyph_size)
+    }
+
+    /// The widest of the buffer's own lines, measured as it will be drawn.
+    fn run_editor_text_width(
+        edit: &EditingRun,
+        ui: &mut egui::Ui,
+        font_id: &egui::FontId,
+        ink: egui::Color32,
+    ) -> f32 {
+        edit.buffer
+            .split('\n')
+            .map(|line| ui.fonts_mut(|f| f.layout_no_wrap(line.to_string(), font_id.clone(), ink)).size().x)
+            .fold(0.0f32, f32::max)
+    }
+
+    /// How wide the box is allowed to get: an explicit resize wins, otherwise
+    /// the run's own measured width — see the comments this moved away from
+    /// in `draw_run_editor` for why it grows with the size slider.
+    fn run_editor_max_width(
+        edit: &EditingRun,
+        ui: &mut egui::Ui,
+        font_id: &egui::FontId,
+        ink: egui::Color32,
+        base_screen_width: f32,
+        grow: f32,
+        view_scale: f32,
+    ) -> f32 {
+        let original_last_line = edit.original.rsplit('\n').next().unwrap_or("");
+        let original_width = ui
+            .fonts_mut(|f| f.layout_no_wrap(original_last_line.to_string(), font_id.clone(), ink))
+            .size()
+            .x;
+        // A width the reader dragged the box to is the width, exactly: no
+        // floor at what the unedited words measured, or it could never be
+        // dragged narrower than the run it opened on.
+        let max_width = match edit.box_resize.width_pt {
+            Some(width_pt) => (width_pt * view_scale).max(1.0),
+            None => (base_screen_width * grow).max(original_width),
+        };
+        max_width
+    }
+
+
 
     /// The box [`Self::begin_text_box`] opened, being typed into.
     ///
@@ -15196,128 +16484,6 @@ fn clear_paper_around(rgba: &mut [u8], width: usize, height: usize) {
             stack.push(i + width);
         }
     }
-}
-
-/// The size the run editor draws its words at — the size they are *drawn*,
-/// not the number in the file. Plenty of producers write `1 Tf` and put the
-/// real size in the text matrix — `pdf_core` already knows that, and says so
-/// where `TJ` displacements are scaled — so the box a run occupies, not its
-/// nominal size, is the fallback: taking the nominal size put the editor at
-/// one point and the words came out as a whisper. Ink is most of an em.
-///
-/// **One line's worth of that box, not the whole thing.** `box_height` is
-/// the *union* of every line for a paragraph — see `EditingRun::lines` —
-/// and a font the height of eight stacked lines is not "the size the words
-/// are drawn", it is eight of them stacked and then some. Reported from
-/// use: opening a paragraph filled the screen with enormous type, wrapping
-/// mid-word because nothing that large could fit the box's own width
-/// either.
-///
-/// **`em_ratio`, when it is known, replaces the fixed `0.92` guess.** That
-/// constant fits no particular face especially well — a font with deep
-/// descenders and one with almost none do not turn a box height into a
-/// point size by the same fraction. `em_ratio` is a specific font's own
-/// `(ascent - descent) / 1000`, from [`PagifyApp::editor_face_metrics`], so
-/// the fallback divides by what this face actually is rather than an
-/// average of every face. `None` keeps the old constant — the program's own
-/// substitute font, whose metrics were never asked for.
-fn run_editor_font_size(
-    box_height: f32,
-    line_count: usize,
-    requested_size: f32,
-    view_scale: f32,
-    em_ratio: Option<f32>,
-) -> f32 {
-    // A bare epsilon, not a readable pixel size — see `draw_run_editor`'s own
-    // `base_screen_height` doc for why a floor here has to stay far below
-    // anything a real zoom level would reach: a bigger one would make the
-    // choice between `nominal` and this fallback flip at some zoom purely
-    // because the floor stopped `per_line` shrinking while `nominal` kept
-    // shrinking, not because either genuinely changed size.
-    let per_line = (box_height.max(0.5)) / line_count.max(1) as f32;
-    let nominal = requested_size * view_scale;
-    if nominal >= per_line * 0.5 {
-        return nominal;
-    }
-    match em_ratio {
-        Some(ratio) if ratio > 0.05 => per_line / ratio,
-        _ => per_line * 0.92,
-    }
-}
-
-/// How much bigger — or smaller — than the run's own opening size the run
-/// editor's box should draw itself right now, given the screen size that
-/// size drew at (`base_on_screen`) and what the *current* `Size` control
-/// draws at (`current_on_screen`). `1.0` when nothing has changed.
-///
-/// **Reported from use: "it locked in a text box, so i cant see the actual
-/// scale it will be once i increase the font size."** `draw_run_editor`
-/// already tracked the Size slider live for the font drawn *inside* the
-/// box; the box itself stayed pinned to whatever rectangle the run measured
-/// when the editor opened, so a bigger size only ever crowded or overflowed
-/// that fixed frame. This is the ratio `draw_run_editor` now scales both of
-/// the box's own screen dimensions by, so growing the size is something a
-/// person watches happen rather than discovers after applying it.
-///
-/// Clamped well short of where a screen coordinate would misbehave — a size
-/// of literally zero, or a division by a `base_on_screen` rounded to
-/// nothing, must shrink or grow the box, never collapse or explode it.
-fn run_editor_box_grow(base_on_screen: f32, current_on_screen: f32) -> f32 {
-    (current_on_screen / base_on_screen.max(1.0)).clamp(0.1, 20.0)
-}
-
-/// The screen-pixel size the run editor actually draws its glyphs at, given
-/// what [`run_editor_font_size`] computed for the current zoom.
-///
-/// **Deliberately not clamped to a fixed pixel range.** `on_screen` is
-/// already exactly proportional to `view.scale` — the same zoom that shrinks
-/// and grows everything else on the page — and a floor or a ceiling on top
-/// of that breaks exactly that proportionality the moment either end of it
-/// is reached: the rest of the page keeps scaling with the zoom and this
-/// stops, so the editor visibly grows or shrinks *relative* to the page
-/// instead of staying the one size it always was next to it. Reported from
-/// use as the preview's own scale changing as the page was zoomed in and
-/// out. A page's own text has no such floor either — at extreme zoom it
-/// gets exactly as small or as large as the arithmetic says, and this now
-/// matches it. Only a hard floor far below anything a zoom level would
-/// plausibly reach, so a literal zero can never reach `FontId`.
-fn run_editor_glyph_size(on_screen: f32) -> f32 {
-    on_screen.max(0.5)
-}
-
-
-
-/// Splits `text` into the stretches the document's own face can draw and the
-/// stretches it cannot, as `(byte range, drawable)` pairs that tile the whole
-/// string in order. `covered` says whether the face has ink for a character.
-///
-/// **Whitespace is always drawable.** Every face maps a space to an empty
-/// glyph, so "has ink" would send each space to the fallback face and chop a
-/// line into a section per word; a space belongs to whichever section it
-/// sits in the middle of, and to the document's own face between two
-/// uncovered letters.
-///
-/// **Why this exists — reported from use, with a screenshot: a paragraph
-/// opened in the document's own face came up with letters missing, and the
-/// heading it began with was bold besides.** The face installed for the
-/// editor is the document's embedded *subset*, which keeps its whole `cmap`
-/// and every advance width but has no outline for a letter the page never
-/// drew in that face — on one real datasheet a heading's subset has none for
-/// b, f, j, k, q or z. egui finds such a letter in the document's face, draws
-/// the empty glyph, and never reaches the fallback face behind it in the
-/// family. So those letters are laid out in a separate section, in the
-/// fallback face, and the rest stays in the document's.
-fn editor_sections(text: &str, covered: &dyn Fn(char) -> bool) -> Vec<(std::ops::Range<usize>, bool)> {
-    let mut sections: Vec<(std::ops::Range<usize>, bool)> = Vec::new();
-    for (at, c) in text.char_indices() {
-        let drawable = c.is_whitespace() || covered(c);
-        let end = at + c.len_utf8();
-        match sections.last_mut() {
-            Some((range, was)) if *was == drawable => range.end = end,
-            _ => sections.push((at..end, drawable)),
-        }
-    }
-    sections
 }
 
 /// Appends `piece` to `job` in the document's face (`doc`), except for the

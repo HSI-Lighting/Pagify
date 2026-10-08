@@ -1,14 +1,14 @@
 //! The canvas: the page strip itself (`draw_pages`), everything drawn over a
-//! page (selection outlines, lock badges, the pending-tool preview, move
+//! page (selection outlines, lock badges, the armed-tool preview, move
 //! guides), and the pointer handling for the object tool, a placed
 //! signature, and a placed picture — the review's `canvas.rs`.
 
 use crate::overlay::{self, PageView};
 use crate::theme;
 use crate::{
-    icon_font, raster_scale, reveal_axis, short, view_height, Awaiting, Grab, Handle, OrganizeDrag,
-    PlacedImageSelected, Reveal, SignatureSelected, Tab, Tool, ToolEffect, ZoomMode, GRID_GAP_PT,
-    HANDLE_PX, ORGANIZE_GRID_PANEL, ROTATE_HANDLE_PX,
+    icon_font, raster_scale, reveal_axis, short, view_height, Awaiting, Grab, Handle,
+    OrganizeDrag, PlacedImageSelected, Reveal, SignatureSelected, Tab, Tool, ToolEffect, ZoomMode,
+    GRID_GAP_PT, HANDLE_PX, ORGANIZE_GRID_PANEL, ROTATE_HANDLE_PX,
 };
 use pagify_shell::command::Kind;
 use pagify_shell::markup::HIT_TOLERANCE_PT;
@@ -766,106 +766,9 @@ impl crate::PagifyApp {
         // left of it is exactly what the scroll area gets.
         let viewport = ui.available_rect_before_wrap();
         let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| viewport.contains(*p));
-        if let Some(p) = pointer {
-            // egui folds ⌘/Ctrl-scroll and a trackpad pinch into the same
-            // number, which is right: they are one gesture with two spellings.
-            let factor = ui.input(|i| i.zoom_delta());
-            if (factor - 1.0).abs() > 0.001 {
-                let before = zoom;
-                let after = (before * factor).clamp(0.05, Self::MAX_ZOOM);
-                if (after - before).abs() > f32::EPSILON {
-                    // Anchored against where the page **was actually drawn**,
-                    // not against a model of where it ought to be.
-                    //
-                    // Reconstructing the content position from the viewport,
-                    // the scroll offset and the strip padding means encoding
-                    // the layout twice, and any term missed from the copy shows
-                    // up as the page creeping away from the cursor — which it
-                    // did, vertically, by a different amount at every scale.
-                    // `last_view` is the mapping the previous frame really
-                    // used, so there is nothing left to get wrong.
-                    // The page under the pointer, or the current one when the
-                    // pointer is beside the page rather than on it — the strip
-                    // is wider than the paper.
-                    let anchor_on =
-                        self.tab_mut().hover_view.or_else(|| self.tab_mut().last_view.map(|v| (self.tab_mut().page, v)));
-                    if let Some((index, view)) = anchor_on {
-                        // Where this page sits in the strip, in strip points.
-                        //
-                        // This is the term the anchor was missing. A page's
-                        // origin on screen is
-                        //
-                        //     viewport - offset + padding + strip_position * zoom
-                        //
-                        // so changing the zoom moves it **even at a fixed
-                        // offset**, by `strip_position * (after - before)`.
-                        // Correcting only for the offset leaves exactly that
-                        // much error, and it grows with distance down the
-                        // document: on the first page `strip_position` is zero
-                        // and the anchor looks perfect, which is why every
-                        // single-page test passed while a catalogue slid 200pt.
-                        let (sx, sy) = self.tab_mut()
-                            .doc
-                            .as_ref()
-                            .map(|d| {
-                                let (w, _) = d.strip.frame_of(index).unwrap_or((0.0, 0.0));
-                                (
-                                    d.strip
-                                        .left_of(index)
-                                        .unwrap_or((d.strip.width_pt() - w) / 2.0),
-                                    d.strip.top_of(index).unwrap_or(0.0),
-                                )
-                            })
-                            .unwrap_or((0.0, 0.0));
+        zoom = self.zoom_at_pointer(ui, pointer, zoom);
 
-                        // `before`/`after` are the *logical* factor — right
-                        // for `ZoomMode::Factor` just below, wrong here:
-                        // `origin_after`/`with_strip` place things on screen,
-                        // which is `view`'s own job, and `view.scale` is
-                        // already the on-screen value `DISPLAY_DPI_SCALE`
-                        // produces. Found by this exact anchor test failing
-                        // once that correction landed — mixing a logical
-                        // factor into on-screen arithmetic held the wrong
-                        // point still, by exactly the 96/72 the two disagree
-                        // by.
-                        let (before_screen, after_screen) =
-                            (before * Self::DISPLAY_DPI_SCALE, after * Self::DISPLAY_DPI_SCALE);
-                        let on_page = view.to_page(p);
-                        let origin_after = egui::vec2(
-                            p.x - on_page.x as f32 * after_screen,
-                            p.y - on_page.y as f32 * after_screen,
-                        );
-                        let moved = view.origin.to_vec2() - origin_after;
-                        let with_strip = egui::vec2(sx, sy) * (after_screen - before_screen);
-                        self.tab_mut().anchor_offset = Some(self.tab_mut().scroll_offset + moved + with_strip);
-                    }
-                    self.tab_mut().zoom = ZoomMode::Factor(after);
-                    zoom = after;
-
-                    // The gesture belongs to the zoom. Left in place, the same
-                    // wheel also scrolls the strip, and the two fight for the
-                    // offset every frame — which reads as the page shuddering
-                    // rather than zooming.
-                    ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
-                }
-            }
-        }
-
-        // When the zoom last changed, which is what a new render waits on — see
-        // [`ZOOM_SETTLE_SECS`]. Watched on the zoom itself rather than on the
-        // events that move it, so a wheel, a pinch, a button and a window being
-        // dragged while the page fits it all count alike. And collected here,
-        // before anything asks for a texture, so one that has just come back is
-        // used this frame.
-        {
-            let now = ctx.input(|i| i.time);
-            let tab = self.tab_mut();
-            if (tab.last_drawn_zoom - zoom).abs() > 1e-4 {
-                tab.last_drawn_zoom = zoom;
-                tab.zoom_changed_at = now;
-            }
-        }
-        self.collect_renders(ctx);
+        self.note_zoom_and_collect_renders(ctx, zoom);
 
         // Every use of `zoom` above this line needed the *logical* value —
         // the pinch handling just above reads and writes `ZoomMode::Factor`
@@ -882,74 +785,8 @@ impl crate::PagifyApp {
         let mut area =
             egui::ScrollArea::both().id_salt(("pages", scroll_id)).auto_shrink([false, false]);
         // Whether this frame dictated the offset rather than observing it.
-        let mut forced: Option<egui::Vec2> = None;
-        if let Some(by) = self.tab_mut().pan_by.take() {
-            // Clamped to what can actually be scrolled to.
-            //
-            // Without the upper bound the offset keeps growing past the end of
-            // the document while the drag continues; the scroll area clamps
-            // what it draws, and the accumulated excess springs back the moment
-            // the drag reverses. That is the bounce at the edges.
-            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
-            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let to = (self.tab_mut().scroll_offset + by).clamp(egui::Vec2::ZERO, room);
-            forced = Some(to);
-            area = area.scroll_offset(to);
-        } else if let Some(Reveal { page, rect }) = self.tab_mut().reveal.take() {
-            // A word to show, not a page: scrolled just far enough, on both
-            // axes, and never by a change of zoom. `go_to` asked for the page's
-            // top along with it — that is what a word in the first screenful
-            // settles for, and the request is taken here, or it would fire a
-            // frame late and undo this.
-            let page_top = self.tab_mut().scroll_to_pt.take();
-            self.tab_mut().anchor_offset = None;
-            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
-            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let at = self.tab().scroll_offset;
-            let place = self.tab().doc.as_ref().and_then(|d| Some((d.strip.left_of(page)?, d.strip.top_of(page)?)));
-            let to = match place {
-                Some((left, top)) => {
-                    // Content pixels, from the content's own origin: the
-                    // strip's padding, then the page, then the word on it.
-                    let pad = STRIP_PAD_PX;
-                    let (x0, x1) = (pad + (left + rect.left) * zoom, pad + (left + rect.right) * zoom);
-                    let (y0, y1) = (pad + (top + rect.top) * zoom, pad + (top + rect.bottom) * zoom);
-                    // `at` was measured at last frame's zoom, which Fit and
-                    // Width change with the page. No matter: the word's own
-                    // extent is at *this* zoom, so a window that holds it
-                    // holds it, and the answer is clamped to the new end.
-                    egui::vec2(
-                        reveal_axis(at.x, viewport.width(), room.x, x0, x1, None),
-                        reveal_axis(at.y, viewport.height(), room.y, y0, y1, page_top.map(|y| y * zoom)),
-                    )
-                }
-                None => egui::vec2(at.x, page_top.map_or(at.y, |y| y * zoom)),
-            };
-            forced = Some(to);
-            area = area.scroll_offset(to);
-        } else if let Some(y) = self.tab_mut().scroll_to_pt.take() {
-            // 12.0 is the strip's top padding, the same constant the page
-            // origins are laid out from.
-            area = area.scroll_offset(egui::vec2(self.tab_mut().scroll_offset.x, y * zoom));
-        } else if let Some(offset) = self.tab_mut().anchor_offset.take() {
-            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
-            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let to = offset.clamp(egui::Vec2::ZERO, room);
-            forced = Some(to);
-            area = area.scroll_offset(to);
-        } else if let Some(to) = {
-            // Nothing asked to go anywhere, but the zoom, the window or the
-            // pages are not what they were last frame: keep the reader at the
-            // same place on the page rather than at the same pixel offset.
-            let tab = self.tab();
-            tab.view.zip(tab.doc.as_ref()).and_then(|(seen, doc)| {
-                seen.restored(&doc.strip, zoom, (viewport.width(), viewport.height()))
-            })
-        } {
-            let to = egui::vec2(to.0, to.1);
-            forced = Some(to);
-            area = area.scroll_offset(to);
-        }
+        let (area, forced) =
+            self.take_forced_scroll(area, viewport, zoom, strip_width, strip_height);
         let scroll = area
             .show(ui, |ui| {
                 let content =
@@ -1132,7 +969,7 @@ impl crate::PagifyApp {
                                 armed.page = page;
                             }
                         }
-                        let owns = self.tab_mut().tool.as_ref().map_or(true, |t| t.page == page);
+                        let owns = self.tab_mut().tool.as_ref().map_or(true, |p| p.page == page);
                         if owns {
                             self.interact(ui, rect, view, page, command_id);
                         }
@@ -1170,6 +1007,223 @@ impl crate::PagifyApp {
                 visible
             });
 
+        let _ = forced;
+        self.settle_strip_after_scroll(
+            ctx, zoom, page_count, scroll.state.offset, scroll.inner_rect, &scroll.inner,
+        );
+    }
+
+    /// Zoom at the pointer: the point under the cursor stays under it, and
+    /// the scroll offset is anchored to it rather than to the middle of the
+    /// window — see the comments this moved away from in `draw_pages`.
+    /// Returns the (possibly corrected) zoom for the rest of the frame.
+    fn zoom_at_pointer(
+        &mut self,
+        ui: &mut egui::Ui,
+        pointer: Option<egui::Pos2>,
+        mut zoom: f32,
+    ) -> f32 {
+        if let Some(p) = pointer {
+            // egui folds ⌘/Ctrl-scroll and a trackpad pinch into the same
+            // number, which is right: they are one gesture with two spellings.
+            let factor = ui.input(|i| i.zoom_delta());
+            if (factor - 1.0).abs() > 0.001 {
+                let before = zoom;
+                let after = (before * factor).clamp(0.05, Self::MAX_ZOOM);
+                if (after - before).abs() > f32::EPSILON {
+                    // Anchored against where the page **was actually drawn**,
+                    // not against a model of where it ought to be.
+                    //
+                    // Reconstructing the content position from the viewport,
+                    // the scroll offset and the strip padding means encoding
+                    // the layout twice, and any term missed from the copy shows
+                    // up as the page creeping away from the cursor — which it
+                    // did, vertically, by a different amount at every scale.
+                    // `last_view` is the mapping the previous frame really
+                    // used, so there is nothing left to get wrong.
+                    // The page under the pointer, or the current one when the
+                    // pointer is beside the page rather than on it — the strip
+                    // is wider than the paper.
+                    let anchor_on =
+                        self.tab_mut().hover_view.or_else(|| self.tab_mut().last_view.map(|v| (self.tab_mut().page, v)));
+                    if let Some((index, view)) = anchor_on {
+                        // Where this page sits in the strip, in strip points.
+                        //
+                        // This is the term the anchor was missing. A page's
+                        // origin on screen is
+                        //
+                        //     viewport - offset + padding + strip_position * zoom
+                        //
+                        // so changing the zoom moves it **even at a fixed
+                        // offset**, by `strip_position * (after - before)`.
+                        // Correcting only for the offset leaves exactly that
+                        // much error, and it grows with distance down the
+                        // document: on the first page `strip_position` is zero
+                        // and the anchor looks perfect, which is why every
+                        // single-page test passed while a catalogue slid 200pt.
+                        let (sx, sy) = self.tab_mut()
+                            .doc
+                            .as_ref()
+                            .map(|d| {
+                                let (w, _) = d.strip.frame_of(index).unwrap_or((0.0, 0.0));
+                                (
+                                    d.strip
+                                        .left_of(index)
+                                        .unwrap_or((d.strip.width_pt() - w) / 2.0),
+                                    d.strip.top_of(index).unwrap_or(0.0),
+                                )
+                            })
+                            .unwrap_or((0.0, 0.0));
+
+                        // `before`/`after` are the *logical* factor — right
+                        // for `ZoomMode::Factor` just below, wrong here:
+                        // `origin_after`/`with_strip` place things on screen,
+                        // which is `view`'s own job, and `view.scale` is
+                        // already the on-screen value `DISPLAY_DPI_SCALE`
+                        // produces. Found by this exact anchor test failing
+                        // once that correction landed — mixing a logical
+                        // factor into on-screen arithmetic held the wrong
+                        // point still, by exactly the 96/72 the two disagree
+                        // by.
+                        let (before_screen, after_screen) =
+                            (before * Self::DISPLAY_DPI_SCALE, after * Self::DISPLAY_DPI_SCALE);
+                        let on_page = view.to_page(p);
+                        let origin_after = egui::vec2(
+                            p.x - on_page.x as f32 * after_screen,
+                            p.y - on_page.y as f32 * after_screen,
+                        );
+                        let moved = view.origin.to_vec2() - origin_after;
+                        let with_strip = egui::vec2(sx, sy) * (after_screen - before_screen);
+                        self.tab_mut().anchor_offset = Some(self.tab_mut().scroll_offset + moved + with_strip);
+                    }
+                    self.tab_mut().zoom = ZoomMode::Factor(after);
+                    zoom = after;
+
+                    // The gesture belongs to the zoom. Left in place, the same
+                    // wheel also scrolls the strip, and the two fight for the
+                    // offset every frame — which reads as the page shuddering
+                    // rather than zooming.
+                    ui.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                }
+            }
+        }
+        zoom
+    }
+
+
+    /// The scroll offset this frame has been told to take — a pan, a reveal,
+    /// a scroll-to, a zoom anchor or a restored view — applied to the scroll
+    /// area. Returns the area and the offset it dictated, if any; the
+    /// comments this moved away from in `draw_pages` explain each branch.
+    fn take_forced_scroll(
+        &mut self,
+        mut area: egui::ScrollArea,
+        viewport: egui::Rect,
+        zoom: f32,
+        strip_width: f32,
+        strip_height: f32,
+    ) -> (egui::ScrollArea, Option<egui::Vec2>) {
+        let mut forced: Option<egui::Vec2> = None;
+        if let Some(by) = self.tab_mut().pan_by.take() {
+            // Clamped to what can actually be scrolled to.
+            //
+            // Without the upper bound the offset keeps growing past the end of
+            // the document while the drag continues; the scroll area clamps
+            // what it draws, and the accumulated excess springs back the moment
+            // the drag reverses. That is the bounce at the edges.
+            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
+            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
+            let to = (self.tab_mut().scroll_offset + by).clamp(egui::Vec2::ZERO, room);
+            forced = Some(to);
+            area = area.scroll_offset(to);
+        } else if let Some(Reveal { page, rect }) = self.tab_mut().reveal.take() {
+            // A word to show, not a page: scrolled just far enough, on both
+            // axes, and never by a change of zoom. `go_to` asked for the page's
+            // top along with it — that is what a word in the first screenful
+            // settles for, and the request is taken here, or it would fire a
+            // frame late and undo this.
+            let page_top = self.tab_mut().scroll_to_pt.take();
+            self.tab_mut().anchor_offset = None;
+            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
+            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
+            let at = self.tab().scroll_offset;
+            let place = self.tab().doc.as_ref().and_then(|d| Some((d.strip.left_of(page)?, d.strip.top_of(page)?)));
+            let to = match place {
+                Some((left, top)) => {
+                    // Content pixels, from the content's own origin: the
+                    // strip's padding, then the page, then the word on it.
+                    let pad = STRIP_PAD_PX;
+                    let (x0, x1) = (pad + (left + rect.left) * zoom, pad + (left + rect.right) * zoom);
+                    let (y0, y1) = (pad + (top + rect.top) * zoom, pad + (top + rect.bottom) * zoom);
+                    // `at` was measured at last frame's zoom, which Fit and
+                    // Width change with the page. No matter: the word's own
+                    // extent is at *this* zoom, so a window that holds it
+                    // holds it, and the answer is clamped to the new end.
+                    egui::vec2(
+                        reveal_axis(at.x, viewport.width(), room.x, x0, x1, None),
+                        reveal_axis(at.y, viewport.height(), room.y, y0, y1, page_top.map(|y| y * zoom)),
+                    )
+                }
+                None => egui::vec2(at.x, page_top.map_or(at.y, |y| y * zoom)),
+            };
+            forced = Some(to);
+            area = area.scroll_offset(to);
+        } else if let Some(y) = self.tab_mut().scroll_to_pt.take() {
+            // 12.0 is the strip's top padding, the same constant the page
+            // origins are laid out from.
+            area = area.scroll_offset(egui::vec2(self.tab_mut().scroll_offset.x, y * zoom));
+        } else if let Some(offset) = self.tab_mut().anchor_offset.take() {
+            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
+            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
+            let to = offset.clamp(egui::Vec2::ZERO, room);
+            forced = Some(to);
+            area = area.scroll_offset(to);
+        } else if let Some(to) = {
+            // Nothing asked to go anywhere, but the zoom, the window or the
+            // pages are not what they were last frame: keep the reader at the
+            // same place on the page rather than at the same pixel offset.
+            let tab = self.tab();
+            tab.view.zip(tab.doc.as_ref()).and_then(|(seen, doc)| {
+                seen.restored(&doc.strip, zoom, (viewport.width(), viewport.height()))
+            })
+        } {
+            let to = egui::vec2(to.0, to.1);
+            forced = Some(to);
+            area = area.scroll_offset(to);
+        }
+        (area, forced)
+    }
+
+
+    /// Note when the zoom last changed — what a new render waits on, see
+    /// [`ZOOM_SETTLE_SECS`] — and collect whatever renders have come back.
+    /// The comment above the call site in `draw_pages` explains why it is
+    /// watched on the zoom itself rather than on the events that move it.
+    fn note_zoom_and_collect_renders(&mut self, ctx: &egui::Context, zoom: f32) {
+        let now = ctx.input(|i| i.time);
+        let tab = self.tab_mut();
+        if (tab.last_drawn_zoom - zoom).abs() > 1e-4 {
+            tab.last_drawn_zoom = zoom;
+            tab.zoom_changed_at = now;
+        }
+        self.collect_renders(ctx);
+    }
+
+    /// Prefetch the neighbouring pages and evict rasters for the ones the
+    /// reader has scrolled away from, then record where the strip ended up.
+    ///
+    /// Observed, not the value asked for — the next zoom anchors from it, and
+    /// mixing an intended offset with an observed origin makes the page slide
+    /// away as you zoom.
+    fn settle_strip_after_scroll(
+        &mut self,
+        ctx: &egui::Context,
+        zoom: f32,
+        page_count: usize,
+        offset: egui::Vec2,
+        inner_rect: egui::Rect,
+        visible: &std::ops::Range<usize>,
+    ) {
         // Prefetch the neighbours, so a scroll onto them is a copy rather than a
         // render. One per frame: the point is to be ready, not to stall now.
         // Where the strip ended up, so the next zoom can anchor from it.
@@ -1179,21 +1233,19 @@ impl crate::PagifyApp {
         // the page was *actually drawn* this frame. Mixing an intended offset
         // with an observed origin means the two describe different moments, and
         // the difference accumulates into the page sliding away as you zoom.
-        let _ = forced;
-        self.tab_mut().scroll_offset = scroll.state.offset;
-        self.tab_mut().viewport_rect = Some(scroll.inner_rect);
+        self.tab_mut().scroll_offset = offset;
+        self.tab_mut().viewport_rect = Some(inner_rect);
         // Where the reader is looking now, for the next frame to compare with.
         let seen = self.tab().doc.as_ref().and_then(|doc| {
             pagify_shell::reader::ViewSnapshot::capture(
                 &doc.strip,
                 zoom,
-                (scroll.inner_rect.width(), scroll.inner_rect.height()),
-                (scroll.state.offset.x, scroll.state.offset.y),
+                (inner_rect.width(), inner_rect.height()),
+                (offset.x, offset.y),
             )
         });
         self.tab_mut().view = seen;
-        let visible = scroll.inner;
-        if let Some(target) = prefetch_targets(&visible, page_count, 2).first().copied() {
+                if let Some(target) = prefetch_targets(visible, page_count, 2).first().copied() {
             // The same quantised scale the draw uses. Prefetching at the raw
             // zoom would warm a texture the next frame does not ask for.
             let device_scale = raster_scale(zoom * ctx.pixels_per_point());
@@ -1230,12 +1282,6 @@ impl crate::PagifyApp {
         view: PageView,
         hover: Option<egui::Pos2>,
     ) {
-        // A signature previews before any point is placed — placing one is
-        // a single click, unlike every other tool here, which needs at
-        // least a first point down before there is anything to draw a
-        // rubber band from. Without this, the only way to know how much of
-        // the page a signature would cover was to place it and look.
-        // `PlaceImage` has never previewed — nothing to draw before its one
         // click either. `PlaceText` previews a rubber-band box once its
         // first corner is down.
         //
@@ -1492,8 +1538,8 @@ impl crate::PagifyApp {
                 } else if let Some(spot) = response.interact_pointer_pos() {
                     let at = view.to_page(spot);
                     self.arm_tool(Tool::PickText, page);
-                    if let Some(armed) = self.tab_mut().tool.as_mut() {
-                        armed.points.push(at);
+                    if let Some(p) = self.tab_mut().tool.as_mut() {
+                        p.points.push(at);
                     }
                     self.resolve_tool();
                     answered_above = true;
@@ -1501,237 +1547,7 @@ impl crate::PagifyApp {
             }
         }
 
-        // Right-click, which is where a reader looks for Copy first.
-        //
-        // **Before the early return, not after it.** Moving the pointer towards
-        // the menu takes it off the page, so the page stops being hovered, so
-        // the function returned before re-declaring the menu — and the menu
-        // vanished as you reached for it. A popup has to be offered on every
-        // frame it is open, including the frames where the pointer has left the
-        // widget that opened it.
-        // What the pointer is over, kept before the menu opens: a right-click
-        // is a press and a release, and the menu is built on a later frame than
-        // the one that knew where the pointer was.
-        if response.secondary_clicked() {
-            if let Some(spot) = response.interact_pointer_pos() {
-                let at = view.to_page(spot);
-                self.tab_mut().selected_image = self
-                    .images_on(page)
-                    .into_iter()
-                    .find(|i| {
-                        at.x >= i.rect.left as f64
-                            && at.x <= i.rect.right as f64
-                            && at.y >= i.rect.top as f64
-                            && at.y <= i.rect.bottom as f64
-                    })
-                    .map(|i| (page, i));
-                // Where the pointer was, kept for the menu built on a later
-                // frame — the same reason `selected_image` is kept.
-                self.tab_mut().right_clicked_at = Some((page, at));
-                // See `right_click_text_actions`'s own doc: computed once,
-                // here, rather than by the menu on every frame it is open.
-                self.tab_mut().right_click_text_actions = Some(self.compute_right_click_text_actions(page, at));
-            }
-        }
-
-        let over_text = self.tab_mut().text_selection.is_some() && page == self.tab_mut().selection_page;
-        let over_image = self.tab_mut().selected_image.as_ref().is_some_and(|(p, _)| *p == page);
-        // **Offered wherever the pointer is**, not only over a selection.
-        //
-        // It used to appear only over selected text or a picture, so a
-        // right-click on a panel, a rule or bare paper produced nothing at all
-        // — which is where somebody whose picture has gone behind something is
-        // most likely to be clicking. Reported from use as the layer option not
-        // being there.
-        if self.tab_mut().doc.is_some() {
-            response.context_menu(|ui| {
-                // A link under the right-click gets its own two actions,
-                // ahead of everything else here — asking whether to follow
-                // it or take it off is what a link's own menu is for, and
-                // "wherever the pointer is" (see below) already means a link
-                // is reached the same way any other page content is.
-                let link_here = self.tab_mut()
-                    .right_clicked_at
-                    .filter(|(p, _)| *p == page)
-                    .and_then(|(_, at)| self.foreign_at(page, at))
-                    .and_then(|n| self.link_uri_at(page, n).map(|uri| (n, uri)));
-                if let Some((n, uri)) = link_here {
-                    if ui.button(format!("Open {}", short(&uri))).clicked() {
-                        self.open_or_report_link(n, &uri);
-                        ui.close();
-                    }
-                    if ui.button("Remove the link").clicked() {
-                        self.remove_mark(n);
-                        ui.close();
-                    }
-                    ui.separator();
-                }
-                if over_text && ui.button("Copy").clicked() {
-                    self.tab_mut().copy_wanted = true;
-                    ui.close();
-                }
-
-                // Read from the cache the click itself filled in — see
-                // `right_click_text_actions`'s own doc for why this menu
-                // must never recompute these on its own account: it is
-                // rebuilt on every repaint of an open popup.
-                let actions_here = self.tab_mut()
-                    .right_clicked_at
-                    .filter(|(p, _)| *p == page)
-                    .and_then(|_| self.tab_mut().right_click_text_actions);
-
-                // A selection spanning more than one line or block can be
-                // declared one paragraph — see `join_selected_text`'s own
-                // doc for why this exists alongside the automatic
-                // heuristic rather than instead of it.
-                //
-                // **Shown disabled, not hidden, when it does not apply** —
-                // the same "Choose one above first" shape the layer buttons
-                // below already use. Reported from use: hiding it outright
-                // whenever the selection was too small to qualify made the
-                // feature itself unfindable — a selection covering only one
-                // run never showed so much as a hint that joining needed a
-                // bigger one.
-                if over_text {
-                    let joinable = actions_here.is_some_and(|a| a.joinable);
-                    if ui.add_enabled(joinable, egui::Button::new("Join into one paragraph")).clicked() {
-                        match self.join_selected_text() {
-                            Ok(message) => self.say_info(message),
-                            Err(e) => self.say_error(e),
-                        }
-                        ui.close();
-                    }
-                    if !joinable {
-                        ui.small("Select text spanning more than one line or block first.");
-                    }
-                }
-                // The other half of the same feature: undeclaring a join,
-                // wherever the right-click landed on one of its runs —
-                // not gated on a selection, since splitting one back apart
-                // is done by pointing at it, not by selecting it first.
-                let split_here = actions_here.and_then(|a| a.split_object);
-                if let Some(object) = split_here {
-                    if ui.button("Split the joined text").clicked() {
-                        self.split_group(page, object);
-                        self.say_info("split — these lines are edited on their own again.");
-                        ui.close();
-                    }
-                }
-                // Locking is a Protect operation, so it is offered where the
-                // Protect tools are rather than on every tab — the same reason
-                // the ribbon has tabs at all.
-                if self.tab_mut().ribbon == Tab::Protect {
-                    if over_image {
-                        if ui.button("🔒 Lock this image").clicked() {
-                            if let Some((page, image)) = self.tab_mut().selected_image.clone() {
-                                self.ask_or_reuse_passcode(
-                                    Awaiting::LockImage { page, object: image.object },
-                                    "type a passcode to lock this image with, or Escape to give up.",
-                                );
-                            }
-                            ui.close();
-                        }
-                    }
-                    if over_text && ui.button("🔒 Lock the selection").clicked() {
-                        self.lock_selection();
-                        ui.close();
-                    }
-                }
-
-                // **The drawing order, where somebody looks for it.** A picture
-                // that has gone behind a panel is not reachable from a ribbon
-                // button, because the thing to act on is the thing under the
-                // pointer.
-                ui.separator();
-                let spot = self.tab_mut().right_clicked_at.filter(|(p, _)| *p == page).map(|(_, at)| at);
-                if let Some(at) = spot {
-                    // **A lock badge is not a layer, and says so.** The
-                    // chequerboard over a locked picture reads as a grey panel,
-                    // and somebody trying to send it back was pointing at the
-                    // one thing on the page the drawing order cannot touch.
-                    let badge = self.locked_items_on(page).into_iter().find(|i| {
-                        at.x >= i.rect.left as f64
-                            && at.x <= i.rect.right as f64
-                            && at.y >= i.rect.top as f64
-                            && at.y <= i.rect.bottom as f64
-                    });
-                    if let Some(badge) = badge {
-                        ui.weak(if badge.is_area {
-                            "🔒 Locked words — not a layer. The padlock brings them back."
-                        } else if badge.stale {
-                            "🔒 A lock badge over a picture that was never taken off — `repairlocks` finishes it."
-                        } else {
-                            "🔒 A locked picture — not a layer. The padlock brings it back."
-                        });
-                        ui.separator();
-                    }
-                    let under = self.layers_under(page, at);
-                    if under.is_empty() {
-                        ui.weak("Nothing is drawn here.");
-                    } else {
-                        ui.weak("Layers here — topmost first");
-                        let listed: Vec<(usize, String, bool)> = under
-                            .iter()
-                            .take(8)
-                            .filter_map(|index| {
-                                self.tab_mut().doc.as_ref()
-                                    .and_then(|d| d.caches.layers.as_ref())
-                                    .and_then(|(_, l)| l.get(*index))
-                                    .map(|d| {
-                                        (
-                                            *index,
-                                            format!("{}  {}", d.kind.describe(), d.label),
-                                            !d.movable,
-                                        )
-                                    })
-                            })
-                            .collect();
-                        for (index, label, grouped) in listed {
-                            let picked = self.tab_mut().picked_layer == Some(index);
-                            let row = ui.selectable_label(
-                                picked,
-                                if grouped { format!("{label}   (in a group)") } else { label },
-                            );
-                            if row.clicked() {
-                                self.pick_layer(page, index);
-                                ui.close();
-                            }
-                        }
-                        ui.separator();
-                        // These act on what has been picked, so somebody can
-                        // choose the thing that is *behind* and raise that,
-                        // rather than the thing on top of it.
-                        let armed = self.tab_mut().picked_layer.is_some();
-                        for (label, to) in [
-                            ("\u{E5D8}  Move the picked one up", pdf_core::document::Stacking::Up),
-                            ("\u{E5DB}  Move the picked one down", pdf_core::document::Stacking::Down),
-                            ("\u{E883}  Bring the picked one to front", pdf_core::document::Stacking::Front),
-                            ("\u{E882}  Send the picked one to back", pdf_core::document::Stacking::Back),
-                        ] {
-                            if ui.add_enabled(armed, egui::Button::new(label)).clicked() {
-                                self.restack_picked(to);
-                                ui.close();
-                            }
-                        }
-                        if !armed {
-                            ui.small("Choose one above first.");
-                        }
-                    }
-                    ui.separator();
-                }
-                let shown = self.show_layers;
-                if ui
-                    .button(if shown { "Hide the layer list" } else { "Show all layers" })
-                    .clicked()
-                {
-                    self.show_layers = !shown;
-                    if self.show_layers {
-                        self.forget_layers();
-                    }
-                    ui.close();
-                }
-            });
-        }
+        self.show_page_context_menu(ui, &response, page, view);
 
         let Some(pointer) = response.interact_pointer_pos().or_else(|| response.hover_pos()) else {
             self.tab_mut().last_snap = None;
@@ -1753,8 +1569,8 @@ impl crate::PagifyApp {
         // explicit request for a specific point and must not then be nudged off
         // it by a constraint.
         self.tab_mut().last_snap = None;
-        let snapping = self.tab().tool.as_ref().is_some_and(|t| t.kind.wants_snapping());
-        let first_point = self.tab().tool.as_ref().and_then(|t| t.points.first().copied());
+        let snapping = self.tab().tool.as_ref().is_some_and(|p| p.kind.wants_snapping());
+        let first_point = self.tab().tool.as_ref().and_then(|p| p.points.first().copied());
         if let Some(layer) = self.tab().markup.existing(page).filter(|_| snapping) {
             let radius = HIT_TOLERANCE_PT * 3.0;
             if let Some(snapped) = tools::snap_at(layer, at, radius, self.snaps, None, first_point) {
@@ -1764,8 +1580,7 @@ impl crate::PagifyApp {
         }
         if snapping && self.tab_mut().last_snap.is_none() {
             if self.ortho {
-                let anchor = self.tab_mut().tool.as_ref().and_then(|t| t.points.last().copied());
-                if let Some(anchor) = anchor {
+                if let Some(anchor) = self.tab_mut().tool.as_ref().and_then(|p| p.points.last().copied()) {
                     at = tools::orthogonal(anchor, at);
                 }
             }
@@ -1780,12 +1595,12 @@ impl crate::PagifyApp {
 
         // A placed-but-unapplied signature, picked with **no tool armed** —
         // before the object tool's own check, and gated the same way: an
-        // armed tool (the object tool, or any `Tool`) owns the pointer
-        // outright, and a signature sitting under it is reached the way any
-        // other page content is, not by this path. Unlike the object tool,
-        // this only takes the gesture when it actually found something to
-        // do with it — a click on bare paper or on text still reaches the
-        // ordinary handling below.
+        // armed tool (the object tool, or anything pending) owns the
+        // pointer outright, and a signature sitting under it is reached the
+        // way any other page content is, not by this path. Unlike the
+        // object tool, this only takes the gesture when it actually found
+        // something to do with it — a click on bare paper or on text still
+        // reaches the ordinary handling below.
         if self.tab_mut().object_tool.is_none()
             && self.tab_mut().tool.is_none()
             && self.interact_signatures(ui, &response, page, at, view)
@@ -1861,10 +1676,21 @@ impl crate::PagifyApp {
         // checked ahead of the text cursor below so a link drawn over
         // running text still reads as clickable rather than as selectable
         // prose.
+        self.update_pointer_cursor(ui, page, at);
+        if self.armed_tool_gesture(&response, at, answered_above) {
+            return;
+        }
+        self.page_drag(ui, &response, view, page, at);
+    }
+
+    /// A pointing hand over a link, a text cursor over words — the same
+    /// signals a browser gives, checked in that order so a link drawn over
+    /// running text still reads as clickable rather than selectable prose.
+    fn update_pointer_cursor(&mut self, ui: &mut egui::Ui, page: usize, at: AppPoint) {
         // A selection-resolved tool (Markup/Link/MatchProperties) leaves the
         // pointer behaving exactly as if nothing were armed here — it takes
-        // the whole gesture only once a drag actually starts (below), not
-        // while just hovering.
+        // the whole gesture only once a drag actually starts, not while
+        // just hovering.
         let no_click_tool_armed = self.tab_mut().tool.as_ref().map_or(true, |t| t.kind.wants_selection());
         let hovering_link = no_click_tool_armed
             && (self.foreign_at(page, at).is_some_and(|n| self.link_uri_at(page, n).is_some())
@@ -1884,27 +1710,25 @@ impl crate::PagifyApp {
         {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Text);
         }
+    }
 
-        // An armed tool owns the pointer, and takes the whole gesture.
-        //
-        // Two defects in one. A drag while a tool was waiting for clicks used
-        // to *also* select text, so one gesture did two things at once. And
-        // egui calls a press-move-release a drag rather than a click even when
-        // the movement is a pixel or two — which mice do constantly — so a
-        // click that wandered was thrown away and the tool appeared not to
-        // respond. That is what "the tools do not work" looks like from the
-        // outside: most clicks land, some vanish, and nothing says why.
-        //
-        // A gesture that stayed within the same tolerance used for hit-testing
-        // is a click, however egui classified it.
-        //
-        // **Except a selection-resolved tool** (Markup/Link/MatchProperties
-        // — see `Tool::wants_selection`): those are not waiting for a click
+    /// The armed tool takes the whole gesture — see the comment this moved
+    /// away from in `interact` for why a wandered click still counts.
+    fn armed_tool_gesture(
+        &mut self,
+        response: &egui::Response,
+        at: AppPoint,
+        answered_above: bool,
+    ) -> bool {
+        if self.tab_mut().tool.is_none() {
+            return false;
+        }
+        // Except a selection-resolved tool (Markup/Link/MatchProperties,
+        // see `Tool::wants_selection`): those are not waiting for a click
         // or a point at all, they are waiting for an ordinary text-selection
-        // drag, the same gesture the code below already handles when no
-        // tool is armed. Taking the whole gesture here the way a point/
-        // object tool does would swallow that drag as a wandered-click pick
-        // instead.
+        // drag, the same gesture `page_drag` already handles when no tool
+        // is armed. Taking the whole gesture here the way a point/object
+        // tool does would swallow that drag as a wandered-click pick instead.
         if self.tab_mut().tool.as_ref().is_some_and(|t| !t.kind.wants_selection()) {
             self.tab_mut().text_drag = None;
             // Not the click the click-away block above has already answered —
@@ -1924,9 +1748,22 @@ impl crate::PagifyApp {
             if response.clicked() && !answered_above {
                 self.take_pick(at);
             }
-            return;
+            return true;
         }
+        false
+    }
 
+    /// Everything a drag on the page does when no armed tool owns it: the
+    /// rotate handle, a markup grab, a text selection or a marquee — see the
+    /// comments this moved away from in `interact`.
+    fn page_drag(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        view: PageView,
+        page: usize,
+        at: AppPoint,
+    ) {
         if response.drag_started() {
             // The rotate handle, if a markup shape is already selected here,
             // wins over everything else a drag could mean at this point —
@@ -2078,4 +1915,274 @@ impl crate::PagifyApp {
             }
         }
     }
+
+
+    /// The right-click menu, offered wherever the pointer is on the page —
+    /// including on frames where the pointer has left the page widget, which
+    /// is why it is declared before `interact`'s own early return.
+    fn show_page_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        response: &egui::Response,
+        page: usize,
+        view: PageView,
+    ) {
+        // Right-click, which is where a reader looks for Copy first.
+        //
+        // **Before the early return, not after it.** Moving the pointer towards
+        // the menu takes it off the page, so the page stops being hovered, so
+        // the function returned before re-declaring the menu — and the menu
+        // vanished as you reached for it. A popup has to be offered on every
+        // frame it is open, including the frames where the pointer has left the
+        // widget that opened it.
+        // What the pointer is over, kept before the menu opens: a right-click
+        // is a press and a release, and the menu is built on a later frame than
+        // the one that knew where the pointer was.
+        if response.secondary_clicked() {
+            if let Some(spot) = response.interact_pointer_pos() {
+                let at = view.to_page(spot);
+                self.tab_mut().selected_image = self
+                    .images_on(page)
+                    .into_iter()
+                    .find(|i| {
+                        at.x >= i.rect.left as f64
+                            && at.x <= i.rect.right as f64
+                            && at.y >= i.rect.top as f64
+                            && at.y <= i.rect.bottom as f64
+                    })
+                    .map(|i| (page, i));
+                // Where the pointer was, kept for the menu built on a later
+                // frame — the same reason `selected_image` is kept.
+                self.tab_mut().right_clicked_at = Some((page, at));
+                // See `right_click_text_actions`'s own doc: computed once,
+                // here, rather than by the menu on every frame it is open.
+                self.tab_mut().right_click_text_actions = Some(self.compute_right_click_text_actions(page, at));
+            }
+        }
+
+        let over_text = self.tab_mut().text_selection.is_some() && page == self.tab_mut().selection_page;
+        let over_image = self.tab_mut().selected_image.as_ref().is_some_and(|(p, _)| *p == page);
+        // **Offered wherever the pointer is**, not only over a selection.
+        //
+        // It used to appear only over selected text or a picture, so a
+        // right-click on a panel, a rule or bare paper produced nothing at all
+        // — which is where somebody whose picture has gone behind something is
+        // most likely to be clicking. Reported from use as the layer option not
+        // being there.
+        if self.tab_mut().doc.is_some() {
+            response.context_menu(|ui| {
+                // A link under the right-click gets its own two actions,
+                // ahead of everything else here — asking whether to follow
+                // it or take it off is what a link's own menu is for, and
+                // "wherever the pointer is" (see below) already means a link
+                // is reached the same way any other page content is.
+                self.context_menu_link(ui, page);
+                self.context_menu_text(ui, page, over_text);
+                self.context_menu_protect(ui, over_text, over_image);
+                self.context_menu_layers(ui, page);
+                let shown = self.show_layers;
+                if ui
+                    .button(if shown { "Hide the layer list" } else { "Show all layers" })
+                    .clicked()
+                {
+                    self.show_layers = !shown;
+                    if self.show_layers {
+                        self.forget_layers();
+                    }
+                    ui.close();
+                }
+            });
+        }
+    }
+    /// The link half of the page context menu: open or remove the link under
+    /// the pointer. Moved out of `show_page_context_menu` whole.
+    fn context_menu_link(&mut self, ui: &mut egui::Ui, page: usize) {
+                let link_here = self.tab_mut()
+                    .right_clicked_at
+                    .filter(|(p, _)| *p == page)
+                    .and_then(|(_, at)| self.foreign_at(page, at))
+                    .and_then(|n| self.link_uri_at(page, n).map(|uri| (n, uri)));
+                if let Some((n, uri)) = link_here {
+                    if ui.button(format!("Open {}", short(&uri))).clicked() {
+                        self.open_or_report_link(n, &uri);
+                        ui.close();
+                    }
+                    if ui.button("Remove the link").clicked() {
+                        self.remove_mark(n);
+                        ui.close();
+                    }
+                    ui.separator();
+                }
+    }
+
+    /// The text half of the page context menu: Copy, Join into one paragraph
+    /// and Split the joined text. Moved out whole.
+    fn context_menu_text(&mut self, ui: &mut egui::Ui, page: usize, over_text: bool) {
+                if over_text && ui.button("Copy").clicked() {
+                    self.tab_mut().copy_wanted = true;
+                    ui.close();
+                }
+
+                // Read from the cache the click itself filled in — see
+                // `right_click_text_actions`'s own doc for why this menu
+                // must never recompute these on its own account: it is
+                // rebuilt on every repaint of an open popup.
+                let actions_here = self.tab_mut()
+                    .right_clicked_at
+                    .filter(|(p, _)| *p == page)
+                    .and_then(|_| self.tab_mut().right_click_text_actions);
+
+                // A selection spanning more than one line or block can be
+                // declared one paragraph — see `join_selected_text`'s own
+                // doc for why this exists alongside the automatic
+                // heuristic rather than instead of it.
+                //
+                // **Shown disabled, not hidden, when it does not apply** —
+                // the same "Choose one above first" shape the layer buttons
+                // below already use. Reported from use: hiding it outright
+                // whenever the selection was too small to qualify made the
+                // feature itself unfindable — a selection covering only one
+                // run never showed so much as a hint that joining needed a
+                // bigger one.
+                if over_text {
+                    let joinable = actions_here.is_some_and(|a| a.joinable);
+                    if ui.add_enabled(joinable, egui::Button::new("Join into one paragraph")).clicked() {
+                        match self.join_selected_text() {
+                            Ok(message) => self.say_info(message),
+                            Err(e) => self.say_error(e),
+                        }
+                        ui.close();
+                    }
+                    if !joinable {
+                        ui.small("Select text spanning more than one line or block first.");
+                    }
+                }
+                // The other half of the same feature: undeclaring a join,
+                // wherever the right-click landed on one of its runs —
+                // not gated on a selection, since splitting one back apart
+                // is done by pointing at it, not by selecting it first.
+                let split_here = actions_here.and_then(|a| a.split_object);
+                if let Some(object) = split_here {
+                    if ui.button("Split the joined text").clicked() {
+                        self.split_group(page, object);
+                        self.say_info("split — these lines are edited on their own again.");
+                        ui.close();
+                    }
+                }
+                // Locking is a Protect operation, so it is offered where the
+                // Protect tools are rather than on every tab — the same reason
+                // the ribbon has tabs at all.
+    }
+
+    /// The Protect-tab half of the page context menu: lock the image or the
+    /// selection. Moved out whole.
+    fn context_menu_protect(&mut self, ui: &mut egui::Ui, over_text: bool, over_image: bool) {
+                if self.tab_mut().ribbon == Tab::Protect {
+                    if over_image {
+                        if ui.button("🔒 Lock this image").clicked() {
+                            if let Some((page, image)) = self.tab_mut().selected_image.clone() {
+                                self.ask_or_reuse_passcode(
+                                    Awaiting::LockImage { page, object: image.object },
+                                    "type a passcode to lock this image with, or Escape to give up.",
+                                );
+                            }
+                            ui.close();
+                        }
+                    }
+                    if over_text && ui.button("🔒 Lock the selection").clicked() {
+                        self.lock_selection();
+                        ui.close();
+                    }
+                }
+
+                // **The drawing order, where somebody looks for it.** A picture
+                // that has gone behind a panel is not reachable from a ribbon
+                // button, because the thing to act on is the thing under the
+                // pointer.
+                ui.separator();
+    }
+
+    /// The layer half of the page context menu: the lock badge line, the
+    /// topmost-first layer list and the stacking buttons. Moved out whole.
+    fn context_menu_layers(&mut self, ui: &mut egui::Ui, page: usize) {
+                let spot = self.tab_mut().right_clicked_at.filter(|(p, _)| *p == page).map(|(_, at)| at);
+                if let Some(at) = spot {
+                    // **A lock badge is not a layer, and says so.** The
+                    // chequerboard over a locked picture reads as a grey panel,
+                    // and somebody trying to send it back was pointing at the
+                    // one thing on the page the drawing order cannot touch.
+                    let badge = self.locked_items_on(page).into_iter().find(|i| {
+                        at.x >= i.rect.left as f64
+                            && at.x <= i.rect.right as f64
+                            && at.y >= i.rect.top as f64
+                            && at.y <= i.rect.bottom as f64
+                    });
+                    if let Some(badge) = badge {
+                        ui.weak(if badge.is_area {
+                            "🔒 Locked words — not a layer. The padlock brings them back."
+                        } else if badge.stale {
+                            "🔒 A lock badge over a picture that was never taken off — `repairlocks` finishes it."
+                        } else {
+                            "🔒 A locked picture — not a layer. The padlock brings it back."
+                        });
+                        ui.separator();
+                    }
+                    let under = self.layers_under(page, at);
+                    if under.is_empty() {
+                        ui.weak("Nothing is drawn here.");
+                    } else {
+                        ui.weak("Layers here — topmost first");
+                        let listed: Vec<(usize, String, bool)> = under
+                            .iter()
+                            .take(8)
+                            .filter_map(|index| {
+                                self.tab_mut().doc.as_ref()
+                                    .and_then(|d| d.caches.layers.as_ref())
+                                    .and_then(|(_, l)| l.get(*index))
+                                    .map(|d| {
+                                        (
+                                            *index,
+                                            format!("{}  {}", d.kind.describe(), d.label),
+                                            !d.movable,
+                                        )
+                                    })
+                            })
+                            .collect();
+                        for (index, label, grouped) in listed {
+                            let picked = self.tab_mut().picked_layer == Some(index);
+                            let row = ui.selectable_label(
+                                picked,
+                                if grouped { format!("{label}   (in a group)") } else { label },
+                            );
+                            if row.clicked() {
+                                self.pick_layer(page, index);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                        // These act on what has been picked, so somebody can
+                        // choose the thing that is *behind* and raise that,
+                        // rather than the thing on top of it.
+                        let armed = self.tab_mut().picked_layer.is_some();
+                        for (label, to) in [
+                            ("\u{E5D8}  Move the picked one up", pdf_core::document::Stacking::Up),
+                            ("\u{E5DB}  Move the picked one down", pdf_core::document::Stacking::Down),
+                            ("\u{E883}  Bring the picked one to front", pdf_core::document::Stacking::Front),
+                            ("\u{E882}  Send the picked one to back", pdf_core::document::Stacking::Back),
+                        ] {
+                            if ui.add_enabled(armed, egui::Button::new(label)).clicked() {
+                                self.restack_picked(to);
+                                ui.close();
+                            }
+                        }
+                        if !armed {
+                            ui.small("Choose one above first.");
+                        }
+                    }
+                    ui.separator();
+                }
+    }
+
+
+
 }

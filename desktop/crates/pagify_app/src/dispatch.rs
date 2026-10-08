@@ -51,6 +51,117 @@ impl crate::PagifyApp {
 
     pub(crate) fn act(&mut self, verb: Verb) {
         match verb {
+            Verb::Open(..)
+            | Verb::OpenDialog
+            | Verb::Close { .. }
+            | Verb::Quit { .. }
+            | Verb::Page(..)
+            | Verb::Zoom(..)
+            | Verb::RotatePage(..)
+            | Verb::TextLayer
+            | Verb::Pdfium
+            | Verb::Version
+            | Verb::CheckUpdate
+            => self.act_document(verb),
+            Verb::Pick(..)
+            | Verb::Sensitivity(..)
+            | Verb::FillSign(..)
+            | Verb::PredefinedText(..)
+            | Verb::EditObject
+            | Verb::MoveThing
+            | Verb::SignLine
+            | Verb::SignRectangle
+            | Verb::DocumentStatus
+            => self.act_tools(verb),
+            Verb::SessionLog
+            | Verb::ApplySignatures
+            | Verb::ManageSignatures(..)
+            | Verb::Signature(..)
+            => self.act_signing(verb),
+            Verb::Validate
+            | Verb::Certify(..)
+            | Verb::Whiteout
+            | Verb::DrawArrow
+            | Verb::ToggleFill
+            | Verb::Redact
+            | Verb::Lock
+            | Verb::Secure(..)
+            | Verb::SmartRedact { .. }
+            | Verb::HiddenData { .. }
+            | Verb::Unsecure
+            => self.act_security(verb),
+            Verb::Layers
+            | Verb::RepairLocks
+            | Verb::Opacity(..)
+            | Verb::BringToFront
+            | Verb::SendToBack
+            | Verb::LockArea
+            | Verb::LockPages(..)
+            | Verb::Unlock
+            => self.act_objects(verb),
+            Verb::Undo
+            | Verb::Redo
+            | Verb::Pointer(..)
+            | Verb::CopyText
+            | Verb::Paste
+            | Verb::EditText
+            | Verb::AddText(..)
+            | Verb::AddImage(..)
+            | Verb::SetLayout(..)
+            | Verb::ReversePages
+            | Verb::Thumbnails
+            | Verb::ToggleAppearance
+            | Verb::DuplicatePages(..)
+            | Verb::CropPages { .. }
+            | Verb::ResizePages { .. }
+            | Verb::SwapPages { .. }
+            | Verb::RotatePages { .. }
+            | Verb::ExtractText(..)
+            | Verb::OutlinedFont(..)
+            | Verb::ClearHistory
+            => self.act_navigation(verb),
+            Verb::Finish
+            | Verb::Save
+            | Verb::SaveAs(..)
+            | Verb::SaveAsDialog
+            | Verb::Extract { .. }
+            | Verb::Import { .. }
+            | Verb::DeletePages(..)
+            | Verb::InsertPage
+            | Verb::MovePages { .. }
+            => self.act_files(verb),
+            Verb::Reflow
+            | Verb::Find(..)
+            | Verb::FindStep { .. }
+            | Verb::Replace
+            | Verb::Spelling
+            | Verb::Bookmark
+            | Verb::ArticleBox
+            | Verb::Weblinks
+            | Verb::JoinText
+            | Verb::MatchProperties
+            | Verb::Copy
+            | Verb::MarkText(..)
+            | Verb::ListMarks
+            | Verb::RemoveMark(..)
+            | Verb::Note(..)
+            => self.act_text_and_find(verb),
+            Verb::Calibrate { .. }
+            | Verb::Scale
+            | Verb::Measure(..)
+            | Verb::Record(..)
+            | Verb::StopRecording
+            | Verb::Replay(..)
+            | Verb::Help(..)
+            | Verb::Planned { .. }
+            => self.act_measurement(verb),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 11 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_document(&mut self, verb: Verb) {
+        match verb {
             // Opening lands in its own tab now, so it never puts this one's
             // unsaved work at risk — see `open_with`.
             Verb::Open(path) => self.open(&path.to_string_lossy()),
@@ -95,6 +206,14 @@ impl crate::PagifyApp {
                 self.spawn_update_check();
                 self.say_info("checking for a newer build…");
             }
+            _ => unreachable!("act_document was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 9 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_tools(&mut self, verb: Verb) {
+        match verb {
             Verb::Pick(at) => {
                 if self.tab_mut().tool.is_none() {
                     self.say_error("nothing is waiting for a click.");
@@ -119,7 +238,63 @@ impl crate::PagifyApp {
                 let in_app = space.from_kernel(cad_kernel::Vec2::new(at.x, at.y));
                 self.take_pick(in_app);
             }
-            Verb::Sensitivity(what) => {
+            Verb::Sensitivity(what) => self.act_sensitivity(what),
+            Verb::FillSign(what) => self.act_fill_sign(what),
+            Verb::PredefinedText(words) => match words {
+                Some(text) => self.use_snippet(&text),
+                None => {
+                    self.snippets = Some(SnippetList::default());
+                    if self.predefined.is_empty() {
+                        self.say_info(
+                            "nothing kept yet — type some words into the window, or \
+                             `predefinedtext Jane Smith` to keep and write them at once.",
+                        );
+                    }
+                }
+            },
+            Verb::EditObject => {
+                let page = self.tab_mut().page;
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                self.take_up_object_tool(true, page);
+            }
+            Verb::MoveThing => {
+                let page = self.tab_mut().page;
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                self.take_up_object_tool(false, page);
+            }
+            Verb::SignLine => {
+                let page = self.tab_mut().page;
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                self.arm_tool(Tool::SignLine, page);
+            }
+            Verb::SignRectangle => {
+                let page = self.tab_mut().page;
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                self.arm_tool(Tool::SignRectangle, page);
+            }
+            Verb::DocumentStatus => {
+                for line in self.document_status() {
+                    self.say_info(line);
+                }
+            }
+            _ => unreachable!("act_tools was handed a verb from another domain"),
+        }
+    }
+
+    /// What `sensitivity` does. Moved out of `act_tools` whole.
+    fn act_sensitivity(&mut self, what: Option<String>) {
                 use pdf_core::document::sensitivity::Sensitivity;
                 let Some(doc) = &self.tab_mut().doc else {
                     self.say_error("nothing open.");
@@ -176,8 +351,11 @@ impl crate::PagifyApp {
                         }
                     }
                 }
-            }
-            Verb::FillSign(what) => {
+    }
+
+    /// What `fillsign`/`signcheck`/`signcross`/`signdot` do. Moved out of
+    /// `act_tools` whole.
+    fn act_fill_sign(&mut self, what: Option<String>) {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -197,56 +375,13 @@ impl crate::PagifyApp {
                         );
                     }
                 }
-            }
-            Verb::PredefinedText(words) => match words {
-                Some(text) => self.use_snippet(&text),
-                None => {
-                    self.snippets = Some(SnippetList::default());
-                    if self.predefined.is_empty() {
-                        self.say_info(
-                            "nothing kept yet — type some words into the window, or \
-                             `predefinedtext Jane Smith` to keep and write them at once.",
-                        );
-                    }
-                }
-            },
-            Verb::EditObject => {
-                let page = self.tab_mut().page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.take_up_object_tool(true, page);
-            }
-            Verb::MoveThing => {
-                let page = self.tab_mut().page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.take_up_object_tool(false, page);
-            }
-            Verb::SignLine => {
-                let page = self.tab_mut().page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.arm_tool(Tool::SignLine, page);
-            }
-            Verb::SignRectangle => {
-                let page = self.tab_mut().page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.arm_tool(Tool::SignRectangle, page);
-            }
-            Verb::DocumentStatus => {
-                for line in self.document_status() {
-                    self.say_info(line);
-                }
-            }
+    }
+
+
+    /// One domain of [`Self::act`]: 6 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_signing(&mut self, verb: Verb) {
+        match verb {
             Verb::SessionLog => match self.session_log.path() {
                 Some(path) => self.say_info(format!(
                     "recording every command and outcome to {} — send it along with a bug report.",
@@ -256,7 +391,64 @@ impl crate::PagifyApp {
                     "no session log this run — the config directory could not be written to.",
                 ),
             },
-            Verb::ApplySignatures => {
+            Verb::ApplySignatures => self.act_apply_signatures(),
+            Verb::ManageSignatures(what) => self.act_manage_signatures(what),
+            Verb::Signature(SignatureAction::Draw) => {
+                let first = self.signatures.current().is_none();
+                self.pad = Some(SignaturePad {
+                    name: if first {
+                        "Signature".to_string()
+                    } else {
+                        format!("Signature {}", self.signatures.entries().len() + 1)
+                    },
+                    // An explicit `signature draw` is a request to draw, not
+                    // to sign — unlike bare `signature` with nothing made yet,
+                    // this does not carry on to placing it.
+                    then_place: false,
+                    ..SignaturePad::default()
+                });
+                self.say_info("draw a signature in the window.");
+            }
+            Verb::Signature(SignatureAction::Upload(path)) => {
+                match path {
+                    Some(path) => self.upload_signature(&path),
+                    None => self.upload_signature_dialog(),
+                }
+            }
+            Verb::Signature(SignatureAction::Place) => {
+                // Nothing drawn or uploaded yet needs a signature made before
+                // it can be placed. Placing does not.
+                if self.signatures.current().is_none() {
+                    self.pad = Some(SignaturePad {
+                        name: "Signature".to_string(),
+                        // Somebody who typed bare `signature` wanted to sign,
+                        // not to draw; carrying on to the click is the rest
+                        // of that.
+                        then_place: true,
+                        ..SignaturePad::default()
+                    });
+                    self.say_info(
+                        "draw your signature in the window — it is kept on this \
+                         computer, and nowhere else. `signature upload` adds one \
+                         from a picture instead.",
+                    );
+                    return;
+                }
+                let page = self.tab_mut().page;
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                self.arm_tool(Tool::Signature, page);
+            }
+            _ => unreachable!("act_signing was handed a verb from another domain"),
+        }
+    }
+
+    /// Everything `applysignatures` does: run the confirmation pass over every
+    /// page, place the saved signatures and say what happened. Moved out of
+    /// `act_signing` whole — it is a page walk, not a dispatch arm.
+    fn act_apply_signatures(&mut self) {
                 let Some(doc) = &self.tab_mut().doc else {
                     self.say_error("nothing open.");
                     return;
@@ -314,8 +506,11 @@ impl crate::PagifyApp {
                     if applied == 1 { "is" } else { "are" },
                     if applied == 1 { "it" } else { "them" },
                 ));
-            }
-            Verb::ManageSignatures(what) => {
+    }
+
+    /// Everything `managesignatures` does, in its several sub-actions. Moved
+    /// out of `act_signing` whole for the same reason as its sibling above.
+    fn act_manage_signatures(&mut self, what: pagify_shell::verbs::Signatures) {
                 use pagify_shell::verbs::Signatures as What;
                 match what {
                     What::Open => {
@@ -387,108 +582,15 @@ impl crate::PagifyApp {
                         }
                     }
                 }
-            }
-            Verb::Signature(SignatureAction::Draw) => {
-                let first = self.signatures.current().is_none();
-                self.pad = Some(SignaturePad {
-                    name: if first {
-                        "Signature".to_string()
-                    } else {
-                        format!("Signature {}", self.signatures.entries().len() + 1)
-                    },
-                    // An explicit `signature draw` is a request to draw, not
-                    // to sign — unlike bare `signature` with nothing made yet,
-                    // this does not carry on to placing it.
-                    then_place: false,
-                    ..SignaturePad::default()
-                });
-                self.say_info("draw a signature in the window.");
-            }
-            Verb::Signature(SignatureAction::Upload(path)) => {
-                match path {
-                    Some(path) => self.upload_signature(&path),
-                    None => self.upload_signature_dialog(),
-                }
-            }
-            Verb::Signature(SignatureAction::Place) => {
-                // Nothing drawn or uploaded yet needs a signature made before
-                // it can be placed. Placing does not.
-                if self.signatures.current().is_none() {
-                    self.pad = Some(SignaturePad {
-                        name: "Signature".to_string(),
-                        // Somebody who typed bare `signature` wanted to sign,
-                        // not to draw; carrying on to the click is the rest
-                        // of that.
-                        then_place: true,
-                        ..SignaturePad::default()
-                    });
-                    self.say_info(
-                        "draw your signature in the window — it is kept on this \
-                         computer, and nowhere else. `signature upload` adds one \
-                         from a picture instead.",
-                    );
-                    return;
-                }
-                let page = self.tab_mut().page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.arm_tool(Tool::Signature, page);
-            }
-            Verb::Validate => {
-                let Some(doc) = &self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                match doc.session.validate_signatures() {
-                    Ok(found) if found.is_empty() => {
-                        // Not a failure, and not phrased as one.
-                        self.say_info("this document carries no signatures.");
-                    }
-                    Ok(found) => {
-                        let said: Vec<String> =
-                            found.iter().map(|s| signature_line("signature", s)).collect();
-                        let all_well = !found.iter().any(signature_is_a_warning);
-                        let line = said.join(" | ");
-                        if all_well {
-                            self.say_info(line);
-                        } else {
-                            self.say_error(line);
-                        }
-                    }
-                    Err(e) => self.say_error(e.to_string()),
-                }
-            }
-            Verb::Certify(path) => {
-                let Some(doc) = &self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                match path {
-                    // Reporting.
-                    None => {
-                        let count = doc.session.signature_count();
-                        self.say_info(if count == 0 {
-                            "not signed. `certify <certificate.p12>` signs it.".to_string()
-                        } else {
-                            format!(
-                                "{count} signature{}. Anything written after a \
-                                 signature breaks it.",
-                                if count == 1 { "" } else { "s" }
-                            )
-                        });
-                    }
-                    Some(path) => {
-                        if !path.is_file() {
-                            self.say_error(format!("{}: no such file.", path.display()));
-                            return;
-                        }
-                        self.tab_mut().awaiting_password = Some(Awaiting::Certificate(path));
-                        self.say_info("type the certificate's password, or Escape to give up.");
-                    }
-                }
-            }
+    }
+
+
+    /// One domain of [`Self::act`]: 11 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_security(&mut self, verb: Verb) {
+        match verb {
+            Verb::Validate => self.act_validate(),
+            Verb::Certify(path) => self.act_certify(path),
             Verb::Whiteout => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
@@ -573,7 +675,127 @@ impl crate::PagifyApp {
                      Anyone opening the file will be asked for it — {allowed}."
                 ));
             }
-            Verb::SmartRedact { redact } => {
+            Verb::SmartRedact { redact } => self.act_smart_redact(redact),
+            Verb::HiddenData { clean } => {
+                let Some(doc) = &self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                if clean {
+                    // **What is printed is what a second survey of the cleaned
+                    // bytes found**, not what the first survey listed. The line
+                    // used to print the findings as removals — and for the
+                    // attachment and the script, which the clean left alone,
+                    // that was a claim with nothing behind it. Found by audit.
+                    match doc.session.remove_hidden_data() {
+                        Ok(done) => {
+                            if let Some(doc) = &mut self.tab_mut().doc {
+                                doc.rendered_is_stale();
+                            }
+                            self.tab_mut().text_selection = None;
+                            self.tab_mut().find_hits.clear();
+                            let said = done.describe();
+                            if done.is_clean() {
+                                self.say_info(if done.removed().is_empty() {
+                                    format!("{said}.")
+                                } else {
+                                    format!("{said}. Save to write it out.")
+                                });
+                            } else {
+                                self.say_error(format!("{said}. Save to write out what was removed."));
+                            }
+                        }
+                        Err(e) => self.say_error(e.to_string()),
+                    }
+                } else {
+                    match doc.session.hidden_data() {
+                        Ok(found) => self.say_info(if found.is_empty() {
+                            found.describe()
+                        } else {
+                            format!("{} — `hiddendata clean` takes it out.", found.describe())
+                        }),
+                        Err(e) => self.say_error(e.to_string()),
+                    }
+                }
+            }
+            Verb::Unsecure => {
+                let Some(doc) = &mut self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                match doc.session.unsecure_document() {
+                    Ok(()) => self.say_info("the password is off; save to write it out."),
+                    Err(e) => self.say_error(e.to_string()),
+                }
+            }
+            _ => unreachable!("act_security was handed a verb from another domain"),
+        }
+    }
+
+
+    /// What `validate` does: run the validation pass and report what it found.
+    /// Moved out of `act_security` whole — it is a document walk, not an arm.
+    fn act_validate(&mut self) {
+                let Some(doc) = &self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                match doc.session.validate_signatures() {
+                    Ok(found) if found.is_empty() => {
+                        // Not a failure, and not phrased as one.
+                        self.say_info("this document carries no signatures.");
+                    }
+                    Ok(found) => {
+                        let said: Vec<String> =
+                            found.iter().map(|s| signature_line("signature", s)).collect();
+                        let all_well = !found.iter().any(signature_is_a_warning);
+                        let line = said.join(" | ");
+                        if all_well {
+                            self.say_info(line);
+                        } else {
+                            self.say_error(line);
+                        }
+                    }
+                    Err(e) => self.say_error(e.to_string()),
+                }
+    }
+
+    /// What `certify`/`sign` does: write the certification signature at
+    /// `path`, or ask for one. Moved out of `act_security` whole.
+    fn act_certify(&mut self, path: Option<std::path::PathBuf>) {
+                let Some(doc) = &self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                match path {
+                    // Reporting.
+                    None => {
+                        let count = doc.session.signature_count();
+                        self.say_info(if count == 0 {
+                            "not signed. `certify <certificate.p12>` signs it.".to_string()
+                        } else {
+                            format!(
+                                "{count} signature{}. Anything written after a \
+                                 signature breaks it.",
+                                if count == 1 { "" } else { "s" }
+                            )
+                        });
+                    }
+                    Some(path) => {
+                        if !path.is_file() {
+                            self.say_error(format!("{}: no such file.", path.display()));
+                            return;
+                        }
+                        self.tab_mut().awaiting_password = Some(Awaiting::Certificate(path));
+                        self.say_info("type the certificate's password, or Escape to give up.");
+                    }
+                }
+    }
+
+
+    /// The whole Smart Redact pass, moved out of `act_security`: it is a page
+    /// walk with its own confirmation and result message, not a dispatch arm.
+    fn act_smart_redact(&mut self, redact: bool) {
                 let Some(doc) = &self.tab_mut().doc else {
                     self.say_error("nothing open.");
                     return;
@@ -689,59 +911,13 @@ impl crate::PagifyApp {
                     }
                     self.say_error(format!("{}. Save to write out what was removed.", said.join("; ")));
                 }
-            }
-            Verb::HiddenData { clean } => {
-                let Some(doc) = &self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                if clean {
-                    // **What is printed is what a second survey of the cleaned
-                    // bytes found**, not what the first survey listed. The line
-                    // used to print the findings as removals — and for the
-                    // attachment and the script, which the clean left alone,
-                    // that was a claim with nothing behind it. Found by audit.
-                    match doc.session.remove_hidden_data() {
-                        Ok(done) => {
-                            if let Some(doc) = &mut self.tab_mut().doc {
-                                doc.rendered_is_stale();
-                            }
-                            self.tab_mut().text_selection = None;
-                            self.tab_mut().find_hits.clear();
-                            let said = done.describe();
-                            if done.is_clean() {
-                                self.say_info(if done.removed().is_empty() {
-                                    format!("{said}.")
-                                } else {
-                                    format!("{said}. Save to write it out.")
-                                });
-                            } else {
-                                self.say_error(format!("{said}. Save to write out what was removed."));
-                            }
-                        }
-                        Err(e) => self.say_error(e.to_string()),
-                    }
-                } else {
-                    match doc.session.hidden_data() {
-                        Ok(found) => self.say_info(if found.is_empty() {
-                            found.describe()
-                        } else {
-                            format!("{} — `hiddendata clean` takes it out.", found.describe())
-                        }),
-                        Err(e) => self.say_error(e.to_string()),
-                    }
-                }
-            }
-            Verb::Unsecure => {
-                let Some(doc) = &mut self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                match doc.session.unsecure_document() {
-                    Ok(()) => self.say_info("the password is off; save to write it out."),
-                    Err(e) => self.say_error(e.to_string()),
-                }
-            }
+    }
+
+
+    /// One domain of [`Self::act`]: 8 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_objects(&mut self, verb: Verb) {
+        match verb {
             Verb::Layers => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
@@ -824,16 +1000,26 @@ impl crate::PagifyApp {
                     self.say_info("type the passcode this was locked with, or Escape to give up.");
                 }
             }
+            _ => unreachable!("act_objects was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 19 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_navigation(&mut self, verb: Verb) {
+        match verb {
             Verb::Undo | Verb::Redo => self.undo_redo(matches!(verb, Verb::Undo)),
 
             Verb::Pointer(mode) => {
                 // Switching tools abandons whatever was half-picked. Leaving a
-                // tool armed under a new one is how a click meant for one
-                // thing lands in another.
-                if self.tab_mut().tool.take().is_some() {
-                    let page = self.tab().page;
-                    if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
-                        layer.forget_last_step();
+                // pending operation armed under a new tool is how a click meant
+                // for one thing lands in another.
+                if let Some(armed) = self.tab_mut().tool.take() {
+                    if armed.kind.cancel_drops_checkpoint() {
+                        let page = self.tab().page;
+                        if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
+                            layer.forget_last_step();
+                        }
                     }
                 }
                 self.tab_mut().pointer = mode;
@@ -908,14 +1094,24 @@ impl crate::PagifyApp {
                 }
             }
 
+            _ => unreachable!("act_navigation was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 9 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_files(&mut self, verb: Verb) {
+        match verb {
             // The typed form of pressing Enter over the page.
             Verb::Finish => {
-                let tool_closeable = self.tab_mut()
+                let closeable = self.tab_mut()
                     .tool
                     .as_ref()
-                    .is_some_and(|t| t.kind.ends_on_enter() && t.points.len() >= 2);
-                if tool_closeable {
+                    .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
+                if closeable {
                     self.resolve_tool();
+                // No multi-point kind is left with fewer than Enter needs —
+                // anything armed at this point is still waiting for more points.
                 } else if self.tab_mut().tool.is_some() {
                     self.say_error("not enough points yet.");
                 } else {
@@ -936,6 +1132,14 @@ impl crate::PagifyApp {
             Verb::InsertPage => self.insert_page(),
             Verb::MovePages { pages, before } => self.move_pages(&pages, before),
 
+            _ => unreachable!("act_files was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 15 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_text_and_find(&mut self, verb: Verb) {
+        match verb {
             Verb::Reflow => self.reflow(),
             Verb::Find(needle) => self.find(&needle),
             Verb::FindStep { forward } => self.find_step(forward),
@@ -959,6 +1163,14 @@ impl crate::PagifyApp {
             Verb::RemoveMark(n) => self.remove_mark(n),
             Verb::Note(text) => self.add_note(text),
 
+            _ => unreachable!("act_text_and_find was handed a verb from another domain"),
+        }
+    }
+
+    /// One domain of [`Self::act`]: 7 verbs, moved out
+    /// whole so the router above stays a table of contents.
+    fn act_measurement(&mut self, verb: Verb) {
+        match verb {
             Verb::Calibrate { distance, unit } => {
                 let page = self.tab_mut().page;
                 self.arm_tool(Tool::Calibrate { distance, unit }, page);
@@ -990,6 +1202,7 @@ impl crate::PagifyApp {
             Verb::Replay(path) => self.replay(&path),
 
             Verb::Help(_) | Verb::Planned { .. } => unreachable!("handled in run()"),
+            _ => unreachable!("act_measurement was handed a verb from another domain"),
         }
     }
 }
