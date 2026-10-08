@@ -92,7 +92,6 @@ Current >150 (clippy non-comment lines), with a suggested first cut:
 | `extract_signature` | `shell/signature_extract.rs:78` | 196 | Pipeline stages: (luma + inset + histogram + strict mask), (components + keep + clusters + winner), (window + loose mask + crop). Each needs a small struct or tuple — this is a design job, not a slice |
 | `draw_signature_list` | `panels.rs:727` | 184 | Per-entry row out to a method taking `&mut panel.renaming` and `&mut action` |
 | `draw_spell_check` | `panels.rs:230` | 170 | Suggestion list / controls blocks |
-| `draw_command_bar` | `main.rs:3226` | 181 | TextEdit + submit block (history is already out) |
 | `draw_ribbon_actions` | `main.rs:3039` | ~150 | Overflow dropdown out of the row |
 | `replace_outlined_word` | `edit.rs:940` | 152 | Find/plan/apply stages |
 | `segment` | `shell/blocks.rs:2031` | 151 | Piece/link/furniture grouping stages |

@@ -26,9 +26,8 @@ merged body) and `3ec8898` (per-tab consts restored) put it back. Clippy's
 measure (non-comment lines) at 2026-10-08 after the repair: the largest
 functions left are `pick_text_run_traced` 205,
 `signature_extract::extract_signature` 196, `draw_signature_list` 184,
-`draw_command_bar` 181, `draw_spell_check` 170, `replace_outlined_word` 152 and
-`blocks::segment` 151, plus shell test helpers (178/173/159); 47 functions are
-still over 100 lines.
+`draw_spell_check` 170, `replace_outlined_word` 152 and `blocks::segment` 151,
+plus shell test helpers (178/173/159); 46 functions are still over 100 lines.
 Phase 2: one `Tool` enum and one `ArmedTool` (`PendingKind`/`Pending` deleted),
 with click/pointer/cancel/preview transitions in `tool.rs` and the thin
 `picking.rs` apply path; the state fields (`editing_run`, `grab`, `handle`,
