@@ -2041,33 +2041,8 @@ fn segment(items: &[It], pieces: &[Piece], link: &Link, furn: &Furniture, fonts:
         let n = chain.len();
         let pc = |i: usize| &pieces[chain[i]]; // the piece at chain position i; the runs below hold positions
 
-        // a ruled cell: a short stack of lines with a rule right under it (a label line and its value
-        // line between two table rules) is one unit whatever its weights and colours
-        let cell = p.ruled_bands && n >= 2 && n <= p.cell_lines && rule_under(furn, pc(n - 1), p);
-
-        // list markers: "1." or "a." only count when the column has another of their kind (a wrapped
-        // line that happens to start with "a." is no list); bullets, dashes and bracketed markers
-        // count on their own. The continuation lines of an item hang from its text, so `tl` is the
-        // left edge of the text proper.
-        let mut kinds = [0usize; 3];
-        for i in 0..n {
-            if let Some(k) = dot_kind(&pc(i).text) {
-                kinds[k] += 1;
-            }
-        }
-        let is_item: Vec<bool> = (0..n).map(|i| !pc(i).opaque && starts_item(&pc(i).text) && dot_kind(&pc(i).text).map_or(true, |k| kinds[k] >= 2)).collect();
-        let tl: Vec<f64> = (0..n).map(|i| if is_item[i] { text_left(pc(i), items) } else { pc(i).l }).collect();
-        let rights: Vec<f64> = (0..n).map(|i| pc(i).r).collect();
-
-        // margins: where a block quote starts or ends. Chain-wide, so that the statistics of the right
-        // margin below see the whole column and not a handful of lines
-        let margins: Vec<usize> = if p.margin_rule && n >= 4 {
-            let mut sizes: Vec<f64> = (0..n).map(|i| pc(i).size).collect();
-            sizes.sort_by(|a, b| a.total_cmp(b));
-            margin_starts(&tl, &rights, sizes[(n - 1) / 2], p)
-        } else {
-            Vec::new()
-        };
+        let RowGeometry { cell, is_item, tl, rights, margins } =
+            row_geometry(items, pieces, &chain, furn, p);
 
         // stage 1: pairwise facts that need no statistics: size, style, margin
         let runs: Vec<Run> = split_by((0..n).collect(), link.head_why[head], |i| {
@@ -2221,6 +2196,52 @@ fn segment(items: &[It], pieces: &[Piece], link: &Link, furn: &Furniture, fonts:
     }
     blocks
 }
+
+/// The per-row facts `segment` needs before it splits runs: whether the stack
+/// is a ruled cell, which lines are list items, the text-left edges to
+/// measure from, the right edges, and where margins start. Moved out of
+/// `segment`; needs no statistics of its own.
+struct RowGeometry {
+    cell: bool,
+    is_item: Vec<bool>,
+    tl: Vec<f64>,
+    rights: Vec<f64>,
+    margins: Vec<usize>,
+}
+
+fn row_geometry(items: &[It], pieces: &[Piece], chain: &[usize], furn: &Furniture, p: &Params) -> RowGeometry {
+    let pc = |i: usize| &pieces[chain[i]];
+    let n = chain.len();
+        // a ruled cell: a short stack of lines with a rule right under it (a label line and its value
+        // line between two table rules) is one unit whatever its weights and colours
+        let cell = p.ruled_bands && n >= 2 && n <= p.cell_lines && rule_under(furn, pc(n - 1), p);
+
+        // list markers: "1." or "a." only count when the column has another of their kind (a wrapped
+        // line that happens to start with "a." is no list); bullets, dashes and bracketed markers
+        // count on their own. The continuation lines of an item hang from its text, so `tl` is the
+        // left edge of the text proper.
+        let mut kinds = [0usize; 3];
+        for i in 0..n {
+            if let Some(k) = dot_kind(&pc(i).text) {
+                kinds[k] += 1;
+            }
+        }
+        let is_item: Vec<bool> = (0..n).map(|i| !pc(i).opaque && starts_item(&pc(i).text) && dot_kind(&pc(i).text).map_or(true, |k| kinds[k] >= 2)).collect();
+        let tl: Vec<f64> = (0..n).map(|i| if is_item[i] { text_left(pc(i), items) } else { pc(i).l }).collect();
+        let rights: Vec<f64> = (0..n).map(|i| pc(i).r).collect();
+
+        // margins: where a block quote starts or ends. Chain-wide, so that the statistics of the right
+        // margin below see the whole column and not a handful of lines
+        let margins: Vec<usize> = if p.margin_rule && n >= 4 {
+            let mut sizes: Vec<f64> = (0..n).map(|i| pc(i).size).collect();
+            sizes.sort_by(|a, b| a.total_cmp(b));
+            margin_starts(&tl, &rights, sizes[(n - 1) / 2], p)
+        } else {
+            Vec::new()
+        };
+    RowGeometry { cell, is_item, tl, rights, margins }
+}
+
 
 fn draft(items: &[It], pieces: &[Piece], run: Vec<usize>, why: &'static str) -> BlockDraft {
     let lines = run
