@@ -989,49 +989,9 @@ impl crate::PagifyApp {
                     .into(),
             );
         }
-        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
         let borrowed: Vec<&[u8]> = faces.iter().map(Vec::as_slice).collect();
-
-        // **A drawn word is often part of something bigger.**
-        //
-        // A heading converted to outlines is frequently one path holding every
-        // letter of it — reported from use as "object 18 is text drawn as
-        // curves, which this pass cannot remove". A rectangle around one word
-        // merely *crosses* that path, and a crossed path stays; a contained one
-        // comes off whatever its shape. So: ask what is in the way, and widen
-        // to contain it.
-        let mut area = area;
-        let mut widened = false;
-        if let Ok(report) = doc.session.preview_redaction(page, area, &borrowed) {
-            for blocker in &report.uncleared {
-                let pdf_core::document::Uncleared::OutlinedText { object } = blocker else {
-                    continue;
-                };
-                let Ok(bounds) = doc.session.object_bounds(page, *object) else { continue };
-                area = pdf_core::document::Rect {
-                    left: area.left.min(bounds.left),
-                    top: area.top.min(bounds.top),
-                    right: area.right.max(bounds.right),
-                    bottom: area.bottom.max(bounds.bottom),
-                };
-                widened = true;
-            }
-        }
-
-        // But not without limit. Some pages draw everything on them as one
-        // path, and widening to contain *that* would take the page with it.
-        if widened {
-            let size = doc.session.page_size(page).map_err(|e| e.to_string())?;
-            let share = ((area.right - area.left) * (area.bottom - area.top)).abs()
-                / (size.width_pt * size.height_pt).max(1.0);
-            if share > 0.4 {
-                return Err(
-                    "these words are part of one drawn shape covering most of the page, \
-                     so replacing them would mean replacing all of it. Nothing was changed."
-                        .into(),
-                );
-            }
-        }
+        let (area, widened) = self.widen_outlined_word_area(page, area, &borrowed)?;
+        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
 
         // Off the page, leaving the space blank rather than the black bar a
         // redaction paints: this is an edit, not a redaction, and a mark would
@@ -1192,4 +1152,59 @@ impl crate::PagifyApp {
             }
         ))
     }
+
+    /// Widen a redaction area so it contains every drawn path it crosses — a
+    /// heading converted to outlines is often one path holding all its
+    /// letters, and a crossed path stays. Errors when the widened area would
+    /// cover most of the page. Moved out of `replace_outlined_word`.
+    fn widen_outlined_word_area(
+        &mut self,
+        page: usize,
+        area: pdf_core::document::Rect,
+        borrowed: &[&[u8]],
+    ) -> Result<(pdf_core::document::Rect, bool), String> {
+        let Some(doc) = &self.tab_mut().doc else { return Ok((area, false)) };
+        // **A drawn word is often part of something bigger.**
+        //
+        // A heading converted to outlines is frequently one path holding every
+        // letter of it — reported from use as "object 18 is text drawn as
+        // curves, which this pass cannot remove". A rectangle around one word
+        // merely *crosses* that path, and a crossed path stays; a contained one
+        // comes off whatever its shape. So: ask what is in the way, and widen
+        // to contain it.
+        let mut area = area;
+        let mut widened = false;
+        if let Ok(report) = doc.session.preview_redaction(page, area, borrowed) {
+            for blocker in &report.uncleared {
+                let pdf_core::document::Uncleared::OutlinedText { object } = blocker else {
+                    continue;
+                };
+                let Ok(bounds) = doc.session.object_bounds(page, *object) else { continue };
+                area = pdf_core::document::Rect {
+                    left: area.left.min(bounds.left),
+                    top: area.top.min(bounds.top),
+                    right: area.right.max(bounds.right),
+                    bottom: area.bottom.max(bounds.bottom),
+                };
+                widened = true;
+            }
+        }
+
+        // But not without limit. Some pages draw everything on them as one
+        // path, and widening to contain *that* would take the page with it.
+        if widened {
+            let size = doc.session.page_size(page).map_err(|e| e.to_string())?;
+            let share = ((area.right - area.left) * (area.bottom - area.top)).abs()
+                / (size.width_pt * size.height_pt).max(1.0);
+            if share > 0.4 {
+                return Err(
+                    "these words are part of one drawn shape covering most of the page, \
+                     so replacing them would mean replacing all of it. Nothing was changed."
+                        .into(),
+                );
+            }
+        }
+        Ok((area, widened))
+    }
+
 }
