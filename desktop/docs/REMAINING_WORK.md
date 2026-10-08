@@ -88,13 +88,11 @@ Current >150 (clippy non-comment lines), with a suggested first cut:
 
 | Function | Where | Size | Suggested split |
 |---|---|---|---|
-| `pick_text_run_traced` | `edit.rs:59` | 155 | Remaining pipeline (unreadable/rotated/editor build); `pick_run_under` already took the heavy/legacy branch |
 | `extract_signature` | `shell/signature_extract.rs:78` | 196 | Pipeline stages: (luma + inset + histogram + strict mask), (components + keep + clusters + winner), (window + loose mask + crop). Each needs a small struct or tuple — this is a design job, not a slice |
-| `draw_spell_check` | `panels.rs:230` | 170 | Suggestion list / controls blocks |
-| `draw_ribbon_actions` | `main.rs:3039` | ~150 | Overflow dropdown out of the row |
-| `replace_outlined_word` | `edit.rs:940` | 152 | Find/plan/apply stages |
+| `pick_text_run_traced` | `edit.rs:59` | 155 | Remaining pipeline (unreadable/rotated/editor build); `pick_run_under` already took the heavy/legacy branch |
 | `segment` | `shell/blocks.rs:2031` | 151 | Piece/link/furniture grouping stages |
-| `draw_run_editor` | `main.rs:14180` | 134 | Optional; wrap/skin/width already out |
+| `draw_frame_preamble` | `main.rs:2533` | 147 | Collect-* polls and dialog calls are separable |
+| `draw_ribbon_actions` | `main.rs:3039` | ~145 | Overflow dropdown out of the row |
 | test helpers | `shell/tests/blocks_synthetic.rs` 178/159/119/108/106/108, `blocks_review_fuzz.rs` 136/121/112/103, `replace_lines_sweep.rs:364` 173, `pick_wiring_tests.rs:92` 133, `lock_wiring_tests.rs:6914` 117, `ui_tests.rs:3183` 108 | | Split only when you touch those files; tests are not the priority |
 
 Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105/103/102,
