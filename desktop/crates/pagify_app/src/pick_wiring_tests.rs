@@ -1272,3 +1272,62 @@ fn a_pasted_words_own_narrow_letters_read_back_the_same_as_the_original() {
         src.text
     );
 }
+
+/// **Reported from use: a pasted word looked "scrambled," letters raised
+/// above their neighbours, even alone on a blank page with nothing to
+/// overlap.** PDFium splits "Description:" into five adjacent word-runs
+/// ("D", "es", "cr", "ipti", "on:" — see `content_for_selected`'s own "the
+/// words" branch) that all share one baseline in the original. The group
+/// branch's vertical anchor used to be `rect.top`, and a box's top sits
+/// above its baseline by that run's own ascent — not the same for every
+/// fragment of one word: "ipti" (an ascender-letter run: i, t) has a
+/// noticeably higher box top than "es" or "on:" (x-height only), even
+/// though all five sit on the same line in the source. Anchoring on
+/// `rect.top` took that ink-height difference as a real vertical offset
+/// between fragments, raising "ipt" above its neighbours in the pasted
+/// copy. Fixed by anchoring on each run's own baseline (`origin.y`)
+/// instead, which — unlike `rect.top` — is provably the same for every
+/// fragment of one shared line.
+#[test]
+fn a_split_words_own_fragments_share_one_baseline_not_each_fragments_own_ascent() {
+    if !std::path::Path::new(MARINA).is_file() {
+        eprintln!("skipping: the Marina datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(MARINA));
+    app.submit("editobject");
+    let runs = text_runs(&app, 0);
+    let by_obj: std::collections::HashMap<usize, TextRun> = runs.iter().map(|r| (r.object, r.clone())).collect();
+    // "D", "es", "cr", "ipti", "on:" — confirmed by inspection to share one
+    // baseline (`origin.y`) while their `rect.top` genuinely differs, since
+    // "ipti" alone carries ascender letters the other fragments do not.
+    let objs = [3usize, 4, 5, 6, 7];
+    let tops: Vec<f32> = objs.iter().map(|&o| by_obj[&o].rect.top).collect();
+    assert!(
+        tops.iter().any(|&t| (t - tops[0]).abs() > 1.0),
+        "setup: these fragments' own box tops should genuinely differ (ascender letters vs. x-height only): {tops:?}"
+    );
+    let origins: Vec<f32> = objs.iter().map(|&o| by_obj[&o].origin.y).collect();
+    assert!(
+        origins.iter().all(|&y| (y - origins[0]).abs() < 0.01),
+        "setup: these fragments should share one real baseline: {origins:?}"
+    );
+
+    app.tab_mut().group = objs
+        .iter()
+        .map(|&o| {
+            let r = &by_obj[&o];
+            Selected { page: 0, object: o, rect: r.rect, what: "the words" }
+        })
+        .collect();
+    assert!(app.copy_object_selection());
+    let Some(ObjectClipboard::Group(items)) = app.object_clipboard.clone() else {
+        panic!("expected a Group on the clipboard");
+    };
+    let dys: Vec<f32> = items.iter().map(|(_, _, dy)| *dy).collect();
+    assert!(
+        dys.iter().all(|&dy| (dy - dys[0]).abs() < 0.01),
+        "every fragment of one split word must share the same vertical offset \
+         (one baseline), not each fragment's own box top: {dys:?}"
+    );
+}

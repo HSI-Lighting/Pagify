@@ -7902,9 +7902,35 @@ impl PagifyApp {
                     // "the words" branch) came back overlapping itself,
                     // reported from use as copy/paste turning a short label
                     // into visual noise.
-                    let (ax, ay) = match &content {
-                        ObjectClipboard::Text { .. } => (sel.rect.left, sel.rect.top),
-                        _ => ((sel.rect.left + sel.rect.right) / 2.0, (sel.rect.top + sel.rect.bottom) / 2.0),
+                    //
+                    // **The vertical half of that anchor cannot be `rect.top`
+                    // either.** A run's box sits above its baseline by that
+                    // run's own ascent, and ascent is not the same for every
+                    // fragment of one split word: "ipti" (an ascender-letter
+                    // run) has a noticeably higher box top than "es" or "on:"
+                    // (x-height only), even though all of them sit on the
+                    // same baseline in the original. Anchoring on `rect.top`
+                    // took that ink-height difference as if it were a real
+                    // vertical offset between fragments, so the pasted copy
+                    // visibly raised "ipt" above its neighbours — reported
+                    // from use as the pasted word looking "scrambled" even
+                    // alone on a blank page, nothing to overlap with. The
+                    // true, shared reference is each run's own baseline
+                    // origin (`TextRun::origin`, already documented as "not
+                    // the top-left of `rect`" for exactly this reason).
+                    let ay = match &content {
+                        ObjectClipboard::Text { .. } => self
+                            .tab()
+                            .doc
+                            .as_ref()
+                            .and_then(|d| d.session.text_run_at(page, sel.object).ok().flatten())
+                            .map(|run| run.origin.y)
+                            .unwrap_or(sel.rect.top),
+                        _ => (sel.rect.top + sel.rect.bottom) / 2.0,
+                    };
+                    let ax = match &content {
+                        ObjectClipboard::Text { .. } => sel.rect.left,
+                        _ => (sel.rect.left + sel.rect.right) / 2.0,
                     };
                     Some((content, ax - cx, ay - cy))
                 })

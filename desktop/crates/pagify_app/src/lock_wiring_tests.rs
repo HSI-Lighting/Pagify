@@ -3932,7 +3932,12 @@ fn a_text_groups_own_offsets_are_each_members_left_edge_not_its_centre() {
     for (sel, (content, dx, dy)) in [a, b].iter().zip(&items) {
         assert!(matches!(content, ObjectClipboard::Text { .. }), "expected text");
         assert!((*dx - (sel.rect.left - cx)).abs() < 0.01, "offset {dx} is not the left edge {}: centred instead?", sel.rect.left - cx);
-        assert!((*dy - (sel.rect.top - cy)).abs() < 0.01, "offset {dy} is not the top edge {}: centred instead?", sel.rect.top - cy);
+        // The vertical half anchors on the run's own *baseline* (`origin.y`),
+        // not `rect.top` — a box's top sits above its baseline by that run's
+        // own ascent, which is not the same number for every run (see the
+        // sibling test using a real ascender/x-height split for why that
+        // matters in practice).
+        assert!((*dy - (sel.origin.y - cy)).abs() < 0.01, "offset {dy} is not the baseline {}: boxed top instead?", sel.origin.y - cy);
     }
 }
 
