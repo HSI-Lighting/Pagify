@@ -124,14 +124,17 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   into the shell: `execute(verb, ...) -> Vec<Effect>` with `Effect` covering
   Say/ScrollTo/OpenDialog/Refresh/AskUnsaved/Quit; `pagify_app::dispatch`
   becomes an effect applier. `verbs::parse` is already split by domain.
-5. **File splits — session done, blocks pending.** `shell/src/session.rs`
-  (1,817 lines) is now `session/`: `mod.rs` ~1,300 (text/recognise, marks and
-  sensitivity, history/undo, typing fonts still to come) plus `io.rs` (48),
-  `render.rs` (117), `locking.rs` (125), `signing.rs` (218), `objects.rs` (66)
-  — each a family of `impl Session` methods; shell suite green throughout.
-  Remaining splits: `shell/src/blocks.rs` (2,292) and `block_input.rs` (2,985)
-  into families the same way, and the big shell test files. Move behaviour-free,
-  one module per commit.
+5. **File splits — session mostly done, blocks pending.** `shell/src/session.rs`
+  (1,817 lines) is now `session/`: `mod.rs` ~805 holding the struct, helpers
+  and the remaining method families (markup commit/restore, is_dirty/save_to,
+  page_rotation, edit-state/extract, text runs, page crop/duplicate/import,
+  annotate/classify/bookmarks, with_engine) plus `io.rs`, `render.rs`,
+  `locking.rs` (207), `signing.rs` (218), `objects.rs`, `reading.rs` (185),
+  `history.rs`, `security.rs` (177) and `typing.rs` — each a family of
+  `impl Session` methods; shell suite green (631/0) after every commit.
+  Remaining splits: the rest of `session/mod.rs`, then `shell/src/blocks.rs`
+  (2,292) and `block_input.rs` (2,985) into families the same way, and the big
+  shell test files. Move behaviour-free, one module per commit.
 6. **CI gates.** Only once the Windows suite is green: add a workflow running
   `cargo test` (Windows runner, with `PAGIFY_PDFIUM_LIB`) plus clippy without
   `-D warnings`; add `clippy.toml` (`too-many-lines-threshold = 150`,
