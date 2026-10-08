@@ -88,9 +88,8 @@ Current >150 (clippy non-comment lines), with a suggested first cut:
 
 | Function | Where | Size | Suggested split |
 |---|---|---|---|
-| `pick_text_run_traced` | `edit.rs:51` | 205 | Heavy-page/legacy fallback branch out to a method returning `Result<(Option<Rc<PageBlocks>>, TextRun), String>`; the two `return self.no_text_here(...)` early-outs must be converted to that return type |
+| `pick_text_run_traced` | `edit.rs:59` | 155 | Remaining pipeline (unreadable/rotated/editor build); `pick_run_under` already took the heavy/legacy branch |
 | `extract_signature` | `shell/signature_extract.rs:78` | 196 | Pipeline stages: (luma + inset + histogram + strict mask), (components + keep + clusters + winner), (window + loose mask + crop). Each needs a small struct or tuple — this is a design job, not a slice |
-| `draw_signature_list` | `panels.rs:727` | 184 | Per-entry row out to a method taking `&mut panel.renaming` and `&mut action` |
 | `draw_spell_check` | `panels.rs:230` | 170 | Suggestion list / controls blocks |
 | `draw_ribbon_actions` | `main.rs:3039` | ~150 | Overflow dropdown out of the row |
 | `replace_outlined_word` | `edit.rs:940` | 152 | Find/plan/apply stages |
