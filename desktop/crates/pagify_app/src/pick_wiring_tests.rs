@@ -1660,3 +1660,72 @@ fn edit_text_boxes_the_paragraphs_around_a_drawn_line_and_lights_the_one_under_t
     let boxes = app.paragraph_boxes(0, view, screen(lower));
     assert!(!boxes.is_empty() && boxes.iter().all(|(_, s)| *s != BoxStyle::Lit), "a box was lit while the editor was open");
 }
+
+
+/// The page rendered at 1x, as RGBA bytes.
+fn page_pixels(app: &PagifyApp) -> Vec<u8> {
+    app.tab().doc.as_ref().expect("open").session.render_page(0, 1.0).expect("render").pixels
+}
+
+fn pixels_that_differ(a: &[u8], b: &[u8]) -> usize {
+    assert_eq!(a.len(), b.len(), "the page changed size");
+    a.chunks(4).zip(b.chunks(4)).filter(|(x, y)| x != y).count()
+}
+
+/// **Reported from use, on RING 600: replacing one drawn word destroyed the page.**
+/// The word is part of one path that draws a whole line, so the replacement takes that
+/// line off — and it used to do it with `Command::Redact`, which rebuilds the page's whole
+/// content stream and, on a page from Illustrator, loses most of it: the picture, the left
+/// column and most of the text gone, what was left shifted. Measured: a quarter of the
+/// page's pixels changed and 3,031 text runs became 2,985. The area held one path.
+///
+/// What may change now is the drawn line and the words put in its place — a sliver of the
+/// page — and every text run that was there still is.
+#[test]
+fn replacing_a_drawn_word_takes_off_its_shape_and_nothing_else() {
+    if !std::path::Path::new(RING600).is_file() {
+        eprintln!("skipping: the RING 600 datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(RING600));
+    app.submit("edittext");
+    let words_before = text_runs(&app, 0).len();
+    let before = page_pixels(&app);
+
+    app.pick_text_run(0, AppPoint { x: 297.8, y: 93.8 }).expect("a drawn word was not picked");
+    assert!(app.tab().editing_run.as_ref().is_some_and(|e| e.drawn), "setup: the click did not pick a drawn word");
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "S".to_string();
+    app.apply_editing_page();
+    let told = said(&app);
+    assert!(told.contains("replaced the drawn word"), "{told}");
+
+    let words_after = text_runs(&app, 0).len();
+    assert_eq!(words_after, words_before + 1, "text was lost or gained besides the new words: {words_before} -> {words_after}");
+    let after = page_pixels(&app);
+    let changed = pixels_that_differ(&before, &after);
+    assert!(
+        changed * 100 < before.len() / 4,
+        "{changed} of {} pixels changed — more than the one drawn line and its replacement",
+        before.len() / 4
+    );
+}
+
+/// "…so `undo` twice puts the artwork back" — and it is the artwork as it was, not near it.
+#[test]
+fn undoing_a_drawn_word_replacement_twice_restores_the_page_exactly() {
+    if !std::path::Path::new(RING600).is_file() {
+        eprintln!("skipping: the RING 600 datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(RING600));
+    app.submit("edittext");
+    let before = page_pixels(&app);
+    app.pick_text_run(0, AppPoint { x: 297.8, y: 93.8 }).expect("a drawn word was not picked");
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "S".to_string();
+    app.apply_editing_page();
+    assert_ne!(pixels_that_differ(&before, &page_pixels(&app)), 0, "setup: the replacement changed nothing");
+
+    app.submit("undo");
+    app.submit("undo");
+    assert_eq!(pixels_that_differ(&before, &page_pixels(&app)), 0, "two undos did not restore the page");
+}
