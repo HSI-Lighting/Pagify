@@ -7414,35 +7414,88 @@ fn font_to_unicode(
         own: &[u8],
         wanted: &str,
     ) -> Option<(Swapped, Vec<u8>)> {
+        // **The closest look, not the first font listed.** Several fonts on a
+        // page can spell the same words, and taking whichever the resource
+        // dictionary lists first put a `600mm` dimension label set in a thin
+        // face into the page's ExtraBold heading font. Judged by the weight
+        // and slant the names declare; where they say nothing the distances
+        // tie and the first listed wins, as it always did.
+        let own_look = Self::font_look(file, fonts, own);
+        let mut best: Option<(i32, Swapped, Vec<u8>)> = None;
         for (key, _) in fonts.0.iter() {
             if key == own {
                 continue;
             }
             let Some(width) = code_width(file, fonts, key) else { continue };
-            let map = match Self::font_to_unicode(file, bytes, fonts, key) {
-                Some(map) => map,
-                None if width == 1 => (0x20u32..0x7F)
-                    .filter_map(|code| char::from_u32(code).map(|c| (code, c.to_string())))
-                    .collect(),
+            let (map, ink) = match Self::font_to_unicode(file, bytes, fonts, key) {
+                Some(map) => (map, None),
+                None if width == 1 => (assumed_ascii(), crate::pdf::subset::drawable_ascii(file, fonts, key)),
                 None => continue,
             };
-            let mut reverse: std::collections::BTreeMap<String, u32> = Default::default();
-            for (code, spelling) in &map {
-                reverse.entry(spelling.clone()).or_insert(*code);
-            }
+            let reverse = spelling_codes(&map, ink.as_ref(), "");
             if let Some(encoded) = encode_with(&reverse, wanted, width) {
-                return Some((
-                    Swapped {
-                        resource: key.clone(),
-                        face: format!("/{}", String::from_utf8_lossy(key)),
-                        added: Vec::new(),
-                        page: None,
-                    },
-                    encoded,
-                ));
+                let (weight, italic) = Self::font_look(file, fonts, key);
+                let distance = (weight - own_look.0).abs() + if italic != own_look.1 { 1000 } else { 0 };
+                if best.as_ref().map_or(true, |(nearest, ..)| distance < *nearest) {
+                    best = Some((
+                        distance,
+                        Swapped {
+                            resource: key.clone(),
+                            face: Self::font_display_name(file, fonts, key)
+                                .unwrap_or_else(|| format!("/{}", String::from_utf8_lossy(key))),
+                            added: Vec::new(),
+                            page: None,
+                        },
+                        encoded,
+                    ));
+                }
             }
         }
-        None
+        best.map(|(_, swapped, encoded)| (swapped, encoded))
+    }
+
+    /// A font's `/BaseFont`, less the six-letter subset tag a producer puts in
+    /// front of it — what to call it to somebody, where `TT3` means nothing.
+    fn font_display_name(
+        file: &crate::pdf::File<'_>,
+        fonts: &crate::pdf::Dict,
+        key: &[u8],
+    ) -> Option<String> {
+        let font = file.resolve(fonts.get(key)?).ok()?;
+        let name = String::from_utf8_lossy(font.as_dict()?.get(b"BaseFont")?.as_name()?).to_string();
+        let bare = match name.split_once('+') {
+            Some((tag, rest)) if tag.len() == 6 && tag.bytes().all(|b| b.is_ascii_uppercase()) => rest,
+            _ => &name,
+        };
+        Some(bare.to_string())
+    }
+
+    /// The weight (100 thin … 900 black, 400 when the name says nothing) and
+    /// slant a font's `/BaseFont` name declares.
+    fn font_look(file: &crate::pdf::File<'_>, fonts: &crate::pdf::Dict, key: &[u8]) -> (i32, bool) {
+        let name = fonts
+            .get(key)
+            .and_then(|font| file.resolve(font).ok())
+            .and_then(|font| font.as_dict()?.get(b"BaseFont")?.as_name().map(|n| n.to_vec()))
+            .map(|n| String::from_utf8_lossy(&n).to_ascii_lowercase())
+            .unwrap_or_default();
+        // Longest first: `extrabold` contains `bold`, `semibold` too.
+        const WEIGHTS: [(&str, i32); 12] = [
+            ("extrabold", 800),
+            ("ultrabold", 800),
+            ("heavy", 800),
+            ("black", 900),
+            ("semibold", 600),
+            ("demibold", 600),
+            ("extralight", 200),
+            ("ultralight", 200),
+            ("thin", 100),
+            ("light", 300),
+            ("medium", 500),
+            ("bold", 700),
+        ];
+        let weight = WEIGHTS.iter().find(|(word, _)| name.contains(word)).map_or(400, |(_, w)| *w);
+        (weight, name.contains("italic") || name.contains("oblique"))
     }
 
     /// Write one of the caller's fonts into the document and type with it.
@@ -8935,13 +8988,18 @@ fn font_to_unicode(
         // is what the standard encodings all agree on for the printable range.
         // Checked rather than assumed: the mapping is only used for characters
         // below 128, and anything else still refuses.
+        //
+        // **A code is not a glyph.** The ASCII reading says what each code
+        // *means*; a subset keeps only the outlines it drew, and a code with
+        // none draws an empty box with no error anywhere. `ink` is what the
+        // font's own `/CharSet` says survived — see [`crate::pdf::subset`].
+        let mut ink = None;
         let unicode = match Self::font_to_unicode(&file, &bytes, &fonts, &name) {
             Some(map) => map,
-            None if width == 1 => (0x20u32..0x7F)
-                .filter_map(|code| {
-                    char::from_u32(code).map(|c| (code, c.to_string()))
-                })
-                .collect(),
+            None if width == 1 => {
+                ink = crate::pdf::subset::drawable_ascii(&file, &fonts, &name);
+                assumed_ascii()
+            }
             None => {
                 return Err(PdfError::Unsupported(
                     "that font carries no character map this can read",
@@ -8951,11 +9009,10 @@ fn font_to_unicode(
 
         // The map read backwards: what code spells each character. Where two
         // codes spell the same thing the lower one wins, which keeps the choice
-        // stable rather than dependent on iteration order.
-        let mut reverse: std::collections::BTreeMap<String, u32> = Default::default();
-        for (code, spelling) in &unicode {
-            reverse.entry(spelling.clone()).or_insert(*code);
-        }
+        // stable rather than dependent on iteration order. `unicode` itself is
+        // left whole: it is what the run's *existing* codes are lined up
+        // against, and those were drawn, whatever a `/CharSet` says.
+        let reverse = spelling_codes(&unicode, ink.as_ref(), &run.text);
 
         // Encode the new words. A character this font cannot spell would come
         // out as a blank or the wrong glyph, so it refuses instead.
@@ -9243,6 +9300,8 @@ fn font_to_unicode(
         // The operators already taken by an edit of this batch.
         let mut claimed: std::collections::HashSet<usize> = std::collections::HashSet::new();
         let codes_in = |p: &content::Placed| codes_drawn(&file, fonts.as_ref(), &operations, p);
+        // What each font used so far can really draw — see `subset`.
+        let mut inked: HashMap<Vec<u8>, Option<std::collections::BTreeSet<u32>>> = HashMap::new();
 
         for &(object, text, requested_face, new_size, requested_color) in edits {
             let run = resolved
@@ -9285,19 +9344,25 @@ fn font_to_unicode(
             let fonts_ref = fonts.as_ref().ok_or(PdfError::Unsupported("that page declares no fonts"))?;
             let width = code_width(&file, fonts_ref, &name)
                 .ok_or(PdfError::Unsupported("that font's codes cannot be counted"))?;
+            // See `set_run_in_stream`: ASCII is what the codes mean, `ink` is
+            // what the subset can actually draw. Asked once per font for the
+            // whole batch — it reads the font program, and a paragraph is many
+            // lines in the same few fonts.
+            let mut ink = None;
             let unicode = match Self::font_to_unicode(&file, bytes, fonts_ref, &name) {
                 Some(map) => map,
-                None if width == 1 => (0x20u32..0x7F)
-                    .filter_map(|code| char::from_u32(code).map(|c| (code, c.to_string())))
-                    .collect(),
+                None if width == 1 => {
+                    ink = inked
+                        .entry(name.clone())
+                        .or_insert_with(|| crate::pdf::subset::drawable_ascii(&file, fonts_ref, &name))
+                        .clone();
+                    assumed_ascii()
+                }
                 None => {
                     return Err(PdfError::Unsupported("that font carries no character map this can read"))
                 }
             };
-            let mut reverse: std::collections::BTreeMap<String, u32> = Default::default();
-            for (code, spelling) in &unicode {
-                reverse.entry(spelling.clone()).or_insert(*code);
-            }
+            let reverse = spelling_codes(&unicode, ink.as_ref(), &run.text);
             let wanted = encodable(text, &reverse);
 
             let (encoded, swap) = if let Some(face) = requested_face {
@@ -10993,6 +11058,37 @@ struct Swapped {
     added: Vec<(u32, Vec<u8>)>,
     /// The page object rewritten to name the new font, where that was needed.
     page: Option<(u32, Vec<u8>)>,
+}
+
+/// What a single-byte font with no `/ToUnicode` is taken to spell: printable
+/// ASCII, one code each.
+fn assumed_ascii() -> crate::pdf::cmap::ToUnicode {
+    (0x20u32..0x7F)
+        .filter_map(|code| char::from_u32(code).map(|c| (code, c.to_string())))
+        .collect()
+}
+
+/// `unicode` read backwards — which code spells each character — **less the
+/// characters the font's subset has no outline for.**
+///
+/// `ink` is [`crate::pdf::subset::drawable_ascii`]'s answer, `None` meaning it
+/// could not tell and nothing is left out. A character that is already drawn
+/// in `drawn` is kept whatever `ink` says: it has an outline by being on the
+/// page, and a name this could not match must not make a run unable to be
+/// retyped with its own words.
+fn spelling_codes(
+    unicode: &crate::pdf::cmap::ToUnicode,
+    ink: Option<&std::collections::BTreeSet<u32>>,
+    drawn: &str,
+) -> std::collections::BTreeMap<String, u32> {
+    let mut reverse: std::collections::BTreeMap<String, u32> = Default::default();
+    for (code, spelling) in unicode {
+        if ink.is_some_and(|ink| !ink.contains(code) && !drawn.contains(spelling.as_str())) {
+            continue;
+        }
+        reverse.entry(spelling.clone()).or_insert(*code);
+    }
+    reverse
 }
 
 /// The codes that spell some words in a font, or `None` if it cannot.

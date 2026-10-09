@@ -909,6 +909,21 @@ impl crate::PagifyApp {
                 if typed.trim().is_empty() {
                     said = said.replacen("paragraph changed", "deleted — `undo` puts it back", 1);
                 }
+                // Said when it happened, as a single run's edit already does: a
+                // font that had no outline for what was typed is not the
+                // words' neighbours' font, and would otherwise be found on a
+                // printed page.
+                let swapped = if nothing_to_execute {
+                    None
+                } else {
+                    self.tab_mut().doc.as_ref().and_then(|d| d.session.substituted_face())
+                };
+                if let Some(face) = swapped {
+                    said = format!(
+                        "{said} Written in {face} — the document's own font here has only the \
+                         letters it already uses, so this will not match its neighbours."
+                    );
+                }
                 self.say_info(if ragged {
                     format!("{said} The retyped lines could not be stretched to the width they had, so they end where the new words end.")
                 } else {

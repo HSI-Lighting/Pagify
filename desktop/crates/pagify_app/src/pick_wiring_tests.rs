@@ -4,6 +4,7 @@ use pdf_core::document::{Rect, TextRun};
 const MARINA: &str = r"C:\Users\hsili\Desktop\test pdf for pgify\Datasheets - Editors market - Marina mall.pdf";
 const CAMINO: &str = r"C:\Users\hsili\Downloads\CAMINO elitee-plus 3.0.pdf";
 const DATASHEET: &str = r"C:\Users\hsili\Desktop\test pdf for pgify\TECHNICAL DATASHEET Q-2075-REV.pdf";
+const RING600: &str = r"D:\Dropbox\Datasheets\Data sheet 2024\RING 600.pdf";
 
 fn fixture(name: &str) -> String {
     format!("{}/../../../rust/pdf_core/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -1455,4 +1456,96 @@ fn deleting_a_dense_selection_does_not_cost_once_per_object() {
         "batching {batch_len} objects took {batch_ms:.1}ms against a single object's {single_ms:.1}ms — \
          this should cost roughly one save+parse, not one per object",
     );
+}
+
+fn said(app: &PagifyApp) -> String {
+    app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n")
+}
+
+/// How many dark pixels each of `slices` equal-width columns of `rect` holds,
+/// rendered at 8x. A glyph with no outline leaves its column blank.
+fn ink_per_column(app: &PagifyApp, rect: Rect, slices: usize) -> Vec<usize> {
+    let raster = app
+        .tab()
+        .doc
+        .as_ref()
+        .expect("open")
+        .session
+        .render_page_region(0, Rect { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }, 8.0)
+        .expect("render");
+    let (w, h) = (raster.width as usize, raster.height as usize);
+    (0..slices)
+        .map(|slice| {
+            let (from, to) = (slice * w / slices, (slice + 1) * w / slices);
+            (0..h)
+                .flat_map(|y| (from..to).map(move |x| (x, y)))
+                .filter(|&(x, y)| raster.pixels[(y * w + x) * 4] < 140)
+                .count()
+        })
+        .collect()
+}
+
+/// **Reported from use: retyping the `600` of a `600mm` dimension to `500`
+/// drew an empty box where the `5` should be.** The label's font is a subset
+/// of `space zero six m` (and a few more letters) that still *declares* every
+/// digit, so the edit wrote code `0x35` into it and nothing in the way said
+/// that the font had no outline for it. It is now written in a font on the
+/// page that has — and says so — and **every glyph has ink**: the first fix
+/// that borrowed a font on the page picked one with the digits' codes and no
+/// digits, and the number vanished.
+#[test]
+fn retyping_a_digit_the_labels_font_never_drew_is_written_in_a_font_that_can_draw_it() {
+    if !std::path::Path::new(RING600).is_file() {
+        eprintln!("skipping: the RING 600 datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(RING600));
+    app.pick_text_run(0, AppPoint { x: 440.0, y: 168.5 }).expect("the dimension is clickable");
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "500mm".to_string();
+    assert!(!app.apply_editing_page(), "the edit was refused: {}", said(&app));
+
+    let said = said(&app);
+    assert!(said.contains("Written in"), "the swap was not announced: {said}");
+    assert!(!said.contains("MyriadPro"), "it claims the label's own font drew a 5: {said}");
+
+    let runs = text_runs(&app, 0);
+    let label = runs.iter().find(|r| r.text.trim() == "500mm").expect("the new words are on the page");
+    let ink = ink_per_column(&app, label.rect, 5);
+    assert!(ink.iter().all(|&n| n > 15), "a glyph has no outline — per-column ink {ink:?}");
+}
+
+/// Words made only of what the label's font did draw stay in it, untouched.
+#[test]
+fn retyping_the_dimension_with_letters_its_font_kept_changes_no_font() {
+    if !std::path::Path::new(RING600).is_file() {
+        eprintln!("skipping: the RING 600 datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(RING600));
+    app.pick_text_run(0, AppPoint { x: 440.0, y: 168.5 }).expect("the dimension is clickable");
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "660mm".to_string();
+    assert!(!app.apply_editing_page(), "the edit was refused: {}", said(&app));
+    assert!(!said(&app).contains("Written in"), "a font was swapped for words it could draw: {}", said(&app));
+}
+
+/// **Why a paste "worked" where a retype did not.** The label's font is a bare
+/// CFF program, which the writing registry cannot read, so a paste silently
+/// fell back to Helvetica — a font with every digit in it, and not the
+/// label's. It is now said at the copy.
+#[test]
+fn copying_words_whose_font_cannot_be_reused_says_what_a_paste_will_use() {
+    if !std::path::Path::new(RING600).is_file() {
+        eprintln!("skipping: the RING 600 datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(RING600));
+    app.submit("editobject");
+    let runs = text_runs(&app, 0);
+    let label = runs
+        .iter()
+        .find(|r| r.text == "6" && r.rect.left > 436.0 && r.rect.left < 440.0 && r.rect.top > 160.0 && r.rect.top < 170.0)
+        .expect("the dimension's first digit");
+    app.tab_mut().selected = Some(Selected { page: 0, object: label.object, rect: label.rect, what: "the words" });
+    assert!(app.copy_object_selection());
+    assert!(said(&app).contains("Helvetica"), "{}", said(&app));
 }

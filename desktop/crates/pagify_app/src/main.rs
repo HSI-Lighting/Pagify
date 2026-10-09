@@ -2200,6 +2200,17 @@ fn describe_clipboard(content: &ObjectClipboard) -> String {
     }
 }
 
+/// Whether words copied from the page have no font to paste in — see
+/// [`PagifyApp::put_on_clipboard`]. `face` is `None` for a copy from the page
+/// only when the run's own font could not be registered for writing with.
+fn words_without_a_font(content: &ObjectClipboard) -> bool {
+    match content {
+        ObjectClipboard::Text { face, .. } => face.is_none(),
+        ObjectClipboard::Group(items) => items.iter().any(|(item, ..)| words_without_a_font(item)),
+        _ => false,
+    }
+}
+
 /// What the system clipboard is given after a copy that is not text, so the
 /// ⌘V that follows has something to paste — see
 /// [`PagifyApp::clipboard_mirror_wanted`]. Also how a paste tells "my own copy
@@ -7988,6 +7999,15 @@ impl PagifyApp {
         // session log, so a "doesn't look like what I copied" report is
         // readable from the log alone instead of needing a live repro.
         self.session_log.record("copy", &describe_clipboard(&content));
+        // **Said at the copy, not found on the page.** Words whose own font
+        // could not be reused (a bare-CFF subset is one `Face::from_slice`
+        // cannot read) paste in Helvetica — close enough to pass unnoticed on
+        // a dimension label, which is exactly why it has to be said.
+        let said = if words_without_a_font(&content) {
+            format!("{said} Their own font cannot be reused for new words, so a paste draws them in Helvetica.")
+        } else {
+            said
+        };
         self.object_clipboard = Some(content);
         self.paste_count = 0;
         self.clipboard_mirror_wanted = true;
