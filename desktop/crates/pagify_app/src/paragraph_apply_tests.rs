@@ -277,9 +277,9 @@ fn an_editor_built_with_an_empty_frozen_first_line_stays_aligned_through_an_appl
         right: runs[0].rect.right,
         bottom: runs[0].rect.top,
     };
-    let mut lines = vec![ParagraphLine { objects: Vec::new(), rect: above, frozen: true }];
+    let mut lines = vec![ParagraphLine { objects: Vec::new(), rect: above, frozen: true, follows_drawn: false }];
     lines.extend(
-        runs.iter().map(|r| ParagraphLine { objects: vec![r.object], rect: r.rect, frozen: false }),
+        runs.iter().map(|r| ParagraphLine { objects: vec![r.object], rect: r.rect, frozen: false, follows_drawn: false }),
     );
     let (edit, _look) = app
         .build_editor_from_lines(0, lines, &runs, &face_names, &std::collections::HashMap::new(), &[], None)
@@ -318,7 +318,7 @@ fn an_editor_built_with_an_empty_frozen_first_line_stays_aligned_through_an_appl
 fn a_block_with_no_text_object_at_all_cannot_be_opened() {
     let mut app = open_page("all-frozen", &FOUR[..1], "");
     let runs = app.tab().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
-    let lines = vec![ParagraphLine { objects: Vec::new(), rect: runs[0].rect, frozen: true }];
+    let lines = vec![ParagraphLine { objects: Vec::new(), rect: runs[0].rect, frozen: true, follows_drawn: false }];
     let refused = app
         .build_editor_from_lines(
             0,

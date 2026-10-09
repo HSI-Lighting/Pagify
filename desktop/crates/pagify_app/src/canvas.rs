@@ -17,6 +17,17 @@ use pagify_shell::reader::{prefetch_targets, STRIP_PAD_PX};
 use pagify_shell::tools;
 use pagify_shell::verbs::{PageTarget, Verb};
 
+/// How one box over the page is drawn — see [`crate::PagifyApp::paragraph_boxes`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BoxStyle {
+    /// A paragraph a click would open.
+    Plain,
+    /// The one the pointer is over.
+    Lit,
+    /// Lines the page draws as shapes: nothing a click can open.
+    Drawn,
+}
+
 impl crate::PagifyApp {
     /// The reference lines, **only while something is being moved** — not while it
     /// is resized, and not when it is merely selected. Grey for a line near it,
@@ -63,6 +74,14 @@ impl crate::PagifyApp {
                 painter.line_segment([left, right], stroke);
             }
         }
+    }
+
+    /// Forget what the object tool has picked. A placed picture or signature
+    /// is selected by the same pointer, and two selections at once means
+    /// Delete, Copy and the handles disagree about which one they mean.
+    fn drop_object_selection(&mut self) {
+        self.tab_mut().selected = None;
+        self.tab_mut().group = Vec::new();
     }
 
     /// The object tool's own pointer handling: select on click, move by
@@ -155,6 +174,10 @@ impl crate::PagifyApp {
                 // the branch above this one still covers exactly as
                 // before.
                 self.tab_mut().selected = None;
+                // A picture or signature picked a moment ago is not part of
+                // what this marquee is about to select.
+                self.tab_mut().placed_image_selected = None;
+                self.tab_mut().signature_selected = None;
                 if !ui.input(|i| i.modifiers.shift) {
                     self.tab_mut().group = Vec::new();
                 }
@@ -278,6 +301,7 @@ impl crate::PagifyApp {
             // the same reason: one gesture, not two.
             if let Some((index, rect, rotation)) = self.signature_at(page, at) {
                 self.tab_mut().signature_selected = Some(SignatureSelected { page, index, rect, rotation });
+                self.drop_object_selection();
                 self.tab_mut().signature_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
                 return true;
             }
@@ -306,6 +330,7 @@ impl crate::PagifyApp {
         if response.clicked() {
             if let Some((index, rect, rotation)) = self.signature_at(page, at) {
                 self.tab_mut().signature_selected = Some(SignatureSelected { page, index, rect, rotation });
+                self.drop_object_selection();
                 self.say_info("signature selected — drag to move, drag a handle to resize, drag the ring above it to turn.");
                 return true;
             }
@@ -362,6 +387,7 @@ impl crate::PagifyApp {
             }
             if let Some((index, rect, rotation)) = self.placed_image_at(page, at) {
                 self.tab_mut().placed_image_selected = Some(PlacedImageSelected { page, index, rect, rotation });
+                self.drop_object_selection();
                 self.tab_mut().placed_image_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
                 return true;
             }
@@ -390,6 +416,7 @@ impl crate::PagifyApp {
         if response.clicked() {
             if let Some((index, rect, rotation)) = self.placed_image_at(page, at) {
                 self.tab_mut().placed_image_selected = Some(PlacedImageSelected { page, index, rect, rotation });
+                self.drop_object_selection();
                 self.say_info("picture selected — drag to move, drag a handle to resize, drag the ring above it to turn.");
                 return true;
             }
@@ -397,6 +424,109 @@ impl crate::PagifyApp {
         }
 
         false
+    }
+
+    /// **A box over every paragraph Edit Text can open**, so what a click will
+    /// take is something to see rather than to find out: the paragraph under
+    /// the pointer drawn stronger, and a run of lines the page draws as shapes
+    /// — which no click can open — dashed and grey, the gap in the paragraph
+    /// it cut. The boxes are [`block_input::piece_boxes`]: the very pieces a
+    /// click opens, so they cannot disagree with it.
+    ///
+    /// Only with Edit Text in hand, and only on the page the pointer is over:
+    /// the page's paragraphs are read once and kept (`page_blocks`, the read a
+    /// click uses, so the first click on a boxed page is free), and a page too
+    /// heavy to read for paragraphs is not boxed at all.
+    pub(crate) fn draw_paragraph_boxes(
+        &mut self,
+        ui: &mut egui::Ui,
+        page: usize,
+        rect: egui::Rect,
+        view: PageView,
+        hover: Option<egui::Pos2>,
+    ) {
+        let Some(pointer) = hover.filter(|at| rect.contains(*at)) else { return };
+        let painter = ui.painter_at(rect);
+        for (outline, style) in self.paragraph_boxes(page, view, pointer) {
+            match style {
+                BoxStyle::Drawn => {
+                    let grey = egui::Stroke::new(1.0, ui.visuals().weak_text_color());
+                    let path = [
+                        outline.left_top(),
+                        outline.right_top(),
+                        outline.right_bottom(),
+                        outline.left_bottom(),
+                        outline.left_top(),
+                    ];
+                    painter.extend(egui::Shape::dashed_line(&path, grey, 4.0, 3.0));
+                }
+                BoxStyle::Lit => {
+                    painter.rect_filled(outline, egui::CornerRadius::same(2), theme::violet().gamma_multiply(0.10));
+                    painter.rect_stroke(
+                        outline,
+                        egui::CornerRadius::same(2),
+                        egui::Stroke::new(1.5, theme::violet()),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+                BoxStyle::Plain => {
+                    painter.rect_stroke(
+                        outline,
+                        egui::CornerRadius::same(2),
+                        egui::Stroke::new(1.0, theme::violet().gamma_multiply(0.45)),
+                        egui::StrokeKind::Outside,
+                    );
+                }
+            }
+        }
+    }
+
+    /// What [`Self::draw_paragraph_boxes`] draws, on screen, with the pointer at
+    /// `pointer`: empty unless Edit Text is in hand and the page is one that is
+    /// read for paragraphs.
+    ///
+    /// Apart from the work of reading the page, this is a function of its
+    /// arguments, which is what lets a test say what is boxed and what is lit
+    /// without painting anything.
+    pub(crate) fn paragraph_boxes(&mut self, page: usize, view: PageView, pointer: egui::Pos2) -> Vec<(egui::Rect, BoxStyle)> {
+        let in_hand = self.tab().tool.as_ref().is_some_and(|t| matches!(t.kind, Tool::PickText));
+        if !in_hand || self.page_weight(page).filter(crate::page_is_heavy).is_some() {
+            return Vec::new();
+        }
+        let Ok((blocks, _)) = self.page_blocks(page) else { return Vec::new() };
+
+        // While a box is open, the others stay outlined but nothing is lit:
+        // the pointer is for the editor.
+        let editing = self.tab().editing_run.is_some();
+        let under = view.to_page(pointer);
+        let boxes = pagify_shell::block_input::piece_boxes(&blocks);
+        let inside = |b: &pagify_shell::block_input::PieceBox| {
+            let (x, y) = (under.x as f32, under.y as f32);
+            x >= b.rect.left && x <= b.rect.right && y >= b.rect.top && y <= b.rect.bottom
+        };
+        let lit = if editing { None } else { boxes.iter().position(|b| !b.drawn && inside(b)) };
+
+        // A little air, so the box is not struck through by the first and last lines' own ink.
+        const AIR_PT: f32 = 2.0;
+        boxes
+            .iter()
+            .enumerate()
+            .map(|(i, piece)| {
+                let corner = |x: f32, y: f32| view.to_screen(AppPoint::new(x as f64, y as f64));
+                let outline = egui::Rect::from_min_max(
+                    corner(piece.rect.left - AIR_PT, piece.rect.top - AIR_PT),
+                    corner(piece.rect.right + AIR_PT, piece.rect.bottom + AIR_PT),
+                );
+                let style = if piece.drawn {
+                    BoxStyle::Drawn
+                } else if Some(i) == lit {
+                    BoxStyle::Lit
+                } else {
+                    BoxStyle::Plain
+                };
+                (outline, style)
+            })
+            .collect()
     }
 
     /// The selection's outline, its handles, and — mid-drag — where it is
@@ -990,6 +1120,9 @@ impl crate::PagifyApp {
                         // a tool part-way through is the most recent thing the
                         // reader did and the thing they are aiming with.
                         self.draw_pending_preview(ui, page, view, hover);
+                        // Under the editor, over the page: what a click on
+                        // Edit Text would open, boxed.
+                        self.draw_paragraph_boxes(ui, page, rect, view, hover);
                         // The editor, for the same reason, learned twice.
                         //
                         // Reported from use: "if i click somewhere else the
@@ -1593,26 +1726,25 @@ impl crate::PagifyApp {
             overlay::draw_snap(ui.painter(), view.to_screen(snapped.at), snapped.kind, theme::snap());
         }
 
-        // A placed-but-unapplied signature, picked with **no tool armed** —
-        // before the object tool's own check, and gated the same way: an
-        // armed tool (the object tool, or anything pending) owns the
-        // pointer outright, and a signature sitting under it is reached the
-        // way any other page content is, not by this path. Unlike the
-        // object tool, this only takes the gesture when it actually found
-        // something to do with it — a click on bare paper or on text still
-        // reaches the ordinary handling below.
-        if self.tab_mut().object_tool.is_none()
-            && self.tab_mut().tool.is_none()
-            && self.interact_signatures(ui, &response, page, at, view)
-        {
+        // A placed-but-unapplied signature, picked with **no tool pending** —
+        // before the object tool's own check. Unlike the object tool, this
+        // only takes the gesture when it actually found something to do with
+        // it — a click on bare paper or on text still reaches the ordinary
+        // handling below.
+        //
+        // **Also with the object tool in hand.** A signature and a placed
+        // picture are annotations, not page content, so the object tool's
+        // own hit-testing — which walks the page's content objects — cannot
+        // see either, and Edit Object is where somebody goes to move a
+        // picture they have just put down. Reported from use: after
+        // `addimage`, Edit Object could neither select nor move it. Any
+        // *other* pending tool still owns the pointer outright.
+        if self.tab_mut().tool.is_none() && self.interact_signatures(ui, &response, page, at, view) {
             return;
         }
 
         // The same, for a plain placed picture — see `interact_placed_images`.
-        if self.tab_mut().object_tool.is_none()
-            && self.tab_mut().tool.is_none()
-            && self.interact_placed_images(ui, &response, page, at, view)
-        {
+        if self.tab_mut().tool.is_none() && self.interact_placed_images(ui, &response, page, at, view) {
             return;
         }
 

@@ -220,17 +220,27 @@ impl crate::PagifyApp {
                 trace.block_facts(pb, block);
                 if trace.objects > 1 {
                     if pb.blocks[block].lines[line].outlined.is_empty() {
-                        match self.open_block(page, pb, block) {
-                            Ok(message) => {
-                                trace.path = PickPath::Block;
-                                return Ok(message);
-                            }
-                            Err(why) => {
-                                self.session_log.record(
-                                    "pick-note",
-                                    &format!("block {block} not opened ({why}); picking the run alone"),
-                                );
-                                alone = Some("the block could not be read safely");
+                        // How many words the paragraph around this line has once
+                        // the drawn lines are cut away: one run is the run
+                        // itself, and opens as it always did.
+                        let in_paragraph: usize = block_input::pieces(pb, block)
+                            .into_iter()
+                            .find(|piece| (piece.from..piece.to).contains(&line))
+                            .map(|piece| pb.blocks[block].lines[piece.from..piece.to].iter().map(|l| l.objects.len()).sum())
+                            .unwrap_or(0);
+                        if in_paragraph > 1 {
+                            match self.open_block(page, pb, block, line) {
+                                Ok(message) => {
+                                    trace.path = PickPath::Block;
+                                    return Ok(message);
+                                }
+                                Err(why) => {
+                                    self.session_log.record(
+                                        "pick-note",
+                                        &format!("block {block} not opened ({why}); picking the run alone"),
+                                    );
+                                    alone = Some("the block could not be read safely");
+                                }
                             }
                         }
                     } else {
@@ -438,7 +448,11 @@ impl crate::PagifyApp {
         // A hyphen the page's text carries as a control code, at the end of a
         // line that the page continues with a line it draws as shapes: the letter
         // that should follow it cannot be looked at, so it is settled here.
-        let drawn: Vec<bool> = lines.iter().map(|line| line.frozen).collect();
+        let mut drawn: Vec<bool> = lines.iter().map(|line| line.frozen).collect();
+        // **The drawn line the block was cut at is still after the last line**, though it is not in
+        // the box. Without this the page's own hyphen before it was dropped from the buffer, and
+        // retyping the line took it off the page.
+        drawn.push(lines.last().is_some_and(|line| line.follows_drawn));
         hyphens_before_drawn_lines(&mut line_texts, &drawn);
         // **Where each line ends, to find a hyphen the page draws there.**
         // The row's rightmost run is the line's last glyph, and its own

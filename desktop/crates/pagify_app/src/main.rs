@@ -1406,6 +1406,12 @@ struct ParagraphLine {
     /// Whether applying an edit must leave the line alone — see
     /// [`EditingRun::frozen`].
     frozen: bool,
+    /// The line after this one, in the block it came from, is drawn as shapes —
+    /// and so is not in the editor, which cuts the block there. Said only of a
+    /// paragraph's last line, because it is what a line-end hyphen is judged by:
+    /// the page's own hyphen before a drawn line is kept, since the letter that
+    /// should follow it cannot be looked at (see [`hyphens_before_drawn_lines`]).
+    follows_drawn: bool,
 }
 
 /// The smallest rectangle holding both.
@@ -10975,9 +10981,30 @@ impl PagifyApp {
     /// objects. The block first has to pass
     /// [`block_input::check_editor_invariants`]; the `Err` says which
     /// invariant it broke, and the caller opens the one run instead.
-    fn open_block(&mut self, page: usize, pb: &PageBlocks, block: usize) -> Result<String, String> {
-        block_input::check_editor_invariants(pb, block)?;
-        let specs = block_input::editor_lines(pb, block);
+    fn open_block(&mut self, page: usize, pb: &PageBlocks, block: usize, line: usize) -> Result<String, String> {
+        // **The paragraph is the written lines around the one clicked.** A line
+        // the page draws as shapes cuts it — see [`block_input::Piece`] — so
+        // what opens has no `[drawn text]` in it, and the rest of the block is
+        // its own paragraph, one click away.
+        let piece = block_input::pieces(pb, block)
+            .into_iter()
+            .find(|piece| !piece.drawn && (piece.from..piece.to).contains(&line))
+            .ok_or_else(|| format!("line {line} of block {block} is not in a paragraph that can be opened"))?;
+        let part = block_input::piece_block(pb, block, piece.from, piece.to)
+            .ok_or_else(|| format!("lines {}..{} of block {block} are not there", piece.from, piece.to))?;
+        if piece.to - piece.from < pb.blocks[block].lines.len() {
+            self.session_log.record(
+                "pick-note",
+                &format!(
+                    "block {block}: opened lines {}..{} of {}, the drawn lines around them left out",
+                    piece.from,
+                    piece.to,
+                    pb.blocks[block].lines.len()
+                ),
+            );
+        }
+        block_input::check_block_invariants(pb, &part)?;
+        let specs = block_input::editor_lines_of(pb, &part);
         // A line made only of outlined words has no text object, so no box of
         // its own to show a left edge from; it is given the paragraph's, so one
         // such line does not stop `paragraph_should_justify` from seeing a
@@ -10991,13 +11018,17 @@ impl PagifyApp {
         // Each line's twins (the faux bold of a heading) ride along with it,
         // so that retyping the line takes them off the page too.
         let twins: Vec<Vec<usize>> = specs.iter().map(|spec| spec.twins.clone()).collect();
+        // A drawn line follows the paragraph's last line when the block goes on past it.
+        let drawn_follows = piece.to < pb.blocks[block].lines.len();
+        let last = specs.len().saturating_sub(1);
         let lines: Vec<ParagraphLine> = specs
             .into_iter()
-            .map(|mut spec| {
+            .enumerate()
+            .map(|(i, mut spec)| {
                 if spec.objects.is_empty() && margin.is_finite() {
                     spec.rect.left = spec.rect.left.min(margin);
                 }
-                ParagraphLine { objects: spec.objects, rect: spec.rect, frozen: spec.frozen }
+                ParagraphLine { objects: spec.objects, rect: spec.rect, frozen: spec.frozen, follows_drawn: drawn_follows && i == last }
             })
             .collect();
         let runs: Vec<pdf_core::document::TextRun> =
@@ -11085,6 +11116,7 @@ impl PagifyApp {
                 objects: row.iter().map(|s| s.object).collect(),
                 rect: row.iter().skip(1).fold(row[0].rect, |acc, s| union_rect(acc, &s.rect)),
                 frozen: false,
+                follows_drawn: false,
             })
             .collect()
     }

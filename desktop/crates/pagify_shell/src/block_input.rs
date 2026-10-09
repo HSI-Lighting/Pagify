@@ -110,7 +110,7 @@ use std::time::Instant;
 
 use pdf_core::document::{DrawnKind, DrawnObject, Rect, RunStyle, TextRun};
 
-use crate::blocks::{self, Block, Frag, Shape};
+use crate::blocks::{self, Block, Frag, Line, Shape};
 use crate::session::PageTextSnapshot;
 
 /// Stands in for the text of a line made only of outlined (path-drawn) words. Non-empty, no newline,
@@ -639,9 +639,91 @@ pub struct LineSpec {
     pub twins: Vec<usize>,
 }
 
+/// A run of one block's lines that is taken as a paragraph of its own.
+///
+/// **A paragraph with drawn words in it is more than one paragraph.** A line the page draws, wholly or in
+/// part, as vector paths (type converted to outlines) can never be retyped — there are no characters to
+/// put in a box — and used to sit inside the paragraph around it as a `[drawn text]` placeholder, so one
+/// click opened a box that was part editable and part not (reported from use: `outlined=1 frozen=[2]`).
+///
+/// The detector's blocks are left exactly as they are: they are what two hand labelings are measured
+/// against, and those count the outlined words as part of their paragraph. The cut is made here, where
+/// the editor and the boxes over the page both read it: the written lines above, the drawn ones, the
+/// written lines below.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Piece {
+    /// Lines `from..to` of the block.
+    pub from: usize,
+    pub to: usize,
+    /// Every line in the run holds outlined words. A drawn piece is never opened as a paragraph.
+    pub drawn: bool,
+}
+
+/// The pieces of block `block`, top to bottom: a maximal run of written lines is one piece, a maximal run
+/// of drawn lines another. A block with no drawn line is a single piece. Empty for an unknown block.
+pub fn pieces(pb: &PageBlocks, block: usize) -> Vec<Piece> {
+    let Some(b) = pb.blocks.get(block) else { return Vec::new() };
+    let mut out: Vec<Piece> = Vec::new();
+    for (i, line) in b.lines.iter().enumerate() {
+        let drawn = !line.outlined.is_empty();
+        match out.last_mut() {
+            Some(piece) if piece.drawn == drawn => piece.to = i + 1,
+            _ => out.push(Piece { from: i, to: i + 1, drawn }),
+        }
+    }
+    out
+}
+
+/// Lines `from..to` of block `block` as a block of their own, its box recomputed over just them. `None`
+/// when the range is empty or not the block's.
+pub fn piece_block(pb: &PageBlocks, block: usize, from: usize, to: usize) -> Option<Block> {
+    let b = pb.blocks.get(block)?;
+    let lines: Vec<Line> = b.lines.get(from..to)?.to_vec();
+    if lines.is_empty() {
+        return None;
+    }
+    let left = lines.iter().map(|l| l.left).fold(f32::MAX, f32::min);
+    let top = lines.iter().map(|l| l.top).fold(f32::MAX, f32::min);
+    let right = lines.iter().map(|l| l.right).fold(f32::MIN, f32::max);
+    let bottom = lines.iter().map(|l| l.bottom).fold(f32::MIN, f32::max);
+    Some(Block { lines, starts_because: b.starts_because, left, top, right, bottom })
+}
+
+/// One box over the page: a paragraph Edit Text can open, or a run of drawn lines it cannot.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PieceBox {
+    pub rect: Rect,
+    pub drawn: bool,
+}
+
+/// Every box to show over the page, in block order. Rotated and unplaced text is left out: a click on it is
+/// refused, and a box would promise otherwise. A drawn piece with no text of its own is still boxed, so
+/// the gap in the paragraph is something to see rather than a hole.
+pub fn piece_boxes(pb: &PageBlocks) -> Vec<PieceBox> {
+    let mut out = Vec::new();
+    for (index, block) in pb.blocks.iter().enumerate() {
+        if matches!(block.starts_because, "rotated" | "unplaced") {
+            continue;
+        }
+        for piece in pieces(pb, index) {
+            let Some(b) = piece_block(pb, index, piece.from, piece.to) else { continue };
+            let rect = Rect { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
+            if finite_rect(&rect) {
+                out.push(PieceBox { rect: normalised(&rect), drawn: piece.drawn });
+            }
+        }
+    }
+    out
+}
+
 /// The lines of block `block`, in order, none dropped (an empty list for an unknown block).
 pub fn editor_lines(pb: &PageBlocks, block: usize) -> Vec<LineSpec> {
     let Some(b) = pb.blocks.get(block) else { return Vec::new() };
+    editor_lines_of(pb, b)
+}
+
+/// [`editor_lines`] for a block already in hand — a [`piece_block`] as readily as one of the page's.
+pub fn editor_lines_of(pb: &PageBlocks, b: &Block) -> Vec<LineSpec> {
     b.lines
         .iter()
         .map(|l| {
@@ -735,7 +817,13 @@ pub fn check_editor_invariants(pb: &PageBlocks, block: usize) -> Result<(), Stri
     let Some(b) = pb.blocks.get(block) else {
         return Err(format!("C1: block {block} does not exist ({} blocks)", pb.blocks.len()));
     };
-    let specs = editor_lines(pb, block);
+    check_block_invariants(pb, b)
+}
+
+/// [`check_editor_invariants`] for a block already in hand — a [`piece_block`] as readily as one of the
+/// page's.
+pub fn check_block_invariants(pb: &PageBlocks, b: &Block) -> Result<(), String> {
+    let specs = editor_lines_of(pb, b);
     let texts = line_texts(pb, &specs);
     check_specs(pb, b, &specs, &texts)
 }
@@ -1970,6 +2058,69 @@ mod tests {
             line(&[5], &[], (10.0, 38.0, 32.5, 45.5), 44.0),
         ])];
         pb
+    }
+
+    /// A block of four lines whose third is drawn as outlines: the shape of the report that began this
+    /// (`outlined=1 frozen=[2]`, a `[drawn text]` placeholder in the middle of the paragraph's box).
+    fn pb_with_a_drawn_line() -> PageBlocks {
+        let mut pb = good_pb();
+        pb.blocks = vec![block_of(vec![
+            line(&[1, 2], &[], (10.0, 14.0, 62.5, 21.5), 20.0),
+            line(&[3, 4], &[], (10.0, 26.0, 63.0, 33.5), 32.0),
+            line(&[], &[100, 101], (10.0, 38.0, 80.0, 45.5), 44.0),
+            line(&[5], &[], (10.0, 50.0, 32.5, 57.5), 56.0),
+        ])];
+        pb
+    }
+
+    #[test]
+    fn a_paragraph_is_cut_into_pieces_at_its_drawn_lines() {
+        let pb = pb_with_a_drawn_line();
+        assert_eq!(
+            pieces(&pb, 0),
+            vec![
+                Piece { from: 0, to: 2, drawn: false },
+                Piece { from: 2, to: 3, drawn: true },
+                Piece { from: 3, to: 4, drawn: false },
+            ]
+        );
+        // The detector's block is left whole: the labelers' paragraph is the whole of it.
+        assert_eq!(pb.blocks[0].lines.len(), 4);
+        assert_eq!(editor_lines(&pb, 0).len(), 4);
+        assert!(pieces(&pb, 9).is_empty(), "an unknown block has no pieces");
+    }
+
+    #[test]
+    fn the_written_pieces_are_editors_with_no_placeholder_in_them() {
+        let pb = pb_with_a_drawn_line();
+        for (from, to) in [(0, 2), (3, 4)] {
+            let piece = piece_block(&pb, 0, from, to).expect("a piece of the block");
+            assert_eq!(piece.lines.len(), to - from);
+            assert_eq!(check_block_invariants(&pb, &piece), Ok(()), "lines {from}..{to} are refused");
+            let specs = editor_lines_of(&pb, &piece);
+            assert!(specs.iter().all(|s| !s.frozen && s.placeholder.is_none()), "a drawn line came along: {specs:?}");
+        }
+        // The box of a piece is over its own lines, not the paragraph's.
+        let top = piece_block(&pb, 0, 0, 2).unwrap();
+        let bottom = piece_block(&pb, 0, 3, 4).unwrap();
+        assert_eq!((top.top, top.bottom), (14.0, 33.5));
+        assert_eq!((bottom.top, bottom.bottom), (50.0, 57.5));
+        assert!(piece_block(&pb, 0, 2, 2).is_none() && piece_block(&pb, 0, 3, 9).is_none());
+    }
+
+    #[test]
+    fn a_page_is_boxed_by_piece_and_the_drawn_one_is_marked() {
+        let pb = pb_with_a_drawn_line();
+        let boxes = piece_boxes(&pb);
+        assert_eq!(boxes.iter().map(|b| b.drawn).collect::<Vec<_>>(), vec![false, true, false]);
+        assert_eq!((boxes[1].rect.top, boxes[1].rect.bottom), (38.0, 45.5));
+
+        // Text the page turns on its side is not boxed: a click on it is refused.
+        let mut pb = good_pb();
+        pb.blocks[0].starts_because = "rotated";
+        assert!(piece_boxes(&pb).is_empty());
+        // A block with nothing drawn is one box, whatever its size.
+        assert_eq!(piece_boxes(&good_pb()).len(), 1);
     }
 
     #[test]

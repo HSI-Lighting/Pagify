@@ -86,3 +86,20 @@ fn a_multi_byte_letter_before_the_code_is_a_letter() {
     assert_eq!(buffer(&["café\u{2}", "[drawn text]"], &[false, true]), "café-\n[drawn text]");
     assert_eq!(buffer(&["日本\u{2}", "[drawn text]"], &[false, true]), "日本-\n[drawn text]");
 }
+
+/// **A paragraph cut at a drawn line still has that line after it.** The editor opens
+/// only the written lines above it, so the drawn line is not among the lines — one more
+/// flag says it is there, and the last line's hyphen is judged by it. Without it the
+/// hyphen was dropped from the buffer and retyping the line took it off the page.
+#[test]
+fn a_hyphen_code_before_a_drawn_line_cut_out_of_the_paragraph_is_a_hyphen() {
+    let lines = ["VEGA series is powerful", "including COB, driv\u{2}"];
+    assert_eq!(buffer(&lines, &[false, false, true]), "VEGA series is powerful\nincluding COB, driv-");
+    // Nothing drawn after it: the code is dropped as it always was.
+    assert_eq!(buffer(&lines, &[false, false, false]), "VEGA series is powerful\nincluding COB, driv");
+    assert_eq!(buffer(&lines, &[false, false]), "VEGA series is powerful\nincluding COB, driv");
+    // And a flag past the end of no lines at all is nothing to act on.
+    let mut none: Vec<String> = Vec::new();
+    hyphens_before_drawn_lines(&mut none, &[true]);
+    assert!(none.is_empty());
+}

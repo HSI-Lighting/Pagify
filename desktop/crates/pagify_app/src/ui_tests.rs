@@ -3452,12 +3452,13 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
         .map(|l| l["text"].as_str().unwrap_or_default().to_string())
         .collect();
     assert_eq!(picks.len(), 2, "one line per click: {picks:?}");
-    assert!(picks[0].contains("cache=miss") && picks[0].contains("path=block"), "{}", picks[0]);
-    assert!(
-        picks[1].contains("cache=miss") && picks[1].contains("path=block"),
-        "the apply moved the page, so the second click must read it again: {}",
-        picks[1]
-    );
+    // **Not `cache=miss` any more, and why that is still not a stale read.** With Edit Text in hand,
+    // moving the pointer over the page reads it for the paragraph boxes — the same read, kept under
+    // the same key, that a click uses — so a click finds it already made. After the apply moved the
+    // page the key no longer matches, so what the second click finds was read from the edited page:
+    // which the assertions above (the right column's own lines, the first edit on the page) check.
+    assert!(picks[0].contains("path=block"), "{}", picks[0]);
+    assert!(picks[1].contains("path=block"), "{}", picks[1]);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -4541,5 +4542,47 @@ fn the_line_tool_draws_where_it_is_clicked() {
         marks, 1,
         "two clicks on the page drew nothing.\n{}",
         app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n")
+    );
+}
+
+/// **Reported from use: after `addimage`, Edit Object could neither select nor
+/// move the picture.** A placed picture is an annotation, not page content, so
+/// the object tool's own hit-testing — which walks the page's content objects —
+/// never saw it, and the annotation interaction that does was only reachable
+/// with *no* tool in hand. The log read `addimage`, "picture placed",
+/// `editobject`, then a marquee ("7 things selected") that could not include
+/// it.
+#[test]
+fn a_placed_picture_is_selected_and_moved_by_the_object_tool() {
+    let mut h = harness("two-column.pdf");
+    let rgba: Vec<u8> = [200u8, 60, 60, 255].repeat(16);
+    h.state_mut().place_image_at(0, AppPoint { x: 150.0, y: 300.0 }, rgba, 4, 4).expect("placed");
+    h.state_mut().submit("editobject");
+    h.run_steps(3);
+    assert!(h.state_mut().tab_mut().object_tool.is_some(), "setup: the object tool should be in hand");
+
+    let marks = |h: &mut Harness<'static, PagifyApp>| {
+        h.state_mut().tab_mut().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks")
+    };
+    let before = marks(&mut h).remove(0);
+    let view = h.state_mut().tab_mut().last_view.expect("the page was never drawn");
+    let centre = view.to_screen(AppPoint {
+        x: ((before.rect.left + before.rect.right) / 2.0) as f64,
+        y: ((before.rect.top + before.rect.bottom) / 2.0) as f64,
+    });
+
+    click(&mut h, centre);
+    assert!(
+        h.state_mut().tab_mut().placed_image_selected.is_some(),
+        "clicking the picture with the object tool in hand did not select it"
+    );
+
+    drag(&mut h, centre, centre + egui::vec2(80.0, 0.0));
+    let after = marks(&mut h).remove(0);
+    assert!(
+        after.rect.left > before.rect.left + 20.0,
+        "the picture did not move: left was {} and is {}",
+        before.rect.left,
+        after.rect.left
     );
 }

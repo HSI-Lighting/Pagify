@@ -1366,8 +1366,11 @@ pub fn fix_extracted_text(text: &str) -> String {
 /// line with a drawn word in it), a control code ending line `i - 1` after a
 /// letter becomes "-" there. A code after anything but a letter, or before a line
 /// that is written, is left to [`fix_extracted_text`] as before.
+///
+/// `drawn` may hold one entry more than there are lines: the line a paragraph was cut at,
+/// which is drawn and not in the box, and which the last line's hyphen is judged by.
 pub fn hyphens_before_drawn_lines(texts: &mut [String], drawn: &[bool]) {
-    for i in 1..texts.len() {
+    for i in 1..=texts.len() {
         if !drawn.get(i).copied().unwrap_or(false) {
             continue;
         }

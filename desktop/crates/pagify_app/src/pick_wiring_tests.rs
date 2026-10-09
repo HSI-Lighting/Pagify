@@ -174,17 +174,30 @@ fn clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block() {
                 }
                 continue;
             }
+            // **The paragraph is the written lines around the click**: a line with
+            // a drawn word in it cuts the block, and nothing drawn is ever in the
+            // box. Worked out here from which lines the page draws part of as
+            // shapes, not from the cut the editor makes.
+            let (mut from, mut to) = (own_line, own_line + 1);
+            while from > 0 && !frozen[from - 1] {
+                from -= 1;
+            }
+            while to < lines.len() && !frozen[to] {
+                to += 1;
+            }
+            let want_lines = &lines[from..to];
+            let want_buffer = fix_extracted_text(&texts[from..to].join("\n"));
             let got: Vec<Vec<usize>> = edit.lines.iter().map(|(objects, _)| objects.clone()).collect();
-            if got != lines {
+            if got != want_lines {
                 let flat = |ls: &[Vec<usize>]| ls.iter().flatten().copied().collect::<std::collections::BTreeSet<_>>();
                 failures.push(format!(
                     "{who}: opened {} lines / {} objects, wanted {} lines / {} objects (missing {:?}, extra {:?})",
                     got.len(),
                     flat(&got).len(),
-                    lines.len(),
-                    ids.len(),
-                    flat(&lines).difference(&flat(&got)).collect::<Vec<_>>(),
-                    flat(&got).difference(&flat(&lines)).collect::<Vec<_>>()
+                    want_lines.len(),
+                    flat(want_lines).len(),
+                    flat(want_lines).difference(&flat(&got)).collect::<Vec<_>>(),
+                    flat(&got).difference(&flat(want_lines)).collect::<Vec<_>>()
                 ));
                 continue;
             }
@@ -197,11 +210,11 @@ fn clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block() {
             if edit.buffer != want_buffer {
                 failures.push(format!("{who}: the words differ from the page's own:\n  got  {:?}\n  want {want_buffer:?}", edit.buffer));
             }
-            if edit.frozen != frozen {
-                failures.push(format!("{who}: frozen lines {:?}, wanted {frozen:?}", edit.frozen));
+            if edit.frozen.iter().any(|f| *f) {
+                failures.push(format!("{who}: a drawn line is in the box: frozen {:?}", edit.frozen));
             }
-            if edit.object != lines[0][0] {
-                failures.push(format!("{who}: the editor sits on object {}, not the first, {}", edit.object, lines[0][0]));
+            if edit.object != want_lines[0][0] {
+                failures.push(format!("{who}: the editor sits on object {}, not the first, {}", edit.object, want_lines[0][0]));
             }
             if font_of(edit.look_object) != want_font || !ids.contains(&edit.look_object) {
                 failures.push(format!(
@@ -213,12 +226,9 @@ fn clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block() {
             if app.editor_face != Some(want_face) {
                 failures.push(format!("{who}: the editor asked for another font program than the block's own"));
             }
-            let drawn = frozen.iter().filter(|f| **f).count();
-            if drawn > 0 && !message.contains(&format!("{drawn} lines hold words drawn as shapes")) {
-                failures.push(format!("{who}: the message does not say words are drawn as shapes: {message}"));
-            }
-            if drawn == 0 && message.contains("drawn as shapes") {
-                failures.push(format!("{who}: the message talks of drawn words where there are none: {message}"));
+            // No drawn line is in the box, so the pick has none to talk about.
+            if message.contains("drawn as shapes") {
+                failures.push(format!("{who}: the message talks of drawn words that are not in the box: {message}"));
             }
         }
     }
@@ -251,7 +261,11 @@ fn clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block() {
 /// with the hyphen code as "-" (including that one); a word of line 1 is
 /// retyped and applied; the retyped piece ends in a real "-" that PDFium reads
 /// back, the apply says it went through, and a click on the paragraph again
-/// opens the same nine lines with the hyphen still there once, not twice.
+/// opens the same lines with the hyphen still there once, not twice.
+///
+/// **The nine-line block is cut at its drawn lines now**, so what opens is the
+/// two written lines above the first of them — the second being the one that
+/// ends in the hyphen — and the drawn line after it is not in the box at all.
 ///
 /// Skipped, with a note, where the file is not on this machine.
 #[test]
@@ -266,8 +280,8 @@ fn the_hyphen_before_a_drawn_line_stays_in_the_buffer_and_on_the_page_when_the_l
     assert!(runs[&9].text.ends_with('\u{2}'), "setup: object 9 ends in the hyphen code: {:?}", runs[&9].text);
     app.pick_text_run(0, centre(&runs[&8].rect)).expect("picked");
     let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
-    assert_eq!(edit.lines.len(), 9, "setup: the paragraph's nine lines: {:?}", edit.buffer);
-    assert_eq!(edit.frozen, [false, false, true, false, false, false, false, false, false]);
+    assert_eq!(edit.lines.len(), 2, "setup: the two written lines above the drawn one: {:?}", edit.buffer);
+    assert_eq!(edit.frozen, [false, false]);
 
     // The page's own words, the hyphen code as "-" wherever there is one.
     let wanted: Vec<String> = edit
@@ -314,7 +328,7 @@ fn the_hyphen_before_a_drawn_line_stays_in_the_buffer_and_on_the_page_when_the_l
     app.tab_mut().editing_run = None;
     app.pick_text_run(0, centre(&after[&8].rect)).expect("picked again");
     let again = app.tab().editing_run.as_ref().expect("an editor opened").clone();
-    assert_eq!(again.lines.len(), 9, "the paragraph reopens whole: {:?}", again.buffer);
+    assert_eq!(again.lines.len(), 2, "the paragraph reopens as the same two lines: {:?}", again.buffer);
     let lines_again: Vec<&str> = again.buffer.split('\n').collect();
     assert_eq!(lines_again[1], typed[1], "line 1 reopens as it was typed");
     assert!(!again.buffer.contains("--"), "the hyphen was doubled: {:?}", again.buffer);
@@ -340,7 +354,7 @@ fn the_look_is_the_font_most_of_the_text_is_set_in_even_when_every_font_has_the_
     let runs = vec![run(0, "Head", 100.0), run(1, "the body of the paragraph", 112.0), run(2, "more body", 124.0)];
     let names: HashMap<usize, String> = (0..3).map(|o| (o, "Montserrat-Thin".to_string())).collect();
     let lines = || -> Vec<ParagraphLine> {
-        runs.iter().map(|r| ParagraphLine { objects: vec![r.object], rect: r.rect, frozen: false }).collect()
+        runs.iter().map(|r| ParagraphLine { objects: vec![r.object], rect: r.rect, frozen: false, follows_drawn: false }).collect()
     };
     let style = |font: u32| pdf_core::document::RunStyle { font, stem_milli_em: Some(51), axis: (1.0, 0.0) };
 
@@ -379,7 +393,9 @@ fn retyping_one_line_of_the_datasheets_paragraph_writes_only_that_line() {
     let runs: HashMap<usize, TextRun> = text_runs(&app, 0).into_iter().map(|r| (r.object, r)).collect();
     app.pick_text_run(0, centre(&runs[&986].rect)).expect("picked");
     let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
-    assert_eq!(edit.lines.len(), 13, "setup: the user's paragraph");
+    // The 13 lines are cut at the two with a drawn word in them (lines 8 and 10); a click on its first line
+    // opens the eight above the first of them.
+    assert_eq!(edit.lines.len(), 8, "setup: the user's paragraph, cut above its first drawn line");
 
     // Line 3, "lighting industry conforming": plain words, several pieces.
     let target = 3;
@@ -778,17 +794,18 @@ fn a_page_with_no_text_objects_still_reaches_the_drawn_words() {
 
 // -- lines drawn as shapes -------------------------------------------------
 
-/// **A paragraph with whole lines drawn as shapes opens whole, and shows
-/// where the drawn lines are.** Page 1 of the datasheet has a 19-line,
-/// 96-object block whose lines 4, 14 and 18 (counting from 0) are drawn
-/// entirely as outlines — ligature-heavy body lines the producer
-/// converted to paths — so they have no text object at all. They must be
-/// in the editor as lines (the box is one line per line of the block,
-/// or an apply would pair every later line with the wrong objects), each
-/// as the placeholder standing for words that cannot be retyped here, and
-/// the pick has to say so.
+/// **A paragraph with lines drawn as shapes is cut at them: what opens is the
+/// written lines around the click, and no drawn line is ever in the box.**
+/// Page 1 of the datasheet has a 19-line, 96-object block whose lines 4, 14
+/// and 18 (counting from 0) are drawn as outlines — ligature-heavy body lines
+/// the producer converted to paths. It used to open whole, a `[drawn text]`
+/// placeholder in the middle of the box standing for each, so one click gave a
+/// box that was part editable and part not (reported from use). The detector's
+/// block is unchanged — the hand labelings count the drawn words in it — and
+/// the cut is made where the editor opens: lines 0-3, 5-13 and 15-17 are
+/// three paragraphs, each its own box.
 #[test]
-fn a_block_with_whole_lines_drawn_as_shapes_opens_whole_with_a_placeholder_for_each() {
+fn a_block_with_lines_drawn_as_shapes_opens_as_the_written_lines_around_the_click() {
     if !std::path::Path::new(MARINA).is_file() {
         eprintln!("skipping: the Marina datasheet is not on this machine");
         return;
@@ -818,6 +835,12 @@ fn a_block_with_whole_lines_drawn_as_shapes_opens_whole_with_a_placeholder_for_e
     assert_eq!(drawn_lines, [4, 18], "setup: block {index}: the lines with no text object");
     assert_eq!(frozen_lines, [4, 14, 18], "setup: block {index}: the lines with drawn words");
 
+    // The paragraphs, worked out here from the drawn lines alone: the maximal runs of lines between them.
+    let written: Vec<std::ops::Range<usize>> = vec![0..4, 5..14, 15..18];
+    for range in &written {
+        assert!(range.clone().all(|i| !frozen_lines.contains(&i)), "setup: {range:?} has a drawn line in it");
+    }
+
     // Clicked from every one of its words, so every line is tried as the seed.
     let (mut clicked, mut alone) = (0, 0);
     for (line_index, line) in block.lines.iter().enumerate() {
@@ -834,34 +857,32 @@ fn a_block_with_whole_lines_drawn_as_shapes_opens_whole_with_a_placeholder_for_e
                 assert!(said.starts_with("opened this word alone: its line is partly drawn"), "{said}");
                 continue;
             }
-            assert_eq!(edit.lines.len(), 19, "clicking object {seed}: {said}");
-            assert_eq!(edit.buffer.split('\n').count(), 19, "one buffer line for every line, drawn ones included");
-            for i in 0..19 {
-                assert_eq!(edit.frozen[i], frozen_lines.contains(&i), "clicking object {seed}: line {i}");
-                let drawn = drawn_lines.contains(&i);
-                assert_eq!(edit.lines[i].0.is_empty(), drawn, "clicking object {seed}: line {i}");
-                assert_eq!(
-                    edit.buffer.split('\n').nth(i) == Some(block_input::OUTLINED_PLACEHOLDER),
-                    drawn,
-                    "clicking object {seed}: line {i} of the buffer is {:?}",
-                    edit.buffer.split('\n').nth(i)
-                );
-            }
-            assert!(said.contains("editing a paragraph of 19 lines"), "{said}");
-            assert!(said.contains("3 lines hold words drawn as shapes and are left exactly as they are"), "{said}");
+            // The paragraph is the written lines around the click, and nothing else.
+            let own = written.iter().find(|r| r.contains(&line_index)).expect("a written line is in a written run");
+            let expected: Vec<Vec<usize>> = own.clone().map(|i| block.lines[i].objects.clone()).collect();
+            let opened: Vec<Vec<usize>> = edit.lines.iter().map(|(objects, _)| objects.clone()).collect();
+            assert_eq!(opened, expected, "clicking object {seed} on line {line_index}: {said}");
+            assert!(edit.frozen.iter().all(|f| !f), "a drawn line is in the editor: clicking object {seed}");
+            assert!(
+                !edit.buffer.contains(block_input::OUTLINED_PLACEHOLDER),
+                "the placeholder is in the box: clicking object {seed}: {:?}",
+                edit.buffer
+            );
+            assert_eq!(edit.buffer.split('\n').count(), own.len(), "one buffer line for every line of the paragraph");
+            assert!(said.contains(&format!("editing a paragraph of {} lines", own.len())), "{said}");
+            assert!(!said.contains("drawn as shapes"), "the pick still talks about drawn lines it no longer holds: {said}");
         }
     }
     assert_eq!(clicked, 99, "every word of the block was clicked");
     assert_eq!(alone, 1, "the one text object on a drawn line: the hyphen glyph");
 }
 
-/// **An apply never touches a line drawn as shapes.** A four-line block of
-/// page 1 — a line of text, two lines drawn entirely as outlines, and a
-/// last line of text (`given project.`) — has one text object on each of
-/// its text lines. One is retyped and the placeholder of a drawn line is
-/// typed over: only the retyped line is written, the typed-over one is
-/// reported as left alone, and every other object — and every shape on the
-/// page — is exactly as it was.
+/// **An edit beside lines drawn as shapes touches only the words retyped.** A
+/// four-line block of page 1 — a line of text, two lines drawn entirely as
+/// outlines, and a last line of text (`given project.`) — has one text object
+/// on each of its text lines. The drawn lines cut the block, so the first
+/// line opens as the one run it is; retyped, only it is written, and every
+/// other object — and every shape on the page — is exactly as it was.
 #[test]
 fn retyping_beside_lines_drawn_as_shapes_writes_only_the_retyped_line() {
     if !std::path::Path::new(MARINA).is_file() {
@@ -893,33 +914,22 @@ fn retyping_beside_lines_drawn_as_shapes_writes_only_the_retyped_line() {
     let (first, last) = (block.lines[0].objects[0], block.lines[3].objects[0]);
     let shapes_before = app.tab().doc.as_ref().unwrap().session.drawn_objects(0).expect("shapes").len();
 
+    // **The drawn lines are not in the box at all.** This used to open the four lines whole, the two drawn
+    // ones frozen in the middle of the buffer — one of them the hyphen glyph the page ends it with, the
+    // other a `[drawn text]` placeholder — and apply had to be taught to leave them alone. A line of text
+    // with nothing but drawn lines under it is now what it looks like: one run.
     let said = app.pick_text_run(0, centre(&page.runs[&first].rect)).expect("picked");
-    assert!(said.contains("2 lines hold words drawn as shapes"), "{said}");
+    assert!(!said.contains("drawn as shapes"), "{said}");
     let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
-    assert_eq!(edit.frozen, [false, true, true, false]);
-    // **The hyphen glyph that is the whole text of the first drawn line stays in
-    // the buffer, on a line of its own** — not dropped (the line would then read
-    // empty, and be taken for a line with nothing on it), not doubled, not run
-    // into the neighbouring lines. The placeholder stands for the line with no
-    // text object at all.
-    let buffer_lines: Vec<&str> = edit.buffer.split('\n').collect();
-    assert_eq!(buffer_lines.len(), 4, "{:?}", edit.buffer);
-    assert_eq!(buffer_lines[1], "-", "{:?}", edit.buffer);
-    assert_eq!(buffer_lines[2], block_input::OUTLINED_PLACEHOLDER, "{:?}", edit.buffer);
+    assert_eq!(edit.lines.len(), 1, "the drawn lines came along: {said}");
+    assert_eq!(edit.frozen, [false]);
+    assert!(!edit.buffer.contains(block_input::OUTLINED_PLACEHOLDER), "{:?}", edit.buffer);
+    assert!(!edit.buffer.contains('\n'), "{:?}", edit.buffer);
 
     let words_before: HashMap<usize, (String, pdf_core::document::Color)> =
         text_runs(&app, 0).into_iter().map(|r| (r.object, (r.text, r.color))).collect();
-    let mut typed: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
-    typed[0] = format!("{} RETYPED", typed[0].trim_end());
-    typed[1] = "typed over a line that is drawn".to_string();
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed.join("\n");
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = format!("{} RETYPED", edit.buffer.trim_end());
     app.apply_editing_page();
-
-    let said_after = app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n");
-    assert!(
-        said_after.contains("paragraph changed; 1 line drawn as shapes was left as it is."),
-        "the apply did not say what it left alone:\n{said_after}"
-    );
     let words_after: HashMap<usize, (String, pdf_core::document::Color)> =
         text_runs(&app, 0).into_iter().map(|r| (r.object, (r.text, r.color))).collect();
     assert_eq!(words_after.len(), words_before.len(), "objects were added or lost");
@@ -1548,4 +1558,105 @@ fn copying_words_whose_font_cannot_be_reused_says_what_a_paste_will_use() {
     app.tab_mut().selected = Some(Selected { page: 0, object: label.object, rect: label.rect, what: "the words" });
     assert!(app.copy_object_selection());
     assert!(said(&app).contains("Helvetica"), "{}", said(&app));
+}
+
+/// **Reported from use, on RING 600: a paragraph with a drawn line in it opened with
+/// `[drawn text]` in the middle of the box.** Its third line, "in components like SMD,
+/// driver, reflector etc.,", is outlines, so the four-line paragraph is now two: the two
+/// written lines above it, and the one below. Neither editor holds the drawn line, and the
+/// log says which lines opened and which were left out.
+#[test]
+fn a_paragraph_with_a_drawn_line_in_it_opens_as_the_two_paragraphs_around_it() {
+    if !std::path::Path::new(RING600).is_file() {
+        eprintln!("skipping: the RING 600 datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(RING600));
+    let (page, _) = app.page_blocks(0).expect("the page's blocks");
+    let block = page
+        .blocks
+        .iter()
+        .find(|b| b.lines.len() == 4 && b.lines[2].objects.is_empty() && !b.lines[2].outlined.is_empty())
+        .expect("the four-line paragraph with a drawn third line is gone from page 1 — has the file changed?");
+
+    // Above the drawn line.
+    let said = app.pick_text_run(0, centre(&page.runs[&block.lines[0].objects[0]].rect)).expect("picked");
+    let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+    assert_eq!(edit.lines.len(), 2, "the paragraph above the drawn line is its first two lines: {said}");
+    assert!(!edit.buffer.contains(block_input::OUTLINED_PLACEHOLDER), "{:?}", edit.buffer);
+    assert!(edit.frozen.iter().all(|f| !f), "{said}");
+    assert!(!said.contains("drawn as shapes"), "{said}");
+
+    // Below it.
+    app.tab_mut().editing_run = None;
+    app.pick_text_run(0, centre(&page.runs[&block.lines[3].objects[0]].rect)).expect("picked");
+    let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+    assert!(!edit.buffer.contains(block_input::OUTLINED_PLACEHOLDER), "{:?}", edit.buffer);
+    assert!(
+        edit.lines.iter().flat_map(|(objects, _)| objects).all(|o| block.lines[3].objects.contains(o)),
+        "words of the paragraph above came along: {:?}",
+        edit.lines
+    );
+}
+
+/// **The boxes over the page are the paragraphs a click opens.** On RING 600 the
+/// four-line paragraph with a drawn third line is boxed twice — above the drawn line and
+/// below it — with the drawn line dashed between them, and the box the pointer is over is
+/// the one lit. Nothing is boxed unless Edit Text is in hand, and nothing is lit while a
+/// box is open.
+#[test]
+fn edit_text_boxes_the_paragraphs_around_a_drawn_line_and_lights_the_one_under_the_pointer() {
+    use crate::canvas::BoxStyle;
+    if !std::path::Path::new(RING600).is_file() {
+        eprintln!("skipping: the RING 600 datasheet is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(RING600));
+    let (page, _) = app.page_blocks(0).expect("the page's blocks");
+    let block = page
+        .blocks
+        .iter()
+        .find(|b| b.lines.len() == 4 && b.lines[2].objects.is_empty() && !b.lines[2].outlined.is_empty())
+        .expect("the four-line paragraph with a drawn third line is gone from page 1");
+    let view = crate::overlay::PageView { origin: egui::Pos2::new(0.0, 0.0), scale: 1.0 };
+    let screen = |at: AppPoint| view.to_screen(at);
+    let upper = centre(&page.runs[&block.lines[0].objects[0]].rect);
+    let lower = centre(&page.runs[&block.lines[3].objects[0]].rect);
+
+    // Not boxed until Edit Text is in hand.
+    assert!(app.paragraph_boxes(0, view, screen(upper)).is_empty(), "boxes with no tool armed");
+
+    app.submit("edittext");
+    let boxes = app.paragraph_boxes(0, view, screen(upper));
+    let drawn: Vec<_> = boxes.iter().filter(|(_, s)| *s == BoxStyle::Drawn).collect();
+    let lit: Vec<_> = boxes.iter().filter(|(_, s)| *s == BoxStyle::Lit).collect();
+    assert!(!drawn.is_empty(), "the drawn line is not marked: {boxes:?}");
+    assert_eq!(lit.len(), 1, "exactly one box is under the pointer: {lit:?}");
+    // The lit box is the paragraph above the drawn line: it holds the pointer and stops short of the drawn one.
+    let (lit_box, _) = lit[0];
+    assert!(lit_box.contains(screen(upper)), "the lit box is not over the pointer");
+    assert!(!lit_box.contains(screen(lower)), "the lit box runs on past the drawn line: {lit_box:?}");
+    // The drawn box starts where the lit one ends (each is padded by 2pt, so they may overlap by that).
+    assert!(
+        drawn.iter().any(|(r, _)| (r.top() - lit_box.bottom()).abs() < 8.0),
+        "the drawn box does not follow the lit one: {drawn:?} / {lit_box:?}"
+    );
+
+    // The paragraph below the drawn line lights on its own.
+    let boxes = app.paragraph_boxes(0, view, screen(lower));
+    let lit_below: Vec<_> = boxes.iter().filter(|(_, s)| *s == BoxStyle::Lit).collect();
+    assert_eq!(lit_below.len(), 1);
+    assert!(lit_below[0].0.contains(screen(lower)) && !lit_below[0].0.contains(screen(upper)));
+
+    // Over the drawn line itself nothing is lit: it is not a paragraph.
+    let gap = AppPoint { x: ((block.lines[2].left + block.lines[2].right) / 2.0) as f64, y: ((block.lines[2].top + block.lines[2].bottom) / 2.0) as f64 };
+    assert!(
+        app.paragraph_boxes(0, view, screen(gap)).iter().all(|(r, s)| *s != BoxStyle::Lit || !r.contains(screen(gap))),
+        "the drawn line was lit as if it could be opened"
+    );
+
+    // With a box open, the rest stay outlined and nothing is lit.
+    app.pick_text_run(0, upper).expect("picked");
+    let boxes = app.paragraph_boxes(0, view, screen(lower));
+    assert!(!boxes.is_empty() && boxes.iter().all(|(_, s)| *s != BoxStyle::Lit), "a box was lit while the editor was open");
 }
