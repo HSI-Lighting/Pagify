@@ -159,10 +159,14 @@ fn main() -> eframe::Result<()> {
         return Ok(());
     }
 
+    // Not `.with_maximized(true)` here: combined with `with_inner_size` on
+    // Windows, winit creates the window at that explicit size and silently
+    // drops the maximized request — a known winit/Win32 quirk, not a toggle
+    // either can override. Sent instead as a `ViewportCommand` on the first
+    // frame, below, once a real window exists to maximize.
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1240.0, 860.0])
         .with_min_inner_size([640.0, 480.0])
-        .with_maximized(true)
         .with_title("Pagify");
     if let Some(icon) = logo::icon() {
         viewport = viewport.with_icon(icon);
@@ -14107,6 +14111,9 @@ impl eframe::App for PagifyApp {
         if self.mark.is_none() {
             install_icons(&ctx);
             self.mark = logo::texture(&ctx);
+            // See the comment on `ViewportBuilder` in `main` for why this is
+            // sent here instead of built into the window at creation.
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
         }
 
         // A face asked for while picking a run is installed here, at the top of

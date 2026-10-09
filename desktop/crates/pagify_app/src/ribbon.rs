@@ -78,7 +78,7 @@ pub(crate) enum Tab {
 
 impl Tab {
     pub(crate) const ALL: [Tab; 15] = [
-        Tab::File, Tab::Home, Tab::Convert, Tab::Edit,
+        Tab::File, Tab::Home, Tab::Edit, Tab::Convert,
         Tab::Organize, Tab::Comment, Tab::View, Tab::Form,
         Tab::Protect, Tab::PagiSign, Tab::Share, Tab::Accessibility,
         Tab::Help, Tab::Draw, Tab::Automate,
