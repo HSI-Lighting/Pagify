@@ -162,6 +162,7 @@ fn main() -> eframe::Result<()> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([1240.0, 860.0])
         .with_min_inner_size([640.0, 480.0])
+        .with_maximized(true)
         .with_title("Pagify");
     if let Some(icon) = logo::icon() {
         viewport = viewport.with_icon(icon);
