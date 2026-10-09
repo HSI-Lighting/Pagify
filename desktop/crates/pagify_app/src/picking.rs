@@ -149,6 +149,9 @@ impl crate::PagifyApp {
             ToolEffect::None | ToolEffect::Cancelled => {
                 unreachable!("on_click never returns these — only on_pointer/on_cancel do")
             }
+            ToolEffect::Finish => {
+                unreachable!("on_click never returns Finish — only on_key does, and the frame applies it itself")
+            }
         }
         // Back in hand, ready for the next one, quietly after a failure so
         // the error stays the last thing said — see `arm_tool_without_saying`'s

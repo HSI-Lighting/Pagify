@@ -422,6 +422,22 @@ pub(crate) enum ToolEffect {
     /// ArticleBox's hand-off: an area is drawn, and the title that names
     /// it is asked for next, in `pending_article_box`.
     OpenArticleBoxPrompt(PendingArticleBox),
+    /// Enter on a kind that ends on it, once it has the points it needs:
+    /// the caller runs the same `resolve_tool` a click would. Returned only
+    /// by [`Tool::on_key`]; `on_click` never produces it.
+    Finish,
+}
+
+/// A key a tool answers to beyond the frame's global shortcuts — the last
+/// piece of DESIGN_REVIEW.md §3.2's `on_key`/`on_cancel` pair. `Cancel`
+/// maps onto [`Tool::on_cancel`]; `Finish` is the `closeable` check
+/// `main.rs` used to make inline against `ends_on_enter()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ToolKey {
+    /// Enter — finish a shape whose point count is open-ended.
+    Finish,
+    /// Escape — put the tool down.
+    Cancel,
 }
 
 impl Tool {
@@ -505,7 +521,73 @@ impl Tool {
                 Some(at) => app.write_text_at(page, at, &text),
                 None => Err("nowhere to write.".into()),
             },
-            Tool::Draw(kind) => {
+            Tool::Draw(kind) => Self::draw_clicked(app, page, kind, &points, height),
+            Tool::EraseMark => match points.first().copied() {
+                Some(at) => app.erase_mark_at(page, at),
+                None => Err("nothing was clicked.".into()),
+            },
+            Tool::Measure(MeasureKind::Distance) => {
+                Ok(measure::measure_distance(&app.tab_mut().calibration, points[0], points[1]).render())
+            }
+            Tool::Measure(MeasureKind::Area) => {
+                Ok(measure::measure_area(&app.tab_mut().calibration, &points).render())
+            }
+            Tool::Modify(pick) => Self::modify_clicked(app, page, pick, &objects, &points, height),
+            Tool::Lock => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => match area_between(*a, *b) {
+                    // The passcode is asked for *after* the area is drawn,
+                    // so it is typed once and used immediately rather than
+                    // being held while the user aims.
+                    Some(area) => {
+                        return ToolEffect::OpenPasscodePrompt(Awaiting::Lock {
+                            page,
+                            shapes: vec![area],
+                            require_complete: true,
+                        });
+                    }
+                    None => Err("lock: that area has no size.".into()),
+                },
+                _ => Err("lock: two corners are needed.".into()),
+            },
+            Tool::ArticleBox => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => match area_between(*a, *b) {
+                    Some(rect) => {
+                        return ToolEffect::OpenArticleBoxPrompt(PendingArticleBox {
+                            page,
+                            rect,
+                            title: String::new(),
+                        });
+                    }
+                    None => Err("article box: that area has no size.".into()),
+                },
+                _ => Err("article box: two corners are needed.".into()),
+            },
+            Tool::PickText => match points.first().copied() {
+                Some(at) => app.pick_text_run(page, at),
+                None => Err("nothing was clicked.".into()),
+            },
+            // Resolved by a text-selection drag, not by `take_pick`'s
+            // click/object collection — see `wants_selection`'s own doc.
+            // `on_click` should never see one of these three.
+            Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. } => {
+                unreachable!("Markup/Link/MatchProperties resolve by selection, never by on_click")
+            }
+        };
+        match outcome {
+            Ok(said) => ToolEffect::Say(Kind::Info, said),
+            Err(problem) => ToolEffect::Say(Kind::Error, problem),
+        }
+    }
+
+    /// The drawing tools' click outcome, moved out of `on_click` whole: the
+    /// draw-kind match plus the layer checkpoint and forget-on-failure.
+    fn draw_clicked(
+        app: &mut PagifyApp,
+        page: usize,
+        kind: DrawKind,
+        points: &[AppPoint],
+        height: f64,
+    ) -> Result<String, String> {
                 let draw_fill = app.draw_fill;
                 let layer = app.tab_mut().markup.page(page, height);
                 layer.begin("draw");
@@ -598,18 +680,18 @@ impl Tool {
                     }
                 }
                 draw_outcome
-            }
-            Tool::EraseMark => match points.first().copied() {
-                Some(at) => app.erase_mark_at(page, at),
-                None => Err("nothing was clicked.".into()),
-            },
-            Tool::Measure(MeasureKind::Distance) => {
-                Ok(measure::measure_distance(&app.tab_mut().calibration, points[0], points[1]).render())
-            }
-            Tool::Measure(MeasureKind::Area) => {
-                Ok(measure::measure_area(&app.tab_mut().calibration, &points).render())
-            }
-            Tool::Modify(pick) => {
+    }
+
+    /// The object-picking tools' click outcome, moved out of `on_click`
+    /// whole: the picked objects and points mapped into kernel space and run.
+    fn modify_clicked(
+        app: &mut PagifyApp,
+        page: usize,
+        pick: tools::Pick,
+        objects: &[(usize, AppPoint)],
+        points: &[AppPoint],
+        height: f64,
+    ) -> Result<String, String> {
                 let layer = app.tab_mut().markup.page(page, height);
                 let space = layer.space();
                 let objects: Vec<(usize, cad_kernel::Vec2)> =
@@ -617,52 +699,8 @@ impl Tool {
                 let points: Vec<cad_kernel::Vec2> =
                     points.iter().map(|q| space.to_kernel(*q)).collect();
                 tools::run(layer, pick.op, &objects, &points)
-            }
-            Tool::Lock => match (points.first(), points.get(1)) {
-                (Some(a), Some(b)) => match area_between(*a, *b) {
-                    // The passcode is asked for *after* the area is drawn,
-                    // so it is typed once and used immediately rather than
-                    // being held while the user aims.
-                    Some(area) => {
-                        return ToolEffect::OpenPasscodePrompt(Awaiting::Lock {
-                            page,
-                            shapes: vec![area],
-                            require_complete: true,
-                        });
-                    }
-                    None => Err("lock: that area has no size.".into()),
-                },
-                _ => Err("lock: two corners are needed.".into()),
-            },
-            Tool::ArticleBox => match (points.first(), points.get(1)) {
-                (Some(a), Some(b)) => match area_between(*a, *b) {
-                    Some(rect) => {
-                        return ToolEffect::OpenArticleBoxPrompt(PendingArticleBox {
-                            page,
-                            rect,
-                            title: String::new(),
-                        });
-                    }
-                    None => Err("article box: that area has no size.".into()),
-                },
-                _ => Err("article box: two corners are needed.".into()),
-            },
-            Tool::PickText => match points.first().copied() {
-                Some(at) => app.pick_text_run(page, at),
-                None => Err("nothing was clicked.".into()),
-            },
-            // Resolved by a text-selection drag, not by `take_pick`'s
-            // click/object collection — see `wants_selection`'s own doc.
-            // `on_click` should never see one of these three.
-            Tool::Markup(_) | Tool::Link | Tool::MatchProperties { .. } => {
-                unreachable!("Markup/Link/MatchProperties resolve by selection, never by on_click")
-            }
-        };
-        match outcome {
-            Ok(said) => ToolEffect::Say(Kind::Info, said),
-            Err(problem) => ToolEffect::Say(Kind::Error, problem),
-        }
     }
+
 
     /// The shape a half-finished tool would make, following the pointer —
     /// `canvas.rs`'s own `draw_pending_preview` match, moved here per
@@ -840,6 +878,19 @@ impl Tool {
     /// needing to know which kind it was.
     pub(crate) fn on_cancel(self) -> ToolEffect {
         ToolEffect::Cancelled
+    }
+
+    /// What the frame's key handling asks the armed tool about a key it saw.
+    /// Enter finishes a kind that ends on it once it has two points — the
+    /// exact check `main.rs` used to make inline — and Escape answers with
+    /// [`Self::on_cancel`]. Every other combination says `None`, which here
+    /// means "not this key", not "nothing to say".
+    pub(crate) fn on_key(&self, key: ToolKey, points: usize) -> ToolEffect {
+        match key {
+            ToolKey::Finish if self.ends_on_enter() && points >= 2 => ToolEffect::Finish,
+            ToolKey::Finish => ToolEffect::None,
+            ToolKey::Cancel => self.clone().on_cancel(),
+        }
     }
 }
 

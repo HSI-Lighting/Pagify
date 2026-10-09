@@ -79,117 +79,8 @@ pub fn extract_signature(rgba: &[u8], width: u32, height: u32) -> Option<Extract
     if width == 0 || height == 0 || (rgba.len() as u64) < (width as u64) * (height as u64) * 4 {
         return None;
     }
-    let luma_buf: Vec<u8> = (0..(width as u64 * height as u64) as usize)
-        .map(|i| luma(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]))
-        .collect();
-
-    // A page photographed at an angle often has the sheet's own edge, or
-    // whatever it's resting on, right at the frame's border — ignored by a
-    // small inset so it never competes with the ink itself.
-    let inset_x = ((width as f64 * 0.06) as u32).min(width - 1);
-    let inset_y = ((height as f64 * 0.03) as u32).min(height - 1);
-    let (x0, y0) = (inset_x, inset_y);
-    let (iw, ih) = (width - 2 * inset_x, height - 2 * inset_y);
-
-    let mut hist = [0u32; 256];
-    for y in y0..y0 + ih {
-        for x in x0..x0 + iw {
-            hist[luma_buf[(y * width + x) as usize] as usize] += 1;
-        }
-    }
-    // The darkest sliver of the page — bold enough that only real ink (or a
-    // bold rule line, filtered out below by shape) is ever this dark.
-    const STRICT_FRACTION: f64 = 0.006;
-    let strict_threshold = percentile_threshold(&hist, STRICT_FRACTION);
-
-    let mut strict_mask = vec![false; (iw * ih) as usize];
-    for y in 0..ih {
-        for x in 0..iw {
-            strict_mask[(y * iw + x) as usize] = luma_buf[((y + y0) * width + (x + x0)) as usize] < strict_threshold;
-        }
-    }
-    let (components, strict_labels) = connected_components(&strict_mask, iw, ih, &luma_buf, x0, y0, width);
-
-    let min_area = ((iw * ih) as f64 * 0.00004).max(10.0) as u32;
-    let keep: Vec<bool> = components.iter().map(|c| plausible_stroke(c, iw, ih, min_area)).collect();
-
-    // Union-find: components within a small gap of each other belong to the
-    // same mark — a signature is rarely pen-continuous letter to letter.
-    let n = components.len();
-    let mut parent: Vec<usize> = (0..n).collect();
-    fn find(parent: &mut [usize], x: usize) -> usize {
-        if parent[x] != x {
-            parent[x] = find(parent, parent[x]);
-        }
-        parent[x]
-    }
-    const CLUSTER_GAP: i64 = 40;
-    for i in 0..n {
-        if !keep[i] {
-            continue;
-        }
-        for j in (i + 1)..n {
-            if !keep[j] {
-                continue;
-            }
-            let (a, b) = (&components[i], &components[j]);
-            let overlap_x =
-                (a.min_x as i64 - CLUSTER_GAP) < b.max_x as i64 && (b.min_x as i64 - CLUSTER_GAP) < a.max_x as i64;
-            let overlap_y =
-                (a.min_y as i64 - CLUSTER_GAP) < b.max_y as i64 && (b.min_y as i64 - CLUSTER_GAP) < a.max_y as i64;
-            if overlap_x && overlap_y {
-                let (ra, rb) = (find(&mut parent, i), find(&mut parent, j));
-                if ra != rb {
-                    parent[ra] = rb;
-                }
-            }
-        }
-    }
-
-    // (left, top, right, bottom, area, luma_sum) per cluster.
-    let mut clusters: std::collections::HashMap<usize, (u32, u32, u32, u32, u32, u64)> = std::collections::HashMap::new();
-    for i in 0..n {
-        if !keep[i] {
-            continue;
-        }
-        let root = find(&mut parent, i);
-        let c = &components[i];
-        let entry = clusters.entry(root).or_insert((c.min_x, c.min_y, c.max_x, c.max_y, 0, 0));
-        entry.0 = entry.0.min(c.min_x);
-        entry.1 = entry.1.min(c.min_y);
-        entry.2 = entry.2.max(c.max_x);
-        entry.3 = entry.3.max(c.max_y);
-        entry.4 += c.area;
-        entry.5 += c.luma_sum;
-    }
-
-    // Area weighted by boldness (how far below the strict threshold the
-    // average pixel sits) — printed grey text sits right at the cutoff,
-    // firm ink well below it — breaking the near-tie between a short bold
-    // word and a longer but fainter one better than area alone. A cluster
-    // centred in the top eighth of the page is penalised, not excluded: a
-    // letterhead or a printed "Name / Date" lives there; a signature on a
-    // document essentially never does.
-    let score = |v: &(u32, u32, u32, u32, u32, u64)| {
-        let avg = v.5 as f64 / v.4 as f64;
-        let boldness = (strict_threshold as f64 - avg).max(1.0);
-        let centre_y = (v.1 + v.3) as f64 / 2.0;
-        let header_zone = ih as f64 * 0.12;
-        let header_penalty = if centre_y < header_zone { 0.15 } else { 1.0 };
-        v.4 as f64 * boldness * header_penalty
-    };
-    let (&winning_root, &(ux0, uy0, ux1, uy1, ..)) =
-        clusters.iter().max_by(|(_, a), (_, b)| score(a).total_cmp(&score(b)))?;
-
-    // The confident core: strict-threshold pixels belonging to the winning
-    // cluster. Everything from here on may only grow this, never shrink it.
-    let roots: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
-    let mut sig_mask = vec![false; (iw * ih) as usize];
-    for (idx, &label) in strict_labels.iter().enumerate() {
-        if label >= 0 && keep[label as usize] && roots[label as usize] == winning_root {
-            sig_mask[idx] = true;
-        }
-    }
+    let StrictInk { luma_buf, x0, y0, iw, ih, strict_threshold, ux0, uy0, ux1, uy1, sig_mask, .. } =
+        strict_ink(rgba, width, height)?;
 
     // A padded window around the located cluster — small enough that a
     // bounded search stays cheap, generous enough to hold the signature's
@@ -333,6 +224,145 @@ pub fn extract_signature(rgba: &[u8], width: u32, height: u32) -> Option<Extract
     }
     Some(Extracted { rgba: out, width: cw, height: ch })
 }
+
+/// The strict pass over the page and the winning ink cluster: the luma buffer
+/// and inset, the darkest-sliver mask, the stroke components, the
+/// gap-clustered winner and the mask of its pixels. Moved out of
+/// `extract_signature` whole, so the crop pass below reads as the other half
+/// of the pipeline.
+struct StrictInk {
+    luma_buf: Vec<u8>,
+    width: u32,
+    height: u32,
+    x0: u32,
+    y0: u32,
+    iw: u32,
+    ih: u32,
+    strict_threshold: u8,
+    ux0: u32,
+    uy0: u32,
+    ux1: u32,
+    uy1: u32,
+    sig_mask: Vec<bool>,
+}
+
+fn strict_ink(rgba: &[u8], width: u32, height: u32) -> Option<StrictInk> {
+    let luma_buf: Vec<u8> = (0..(width as u64 * height as u64) as usize)
+        .map(|i| luma(rgba[i * 4], rgba[i * 4 + 1], rgba[i * 4 + 2]))
+        .collect();
+
+    // A page photographed at an angle often has the sheet's own edge, or
+    // whatever it's resting on, right at the frame's border — ignored by a
+    // small inset so it never competes with the ink itself.
+    let inset_x = ((width as f64 * 0.06) as u32).min(width - 1);
+    let inset_y = ((height as f64 * 0.03) as u32).min(height - 1);
+    let (x0, y0) = (inset_x, inset_y);
+    let (iw, ih) = (width - 2 * inset_x, height - 2 * inset_y);
+
+    let mut hist = [0u32; 256];
+    for y in y0..y0 + ih {
+        for x in x0..x0 + iw {
+            hist[luma_buf[(y * width + x) as usize] as usize] += 1;
+        }
+    }
+    // The darkest sliver of the page — bold enough that only real ink (or a
+    // bold rule line, filtered out below by shape) is ever this dark.
+    const STRICT_FRACTION: f64 = 0.006;
+    let strict_threshold = percentile_threshold(&hist, STRICT_FRACTION);
+
+    let mut strict_mask = vec![false; (iw * ih) as usize];
+    for y in 0..ih {
+        for x in 0..iw {
+            strict_mask[(y * iw + x) as usize] = luma_buf[((y + y0) * width + (x + x0)) as usize] < strict_threshold;
+        }
+    }
+    let (components, strict_labels) = connected_components(&strict_mask, iw, ih, &luma_buf, x0, y0, width);
+
+    let min_area = ((iw * ih) as f64 * 0.00004).max(10.0) as u32;
+    let keep: Vec<bool> = components.iter().map(|c| plausible_stroke(c, iw, ih, min_area)).collect();
+
+    // Union-find: components within a small gap of each other belong to the
+    // same mark — a signature is rarely pen-continuous letter to letter.
+    let n = components.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], x: usize) -> usize {
+        if parent[x] != x {
+            parent[x] = find(parent, parent[x]);
+        }
+        parent[x]
+    }
+    const CLUSTER_GAP: i64 = 40;
+    for i in 0..n {
+        if !keep[i] {
+            continue;
+        }
+        for j in (i + 1)..n {
+            if !keep[j] {
+                continue;
+            }
+            let (a, b) = (&components[i], &components[j]);
+            let overlap_x =
+                (a.min_x as i64 - CLUSTER_GAP) < b.max_x as i64 && (b.min_x as i64 - CLUSTER_GAP) < a.max_x as i64;
+            let overlap_y =
+                (a.min_y as i64 - CLUSTER_GAP) < b.max_y as i64 && (b.min_y as i64 - CLUSTER_GAP) < a.max_y as i64;
+            if overlap_x && overlap_y {
+                let (ra, rb) = (find(&mut parent, i), find(&mut parent, j));
+                if ra != rb {
+                    parent[ra] = rb;
+                }
+            }
+        }
+    }
+
+    // (left, top, right, bottom, area, luma_sum) per cluster.
+    let mut clusters: std::collections::HashMap<usize, (u32, u32, u32, u32, u32, u64)> = std::collections::HashMap::new();
+    for i in 0..n {
+        if !keep[i] {
+            continue;
+        }
+        let root = find(&mut parent, i);
+        let c = &components[i];
+        let entry = clusters.entry(root).or_insert((c.min_x, c.min_y, c.max_x, c.max_y, 0, 0));
+        entry.0 = entry.0.min(c.min_x);
+        entry.1 = entry.1.min(c.min_y);
+        entry.2 = entry.2.max(c.max_x);
+        entry.3 = entry.3.max(c.max_y);
+        entry.4 += c.area;
+        entry.5 += c.luma_sum;
+    }
+
+    // Area weighted by boldness (how far below the strict threshold the
+    // average pixel sits) — printed grey text sits right at the cutoff,
+    // firm ink well below it — breaking the near-tie between a short bold
+    // word and a longer but fainter one better than area alone. A cluster
+    // centred in the top eighth of the page is penalised, not excluded: a
+    // letterhead or a printed "Name / Date" lives there; a signature on a
+    // document essentially never does.
+    let score = |v: &(u32, u32, u32, u32, u32, u64)| {
+        let avg = v.5 as f64 / v.4 as f64;
+        let boldness = (strict_threshold as f64 - avg).max(1.0);
+        let centre_y = (v.1 + v.3) as f64 / 2.0;
+        let header_zone = ih as f64 * 0.12;
+        let header_penalty = if centre_y < header_zone { 0.15 } else { 1.0 };
+        v.4 as f64 * boldness * header_penalty
+    };
+    let (&winning_root, &(ux0, uy0, ux1, uy1, ..)) =
+        clusters.iter().max_by(|(_, a), (_, b)| score(a).total_cmp(&score(b)))?;
+
+    // The confident core: strict-threshold pixels belonging to the winning
+    // cluster. Everything from here on may only grow this, never shrink it.
+    let roots: Vec<usize> = (0..n).map(|i| find(&mut parent, i)).collect();
+    let mut sig_mask = vec![false; (iw * ih) as usize];
+    for (idx, &label) in strict_labels.iter().enumerate() {
+        if label >= 0 && keep[label as usize] && roots[label as usize] == winning_root {
+            sig_mask[idx] = true;
+        }
+    }
+    Some(StrictInk {
+        luma_buf, width, height, x0, y0, iw, ih, strict_threshold, ux0, uy0, ux1, uy1, sig_mask,
+    })
+}
+
 
 fn luma(r: u8, g: u8, b: u8) -> u8 {
     (0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64).round() as u8

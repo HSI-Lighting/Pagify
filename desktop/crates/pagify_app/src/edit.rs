@@ -16,6 +16,24 @@ use pagify_shell::page_space::AppPoint;
 use pagify_shell::PageRaster;
 use pdf_core::document::Color;
 
+/// What [`PagifyApp::pick_run_under`] found: the clicked run (with the page
+/// blocks it came from when the paragraph-aware path produced them), or the
+/// "nothing written here" message `no_text_here` already composed.
+enum PickRun {
+    Run(Option<std::rc::Rc<PageBlocks>>, pdf_core::document::TextRun),
+    NoText(String),
+}
+
+/// What [`PagifyApp::try_open_block`] found: the message to return when the
+/// block opened, or the reason only the run can be picked, plus whether its
+/// line is partly drawn lettering.
+struct BlockOpen {
+    opened: Option<String>,
+    alone: Option<&'static str>,
+    seed_is_drawn_lettering: bool,
+}
+
+
 impl crate::PagifyApp {
     /// The body of [`Self::pick_text_run`], filling `trace` as it goes.
     ///
@@ -67,74 +85,10 @@ impl crate::PagifyApp {
         // froze the whole window for seconds (and, at 877 000 shapes, for tens of
         // seconds) with nothing on screen to say why.
         let heavy = self.page_weight(page).filter(page_is_heavy);
-
-        // **One read of the page for the whole click**, cached — see
-        // `page_blocks`. If it cannot be made, the tool still works on the
-        // run alone.
         let (pb, run): (Option<std::rc::Rc<PageBlocks>>, pdf_core::document::TextRun) =
-            if let Some(weight) = heavy {
-                self.session_log.record(
-                    "pick-note",
-                    &format!(
-                        "page {} holds {} objects, {} of them text: too many to read for paragraphs; picking the run alone",
-                        page + 1,
-                        weight.page_objects,
-                        weight.text_objects
-                    ),
-                );
-                match self.heavy_run_under(page, x, y)? {
-                    Some((run, rule)) => {
-                        trace.seed = Some(run.object);
-                        trace.rule = Some(rule);
-                        (None, run)
-                    }
-                    None => return self.no_text_here(page, at, trace),
-                }
-            } else {
-            match self.page_blocks(page) {
-                Ok((pb, hit)) => {
-                    trace.page_facts(&pb);
-                    trace.cache_hit = hit;
-                    if hit {
-                        // The cost of the reading the click found waiting is not
-                        // a cost of this click (`page_facts` carries the cost of
-                        // the one that made it): a hit's line says it cost nothing.
-                        trace.build_ms = 0.0;
-                        trace.detect_ms = 0.0;
-                    }
-                    // **How far outside its own box a run will still answer
-                    // to a click** (`HIT_TOLERANCE_PT`): the target is a few
-                    // pixels tall. Measured at the zoom these documents open
-                    // at: the median run is 5.1 pixels high in one and 6.7 in
-                    // the other. Asking somebody to land inside a five-pixel
-                    // band is not a reasonable thing to ask, and missing it
-                    // looks exactly like the tool being broken.
-                    let Some((seed, rule)) = block_input::pick_seed(&pb, x, y, HIT_TOLERANCE_PT as f32)
-                    else {
-                        return self.no_text_here(page, at, trace);
-                    };
-                    trace.seed = Some(seed);
-                    trace.rule = Some(rule);
-                    let Some(run) = pb.runs.get(&seed).cloned() else {
-                        return Err("no text there — click on some words.".into());
-                    };
-                    (Some(pb), run)
-                }
-                Err(why) => {
-                    self.session_log.record(
-                        "pick-note",
-                        &format!("the page's text could not be read in one pass ({why}); picking the run alone"),
-                    );
-                    match self.legacy_run_under(page, x, y)? {
-                        Some((run, rule)) => {
-                            trace.seed = Some(run.object);
-                            trace.rule = Some(rule);
-                            (None, run)
-                        }
-                        None => return self.no_text_here(page, at, trace),
-                    }
-                }
-            }
+            match self.pick_run_under(page, x, y, at, trace)? {
+                PickRun::Run(pb, run) => (pb, run),
+                PickRun::NoText(said) => return Ok(said),
             };
         let unreadable = run.text.trim().is_empty();
 
@@ -216,46 +170,14 @@ impl crate::PagifyApp {
         let mut alone: Option<&str> = heavy.map(|_| "this page is very large, so its paragraphs are not read");
         let mut seed_is_drawn_lettering = false;
         if let Some(pb) = pb.as_ref().filter(|_| !unreadable && run.color.a != 0) {
-            if let Some(&(block, line)) = pb.by_object.get(&run.object) {
-                trace.block_facts(pb, block);
-                if trace.objects > 1 {
-                    if pb.blocks[block].lines[line].outlined.is_empty() {
-                        // How many words the paragraph around this line has once
-                        // the drawn lines are cut away: one run is the run
-                        // itself, and opens as it always did.
-                        let in_paragraph: usize = block_input::pieces(pb, block)
-                            .into_iter()
-                            .find(|piece| (piece.from..piece.to).contains(&line))
-                            .map(|piece| pb.blocks[block].lines[piece.from..piece.to].iter().map(|l| l.objects.len()).sum())
-                            .unwrap_or(0);
-                        if in_paragraph > 1 {
-                            match self.open_block(page, pb, block, line) {
-                                Ok(message) => {
-                                    trace.path = PickPath::Block;
-                                    return Ok(message);
-                                }
-                                Err(why) => {
-                                    self.session_log.record(
-                                        "pick-note",
-                                        &format!("block {block} not opened ({why}); picking the run alone"),
-                                    );
-                                    alone = Some("the block could not be read safely");
-                                }
-                            }
-                        }
-                    } else {
-                        seed_is_drawn_lettering = true;
-                        alone = Some("its line is partly drawn as shapes, which cannot be retyped here");
-                        self.session_log.record(
-                            "pick-note",
-                            &format!(
-                                "block {block} not opened (the clicked words are on line {line}, which has drawn \
-                                 lettering in it); picking the run alone"
-                            ),
-                        );
-                    }
-                }
+            let found = self.try_open_block(page, pb, &run, trace);
+            if let Some(message) = found.opened {
+                return Ok(message);
             }
+            if found.alone.is_some() {
+                alone = found.alone;
+            }
+            seed_is_drawn_lettering = found.seed_is_drawn_lettering;
         }
 
         trace.path = PickPath::Single;
@@ -387,6 +309,152 @@ impl crate::PagifyApp {
             ),
         })
     }
+
+    /// Open the whole paragraph the clicked run belongs to when the page's
+    /// blocks say so; otherwise say why only the run can be picked — a line
+    /// partly drawn as shapes, or a block that would not read safely. Moved
+    /// out of `pick_text_run_traced`.
+    fn try_open_block(
+        &mut self,
+        page: usize,
+        pb: &PageBlocks,
+        run: &pdf_core::document::TextRun,
+        trace: &mut PickTrace,
+    ) -> BlockOpen {
+        let mut alone: Option<&'static str> = None;
+        let mut seed_is_drawn_lettering = false;
+            if let Some(&(block, line)) = pb.by_object.get(&run.object) {
+                trace.block_facts(pb, block);
+                if trace.objects > 1 {
+                    if pb.blocks[block].lines[line].outlined.is_empty() {
+                        // How many words the paragraph around this line has once
+                        // the drawn lines are cut away: one run is the run
+                        // itself, and opens as it always did.
+                        let in_paragraph: usize = block_input::pieces(pb, block)
+                            .into_iter()
+                            .find(|piece| (piece.from..piece.to).contains(&line))
+                            .map(|piece| pb.blocks[block].lines[piece.from..piece.to].iter().map(|l| l.objects.len()).sum())
+                            .unwrap_or(0);
+                        if in_paragraph > 1 {
+                            match self.open_block(page, pb, block, line) {
+                                Ok(message) => {
+                                    trace.path = PickPath::Block;
+                                    return BlockOpen { opened: Some(message), alone: None, seed_is_drawn_lettering: false };
+                                }
+                                Err(why) => {
+                                    self.session_log.record(
+                                        "pick-note",
+                                        &format!("block {block} not opened ({why}); picking the run alone"),
+                                    );
+                                    alone = Some("the block could not be read safely");
+                                }
+                            }
+                        }
+                    } else {
+                        seed_is_drawn_lettering = true;
+                        alone = Some("its line is partly drawn as shapes, which cannot be retyped here");
+                        self.session_log.record(
+                            "pick-note",
+                            &format!(
+                                "block {block} not opened (the clicked words are on line {line}, which has drawn \
+                                 lettering in it); picking the run alone"
+                            ),
+                        );
+                    }
+                }
+            }
+        BlockOpen { opened: None, alone, seed_is_drawn_lettering }
+    }
+
+
+/// What [`PagifyApp::pick_run_under`] found: the clicked run (with the page
+/// blocks it came from when the paragraph-aware path produced them), or the
+/// "nothing written here" message `no_text_here` already composed.
+    /// Which run a click picked: the paragraph-aware path, the heavy-page
+    /// shortcut or the legacy fallback — or the "no text" answer from
+    /// `no_text_here`. Moved out of `pick_text_run_traced` whole; the enum
+    /// above carries the two kinds of success so the early-outs keep working.
+    fn pick_run_under(
+        &mut self,
+        page: usize,
+        x: f32,
+        y: f32,
+        at: AppPoint,
+        trace: &mut PickTrace,
+    ) -> Result<PickRun, String> {
+        let heavy = self.page_weight(page).filter(page_is_heavy);
+
+        // **One read of the page for the whole click**, cached — see
+        // `page_blocks`. If it cannot be made, the tool still works on the
+        // run alone.
+        let (pb, run) =
+            if let Some(weight) = heavy {
+                self.session_log.record(
+                    "pick-note",
+                    &format!(
+                        "page {} holds {} objects, {} of them text: too many to read for paragraphs; picking the run alone",
+                        page + 1,
+                        weight.page_objects,
+                        weight.text_objects
+                    ),
+                );
+                match self.heavy_run_under(page, x, y)? {
+                    Some((run, rule)) => {
+                        trace.seed = Some(run.object);
+                        trace.rule = Some(rule);
+                        (None, run)
+                    }
+                    None => return self.no_text_here(page, at, trace).map(PickRun::NoText),
+                }
+            } else {
+            match self.page_blocks(page) {
+                Ok((pb, hit)) => {
+                    trace.page_facts(&pb);
+                    trace.cache_hit = hit;
+                    if hit {
+                        // The cost of the reading the click found waiting is not
+                        // a cost of this click (`page_facts` carries the cost of
+                        // the one that made it): a hit's line says it cost nothing.
+                        trace.build_ms = 0.0;
+                        trace.detect_ms = 0.0;
+                    }
+                    // **How far outside its own box a run will still answer
+                    // to a click** (`HIT_TOLERANCE_PT`): the target is a few
+                    // pixels tall. Measured at the zoom these documents open
+                    // at: the median run is 5.1 pixels high in one and 6.7 in
+                    // the other. Asking somebody to land inside a five-pixel
+                    // band is not a reasonable thing to ask, and missing it
+                    // looks exactly like the tool being broken.
+                    let Some((seed, rule)) = block_input::pick_seed(&pb, x, y, HIT_TOLERANCE_PT as f32)
+                    else {
+                        return self.no_text_here(page, at, trace).map(PickRun::NoText);
+                    };
+                    trace.seed = Some(seed);
+                    trace.rule = Some(rule);
+                    let Some(run) = pb.runs.get(&seed).cloned() else {
+                        return Err("no text there — click on some words.".into());
+                    };
+                    (Some(pb), run)
+                }
+                Err(why) => {
+                    self.session_log.record(
+                        "pick-note",
+                        &format!("the page's text could not be read in one pass ({why}); picking the run alone"),
+                    );
+                    match self.legacy_run_under(page, x, y)? {
+                        Some((run, rule)) => {
+                            trace.seed = Some(run.object);
+                            trace.rule = Some(rule);
+                            (None, run)
+                        }
+                        None => return self.no_text_here(page, at, trace).map(PickRun::NoText),
+                    }
+                }
+            }
+            };
+        Ok(PickRun::Run(pb, run))
+    }
+
 
     /// The editor for lines that are already decided — **including frozen
     /// ones**: lines that carry words the page draws as shapes, which applying
@@ -985,49 +1053,9 @@ impl crate::PagifyApp {
                     .into(),
             );
         }
-        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
         let borrowed: Vec<&[u8]> = faces.iter().map(Vec::as_slice).collect();
-
-        // **A drawn word is often part of something bigger.**
-        //
-        // A heading converted to outlines is frequently one path holding every
-        // letter of it — reported from use as "object 18 is text drawn as
-        // curves, which this pass cannot remove". A rectangle around one word
-        // merely *crosses* that path, and a crossed path stays; a contained one
-        // comes off whatever its shape. So: ask what is in the way, and widen
-        // to contain it.
-        let mut area = area;
-        let mut widened = false;
-        if let Ok(report) = doc.session.preview_redaction(page, area, &borrowed) {
-            for blocker in &report.uncleared {
-                let pdf_core::document::Uncleared::OutlinedText { object } = blocker else {
-                    continue;
-                };
-                let Ok(bounds) = doc.session.object_bounds(page, *object) else { continue };
-                area = pdf_core::document::Rect {
-                    left: area.left.min(bounds.left),
-                    top: area.top.min(bounds.top),
-                    right: area.right.max(bounds.right),
-                    bottom: area.bottom.max(bounds.bottom),
-                };
-                widened = true;
-            }
-        }
-
-        // But not without limit. Some pages draw everything on them as one
-        // path, and widening to contain *that* would take the page with it.
-        if widened {
-            let size = doc.session.page_size(page).map_err(|e| e.to_string())?;
-            let share = ((area.right - area.left) * (area.bottom - area.top)).abs()
-                / (size.width_pt * size.height_pt).max(1.0);
-            if share > 0.4 {
-                return Err(
-                    "these words are part of one drawn shape covering most of the page, \
-                     so replacing them would mean replacing all of it. Nothing was changed."
-                        .into(),
-                );
-            }
-        }
+        let (area, widened) = self.widen_outlined_word_area(page, area, &borrowed)?;
+        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
 
         // **Taken off by the operators that draw them — not redacted.**
         //
@@ -1226,4 +1254,59 @@ impl crate::PagifyApp {
             }
         ))
     }
+
+    /// Widen a redaction area so it contains every drawn path it crosses — a
+    /// heading converted to outlines is often one path holding all its
+    /// letters, and a crossed path stays. Errors when the widened area would
+    /// cover most of the page. Moved out of `replace_outlined_word`.
+    fn widen_outlined_word_area(
+        &mut self,
+        page: usize,
+        area: pdf_core::document::Rect,
+        borrowed: &[&[u8]],
+    ) -> Result<(pdf_core::document::Rect, bool), String> {
+        let Some(doc) = &self.tab_mut().doc else { return Ok((area, false)) };
+        // **A drawn word is often part of something bigger.**
+        //
+        // A heading converted to outlines is frequently one path holding every
+        // letter of it — reported from use as "object 18 is text drawn as
+        // curves, which this pass cannot remove". A rectangle around one word
+        // merely *crosses* that path, and a crossed path stays; a contained one
+        // comes off whatever its shape. So: ask what is in the way, and widen
+        // to contain it.
+        let mut area = area;
+        let mut widened = false;
+        if let Ok(report) = doc.session.preview_redaction(page, area, borrowed) {
+            for blocker in &report.uncleared {
+                let pdf_core::document::Uncleared::OutlinedText { object } = blocker else {
+                    continue;
+                };
+                let Ok(bounds) = doc.session.object_bounds(page, *object) else { continue };
+                area = pdf_core::document::Rect {
+                    left: area.left.min(bounds.left),
+                    top: area.top.min(bounds.top),
+                    right: area.right.max(bounds.right),
+                    bottom: area.bottom.max(bounds.bottom),
+                };
+                widened = true;
+            }
+        }
+
+        // But not without limit. Some pages draw everything on them as one
+        // path, and widening to contain *that* would take the page with it.
+        if widened {
+            let size = doc.session.page_size(page).map_err(|e| e.to_string())?;
+            let share = ((area.right - area.left) * (area.bottom - area.top)).abs()
+                / (size.width_pt * size.height_pt).max(1.0);
+            if share > 0.4 {
+                return Err(
+                    "these words are part of one drawn shape covering most of the page, \
+                     so replacing them would mean replacing all of it. Nothing was changed."
+                        .into(),
+                );
+            }
+        }
+        Ok((area, widened))
+    }
+
 }

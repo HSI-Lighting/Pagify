@@ -181,7 +181,18 @@ fn every_tool_ids_ribbon_command_matches_what_the_ribbon_table_expects() {
 /// interaction level by `ui_tests::escape_puts_the_tool_down`, cited above.
 #[test]
 fn on_cancel_always_leaves_nothing_armed_and_no_ribbon_button_lit() {
-    let every_kind = [
+    for tool in every_kind() {
+        let described = format!("{tool:?}");
+        assert!(
+            matches!(tool.on_cancel(), ToolEffect::Cancelled),
+            "{described} should just say \"cancelled.\", not re-arm or open a dialog"
+        );
+    }
+}
+
+/// Every `Tool` variant, for the property tests above.
+fn every_kind() -> Vec<Tool> {
+    vec![
         Tool::Signature,
         Tool::PlaceImage { rgba: Vec::new(), width: 0, height: 0 },
         Tool::PlaceText,
@@ -214,12 +225,32 @@ fn on_cancel_always_leaves_nothing_armed_and_no_ribbon_button_lit() {
         Tool::Markup(pagify_shell::verbs::Markup::Highlight),
         Tool::Link,
         Tool::MatchProperties { sample: None },
-    ];
-    for tool in every_kind {
+    ]
+}
+
+/// **`on_key` is the frame's own Enter/Escape question to the armed tool.**
+/// Enter finishes only the kinds whose point count is open-ended, and only
+/// once they have two points; Escape answers with `on_cancel` for every
+/// kind; anything else is "not this key". This is the check `main.rs` used
+/// to make inline against `ends_on_enter()`.
+#[test]
+fn on_key_finishes_only_open_ended_kinds_and_cancels_every_one() {
+    for tool in every_kind() {
         let described = format!("{tool:?}");
         assert!(
-            matches!(tool.on_cancel(), ToolEffect::Cancelled),
-            "{described} should just say \"cancelled.\", not re-arm or open a dialog"
+            matches!(tool.on_key(ToolKey::Cancel, 0), ToolEffect::Cancelled),
+            "{described} should answer Escape with on_cancel"
         );
+        assert_eq!(
+            matches!(tool.on_key(ToolKey::Finish, 2), ToolEffect::Finish),
+            tool.ends_on_enter(),
+            "{described}: Enter should finish exactly the kinds that end on it"
+        );
+        if tool.ends_on_enter() {
+            assert!(
+                matches!(tool.on_key(ToolKey::Finish, 1), ToolEffect::None),
+                "{described} should need two points before Enter finishes it"
+            );
+        }
     }
 }

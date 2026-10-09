@@ -7,7 +7,7 @@
 use crate::overlay::PageView;
 use crate::{
     compact_page_spec, page_to_image, paint_signature, short, view_height, Awaiting, DetailTile, FindReplaceMode,
-    ListAction, RenderJob, SignaturePad, Tool,
+    ListAction, RenderJob, SignatureList, SignaturePad, SpellCheck, Tool,
 };
 use crate::spelling;
 use crate::theme;
@@ -362,6 +362,29 @@ impl crate::PagifyApp {
         // left the list as if it had been fixed, so a page kept its typo and
         // the panel moved on without a word. Now the reason is shown in the
         // panel and the word stays to be changed some other way or ignored.
+        self.apply_spell_check_actions(
+            &mut panel, add_to_dictionary, change, change_all, ignore, ignore_all,
+        );
+        if done {
+            return;
+        }
+
+        self.tab_mut().spelling = Some(panel);
+    }
+
+    /// The action the spell dialog's buttons asked for, applied to the word in
+    /// front: dictionary, change, change-all, ignore, ignore-all. A Change the
+    /// engine refuses leaves the word in place with `panel.notice` set — see
+    /// the comment this moved with in `draw_spell_check`.
+    fn apply_spell_check_actions(
+        &mut self,
+        panel: &mut SpellCheck,
+        add_to_dictionary: bool,
+        change: bool,
+        change_all: bool,
+        ignore: bool,
+        ignore_all: bool,
+    ) {
         if add_to_dictionary {
             panel.notice = None;
             if let Some(current) = panel.found.first().cloned() {
@@ -428,13 +451,8 @@ impl crate::PagifyApp {
             }
         }
 
-        if done {
-            // Closing the panel puts a scan still running down.
-            self.tab_mut().spell_scan = None;
-            return;
-        }
-        self.tab_mut().spelling = Some(panel);
     }
+
 
     /// The Bookmarks panel — every bookmark, click to jump.
     pub(crate) fn draw_bookmark_panel(&mut self, ctx: &egui::Context) {
@@ -875,6 +893,21 @@ impl crate::PagifyApp {
             done = true;
         }
 
+        if self.apply_signature_list_action(&mut panel, action) {
+            return;
+        }
+
+        if done {
+            return;
+        }
+        self.signature_list = Some(panel);
+    }
+
+    /// What the signature list asked for once its dialog closed: use, forget,
+    /// rename or draw. `true` means the caller must return before restoring
+    /// the panel — the Draw arm opens the pad instead. Moved out of
+    /// `draw_signature_list`.
+    fn apply_signature_list_action(&mut self, panel: &mut SignatureList, action: Option<ListAction>) -> bool {
         match action {
             Some(ListAction::Use(name)) => {
                 if self.signatures.choose(&name) {
@@ -913,16 +946,13 @@ impl crate::PagifyApp {
                     then_place: false,
                     ..SignaturePad::default()
                 });
-                return;
+                return true;
             }
             None => {}
         }
-
-        if done {
-            return;
-        }
-        self.signature_list = Some(panel);
+        false
     }
+
 
     /// The pad a signature is drawn on.
     ///

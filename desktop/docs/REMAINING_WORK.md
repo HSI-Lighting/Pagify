@@ -84,20 +84,18 @@ Regenerate the list any time with the clippy command above and:
 grep -E 'this function has too many lines' clippy.txt | sort -t'(' -k2 -rn
 ```
 
-Current >150 (clippy non-comment lines), with a suggested first cut:
+Current >150 (clippy non-comment lines) — **shell test helpers only**:
 
-| Function | Where | Size | Suggested split |
-|---|---|---|---|
-| `pick_text_run_traced` | `edit.rs:51` | 205 | Heavy-page/legacy fallback branch out to a method returning `Result<(Option<Rc<PageBlocks>>, TextRun), String>`; the two `return self.no_text_here(...)` early-outs must be converted to that return type |
-| `extract_signature` | `shell/signature_extract.rs:78` | 196 | Pipeline stages: (luma + inset + histogram + strict mask), (components + keep + clusters + winner), (window + loose mask + crop). Each needs a small struct or tuple — this is a design job, not a slice |
-| `draw_signature_list` | `panels.rs:727` | 184 | Per-entry row out to a method taking `&mut panel.renaming` and `&mut action` |
-| `draw_spell_check` | `panels.rs:230` | 170 | Suggestion list / controls blocks |
-| `draw_command_bar` | `main.rs:3224` | 164 | TextEdit + submit block (history is already out) |
-| `draw_ribbon_actions` | `main.rs:3039` | ~150 | Overflow dropdown out of the row |
-| `replace_outlined_word` | `edit.rs:940` | 152 | Find/plan/apply stages |
-| `segment` | `shell/blocks.rs:2031` | 151 | Piece/link/furniture grouping stages |
-| `draw_run_editor` | `main.rs:14180` | 134 | Optional; wrap/skin/width already out |
-| test helpers | `shell/tests/blocks_synthetic.rs` 178/159/119/108/106/108, `blocks_review_fuzz.rs` 136/121/112/103, `replace_lines_sweep.rs:364` 173, `pick_wiring_tests.rs:92` 133, `lock_wiring_tests.rs:6914` 117, `ui_tests.rs:3183` 108 | | Split only when you touch those files; tests are not the priority |
+| Function | Where | Size |
+|---|---|---|
+| `mode_bin`-area test helpers | `shell/tests/blocks_synthetic.rs` | 178 and 159 (plus several 100–125) |
+| a sweep helper | `shell/tests/replace_lines_sweep.rs:364` | 173 |
+| fuzz helpers | `shell/tests/blocks_review_fuzz.rs` | 136/121/112/103 |
+
+No production function exceeds 150 lines. The nearest are `draw_ribbon` 147
+(its action-row half is separable again), `draw_passcode_dialog` 145,
+`main.rs:3728` 139, `draw_pages` 138, `blocks::segment` 136 and
+`draw_signature_list` 136. Split test helpers only when touching those files.
 
 Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105/103/102,
 `main.rs` 139/135/123/118/108/105/102/102/102, `panels.rs` 136/123/102/102,
@@ -106,32 +104,37 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
 
 ### 2.2 Structural tier (the bigger jobs)
 
-1. **`ToolId` enums.** Tool identity is still strings: `type Tool = (&str, &str, &str)`
-  in `ribbon.rs`, the per-tab `*_BUTTONS` consts, `Tool::command() -> Option<&'static str>`,
-  `ribbon_click(&str)`, `tool_button(..., command: &str)`. Introduce a `ToolId`
-  enum, map the tables and `Tool::command`, and keep the command-box string
-  parser as the boundary where strings become ids.
-2. **State sub-structs.** `DocTab` has ~89 fields, `PagifyApp` ~53; targets are
-  25 and 15 (DESIGN_REVIEW §5). Suggested first groups: `ViewState`
-  (page/zoom/scroll/hover/anchor/settling), `ToolState` (already partly
-  `ArmedTool`, plus `markup_armed`/`object_tool`/`grab`/`handle`/selections),
-  `EditState` (`editing_run`, `new_text_box`, `paste_ghost`), `PanelsState`
-  (dialogs, find, spell, bookmarks). `Doc` already delegates caches.
-3. **Event-returning tool transitions.** DESIGN_REVIEW §3.2 sketch: `Tool`
-  variants own their sub-state and `on_click`/`on_key`/`on_cancel` return a
-  `ToolEffect` the canvas/dispatch applies. Today `picking.rs` still matches,
-  and `canvas::armed_tool_gesture`/`page_drag` take the pointer. Do this only
-  with the interaction tests (`pointer_tests`, `ui_tests`, `tool_state_gap_tests`)
-  as the harness; add the cancel/ribbon property test the review asks for.
+1. **`ToolId` — DONE** on the refactor line (`fe97c64`): the ribbon tables
+  carry `Command::Verb(...)`/`ToolId` instead of bare strings, and
+  `Tool::id()`/`ToolId` are in `tool.rs`. Keep the command-box string parser
+  as the boundary where strings become ids.
+2. **State sub-structs and folding into `Tool`.** `DocTab` has ~84 fields,
+  `PagifyApp` ~53; targets are 25 and 15 (DESIGN_REVIEW §5). The tool-kind
+  migration itself is finished — the remaining Phase 2 work is moving the
+  *fields* `Tool` belongs with (`editing_run`, `new_text_box`, `paste_ghost`,
+  `grab`, `handle`, `markup_armed`/`object_tool`, the selections) into `Tool`
+  or a `ToolState`, then grouping the rest into `ViewState`/`EditState`/
+  `PanelsState`. `Doc` already delegates caches.
+3. **Event-returning transitions — DONE.** `ToolEffect` +
+  `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
+  `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
+  the Enter/Escape rules live in `Tool::on_key`; both property tests are in
+  `tool_transition_tests.rs` (cancel, and the `on_key` matrix).
 4. **`Effect`-returning command executor (Phase 4b).** Move command semantics
   into the shell: `execute(verb, ...) -> Vec<Effect>` with `Effect` covering
   Say/ScrollTo/OpenDialog/Refresh/AskUnsaved/Quit; `pagify_app::dispatch`
   becomes an effect applier. `verbs::parse` is already split by domain.
-5. **File splits.** `shell/src/blocks.rs` (2,292) + `block_input.rs` (2,985);
-  `shell/src/session.rs` (1,817 lines, 116 methods) → `session/` submodules by
-  operation family (open/save/organize/annotate/lock/sign); the big shell test
-  files too. Move code and tests together, behaviour-free, one module per
-  commit.
+5. **File splits — session done; blocks pending.** `shell/src/session.rs`
+  (1,817 lines) is now `session/mod.rs` (475: `Session` itself, staging
+  helpers, `PageRaster`/`PageTextSnapshot`, `with_engine`) plus fourteen
+  families of `impl Session` methods: `io`, `render`, `reading`, `runs`,
+  `save`, `markup`, `locking`, `signing`, `security`, `annotate`, `objects`,
+  `pages`, `history`, `typing` (36–225 lines each). `blocks.rs` is likewise
+  now `blocks/`: `mod.rs` 900 (public API, shared types, `Params`, tests)
+  plus `furniture.rs` 268, `rows.rs` 542, `link.rs` 211, `layout.rs` 143,
+  `segment.rs` 298. Shell suite green (631/0) after every commit. Remaining
+  split: `shell/src/block_input.rs` (2,985) into families the same way, and
+  the big shell test files. Move behaviour-free, one module per commit.
 6. **CI gates.** Only once the Windows suite is green: add a workflow running
   `cargo test` (Windows runner, with `PAGIFY_PDFIUM_LIB`) plus clippy without
   `-D warnings`; add `clippy.toml` (`too-many-lines-threshold = 150`,
@@ -153,11 +156,18 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   sites across `main.rs`/`dispatch.rs`. A `doc_mut()` helper is tempting but
   the `let ... else` borrow must compile; only do it if a confirming pattern
   is found, otherwise leave it.
+- **Merging parallel refactors re-verifies nothing by itself.** The
+  `82d44d9` merge compiled and passed the suite while silently reverting the
+  `ui` split and the per-tab consts: the extracted methods stayed in the file,
+  dead, while the merged `ui` inlined everything again. After any merge,
+  re-measure (`clippy` inventory), check that extracted methods actually have
+  call sites, and re-run the docs comparison. Repairs: `3fc46fa`, `3ec8898`.
 - **Untracked files, deliberately not committed:** `.obsidian/` and
   `desktop/docs/SECURITY_AUDIT.md`.
-- **Merge topology:** `farzad-debug` sits on `pagify-windows-refactor`, which
-  sits on `pagify-desktop-windows` @ `e3585d1`. Decide whether the refactor
-  branch merges first or this branch carries everything.
+- **Merge topology:** `farzad-debug` is already merged into
+  `pagify-windows-refactor` (`82d44d9`), which sits on
+  `pagify-desktop-windows` @ `e3585d1`. Continue on the refactor branch;
+  `farzad-debug` is history.
 
 ---
 
@@ -184,5 +194,7 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
 3. Work §2.1 top-down, one function per commit, running
    `cargo test -p pagify_app --release --bin pagify_app` before committing.
 4. Re-run the clippy inventory every few functions and keep the docs current.
-5. When the suite is green on Windows, start §2.2 with `ToolId`, then the
-   state sub-structs; leave CI gates (`clippy.toml` + workflow) until last.
+5. When the suite is green on Windows, start §2.2 by folding the tool state
+   fields into `Tool` (item 2), then the command `Effect` executor; `ToolId`
+   and the click/pointer transitions are already done. Leave CI gates
+   (`clippy.toml` + workflow) until last.
