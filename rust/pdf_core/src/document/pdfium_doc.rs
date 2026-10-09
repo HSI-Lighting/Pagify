@@ -2099,7 +2099,7 @@ impl Document for PdfiumDocument {
         // so counting the whole span, not just those, once named the wrong
         // objects entirely on a run whose own operators were not the only
         // ones in it.
-        let operator_count = operations[first..=last].iter().filter(|op| op.shows_text()).count();
+        let operator_count = operations[first..=last].iter().filter(|op| op.draws_glyphs()).count();
         let mut owners = Vec::with_capacity(operator_count);
         for k in 0..operator_count {
             let index = i32::try_from(object + k)
@@ -7888,7 +7888,13 @@ fn font_to_unicode(
             ];
             let at = operations[open].span.end;
             vec![(at..at, concat_matrix(&local)?)]
-        } else if continues {
+        } else if continues || content::follows_a_show_on_its_line(&operations, first) {
+            // **Relative, because the absolute position is not known.** A run
+            // that follows another show on its line starts wherever that one
+            // ended, which the walk cannot say — see
+            // `content::follows_a_show_on_its_line`. A `Tm` set from the line's
+            // start landed `(i)Tj` after `(ont)Tj` 12 pt short of where it was
+            // sent.
             self.glyph_shift(&stream, &operations, &states, first, last, ctm, (wanted_x, wanted_y))?
         } else {
             // **Nothing goes on drawing this line, so the matrix can simply be
@@ -11864,7 +11870,7 @@ fn run_operators(
     };
 
     for (index, operation) in operations.iter().enumerate().take(last + 1).skip(first) {
-        if operation.shows_text() && !mine.contains(&index) {
+        if operation.draws_glyphs() && !mine.contains(&index) {
             return Err(PdfError::Unsupported("other words are drawn between these ones"));
         }
         if matches!(operation.operator.as_slice(), b"BT" | b"ET") {
@@ -11890,7 +11896,7 @@ fn continues_after(operations: &[crate::pdf::content::Operation], last: usize) -
         ) {
             return false;
         }
-        if operation.shows_text() {
+        if operation.draws_glyphs() {
             return true;
         }
     }

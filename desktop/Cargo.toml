@@ -24,7 +24,7 @@ pdfium-render = { path = "../rust/vendor/pdfium-render" }
 
 [workspace.package]
 edition = "2021"
-version = "0.1.59"
+version = "0.1.60"
 
 # Consumed, never forked — see the build plan §5.4. Anything Pagify needs that
 # these do not do belongs in `pagify_shell`, above them.

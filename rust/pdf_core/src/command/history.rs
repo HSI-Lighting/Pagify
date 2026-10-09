@@ -12,7 +12,13 @@ use crate::command::{Command, UndoRecord};
 use crate::document::DocumentMut;
 use crate::error::Result;
 
-pub const DEFAULT_UNDO_DEPTH: usize = 64;
+/// How many edits can be taken back.
+///
+/// 64 ran out within a working session — reported from use as "undo only works
+/// a certain number of times" — and an entry is cheap: a move or a style change
+/// records a few numbers. Only the snapshot kind (deleting objects, redaction)
+/// keeps a page's bytes, and those are rare next to moves.
+pub const DEFAULT_UNDO_DEPTH: usize = 200;
 
 pub struct CommandHistory {
     /// Applied changes, each with what it takes to reverse them.

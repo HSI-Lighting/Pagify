@@ -5837,32 +5837,44 @@ impl PagifyApp {
                 let members = std::mem::take(&mut self.tab_mut().group);
                 let total = members.len();
                 let page = members.first().map(|m| m.page);
-                let mut moved = 0;
-                let mut last_err = None;
-                for member in &members {
-                    match self.move_object_by(member.page, member.object, member.what, (dx, dy)) {
-                        Ok(_) => moved += 1,
-                        Err(e) => last_err = Some(e),
-                    }
-                }
+                // **One command, so one `undo`.** A loop of `MoveObject`s put
+                // one history entry per member on the stack: undoing a moved
+                // paragraph walked it back a piece at a time, and two such
+                // moves used up the whole undo depth. A `Batch` is also all or
+                // nothing, so a member that cannot move leaves the rest where
+                // they were instead of a half-moved selection.
+                let by = pdf_core::document::Point { x: dx, y: dy };
+                let moved = self.run_group_command(
+                    members
+                        .iter()
+                        .map(|m| pdf_core::command::Command::MoveObject {
+                            page_index: m.page,
+                            object: m.object,
+                            by,
+                        })
+                        .collect(),
+                );
+                let moved_rects = moved.is_ok();
                 self.tab_mut().group = members
                     .into_iter()
                     .map(|mut m| {
-                        m.rect.left += dx;
-                        m.rect.right += dx;
-                        m.rect.top += dy;
-                        m.rect.bottom += dy;
+                        if moved_rects {
+                            m.rect.left += dx;
+                            m.rect.right += dx;
+                            m.rect.top += dy;
+                            m.rect.bottom += dy;
+                        }
                         m
                     })
                     .collect();
                 self.forget_layers();
-                match (last_err, page) {
-                    (Some(e), _) => self.say_error(format!("moved {moved} of {total} things; {e}")),
-                    (None, Some(page)) => self.say_info(format!(
-                        "moved {total} things by {dx:.0} across and {dy:.0} down on page {}.",
+                match (moved, page) {
+                    (Err(e), _) => self.say_error(format!("nothing was moved; {e}")),
+                    (Ok(()), Some(page)) => self.say_info(format!(
+                        "moved {total} things by {dx:.0} across and {dy:.0} down on page {} — one `undo` puts them all back.",
                         page + 1
                     )),
-                    (None, None) => {}
+                    (Ok(()), None) => {}
                 }
             }
             Some(handle) => {
@@ -5876,30 +5888,37 @@ impl PagifyApp {
                 let anchor = pdf_core::document::Point { x: ax, y: ay };
                 let members = std::mem::take(&mut self.tab_mut().group);
                 let total = members.len();
-                let mut done = 0;
-                let mut last_err = None;
-                for member in &members {
-                    match self.scale_thing(member.page, member.object, anchor, sx, sy) {
-                        Ok(_) => done += 1,
-                        Err(e) => last_err = Some(e),
-                    }
-                }
+                let resized = self.run_group_command(
+                    members
+                        .iter()
+                        .map(|m| pdf_core::command::Command::ScaleObject {
+                            page_index: m.page,
+                            object: m.object,
+                            anchor,
+                            sx,
+                            sy,
+                        })
+                        .collect(),
+                );
+                let resized_rects = resized.is_ok();
                 self.tab_mut().group = members
                     .into_iter()
                     .map(|mut m| {
-                        m.rect = pdf_core::document::Rect {
-                            left: ax + (m.rect.left - ax) * sx,
-                            top: ay + (m.rect.top - ay) * sy,
-                            right: ax + (m.rect.right - ax) * sx,
-                            bottom: ay + (m.rect.bottom - ay) * sy,
-                        };
+                        if resized_rects {
+                            m.rect = pdf_core::document::Rect {
+                                left: ax + (m.rect.left - ax) * sx,
+                                top: ay + (m.rect.top - ay) * sy,
+                                right: ax + (m.rect.right - ax) * sx,
+                                bottom: ay + (m.rect.bottom - ay) * sy,
+                            };
+                        }
                         m
                     })
                     .collect();
                 self.forget_layers();
-                match last_err {
-                    Some(e) => self.say_error(format!("resized {done} of {total} things; {e}")),
-                    None => self.say_info(format!(
+                match resized {
+                    Err(e) => self.say_error(format!("nothing was resized; {e}")),
+                    Ok(()) => self.say_info(format!(
                         "resized {total} things to {:.0}% across and {:.0}% down on page {}.",
                         sx * 100.0,
                         sy * 100.0,
@@ -5908,6 +5927,20 @@ impl PagifyApp {
                 }
             }
         }
+    }
+
+    /// Run one edit per group member as a single, all-or-nothing history entry.
+    fn run_group_command(&mut self, commands: Vec<pdf_core::command::Command>) -> Result<(), String> {
+        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
+        doc.session
+            .execute(pdf_core::command::Command::Batch { commands })
+            .map_err(|e| e.to_string())?;
+        if let Some(doc) = &mut self.tab_mut().doc {
+            doc.rendered_is_stale();
+        }
+        self.tab_mut().text_selection = None;
+        self.tab_mut().find_hits.clear();
+        Ok(())
     }
 
     /// Delete every member of [`Self::group`], highest object index first.

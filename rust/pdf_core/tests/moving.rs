@@ -722,3 +722,69 @@ fn a_framed_picture_is_still_visible_after_it_moves_and_takes_its_placeholder() 
         "the placeholder was left behind as a grey block: {grey_after} grey pixels, was {grey_before}"
     );
 }
+
+/// **Moving run after run on one document never gets refused.**
+///
+/// A move that continues a line (`glyph_shift`) writes a `[n] TJ` before and
+/// after the run. PDFium makes no text object for a kerning-only `TJ`, so the
+/// operator count and the object count stop agreeing — and the ordinal locator
+/// that depends on them used to switch itself off, so the *next* move was
+/// refused ("moving anything on this page rewrites what is drawn on it").
+/// Reported as: some text selects but cannot be moved, and cannot be moved at
+/// all once it has been moved and undone.
+#[test]
+fn moving_every_run_in_turn_is_never_refused() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    // The user's own datasheet is the case that failed; the repository fixture
+    // keeps the check running where that file does not exist.
+    let real = std::path::Path::new(r"D:\Dropbox\Datasheets\Data sheet 2024\RING 600.pdf");
+    let paths: Vec<String> = if real.is_file() {
+        vec![real.to_string_lossy().into_owned()]
+    } else {
+        vec![harness::fixture_path("two-column.pdf").to_string_lossy().into_owned()]
+    };
+    for path in paths {
+        let mut doc = PdfiumDocument::open_path(&path, None).expect("open");
+        let runs = doc.text_runs(0).expect("runs");
+        let moved: Vec<_> = runs.iter().filter(|r| r.rect.top < 420.0 && r.rect.bottom > 380.0).collect();
+        let mut refused = Vec::new();
+        for run in &moved {
+            if let Err(e) = doc.try_move_run_in_stream(0, run.object, Point { x: 10.0, y: 0.0 }) {
+                refused.push((run.object, run.text.clone(), e.to_string()));
+            }
+        }
+        assert!(refused.is_empty(), "{path}: moves refused after earlier moves: {refused:#?}");
+
+        // And every one is where it was sent, the rest of the page where it was.
+        let now = doc.text_runs(0).expect("runs");
+        let mut off = Vec::new();
+        for (was, is) in runs.iter().zip(&now) {
+            let want = if moved.iter().any(|m| m.object == was.object) { 10.0 } else { 0.0 };
+            let (dx, dy) = (is.rect.left - was.rect.left, is.rect.top - was.rect.top);
+            if (dx - want).abs() > 0.5 || dy.abs() > 0.5 {
+                off.push((was.object, was.text.clone(), dx, dy));
+            }
+        }
+        assert!(off.is_empty(), "{path}: runs not where they were sent: {off:#?}");
+    }
+}
+
+/// **A run that was moved and moved back can be moved again.**
+#[test]
+fn a_run_moved_and_moved_back_can_be_moved_again() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+
+    let doc = open("two-column.pdf");
+    let runs = doc.text_runs(0).expect("runs");
+    drop(doc);
+    for run in runs.iter().take(12) {
+        let mut doc = open("two-column.pdf");
+        doc.try_move_run_in_stream(0, run.object, Point { x: 10.0, y: 0.0 }).expect("first");
+        doc.try_move_run_in_stream(0, run.object, Point { x: -10.0, y: 0.0 }).expect("back");
+        doc.try_move_run_in_stream(0, run.object, Point { x: 15.0, y: 0.0 })
+            .unwrap_or_else(|e| panic!("run {} {:?} refused after a move and its undo: {e}", run.object, run.text));
+    }
+}

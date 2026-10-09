@@ -40,6 +40,24 @@ impl Operation {
     pub fn shows_text(&self) -> bool {
         matches!(self.operator.as_slice(), b"Tj" | b"TJ" | b"'" | b"\"")
     }
+
+    /// Whether this operation draws **at least one glyph** — a show-text
+    /// operator with a character code in it.
+    ///
+    /// **The one that has an object in PDFium.** `[-120] TJ` (spacing and no
+    /// string) and `() Tj` move the pen or nothing and make no text object, so
+    /// a count of operators that includes them no longer equals a count of
+    /// objects — and "the *n*th object is the *n*th operator" is how a run is
+    /// found by count. Moving a run whose line goes on after it writes exactly
+    /// such operators (`[n] TJ`, to displace the glyphs and put the pen back),
+    /// so after one move the count was two out, the count-based lookup refused
+    /// the whole page, and every later move of a run on it — and the undo of
+    /// the first, which is a move — failed with "drawn in a way this cannot
+    /// follow".
+    pub fn draws_glyphs(&self) -> bool {
+        self.shows_text()
+            && pieces(self).iter().any(|piece| matches!(piece, Piece::Codes(codes) if !codes.is_empty()))
+    }
 }
 
 /// Split a content stream into its operations.
@@ -273,6 +291,25 @@ pub struct State {
     pub line_number: usize,
 }
 
+/// Whether a show-text operator has already drawn on the line `at` belongs to.
+///
+/// **Why the walk cannot answer this for itself.** [`states`] keeps no glyph
+/// advances (it has no font metrics), so after `(ont) Tj` the walk's text matrix
+/// is still where `ont` *started*. For the first operator of a line that is right;
+/// for any later one it is short by the width of everything drawn before it, and a
+/// `Tm` written from it puts the words back at the start of the line.
+pub fn follows_a_show_on_its_line(operations: &[Operation], at: usize) -> bool {
+    for operation in operations[..at].iter().rev() {
+        if operation.shows_text() {
+            return true;
+        }
+        if matches!(operation.operator.as_slice(), b"Td" | b"TD" | b"T*" | b"Tm" | b"BT") {
+            return false;
+        }
+    }
+    false
+}
+
 /// Walk the stream, keeping every matrix it sets.
 pub fn states(operations: &[Operation]) -> Vec<State> {
     let mut out = Vec::with_capacity(operations.len());
@@ -400,7 +437,7 @@ pub fn placed(operations: &[Operation]) -> Vec<Placed> {
     states(operations)
         .into_iter()
         .enumerate()
-        .filter(|(index, _)| operations[*index].shows_text())
+        .filter(|(index, _)| operations[*index].draws_glyphs())
         .map(|(index, state)| {
             let at = multiply(state.text, state.ctm);
             // The length of the transformed x-axis: what one unit of text space

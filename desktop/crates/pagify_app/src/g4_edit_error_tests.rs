@@ -197,13 +197,15 @@ fn a_refused_apply_reads_as_a_refusal_on_screen_not_as_a_missing_feature() {
 }
 
 /// A paragraph — a line the page draws in several pieces — is applied
-/// through its own function and prints its own copy of the error. The empty
-/// `() Tj` makes no text object, so there is one operator more than there
-/// are objects and the batch cannot be counted (`pdf_core`'s
-/// `a_page_whose_objects_do_not_match_its_operators_is_not_counted`).
+/// through its own function and prints its own copy of the error. The first
+/// piece starts with a kern (`[500 (Same)] TJ`): PDFium places it half an em to
+/// the left and the stream walk does not know, so the stream does not confirm
+/// where the pieces are and the batch is refused. (An empty `() Tj` used to
+/// be the trigger; it is counted exactly now — see `pdf_core`'s
+/// `an_empty_show_operator_does_not_throw_the_count_off`.)
 #[test]
 fn a_refused_paragraph_apply_reads_as_a_refusal_too() {
-    let content = b"BT /F1 12 Tf 72 700 Td () Tj (Same) Tj (Same) Tj (Same) Tj ET";
+    let content = b"BT /F1 12 Tf 72 700 Td [500 (Same)] TJ (Same) Tj (Same) Tj (Same) Tj ET";
     let mut h = opened("paragraph.pdf", &page_with(content, "", &[]));
     h.state_mut().command_open = false;
     h.state_mut().submit("edittext");

@@ -849,48 +849,40 @@ fn a_piece_close_behind_the_one_before_it_is_found_by_count_not_by_position() {
     assert_eq!(words(&doc), ["ii", "yy", "zz", "ww"]);
 }
 
-/// **A page whose operators and objects do not match one to one is not counted.**
-/// The empty string in `() Tj` makes no text object, so there is one operator
-/// more than there are objects and the *n*th object is no longer the *n*th
-/// operator. Everything here is on one line, so no position test could tell the
-/// pieces apart either: the batch is refused, and nothing is written.
+/// **An empty show operator does not throw the count off.**
+/// The empty string in `() Tj` makes no text object, so counting every show-text
+/// operator found one operator more than there were objects and the *n*th object
+/// stopped being the *n*th operator — which switched the by-count lookup off for
+/// the whole page, and (the same count decides it) refused to move text once an
+/// earlier move had left a kerning-only `[n] TJ` behind. Only an operator that
+/// draws glyphs is counted now, so the page below is counted exactly and each
+/// piece is retyped where it stands. Everything is on one line, so no position
+/// test could have told the pieces apart.
 #[test]
-fn a_page_whose_objects_do_not_match_its_operators_is_not_counted() {
+fn an_empty_show_operator_does_not_throw_the_count_off() {
     let Some(_) = skip_without_pdfium() else { return };
     let _lock = serial();
     let mut doc = open(b"BT /F1 12 Tf 72 700 Td () Tj (Same) Tj (Same) Tj (Same) Tj ET");
     assert_eq!(words(&doc), ["Same", "Same", "Same"], "the empty string makes no text object");
-    let stream_before = stream_of(&mut doc);
-    let runs_before = runs(&doc);
 
-    let result = doc.set_text_runs_styled(0, &[edit(1, "Aaaa"), edit(2, "Bbbb")]);
-    let error = result.err().unwrap_or_else(|| {
-        panic!("the batch was accepted, and the words are now {:?}", words(&doc));
-    });
-    println!("refused: {error}");
-    assert_eq!(words(&doc), ["Same", "Same", "Same"], "a refused batch changed the page");
-    assert!(runs(&doc) == runs_before);
-    assert!(stream_of(&mut doc) == stream_before, "a refused batch changed the stream");
+    doc.set_text_runs_styled(0, &[edit(1, "Aaaa"), edit(2, "Bbbb")])
+        .unwrap_or_else(|e| panic!("the batch was refused: {e}"));
+    assert_eq!(words(&doc), ["Same", "Aaaa", "Bbbb"], "an edit landed on another piece");
 }
 
-/// **Two edits that land on one operator are refused**, not applied by half.
-/// Splicing two edits into one operator keeps the first and drops the second
-/// without a word, so a batch that said both were done would have done one.
+/// **A trailing empty show operator does not make two edits collide.** They used
+/// to resolve to one operator and be refused, because the extra operator broke
+/// the count that tells the pieces apart.
 #[test]
-fn two_edits_that_resolve_to_one_operator_are_refused() {
+fn an_empty_show_operator_after_the_words_does_not_make_two_edits_collide() {
     let Some(_) = skip_without_pdfium() else { return };
     let _lock = serial();
     let mut doc = open(b"BT /F1 5 Tf 72 700 Td (ii) Tj (ii) Tj () Tj ET");
     assert_eq!(words(&doc), ["ii", "ii"]);
-    let stream_before = stream_of(&mut doc);
 
-    let result = doc.set_text_runs_styled(0, &[edit(0, "xx"), edit(1, "yy")]);
-    let error = result.err().unwrap_or_else(|| {
-        panic!("both edits were reported done, and the words are now {:?}", words(&doc));
-    });
-    println!("refused: {error}");
-    assert_eq!(words(&doc), ["ii", "ii"]);
-    assert!(stream_of(&mut doc) == stream_before);
+    doc.set_text_runs_styled(0, &[edit(0, "xx"), edit(1, "yy")])
+        .unwrap_or_else(|e| panic!("the batch was refused: {e}"));
+    assert_eq!(words(&doc), ["xx", "yy"]);
 }
 
 /// **A kerned start is not confirmed by the stream.** `[500 (Hello)] TJ` moves
@@ -1425,6 +1417,36 @@ fn what_the_paragraph_costs() {
         match outcome {
             Ok(_) => println!("round {round}: one continuation piece alone applied in {took:7.1} ms"),
             Err(e) => println!("round {round}: one continuation piece alone REFUSED after {took:7.1} ms: {e}"),
+        }
+    }
+}
+
+/// **A piece after others on its line lands where it is sent.** `(i) Tj` comes
+/// after `(ont) Tj` with no `Td` between them, so it starts where `ont` ended —
+/// a position the content walk cannot know. The move used to set the text matrix
+/// from the line's start, which put the piece short by the width of `ont` (12 pt
+/// on a real datasheet) every time it was the *last* piece of its line.
+#[test]
+fn a_piece_after_others_on_its_line_is_moved_exactly() {
+    let Some(_) = skip_without_pdfium() else { return };
+    let _lock = serial();
+    let content = b"BT /F1 12 Tf 72 700 Td (ont) Tj (i) Tj 40 0 Td (n) Tj ET";
+    let before = runs(&open(content));
+    assert_eq!(before.iter().map(|r| clean(&r.text)).collect::<Vec<_>>(), ["ont", "i", "n"]);
+
+    for target in 0..before.len() {
+        let mut doc = open(content);
+        doc.try_move_run_in_stream(0, before[target].object, pdf_core::document::Point { x: 30.0, y: 12.0 })
+            .unwrap_or_else(|e| panic!("moving piece {target} was refused: {e}"));
+        let after = runs(&doc);
+        for (index, (was, now)) in before.iter().zip(&after).enumerate() {
+            let want = if index == target { (30.0, 12.0) } else { (0.0, 0.0) };
+            let got = (now.rect.left - was.rect.left, now.rect.top - was.rect.top);
+            assert!(
+                (got.0 - want.0).abs() < 0.5 && (got.1 - want.1).abs() < 0.5,
+                "moving piece {target}: piece {index} {:?} moved by {got:?}, wanted {want:?}",
+                was.text
+            );
         }
     }
 }

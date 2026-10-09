@@ -4586,3 +4586,199 @@ fn a_placed_picture_is_selected_and_moved_by_the_object_tool() {
         after.rect.left
     );
 }
+
+/// [`click`] with a modifier held down (Ctrl; Cmd on a Mac).
+fn click_holding(h: &mut Harness<'static, PagifyApp>, at: egui::Pos2, modifiers: egui::Modifiers) {
+    use egui::{Event, PointerButton};
+    h.input_mut().events.push(Event::ModifiersChanged(modifiers));
+    h.input_mut().events.push(Event::PointerMoved(at));
+    h.run_steps(1);
+    for pressed in [true, false] {
+        h.input_mut().events.push(Event::PointerButton {
+            pos: at,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers,
+        });
+        h.run_steps(1);
+    }
+    h.run_steps(1);
+    h.input_mut().events.push(Event::ModifiersChanged(Default::default()));
+    h.run_steps(1);
+}
+
+fn screen_centre(h: &mut Harness<'static, PagifyApp>, r: pdf_core::document::Rect) -> egui::Pos2 {
+    let view = h.state_mut().tab_mut().last_view.expect("the page was never drawn");
+    view.to_screen(AppPoint {
+        x: ((r.left + r.right) / 2.0) as f64,
+        y: ((r.top + r.bottom) / 2.0) as f64,
+    })
+}
+
+/// **Hold Ctrl and click to pick several things.** Reported from use: only
+/// Shift extended a selection, so a user reaching for the usual Ctrl-click got
+/// a lone thing selected each time.
+#[test]
+fn ctrl_clicking_adds_to_and_removes_from_the_selection_through_the_real_pointer() {
+    let mut h = harness("pictures.pdf");
+    h.state_mut().submit("editobject");
+    h.run_steps(3);
+    let pictures = h.state_mut().tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
+    let (first, second) = (pictures[0].clone(), pictures[1].clone());
+    let (a, b) = (screen_centre(&mut h, first.rect), screen_centre(&mut h, second.rect));
+
+    click(&mut h, a);
+    assert_eq!(h.state_mut().tab_mut().selected.as_ref().map(|s| s.object), Some(first.object), "setup");
+
+    click_holding(&mut h, b, egui::Modifiers::COMMAND);
+    let objects: Vec<usize> = h.state_mut().tab_mut().group.iter().map(|s| s.object).collect();
+    assert!(
+        objects.contains(&first.object) && objects.contains(&second.object),
+        "Ctrl-click did not add the second picture: group {objects:?}"
+    );
+
+    click_holding(&mut h, a, egui::Modifiers::COMMAND);
+    assert_eq!(
+        h.state_mut().tab_mut().selected.as_ref().map(|s| s.object),
+        Some(second.object),
+        "Ctrl-clicking a selected picture did not take it out"
+    );
+}
+
+/// **A group that was moved comes back in one `undo`.** Reported from use:
+/// moving a paragraph then pressing undo walked it back a piece at a time,
+/// and two such moves used up the whole undo history.
+#[test]
+fn moving_a_group_is_one_undo_step() {
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("editobject");
+    h.run_steps(3);
+    let runs = h.state_mut().tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+    let mine: Vec<_> = runs.iter().take(4).cloned().collect();
+    let area = pdf_core::document::Rect {
+        left: mine.iter().map(|r| r.rect.left).fold(f32::MAX, f32::min) - 1.0,
+        top: mine.iter().map(|r| r.rect.top).fold(f32::MAX, f32::min) - 1.0,
+        right: mine.iter().map(|r| r.rect.right).fold(f32::MIN, f32::max) + 1.0,
+        bottom: mine.iter().map(|r| r.rect.bottom).fold(f32::MIN, f32::max) + 1.0,
+    };
+    h.state_mut().select_group_in(
+        0,
+        AppPoint { x: area.left as f64, y: area.top as f64 },
+        AppPoint { x: area.right as f64, y: area.bottom as f64 },
+        false,
+    );
+    let members = h.state_mut().tab_mut().group.len();
+    assert!(members >= 2, "setup: the marquee should have selected several runs, got {members}");
+
+    let where_are = |h: &mut Harness<'static, PagifyApp>| -> Vec<(usize, f32, f32)> {
+        let runs = h.state_mut().tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        runs.iter().map(|r| (r.object, r.rect.left, r.rect.top)).collect()
+    };
+    let before = where_are(&mut h);
+
+    let bounds = h.state_mut().group_bounds(0).expect("a group has bounds");
+    let from = screen_centre(&mut h, bounds);
+    drag(&mut h, from, from + egui::vec2(60.0, 30.0));
+    let moved = where_are(&mut h);
+    assert_ne!(before, moved, "setup: dragging the group should have moved it");
+
+    h.state_mut().submit("undo");
+    h.run_steps(2);
+    let after = where_are(&mut h);
+    assert_eq!(after.len(), before.len());
+    for (was, now) in before.iter().zip(&after) {
+        assert!(
+            (was.1 - now.1).abs() < 0.5 && (was.2 - now.2).abs() < 0.5,
+            "one undo left run {} at ({}, {}) instead of ({}, {})",
+            was.0, now.1, now.2, was.1, was.2
+        );
+    }
+}
+
+/// **A group move that cannot be completed moves nothing.**
+#[test]
+fn a_group_move_that_one_member_refuses_moves_none_of_them() {
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("editobject");
+    h.run_steps(3);
+    let runs = h.state_mut().tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+    let (good, other) = (runs[0].clone(), runs[1].clone());
+    h.state_mut().tab_mut().group = vec![
+        Selected { page: 0, object: good.object, rect: good.rect, what: "the text" },
+        Selected { page: 0, object: other.object, rect: other.rect, what: "the text" },
+        Selected { page: 0, object: 999_999, rect: other.rect, what: "the text" },
+    ];
+    h.state_mut().finish_group_grab(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (40.0, 0.0) }, 1.0);
+
+    let now = h.state_mut().tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+    let find = |object: usize| now.iter().find(|r| r.object == object).expect("run").rect;
+    assert!((find(good.object).left - good.rect.left).abs() < 0.5, "a run moved although the move failed");
+    assert!((find(other.object).left - other.rect.left).abs() < 0.5, "a run moved although the move failed");
+}
+
+/// **The reported paragraph, end to end.** On the user's datasheet a paragraph
+/// is 29 pieces; moving it, then pressing undo once, must put every piece back
+/// — and moving it a second time afterwards must still work (it used to be
+/// refused once earlier moves had left their markers in the page).
+#[test]
+fn a_whole_paragraph_moves_undoes_and_moves_again_on_the_real_datasheet() {
+    let Some(mut h) = harness_at(r"D:\Dropbox\Datasheets\Data sheet 2024\RING 600.pdf") else { return };
+    h.state_mut().submit("editobject");
+    h.run_steps(3);
+    h.state_mut().select_group_in(
+        0,
+        AppPoint { x: 24.0, y: 384.0 },
+        AppPoint { x: 146.0, y: 409.0 },
+        false,
+    );
+    let members = h.state_mut().tab_mut().group.len();
+    assert!(members >= 20, "setup: expected the paragraph's pieces to be selected, got {members}");
+
+    let where_are = |h: &mut Harness<'static, PagifyApp>| -> Vec<(usize, f32, f32)> {
+        let runs = h.state_mut().tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
+        runs.iter().map(|r| (r.object, r.rect.left, r.rect.top)).collect()
+    };
+    let before = where_are(&mut h);
+    let members_before: Vec<usize> = h.state_mut().tab_mut().group.iter().map(|m| m.object).collect();
+    let grab = |dx, dy| Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, dy) };
+
+    let started = std::time::Instant::now();
+    h.state_mut().finish_group_grab(grab(30.0, 12.0), 1.0);
+    eprintln!("moving {members} pieces took {:?}", started.elapsed());
+    let moved = where_are(&mut h);
+    assert_ne!(before, moved, "the paragraph did not move");
+    let group_objects: Vec<usize> = members_before.clone();
+    for (was, now) in before.iter().zip(&moved) {
+        let member = group_objects.contains(&was.0);
+        let (dx, dy) = (now.1 - was.1, now.2 - was.2);
+        let wanted = if member { (30.0, 12.0) } else { (0.0, 0.0) };
+        if (dx - wanted.0).abs() > 0.5 || (dy - wanted.1).abs() > 0.5 {
+            eprintln!("FORWARD {} run {} moved by ({dx:.2}, {dy:.2})", if member { "member" } else { "NON-member" }, was.0);
+        }
+    }
+
+    h.state_mut().submit("undo");
+    let back = where_are(&mut h);
+    for (was, now) in before.iter().zip(&back) {
+        if (now.1 - was.1).abs() > 0.5 || (now.2 - was.2).abs() > 0.5 {
+            eprintln!("UNDO run {} is off by ({:.2}, {:.2})", was.0, now.1 - was.1, now.2 - was.2);
+        }
+    }
+    for (was, now) in before.iter().zip(&back) {
+        assert!(
+            (was.1 - now.1).abs() < 0.5 && (was.2 - now.2).abs() < 0.5,
+            "after one undo run {} is at ({}, {}) instead of ({}, {})",
+            was.0, now.1, now.2, was.1, was.2
+        );
+    }
+
+    // And it can be moved again, as often as the reader likes.
+    for _ in 0..3 {
+        h.state_mut().finish_group_grab(grab(20.0, 0.0), 1.0);
+        h.state_mut().submit("undo");
+    }
+    let end = where_are(&mut h);
+    for (was, now) in before.iter().zip(&end) {
+        assert!((was.1 - now.1).abs() < 0.5 && (was.2 - now.2).abs() < 0.5, "run {} drifted", was.0);
+    }
+}

@@ -178,7 +178,7 @@ impl crate::PagifyApp {
                 // what this marquee is about to select.
                 self.tab_mut().placed_image_selected = None;
                 self.tab_mut().signature_selected = None;
-                if !ui.input(|i| i.modifiers.shift) {
+                if !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
                     self.tab_mut().group = Vec::new();
                 }
                 self.tab_mut().marquee = Some((at, at));
@@ -222,13 +222,14 @@ impl crate::PagifyApp {
                 self.finish_group_grab(grab, view.scale);
             }
             if let Some((start, end)) = self.tab_mut().marquee.take() {
-                let extend = ui.input(|i| i.modifiers.shift);
+                let extend = ui.input(|i| i.modifiers.shift || i.modifiers.command);
                 self.select_group_in(page, start, end, extend);
             }
         }
 
         if response.clicked() {
-            if ui.input(|i| i.modifiers.shift) {
+            // Ctrl (Cmd on a Mac) or Shift: add to, or take out of, the selection.
+            if ui.input(|i| i.modifiers.shift || i.modifiers.command) {
                 self.extend_selection_at(page, at);
             } else {
                 self.tab_mut().group = Vec::new();
