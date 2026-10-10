@@ -1127,30 +1127,7 @@ impl crate::PagifyApp {
             // What is still needed, ticked off as it arrives — shown while one
             // is being chosen, which is the only time it can be acted on.
             if ruled && !confirming {
-                ui.add_space(8.0);
-                let missing = passphrase::unmet(&self.tab_mut().secure_state.password_typed);
-                let here = self.tab_mut().secure_state.password_typed.chars().count();
-                for (wanted, said) in [
-                    (
-                        passphrase::Unmet::TooShort { need: passphrase::LEAST, have: here },
-                        format!("{} characters or more", passphrase::LEAST),
-                    ),
-                    (passphrase::Unmet::NoUppercase, "an upper-case letter".into()),
-                    (passphrase::Unmet::NoLowercase, "a lower-case letter".into()),
-                    (passphrase::Unmet::NoDigit, "a number".into()),
-                    (passphrase::Unmet::NoSymbol, "a symbol".into()),
-                ] {
-                    let met = !missing
-                        .iter()
-                        .any(|m| std::mem::discriminant(m) == std::mem::discriminant(&wanted));
-                    ui.horizontal(|ui| {
-                        ui.colored_label(
-                            if met { theme::snap() } else { theme::ink_faint() },
-                            if met { "\u{2713}" } else { "\u{2022}" },
-                        );
-                        ui.colored_label(if met { theme::ink() } else { theme::ink_dim() }, said);
-                    });
-                }
+                self.passcode_rule_checklist(ui);
             }
 
             // Which handler writes it. Offered only where a password is being
@@ -1242,6 +1219,36 @@ impl crate::PagifyApp {
         let typed = std::mem::take(&mut self.tab_mut().secure_state.password_typed);
         let _ = choosing;
         self.answer_passcode(&typed);
+    }
+
+    /// The live checklist of what a working passcode still needs, above the
+    /// buttons while one is being chosen. Moved out of `draw_passcode_dialog`.
+    fn passcode_rule_checklist(&mut self, ui: &mut egui::Ui) {
+        use pagify_shell::passphrase;
+                ui.add_space(8.0);
+                let missing = passphrase::unmet(&self.tab_mut().secure_state.password_typed);
+                let here = self.tab_mut().secure_state.password_typed.chars().count();
+                for (wanted, said) in [
+                    (
+                        passphrase::Unmet::TooShort { need: passphrase::LEAST, have: here },
+                        format!("{} characters or more", passphrase::LEAST),
+                    ),
+                    (passphrase::Unmet::NoUppercase, "an upper-case letter".into()),
+                    (passphrase::Unmet::NoLowercase, "a lower-case letter".into()),
+                    (passphrase::Unmet::NoDigit, "a number".into()),
+                    (passphrase::Unmet::NoSymbol, "a symbol".into()),
+                ] {
+                    let met = !missing
+                        .iter()
+                        .any(|m| std::mem::discriminant(m) == std::mem::discriminant(&wanted));
+                    ui.horizontal(|ui| {
+                        ui.colored_label(
+                            if met { theme::snap() } else { theme::ink_faint() },
+                            if met { "\u{2713}" } else { "\u{2022}" },
+                        );
+                        ui.colored_label(if met { theme::ink() } else { theme::ink_dim() }, said);
+                    });
+                }
     }
 
     pub(crate) fn draw_extract_dialog(&mut self, ctx: &egui::Context) {
