@@ -5,6 +5,8 @@
 //! design review flagged (Phase 4, file splits).
 use super::*;
 
+/// Stands in for the text of a line made only of outlined (path-drawn) words. Non-empty, no newline,
+/// does not end in `-`: the editor shows it and apply never touches that line.
 pub const OUTLINED_PLACEHOLDER: &str = "[drawn text]";
 
 /// Two objects whose baseline origins are this close (points) are one place. With coincident boxes the
