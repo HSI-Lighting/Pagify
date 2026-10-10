@@ -113,12 +113,12 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   (commit `f3d07b4`), and `view_state: ViewState` holds twelve of the
   view fields (hover/last view, viewport, scroll offsets, deferred pan/
   scroll-to, canvas point, reveal, saved revision, queued copy — commit
-  `c81eb0e`). **`DocTab` is at 39 fields** (target 25). Next: the scoped
-  pass for `page`/`zoom`/`rotation`/`view` (into `ViewState`) and
-  `selected`/`group`/`grab`/`marquee` (into `SelectionState`) — these
-  collide with locals and other types, so renames must be receiver-scoped,
-  not bulk. Then folding the armed-tool leftovers into `tool.rs`. `Doc`
-  already delegates caches.
+  `c81eb0e`), and the scoped pass has since moved `page`/`zoom`/
+  `rotation`/`view` into it too (151 qualified rewrites + compiler-guided
+  local fixes). **`DocTab` is at ~35 fields** (target 25). Next: the same
+  scoped treatment for `selected`/`group`/`grab`/`marquee` into
+  `SelectionState`. Then folding the armed-tool leftovers
+  (`object_tool`, …) into `tool.rs`. `Doc` already delegates caches.
 3. **Event-returning transitions — DONE.** `ToolEffect` +
   `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
   `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
