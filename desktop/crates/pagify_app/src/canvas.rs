@@ -1692,7 +1692,7 @@ impl crate::PagifyApp {
 
         // A paste picked up with ⌘V owns the pointer until it is put down: the
         // click that does it is not also a pick, a selection or a mark.
-        if self.paste_ghost.is_some() {
+        if self.clipboard_state.paste_ghost.is_some() {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
             if response.clicked() {
                 self.place_paste_ghost(page, at);

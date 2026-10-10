@@ -285,7 +285,7 @@ fn copying_and_pasting_twice_in_a_row_does_not_lose_the_second_copy() {
 fn pages_copied_in_one_window_paste_into_another_window() {
     let mut first = app("text-lines.pdf");
     let mut second = app("two-column.pdf");
-    second.clipboard_dir = first.clipboard_dir.clone();
+    second.clipboard_state.clipboard_dir = first.clipboard_state.clipboard_dir.clone();
     let before = second.tab().doc.as_ref().unwrap().page_count;
 
     first.tab_mut().organize.organize_selected = vec![0];
@@ -307,7 +307,7 @@ fn pages_copied_in_one_window_paste_into_another_window() {
 fn a_copy_outlives_the_window_that_made_it() {
     let mut first = app("text-lines.pdf");
     let mut second = app("two-column.pdf");
-    second.clipboard_dir = first.clipboard_dir.clone();
+    second.clipboard_state.clipboard_dir = first.clipboard_state.clipboard_dir.clone();
     let before = second.tab().doc.as_ref().unwrap().page_count;
 
     first.tab_mut().organize.organize_selected = vec![0];
@@ -325,7 +325,7 @@ fn a_copy_outlives_the_window_that_made_it() {
 fn the_newest_copy_wins_and_a_stale_or_replaced_one_is_not_offered() {
     let mut first = app("text-lines.pdf");
     let mut second = app("two-column.pdf");
-    second.clipboard_dir = first.clipboard_dir.clone();
+    second.clipboard_state.clipboard_dir = first.clipboard_state.clipboard_dir.clone();
 
     first.tab_mut().organize.organize_selected = vec![0];
     assert!(first.copy_organize_selection());
@@ -347,10 +347,10 @@ fn the_newest_copy_wins_and_a_stale_or_replaced_one_is_not_offered() {
     // An hour-old manifest is not offered to a window with no copy of its own.
     let mut third = app("text-lines.pdf");
     let mut fourth = app("two-column.pdf");
-    fourth.clipboard_dir = third.clipboard_dir.clone();
+    fourth.clipboard_state.clipboard_dir = third.clipboard_state.clipboard_dir.clone();
     third.tab_mut().organize.organize_selected = vec![0];
     assert!(third.copy_organize_selection());
-    let manifest = third.clipboard_dir.join("latest.txt");
+    let manifest = third.clipboard_state.clipboard_dir.join("latest.txt");
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
     std::fs::OpenOptions::new().write(true).open(&manifest).expect("manifest").set_modified(old).expect("age it");
     assert!(fourth.current_page_clipboard().is_none(), "a two-hour-old copy was offered");
@@ -4163,19 +4163,19 @@ fn picking_a_run_asks_for_the_face_it_is_drawn_in() {
                 "the run's font came back as something no reader could parse"
             );
             assert!(
-                app.pending_face.is_some() || app.editor_face.is_some(),
+                app.faces_state.pending_face.is_some() || app.faces_state.editor_face.is_some(),
                 "the editor did not ask for the face the words are drawn in"
             );
         }
         None => {
             // A named font — nothing in the file to install.
-            assert!(app.editor_face.is_none(), "it installed a face that is not there");
+            assert!(app.faces_state.editor_face.is_none(), "it installed a face that is not there");
         }
     }
 
     // And it is never used before egui has had a frame to build it.
     assert!(
-        !app.editor_face_ready,
+        !app.faces_state.editor_face_ready,
         "the face was marked usable on the frame it was asked for"
     );
 }

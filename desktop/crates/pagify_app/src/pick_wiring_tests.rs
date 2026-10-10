@@ -223,7 +223,7 @@ fn clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block() {
                     font_of(edit.look_object)
                 ));
             }
-            if app.editor_face != Some(want_face) {
+            if app.faces_state.editor_face != Some(want_face) {
                 failures.push(format!("{who}: the editor asked for another font program than the block's own"));
             }
             // No drawn line is in the box, so the pick has none to talk about.

@@ -396,12 +396,12 @@ fn pasting_words_picks_them_up_and_a_click_puts_them_down() {
 
     h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
     h.run_steps(2);
-    assert!(h.state().paste_ghost.is_some(), "paste did not pick the copy up");
+    assert!(h.state().clipboard_state.paste_ghost.is_some(), "paste did not pick the copy up");
     assert_eq!(occurrences(&mut h, &words), before, "something was put on the page before the click");
 
     { let spot = page_spot(&h, 100.0, 150.0); click(&mut h, spot); }
     h.run_steps(2);
-    assert!(h.state().paste_ghost.is_none(), "the click did not put it down");
+    assert!(h.state().clipboard_state.paste_ghost.is_none(), "the click did not put it down");
     assert_eq!(occurrences(&mut h, &words), before + 1, "the copy is not on the page");
     assert!(errors(&h).is_empty(), "{:?}", errors(&h));
 
@@ -442,11 +442,11 @@ fn escape_puts_a_picked_up_paste_down_nowhere() {
     h.run_steps(2);
     h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
     h.run_steps(2);
-    assert!(h.state().paste_ghost.is_some());
+    assert!(h.state().clipboard_state.paste_ghost.is_some());
 
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
-    assert!(h.state().paste_ghost.is_none(), "Escape did not drop it");
+    assert!(h.state().clipboard_state.paste_ghost.is_none(), "Escape did not drop it");
     assert_eq!(occurrences(&mut h, &words), before);
 }
 
@@ -460,7 +460,7 @@ fn text_copied_elsewhere_is_picked_up_in_edit_text_too() {
     h.event(egui::Event::Paste("Brand new words\nand a second line".into()));
     h.run_steps(2);
     assert!(
-        matches!(&h.state().paste_ghost, Some(PasteGhost { content: ObjectClipboard::Text { lines, .. }, .. }) if lines.len() == 2),
+        matches!(&h.state().clipboard_state.paste_ghost, Some(PasteGhost { content: ObjectClipboard::Text { lines, .. }, .. }) if lines.len() == 2),
         "the pasted text was not picked up"
     );
 
@@ -480,7 +480,7 @@ fn with_no_editing_tool_in_hand_paste_does_not_pick_anything_up() {
     let mut h = harness("text-lines.pdf");
     h.event(egui::Event::Paste("Brand new words".into()));
     h.run_steps(2);
-    assert!(h.state().paste_ghost.is_none());
+    assert!(h.state().clipboard_state.paste_ghost.is_none());
 }
 
 /// A picture copied from the page is picked up and put down as a picture.
@@ -505,7 +505,7 @@ fn a_picture_from_the_page_is_copied_and_pasted_where_clicked() {
     assert!(matches!(h.state().object_clipboard, Some(ObjectClipboard::Image { .. })), "the picture was not copied");
     h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
     h.run_steps(2);
-    assert!(h.state().paste_ghost.is_some());
+    assert!(h.state().clipboard_state.paste_ghost.is_some());
     assert_eq!(marks(&h), before, "it was placed before the click");
 
     { let spot = page_spot(&h, 150.0, 150.0); click(&mut h, spot); }
@@ -862,7 +862,7 @@ fn a_refused_click_away_apply_leaves_its_refusal_on_screen_and_the_tool_armed() 
     click(&mut h, away);
     h.run_steps(2);
     assert!(h.state().tab().edit.editing_run.is_none(), "the same refused edit was kept a second time");
-    assert!(h.state().text_to_offer.is_none() || h.state().text_to_offer.as_deref() == Some("Jello"));
+    assert!(h.state().faces_state.text_to_offer.is_none() || h.state().faces_state.text_to_offer.as_deref() == Some("Jello"));
     assert!(h.state().tab().tool.is_some(), "the tool should be back in hand for the next click");
     assert!(
         h.query_all_by_label_contains("click the words to change").next().is_some()

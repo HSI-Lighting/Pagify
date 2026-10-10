@@ -1689,13 +1689,13 @@ fn clicking_later_dismisses_the_update_prompt_without_updating() {
     use egui_kittest::kittest::Queryable;
 
     let mut h = harness("two-column.pdf");
-    h.state_mut().update_available = Some(("9.9.9".to_string(), std::env::temp_dir()));
+    h.state_mut().update_state.update_available = Some(("9.9.9".to_string(), std::env::temp_dir()));
     h.run_steps(2);
 
     h.get_by_label_contains("Later").click();
     h.run_steps(1);
 
-    assert!(h.state().update_available.is_none(), "Later should have dismissed the prompt");
+    assert!(h.state().update_state.update_available.is_none(), "Later should have dismissed the prompt");
     assert!(h.state().pending_update.is_none(), "Later must never stage an update");
     assert!(h.state().tab().closing.is_none(), "Later must never start a quit");
 }
@@ -1715,13 +1715,13 @@ fn clicking_update_now_stages_it_and_asks_about_unsaved_work_first() {
     assert!(h.state().unsaved().is_some(), "test assumption: the mark should count as unsaved");
 
     let source = std::env::temp_dir();
-    h.state_mut().update_available = Some(("9.9.9".to_string(), source.clone()));
+    h.state_mut().update_state.update_available = Some(("9.9.9".to_string(), source.clone()));
     h.run_steps(2);
 
     h.get_by_label_contains("Update now").click();
     h.run_steps(1);
 
-    assert!(h.state().update_available.is_none(), "the prompt should have closed");
+    assert!(h.state().update_state.update_available.is_none(), "the prompt should have closed");
     assert_eq!(h.state().pending_update, Some(source), "Update now should have staged the update");
     assert_eq!(
         h.state().tab().closing,
@@ -3603,7 +3603,7 @@ fn opening_the_font_picker_takes_focus_off_the_run_editor() {
     h.run_steps(2);
     assert!(h.ctx.memory(|m| m.has_focus(editor_id)), "setup: the editor should hold the caret");
 
-    h.state_mut().font_picker_open = true;
+    h.state_mut().faces_state.font_picker_open = true;
     h.run_steps(2);
 
     assert!(

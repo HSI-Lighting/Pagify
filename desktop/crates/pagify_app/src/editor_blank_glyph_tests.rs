@@ -545,7 +545,7 @@ fn on_the_real_datasheet_the_letters_a_heading_face_never_drew_come_out() {
     let words = "bfjkqz abc bfjkqz";
     h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editing").buffer = words.to_string();
     h.run_steps(6);
-    assert!(h.state().editor_face_ready, "setup: the heading's face should be in use");
+    assert!(h.state().faces_state.editor_face_ready, "setup: the heading's face should be in use");
 
     let mut galleys = Vec::new();
     for clipped in &h.output().shapes {
@@ -565,7 +565,7 @@ fn on_the_real_datasheet_the_letters_a_heading_face_never_drew_come_out() {
 #[test]
 fn picking_a_run_reads_the_coverage_of_its_face_once() {
     let mut h = editor_on_a_gutted_page("coverage");
-    let first = h.state().editor_face_coverage.clone().expect("the face's coverage should have been read");
+    let first = h.state().faces_state.editor_face_coverage.clone().expect("the face's coverage should have been read");
     assert!(!first.has('b'), "the page's face has no ink for b");
     assert!(first.has('a') && first.has('c'));
 
@@ -577,7 +577,7 @@ fn picking_a_run_reads_the_coverage_of_its_face_once() {
     };
     h.state_mut().tab_mut().edit.editing_run = None;
     h.state_mut().pick_text_run(0, at).expect("picked again");
-    let second = h.state().editor_face_coverage.clone().expect("still there");
+    let second = h.state().faces_state.editor_face_coverage.clone().expect("still there");
     assert!(std::sync::Arc::ptr_eq(&first, &second), "the same face was read a second time");
 }
 
@@ -589,7 +589,7 @@ fn the_open_editor_draws_ink_for_a_letter_its_face_never_drew() {
     let h = editor_on_a_gutted_page("editor");
     let buffer = h.state().tab().edit.editing_run.as_ref().expect("editing").buffer.clone();
     assert_eq!(buffer, "abc bab", "setup: the page's own words");
-    assert!(h.state().editor_face_ready, "setup: the document's face should be installed and in use");
+    assert!(h.state().faces_state.editor_face_ready, "setup: the document's face should be installed and in use");
 
     let mut galleys = Vec::new();
     for clipped in &h.output().shapes {

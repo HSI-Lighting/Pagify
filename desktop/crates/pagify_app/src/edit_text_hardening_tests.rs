@@ -241,7 +241,7 @@ fn a_page_too_heavy_to_read_opens_the_word_alone_and_reads_nothing_else() {
     assert!(doc.caches.page_blocks.borrow().is_none(), "the page was read for paragraphs");
     assert!(doc.caches.sampling.borrow().is_none(), "the page was rendered to sample a background");
     assert_eq!(edit.background, Color { r: 255, g: 255, b: 255, a: 255 }, "the box is drawn on white");
-    assert!(app.editor_face.is_none() && app.pending_face.is_none(), "a font program was asked for");
+    assert!(app.faces_state.editor_face.is_none() && app.faces_state.pending_face.is_none(), "a font program was asked for");
     assert!(
         logged(&log, "pick-note").iter().any(|note| note.contains("too many to read for paragraphs")),
         "the guard did not say it fired: {:?}",
@@ -354,9 +354,9 @@ fn an_editor_whose_page_was_restacked_is_refused_and_the_page_is_untouched() {
     assert!(picture(&app, 0) == picture_before, "the page's picture changed");
     // The words that were typed are not lost with it.
     assert!(
-        app.text_to_offer.as_deref().is_some_and(|text| text.contains("SECOND")),
+        app.faces_state.text_to_offer.as_deref().is_some_and(|text| text.contains("SECOND")),
         "the typed words were not offered back: {:?}",
-        app.text_to_offer
+        app.faces_state.text_to_offer
     );
 }
 
@@ -427,7 +427,7 @@ fn an_editor_whose_page_changed_is_closed_on_the_next_frame() {
     h.run_steps(2);
     assert!(h.state().tab().edit.editing_run.is_none(), "the editor was left open over a page that changed");
     assert!(said(h.state()).contains(STALE_EDITOR_MESSAGE), "{}", said(h.state()));
-    assert!(h.state().text_to_offer.is_none(), "the typed words were left unsaid");
+    assert!(h.state().faces_state.text_to_offer.is_none(), "the typed words were left unsaid");
 }
 
 // -- joined groups -----------------------------------------------------------------
@@ -617,34 +617,34 @@ fn the_editor_face_is_asked_of_the_engine_once_per_font_per_state_of_the_page() 
     let mut app = PagifyApp::new(Some(MARINA));
     let runs: std::collections::HashMap<usize, TextRun> = runs_on(&app, 0).into_iter().map(|r| (r.object, r)).collect();
     app.pick_text_run(0, centre(&runs[&986].rect)).expect("picked");
-    assert_eq!(app.face_cache.entries.len(), 1, "the body font was kept");
-    let first = app.face_cache.entries[0].1.program.clone().expect("a program");
-    let face = app.editor_face;
+    assert_eq!(app.faces_state.face_cache.entries.len(), 1, "the body font was kept");
+    let first = app.faces_state.face_cache.entries[0].1.program.clone().expect("a program");
+    let face = app.faces_state.editor_face;
     assert!(face.is_some(), "setup: the editor asked for a face");
 
     // Another word of the same paragraph — the same font.
     app.tab_mut().edit.editing_run = None;
     app.pick_text_run(0, centre(&runs[&990].rect)).expect("picked");
-    assert_eq!(app.face_cache.entries.len(), 1, "one font, one entry");
+    assert_eq!(app.faces_state.face_cache.entries.len(), 1, "one font, one entry");
     assert!(
-        std::rc::Rc::ptr_eq(&first, app.face_cache.entries[0].1.program.as_ref().expect("a program")),
+        std::rc::Rc::ptr_eq(&first, app.faces_state.face_cache.entries[0].1.program.as_ref().expect("a program")),
         "the second click asked the engine for the font again"
     );
-    assert_eq!(app.editor_face, face);
+    assert_eq!(app.faces_state.editor_face, face);
 
     // The heading above it is another font: a second entry, most recent first.
     app.tab_mut().edit.editing_run = None;
     app.pick_text_run(0, centre(&runs[&981].rect)).expect("picked");
-    assert_eq!(app.face_cache.entries.len(), 2);
-    assert_ne!(app.editor_face, face, "the heading's own face");
+    assert_eq!(app.faces_state.face_cache.entries.len(), 2);
+    assert_ne!(app.faces_state.editor_face, face, "the heading's own face");
 
     // The page changes: nothing of the old state is served, and none of it is kept.
     app.tab_mut().edit.editing_run = None;
     app.tab_mut().doc.as_mut().expect("open").rendered_is_stale();
     app.pick_text_run(0, centre(&runs[&986].rect)).expect("picked");
-    assert_eq!(app.face_cache.entries.len(), 1, "the old state's fonts were kept: {}", app.face_cache.entries.len());
+    assert_eq!(app.faces_state.face_cache.entries.len(), 1, "the old state's fonts were kept: {}", app.faces_state.face_cache.entries.len());
     assert!(
-        !std::rc::Rc::ptr_eq(&first, app.face_cache.entries[0].1.program.as_ref().expect("a program")),
+        !std::rc::Rc::ptr_eq(&first, app.faces_state.face_cache.entries[0].1.program.as_ref().expect("a program")),
         "a font of the page as it was served the page as it is"
     );
 }
@@ -845,11 +845,11 @@ fn a_second_click_away_from_the_same_refused_edit_lets_it_go_with_the_words_offe
     let mut app = a_run_with_an_unwritable_word("click-away-twice");
     assert!(app.leave_editor_by_click(), "the first click away should keep the refused editor");
     assert!(app.tab().edit.editing_run.is_some());
-    assert!(app.text_to_offer.is_none(), "the words were offered back while the box was still open");
+    assert!(app.faces_state.text_to_offer.is_none(), "the words were offered back while the box was still open");
 
     assert!(!app.leave_editor_by_click(), "the second click away should let it go");
     assert!(app.tab().edit.editing_run.is_none(), "the editor is still there");
-    assert_eq!(app.text_to_offer.as_deref(), Some("\u{3A9}"), "the typed words were not offered back");
+    assert_eq!(app.faces_state.text_to_offer.as_deref(), Some("\u{3A9}"), "the typed words were not offered back");
     assert!(said(&app).contains("let go of the edit the engine refused"), "{}", said(&app));
     // Nothing was ever written.
     assert_eq!(runs_on(&app, 0)[0].text.trim(), "one lonely line");
@@ -865,7 +865,7 @@ fn an_edit_changed_after_a_refusal_is_tried_again_by_a_click_away() {
     assert!(!app.leave_editor_by_click(), "{}", said(&app));
     assert!(app.tab().edit.editing_run.is_none());
     assert_eq!(runs_on(&app, 0)[0].text.trim(), "one LONELY line");
-    assert!(app.text_to_offer.is_none(), "words that were written were offered back");
+    assert!(app.faces_state.text_to_offer.is_none(), "words that were written were offered back");
 }
 
 /// Escape lets a refused edit go too, and offers the words back.
@@ -875,7 +875,7 @@ fn escape_after_a_refusal_offers_the_words_back() {
     assert!(app.apply_editing_page());
     app.escape();
     assert!(app.tab().edit.editing_run.is_none());
-    assert_eq!(app.text_to_offer.as_deref(), Some("\u{3A9}"));
+    assert_eq!(app.faces_state.text_to_offer.as_deref(), Some("\u{3A9}"));
     assert!(said(&app).contains("what was typed is on the clipboard"), "{}", said(&app));
     // An Escape with nothing refused offers nothing: the clipboard is not the app's to take.
     let mut plain = open_page("escape-plain", &[(100.0, 700.0, "one lonely line")], "");
@@ -883,7 +883,7 @@ fn escape_after_a_refusal_offers_the_words_back() {
     plain.pick_text_run(0, centre(&run.rect)).expect("picked");
     plain.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
     plain.escape();
-    assert!(plain.text_to_offer.is_none());
+    assert!(plain.faces_state.text_to_offer.is_none());
 }
 
 /// **The stamp stays good across the restore, and still refuses what it should**: the

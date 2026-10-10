@@ -20,7 +20,7 @@ impl crate::PagifyApp {
     /// `ask_about_unsaved`'s modal: a local decision set inside the closure,
     /// acted on once it returns.
     pub(crate) fn draw_update_prompt(&mut self, ctx: &egui::Context) {
-        let Some((version, source)) = self.update_available.clone() else { return };
+        let Some((version, source)) = self.update_state.update_available.clone() else { return };
         // `Some(true)` = update now, `Some(false)` = later — just the two
         // outcomes this dialog has, not `Decision`'s three (that one is
         // `ask_about_unsaved`'s own, for a different question).
@@ -48,13 +48,13 @@ impl crate::PagifyApp {
         }
         match decision {
             None => {}
-            Some(false) => self.update_available = None,
+            Some(false) => self.update_state.update_available = None,
             Some(true) => {
                 // The same walk a plain `quit` makes — an update is a quit
                 // that relaunches a newer build, not a second "is anything
                 // unsaved" check of its own. `exit_program` is where it actually
                 // happens, once every tab has agreed it is safe to close.
-                self.update_available = None;
+                self.update_state.update_available = None;
                 self.pending_update = Some(source);
                 self.act(Verb::Quit { force: false });
             }

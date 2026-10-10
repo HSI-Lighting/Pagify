@@ -994,8 +994,93 @@ impl DocTab {
     }
 }
 
+/// The update check and whatever it found available.
+struct UpdateState {
+    update_check: Option<UpdateCheck>,
+    update_available: Option<(String, std::path::PathBuf)>,
+}
+
+/// Editor faces and fonts: the document face installed in the run editor, the
+/// pending face, the coverage and metrics read for it, the face cache, the
+/// system-font list and the font picker.
+struct FacesState {
+    /// The document face installed for the editor, and whether egui has
+    /// rebuilt its atlas with it yet.
+    ///
+    /// **Two fields because the family does not exist until the next frame.**
+    /// `set_fonts` takes effect at the start of the frame after it is called,
+    /// and drawing in a family nothing is bound to panics rather than falling
+    /// back — the same trap `install_fonts` warns about for the icons. So the
+    /// face is asked for on one frame and used on the next.
+    editor_face: Option<u64>,
+    editor_face_ready: bool,
+    /// The real ascent/descent of whatever font `editor_face` names, read
+    /// once when it is loaded — see [`Self::want_document_face`]'s own doc
+    /// and [`run_editor_font_size`], which sizes the editor from this
+    /// instead of a fixed guess when a run's own reported size cannot be
+    /// trusted.
+    editor_face_metrics: Option<pdf_core::pdf::embed::Metrics>,
+    /// Which characters `editor_face` has *ink* for, read once beside the
+    /// metrics — see [`pdf_core::pdf::embed::outlined_chars`]. The editor
+    /// lays out any other character in the program's own face
+    /// (`editor_sections`), since the document's subset would draw it blank.
+    /// Shared, not copied, into the layouter every frame.
+    editor_face_coverage: Option<std::sync::Arc<pdf_core::pdf::embed::OutlineCoverage>>,
+    /// A face asked for and not yet installed, handed to `install_fonts` at the
+    /// top of the next frame.
+    pending_face: Option<Vec<u8>>,
+    /// Words somebody typed that an editor is being let go of without applying —
+    /// the engine refused them, or the page changed under the box — to be put on
+    /// the clipboard, so that the typing is never simply lost. Said at the next
+    /// frame, in `draw_properties_panel`: putting text on the clipboard takes the
+    /// `egui::Context` that the apply, which has none, cannot reach.
+    text_to_offer: Option<String>,
+    /// The font programs the editor has been handed, kept so that a click on a
+    /// paragraph the document already showed a face for does not ask the engine
+    /// for it again — see [`Self::want_document_face_for`].
+    face_cache: FaceCache,
+    /// Every font Windows has installed, named and by file path — the run
+    /// editor's font picker reads from this rather than scanning the
+    /// filesystem itself. `None` until the picker is opened for the first
+    /// time: populated lazily because the scan reads and parses every
+    /// installed font file, a real cost worth paying once, not on every
+    /// frame a document happens to be open.
+    system_fonts: Option<Vec<system_fonts::SystemFont>>,
+    /// Whether the run editor's font-picker popup is open, and what has been
+    /// typed into its filter box.
+    font_picker_open: bool,
+    font_picker_filter: String,
+}
+
+/// The app-wide clipboard dir and mirroring, and the paste ghost the
+/// clipboard places.
+struct ClipboardState {
+    /// A paste picked up with ⌘V in Edit Object / Edit Text and not yet put
+    /// down: drawn under the pointer at 50% opacity, placed by the next click
+    /// on a page, dropped by Escape. Shared across tabs like the clipboard.
+    paste_ghost: Option<PasteGhost>,
+    /// Where copied pages are left so any Pagify window can paste them — see
+    /// [`Self::copy_organize_selection`].
+    clipboard_dir: std::path::PathBuf,
+    /// **Reported from use**: ⌘V did nothing. egui-winit only emits
+    /// `Event::Paste` when the *system* clipboard already holds non-empty
+    /// text — unrelated to whether Pagify's own [`Self::page_clipboard`]/
+    /// [`Self::object_clipboard`] has anything, so a ⌘C that only ever wrote
+    /// to those left the system clipboard untouched and the next ⌘V's
+    /// `Event::Paste` never fired at all. Set by [`Self::copy_organize_selection`]/
+    /// [`Self::copy_object_selection`] on success; consumed once per frame in
+    /// `ui()`, the one place that actually has the `egui::Context` a real
+    /// OS-clipboard write needs (neither of those two functions do, and
+    /// adding it would mean every test calling them directly would need one
+    /// too).
+    clipboard_mirror_wanted: bool,
+}
+
 struct PagifyApp {
     /// Every open document, in the order its tab sits — see [`DocTab`].
+    clipboard_state: ClipboardState,
+    faces_state: FacesState,
+    update_state: UpdateState,
     tabs: Vec<DocTab>,
     /// Which of `tabs` is showing. Always a valid index into `tabs`, which
     /// is never empty while the app is running — closing the last tab quits
@@ -1074,52 +1159,6 @@ struct PagifyApp {
     predefined_path: Option<std::path::PathBuf>,
     /// The Predefined Text panel, while it is open.
     snippets: Option<SnippetList>,
-    /// The document face installed for the editor, and whether egui has
-    /// rebuilt its atlas with it yet.
-    ///
-    /// **Two fields because the family does not exist until the next frame.**
-    /// `set_fonts` takes effect at the start of the frame after it is called,
-    /// and drawing in a family nothing is bound to panics rather than falling
-    /// back — the same trap `install_fonts` warns about for the icons. So the
-    /// face is asked for on one frame and used on the next.
-    editor_face: Option<u64>,
-    editor_face_ready: bool,
-    /// The real ascent/descent of whatever font `editor_face` names, read
-    /// once when it is loaded — see [`Self::want_document_face`]'s own doc
-    /// and [`run_editor_font_size`], which sizes the editor from this
-    /// instead of a fixed guess when a run's own reported size cannot be
-    /// trusted.
-    editor_face_metrics: Option<pdf_core::pdf::embed::Metrics>,
-    /// Which characters `editor_face` has *ink* for, read once beside the
-    /// metrics — see [`pdf_core::pdf::embed::outlined_chars`]. The editor
-    /// lays out any other character in the program's own face
-    /// (`editor_sections`), since the document's subset would draw it blank.
-    /// Shared, not copied, into the layouter every frame.
-    editor_face_coverage: Option<std::sync::Arc<pdf_core::pdf::embed::OutlineCoverage>>,
-    /// A face asked for and not yet installed, handed to `install_fonts` at the
-    /// top of the next frame.
-    pending_face: Option<Vec<u8>>,
-    /// Words somebody typed that an editor is being let go of without applying —
-    /// the engine refused them, or the page changed under the box — to be put on
-    /// the clipboard, so that the typing is never simply lost. Said at the next
-    /// frame, in `draw_properties_panel`: putting text on the clipboard takes the
-    /// `egui::Context` that the apply, which has none, cannot reach.
-    text_to_offer: Option<String>,
-    /// The font programs the editor has been handed, kept so that a click on a
-    /// paragraph the document already showed a face for does not ask the engine
-    /// for it again — see [`Self::want_document_face_for`].
-    face_cache: FaceCache,
-    /// Every font Windows has installed, named and by file path — the run
-    /// editor's font picker reads from this rather than scanning the
-    /// filesystem itself. `None` until the picker is opened for the first
-    /// time: populated lazily because the scan reads and parses every
-    /// installed font file, a real cost worth paying once, not on every
-    /// frame a document happens to be open.
-    system_fonts: Option<Vec<system_fonts::SystemFont>>,
-    /// Whether the run editor's font-picker popup is open, and what has been
-    /// typed into its filter box.
-    font_picker_open: bool,
-    font_picker_filter: String,
     /// This run's on-disk transcript of every command and every line the app
     /// has said about it — see [`pagify_shell::session_log`]. One continuous
     /// transcript for the whole run, tabs included, not one per document —
@@ -1136,10 +1175,6 @@ struct PagifyApp {
     /// ([`Self::copy_selection`]/⌘C). Not the system clipboard itself —
     /// these are structured page objects, not text.
     object_clipboard: Option<ObjectClipboard>,
-    /// A paste picked up with ⌘V in Edit Object / Edit Text and not yet put
-    /// down: drawn under the pointer at 50% opacity, placed by the next click
-    /// on a page, dropped by Escape. Shared across tabs like the clipboard.
-    paste_ghost: Option<PasteGhost>,
     /// How many times `paste` has run since the clipboard was last filled —
     /// see [`Self::PASTE_STEP`].
     paste_count: u32,
@@ -1154,21 +1189,6 @@ struct PagifyApp {
     /// [`Self::copy_organize_selection`] — rather than accumulated, since a
     /// clipboard only ever needs to hold the most recent copy.
     page_clipboard: Option<PageClipboard>,
-    /// Where copied pages are left so any Pagify window can paste them — see
-    /// [`Self::copy_organize_selection`].
-    clipboard_dir: std::path::PathBuf,
-    /// **Reported from use**: ⌘V did nothing. egui-winit only emits
-    /// `Event::Paste` when the *system* clipboard already holds non-empty
-    /// text — unrelated to whether Pagify's own [`Self::page_clipboard`]/
-    /// [`Self::object_clipboard`] has anything, so a ⌘C that only ever wrote
-    /// to those left the system clipboard untouched and the next ⌘V's
-    /// `Event::Paste` never fired at all. Set by [`Self::copy_organize_selection`]/
-    /// [`Self::copy_object_selection`] on success; consumed once per frame in
-    /// `ui()`, the one place that actually has the `egui::Context` a real
-    /// OS-clipboard write needs (neither of those two functions do, and
-    /// adding it would mean every test calling them directly would need one
-    /// too).
-    clipboard_mirror_wanted: bool,
     /// The thread that renders pages off the UI thread, started on first use —
     /// see [`RenderWorker`].
     renders: Option<RenderWorker>,
@@ -1199,10 +1219,8 @@ struct PagifyApp {
     /// A check for a newer build in [`UPDATE_FOLDER`], in progress — see
     /// [`Self::collect_update_check`]. `None` once it has reported back (or
     /// in a test, which never starts one).
-    update_check: Option<UpdateCheck>,
     /// A newer build was found and is waiting on an answer — see
     /// [`Self::draw_update_prompt`].
-    update_available: Option<(String, std::path::PathBuf)>,
     /// Where to update from, once it is safe to quit — set by **Update now**
     /// and carried out by [`Self::exit_program`]. An update is a quit that relaunches
     /// a newer build, not a separate "is anything unsaved" check of its own.
@@ -2797,10 +2815,10 @@ impl PagifyApp {
         // the frame after it was asked for — and marked usable only on the
         // frame after *that*, when egui has rebuilt its atlas. Drawing in a
         // family that does not exist yet panics; see `install_fonts`.
-        if let Some(face) = self.pending_face.take() {
+        if let Some(face) = self.faces_state.pending_face.take() {
             install_fonts(&ctx, Some(face));
-        } else if self.editor_face.is_some() {
-            self.editor_face_ready = true;
+        } else if self.faces_state.editor_face.is_some() {
+            self.faces_state.editor_face_ready = true;
         }
 
         // A document that wants a password asks for it in a window, not in the
@@ -2940,7 +2958,7 @@ impl PagifyApp {
         // non-empty text, so this gives it something right after every
         // successful copy — the one place in the app that actually has the
         // `egui::Context` a real write needs.
-        if std::mem::take(&mut self.clipboard_mirror_wanted) {
+        if std::mem::take(&mut self.clipboard_state.clipboard_mirror_wanted) {
             ctx.copy_text(COPIED_IN_PAGIFY.to_string());
         }
         if keys.find_next && !self.tab_mut().panels.find_hits.is_empty() {
@@ -4027,6 +4045,18 @@ impl PagifyApp {
             spelling::use_dictionary_file();
         }
         let mut app = PagifyApp {
+            clipboard_state: ClipboardState { paste_ghost: None, clipboard_dir: if cfg!(test) {
+                static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                std::env::temp_dir().join(format!(
+                    "pagify-clipboard-test-{}-{}",
+                    std::process::id(),
+                    APPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                ))
+            } else {
+                Self::shared_clipboard_dir()
+            }, clipboard_mirror_wanted: false, },
+            faces_state: FacesState { editor_face: None, editor_face_ready: false, editor_face_metrics: None, editor_face_coverage: None, pending_face: None, text_to_offer: None, face_cache: FaceCache::default(), system_fonts: None, font_picker_open: false, font_picker_filter: String::new(), },
+            update_state: UpdateState { update_check: None, update_available: None },
             tabs: vec![DocTab::new()],
             active_tab: 0,
             cmd: CommandBox::default(),
@@ -4074,16 +4104,6 @@ impl PagifyApp {
             },
             predefined_path: if cfg!(test) { None } else { pagify_shell::predefined::Predefined::path() },
             snippets: None,
-            editor_face: None,
-            editor_face_ready: false,
-            editor_face_metrics: None,
-            editor_face_coverage: None,
-            pending_face: None,
-            text_to_offer: None,
-            face_cache: FaceCache::default(),
-            system_fonts: None,
-            font_picker_open: false,
-            font_picker_filter: String::new(),
             // Real disk I/O under the user's actual config directory — a test
             // run must not litter it with hundreds of near-empty session
             // logs, the same reason `predefined` above skips its own real
@@ -4094,28 +4114,14 @@ impl PagifyApp {
                 pagify_shell::session_log::SessionLog::start()
             },
             object_clipboard: None,
-            paste_ghost: None,
             paste_count: 0,
             page_clipboard: None,
-            clipboard_dir: if cfg!(test) {
-                static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-                std::env::temp_dir().join(format!(
-                    "pagify-clipboard-test-{}-{}",
-                    std::process::id(),
-                    APPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                ))
-            } else {
-                Self::shared_clipboard_dir()
-            },
-            clipboard_mirror_wanted: false,
             renders: None,
             async_render: !cfg!(test),
             render_stats: RenderStats::default(),
             handover: instance::Handover::default(),
             win: hub::WindowState::default(),
             replay_depth: 0,
-            update_check: None,
-            update_available: None,
             pending_update: None,
         };
         app.say_info(format!("Pagify {} — type `help`, or `open <path.pdf>`.", pagify_shell::VERSION));
@@ -4718,22 +4724,22 @@ impl PagifyApp {
                 .map(|version| (version, std::path::PathBuf::from(UPDATE_FOLDER)));
             let _ = tx.send(found);
         });
-        self.update_check = Some(UpdateCheck { done });
+        self.update_state.update_check = Some(UpdateCheck { done });
     }
 
     /// Collect the update check, if it has answered.
     fn collect_update_check(&mut self, ctx: &egui::Context) {
-        let Some(check) = &self.update_check else { return };
+        let Some(check) = &self.update_state.update_check else { return };
         match check.done.try_recv() {
             Ok(found) => {
-                self.update_check = None;
-                self.update_available = found;
+                self.update_state.update_check = None;
+                self.update_state.update_available = found;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.update_check = None;
+                self.update_state.update_check = None;
             }
         }
     }
@@ -8279,7 +8285,7 @@ impl PagifyApp {
         };
         self.object_clipboard = Some(content);
         self.paste_count = 0;
-        self.clipboard_mirror_wanted = true;
+        self.clipboard_state.clipboard_mirror_wanted = true;
         self.forget_copied_pages();
         self.say_info(said);
     }
@@ -8427,7 +8433,7 @@ impl PagifyApp {
                 None => return false,
             },
         };
-        self.paste_ghost = Some(PasteGhost { content, texture: None });
+        self.clipboard_state.paste_ghost = Some(PasteGhost { content, texture: None });
         self.say_info("pasting — move to where it goes and click to put it down. Escape cancels.");
         true
     }
@@ -8436,7 +8442,7 @@ impl PagifyApp {
     /// words start at the pointer, a picture or shapes are centred on it.
     /// One undo step, however many lines.
     fn place_paste_ghost(&mut self, page: usize, at: AppPoint) {
-        let Some(ghost) = self.paste_ghost.take() else { return };
+        let Some(ghost) = self.clipboard_state.paste_ghost.take() else { return };
         self.place_clipboard_content(page, at, ghost.content);
     }
 
@@ -8559,7 +8565,7 @@ impl PagifyApp {
         let painter = ui.painter_at(rect);
         // Taken out while it is drawn (the shapes need the markup layer, which
         // is the app's too) and put straight back.
-        let Some(mut ghost) = self.paste_ghost.take() else { return };
+        let Some(mut ghost) = self.clipboard_state.paste_ghost.take() else { return };
         match &ghost.content {
             ObjectClipboard::Text { lines, size, color, .. } => {
                 let font = egui::FontId::proportional((size * view.scale).max(4.0));
@@ -8626,7 +8632,7 @@ impl PagifyApp {
                 }
             }
         }
-        self.paste_ghost = Some(ghost);
+        self.clipboard_state.paste_ghost = Some(ghost);
     }
 
     /// How far each successive paste is offset from where it was copied —
@@ -8652,7 +8658,7 @@ impl PagifyApp {
             // group is the same — it has no single source rect to step away
             // from, so it also waits for a click.
             ObjectClipboard::Text { .. } | ObjectClipboard::Group(_) => {
-                self.paste_ghost = Some(PasteGhost { content: clip, texture: None });
+                self.clipboard_state.paste_ghost = Some(PasteGhost { content: clip, texture: None });
                 self.say_info("pasting — move to where it goes and click to put it down. Escape cancels.");
             }
             ObjectClipboard::Shapes(objects) => {
@@ -8709,12 +8715,12 @@ impl PagifyApp {
         // be open. A copy replaces the previous one for everybody, which is
         // what a clipboard is; the earlier files are cleared as it is made.
         static COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let _ = std::fs::create_dir_all(&self.clipboard_dir);
+        let _ = std::fs::create_dir_all(&self.clipboard_state.clipboard_dir);
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let temp_file = self.clipboard_dir.join(format!(
+        let temp_file = self.clipboard_state.clipboard_dir.join(format!(
             "pages-{stamp}-{}-{}.pdf",
             std::process::id(),
             COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -8727,9 +8733,9 @@ impl PagifyApp {
         match result {
             Ok(page_count) => {
                 let n = pages.len();
-                Self::publish_page_clipboard(&self.clipboard_dir, &temp_file, page_count);
+                Self::publish_page_clipboard(&self.clipboard_state.clipboard_dir, &temp_file, page_count);
                 self.page_clipboard = Some(PageClipboard { temp_file, page_count });
-                self.clipboard_mirror_wanted = true;
+                self.clipboard_state.clipboard_mirror_wanted = true;
                 self.say_info(format!(
                     "{n} page{} copied — `paste` puts {} in.",
                     if n == 1 { "" } else { "s" },
@@ -8796,14 +8802,14 @@ impl PagifyApp {
     /// any window, which is why the manifest goes too.
     fn forget_copied_pages(&mut self) {
         self.page_clipboard = None;
-        let _ = std::fs::remove_file(self.clipboard_dir.join("latest.txt"));
+        let _ = std::fs::remove_file(self.clipboard_state.clipboard_dir.join("latest.txt"));
     }
 
     /// What `paste` would paste right now: the newest copy from any window,
     /// else this window's own (a copy this window made that has since aged out
     /// of the folder is still its own to paste).
     fn current_page_clipboard(&self) -> Option<(std::path::PathBuf, usize)> {
-        Self::shared_page_clipboard(&self.clipboard_dir)
+        Self::shared_page_clipboard(&self.clipboard_state.clipboard_dir)
             .or_else(|| self.page_clipboard.as_ref().map(|c| (c.temp_file.clone(), c.page_count)))
     }
 
@@ -9486,7 +9492,7 @@ impl PagifyApp {
         // Escape means "stop what you are doing", and being left in Hand
         // afterwards is not stopping.
         self.tab_mut().pointer = Default::default();
-        if self.paste_ghost.take().is_some() {
+        if self.clipboard_state.paste_ghost.take().is_some() {
             self.say_info("nothing was pasted.");
         }
         if self.organize_open {
@@ -11905,7 +11911,7 @@ impl PagifyApp {
     fn want_document_face_for(&mut self, page: usize, object: usize, font: Option<u32>) {
         let stamp = self.tab().doc.as_ref().map(|d| (d.id, d.render_epoch, d.session.undo_generation()));
         let key: Option<FaceKey> = font.zip(stamp).map(|(font, (id, epoch, generation))| (id, page, epoch, generation, font));
-        let held = key.as_ref().and_then(|key| self.face_cache.get(key));
+        let held = key.as_ref().and_then(|key| self.faces_state.face_cache.get(key));
         let face = match held {
             Some(face) => face,
             None => {
@@ -11915,7 +11921,7 @@ impl PagifyApp {
                 let answered = matches!(asked, Some(Ok(_)));
                 let face = Self::read_face(asked.and_then(Result::ok).flatten());
                 if let (Some(key), true) = (key, answered) {
-                    self.face_cache.put(key, face.clone());
+                    self.faces_state.face_cache.put(key, face.clone());
                 }
                 face
             }
@@ -11929,28 +11935,28 @@ impl PagifyApp {
         // own 1000ths-of-an-em units — what `run_editor_font_size` sizes the
         // editor from when a run's own reported size cannot be trusted, instead of
         // a fixed guess that fits no particular face especially well.
-        self.editor_face_metrics = Some(metrics);
-        if self.editor_face == Some(face.key) {
+        self.faces_state.editor_face_metrics = Some(metrics);
+        if self.faces_state.editor_face == Some(face.key) {
             return;
         }
         // Replaced together with `editor_face`, and not used before
         // `editor_face_ready`, so the coverage always describes the face being
         // drawn.
-        self.editor_face_coverage = face.coverage.clone();
-        self.editor_face = Some(face.key);
-        self.editor_face_ready = false;
-        self.pending_face = Some(program.as_ref().clone());
+        self.faces_state.editor_face_coverage = face.coverage.clone();
+        self.faces_state.editor_face = Some(face.key);
+        self.faces_state.editor_face_ready = false;
+        self.faces_state.pending_face = Some(program.as_ref().clone());
     }
 
     /// The editor has no document face to draw in: the program's own face, as
     /// it was before any was asked for. Also what a click that does not ask for
     /// one leaves behind it — **the face of the last editor must not outlive it**.
     fn no_document_face(&mut self) {
-        self.editor_face = None;
-        self.editor_face_ready = false;
-        self.editor_face_metrics = None;
-        self.editor_face_coverage = None;
-        self.pending_face = None;
+        self.faces_state.editor_face = None;
+        self.faces_state.editor_face_ready = false;
+        self.faces_state.editor_face_metrics = None;
+        self.faces_state.editor_face_coverage = None;
+        self.faces_state.pending_face = None;
     }
 
     /// Everything the editor needs of a font program, worked out once — see
@@ -12468,7 +12474,7 @@ impl PagifyApp {
     /// clipboard at the next frame (see [`Self::text_to_offer`]).
     fn offer_typed_text(&mut self, edit: &EditingRun) {
         if !edit.buffer.trim().is_empty() {
-            self.text_to_offer = Some(edit.buffer.clone());
+            self.faces_state.text_to_offer = Some(edit.buffer.clone());
         }
     }
 
@@ -14533,9 +14539,9 @@ impl PagifyApp {
     fn draw_run_editor(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         // Read once, before the borrow below — app-wide font state, not any
         // one paragraph's own.
-        let em_ratio = self.editor_face_metrics.map(|m| (m.ascent - m.descent) as f32 / 1000.0);
-        let face_ready = self.editor_face.is_some() && self.editor_face_ready;
-        let coverage = self.editor_face_coverage.clone();
+        let em_ratio = self.faces_state.editor_face_metrics.map(|m| (m.ascent - m.descent) as f32 / 1000.0);
+        let face_ready = self.faces_state.editor_face.is_some() && self.faces_state.editor_face_ready;
+        let coverage = self.faces_state.editor_face_coverage.clone();
 
         let Some(edit) = self.tab_mut().edit.editing_run.as_mut() else { return };
         if edit.page != page {
@@ -15113,11 +15119,11 @@ fn wrap_typed_last_line(
         // apply that let them go had no `egui::Context` to put them there with),
         // and an editor whose page changed under it is closed and says why — it
         // names objects by number, and nobody has to press Apply to be told.
-        if let Some(text) = self.text_to_offer.take() {
+        if let Some(text) = self.faces_state.text_to_offer.take() {
             ui.ctx().copy_text(text);
         }
         self.close_editor_if_stale();
-        if let Some(text) = self.text_to_offer.take() {
+        if let Some(text) = self.faces_state.text_to_offer.take() {
             ui.ctx().copy_text(text);
         }
         let text_page = self.tab_mut().edit.editing_run.as_ref().map(|e| e.page);
@@ -15182,7 +15188,7 @@ fn wrap_typed_last_line(
             }
         });
 
-        if self.font_picker_open {
+        if self.faces_state.font_picker_open {
             self.draw_font_picker(ui, page);
         }
     }
@@ -15248,9 +15254,9 @@ fn wrap_typed_last_line(
         let changes = tsp::show(ui, egui::Id::new(("text-style", new_box)), &look, &gates);
 
         if changes.font_clicked {
-            self.font_picker_open = !self.font_picker_open;
-            if self.font_picker_open && self.system_fonts.is_none() {
-                self.system_fonts = Some(system_fonts::list());
+            self.faces_state.font_picker_open = !self.faces_state.font_picker_open;
+            if self.faces_state.font_picker_open && self.faces_state.system_fonts.is_none() {
+                self.faces_state.system_fonts = Some(system_fonts::list());
             }
         }
         if let Some(new_size) = changes.size {
@@ -15292,15 +15298,15 @@ fn wrap_typed_last_line(
     /// family, from the installed and bundled fonts. Says so, and changes
     /// nothing, when the family has no such face.
     fn pick_style_face(&mut self, current: Option<&str>, bold: bool, italic: bool) {
-        if self.system_fonts.is_none() {
-            self.system_fonts = Some(system_fonts::list());
+        if self.faces_state.system_fonts.is_none() {
+            self.faces_state.system_fonts = Some(system_fonts::list());
         }
         // A new box set in "(automatic)" is Helvetica, whose installed twin is Arial.
         let hint = current.unwrap_or("Arial").to_string();
         let bundled = self.writing_faces();
         let found = {
             let names: Vec<&str> = self
-                .system_fonts
+                .faces_state.system_fonts
                 .iter()
                 .flatten()
                 .map(|f| f.name.as_str())
@@ -15345,7 +15351,7 @@ fn wrap_typed_last_line(
             ui.add(egui::Label::new(egui::RichText::new(why).color(theme::danger())).wrap());
         }
 
-        if self.font_picker_open {
+        if self.faces_state.font_picker_open {
             let page = self.tab_mut().edit.editing_run.as_ref().map(|e| e.page).unwrap_or(self.tab_mut().view_state.page);
             self.draw_font_picker(ui, page);
         }
@@ -15358,7 +15364,7 @@ fn wrap_typed_last_line(
     /// A plain list rather than an `egui::ComboBox` — a system can easily
     /// have several hundred fonts installed, and a combo box holding all of
     /// them open at once is not a picker, it is a wall of text. Populated
-    /// once into `self.system_fonts` (see that field's own doc) and read
+    /// once into `self.faces_state.system_fonts` (see that field's own doc) and read
     /// from here on every frame the picker is open, not rescanned.
     fn draw_font_picker(&mut self, ui: &mut egui::Ui, page: usize) {
         let mut close = false;
@@ -15380,7 +15386,7 @@ fn wrap_typed_last_line(
                     // whatever kept that box in view as its content changed
                     // scrolled the page along with it. Reported from use as
                     // "the screen moves upward while searching fonts".
-                    let filter = ui.text_edit_singleline(&mut self.font_picker_filter);
+                    let filter = ui.text_edit_singleline(&mut self.faces_state.font_picker_filter);
                     if !filter.has_focus() {
                         filter.request_focus();
                     }
@@ -15393,8 +15399,8 @@ fn wrap_typed_last_line(
                     if ui.selectable_label(false, "(automatic)").clicked() {
                         chosen = Some(None);
                     }
-                    let filter = self.font_picker_filter.to_ascii_lowercase();
-                    for font in self.system_fonts.iter().flatten() {
+                    let filter = self.faces_state.font_picker_filter.to_ascii_lowercase();
+                    for font in self.faces_state.system_fonts.iter().flatten() {
                         if !filter.is_empty() && !font.name.to_ascii_lowercase().contains(&filter) {
                             continue;
                         }
@@ -15411,8 +15417,8 @@ fn wrap_typed_last_line(
         }
 
         if close {
-            self.font_picker_open = false;
-            self.font_picker_filter.clear();
+            self.faces_state.font_picker_open = false;
+            self.faces_state.font_picker_filter.clear();
         }
     }
 
@@ -15426,7 +15432,7 @@ fn wrap_typed_last_line(
             // find its name.
             if let Some(name) = &face {
                 if let Some(path) = self
-                    .system_fonts
+                    .faces_state.system_fonts
                     .iter()
                     .flatten()
                     .find(|f| &f.name == name)
