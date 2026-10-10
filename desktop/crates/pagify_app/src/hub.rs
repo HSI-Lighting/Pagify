@@ -336,22 +336,22 @@ impl PagifyApp {
     /// Swap what is the program's in or out. Called twice round a window's
     /// frame: once to lend [`Shared`] to it, once to take it back.
     pub(crate) fn lend(&mut self, shared: &mut Shared) {
-        std::mem::swap(&mut self.recent, &mut shared.recent);
-        std::mem::swap(&mut self.outlined_fonts, &mut shared.outlined_fonts);
-        std::mem::swap(&mut self.signatures, &mut shared.signatures);
-        std::mem::swap(&mut self.predefined, &mut shared.predefined);
-        std::mem::swap(&mut self.session_log, &mut shared.session_log);
-        std::mem::swap(&mut self.object_clipboard, &mut shared.object_clipboard);
-        std::mem::swap(&mut self.paste_count, &mut shared.paste_count);
-        std::mem::swap(&mut self.page_clipboard, &mut shared.page_clipboard);
+        std::mem::swap(&mut self.library_state.recent, &mut shared.recent);
+        std::mem::swap(&mut self.faces_state.outlined_fonts, &mut shared.outlined_fonts);
+        std::mem::swap(&mut self.library_state.signatures, &mut shared.signatures);
+        std::mem::swap(&mut self.library_state.predefined, &mut shared.predefined);
+        std::mem::swap(&mut self.recording_state.session_log, &mut shared.session_log);
+        std::mem::swap(&mut self.clipboard_state.object_clipboard, &mut shared.object_clipboard);
+        std::mem::swap(&mut self.clipboard_state.paste_count, &mut shared.paste_count);
+        std::mem::swap(&mut self.clipboard_state.page_clipboard, &mut shared.page_clipboard);
     }
 
     /// This window's command box. The first window keeps the id it always had.
     pub(crate) fn command_id(&self) -> egui::Id {
-        if self.win.serial == 0 {
+        if self.hub_state.win.serial == 0 {
             egui::Id::new(COMMAND_INPUT)
         } else {
-            egui::Id::new((COMMAND_INPUT, self.win.serial))
+            egui::Id::new((COMMAND_INPUT, self.hub_state.win.serial))
         }
     }
 
@@ -362,7 +362,7 @@ impl PagifyApp {
             Some(index) => {
                 self.active_tab = index;
                 self.tab_mut().closing = Some(crate::Closing::Program);
-                self.win.closing_leaves = how;
+                self.hub_state.win.closing_leaves = how;
             }
             None => self.leave(how),
         }
@@ -456,12 +456,12 @@ impl PagifyApp {
 
     /// Whether any tab of this window is being carried.
     pub(crate) fn carrying_a_tab(&self) -> bool {
-        self.win.drag.is_some()
+        self.hub_state.win.drag.is_some()
     }
 
     /// Whether tab `index` is the one being carried.
     pub(crate) fn dragging_tab(&self, index: usize) -> bool {
-        self.win.drag.as_ref().is_some_and(|d| d.tab == index && !d.cancelled)
+        self.hub_state.win.drag.as_ref().is_some_and(|d| d.tab == index && !d.cancelled)
     }
 
     /// The pointer in screen points: the window's own position, plus where in
@@ -482,12 +482,12 @@ impl PagifyApp {
         let r = &button.response;
         let press = ctx.input(|i| i.pointer.press_origin());
         if r.drag_started()
-            && self.win.drag.is_none()
+            && self.hub_state.win.drag.is_none()
             && self.tabs_are_settled()
             // Not a drag that began on the ×.
             && !press.is_some_and(|p| button.close_rect.contains(p))
         {
-            self.win.drag = Some(TabDrag {
+            self.hub_state.win.drag = Some(TabDrag {
                 tab: index,
                 label: label.to_string(),
                 grab: press.map_or(Vec2::ZERO, |p| p - r.rect.min),
@@ -497,7 +497,7 @@ impl PagifyApp {
             });
             self.active_tab = index;
         }
-        let Some(drag) = self.win.drag.as_mut().filter(|d| d.tab == index) else { return };
+        let Some(drag) = self.hub_state.win.drag.as_mut().filter(|d| d.tab == index) else { return };
         if r.dragged() {
             if let Some(p) = ctx.pointer_latest_pos() {
                 drag.screen = Self::screen_of(ctx, p).or(drag.screen);
@@ -507,17 +507,17 @@ impl PagifyApp {
             ctx.request_repaint();
         }
         if r.drag_stopped() {
-            let drag = self.win.drag.take().expect("checked just above");
+            let drag = self.hub_state.win.drag.take().expect("checked just above");
             if !drag.cancelled {
                 let screen = ctx.pointer_latest_pos().and_then(|p| Self::screen_of(ctx, p)).or(drag.screen);
-                self.win.out = Some(TabOut { tab: drag.tab, screen });
+                self.hub_state.win.out = Some(TabOut { tab: drag.tab, screen });
             }
         }
     }
 
     /// Escape puts the tab back, and is not also an Escape for everything else.
     pub(crate) fn cancel_tab_drag_on_escape(&mut self, ctx: &egui::Context) {
-        if let Some(drag) = self.win.drag.as_mut() {
+        if let Some(drag) = self.hub_state.win.drag.as_mut() {
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 drag.cancelled = true;
                 ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -528,11 +528,11 @@ impl PagifyApp {
     /// Record where the strip and its tabs were drawn, and draw what a carried
     /// tab looks like over it.
     pub(crate) fn publish_strip(&mut self, ctx: &egui::Context, panel: Rect, tabs: Vec<Rect>) {
-        self.win.strip = Some(StripGeom { panel, tabs });
+        self.hub_state.win.strip = Some(StripGeom { panel, tabs });
         // A drag whose release was never seen — the window lost the pointer
         // some other way — must not leave a tab lifted for ever.
-        if self.win.drag.is_some() && !ctx.input(|i| i.pointer.any_down()) {
-            self.win.drag = None;
+        if self.hub_state.win.drag.is_some() && !ctx.input(|i| i.pointer.any_down()) {
+            self.hub_state.win.drag = None;
         }
         self.draw_flight(ctx);
     }
@@ -540,7 +540,7 @@ impl PagifyApp {
     /// The copy of the tab under the pointer, and the place it would take — in
     /// this window, when it is carried here, and in another's when carried over it.
     fn draw_flight(&self, ctx: &egui::Context) {
-        let Some(strip) = &self.win.strip else { return };
+        let Some(strip) = &self.hub_state.win.strip else { return };
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("pagify-tab-flight")));
         let marker = |at: usize, skip: Option<usize>| {
             let tabs: Vec<&Rect> =
@@ -556,7 +556,7 @@ impl PagifyApp {
                 theme::violet_bright(),
             );
         };
-        if let (Some(drag), Some(p)) = (self.win.drag.as_ref().filter(|d| !d.cancelled), ctx.pointer_latest_pos()) {
+        if let (Some(drag), Some(p)) = (self.hub_state.win.drag.as_ref().filter(|d| !d.cancelled), ctx.pointer_latest_pos()) {
             let rect = Rect::from_min_size(p - drag.grab, drag.size);
             painter.rect_filled(rect, 3.0, theme::violet().gamma_multiply(0.9));
             painter.text(
@@ -570,7 +570,7 @@ impl PagifyApp {
                 marker(slot(p, &strip.tabs, Some(drag.tab)), Some(drag.tab));
             }
         }
-        if let Some(hint) = &self.win.hint {
+        if let Some(hint) = &self.hub_state.win.hint {
             if hint.over_strip {
                 marker(hint.at, None);
             } else {
@@ -647,7 +647,7 @@ fn draw_window(
     others: usize,
 ) -> bool {
     let close_asked = ui.ctx().input(|i| i.viewport().close_requested());
-    app.win.others = others;
+    app.hub_state.win.others = others;
     app.lend(shared);
     eframe::App::ui(app, ui, frame);
     app.lend(shared);
@@ -710,7 +710,7 @@ impl Hub {
                 let info = infos.get(id)?;
                 let (outer, inner) = (info.outer_rect?, info.inner_rect?);
                 let origin = inner.min.to_vec2();
-                let strip = window.app.win.strip.as_ref();
+                let strip = window.app.hub_state.win.strip.as_ref();
                 Some(Geom {
                     id: *id,
                     outer,
@@ -725,12 +725,12 @@ impl Hub {
     /// Tell each window what a tab being carried over it would do.
     fn mark_hints(&mut self, ctx: &egui::Context) {
         let flight = self.windows.iter().find_map(|w| {
-            let drag = w.app.win.drag.as_ref().filter(|d| !d.cancelled)?;
+            let drag = w.app.hub_state.win.drag.as_ref().filter(|d| !d.cancelled)?;
             Some((w.vp, drag.screen?))
         });
         let geoms = if flight.is_some() { self.geoms(ctx) } else { Vec::new() };
         for w in &mut self.windows {
-            w.app.win.hint = flight.and_then(|(source, p)| {
+            w.app.hub_state.win.hint = flight.and_then(|(source, p)| {
                 // Over the window it came from, that window is what is under it.
                 if w.vp == source || geoms.iter().any(|g| g.id == source && g.outer.contains(p)) {
                     return None;
@@ -787,7 +787,7 @@ impl Hub {
         self.next_serial += 1;
         let vp = ViewportId::from_hash_of(("pagify-window", serial));
         let mut app = PagifyApp::build(None, true);
-        app.win.serial = serial;
+        app.hub_state.win.serial = serial;
         // The one logo texture, not a second install of the icon font — which
         // would replace the fonts the other windows are drawing with.
         app.mark = self.windows[from].app.mark.clone();
@@ -810,7 +810,7 @@ impl Hub {
     /// Window `from` has given a tab away: if that was its last, it is done.
     fn after_giving(&mut self, from: usize) {
         if self.windows[from].app.tabs.is_empty() {
-            self.windows[from].app.win.leaving = Some(Leaving::Window);
+            self.windows[from].app.hub_state.win.leaving = Some(Leaving::Window);
         }
     }
 
@@ -857,11 +857,11 @@ impl Hub {
         }
         let vp = self.windows[used_last].vp;
         let request = Request { files: rest, commands: request.commands };
-        let (number, of) = (self.windows[used_last].app.win.serial + 1, self.windows.len());
+        let (number, of) = (self.windows[used_last].app.hub_state.win.serial + 1, self.windows.len());
         self.with_window(used_last, |app| {
             // In the session log only: which window a document went to is what
             // someone asks when it "opened in the wrong place".
-            app.session_log.record("hub", &format!("handed over to window {number} of {of}."));
+            app.recording_state.session_log.record("hub", &format!("handed over to window {number} of {of}."));
             app.open_handed_over(&request, ctx, vp)
         });
         self.touch(vp);
@@ -871,7 +871,7 @@ impl Hub {
     /// whether the program ends.
     fn settle(&mut self, ctx: &egui::Context) -> bool {
         for w in &self.windows {
-            if let Some(source) = &w.app.pending_update {
+            if let Some(source) = &w.app.hub_state.pending_update {
                 self.pending_update = Some(source.clone());
             }
         }
@@ -879,14 +879,14 @@ impl Hub {
             .windows
             .iter()
             .map(|w| Status {
-                leaving: w.app.win.leaving,
+                leaving: w.app.hub_state.win.leaving,
                 asking: w.app.tabs.iter().any(|t| t.closing.is_some()),
-                cancelled: w.app.win.quit_cancelled,
+                cancelled: w.app.hub_state.win.quit_cancelled,
             })
             .collect();
         let plan = plan(&statuses, self.quitting);
         for w in &mut self.windows {
-            w.app.win.quit_cancelled = false;
+            w.app.hub_state.win.quit_cancelled = false;
         }
         self.quitting = plan.quitting;
         // With no window there is nothing left to keep a program running for.
@@ -894,20 +894,20 @@ impl Hub {
             return true;
         }
         for &i in &plan.forget {
-            self.windows[i].app.win.leaving = None;
+            self.windows[i].app.hub_state.win.leaving = None;
         }
         if !plan.forget.is_empty() {
             // The update was part of the quit.
             self.pending_update = None;
             for w in &mut self.windows {
-                w.app.pending_update = None;
+                w.app.hub_state.pending_update = None;
             }
         }
         for &i in &plan.ask {
             let vp = self.windows[i].vp;
             self.with_window(i, |app| app.ask_to_leave(Leaving::Program));
             // Whatever it asks, it asks where it can be seen.
-            if self.windows[i].app.win.leaving.is_none() {
+            if self.windows[i].app.hub_state.win.leaving.is_none() {
                 ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Minimized(false));
                 ctx.send_viewport_cmd_to(vp, egui::ViewportCommand::Focus);
             }
@@ -970,13 +970,13 @@ impl eframe::App for Hub {
         // The first window's close button ends the program — unless there is
         // another window, which it is not allowed to take with it.
         if root_close_asked && others > 0 {
-            let leaving = self.windows.iter().any(|w| w.vp == ViewportId::ROOT && w.app.win.leaving.is_some());
+            let leaving = self.windows.iter().any(|w| w.vp == ViewportId::ROOT && w.app.hub_state.win.leaving.is_some());
             if leaving {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             }
         }
-        if let Some(i) = (0..self.windows.len()).find(|&i| self.windows[i].app.win.out.is_some()) {
-            if let Some(out) = self.windows[i].app.win.out.take() {
+        if let Some(i) = (0..self.windows.len()).find(|&i| self.windows[i].app.hub_state.win.out.is_some()) {
+            if let Some(out) = self.windows[i].app.hub_state.win.out.take() {
                 self.drop_tab(&ctx, i, out);
             }
         }

@@ -509,10 +509,10 @@ impl PagifyApp {
     /// costs one atomic load.
     pub(crate) fn take_handover(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().focused) == Some(true) {
-            self.handover.note_focus(ctx.viewport_id());
+            self.hub_state.handover.note_focus(ctx.viewport_id());
         }
-        for request in self.handover.take() {
-            let window = self.handover.target_window();
+        for request in self.hub_state.handover.take() {
+            let window = self.hub_state.handover.target_window();
             self.open_handed_over(&request, ctx, window);
         }
     }
@@ -920,7 +920,7 @@ mod tests {
         let Lock::Held(lock) = take_lock(&dir.join("instance.lock")) else { panic!("no lock") };
         let inbox = dir.join("inbox");
         let ctx = h.ctx.clone();
-        h.state_mut().handover =
+        h.state_mut().hub_state.handover =
             Handover::watch_every(Primary { lock, inbox: inbox.clone() }, ctx, Duration::from_millis(20));
         inbox
     }

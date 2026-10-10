@@ -32,8 +32,8 @@ fn text_runs(app: &PagifyApp, page: usize) -> Vec<TextRun> {
 fn log_into(app: &mut PagifyApp, tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("pagify-test-pick-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let path = app.session_log.path().expect("the scratch folder is writable").to_path_buf();
+    app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let path = app.recording_state.session_log.path().expect("the scratch folder is writable").to_path_buf();
     (dir, path)
 }
 
@@ -1333,7 +1333,7 @@ fn a_split_words_own_fragments_share_one_baseline_not_each_fragments_own_ascent(
         })
         .collect();
     assert!(app.copy_object_selection());
-    let Some(ObjectClipboard::Group(items)) = app.object_clipboard.clone() else {
+    let Some(ObjectClipboard::Group(items)) = app.clipboard_state.object_clipboard.clone() else {
         panic!("expected a Group on the clipboard");
     };
     let dys: Vec<f32> = items.iter().map(|(_, _, dy)| *dy).collect();

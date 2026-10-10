@@ -217,8 +217,8 @@ fn frozen_lines_are_never_touched_by_an_apply_and_nothing_panics() {
     // Then for real, through the apply, with a real session log to read back.
     let dir = std::env::temp_dir().join(format!("pagify-test-frozen-log-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let log_path = app.session_log.path().expect("the temp dir is writable").to_path_buf();
+    app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let log_path = app.recording_state.session_log.path().expect("the temp dir is writable").to_path_buf();
     let before = runs_by_object(&app);
     app.apply_one_edit(edit.clone());
     let after = runs_by_object(&app);

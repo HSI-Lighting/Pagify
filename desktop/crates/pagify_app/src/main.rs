@@ -1004,6 +1004,11 @@ struct UpdateState {
 /// pending face, the coverage and metrics read for it, the face cache, the
 /// system-font list and the font picker.
 struct FacesState {
+    /// Extra fonts a reader has added for outlined-text recognition, beyond
+    /// `BUNDLED_OUTLINED_FONTS` — see `outlined_font_bytes`. A library, like
+    /// the signature and predefined-text ones below: added once, available
+    /// to every tab.
+    outlined_fonts: pagify_shell::outlined_fonts::OutlinedFonts,
     /// The document face installed for the editor, and whether egui has
     /// rebuilt its atlas with it yet.
     ///
@@ -1055,6 +1060,28 @@ struct FacesState {
 /// The app-wide clipboard dir and mirroring, and the paste ghost the
 /// clipboard places.
 struct ClipboardState {
+    /// What `copy` last took from a drawn shape or placed picture selection,
+    /// for `paste` to lay back down — see [`ObjectClipboard`]. Shared across
+    /// tabs on purpose: copying a stamp from one open document and pasting
+    /// it into another is a feature, not a leak, and the system clipboard
+    /// works the same way for the text case
+    /// ([`Self::copy_selection`]/⌘C). Not the system clipboard itself —
+    /// these are structured page objects, not text.
+    object_clipboard: Option<ObjectClipboard>,
+    /// How many times `paste` has run since the clipboard was last filled —
+    /// see [`Self::PASTE_STEP`].
+    paste_count: u32,
+    /// What Organize's own copy last took — a temp file holding exactly the
+    /// copied pages, extracted live from whichever tab they were copied on
+    /// (via [`pagify_shell::Session::extract_to`], which reads the
+    /// document's current in-memory state, not what was last saved to disk —
+    /// so copying from a tab with unsaved edits still copies what is on
+    /// screen). Shared across tabs, same reasoning as [`Self::object_clipboard`]
+    /// right above: pasting pages from one open document into another is a
+    /// feature. Deleted and replaced wholesale on every new copy — see
+    /// [`Self::copy_organize_selection`] — rather than accumulated, since a
+    /// clipboard only ever needs to hold the most recent copy.
+    page_clipboard: Option<PageClipboard>,
     /// A paste picked up with ⌘V in Edit Object / Edit Text and not yet put
     /// down: drawn under the pointer at 50% opacity, placed by the next click
     /// on a page, dropped by Escape. Shared across tabs like the clipboard.
@@ -1079,6 +1106,15 @@ struct ClipboardState {
 /// Where the signature library, predefined-text and snippet files live on disk, and the
 /// open signature pad / list / snippet list.
 struct LibraryState {
+    /// The signatures this person has drawn, and where they are kept.
+    ///
+    /// The path is held rather than asked for each time so a test can point it
+    /// at a scratch file: writing a test signature into somebody's real
+    /// settings would be a poor way to find out this works.
+    signatures: pagify_shell::signatures::Signatures,
+    /// The words kept for writing again, and where they are kept.
+    predefined: pagify_shell::predefined::Predefined,
+    recent: Recent,
     /// Loaded on first use and kept. The models are twelve megabytes and take
     /// a moment to memory-map; doing that per page would make the second page
     /// as slow as the first for no reason — and every tab's own OCR job
@@ -1151,6 +1187,14 @@ struct UiState {
 
 /// The session recorder and how deep a replay is running.
 struct RecordingState {
+    /// This run's on-disk transcript of every command and every line the app
+    /// has said about it — see [`pagify_shell::session_log`]. One continuous
+    /// transcript for the whole run, tabs included, not one per document —
+    /// not the same thing as [`Self::recorder`] (Automate): that keeps only
+    /// what could be typed back in and replayed; this keeps the outcomes
+    /// too, almost none of which are typeable, so a bug can be reproduced
+    /// once and the file handed over instead of described from memory.
+    session_log: pagify_shell::session_log::SessionLog,
     /// Shared across every tab — recording a macro follows what you actually
     /// did, tab switches included, rather than one silently-incomplete
     /// recording per document.
@@ -1164,74 +1208,9 @@ struct RecordingState {
     replay_depth: usize,
 }
 
-struct PagifyApp {
-    /// Every open document, in the order its tab sits — see [`DocTab`].
-    library_state: LibraryState,
-    recording_state: RecordingState,
-    prefs_state: PrefsState,
-    render_state: RenderState,
-    ui_state: UiState,
-    clipboard_state: ClipboardState,
-    faces_state: FacesState,
-    update_state: UpdateState,
-    tabs: Vec<DocTab>,
-    /// Which of `tabs` is showing. Always a valid index into `tabs`, which
-    /// is never empty while the app is running — closing the last tab quits
-    /// instead of leaving this dangling.
-    active_tab: usize,
-
-    cmd: CommandBox,
-
-    recent: Recent,
-
-    /// Extra fonts a reader has added for outlined-text recognition, beyond
-    /// `BUNDLED_OUTLINED_FONTS` — see `outlined_font_bytes`. A library, like
-    /// the signature and predefined-text ones below: added once, available
-    /// to every tab.
-    outlined_fonts: pagify_shell::outlined_fonts::OutlinedFonts,
-
-    /// Decoded on the first frame — a `Context` is needed to upload it and
-    /// there is none when the app is constructed.
-    mark: Option<egui::TextureHandle>,
-
-    /// The signatures this person has drawn, and where they are kept.
-    ///
-    /// The path is held rather than asked for each time so a test can point it
-    /// at a scratch file: writing a test signature into somebody's real
-    /// settings would be a poor way to find out this works.
-    signatures: pagify_shell::signatures::Signatures,
-    /// The words kept for writing again, and where they are kept.
-    predefined: pagify_shell::predefined::Predefined,
-    /// This run's on-disk transcript of every command and every line the app
-    /// has said about it — see [`pagify_shell::session_log`]. One continuous
-    /// transcript for the whole run, tabs included, not one per document —
-    /// not the same thing as [`Self::recorder`] (Automate): that keeps only
-    /// what could be typed back in and replayed; this keeps the outcomes
-    /// too, almost none of which are typeable, so a bug can be reproduced
-    /// once and the file handed over instead of described from memory.
-    session_log: pagify_shell::session_log::SessionLog,
-    /// What `copy` last took from a drawn shape or placed picture selection,
-    /// for `paste` to lay back down — see [`ObjectClipboard`]. Shared across
-    /// tabs on purpose: copying a stamp from one open document and pasting
-    /// it into another is a feature, not a leak, and the system clipboard
-    /// works the same way for the text case
-    /// ([`Self::copy_selection`]/⌘C). Not the system clipboard itself —
-    /// these are structured page objects, not text.
-    object_clipboard: Option<ObjectClipboard>,
-    /// How many times `paste` has run since the clipboard was last filled —
-    /// see [`Self::PASTE_STEP`].
-    paste_count: u32,
-    /// What Organize's own copy last took — a temp file holding exactly the
-    /// copied pages, extracted live from whichever tab they were copied on
-    /// (via [`pagify_shell::Session::extract_to`], which reads the
-    /// document's current in-memory state, not what was last saved to disk —
-    /// so copying from a tab with unsaved edits still copies what is on
-    /// screen). Shared across tabs, same reasoning as [`Self::object_clipboard`]
-    /// right above: pasting pages from one open document into another is a
-    /// feature. Deleted and replaced wholesale on every new copy — see
-    /// [`Self::copy_organize_selection`] — rather than accumulated, since a
-    /// clipboard only ever needs to hold the most recent copy.
-    page_clipboard: Option<PageClipboard>,
+/// The hub windows: the Windows build's multi-window state, the
+/// single-instance handover and any update waiting to be applied.
+struct HubState {
     /// Whether this window is *the* running Pagify on its own, answering
     /// documents other launches hand over — and which window a handed-over
     /// document goes to. Not the running instance (the default) answers nothing.
@@ -1252,6 +1231,33 @@ struct PagifyApp {
     /// and carried out by [`Self::exit_program`]. An update is a quit that relaunches
     /// a newer build, not a separate "is anything unsaved" check of its own.
     pending_update: Option<std::path::PathBuf>,
+}
+
+struct PagifyApp {
+    /// Every open document, in the order its tab sits — see [`DocTab`].
+    hub_state: HubState,
+    library_state: LibraryState,
+    recording_state: RecordingState,
+    prefs_state: PrefsState,
+    render_state: RenderState,
+    ui_state: UiState,
+    clipboard_state: ClipboardState,
+    faces_state: FacesState,
+    update_state: UpdateState,
+    tabs: Vec<DocTab>,
+    /// Which of `tabs` is showing. Always a valid index into `tabs`, which
+    /// is never empty while the app is running — closing the last tab quits
+    /// instead of leaving this dangling.
+    active_tab: usize,
+
+    cmd: CommandBox,
+
+
+
+    /// Decoded on the first frame — a `Context` is needed to upload it and
+    /// there is none when the app is constructed.
+    mark: Option<egui::TextureHandle>,
+
 }
 
 /// Where a newer build is published — a Dropbox-synced folder, the same one
@@ -2871,7 +2877,7 @@ impl PagifyApp {
                 self.tab_mut().closing = Some(Closing::Program);
                 // This window's button closes this window; whether that is
                 // also the end of the program is the `Hub`'s to say.
-                self.win.closing_leaves = hub::Leaving::Window;
+                self.hub_state.win.closing_leaves = hub::Leaving::Window;
             } else {
                 self.leave(hub::Leaving::Window);
             }
@@ -3650,7 +3656,7 @@ impl PagifyApp {
                 .map(|e| e.text.clone())
                 .unwrap_or_default();
             self.recording_state.recorder.observe(&line);
-            self.session_log.record("command", &line);
+            self.recording_state.session_log.record("command", &line);
             self.run(dispatch);
         }
     }
@@ -4019,7 +4025,7 @@ impl PagifyApp {
                 let chosen = egui::ScrollArea::vertical()
                     .id_salt("backstage")
                     .auto_shrink([false, false])
-                    .show(ui, |ui| home::show(ui, &self.recent, &self.outlined_fonts))
+                    .show(ui, |ui| home::show(ui, &self.library_state.recent, &self.faces_state.outlined_fonts))
                     .inner;
                 if let Some(command) = chosen {
                     home_command = Some(command);
@@ -4072,16 +4078,29 @@ impl PagifyApp {
             spelling::use_dictionary_file();
         }
         let mut app = PagifyApp {
-            library_state: LibraryState { recogniser: None, signature_textures: std::collections::HashMap::new(), signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() }, scripts_dir: if cfg!(test) {
+            hub_state: HubState { handover: instance::Handover::default(), win: hub::WindowState::default(), pending_update: None, },
+            library_state: LibraryState { signatures: if quiet {
+                pagify_shell::signatures::Signatures::default()
+            } else {
+                pagify_shell::signatures::Signatures::load()
+            }, predefined: if quiet {
+                pagify_shell::predefined::Predefined::default()
+            } else {
+                pagify_shell::predefined::Predefined::load()
+            }, recent: if quiet { Recent::default() } else { Recent::load() }, recogniser: None, signature_textures: std::collections::HashMap::new(), signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() }, scripts_dir: if cfg!(test) {
                 None
             } else {
                 pagify_shell::state::state_dir().map(|d| d.join("scripts"))
             }, pad: None, signature_list: None, predefined_path: if cfg!(test) { None } else { pagify_shell::predefined::Predefined::path() }, snippets: None, },
-            recording_state: RecordingState { recorder: Recorder::default(), replay_depth: 0, },
+            recording_state: RecordingState { session_log: if quiet {
+                pagify_shell::session_log::SessionLog::default()
+            } else {
+                pagify_shell::session_log::SessionLog::start()
+            }, recorder: Recorder::default(), replay_depth: 0, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
             render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
-            clipboard_state: ClipboardState { paste_ghost: None, clipboard_dir: if cfg!(test) {
+            clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 std::env::temp_dir().join(format!(
                     "pagify-clipboard-test-{}-{}",
@@ -4091,7 +4110,11 @@ impl PagifyApp {
             } else {
                 Self::shared_clipboard_dir()
             }, clipboard_mirror_wanted: false, },
-            faces_state: FacesState { editor_face: None, editor_face_ready: false, editor_face_metrics: None, editor_face_coverage: None, pending_face: None, text_to_offer: None, face_cache: FaceCache::default(), system_fonts: None, font_picker_open: false, font_picker_filter: String::new(), },
+            faces_state: FacesState { outlined_fonts: if quiet {
+                pagify_shell::outlined_fonts::OutlinedFonts::default()
+            } else {
+                pagify_shell::outlined_fonts::OutlinedFonts::load()
+            }, editor_face: None, editor_face_ready: false, editor_face_metrics: None, editor_face_coverage: None, pending_face: None, text_to_offer: None, face_cache: FaceCache::default(), system_fonts: None, font_picker_open: false, font_picker_filter: String::new(), },
             update_state: UpdateState { update_check: None, update_available: None },
             tabs: vec![DocTab::new()],
             active_tab: 0,
@@ -4100,44 +4123,17 @@ impl PagifyApp {
             // constructs hundreds of apps, and every one of them was writing
             // its fixture into the real Recent Documents list and reading the
             // real font list — reported as a recents list full of test files.
-            recent: if quiet { Recent::default() } else { Recent::load() },
-            outlined_fonts: if quiet {
-                pagify_shell::outlined_fonts::OutlinedFonts::default()
-            } else {
-                pagify_shell::outlined_fonts::OutlinedFonts::load()
-            },
             mark: None,
-            signatures: if quiet {
-                pagify_shell::signatures::Signatures::default()
-            } else {
-                pagify_shell::signatures::Signatures::load()
-            },
-            predefined: if quiet {
-                pagify_shell::predefined::Predefined::default()
-            } else {
-                pagify_shell::predefined::Predefined::load()
-            },
             // Real disk I/O under the user's actual config directory — a test
             // run must not litter it with hundreds of near-empty session
             // logs, the same reason `predefined` above skips its own real
             // load in `cfg!(test)`.
-            session_log: if quiet {
-                pagify_shell::session_log::SessionLog::default()
-            } else {
-                pagify_shell::session_log::SessionLog::start()
-            },
-            object_clipboard: None,
-            paste_count: 0,
-            page_clipboard: None,
-            handover: instance::Handover::default(),
-            win: hub::WindowState::default(),
-            pending_update: None,
         };
         app.say_info(format!("Pagify {} — type `help`, or `open <path.pdf>`.", pagify_shell::VERSION));
         // `None` in a test run — `session_log` is a no-op there — so this
         // never adds a line the existing tests asserting on `history()`
         // would have to account for.
-        if let Some(log_path) = app.session_log.path() {
+        if let Some(log_path) = app.recording_state.session_log.path() {
             app.say_info(format!(
                 "recording this session to {} — `sessionlog` any time for this path.",
                 log_path.display()
@@ -4221,7 +4217,7 @@ impl PagifyApp {
             ui.heading(match intent {
                 Closing::Document | Closing::Tab(_) => "Close this document?",
                 // Closing one of several windows is not quitting.
-                Closing::Program if self.win.closing_leaves == hub::Leaving::Window && self.win.others > 0 => {
+                Closing::Program if self.hub_state.win.closing_leaves == hub::Leaving::Window && self.hub_state.win.others > 0 => {
                     "Close this window?"
                 }
                 Closing::Program => "Quit Pagify?",
@@ -4276,7 +4272,7 @@ impl PagifyApp {
                 self.tab_mut().closing = None;
                 // A quit that was walking the windows stops here: see
                 // `hub::plan`.
-                self.win.quit_cancelled = true;
+                self.hub_state.win.quit_cancelled = true;
                 self.say_info("still open.");
             }
             Some(Decision::Save) => {
@@ -4343,7 +4339,7 @@ impl PagifyApp {
                         return;
                     }
                 }
-                self.leave(self.win.closing_leaves);
+                self.leave(self.hub_state.win.closing_leaves);
             }
         }
     }
@@ -5012,7 +5008,7 @@ impl PagifyApp {
     /// "kept" when nothing was kept is worse than saying so.
     fn keep_snippets(&self) -> Result<(), String> {
         let Some(path) = &self.library_state.predefined_path else { return Ok(()) };
-        self.predefined
+        self.library_state.predefined
             .save_to(path)
             .map_err(|e| format!("could not write {}: {e}", path.display()))
     }
@@ -5024,7 +5020,7 @@ impl PagifyApp {
             self.say_error("predefinedtext: the words to keep, as in `predefinedtext Jane Smith`.");
             return;
         }
-        let is_new = self.predefined.remember(&text);
+        let is_new = self.library_state.predefined.remember(&text);
         if let Err(e) = self.keep_snippets() {
             self.say_error(e);
             return;
@@ -5046,18 +5042,18 @@ impl PagifyApp {
     /// costs them a drawing they were told was safe.
     fn keep_signatures(&self) -> Result<(), String> {
         let Some(path) = &self.library_state.signatures_path else { return Ok(()) };
-        self.signatures
+        self.library_state.signatures
             .save_to(path)
             .map_err(|e| format!("could not write {}: {e}", path.display()))
     }
 
     /// Say what is kept, newest last — the last one being the one a click uses.
     fn signature_list_lines(&self) -> String {
-        if self.signatures.is_empty() {
+        if self.library_state.signatures.is_empty() {
             return "no signatures drawn yet — `signature draw` makes one.".into();
         }
-        let current = self.signatures.current().map(|s| s.name.clone()).unwrap_or_default();
-        let names: Vec<String> = self
+        let current = self.library_state.signatures.current().map(|s| s.name.clone()).unwrap_or_default();
+        let names: Vec<String> = self.library_state
             .signatures
             .names()
             .iter()
@@ -5092,9 +5088,9 @@ impl PagifyApp {
             return Err("that is not enough of a signature to keep — draw across the pad.".into());
         };
 
-        self.signatures.add(signature);
+        self.library_state.signatures.add(signature);
         if let Err(e) = self.keep_signatures() {
-            self.signatures.remove(&name);
+            self.library_state.signatures.remove(&name);
             return Err(e);
         }
         // Says where it went, because a signature is about as personal as a
@@ -5128,9 +5124,9 @@ impl PagifyApp {
             return Err("that picture has no size, or its pixels do not match it.".into());
         };
 
-        self.signatures.add(signature);
+        self.library_state.signatures.add(signature);
         if let Err(e) = self.keep_signatures() {
-            self.signatures.remove(&name);
+            self.library_state.signatures.remove(&name);
             return Err(e);
         }
         Ok(format!(
@@ -5149,7 +5145,7 @@ impl PagifyApp {
     fn signature_name_for(&self, path: &std::path::Path) -> String {
         match path.file_stem().and_then(|s| s.to_str()) {
             Some(stem) if !stem.trim().is_empty() => stem.trim().to_string(),
-            _ => format!("Signature {}", self.signatures.entries().len() + 1),
+            _ => format!("Signature {}", self.library_state.signatures.entries().len() + 1),
         }
     }
 
@@ -5262,7 +5258,7 @@ impl PagifyApp {
     /// Put the drawn or uploaded signature on the line somebody clicked.
     fn place_signature(&mut self, page: usize, at: AppPoint) -> Result<String, String> {
         const WIDTH: f32 = SIGNATURE_WIDTH_PT;
-        let Some(signature) = self.signatures.current().cloned() else {
+        let Some(signature) = self.library_state.signatures.current().cloned() else {
             return Err("no signature has been drawn or uploaded yet — `signature draw` makes \
                         one, `signature upload` adds a picture.".into());
         };
@@ -5981,7 +5977,7 @@ impl PagifyApp {
         // prevent — logged before the outcome message below, which only
         // ever says "moved"/"resized" and cannot by itself say which one a
         // reporter actually meant to happen.
-        self.session_log.record(
+        self.recording_state.session_log.record(
             "drag",
             &format!("{} handle={:?} by=({dx:.1},{dy:.1}) rect={:?}", sel.what, grab.handle, sel.rect),
         );
@@ -6421,7 +6417,7 @@ impl PagifyApp {
     /// is the whole of what moving, resizing or turning it means; there is
     /// no content-stream object underneath to transform.
     fn finish_signature_grab(&mut self, sel: SignatureSelected, grab: Grab) {
-        self.session_log.record(
+        self.recording_state.session_log.record(
             "drag",
             &format!("signature handle={:?} by={:?} rect={:?}", grab.handle, grab.by, sel.rect),
         );
@@ -6496,7 +6492,7 @@ impl PagifyApp {
 
     /// The same as [`Self::finish_signature_grab`], for [`Self::placed_image_selected`].
     fn finish_placed_image_grab(&mut self, sel: PlacedImageSelected, grab: Grab) {
-        self.session_log.record(
+        self.recording_state.session_log.record(
             "drag",
             &format!("placed image handle={:?} by={:?} rect={:?}", grab.handle, grab.by, sel.rect),
         );
@@ -6575,7 +6571,7 @@ impl PagifyApp {
         if dx.hypot(dy) < Self::MIN_DRAG_PX {
             return;
         }
-        self.session_log.record("drag", &format!("markup by=({dx:.1},{dy:.1})"));
+        self.recording_state.session_log.record("drag", &format!("markup by=({dx:.1},{dy:.1})"));
         let height = view_height(self, page);
         let layer = self.tab_mut().markup.page(page, height);
         layer.begin("move");
@@ -6607,7 +6603,7 @@ impl PagifyApp {
         if degrees.abs() < 1.0 {
             return;
         }
-        self.session_log.record("drag", &format!("markup rotate by={degrees:.1}deg"));
+        self.recording_state.session_log.record("drag", &format!("markup rotate by={degrees:.1}deg"));
         let height = view_height(self, page);
         let layer = self.tab_mut().markup.page(page, height);
         let space = layer.space();
@@ -8282,7 +8278,7 @@ impl PagifyApp {
         // `said`, which stays short for the command bar) goes only to the
         // session log, so a "doesn't look like what I copied" report is
         // readable from the log alone instead of needing a live repro.
-        self.session_log.record("copy", &describe_clipboard(&content));
+        self.recording_state.session_log.record("copy", &describe_clipboard(&content));
         // **Said at the copy, not found on the page.** Words whose own font
         // could not be reused (a bare-CFF subset is one `Face::from_slice`
         // cannot read) paste in Helvetica — close enough to pass unnoticed on
@@ -8292,8 +8288,8 @@ impl PagifyApp {
         } else {
             said
         };
-        self.object_clipboard = Some(content);
-        self.paste_count = 0;
+        self.clipboard_state.object_clipboard = Some(content);
+        self.clipboard_state.paste_count = 0;
         self.clipboard_state.clipboard_mirror_wanted = true;
         self.forget_copied_pages();
         self.say_info(said);
@@ -8315,7 +8311,7 @@ impl PagifyApp {
         // inside (or very near) this rect is pasting over itself, which
         // reads as a font/size mismatch but is really two renders of the
         // same words a pixel apart.
-        self.session_log.record("copy-source", &format!("what={} object={} rect={:?}", sel.what, sel.object, sel.rect));
+        self.recording_state.session_log.record("copy-source", &format!("what={} object={} rect={:?}", sel.what, sel.object, sel.rect));
         let what = sel.what.strip_prefix("the ").unwrap_or(sel.what);
         self.put_on_clipboard(content, format!("{what} copied — Ctrl+V picks it up, a click puts it down."));
         true
@@ -8437,7 +8433,7 @@ impl PagifyApp {
                 face: None,
                 track: 1.0,
             },
-            None => match self.object_clipboard.clone() {
+            None => match self.clipboard_state.object_clipboard.clone() {
                 Some(content) => content,
                 None => return false,
             },
@@ -8463,7 +8459,7 @@ impl PagifyApp {
         // returns early, and the log should still show what was *attempted*,
         // not just what succeeded. Recurses once per `Group` member, so each
         // one's own placement point and content are on their own log line.
-        self.session_log.record("paste", &format!("at=({:.1},{:.1}) {}", at.x, at.y, describe_clipboard(&content)));
+        self.recording_state.session_log.record("paste", &format!("at=({:.1},{:.1}) {}", at.x, at.y, describe_clipboard(&content)));
         match content {
             ObjectClipboard::Group(items) => {
                 for (item, dx, dy) in items {
@@ -8653,12 +8649,12 @@ impl PagifyApp {
 
     /// ⌘V for whatever `copy` last took — see [`Self::copy_object_selection`].
     fn paste_object_selection(&mut self) {
-        let Some(clip) = self.object_clipboard.clone() else {
+        let Some(clip) = self.clipboard_state.object_clipboard.clone() else {
             self.say_info("nothing to paste — `copy` a shape or picture first.");
             return;
         };
-        self.paste_count += 1;
-        let step = Self::PASTE_STEP * self.paste_count as f64;
+        self.clipboard_state.paste_count += 1;
+        let step = Self::PASTE_STEP * self.clipboard_state.paste_count as f64;
         let page = self.tab_mut().view_state.page;
 
         match clip {
@@ -8734,7 +8730,7 @@ impl PagifyApp {
             std::process::id(),
             COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
-        self.page_clipboard = None;
+        self.clipboard_state.page_clipboard = None;
         let result = match &self.tab_mut().doc {
             Some(doc) => doc.session.extract_to(&pages, &temp_file),
             None => return false,
@@ -8743,7 +8739,7 @@ impl PagifyApp {
             Ok(page_count) => {
                 let n = pages.len();
                 Self::publish_page_clipboard(&self.clipboard_state.clipboard_dir, &temp_file, page_count);
-                self.page_clipboard = Some(PageClipboard { temp_file, page_count });
+                self.clipboard_state.page_clipboard = Some(PageClipboard { temp_file, page_count });
                 self.clipboard_state.clipboard_mirror_wanted = true;
                 self.say_info(format!(
                     "{n} page{} copied — `paste` puts {} in.",
@@ -8810,7 +8806,7 @@ impl PagifyApp {
     /// is one clipboard, and `paste` must paste the newest thing copied — in
     /// any window, which is why the manifest goes too.
     fn forget_copied_pages(&mut self) {
-        self.page_clipboard = None;
+        self.clipboard_state.page_clipboard = None;
         let _ = std::fs::remove_file(self.clipboard_state.clipboard_dir.join("latest.txt"));
     }
 
@@ -8819,7 +8815,7 @@ impl PagifyApp {
     /// of the folder is still its own to paste).
     fn current_page_clipboard(&self) -> Option<(std::path::PathBuf, usize)> {
         Self::shared_page_clipboard(&self.clipboard_state.clipboard_dir)
-            .or_else(|| self.page_clipboard.as_ref().map(|c| (c.temp_file.clone(), c.page_count)))
+            .or_else(|| self.clipboard_state.page_clipboard.as_ref().map(|c| (c.temp_file.clone(), c.page_count)))
     }
 
     /// Paste Organize's own clipboard into the current tab — the same
@@ -9085,7 +9081,7 @@ impl PagifyApp {
 
 
     fn open_dialog(&mut self) {
-        let start = self
+        let start = self.library_state
             .recent
             .present()
             .first()
@@ -9195,7 +9191,7 @@ impl PagifyApp {
     /// calls must take effect on the very next one, not after a restart.
     fn outlined_font_bytes(&self) -> Vec<Vec<u8>> {
         let mut fonts: Vec<Vec<u8>> = BUNDLED_OUTLINED_FONTS.iter().map(|f| f.to_vec()).collect();
-        fonts.extend(self.outlined_fonts.bytes());
+        fonts.extend(self.faces_state.outlined_fonts.bytes());
         fonts
     }
 
@@ -9211,11 +9207,11 @@ impl PagifyApp {
     }
 
     fn add_outlined_font(&mut self, path: PathBuf) {
-        match self.outlined_fonts.add(path) {
+        match self.faces_state.outlined_fonts.add(path) {
             Ok(()) => {
                 if !cfg!(test) {
                     if !cfg!(test) {
-            self.outlined_fonts.save();
+            self.faces_state.outlined_fonts.save();
         }
                 }
                 self.say_info("font added — tried on outlined pages from now on.");
@@ -9225,17 +9221,17 @@ impl PagifyApp {
     }
 
     fn remove_outlined_font(&mut self, path: PathBuf) {
-        self.outlined_fonts.remove(&path);
+        self.faces_state.outlined_fonts.remove(&path);
         if !cfg!(test) {
-            self.outlined_fonts.save();
+            self.faces_state.outlined_fonts.save();
         }
         self.say_info("removed.");
     }
 
     fn clear_outlined_fonts(&mut self) {
-        self.outlined_fonts.clear();
+        self.faces_state.outlined_fonts.clear();
         if !cfg!(test) {
-            self.outlined_fonts.save();
+            self.faces_state.outlined_fonts.save();
         }
         self.say_info("cleared — only the bundled fonts will be tried now.");
     }
@@ -9399,7 +9395,7 @@ impl PagifyApp {
         if let Some(dispatch) = pagify_shell::command::dispatch(line) {
             self.cmd.say(Kind::Echo, line);
             self.recording_state.recorder.observe(line);
-            self.session_log.record("command", line);
+            self.recording_state.session_log.record("command", line);
             self.run(dispatch);
         }
     }
@@ -11145,7 +11141,7 @@ impl PagifyApp {
         let mut trace = PickTrace::new(page, (at.x as f32, at.y as f32));
         let outcome = self.pick_text_run_traced(page, at, &mut trace);
         trace.total_ms = started.elapsed().as_secs_f32() * 1000.0;
-        self.session_log.record("pick", &block_input::format_pick_line(&trace));
+        self.recording_state.session_log.record("pick", &block_input::format_pick_line(&trace));
         outcome
     }
 
@@ -11271,7 +11267,7 @@ impl PagifyApp {
         let part = block_input::piece_block(pb, block, piece.from, piece.to)
             .ok_or_else(|| format!("lines {}..{} of block {block} are not there", piece.from, piece.to))?;
         if piece.to - piece.from < pb.blocks[block].lines.len() {
-            self.session_log.record(
+            self.recording_state.session_log.record(
                 "pick-note",
                 &format!(
                     "block {block}: opened lines {}..{} of {}, the drawn lines around them left out",
@@ -11422,7 +11418,7 @@ impl PagifyApp {
             .retain(|group| group.page != page || group_fingerprint(pb, &group.objects) == Some(group.fingerprint));
         let forgotten = before - self.tab().joined_groups.len();
         if forgotten > 0 {
-            self.session_log.record(
+            self.recording_state.session_log.record(
                 "pick-note",
                 &format!("{forgotten} joined group(s) on page {} no longer match the page and were forgotten", page + 1),
             );
@@ -12414,7 +12410,7 @@ impl PagifyApp {
         let backup = edit.clone();
         self.apply_one_edit(edit);
         let elapsed = started.elapsed();
-        self.session_log.record("info", &format!("apply took {elapsed:?}"));
+        self.recording_state.session_log.record("info", &format!("apply took {elapsed:?}"));
 
         // Refused: an error was said, and nothing was executed. (An error said
         // *after* something was written is not a refusal — see above.)
@@ -12642,7 +12638,7 @@ impl PagifyApp {
             }
         }
 
-        self.session_log.record("info", &plan_log_line(new_lines.len(), &plan, &edit.lines, &edit.twins));
+        self.recording_state.session_log.record("info", &plan_log_line(new_lines.len(), &plan, &edit.lines, &edit.twins));
         // A retyped line of a justified paragraph is asked to keep the width it
         // had — the editor's own test for drawing it justified, and that its
         // lines end at one margin (left-aligned text starts at one margin too).
@@ -13965,7 +13961,7 @@ impl PagifyApp {
             self.render_state.render_stats.applied += 1;
             self.render_state.render_stats.slowest_ms = self.render_state.render_stats.slowest_ms.max(done.took.as_millis());
             if done.took.as_millis() >= SLOW_RENDER_MS {
-                self.session_log.record(
+                self.recording_state.session_log.record(
                     "perf",
                     &format!(
                         "page {}{} rendered off the UI thread in {} ms ({width}x{height} px)",
@@ -14099,7 +14095,7 @@ impl PagifyApp {
         // log had no timing at all, so "it stutters" could not be answered
         // from it.
         if took.as_millis() >= SLOW_RENDER_MS {
-            self.session_log.record(
+            self.recording_state.session_log.record(
                 "perf",
                 &format!(
                     "page {} rendered on the UI thread in {} ms ({}x{} px, {:.2}x) — a frame that long is a stall",
@@ -14489,7 +14485,7 @@ impl PagifyApp {
     /// thumbnail in the signature list — exactly what an accurate preview
     /// must not do.
     fn draw_signature_preview(&mut self, ui: &mut egui::Ui, view: PageView, at: AppPoint) {
-        let Some(signature) = self.signatures.current().cloned() else { return };
+        let Some(signature) = self.library_state.signatures.current().cloned() else { return };
         let rect = signature.placed_rect(at.x as f32, at.y as f32, SIGNATURE_WIDTH_PT);
         let area = egui::Rect::from_min_max(
             view.to_screen(AppPoint::new(rect.left as f64, rect.top as f64)),

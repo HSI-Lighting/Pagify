@@ -216,7 +216,7 @@ fn copying_an_unsaved_page_from_one_tab_pastes_into_another() {
 
     app.tab_mut().organize.organize_selected = vec![0];
     assert!(app.copy_organize_selection(), "copy should have found a selection to extract");
-    assert!(app.page_clipboard.is_some(), "copy should have filled the page clipboard");
+    assert!(app.clipboard_state.page_clipboard.is_some(), "copy should have filled the page clipboard");
 
     // A second, independent tab opened fresh from the same file on disk —
     // it never saw the blank page `insert_page` added to the first tab.
@@ -241,7 +241,7 @@ fn copying_an_unsaved_page_from_one_tab_pastes_into_another() {
 /// cannot find the file specified". `PageClipboard`'s backing file is
 /// the same path every time (one clipboard per running app instance,
 /// not per copy — see its own doc comment), and replacing
-/// `self.page_clipboard` used to drop, and so delete, that shared path
+/// `self.clipboard_state.page_clipboard` used to drop, and so delete, that shared path
 /// *after* the second copy had already written its fresh content there.
 #[test]
 fn copying_and_pasting_twice_in_a_row_does_not_lose_the_second_copy() {
@@ -334,7 +334,7 @@ fn the_newest_copy_wins_and_a_stale_or_replaced_one_is_not_offered() {
     let (newest, _) = first.current_page_clipboard().expect("a copy");
     assert_eq!(
         Some(newest),
-        second.page_clipboard.as_ref().map(|c| c.temp_file.clone()),
+        second.clipboard_state.page_clipboard.as_ref().map(|c| c.temp_file.clone()),
         "the first window did not see the second window's newer copy"
     );
 
@@ -591,7 +591,7 @@ fn with_signature_pad(name: &str, label: &str) -> (PagifyApp, std::path::PathBuf
     let path = std::env::temp_dir()
         .join(format!("pagify-test-signatures-{}-{label}.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    app.signatures = Default::default();
+    app.library_state.signatures = Default::default();
     app.library_state.signatures_path = Some(path.clone());
     (app, path)
 }
@@ -2227,7 +2227,7 @@ fn a_picture_file_is_decoded_and_kept_by_its_own_name() {
     assert!(said(&app).contains("this computer"), "{}", said(&app));
     assert!(said(&app).contains("does not prove"), "{}", said(&app));
 
-    let kept = app.signatures.current().expect("a signature was kept");
+    let kept = app.library_state.signatures.current().expect("a signature was kept");
     let expected_name = png_path.file_stem().unwrap().to_string_lossy().into_owned();
     assert_eq!(kept.name, expected_name, "it was not named from the file");
     let stored = kept.image.as_ref().expect("it is a picture, not ink");
@@ -2290,7 +2290,7 @@ fn a_picture_declaring_an_absurd_size_is_refused_before_it_is_decoded() {
 
     app.upload_signature(&png_path);
     assert!(said(&app).contains("too large"), "{}", said(&app));
-    assert!(app.signatures.is_empty(), "something was kept from an oversized picture");
+    assert!(app.library_state.signatures.is_empty(), "something was kept from an oversized picture");
 
     let _ = std::fs::remove_file(&png_path);
     let _ = std::fs::remove_file(&sig_path);
@@ -2331,7 +2331,7 @@ fn a_file_that_is_not_a_picture_is_refused() {
 
     app.upload_signature(&bad_path);
     assert!(said(&app).contains("not a picture"), "{}", said(&app));
-    assert!(app.signatures.is_empty(), "something was kept from a file that could not decode");
+    assert!(app.library_state.signatures.is_empty(), "something was kept from a file that could not decode");
 
     let _ = std::fs::remove_file(&bad_path);
     let _ = std::fs::remove_file(&sig_path);
@@ -2343,7 +2343,7 @@ fn with_snippets(name: &str, label: &str) -> (PagifyApp, std::path::PathBuf) {
     let path = std::env::temp_dir()
         .join(format!("pagify-test-predefined-{}-{label}.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    app.predefined = Default::default();
+    app.library_state.predefined = Default::default();
     app.library_state.predefined_path = Some(path.clone());
     (app, path)
 }
@@ -2355,7 +2355,7 @@ fn predefined_text_keeps_the_words_and_waits_for_a_click() {
     app.submit("predefinedtext Jane Smith");
 
     assert!(said(&app).contains("this computer"), "{}", said(&app));
-    assert_eq!(app.predefined.current(), Some("Jane Smith"));
+    assert_eq!(app.library_state.predefined.current(), Some("Jane Smith"));
     assert!(
         matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Write(t)) if t == "Jane Smith"),
         "it did not arm the click that writes them:\n{}",
@@ -2379,8 +2379,8 @@ fn using_kept_words_again_keeps_no_second_copy() {
     app.submit("predefinedtext jane@example.com");
     app.submit("predefinedtext Jane Smith");
 
-    assert_eq!(app.predefined.entries().len(), 2, "{:?}", app.predefined.entries());
-    assert_eq!(app.predefined.current(), Some("Jane Smith"), "using it did not bring it back");
+    assert_eq!(app.library_state.predefined.entries().len(), 2, "{:?}", app.library_state.predefined.entries());
+    assert_eq!(app.library_state.predefined.current(), Some("Jane Smith"), "using it did not bring it back");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -2396,7 +2396,7 @@ fn writing_text_on_a_page_does_not_keep_it() {
     app.write_text_at(0, AppPoint { x: 100.0, y: 200.0 }, "Something private")
         .expect("written");
 
-    assert!(app.predefined.is_empty(), "the typewriter filled the list: {:?}", app.predefined.entries());
+    assert!(app.library_state.predefined.is_empty(), "the typewriter filled the list: {:?}", app.library_state.predefined.entries());
     assert!(!path.exists(), "it wrote a list nobody asked for");
     let _ = std::fs::remove_file(&path);
 }
@@ -2940,8 +2940,8 @@ fn commands_and_outcomes_both_reach_the_session_log() {
     let dir = std::env::temp_dir()
         .join(format!("pagify-test-session-log-wiring-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let log_path = app.session_log.path().expect("the temp dir is writable").to_path_buf();
+    app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let log_path = app.recording_state.session_log.path().expect("the temp dir is writable").to_path_buf();
 
     app.submit("zoom fit");
     app.say_error("a deliberate test error");
@@ -3925,7 +3925,7 @@ fn a_text_groups_own_offsets_are_each_members_left_edge_not_its_centre() {
     let (cx, cy) = ((bounds.left + bounds.right) / 2.0, (bounds.top + bounds.bottom) / 2.0);
 
     assert!(app.copy_object_selection());
-    let Some(ObjectClipboard::Group(items)) = app.object_clipboard.clone() else {
+    let Some(ObjectClipboard::Group(items)) = app.clipboard_state.object_clipboard.clone() else {
         panic!("expected a Group on the clipboard");
     };
     assert_eq!(items.len(), 2);
@@ -3953,8 +3953,8 @@ fn copying_and_pasting_words_logs_their_shape_but_never_their_text() {
     let mut app = app("two-column.pdf");
     let dir = std::env::temp_dir().join(format!("pagify-test-copy-paste-log-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let log_path = app.session_log.path().expect("the temp dir is writable").to_path_buf();
+    app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let log_path = app.recording_state.session_log.path().expect("the temp dir is writable").to_path_buf();
 
     app.submit("editobject");
     let runs = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
@@ -4652,10 +4652,10 @@ fn managing_signatures_chooses_which_one_a_click_places() {
     let (mut app, path) = with_signature_pad("two-column.pdf", "choose");
     app.save_drawn_signature("work", &scrawl()).expect("kept");
     app.save_drawn_signature("personal", &scrawl()).expect("kept");
-    assert_eq!(app.signatures.current().map(|s| s.name.as_str()), Some("personal"));
+    assert_eq!(app.library_state.signatures.current().map(|s| s.name.as_str()), Some("personal"));
 
     app.submit("managesignatures use work");
-    assert_eq!(app.signatures.current().map(|s| s.name.as_str()), Some("work"));
+    assert_eq!(app.library_state.signatures.current().map(|s| s.name.as_str()), Some("work"));
     assert!(said(&app).contains("now places"), "{}", said(&app));
 
     // And it is on disk, not only in this window.
@@ -4675,7 +4675,7 @@ fn choosing_a_signature_that_is_not_there_says_what_is() {
     let told = said(&app);
     assert!(told.contains("no signature called"), "{told}");
     assert!(told.contains("work"), "it did not say what there is: {told}");
-    assert_eq!(app.signatures.current().map(|s| s.name.as_str()), Some("work"));
+    assert_eq!(app.library_state.signatures.current().map(|s| s.name.as_str()), Some("work"));
 
     let _ = std::fs::remove_file(&path);
 }
@@ -4690,9 +4690,9 @@ fn forgetting_a_signature_says_that_undo_does_not_reach_it() {
     app.submit("managesignatures delete work");
     let told = said(&app);
     assert!(told.contains("undo"), "it did not say undo will not help: {told}");
-    assert!(app.signatures.find("work").is_none(), "it is still there");
+    assert!(app.library_state.signatures.find("work").is_none(), "it is still there");
     // The remaining one is a real signature, not a dangling choice.
-    assert_eq!(app.signatures.current().map(|s| s.name.as_str()), Some("personal"));
+    assert_eq!(app.library_state.signatures.current().map(|s| s.name.as_str()), Some("personal"));
     assert!(
         pagify_shell::signatures::Signatures::load_from(&path).find("work").is_none(),
         "it came back from disk"
@@ -4710,11 +4710,11 @@ fn renaming_will_not_quietly_destroy_another_drawing() {
 
     app.submit("managesignatures rename work");
     assert!(said(&app).contains("already called that"), "{}", said(&app));
-    assert_eq!(app.signatures.entries().len(), 2, "a drawing was destroyed");
+    assert_eq!(app.library_state.signatures.entries().len(), 2, "a drawing was destroyed");
 
     app.submit("managesignatures rename my mark");
-    assert!(app.signatures.find("my mark").is_some(), "{}", said(&app));
-    assert!(app.signatures.find("personal").is_none());
+    assert!(app.library_state.signatures.find("my mark").is_some(), "{}", said(&app));
+    assert!(app.library_state.signatures.find("personal").is_none());
 
     let _ = std::fs::remove_file(&path);
 }
@@ -4750,7 +4750,7 @@ fn too_little_to_be_a_signature_is_refused() {
     let (mut app, path) = with_signature_pad("two-column.pdf", "smudge");
     let told = app.save_drawn_signature("mine", &[vec![(4.0, 4.0)]]).expect_err("refused");
     assert!(told.contains("draw across the pad"), "{told}");
-    assert!(app.signatures.is_empty(), "a smudge was kept anyway");
+    assert!(app.library_state.signatures.is_empty(), "a smudge was kept anyway");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -5076,11 +5076,11 @@ fn a_recording_named_like_a_path_is_refused_and_a_good_one_lands_in_pagifys_fold
 #[test]
 fn clearhistory_forgets_the_recent_list_and_says_where_the_rest_is_kept() {
     let mut app = app("two-column.pdf");
-    app.recent.record(std::path::Path::new("/tmp/something.pdf"), 3, 0);
-    assert!(!app.recent.entries.is_empty());
+    app.library_state.recent.record(std::path::Path::new("/tmp/something.pdf"), 3, 0);
+    assert!(!app.library_state.recent.entries.is_empty());
     app.submit("clearhistory");
     let told = said(&app);
-    assert!(app.recent.entries.is_empty(), "the list was not cleared: {told}");
+    assert!(app.library_state.recent.entries.is_empty(), "the list was not cleared: {told}");
     assert!(told.contains("recent-documents list is gone"), "{told}");
     assert!(told.contains("signatures.json"), "it did not say what else is kept: {told}");
     assert!(told.contains("outlined_fonts.json"), "it did not mention outlined_fonts.json: {told}");

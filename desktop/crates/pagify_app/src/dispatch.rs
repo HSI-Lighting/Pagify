@@ -14,7 +14,7 @@ use pagify_shell::verbs::{self, SignatureAction, Verb};
 impl crate::PagifyApp {
     pub(crate) fn say_info(&mut self, text: impl Into<String>) {
         let text = text.into();
-        self.session_log.record("info", &text);
+        self.recording_state.session_log.record("info", &text);
         self.cmd.say(Kind::Info, text);
     }
 
@@ -29,7 +29,7 @@ impl crate::PagifyApp {
         // the arrow beside the input opens the rest whenever it is wanted.
         let text = text.into();
         self.ui_state.errors_said += 1;
-        self.session_log.record("error", &text);
+        self.recording_state.session_log.record("error", &text);
         self.cmd.say(Kind::Error, text);
     }
 
@@ -187,7 +187,7 @@ impl crate::PagifyApp {
                         self.active_tab = index;
                         self.tab_mut().closing = Some(Closing::Program);
                         // The whole program, not just this window.
-                        self.win.closing_leaves = hub::Leaving::Program;
+                        self.hub_state.win.closing_leaves = hub::Leaving::Program;
                         return;
                     }
                 }
@@ -244,7 +244,7 @@ impl crate::PagifyApp {
                 Some(text) => self.use_snippet(&text),
                 None => {
                     self.library_state.snippets = Some(SnippetList::default());
-                    if self.predefined.is_empty() {
+                    if self.library_state.predefined.is_empty() {
                         self.say_info(
                             "nothing kept yet — type some words into the window, or \
                              `predefinedtext Jane Smith` to keep and write them at once.",
@@ -382,7 +382,7 @@ impl crate::PagifyApp {
     /// whole so the router above stays a table of contents.
     fn act_signing(&mut self, verb: Verb) {
         match verb {
-            Verb::SessionLog => match self.session_log.path() {
+            Verb::SessionLog => match self.recording_state.session_log.path() {
                 Some(path) => self.say_info(format!(
                     "recording every command and outcome to {} — send it along with a bug report.",
                     path.display()
@@ -394,12 +394,12 @@ impl crate::PagifyApp {
             Verb::ApplySignatures => self.act_apply_signatures(),
             Verb::ManageSignatures(what) => self.act_manage_signatures(what),
             Verb::Signature(SignatureAction::Draw) => {
-                let first = self.signatures.current().is_none();
+                let first = self.library_state.signatures.current().is_none();
                 self.library_state.pad = Some(SignaturePad {
                     name: if first {
                         "Signature".to_string()
                     } else {
-                        format!("Signature {}", self.signatures.entries().len() + 1)
+                        format!("Signature {}", self.library_state.signatures.entries().len() + 1)
                     },
                     // An explicit `signature draw` is a request to draw, not
                     // to sign — unlike bare `signature` with nothing made yet,
@@ -418,7 +418,7 @@ impl crate::PagifyApp {
             Verb::Signature(SignatureAction::Place) => {
                 // Nothing drawn or uploaded yet needs a signature made before
                 // it can be placed. Placing does not.
-                if self.signatures.current().is_none() {
+                if self.library_state.signatures.current().is_none() {
                     self.library_state.pad = Some(SignaturePad {
                         name: "Signature".to_string(),
                         // Somebody who typed bare `signature` wanted to sign,
@@ -515,7 +515,7 @@ impl crate::PagifyApp {
                 match what {
                     What::Open => {
                         self.library_state.signature_list = Some(SignatureList::default());
-                        if self.signatures.is_empty() {
+                        if self.library_state.signatures.is_empty() {
                             self.say_info("no signatures yet — the window has a button to draw one.");
                         }
                     }
@@ -524,10 +524,10 @@ impl crate::PagifyApp {
                         self.say_info(said);
                     }
                     What::Use(name) => {
-                        if self.signatures.choose(&name) {
+                        if self.library_state.signatures.choose(&name) {
                             match self.keep_signatures() {
                                 Ok(()) => {
-                                    let chosen = self
+                                    let chosen = self.library_state
                                         .signatures
                                         .current()
                                         .map(|s| s.name.clone())
@@ -545,7 +545,7 @@ impl crate::PagifyApp {
                         }
                     }
                     What::Forget(name) => {
-                        if self.signatures.remove(&name) {
+                        if self.library_state.signatures.remove(&name) {
                             match self.keep_signatures() {
                                 // Said plainly: this one does not come back.
                                 Ok(()) => self.say_info(format!(
@@ -563,13 +563,13 @@ impl crate::PagifyApp {
                         }
                     }
                     What::Rename(to) => {
-                        let Some(from) = self.signatures.current().map(|s| s.name.clone()) else {
+                        let Some(from) = self.library_state.signatures.current().map(|s| s.name.clone()) else {
                             self.say_error(
                                 "no signatures drawn yet — `signature draw` makes one.",
                             );
                             return;
                         };
-                        match self.signatures.rename(&from, &to) {
+                        match self.library_state.signatures.rename(&from, &to) {
                             Ok(()) => match self.keep_signatures() {
                                 Ok(()) => self.say_info(format!("\"{from}\" is now \"{to}\".")),
                                 Err(e) => self.say_error(e),
@@ -1084,7 +1084,7 @@ impl crate::PagifyApp {
                 let where_kept = pagify_shell::state::state_dir()
                     .map(|d| d.display().to_string())
                     .unwrap_or_else(|| "nowhere on this system".into());
-                match self.recent.forget_all() {
+                match self.library_state.recent.forget_all() {
                     Ok(()) => self.say_info(format!(
                         "the recent-documents list is gone. Pagify keeps its own files in \
                          {where_kept}: predefined.json (saved texts), signatures.json (drawn \

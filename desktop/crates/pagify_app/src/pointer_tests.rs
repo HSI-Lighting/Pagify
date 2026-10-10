@@ -595,7 +595,7 @@ fn outlinedfont_reports_a_clear_error_for_a_bad_path() {
     let mut app = PagifyApp::new(None);
     app.submit(&format!("outlinedfont {bad}"));
     assert!(said(&app).contains("could not read"), "unhelpful error:\n{}", said(&app));
-    assert!(!app.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(bad)));
+    assert!(!app.faces_state.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(bad)));
 }
 
 /// The end-to-end proof that adding a font actually changes what
@@ -628,7 +628,7 @@ fn a_user_added_font_unlocks_the_fast_path_for_a_page_the_bundled_fonts_do_not_m
 
     app.submit(&format!("outlinedfont {arial}"));
     assert!(
-        app.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(arial)),
+        app.faces_state.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(arial)),
         "the font was not added:\n{}",
         said(&app)
     );
@@ -645,7 +645,7 @@ fn a_user_added_font_unlocks_the_fast_path_for_a_page_the_bundled_fonts_do_not_m
     // outright — see the bad-path test above for why: another test's own
     // font may legitimately share this same on-disk settings file.
     assert!(
-        !app.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(arial)),
+        !app.faces_state.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(arial)),
         "cleanup left the font on the list"
     );
 

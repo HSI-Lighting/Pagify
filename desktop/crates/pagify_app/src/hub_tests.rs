@@ -471,7 +471,7 @@ fn a_window_left_with_no_tab_says_it_is_leaving() {
     let mut hub = Hub::new(app_with(&["single-page.pdf"]), Handover::default());
     let moving = hub.windows[0].app.give_tab(0).unwrap();
     hub.after_giving(0);
-    assert_eq!(hub.windows[0].app.win.leaving, Some(Leaving::Window));
+    assert_eq!(hub.windows[0].app.hub_state.win.leaving, Some(Leaving::Window));
     drop(moving);
 }
 
@@ -497,7 +497,7 @@ fn tearing_a_tab_off_makes_a_window_of_its_own_with_that_very_tab() {
     assert_eq!(new.app.tabs.len(), 1);
     assert_eq!(new.app.tab().doc.as_ref().unwrap().id, doc, "it is another document, not the same live tab");
     assert_eq!(marks(new.app.tab()), 1, "the unsaved mark did not travel");
-    assert_eq!(new.app.win.serial, 1, "the new window shares the first one's command box id");
+    assert_eq!(new.app.hub_state.win.serial, 1, "the new window shares the first one's command box id");
     assert_ne!(new.vp, ViewportId::ROOT);
     assert_eq!(hub.mru[0], new.vp, "the new window is the one used last");
     assert_eq!(hub.focus_next, Some(new.vp), "the new window is not asked to take the focus");
@@ -513,7 +513,7 @@ fn tearing_off_the_last_tab_of_a_window_is_a_moved_window() {
     let mut hub = hub_of(&["single-page.pdf"]);
     hub.tear_off(&ctx, 0, 0, pos2(900.0, 300.0), vec2(1240.0, 860.0));
     assert_eq!(hub.windows.len(), 2);
-    assert_eq!(hub.windows[0].app.win.leaving, Some(Leaving::Window), "the emptied window stays open");
+    assert_eq!(hub.windows[0].app.hub_state.win.leaving, Some(Leaving::Window), "the emptied window stays open");
     assert!(!hub.settle(&ctx), "the program ended with a window still open");
     assert_eq!(hub.windows.len(), 1, "the emptied window did not close");
     assert_eq!(name_of(hub.windows[0].app.tab()), "single-page.pdf");
@@ -544,7 +544,7 @@ fn merging_moves_the_tab_and_the_emptied_window_goes() {
     assert_eq!(name_of(&hub.windows[1].app.tabs[0]), "single-page.pdf");
     assert_eq!(name_of(&hub.windows[1].app.tabs[1]), "two-column.pdf");
     assert_eq!(hub.windows[1].app.active_tab, 0, "the tab that arrived is not showing");
-    assert_eq!(hub.windows[0].app.win.leaving, Some(Leaving::Window));
+    assert_eq!(hub.windows[0].app.hub_state.win.leaving, Some(Leaving::Window));
     assert!(!hub.settle(&ctx));
     assert_eq!(hub.windows.len(), 1);
     assert_eq!(hub.windows[0].vp, second);
@@ -556,10 +556,10 @@ fn closing_one_of_two_windows_leaves_the_program_running_and_the_last_ends_it() 
     let ctx = egui::Context::default();
     let mut hub = hub_of(&["single-page.pdf", "two-column.pdf"]);
     hub.tear_off(&ctx, 0, 1, pos2(900.0, 300.0), vec2(1240.0, 860.0));
-    hub.windows[1].app.win.leaving = Some(Leaving::Window);
+    hub.windows[1].app.hub_state.win.leaving = Some(Leaving::Window);
     assert!(!hub.settle(&ctx), "the program ended with a window still open");
     assert_eq!(hub.windows.len(), 1);
-    hub.windows[0].app.win.leaving = Some(Leaving::Window);
+    hub.windows[0].app.hub_state.win.leaving = Some(Leaving::Window);
     assert!(hub.settle(&ctx), "the last window closed and the program did not end");
 }
 
@@ -575,22 +575,22 @@ fn a_quit_asks_about_the_unsaved_work_in_every_window_and_a_cancel_anywhere_stop
     hub.windows[0].app.submit("quit");
     assert_eq!(hub.windows[0].app.tab().closing, Some(crate::Closing::Program));
     assert!(!hub.settle(&ctx));
-    assert!(hub.windows[1].app.win.leaving.is_none() && hub.windows[1].app.tab().closing.is_none(), "asked too soon");
+    assert!(hub.windows[1].app.hub_state.win.leaving.is_none() && hub.windows[1].app.tab().closing.is_none(), "asked too soon");
 
     // It is answered (Discard): that window agrees, and the next is asked.
     hub.windows[0].app.tab_mut().closing = None;
     hub.windows[0].app.finish_closing(crate::Closing::Program, &ctx);
-    assert_eq!(hub.windows[0].app.win.leaving, Some(Leaving::Program));
+    assert_eq!(hub.windows[0].app.hub_state.win.leaving, Some(Leaving::Program));
     assert!(!hub.settle(&ctx));
     assert_eq!(hub.windows[1].app.tab().closing, Some(crate::Closing::Program), "the other window was not asked");
     assert!(hub.quitting);
 
     // Cancel there: the quit is off, and the first window is not left half gone.
     hub.windows[1].app.tab_mut().closing = None;
-    hub.windows[1].app.win.quit_cancelled = true;
+    hub.windows[1].app.hub_state.win.quit_cancelled = true;
     assert!(!hub.settle(&ctx));
     assert!(!hub.quitting);
-    assert!(hub.windows[0].app.win.leaving.is_none(), "a window that agreed to a quit that was cancelled still wants to go");
+    assert!(hub.windows[0].app.hub_state.win.leaving.is_none(), "a window that agreed to a quit that was cancelled still wants to go");
     assert_eq!(hub.windows.len(), 2);
     assert!(hub.windows[1].app.tab_with_unsaved_work().is_some(), "the unsaved work is still there");
 
@@ -610,15 +610,15 @@ fn an_update_staged_in_one_window_is_carried_out_by_the_program() {
     let mut hub = hub_of(&["single-page.pdf", "two-column.pdf"]);
     hub.tear_off(&ctx, 0, 1, pos2(900.0, 300.0), vec2(1240.0, 860.0));
     let source = std::env::temp_dir();
-    hub.windows[1].app.pending_update = Some(source.clone());
+    hub.windows[1].app.hub_state.pending_update = Some(source.clone());
     hub.windows[1].app.submit("quit");
     assert!(!hub.settle(&ctx), "the other window has not been asked yet");
     assert_eq!(hub.pending_update, Some(source.clone()), "the staged update was forgotten before the program could exit");
     // A cancel anywhere takes the update with it.
-    hub.windows[0].app.win.quit_cancelled = true;
+    hub.windows[0].app.hub_state.win.quit_cancelled = true;
     assert!(!hub.settle(&ctx));
     assert!(hub.pending_update.is_none(), "an update survived a cancelled quit");
-    assert!(hub.windows[1].app.pending_update.is_none());
+    assert!(hub.windows[1].app.hub_state.pending_update.is_none());
 }
 
 #[test]
@@ -628,7 +628,7 @@ fn closing_the_last_tab_closes_the_window_but_not_the_other_windows() {
     hub.tear_off(&ctx, 0, 1, pos2(900.0, 300.0), vec2(1240.0, 860.0));
     // The × on the only tab of the new window.
     hub.windows[1].app.close_tab(0);
-    assert_eq!(hub.windows[1].app.win.leaving, Some(Leaving::Window));
+    assert_eq!(hub.windows[1].app.hub_state.win.leaving, Some(Leaving::Window));
     assert!(!hub.settle(&ctx));
     assert_eq!(hub.windows.len(), 1);
     assert_eq!(name_of(hub.windows[0].app.tab()), "single-page.pdf");
@@ -642,11 +642,11 @@ fn a_window_with_unsaved_work_asks_before_it_closes_and_only_about_its_own_tabs(
     hub.windows[0].app.submit("l 10,10 100,100");
     // The second window's close button, with nothing unsaved in it, closes it.
     hub.windows[1].app.ask_to_leave(Leaving::Window);
-    assert_eq!(hub.windows[1].app.win.leaving, Some(Leaving::Window));
+    assert_eq!(hub.windows[1].app.hub_state.win.leaving, Some(Leaving::Window));
     // The first window's, with a mark in it, asks — and the other window is not
     // part of the question.
     hub.windows[0].app.ask_to_leave(Leaving::Window);
-    assert!(hub.windows[0].app.win.leaving.is_none(), "a window with unsaved work said it was leaving without asking");
+    assert!(hub.windows[0].app.hub_state.win.leaving.is_none(), "a window with unsaved work said it was leaving without asking");
     assert_eq!(hub.windows[0].app.tab().closing, Some(crate::Closing::Program));
     assert!(!hub.settle(&ctx));
     assert_eq!(hub.windows.len(), 1, "the clean window did not close, or the dirty one did");
@@ -658,7 +658,7 @@ fn a_window_with_unsaved_work_asks_before_it_closes_and_only_about_its_own_tabs(
     hub.windows[0].app.ask_to_leave(Leaving::Window);
     hub.windows[0].app.tab_mut().closing = None;
     hub.windows[0].app.finish_closing(crate::Closing::Program, &ctx);
-    assert_eq!(hub.windows[0].app.win.leaving, Some(Leaving::Window));
+    assert_eq!(hub.windows[0].app.hub_state.win.leaving, Some(Leaving::Window));
     assert!(hub.settle(&ctx));
 }
 
@@ -668,15 +668,15 @@ fn what_is_the_programs_is_one_copy_whichever_window_is_working() {
     let mut hub = hub_of(&["single-page.pdf", "two-column.pdf"]);
     hub.tear_off(&ctx, 0, 1, pos2(900.0, 300.0), vec2(1240.0, 860.0));
     // Something copied in one window is there to paste in the other.
-    hub.with_window(0, |a| a.object_clipboard = Some(crate::ObjectClipboard::Shapes(Vec::new())));
-    assert!(hub.with_window(1, |b| b.object_clipboard.is_some()), "a copy made in one window cannot be pasted in the other");
+    hub.with_window(0, |a| a.clipboard_state.object_clipboard = Some(crate::ObjectClipboard::Shapes(Vec::new())));
+    assert!(hub.with_window(1, |b| b.clipboard_state.object_clipboard.is_some()), "a copy made in one window cannot be pasted in the other");
     // A document opened in one window is in the recent list of the other.
-    hub.with_window(0, |a| a.recent.record(std::path::Path::new("some-recent.pdf"), 3, 1));
-    let seen = hub.with_window(1, |b| b.recent.entries.len());
-    assert_eq!(seen, hub.with_window(0, |a| a.recent.entries.len()), "two windows, two recent lists");
+    hub.with_window(0, |a| a.library_state.recent.record(std::path::Path::new("some-recent.pdf"), 3, 1));
+    let seen = hub.with_window(1, |b| b.library_state.recent.entries.len());
+    assert_eq!(seen, hub.with_window(0, |a| a.library_state.recent.entries.len()), "two windows, two recent lists");
     assert!(seen >= 1);
     // And outside a frame a window holds none of it: it is on loan.
-    assert!(hub.windows[1].app.recent.entries.is_empty() && hub.windows[1].app.object_clipboard.is_none());
+    assert!(hub.windows[1].app.library_state.recent.entries.is_empty() && hub.windows[1].app.clipboard_state.object_clipboard.is_none());
 }
 
 // -- documents handed over from outside, with several windows ------------------
@@ -765,11 +765,11 @@ fn carrying_a_tab_lifts_it_and_letting_go_reports_where() {
 
     press_and_carry(&mut h, tab, &[tab + vec2(30.0, 5.0), pos2(1700.0, 400.0)]);
     assert!(h.state().dragging_tab(1), "the tab was not picked up");
-    assert!(h.state().win.out.is_none(), "it was let go before it was");
+    assert!(h.state().hub_state.win.out.is_none(), "it was let go before it was");
 
     h.drop_at(pos2(1700.0, 400.0));
     h.run_steps(1);
-    let out = h.state_mut().win.out.take().expect("letting go did not report");
+    let out = h.state_mut().hub_state.win.out.take().expect("letting go did not report");
     assert_eq!(out.tab, 1);
     // In the window's own points, plus where the window is on the screen.
     assert_eq!(out.screen, Some(pos2(300.0 + 1700.0, 200.0 + 400.0)));
@@ -836,18 +836,18 @@ fn a_tab_carried_over_this_window_from_another_marks_its_place_or_outlines_the_w
     assert_eq!(bars(&h), 0);
 
     // Over the strip, between the two tabs: a bar there.
-    h.state_mut().win.hint = Some(DropHint { over_strip: true, at: 1 });
+    h.state_mut().hub_state.win.hint = Some(DropHint { over_strip: true, at: 1 });
     h.run_steps(1);
     assert_eq!(bars(&h), 1, "no marker for the place a tab would take");
 
     // Over the page: the whole window is outlined instead, and there is no bar.
-    h.state_mut().win.hint = Some(DropHint { over_strip: false, at: 2 });
+    h.state_mut().hub_state.win.hint = Some(DropHint { over_strip: false, at: 2 });
     h.run_steps(1);
     assert_eq!(bars(&h), 0);
     let stroked = h.output().shapes.iter().any(|s| matches!(&s.shape, egui::Shape::Rect(r) if r.stroke.color == marker && r.stroke.width >= 3.0));
     assert!(stroked, "the window was not outlined");
 
-    h.state_mut().win.hint = None;
+    h.state_mut().hub_state.win.hint = None;
     h.run_steps(1);
     assert_eq!(bars(&h), 0);
 }
@@ -869,14 +869,14 @@ fn escape_while_carrying_puts_the_tab_back_and_is_not_also_an_escape_elsewhere()
     h.run_steps(1);
     // (egui ends the drag itself on Escape, in the same frame, so the tab is
     // put down without being reported — what matters is that nothing came of it.)
-    assert!(h.state().win.drag.is_none(), "the tab is still lifted after Escape");
-    assert!(h.state().win.out.is_none(), "Escape was reported as a release");
+    assert!(h.state().hub_state.win.drag.is_none(), "the tab is still lifted after Escape");
+    assert!(h.state().hub_state.win.out.is_none(), "Escape was reported as a release");
     assert!(h.state_mut().tab_mut().tool.is_some(), "the Escape also put the armed tool down");
 
     h.drop_at(pos2(1700.0, 400.0));
     h.run_steps(2);
-    assert!(h.state().win.out.is_none(), "a cancelled drag still reported a release");
-    assert!(h.state().win.drag.is_none());
+    assert!(h.state().hub_state.win.out.is_none(), "a cancelled drag still reported a release");
+    assert!(h.state().hub_state.win.drag.is_none());
     assert_eq!(h.state().tabs.len(), 2);
 }
 
@@ -891,11 +891,11 @@ fn a_cancelled_drag_is_never_reported_when_it_is_let_go() {
     h.run_steps(2);
     let tab = tab_centre(&h, "two-column.pdf");
     press_and_carry(&mut h, tab, &[tab + vec2(40.0, 10.0), pos2(1700.0, 400.0)]);
-    h.state_mut().win.drag.as_mut().expect("lifted").cancelled = true;
+    h.state_mut().hub_state.win.drag.as_mut().expect("lifted").cancelled = true;
     h.drop_at(pos2(1700.0, 400.0));
     h.run_steps(2);
-    assert!(h.state().win.out.is_none(), "a cancelled drag was reported when let go");
-    assert!(h.state().win.drag.is_none());
+    assert!(h.state().hub_state.win.out.is_none(), "a cancelled drag was reported when let go");
+    assert!(h.state().hub_state.win.drag.is_none());
 }
 
 #[test]
@@ -912,7 +912,7 @@ fn a_press_on_the_close_button_does_not_pick_the_tab_up() {
         pos2(r.right() - 20.0, tab.y)
     };
     press_and_carry(&mut h, close, &[close + vec2(40.0, 10.0), close + vec2(300.0, 80.0)]);
-    assert!(h.state().win.drag.is_none(), "a drag that began on the × picked the tab up");
+    assert!(h.state().hub_state.win.drag.is_none(), "a drag that began on the × picked the tab up");
 }
 
 #[test]
@@ -929,7 +929,7 @@ fn a_click_on_a_tab_still_selects_it() {
     h.drop_at(first);
     h.run_steps(2);
     assert_eq!(h.state().active_tab, 0, "a click on a tab no longer selects it");
-    assert!(h.state().win.out.is_none() && h.state().win.drag.is_none());
+    assert!(h.state().hub_state.win.out.is_none() && h.state().hub_state.win.drag.is_none());
 }
 
 #[test]
@@ -942,7 +942,7 @@ fn a_drag_with_no_window_geometry_reports_nothing_rather_than_guess() {
     press_and_carry(&mut h, tab, &[tab + vec2(30.0, 5.0), pos2(1700.0, 400.0)]);
     h.drop_at(pos2(1700.0, 400.0));
     h.run_steps(1);
-    let out = h.state_mut().win.out.take().expect("a release was not reported");
+    let out = h.state_mut().hub_state.win.out.take().expect("a release was not reported");
     assert_eq!(out.screen, None);
     // Which the hub does nothing with.
     let ctx = h.ctx.clone();
@@ -963,9 +963,9 @@ fn the_cancel_button_of_the_question_ends_a_quit_that_was_walking_the_windows() 
     h.run_steps(2);
     h.get_by_label("Cancel").click();
     h.run_steps(2);
-    assert!(h.state().win.quit_cancelled, "Cancel did not say so — a quit would ask the next window anyway");
+    assert!(h.state().hub_state.win.quit_cancelled, "Cancel did not say so — a quit would ask the next window anyway");
     assert!(h.state().tab().closing.is_none());
-    assert!(h.state().win.leaving.is_none());
+    assert!(h.state().hub_state.win.leaving.is_none());
 }
 
 #[test]
@@ -973,7 +973,7 @@ fn the_question_says_window_when_there_is_another_window() {
     use egui_kittest::kittest::Queryable;
     let mut app = app_with(&["single-page.pdf"]);
     app.submit("l 10,10 100,100");
-    app.win.others = 1;
+    app.hub_state.win.others = 1;
     app.ask_to_leave(Leaving::Window);
     let mut h = harness_from(app);
     h.run_steps(2);
@@ -991,8 +991,8 @@ fn the_question_says_window_when_there_is_another_window() {
 fn the_first_window_keeps_its_command_box_and_the_others_have_their_own() {
     let mut a = PagifyApp::new(None);
     let mut b = PagifyApp::build(None, true);
-    b.win.serial = 1;
-    a.win.serial = 0;
+    b.hub_state.win.serial = 1;
+    a.hub_state.win.serial = 0;
     assert_eq!(a.command_id(), egui::Id::new(crate::COMMAND_INPUT));
     assert_ne!(a.command_id(), b.command_id(), "two windows' command boxes share one text state");
 }
@@ -1008,7 +1008,7 @@ fn press_the_close_button(h: &mut egui_kittest::Harness<'static, PagifyApp>) {
 fn the_close_button_of_a_window_with_nothing_unsaved_says_the_window_is_leaving() {
     let mut h = harness_from(app_with(&["single-page.pdf", "two-column.pdf"]));
     press_the_close_button(&mut h);
-    assert_eq!(h.state().win.leaving, Some(Leaving::Window));
+    assert_eq!(h.state().hub_state.win.leaving, Some(Leaving::Window));
     assert_eq!(h.state().tabs.len(), 2, "the window took its own tabs down: that is the hub's to do");
 }
 
@@ -1021,10 +1021,10 @@ fn the_close_button_of_a_window_with_unsaved_work_asks_instead_of_leaving() {
     app.active_tab = 1;
     let mut h = harness_from(app);
     press_the_close_button(&mut h);
-    assert!(h.state().win.leaving.is_none(), "a window with unsaved work said it was leaving");
+    assert!(h.state().hub_state.win.leaving.is_none(), "a window with unsaved work said it was leaving");
     assert_eq!(h.state().active_tab, 0, "the question is not about the tab with the work in it");
     assert_eq!(h.state().tab().closing, Some(crate::Closing::Program));
-    assert_eq!(h.state().win.closing_leaves, Leaving::Window, "the button of one window is not a quit");
+    assert_eq!(h.state().hub_state.win.closing_leaves, Leaving::Window, "the button of one window is not a quit");
 }
 
 // -- the hub as eframe runs it ---------------------------------------------------
@@ -1141,7 +1141,7 @@ fn what_the_hub_does_with_each_kind_of_release() {
     let _ = ctx.run_ui(raw, |_| {});
     for w in &mut hub.windows {
         let n = w.app.tabs.len();
-        w.app.win.strip = Some(StripGeom {
+        w.app.hub_state.win.strip = Some(StripGeom {
             panel: rect(0.0, 0.0, 1000.0, 50.0),
             tabs: (0..n).map(|i| rect(10.0 + 110.0 * i as f32, 10.0, 110.0 + 110.0 * i as f32, 40.0)).collect(),
         });
@@ -1188,7 +1188,7 @@ fn two_windows_are_drawn_in_one_frame_each_with_its_own_tabs() {
     assert_eq!(h.get_all_by_label("two-column.pdf").count() >= 1, true);
     assert_eq!(h.state().windows[0].app.tabs.len(), 1);
     assert_eq!(h.state().windows[1].app.tabs.len(), 1);
-    assert_eq!(h.state().windows[0].app.win.others, 1);
+    assert_eq!(h.state().windows[0].app.hub_state.win.others, 1);
     // What is lent is back where it belongs after the frame.
-    assert!(h.state().windows.iter().all(|w| w.app.recent.entries.is_empty()));
+    assert!(h.state().windows.iter().all(|w| w.app.library_state.recent.entries.is_empty()));
 }

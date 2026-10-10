@@ -342,7 +342,7 @@ impl crate::PagifyApp {
                                     return BlockOpen { opened: Some(message), alone: None, seed_is_drawn_lettering: false };
                                 }
                                 Err(why) => {
-                                    self.session_log.record(
+                                    self.recording_state.session_log.record(
                                         "pick-note",
                                         &format!("block {block} not opened ({why}); picking the run alone"),
                                     );
@@ -353,7 +353,7 @@ impl crate::PagifyApp {
                     } else {
                         seed_is_drawn_lettering = true;
                         alone = Some("its line is partly drawn as shapes, which cannot be retyped here");
-                        self.session_log.record(
+                        self.recording_state.session_log.record(
                             "pick-note",
                             &format!(
                                 "block {block} not opened (the clicked words are on line {line}, which has drawn \
@@ -389,7 +389,7 @@ impl crate::PagifyApp {
         // run alone.
         let (pb, run) =
             if let Some(weight) = heavy {
-                self.session_log.record(
+                self.recording_state.session_log.record(
                     "pick-note",
                     &format!(
                         "page {} holds {} objects, {} of them text: too many to read for paragraphs; picking the run alone",
@@ -437,7 +437,7 @@ impl crate::PagifyApp {
                     (Some(pb), run)
                 }
                 Err(why) => {
-                    self.session_log.record(
+                    self.recording_state.session_log.record(
                         "pick-note",
                         &format!("the page's text could not be read in one pass ({why}); picking the run alone"),
                     );
@@ -937,7 +937,7 @@ impl crate::PagifyApp {
         }
         let exec_time = t_exec.elapsed();
         let inner = self.tab_mut().doc.as_ref().map(|doc| doc.session.take_last_batch_timing());
-        self.session_log.record(
+        self.recording_state.session_log.record(
             "info",
             &format!(
                 "paragraph apply breakdown: {line_count} lines, build {build_time:?}, execute {exec_time:?}"
@@ -945,7 +945,7 @@ impl crate::PagifyApp {
         );
         if let Some(inner) = inner {
             for (name, d) in inner {
-                self.session_log.record("info", &format!("  pdf_core: {name} {d:?}"));
+                self.recording_state.session_log.record("info", &format!("  pdf_core: {name} {d:?}"));
             }
         }
 

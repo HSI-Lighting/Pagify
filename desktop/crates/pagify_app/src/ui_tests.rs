@@ -1328,7 +1328,7 @@ fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
     let path = std::env::temp_dir()
         .join(format!("pagify-test-signatures-{}-real-drag.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    h.state_mut().signatures = Default::default();
+    h.state_mut().library_state.signatures = Default::default();
     h.state_mut().library_state.signatures_path = Some(path.clone());
     h.state_mut()
         .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
@@ -1385,7 +1385,7 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
     let path = std::env::temp_dir()
         .join(format!("pagify-test-signatures-{}-real-rotate.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    h.state_mut().signatures = Default::default();
+    h.state_mut().library_state.signatures = Default::default();
     h.state_mut().library_state.signatures_path = Some(path.clone());
     h.state_mut()
         .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
@@ -1696,7 +1696,7 @@ fn clicking_later_dismisses_the_update_prompt_without_updating() {
     h.run_steps(1);
 
     assert!(h.state().update_state.update_available.is_none(), "Later should have dismissed the prompt");
-    assert!(h.state().pending_update.is_none(), "Later must never stage an update");
+    assert!(h.state().hub_state.pending_update.is_none(), "Later must never stage an update");
     assert!(h.state().tab().closing.is_none(), "Later must never start a quit");
 }
 
@@ -1722,7 +1722,7 @@ fn clicking_update_now_stages_it_and_asks_about_unsaved_work_first() {
     h.run_steps(1);
 
     assert!(h.state().update_state.update_available.is_none(), "the prompt should have closed");
-    assert_eq!(h.state().pending_update, Some(source), "Update now should have staged the update");
+    assert_eq!(h.state().hub_state.pending_update, Some(source), "Update now should have staged the update");
     assert_eq!(
         h.state().tab().closing,
         Some(Closing::Program),
@@ -1900,7 +1900,7 @@ fn the_home_screen_renders_the_outlined_fonts_panel() {
     // when nothing has been added, and it was reading the settings file of
     // whoever ran it — so adding a font to your own copy of the program
     // broke the suite. What is on this machine is not what is under test.
-    app.outlined_fonts = Default::default();
+    app.faces_state.outlined_fonts = Default::default();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1400.0, 1000.0))
         .build_ui_state(
@@ -1932,7 +1932,7 @@ fn the_home_screen_renders_the_outlined_fonts_panel() {
 #[test]
 fn the_command_box_is_focused_on_a_fresh_home_screen() {
     let mut app = PagifyApp::new(None);
-    app.outlined_fonts = Default::default();
+    app.faces_state.outlined_fonts = Default::default();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1400.0, 1000.0))
         .build_ui_state(
@@ -2003,7 +2003,7 @@ fn a_configured_font_shows_its_name_and_a_way_to_remove_it() {
             },
             app,
         );
-    h.state_mut().outlined_fonts.paths = vec![PathBuf::from(arial)];
+    h.state_mut().faces_state.outlined_fonts.paths = vec![PathBuf::from(arial)];
     h.run_steps(4);
 
     h.get_by_label_contains("Arial.ttf");
@@ -2495,7 +2495,7 @@ fn a_page_selected_in_the_plain_rail_copies_without_opening_organize() {
     h.run_steps(3);
 
     assert!(
-        h.state().page_clipboard.is_some(),
+        h.state().clipboard_state.page_clipboard.is_some(),
         "⌘C on a page selected outside Organize should have filled the page clipboard"
     );
 }
@@ -2536,7 +2536,7 @@ fn copying_still_works_after_several_real_drag_reorders() {
 
     let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
     assert!(
-        h.state().page_clipboard.is_some(),
+        h.state().clipboard_state.page_clipboard.is_some(),
         "⌘C after several real drag-reorders should still copy — said: {said:?}"
     );
 }
@@ -2564,7 +2564,7 @@ fn copying_works_after_a_real_plain_click_on_a_thumbnail() {
     h.run_steps(3);
 
     let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
-    assert!(h.state().page_clipboard.is_some(), "⌘C after a plain click should copy — said: {said:?}");
+    assert!(h.state().clipboard_state.page_clipboard.is_some(), "⌘C after a plain click should copy — said: {said:?}");
 }
 
 /// The typed command, not the keyboard shortcut — §7 says they must
@@ -2579,7 +2579,7 @@ fn the_typed_copy_command_also_copies_a_selected_page() {
     h.run_steps(2);
 
     assert!(
-        h.state().page_clipboard.is_some(),
+        h.state().clipboard_state.page_clipboard.is_some(),
         "typing `copy` with a page selected should copy it, same as ⌘C"
     );
 }
@@ -2598,7 +2598,7 @@ fn the_typed_paste_command_exists_and_pastes_a_copied_page() {
     h.state_mut().tab_mut().organize.organize_selected = vec![0];
     h.state_mut().submit("copy");
     h.run_steps(1);
-    assert!(h.state().page_clipboard.is_some(), "the copy half of this didn't take");
+    assert!(h.state().clipboard_state.page_clipboard.is_some(), "the copy half of this didn't take");
 
     h.state_mut().submit("paste");
     h.run_steps(1);
@@ -2629,7 +2629,7 @@ fn pasting_after_a_real_copy_adds_a_page() {
 
     h.event(egui::Event::Copy);
     h.run_steps(3);
-    assert!(h.state().page_clipboard.is_some(), "the copy half of this didn't take");
+    assert!(h.state().clipboard_state.page_clipboard.is_some(), "the copy half of this didn't take");
 
     h.event(egui::Event::Paste("placeholder".to_string()));
     h.run_steps(3);
@@ -2671,7 +2671,7 @@ fn the_shortcut_still_copies_and_pastes_while_the_command_box_has_focus() {
     h.event(egui::Event::Copy);
     h.run_steps(3);
     assert!(
-        h.state().page_clipboard.is_some(),
+        h.state().clipboard_state.page_clipboard.is_some(),
         "\u{2318}C should still copy the selected page while the command box has focus"
     );
 
@@ -3383,8 +3383,8 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
     let mut h = harness("two-column.pdf");
     let dir = std::env::temp_dir().join(format!("pagify-test-chain-click-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    h.state_mut().session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let log_path = h.state().session_log.path().expect("the scratch folder is writable").to_path_buf();
+    h.state_mut().recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let log_path = h.state().recording_state.session_log.path().expect("the scratch folder is writable").to_path_buf();
 
     let runs = h.state_mut().tab_mut().doc.as_ref().unwrap().session.text_runs(0).expect("runs");
     let left: std::collections::BTreeSet<usize> =

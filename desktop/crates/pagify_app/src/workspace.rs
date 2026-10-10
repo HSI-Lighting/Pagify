@@ -81,7 +81,7 @@ impl crate::PagifyApp {
     /// to decide: a window going is only that, and the program ends when no
     /// window is left (see [`hub::plan`]).
     pub(crate) fn leave(&mut self, how: hub::Leaving) {
-        self.win.leaving = Some(how);
+        self.hub_state.win.leaving = Some(how);
     }
 
     /// Carry out an update staged by **Update now**, then exit — what the
@@ -175,9 +175,9 @@ impl crate::PagifyApp {
                 if self.tab_mut().ribbon == Tab::File {
                     self.tab_mut().ribbon = Tab::Home;
                 }
-                self.recent.record(session.path(), page_count, pagify_shell::recent::now());
+                self.library_state.recent.record(session.path(), page_count, pagify_shell::recent::now());
                 if !cfg!(test) {
-                    self.recent.save();
+                    self.library_state.recent.save();
                 }
                 self.cmd.prompt_mut().document = Some(name.clone());
                 self.say_info(format!(
@@ -244,7 +244,7 @@ impl crate::PagifyApp {
             }
             Err(e) => {
                 // The raw error goes in the session log whatever is shown.
-                self.session_log.record("open-error", &format!("{path}: {e}"));
+                self.recording_state.session_log.record("open-error", &format!("{path}: {e}"));
                 match e {
                     // The library itself is missing: where it was looked for is
                     // the one useful thing to say.

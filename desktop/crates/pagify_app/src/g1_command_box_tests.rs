@@ -254,7 +254,7 @@ fn a_click_that_only_fills_the_box_is_not_recorded_and_keeps_the_armed_tool() {
 #[test]
 fn the_extract_card_with_nothing_open_says_to_open_a_pdf_first() {
     let mut app = PagifyApp::new(None);
-    app.outlined_fonts = Default::default();
+    app.faces_state.outlined_fonts = Default::default();
     let mut h = harness_from(app);
     assert!(h.state().tab().doc.is_none());
 

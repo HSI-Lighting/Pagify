@@ -390,7 +390,7 @@ fn pasting_words_picks_them_up_and_a_click_puts_them_down() {
     h.event(egui::Event::Copy);
     h.run_steps(2);
     assert!(
-        matches!(&h.state().object_clipboard, Some(ObjectClipboard::Text { lines, .. }) if lines == &[words.clone()]),
+        matches!(&h.state().clipboard_state.object_clipboard, Some(ObjectClipboard::Text { lines, .. }) if lines == &[words.clone()]),
         "the words were not copied as words"
     );
 
@@ -502,7 +502,7 @@ fn a_picture_from_the_page_is_copied_and_pasted_where_clicked() {
 
     h.event(egui::Event::Copy);
     h.run_steps(2);
-    assert!(matches!(h.state().object_clipboard, Some(ObjectClipboard::Image { .. })), "the picture was not copied");
+    assert!(matches!(h.state().clipboard_state.object_clipboard, Some(ObjectClipboard::Image { .. })), "the picture was not copied");
     h.event(egui::Event::Paste(COPIED_IN_PAGIFY.into()));
     h.run_steps(2);
     assert!(h.state().clipboard_state.paste_ghost.is_some());
@@ -520,7 +520,7 @@ fn copying_in_the_editor_with_nothing_selected_takes_the_whole_text() {
     h.event(egui::Event::Copy);
     h.run_steps(2);
     assert!(
-        matches!(&h.state().object_clipboard, Some(ObjectClipboard::Text { lines, .. }) if lines == &["Hello there".to_string()]),
+        matches!(&h.state().clipboard_state.object_clipboard, Some(ObjectClipboard::Text { lines, .. }) if lines == &["Hello there".to_string()]),
         "the run was not copied whole"
     );
 }

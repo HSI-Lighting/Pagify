@@ -51,8 +51,8 @@ fn said(app: &PagifyApp) -> String {
 fn log_into(app: &mut PagifyApp, tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("pagify-test-hardening-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let path = app.session_log.path().expect("the scratch folder is writable").to_path_buf();
+    app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let path = app.recording_state.session_log.path().expect("the scratch folder is writable").to_path_buf();
     (dir, path)
 }
 

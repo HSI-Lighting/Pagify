@@ -55,7 +55,7 @@ impl crate::PagifyApp {
                 // unsaved" check of its own. `exit_program` is where it actually
                 // happens, once every tab has agreed it is safe to close.
                 self.update_state.update_available = None;
-                self.pending_update = Some(source);
+                self.hub_state.pending_update = Some(source);
                 self.act(Verb::Quit { force: false });
             }
         }
@@ -623,7 +623,7 @@ impl crate::PagifyApp {
         let mut chosen: Option<String> = None;
         let mut doomed: Option<String> = None;
         let mut add = false;
-        let kept: Vec<String> = self.predefined.entries().to_vec();
+        let kept: Vec<String> = self.library_state.predefined.entries().to_vec();
 
         egui::Modal::new(egui::Id::new("snippet-list")).show(ctx, |ui| {
             ui.set_width(520.0);
@@ -703,21 +703,21 @@ impl crate::PagifyApp {
         if add {
             let typed = panel.adding.trim().to_string();
             if !typed.is_empty() {
-                self.predefined.remember(&typed);
+                self.library_state.predefined.remember(&typed);
                 match self.keep_snippets() {
                     Ok(()) => {
                         panel.adding.clear();
                         self.say_info(format!("kept \"{}\".", short(&typed)));
                     }
                     Err(e) => {
-                        self.predefined.forget(&typed);
+                        self.library_state.predefined.forget(&typed);
                         self.say_error(e);
                     }
                 }
             }
         }
         if let Some(text) = doomed {
-            if self.predefined.forget(&text) {
+            if self.library_state.predefined.forget(&text) {
                 match self.keep_snippets() {
                     Ok(()) => self.say_info(format!("forgot \"{}\".", short(&text))),
                     Err(e) => self.say_error(e),
@@ -747,8 +747,8 @@ impl crate::PagifyApp {
 
         let mut done = false;
         let mut action: Option<ListAction> = None;
-        let current = self.signatures.current().map(|s| s.name.clone());
-        let entries = self.signatures.entries().to_vec();
+        let current = self.library_state.signatures.current().map(|s| s.name.clone());
+        let entries = self.library_state.signatures.entries().to_vec();
 
         egui::Modal::new(egui::Id::new("signature-list")).show(ctx, |ui| {
             ui.set_width(560.0);
@@ -910,7 +910,7 @@ impl crate::PagifyApp {
     fn apply_signature_list_action(&mut self, panel: &mut SignatureList, action: Option<ListAction>) -> bool {
         match action {
             Some(ListAction::Use(name)) => {
-                if self.signatures.choose(&name) {
+                if self.library_state.signatures.choose(&name) {
                     match self.keep_signatures() {
                         Ok(()) => self.say_info(format!("`signature` now places \"{name}\".")),
                         Err(e) => self.say_error(e),
@@ -919,7 +919,7 @@ impl crate::PagifyApp {
             }
             Some(ListAction::Forget(name)) => {
                 panel.doomed = None;
-                if self.signatures.remove(&name) {
+                if self.library_state.signatures.remove(&name) {
                     match self.keep_signatures() {
                         Ok(()) => self.say_info(format!(
                             "\"{name}\" is gone — a drawing is not something undo reaches."
@@ -931,7 +931,7 @@ impl crate::PagifyApp {
             Some(ListAction::Rename(from, to)) => {
                 panel.renaming = None;
                 if !from.eq_ignore_ascii_case(&to) {
-                    match self.signatures.rename(&from, &to) {
+                    match self.library_state.signatures.rename(&from, &to) {
                         Ok(()) => match self.keep_signatures() {
                             Ok(()) => self.say_info(format!("\"{from}\" is now \"{to}\".")),
                             Err(e) => self.say_error(e),
@@ -942,7 +942,7 @@ impl crate::PagifyApp {
             }
             Some(ListAction::Draw) => {
                 self.library_state.pad = Some(SignaturePad {
-                    name: format!("Signature {}", self.signatures.entries().len() + 1),
+                    name: format!("Signature {}", self.library_state.signatures.entries().len() + 1),
                     then_place: false,
                     ..SignaturePad::default()
                 });
