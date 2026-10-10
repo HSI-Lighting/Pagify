@@ -1253,6 +1253,7 @@ impl Case {
     /// Internal consistency of the expectations (they must be a partition of the page's fragments).
     fn consistency(&self) -> Vec<String> {
         let mut out: Vec<String> = self.consistency_basics();
+        let page = &self.page;
         let free: HashSet<&str> = self.free.iter().map(|s| s.as_str()).collect();
         let frag_labels: BTreeSet<&str> = page.frag_labels.iter().map(|s| s.as_str()).collect();
         for l in &self.free {
