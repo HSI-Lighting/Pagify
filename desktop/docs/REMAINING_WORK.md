@@ -117,11 +117,15 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   `rotation`/`view` into it too, then the scoped pass for `selected`/
   `group`/`grab`/`marquee` (`SelectionState`), and finally `secure_state`
   (9 passcode/redaction fields), `undo_state` (3) and `tool_state` (2).
-  **`DocTab` is at 20 fields — its 25 target is met.** `PagifyApp` is
-  still ~53 (target 15): its groups (`object_clipboard`/`paste_ghost`/
-  `paste_count`/`page_clipboard` → a `Clipboard` group; editor-face and
-  font fields → a `Faces` group; update/recorder/session-log → `AppState`)
-  are the next fold. `Doc` already delegates caches.
+  **`DocTab` is at 20 fields — its 25 target is met.** `PagifyApp` is at
+  **41** (target 15): `FacesState` (10), `UpdateState` (2) and a partial
+  `ClipboardState` (3) are in. Remaining groups: the clipboard fields that
+  collide with `hub.rs`'s own (`object_clipboard`/`paste_count`/
+  `page_clipboard` — scoped pass), `predefined`/`signatures`/`pad`/
+  `signature_list`/`snippets` plus their paths, preferences (`defaults`,
+  `draw_fill`, `snaps`, `ortho`, `grid_pt`), the render worker trio, the
+  UI toggles, and `pending_update`/`handover`/`win`. `Doc` already
+  delegates caches.
 3. **Event-returning transitions — DONE.** `ToolEffect` +
   `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
   `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
