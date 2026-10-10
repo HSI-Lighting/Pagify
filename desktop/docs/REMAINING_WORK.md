@@ -101,13 +101,16 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   carry `Command::Verb(...)`/`ToolId` instead of bare strings, and
   `Tool::id()`/`ToolId` are in `tool.rs`. Keep the command-box string parser
   as the boundary where strings become ids.
-2. **State sub-structs and folding into `Tool`.** `DocTab` has ~84 fields,
-  `PagifyApp` ~53; targets are 25 and 15 (DESIGN_REVIEW §5). The tool-kind
-  migration itself is finished — the remaining Phase 2 work is moving the
-  *fields* `Tool` belongs with (`editing_run`, `new_text_box`, `paste_ghost`,
-  `grab`, `handle`, `markup_armed`/`object_tool`, the selections) into `Tool`
-  or a `ToolState`, then grouping the rest into `ViewState`/`EditState`/
-  `PanelsState`. `Doc` already delegates caches.
+2. **State sub-structs and folding into `Tool`.** `DocTab` has ~82 fields,
+  `PagifyApp` ~53; targets are 25 and 15 (DESIGN_REVIEW §5). **First slice
+  done:** `DocTab.edit: EditState` now holds `editing_run` and
+  `new_text_box` (commit `5d4a448`; `paste_ghost` stayed on `PagifyApp`,
+  where it is the app-wide clipboard ghost). Next: a `PanelsState` for the
+  dialog/modal fields (mostly uniquely named, same `.field` → `.panels.field`
+  recipe), then `ViewState` for page/zoom/scroll — those names collide with
+  locals, so they need targeted renames rather than a blunt rewrite — and
+  finally folding `grab`/`handle`/`markup_armed`/`object_tool`/selections
+  into `Tool`/`ToolState`. `Doc` already delegates caches.
 3. **Event-returning transitions — DONE.** `ToolEffect` +
   `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
   `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
