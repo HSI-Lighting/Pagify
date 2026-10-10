@@ -1248,7 +1248,7 @@ impl crate::PagifyApp {
         let Some(mut ask) = self.tab_mut().panels.extract_ask.take() else { return };
         let Some(count) = self.tab().doc.as_ref().map(|d| d.page_count) else { return };
         let current = self.tab().page;
-        let selected = self.tab().organize_selected.clone();
+        let selected = self.tab().organize.organize_selected.clone();
 
         let mut go = false;
         let mut cancel = false;

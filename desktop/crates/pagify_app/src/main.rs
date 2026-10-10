@@ -519,10 +519,18 @@ struct EditState {
 /// The modal and panel state a tab can have open: search, spelling and its
 /// scan, bookmarks, the link and article-box prompts, and the extract-range
 /// dialog. One group so a tab's panels are one thing to hand around.
+    /// A text selection, once made, waiting for the address to link it to —
+    /// set once `Tool::Link` resolves a drag. `Tool::Link` itself (not this
+    /// field) is what says the web-link tool is still armed: it stays
+    /// armed through this dialog being open, closed, or never opened at
+    /// all, which is why the two are separate.
 struct PanelsState {
     pending_link: Option<PendingLink>,
+    /// The Extract dialog, while it is open on this tab.
     extract_ask: Option<ExtractAsk>,
+    /// A drawn Article Box rectangle, waiting for its title.
     pending_article_box: Option<PendingArticleBox>,
+    /// The Bookmarks panel, while it is open.
     bookmark_panel: Option<BookmarkPanel>,
     find_needle: String,
     find_hits: Vec<(usize, std::ops::Range<usize>)>,
@@ -530,6 +538,54 @@ struct PanelsState {
     find_replace: Option<FindReplace>,
     spell_scan: Option<SpellScan>,
     spelling: Option<SpellCheck>,
+}
+
+/// The rail/Organize selection and drag: which page the rail follows, which
+/// pages are selected in the grid, and an in-flight drag in it.
+struct OrganizeState {
+    /// The page the current text selection belongs to.
+    ///
+    /// The selection used to be dropped whenever the current page changed, and
+    /// the current page now follows the scroll — so nudging the wheel after
+    /// highlighting something threw the highlight away, and ⌘C then had nothing
+    /// to copy. It survives; it just remembers which page it is on.
+    selection_page: usize,
+    /// Pages selected in the Organize grid, this tab's own — a page's index
+    /// means nothing on another tab's document, so unlike
+    /// [`PagifyApp::organize_open`] (one workspace-wide panel toggle) this
+    /// lives per tab.
+    organize_selected: Vec<usize>,
+    /// The page a plain click last landed on, the anchor a shift-click range
+    /// extends from — the standard file-manager range-select idiom.
+    organize_anchor: Option<usize>,
+    /// A drag-to-reorder in progress in the Organize grid.
+    organize_drag: Option<OrganizeDrag>,
+}
+
+/// Zoom settling: a new scale waits for its first render before the strip is
+/// drawn at it, so the page does not visibly resize twice.
+struct ZoomState {
+    /// Frames to leave the current page alone after a jump.
+    ///
+    /// A programmatic scroll takes a frame or two to arrive, and the
+    /// follow-the-scroll rule would read the *old* position in the meantime and
+    /// put the page straight back — which is why clicking a thumbnail appeared
+    /// to do nothing at all.
+    settling: u8,
+    /// **The page "Fit" and "Width" are worked out for.** Not the page being
+    /// scrolled past: that one follows the scroll, so a zoom taken from it is
+    /// an input to its own decision. With pages of different sizes the page
+    /// that fills the window set the zoom, the zoom decided which page fills
+    /// the window, and the view flipped between the two for ever with no input
+    /// at all (reported from use as "jumping around and glitches" on files of
+    /// different page dimensions). It changes only when the reader says so:
+    /// opening, going to a page, or choosing Fit / Width.
+    zoom_basis: usize,
+    /// The zoom drawn last frame, and when it last *changed* (egui's own clock,
+    /// in seconds) — what tells a zoom still moving from one that has stopped.
+    /// See [`ZOOM_SETTLE_SECS`].
+    last_drawn_zoom: f32,
+    zoom_changed_at: f64,
 }
 
 struct DocTab {
@@ -571,17 +627,9 @@ struct DocTab {
     /// other line with it. Well clear of `TEXT_LAYER_ID`, which recognition
     /// owns.
     next_text_id: i32,
-    /// A text selection, once made, waiting for the address to link it to —
-    /// set once `Tool::Link` resolves a drag. `Tool::Link` itself (not this
-    /// field) is what says the web-link tool is still armed: it stays
-    /// armed through this dialog being open, closed, or never opened at
-    /// all, which is why the two are separate.
     /// The modal and panel state: search, spelling, bookmarks, link and
     /// article-box prompts and the extract dialog — see [`PanelsState`].
     panels: PanelsState,
-    /// The Extract dialog, while it is open on this tab.
-    /// A drawn Article Box rectangle, waiting for its title.
-    /// The Bookmarks panel, while it is open.
     /// Every page this document's own outline points at — read once and
     /// kept current rather than re-walked every frame, so the small icon
     /// `draw_pages` paints in a bookmarked page's corner costs a `HashSet`
@@ -595,34 +643,10 @@ struct DocTab {
     /// there is nothing here for a save to carry and nothing a reopen needs
     /// to restore.
     joined_groups: Vec<JoinedGroup>,
-    /// The page the current text selection belongs to.
-    ///
-    /// The selection used to be dropped whenever the current page changed, and
-    /// the current page now follows the scroll — so nudging the wheel after
-    /// highlighting something threw the highlight away, and ⌘C then had nothing
-    /// to copy. It survives; it just remembers which page it is on.
-    selection_page: usize,
-    /// Frames to leave the current page alone after a jump.
-    ///
-    /// A programmatic scroll takes a frame or two to arrive, and the
-    /// follow-the-scroll rule would read the *old* position in the meantime and
-    /// put the page straight back — which is why clicking a thumbnail appeared
-    /// to do nothing at all.
-    settling: u8,
-    /// **The page "Fit" and "Width" are worked out for.** Not the page being
-    /// scrolled past: that one follows the scroll, so a zoom taken from it is
-    /// an input to its own decision. With pages of different sizes the page
-    /// that fills the window set the zoom, the zoom decided which page fills
-    /// the window, and the view flipped between the two for ever with no input
-    /// at all (reported from use as "jumping around and glitches" on files of
-    /// different page dimensions). It changes only when the reader says so:
-    /// opening, going to a page, or choosing Fit / Width.
-    zoom_basis: usize,
-    /// The zoom drawn last frame, and when it last *changed* (egui's own clock,
-    /// in seconds) — what tells a zoom still moving from one that has stopped.
-    /// See [`ZOOM_SETTLE_SECS`].
-    last_drawn_zoom: f32,
-    zoom_changed_at: f64,
+    /// The rail/Organize selection and drag — see [`OrganizeState`].
+    organize: OrganizeState,
+    /// Zoom settling: how a new scale waits for renders — see [`ZoomState`].
+    zoom_settle: ZoomState,
     /// The mapping for the page under the pointer, and which page it is.
     ///
     /// Not always the current page, and the index matters: a `PageView` maps to
@@ -886,20 +910,6 @@ struct DocTab {
     prefer_layer_undo: bool,
     last_layer_edits: u64,
     last_doc_generation: u64,
-    /// Pages selected in the Organize grid, this tab's own — a page's index
-    /// means nothing on another tab's document, so unlike [`PagifyApp::
-    /// organize_open`] (one workspace-wide panel toggle, the same convention
-    /// `show_thumbs` already uses) this lives per tab.
-    organize_selected: Vec<usize>,
-    /// The page a plain click last landed on, the anchor a shift-click range
-    /// extends from — the standard file-manager range-select idiom. Not
-    /// modelled on this file's existing shift-click pattern for canvas
-    /// objects ([`Self::extend_selection_at`]), which only toggles one item
-    /// at a time: a canvas selection has no natural order to span, a page
-    /// grid does.
-    organize_anchor: Option<usize>,
-    /// A drag-to-reorder in progress in the Organize grid.
-    organize_drag: Option<OrganizeDrag>,
 }
 
 /// A drag-to-reorder in progress in the Organize grid — which pages are
@@ -933,11 +943,8 @@ impl DocTab {
             panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
-            selection_page: 0,
-            settling: 0,
-            zoom_basis: 0,
-            last_drawn_zoom: 0.0,
-            zoom_changed_at: f64::NEG_INFINITY,
+            organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
+            zoom_settle: ZoomState { settling: 0, zoom_basis: 0, last_drawn_zoom: 0.0, zoom_changed_at: f64::NEG_INFINITY },
             hover_view: None,
             viewport_rect: None,
             copy_wanted: false,
@@ -987,9 +994,6 @@ impl DocTab {
             prefer_layer_undo: false,
             last_layer_edits: 0,
             last_doc_generation: 0,
-            organize_selected: Vec::new(),
-            organize_anchor: None,
-            organize_drag: None,
         }
     }
 }
@@ -3021,7 +3025,7 @@ impl PagifyApp {
                 // Pages selected in the rail (or the wider Organize grid —
                 // one selection, shared) take priority, the same precedence
                 // copy already gives pages over objects above.
-                if !self.tab_mut().organize_selected.is_empty() {
+                if !self.tab_mut().organize.organize_selected.is_empty() {
                     self.delete_organize_selection();
                 } else {
                     self.delete_selection();
@@ -3714,7 +3718,7 @@ impl PagifyApp {
                     }
                     Self::draw_drop_indicator(
                         ui,
-                        self.tab_mut().organize_drag.is_some(),
+                        self.tab_mut().organize.organize_drag.is_some(),
                         &cell_rects,
                         pointer_pos,
                     );
@@ -7266,7 +7270,7 @@ impl PagifyApp {
         // The match is also the selection, so ⌘C copies what was found.
         self.tab_mut().text_selection = Some(range);
         let current_page = self.tab().page;
-        self.tab_mut().selection_page = current_page;
+        self.tab_mut().organize.selection_page = current_page;
         let total = self.tab().panels.find_hits.len();
         self.say_info(format!("match {} of {total}", index + 1));
     }
@@ -7682,7 +7686,7 @@ impl PagifyApp {
         let title = self.tab_mut()
             .text_selection
             .clone()
-            .filter(|_| self.tab_mut().selection_page == page)
+            .filter(|_| self.tab_mut().organize.selection_page == page)
             .and_then(|range| self.characters(page).map(|c| c.text_of(range)))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -7753,7 +7757,7 @@ impl PagifyApp {
     /// address to send it to.
     fn open_link_prompt_from_selection(&mut self) {
         let Some(range) = self.tab_mut().text_selection.clone() else { return };
-        let page = self.tab_mut().selection_page;
+        let page = self.tab_mut().organize.selection_page;
         let rects = self.selection_rects(page, range);
         if rects.is_empty() {
             self.say_error("that selection has nothing to link.");
@@ -7879,7 +7883,7 @@ impl PagifyApp {
             .text_run_object_at(page, at)
             .filter(|object| self.group_containing(page, *object).is_some());
 
-        let selection = (page == self.tab_mut().selection_page)
+        let selection = (page == self.tab_mut().organize.selection_page)
             .then(|| self.tab_mut().text_selection.clone())
             .flatten()
             .filter(|range| !range.is_empty());
@@ -8117,7 +8121,7 @@ impl PagifyApp {
     fn copy_selection(&mut self, ctx: &egui::Context) {
         // The page the selection was made on, not whichever one happens to be
         // in view now.
-        let page = self.tab_mut().selection_page;
+        let page = self.tab_mut().organize.selection_page;
         let Some(range) = self.tab_mut().text_selection.clone() else {
             self.say_info("nothing selected.");
             return;
@@ -8694,7 +8698,7 @@ impl PagifyApp {
     /// outright, the same way [`Self::copy_object_selection`] does for
     /// shapes and pictures.
     fn copy_organize_selection(&mut self) -> bool {
-        let mut pages: Vec<usize> = self.tab_mut().organize_selected.clone();
+        let mut pages: Vec<usize> = self.tab_mut().organize.organize_selected.clone();
         pages.sort_unstable();
         if pages.is_empty() {
             return false;
@@ -8816,7 +8820,7 @@ impl PagifyApp {
             self.say_info("nothing to paste — copy some pages first.");
             return;
         };
-        let at = match self.tab_mut().organize_selected.iter().copied().min() {
+        let at = match self.tab_mut().organize.organize_selected.iter().copied().min() {
             Some(p) => p,
             None => self.tab_mut().doc.as_ref().map(|d| d.page_count).unwrap_or(0),
         };
@@ -8879,13 +8883,13 @@ impl PagifyApp {
 
     /// Delete the Organize grid's own current selection.
     fn delete_organize_selection(&mut self) {
-        let mut pages = std::mem::take(&mut self.tab_mut().organize_selected);
+        let mut pages = std::mem::take(&mut self.tab_mut().organize.organize_selected);
         if pages.is_empty() {
             return;
         }
         pages.sort_unstable();
         let spec = Self::page_spec(&pages);
-        self.tab_mut().organize_anchor = None;
+        self.tab_mut().organize.organize_anchor = None;
         self.delete_pages(&spec);
     }
 
@@ -9044,7 +9048,7 @@ impl PagifyApp {
         if !released {
             return;
         }
-        let Some(drag) = self.tab_mut().organize_drag.take() else { return };
+        let Some(drag) = self.tab_mut().organize.organize_drag.take() else { return };
         let Some(pointer) = pointer_pos else { return };
         if pointer.distance(drag.pointer_started_at) < Self::MIN_DRAG_PX {
             return;
@@ -9493,10 +9497,10 @@ impl PagifyApp {
             self.organize_open = false;
             self.say_info("Organize closed.");
         }
-        if !self.tab_mut().organize_selected.is_empty() || self.tab_mut().organize_drag.is_some() {
-            self.tab_mut().organize_selected.clear();
-            self.tab_mut().organize_anchor = None;
-            self.tab_mut().organize_drag = None;
+        if !self.tab_mut().organize.organize_selected.is_empty() || self.tab_mut().organize.organize_drag.is_some() {
+            self.tab_mut().organize.organize_selected.clear();
+            self.tab_mut().organize.organize_anchor = None;
+            self.tab_mut().organize.organize_drag = None;
         }
         if let Some(what) = self.tab_mut().awaiting_password.take() {
             self.say_info(match what {
@@ -9952,7 +9956,7 @@ impl PagifyApp {
     /// module's `crypto::vault` explains at length why a text run restored on
     /// its own cannot be trusted to come back in the typeface it left in.
     fn lock_selection(&mut self) {
-        let page = self.tab_mut().selection_page;
+        let page = self.tab_mut().organize.selection_page;
         let Some(range) = self.tab_mut().text_selection.clone() else {
             self.say_error("nothing selected.");
             return;
@@ -10865,7 +10869,7 @@ impl PagifyApp {
             // view is at is kept for the same reason.
             doc.strip = Strip::with_layout_turned(&sizes, PAGE_GAP_PT, doc.strip.layout(), doc.strip.turned());
             self.tab_mut().page = self.tab_mut().page.min(count.saturating_sub(1));
-            self.tab_mut().zoom_basis = self.tab_mut().zoom_basis.min(count.saturating_sub(1));
+            self.tab_mut().zoom_settle.zoom_basis = self.tab_mut().zoom_settle.zoom_basis.min(count.saturating_sub(1));
         }
     }
 
@@ -10891,10 +10895,10 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let pages = if self.tab().organize_selected.is_empty() {
+        let pages = if self.tab().organize.organize_selected.is_empty() {
             (self.tab().page + 1).to_string()
         } else {
-            compact_page_spec(&self.tab().organize_selected)
+            compact_page_spec(&self.tab().organize.organize_selected)
         };
         self.tab_mut().panels.extract_ask = Some(ExtractAsk { pages, ..Default::default() });
     }
@@ -11507,7 +11511,7 @@ impl PagifyApp {
         let Some(range) = self.tab_mut().text_selection.clone() else {
             return Err("select text across at least two lines or blocks first.".into());
         };
-        let page = self.tab_mut().selection_page;
+        let page = self.tab_mut().organize.selection_page;
         let rects = self.selection_rects(page, range);
         if rects.is_empty() {
             return Err("that selection has nothing to join.".into());
@@ -11609,7 +11613,7 @@ impl PagifyApp {
         let Some(range) = self.tab_mut().text_selection.clone() else {
             return Err("select the sample text first.".into());
         };
-        let page = self.tab_mut().selection_page;
+        let page = self.tab_mut().organize.selection_page;
         if range.is_empty() {
             return Err("that selection has nothing to copy from.".into());
         }
@@ -11728,7 +11732,7 @@ impl PagifyApp {
         let Some(range) = self.tab_mut().text_selection.clone() else {
             return Err("select the text to change.".into());
         };
-        let page = self.tab_mut().selection_page;
+        let page = self.tab_mut().organize.selection_page;
         if page != sample.page {
             return Err("match properties: select text on the same page as the sample.".into());
         }
@@ -13158,7 +13162,7 @@ impl PagifyApp {
         }
         let scroll_to_pt = doc.strip.top_of(page);
         self.tab_mut().scroll_to_pt = scroll_to_pt;
-        self.tab_mut().settling = 3;
+        self.tab_mut().zoom_settle.settling = 3;
 
         self.say_info(match layout {
             Layout::Single => "one page at a time.",
@@ -13318,7 +13322,7 @@ impl PagifyApp {
     /// Where pages inserted "here" go: just after the last selected page, or
     /// just after the current one.
     fn page_after_selection(&self) -> usize {
-        let last = self.tab().organize_selected.iter().copied().max().unwrap_or(self.tab().page);
+        let last = self.tab().organize.organize_selected.iter().copied().max().unwrap_or(self.tab().page);
         let count = self.tab().doc.as_ref().map_or(0, |d| d.page_count);
         (last + 1).min(count)
     }
@@ -13643,7 +13647,7 @@ impl PagifyApp {
             self.arm_tool(Tool::Markup(kind), page);
             return;
         };
-        let page = self.tab_mut().selection_page;
+        let page = self.tab_mut().organize.selection_page;
 
         // One rect per line covered, from the characters themselves: a single
         // box round a selection that wraps would cover the margins and the
@@ -13882,7 +13886,7 @@ impl PagifyApp {
     /// a frame at the moment it will have stopped, so the render it has been
     /// waiting for is not left until something else wakes the window.
     fn zoom_is_moving(&self, ctx: &egui::Context) -> bool {
-        let since = ctx.input(|i| i.time) - self.tab().zoom_changed_at;
+        let since = ctx.input(|i| i.time) - self.tab().zoom_settle.zoom_changed_at;
         if since < ZOOM_SETTLE_SECS {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(ZOOM_SETTLE_SECS - since + 0.01));
             true
@@ -15496,7 +15500,7 @@ fn wrap_typed_last_line(
         // Only on the page it was made on, now that a selection outlives the
         // page being scrolled past.
         let selection =
-            (page == self.tab_mut().selection_page).then(|| self.tab_mut().text_selection.clone()).flatten();
+            (page == self.tab_mut().organize.selection_page).then(|| self.tab_mut().text_selection.clone()).flatten();
         let hits: Vec<std::ops::Range<usize>> = self.tab_mut()
             .panels.find_hits
             .iter()

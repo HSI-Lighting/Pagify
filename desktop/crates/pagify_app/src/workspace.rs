@@ -204,7 +204,7 @@ impl crate::PagifyApp {
                     caches: Default::default(),
                 });
                 self.tab_mut().page = 0;
-                self.tab_mut().zoom_basis = 0;
+                self.tab_mut().zoom_settle.zoom_basis = 0;
                 // A passcode belongs to the document it was typed for, and this
                 // is a different one.
                 self.forget_passcode();

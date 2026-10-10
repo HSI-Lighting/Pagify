@@ -835,7 +835,7 @@ fn a_click_in_the_organize_grid_selects_the_page_and_goes_to_it() {
     click(&mut h, rects[3].center());
     h.run_steps(3);
 
-    assert_eq!(h.state().tab().organize_selected, vec![3], "the clicked page was not selected");
+    assert_eq!(h.state().tab().organize.organize_selected, vec![3], "the clicked page was not selected");
     assert_eq!(h.state().tab().page, 3, "the view did not go to the clicked page");
 }
 
@@ -911,7 +911,7 @@ fn pages_from_another_pdf_can_be_inserted_from_the_pages_rail() {
     );
 
     let before = h.state().tab().doc.as_ref().expect("doc").page_count;
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
     let at = h.state().page_after_selection();
     assert_eq!(at, 1, "pages are not put in just after the selected one");
 
@@ -2490,7 +2490,7 @@ fn a_page_selected_in_the_plain_rail_copies_without_opening_organize() {
     h.state_mut().insert_page();
     assert!(!h.state().organize_open, "the wider Organize grid was never opened");
 
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
     h.event(egui::Event::Copy);
     h.run_steps(3);
 
@@ -2527,7 +2527,7 @@ fn copying_still_works_after_several_real_drag_reorders() {
     h.run_steps(2);
 
     assert!(
-        !h.state().tab().organize_selected.is_empty(),
+        !h.state().tab().organize.organize_selected.is_empty(),
         "a page should still be selected after dragging it"
     );
 
@@ -2556,7 +2556,7 @@ fn copying_works_after_a_real_plain_click_on_a_thumbnail() {
     h.run_steps(2);
 
     assert!(
-        !h.state().tab().organize_selected.is_empty(),
+        !h.state().tab().organize.organize_selected.is_empty(),
         "a plain click should have selected the page it landed on"
     );
 
@@ -2573,7 +2573,7 @@ fn copying_works_after_a_real_plain_click_on_a_thumbnail() {
 fn the_typed_copy_command_also_copies_a_selected_page() {
     let mut h = harness("text-lines.pdf");
     h.state_mut().insert_page();
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
 
     h.state_mut().submit("copy");
     h.run_steps(2);
@@ -2595,7 +2595,7 @@ fn the_typed_paste_command_exists_and_pastes_a_copied_page() {
     let before = h.state().tab().doc.as_ref().unwrap().page_count;
 
     h.state_mut().insert_page();
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
     h.state_mut().submit("copy");
     h.run_steps(1);
     assert!(h.state().page_clipboard.is_some(), "the copy half of this didn't take");
@@ -2667,7 +2667,7 @@ fn the_shortcut_still_copies_and_pastes_while_the_command_box_has_focus() {
         "test setup: the command box should have focus"
     );
 
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
     h.event(egui::Event::Copy);
     h.run_steps(3);
     assert!(
@@ -2675,7 +2675,7 @@ fn the_shortcut_still_copies_and_pastes_while_the_command_box_has_focus() {
         "\u{2318}C should still copy the selected page while the command box has focus"
     );
 
-    h.state_mut().tab_mut().organize_selected.clear();
+    h.state_mut().tab_mut().organize.organize_selected.clear();
     let before = h.state().tab().doc.as_ref().unwrap().page_count;
     h.event(egui::Event::Paste("placeholder".to_string()));
     h.run_steps(3);
@@ -2856,13 +2856,13 @@ fn a_selection_survives_scrolling() {
     drag(&mut h, start, start + egui::vec2(150.0, 0.0));
     let selected = h.state().tab().text_selection.clone();
     assert!(selected.is_some(), "nothing was selected to begin with");
-    let on_page = h.state().tab().selection_page;
+    let on_page = h.state().tab().organize.selection_page;
 
     // A nudge, not a jump to another page.
     wheel(&mut h, 60.0);
 
     assert_eq!(h.state().tab().text_selection, selected, "the wheel threw the selection away");
-    assert_eq!(h.state().tab().selection_page, on_page, "the selection changed page");
+    assert_eq!(h.state().tab().organize.selection_page, on_page, "the selection changed page");
 
     h.state_mut().submit("copy");
     h.run_steps(1);

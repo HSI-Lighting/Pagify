@@ -437,7 +437,7 @@ fn an_editor_whose_page_changed_is_closed_on_the_next_frame() {
 fn join_everything(app: &mut PagifyApp) {
     let total = app.characters(0).expect("characters").len();
     app.tab_mut().text_selection = Some(0..total);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     app.join_selected_text().expect("join");
     app.tab_mut().edit.editing_run = None;
 }

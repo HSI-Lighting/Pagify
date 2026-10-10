@@ -500,7 +500,7 @@ fn every_click_writes_exactly_one_content_free_pick_line_to_the_session_log() {
     );
     let total = app.characters(0).expect("characters").len();
     app.tab_mut().text_selection = Some(0..total);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     app.join_selected_text().expect("join");
     app.tab_mut().edit.editing_run = None;
     let (outcome, line) = click_logged(&mut app, &log, 0, centre(&b.rect));

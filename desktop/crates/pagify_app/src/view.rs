@@ -40,7 +40,7 @@ impl crate::PagifyApp {
     /// fit against `available` (an on-screen size) needs to divide that
     /// factor back out before handing back a *logical* one.
     pub(crate) fn resolved_zoom(&self) -> f32 {
-        let (w, h) = self.page_extent(self.tab().zoom_basis);
+        let (w, h) = self.page_extent(self.tab().zoom_settle.zoom_basis);
         let available = (self.tab().canvas_pt - egui::vec2(24.0, 24.0)).max(egui::vec2(1.0, 1.0));
         match self.tab().zoom {
             ZoomMode::Factor(f) => f,
@@ -71,18 +71,18 @@ impl crate::PagifyApp {
             return;
         }
         self.tab_mut().page = wanted;
-        self.tab_mut().zoom_basis = wanted;
+        self.tab_mut().zoom_settle.zoom_basis = wanted;
         let scroll_pt = self.tab().doc.as_ref().map(|d| d.strip.scroll_to(wanted)).unwrap_or(0.0);
         self.tab_mut().scroll_pt = scroll_pt;
         self.tab_mut().scroll_to_pt = Some(scroll_pt);
-        self.tab_mut().settling = 3;
+        self.tab_mut().zoom_settle.settling = 3;
     }
 
     pub(crate) fn set_zoom(&mut self, target: ZoomTarget) {
         // Choosing Fit or Width fits the page being read now: see `zoom_basis`.
         if matches!(target, ZoomTarget::Fit | ZoomTarget::Width) {
             let page = self.tab().page;
-            self.tab_mut().zoom_basis = page;
+            self.tab_mut().zoom_settle.zoom_basis = page;
         }
         let current = self.resolved_zoom();
         // Every `Factor` built here is clamped at the point it's built —
@@ -131,6 +131,6 @@ impl crate::PagifyApp {
         // else; keep the page that was being read in view.
         let top = self.tab_mut().doc.as_ref().and_then(|d| d.strip.top_of(page));
         self.tab_mut().scroll_to_pt = top;
-        self.tab_mut().settling = 3;
+        self.tab_mut().zoom_settle.settling = 3;
     }
 }

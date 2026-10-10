@@ -214,7 +214,7 @@ fn copying_an_unsaved_page_from_one_tab_pastes_into_another() {
     app.insert_page();
     assert_eq!(app.tab().doc.as_ref().unwrap().page_count, original_count + 1);
 
-    app.tab_mut().organize_selected = vec![0];
+    app.tab_mut().organize.organize_selected = vec![0];
     assert!(app.copy_organize_selection(), "copy should have found a selection to extract");
     assert!(app.page_clipboard.is_some(), "copy should have filled the page clipboard");
 
@@ -225,7 +225,7 @@ fn copying_an_unsaved_page_from_one_tab_pastes_into_another() {
     let before = app.tab().doc.as_ref().unwrap().page_count;
     assert_eq!(before, original_count, "the second tab should not already have the blank page");
 
-    app.tab_mut().organize_selected.clear();
+    app.tab_mut().organize.organize_selected.clear();
     app.paste_organize_selection();
 
     let after = app.tab().doc.as_ref().unwrap().page_count;
@@ -248,9 +248,9 @@ fn copying_and_pasting_twice_in_a_row_does_not_lose_the_second_copy() {
     let mut app = app("text-lines.pdf");
     let original_count = app.tab().doc.as_ref().unwrap().page_count;
 
-    app.tab_mut().organize_selected = vec![0];
+    app.tab_mut().organize.organize_selected = vec![0];
     assert!(app.copy_organize_selection(), "first copy should find a selection");
-    app.tab_mut().organize_selected.clear();
+    app.tab_mut().organize.organize_selected.clear();
     app.paste_organize_selection();
     assert_eq!(
         app.tab().doc.as_ref().unwrap().page_count,
@@ -259,9 +259,9 @@ fn copying_and_pasting_twice_in_a_row_does_not_lose_the_second_copy() {
         said(&app)
     );
 
-    app.tab_mut().organize_selected = vec![0];
+    app.tab_mut().organize.organize_selected = vec![0];
     assert!(app.copy_organize_selection(), "second copy should also report success");
-    app.tab_mut().organize_selected.clear();
+    app.tab_mut().organize.organize_selected.clear();
     app.paste_organize_selection();
     assert_eq!(
         app.tab().doc.as_ref().unwrap().page_count,
@@ -288,9 +288,9 @@ fn pages_copied_in_one_window_paste_into_another_window() {
     second.clipboard_dir = first.clipboard_dir.clone();
     let before = second.tab().doc.as_ref().unwrap().page_count;
 
-    first.tab_mut().organize_selected = vec![0];
+    first.tab_mut().organize.organize_selected = vec![0];
     assert!(first.copy_organize_selection(), "copy should find a selection");
-    second.tab_mut().organize_selected.clear();
+    second.tab_mut().organize.organize_selected.clear();
     second.paste_organize_selection();
 
     assert_eq!(
@@ -310,7 +310,7 @@ fn a_copy_outlives_the_window_that_made_it() {
     second.clipboard_dir = first.clipboard_dir.clone();
     let before = second.tab().doc.as_ref().unwrap().page_count;
 
-    first.tab_mut().organize_selected = vec![0];
+    first.tab_mut().organize.organize_selected = vec![0];
     assert!(first.copy_organize_selection());
     drop(first);
     second.paste_organize_selection();
@@ -327,9 +327,9 @@ fn the_newest_copy_wins_and_a_stale_or_replaced_one_is_not_offered() {
     let mut second = app("two-column.pdf");
     second.clipboard_dir = first.clipboard_dir.clone();
 
-    first.tab_mut().organize_selected = vec![0];
+    first.tab_mut().organize.organize_selected = vec![0];
     assert!(first.copy_organize_selection());
-    second.tab_mut().organize_selected = vec![0];
+    second.tab_mut().organize.organize_selected = vec![0];
     assert!(second.copy_organize_selection());
     let (newest, _) = first.current_page_clipboard().expect("a copy");
     assert_eq!(
@@ -348,7 +348,7 @@ fn the_newest_copy_wins_and_a_stale_or_replaced_one_is_not_offered() {
     let mut third = app("text-lines.pdf");
     let mut fourth = app("two-column.pdf");
     fourth.clipboard_dir = third.clipboard_dir.clone();
-    third.tab_mut().organize_selected = vec![0];
+    third.tab_mut().organize.organize_selected = vec![0];
     assert!(third.copy_organize_selection());
     let manifest = third.clipboard_dir.join("latest.txt");
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
@@ -1238,7 +1238,7 @@ fn joining_two_distant_runs_opens_them_as_one_paragraph_and_persists() {
 
     let total_chars = app.characters(0).expect("characters").len();
     app.tab_mut().text_selection = Some(0..total_chars);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
 
     let message = app.join_selected_text().expect("join should succeed");
     assert!(message.contains("paragraph"), "should have opened the paragraph editor: {message}");
@@ -1273,7 +1273,7 @@ fn splitting_a_joined_pair_edits_them_separately_again() {
 
     let total_chars = app.characters(0).expect("characters").len();
     app.tab_mut().text_selection = Some(0..total_chars);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     app.join_selected_text().expect("join should succeed");
     assert!(app.group_containing(0, b.object).is_some(), "setup: should be joined");
 
@@ -1306,7 +1306,7 @@ fn joining_a_single_run_selection_is_refused() {
         .and_then(|c| c.range_between((centre.0, centre.1), (centre.0, centre.1)))
         .expect("a point inside a run's own rect should hit something");
     app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     assert!(app.join_selected_text().is_err(), "one run alone is nothing to join");
 }
 
@@ -1353,7 +1353,7 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
         .and_then(|c| c.range_between(centre_a, centre_a))
         .expect("a point inside a's own rect");
     app.tab_mut().text_selection = Some(sample_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
     assert!(
         matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::MatchProperties { sample: Some(_) })),
@@ -1366,7 +1366,7 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
         .and_then(|c| c.range_between(centre_b, centre_b))
         .expect("a point inside b's own rect");
     app.tab_mut().text_selection = Some(target_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     let message = app.apply_match_properties_to_current_selection().expect("match should succeed");
     assert!(message.contains("matched"), "unexpected message: {message}");
     assert!(
@@ -1394,7 +1394,7 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
 fn an_empty_selection_is_refused_by_both_match_properties_steps() {
     let mut app = app("two-column.pdf");
     app.tab_mut().text_selection = Some(0..0);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     assert!(
         app.match_properties_sample_from_current_selection().is_err(),
         "an empty selection is nothing to copy from"
@@ -1410,7 +1410,7 @@ fn an_empty_selection_is_refused_by_both_match_properties_steps() {
         points: Vec::new(),
     });
     app.tab_mut().text_selection = Some(0..0);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     assert!(
         app.apply_match_properties_to_current_selection().is_err(),
         "an empty selection is nothing to change"
@@ -1442,7 +1442,7 @@ fn right_click_text_actions_are_computed_correctly_from_one_call() {
         .and_then(|c| c.range_between(centre_a, centre_b))
         .expect("a range covering both runs");
     app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
 
     let at = AppPoint { x: centre_a.0 as f64, y: centre_a.1 as f64 };
     let actions = app.compute_right_click_text_actions(0, at);
@@ -2456,7 +2456,7 @@ fn bookmarking_with_a_selection_uses_it_as_the_title() {
     let mut app = app("two-column.pdf");
     let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
     app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
 
     app.submit("bookmark");
 
@@ -2495,7 +2495,7 @@ fn weblinks_opens_the_prompt_when_text_is_already_selected() {
     let mut app = app("two-column.pdf");
     let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
     app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
 
     app.submit("weblinks");
 
@@ -2533,7 +2533,7 @@ fn jointext_joins_an_already_made_selection_at_once() {
         .and_then(|c| c.range_between(centre_a, centre_b))
         .expect("a range covering both runs");
     app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
 
     app.submit("jointext");
 
@@ -5496,7 +5496,7 @@ fn the_lock_verb_takes_the_selection_that_is_already_there() {
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let chars = app.characters(0).expect("characters").clone();
     app.tab_mut().text_selection = Some(0..chars.len().min(8));
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
 
     app.submit("lock");
     assert!(
@@ -5737,7 +5737,7 @@ fn locking_a_selection_across_lines_sends_the_lines_not_their_union() {
     // Past the line break, so the selection is genuinely two lines.
     let to = at + phrase.chars().count() + 8;
 
-    app.tab_mut().selection_page = page;
+    app.tab_mut().organize.selection_page = page;
     app.tab_mut().text_selection = Some(at..to);
     app.lock_selection();
 
@@ -6669,7 +6669,7 @@ fn the_selection_menu_asks_for_an_incomplete_lock() {
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let chars = app.characters(0).expect("characters").clone();
     app.tab_mut().text_selection = Some(0..chars.len().min(8));
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
 
     app.lock_selection();
     match &app.tab().awaiting_password {
@@ -7581,12 +7581,12 @@ fn matching_properties_does_not_corrupt_the_page() {
     let to = (300.0, 305.0);
     let sample_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
     app.tab_mut().text_selection = Some(sample_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
 
     let target_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
     app.tab_mut().text_selection = Some(target_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     app.apply_match_properties_to_current_selection().expect("match should succeed");
 
     app.tab_mut().doc.as_mut().unwrap().caches.text = None; // force a fresh read — `characters()` caches per page
@@ -7641,7 +7641,7 @@ fn matching_properties_on_a_small_selection_is_fast_on_a_busy_page() {
     let to = (300.0, 305.0);
     let sample_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
     app.tab_mut().text_selection = Some(sample_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
 
     let started = std::time::Instant::now();
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
@@ -7676,7 +7676,7 @@ fn matching_properties_finds_the_sample_the_selection_only_starts_inside() {
     let to = ((b.rect.left + b.rect.right) / 2.0, (b.rect.top + b.rect.bottom) / 2.0);
     let range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
     app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
 
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
     let sample = match app.tab_mut().tool.as_ref().map(|t| &t.kind) {

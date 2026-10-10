@@ -353,7 +353,7 @@ fn the_extract_card_with_a_document_open_asks_for_its_pages_in_a_dialog() {
 #[test]
 fn the_extract_dialog_offers_the_selected_pages_and_says_what_is_wrong_with_a_range() {
     let mut h = harness("pages-ladder.pdf");
-    h.state_mut().tab_mut().organize_selected = vec![0, 1, 2, 4];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0, 1, 2, 4];
     h.state_mut().open_extract_dialog();
     h.run_steps(3);
     assert_eq!(h.state().tab().panels.extract_ask.clone().unwrap().pages, "1-3,5");

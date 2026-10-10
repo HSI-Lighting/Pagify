@@ -668,7 +668,7 @@ impl crate::PagifyApp {
         cell_width: f32,
     ) -> Option<usize> {
         let current = page == self.tab_mut().page;
-        let selected = self.tab_mut().organize_selected.contains(&page);
+        let selected = self.tab_mut().organize.organize_selected.contains(&page);
         // **Reported from use, with a screenshot, twice.** First "fill the
         // thumbnails in the ribbon, it's too small", which was answered by
         // drawing the same seventy-pixel bitmap larger. Then "the quality of
@@ -736,7 +736,7 @@ impl crate::PagifyApp {
             ui.memory_mut(|m| m.surrender_focus(command_id));
             let plain = !modifiers.command && !modifiers.shift;
             let tab = self.tab_mut();
-            Self::apply_organize_click(&mut tab.organize_selected, &mut tab.organize_anchor, page, modifiers);
+            Self::apply_organize_click(&mut tab.organize.organize_selected, &mut tab.organize.organize_anchor, page, modifiers);
             if plain {
                 jump = Some(page);
             }
@@ -747,12 +747,12 @@ impl crate::PagifyApp {
         if response.drag_started() {
             let command_id = self.command_id();
             ui.memory_mut(|m| m.surrender_focus(command_id));
-            if !self.tab_mut().organize_selected.contains(&page) {
-                self.tab_mut().organize_selected = vec![page];
-                self.tab_mut().organize_anchor = Some(page);
+            if !self.tab_mut().organize.organize_selected.contains(&page) {
+                self.tab_mut().organize.organize_selected = vec![page];
+                self.tab_mut().organize.organize_anchor = Some(page);
             }
-            let moving = self.tab_mut().organize_selected.clone();
-            self.tab_mut().organize_drag = Some(OrganizeDrag {
+            let moving = self.tab_mut().organize.organize_selected.clone();
+            self.tab_mut().organize.organize_drag = Some(OrganizeDrag {
                 moving,
                 pointer_started_at: response.interact_pointer_pos().unwrap_or(response.rect.center()),
             });
@@ -860,7 +860,7 @@ impl crate::PagifyApp {
                     }
                     Self::draw_drop_indicator(
                         ui,
-                        self.tab_mut().organize_drag.is_some(),
+                        self.tab_mut().organize.organize_drag.is_some(),
                         &cell_rects,
                         pointer_pos,
                     );
@@ -957,8 +957,8 @@ impl crate::PagifyApp {
                 //
                 // Not while the pointer is down: re-deciding the current page
                 // in the middle of a drag would drop the selection being made.
-                if self.tab_mut().settling > 0 {
-                    self.tab_mut().settling -= 1;
+                if self.tab_mut().zoom_settle.settling > 0 {
+                    self.tab_mut().zoom_settle.settling -= 1;
                 } else if !ui.ctx().input(|i| i.pointer.any_down()) {
                     let clip = ui.clip_rect();
                     let mut best: Option<(usize, f32)> = None;
@@ -1336,9 +1336,9 @@ impl crate::PagifyApp {
     fn note_zoom_and_collect_renders(&mut self, ctx: &egui::Context, zoom: f32) {
         let now = ctx.input(|i| i.time);
         let tab = self.tab_mut();
-        if (tab.last_drawn_zoom - zoom).abs() > 1e-4 {
-            tab.last_drawn_zoom = zoom;
-            tab.zoom_changed_at = now;
+        if (tab.zoom_settle.last_drawn_zoom - zoom).abs() > 1e-4 {
+            tab.zoom_settle.last_drawn_zoom = zoom;
+            tab.zoom_settle.zoom_changed_at = now;
         }
         self.collect_renders(ctx);
     }
@@ -1970,7 +1970,7 @@ impl crate::PagifyApp {
                         )
                     });
                 if self.tab_mut().text_selection.is_some() {
-                    self.tab_mut().selection_page = page;
+                    self.tab_mut().organize.selection_page = page;
                 }
             }
             if let Some(grab) = self.tab_mut().markup_grab.as_mut() {
@@ -2093,7 +2093,7 @@ impl crate::PagifyApp {
             }
         }
 
-        let over_text = self.tab_mut().text_selection.is_some() && page == self.tab_mut().selection_page;
+        let over_text = self.tab_mut().text_selection.is_some() && page == self.tab_mut().organize.selection_page;
         let over_image = self.tab_mut().selected_image.as_ref().is_some_and(|(p, _)| *p == page);
         // **Offered wherever the pointer is**, not only over a selection.
         //

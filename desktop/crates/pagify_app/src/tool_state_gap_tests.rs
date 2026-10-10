@@ -81,7 +81,7 @@ fn the_central_escape_does_not_close_the_link_prompt() {
     let mut app = app("two-column.pdf");
     let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
     app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().organize.selection_page = 0;
     app.submit("weblinks");
     assert!(app.tab_mut().panels.pending_link.is_some(), "setup: the link prompt should have opened");
 
