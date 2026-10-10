@@ -2813,129 +2813,13 @@ fn oracle_self_check_standins_mutants_and_perfect() {
     ));
     problems.extend(perfect_fail);
     // ... and on other seeds of the same layouts (a different random instance must be judged just as cleanly)
-    let (mut seeded_runs, mut seeded_fail) = (0usize, vec![]);
-    for k in 1..=3u64 {
-        let cs = all_cases_seeded(false, k);
-        for c in cs.iter().filter(|c| c.strength == Strength::Must) {
-            let det = perfect(c, Mutation::None);
-            for v in &FULL_VARIANTS {
-                seeded_runs += 1;
-                let ev = evaluate(c, &det, v, true);
-                if !ev.problems.is_empty() {
-                    seeded_fail.push(format!("{} [seed {k}, {}]: {}", c.name, v.name, ev.problems.join(" | ")));
-                }
-            }
-        }
-    }
-    report.push_str(&format!(
-        "SELF-CHECK perfect detector on 3 other seeds: {} of {seeded_runs} case x variant runs clean\n",
-        seeded_runs - seeded_fail.len()
-    ));
-    problems.extend(seeded_fail);
+    report.push_str(&self_check_seeded(&must, &mut problems));
 
     // mutants
-    for (name, m) in [
-        ("split-largest-block", Mutation::Split),
-        ("merge-first-two-blocks", Mutation::Merge),
-        ("peel-one-fragment-off-the-largest-block", Mutation::Peel),
-    ] {
-        let (mut applicable, mut caught) = (0, 0);
-        let mut missed = vec![];
-        for c in &must {
-            let groups_ok = c.check_groups
-                && match m {
-                    Mutation::Split | Mutation::Peel => c.expect.iter().any(|g| g.len() >= 2),
-                    Mutation::Merge => c.expect.len() >= 2,
-                    Mutation::None => false,
-                };
-            if !groups_ok {
-                continue;
-            }
-            applicable += 1;
-            let det = perfect(c, m);
-            let ev = evaluate(c, &det, &V_X1, true);
-            if ev.problems.is_empty() {
-                missed.push(c.name);
-            } else {
-                caught += 1;
-            }
-        }
-        report.push_str(&format!(
-            "SELF-CHECK mutant '{name}': caught by the checker in {caught}/{applicable} applicable MUST cases\n"
-        ));
-        if !missed.is_empty() {
-            problems.push(format!("mutant '{name}' NOT caught in: {}", missed.join(", ")));
-        }
-    }
+    report.push_str(&self_check_mutants(&must, &mut problems));
 
     // the CONTRACT checks must be able to fail too: four ways of breaking the contract, each derived from the perfect answer
-    for (name, kind) in [
-        ("drop-one-object (coverage)", Breaker::DropOne),
-        ("report-a-block-twice (exactly-once)", Breaker::DuplicateBlock),
-        ("alternate-block-order-between-calls (determinism)", Breaker::Flaky),
-        ("block-box-that-does-not-enclose-its-members", Breaker::ShrinkBox),
-    ] {
-        let (mut applicable, mut flagged) = (0, 0);
-        let mut missed = vec![];
-        for c in &must {
-            let ok = c.check_groups
-                && !c.degenerate
-                && !c.dup_ids
-                && !c.heavy
-                && match kind {
-                    Breaker::DropOne => c.expect.iter().any(|g| g.len() >= 2),
-                    Breaker::DuplicateBlock | Breaker::ShrinkBox => !c.expect.is_empty(),
-                    Breaker::Flaky => c.expect.len() >= 2,
-                };
-            if !ok {
-                continue;
-            }
-            applicable += 1;
-            let base = perfect(c, Mutation::None);
-            let flip = std::cell::Cell::new(false);
-            let det = |f: &[Frag], s: &[Shape]| {
-                let mut b = base(f, s);
-                match kind {
-                    Breaker::DropOne => {
-                        if let Some(blk) = b.iter_mut().find(|x| x.objects().len() >= 2) {
-                            if let Some(l) = blk.lines.iter_mut().rev().find(|l| !l.objects.is_empty()) {
-                                l.objects.pop();
-                            }
-                        }
-                    }
-                    Breaker::DuplicateBlock => {
-                        if let Some(first) = b.first().cloned() {
-                            b.push(first);
-                        }
-                    }
-                    Breaker::Flaky => {
-                        flip.set(!flip.get());
-                        if flip.get() {
-                            b.reverse();
-                        }
-                    }
-                    Breaker::ShrinkBox => {
-                        for blk in b.iter_mut() {
-                            blk.right = blk.left - 5.0;
-                        }
-                    }
-                }
-                b
-            };
-            let ev = evaluate(c, &det, &V_X1, false);
-            if ev.problems.iter().any(|p| p.starts_with("INV")) {
-                flagged += 1;
-            } else {
-                missed.push(c.name);
-            }
-        }
-        report.push_str(&format!(
-            "SELF-CHECK contract breaker '{name}': flagged by the invariant checks in {flagged}/{applicable} applicable MUST cases\n"
-        ));
-        if !missed.is_empty() {
-            problems.push(format!("contract breaker '{name}' NOT flagged in: {}", missed.join(", ")));
-        }
-    }
+    report.push_str(&self_check_breakers(&must, &mut problems));
 
     // stand-ins: (a), (b) trivial; (c) plausible but naive (reported, and must stay clearly below the perfect score)
     let mut summary = vec![];
@@ -5245,3 +5129,144 @@ fn c_heavy_one_row() -> Case {
     c
 }
 
+
+/// Phase of [`oracle_self_check_standins_mutants_and_perfect`]: the perfect
+/// detector over MUST cases on three other seeds. Returns the report line
+/// and appends failures to `problems`.
+fn self_check_seeded(must: &[&Case], problems: &mut Vec<String>) -> String {
+    let mut report = String::new();
+    let (mut seeded_runs, mut seeded_fail) = (0usize, vec![]);
+    for k in 1..=3u64 {
+        let cs = all_cases_seeded(false, k);
+        for c in cs.iter().filter(|c| c.strength == Strength::Must) {
+            let det = perfect(c, Mutation::None);
+            for v in &FULL_VARIANTS {
+                seeded_runs += 1;
+                let ev = evaluate(c, &det, v, true);
+                if !ev.problems.is_empty() {
+                    seeded_fail.push(format!("{} [seed {k}, {}]: {}", c.name, v.name, ev.problems.join(" | ")));
+                }
+            }
+        }
+    }
+    report.push_str(&format!(
+        "SELF-CHECK perfect detector on 3 other seeds: {} of {seeded_runs} case x variant runs clean\n",
+        seeded_runs - seeded_fail.len()
+    ));
+    problems.extend(seeded_fail);
+    report
+}
+
+/// Phase of [`oracle_self_check_standins_mutants_and_perfect`]: split/merge/
+/// peel mutants must be caught by the checker.
+fn self_check_mutants(must: &[&Case], problems: &mut Vec<String>) -> String {
+    let mut report = String::new();
+    for (name, m) in [
+        ("split-largest-block", Mutation::Split),
+        ("merge-first-two-blocks", Mutation::Merge),
+        ("peel-one-fragment-off-the-largest-block", Mutation::Peel),
+    ] {
+        let (mut applicable, mut caught) = (0, 0);
+        let mut missed = vec![];
+        for c in &must {
+            let groups_ok = c.check_groups
+                && match m {
+                    Mutation::Split | Mutation::Peel => c.expect.iter().any(|g| g.len() >= 2),
+                    Mutation::Merge => c.expect.len() >= 2,
+                    Mutation::None => false,
+                };
+            if !groups_ok {
+                continue;
+            }
+            applicable += 1;
+            let det = perfect(c, m);
+            let ev = evaluate(c, &det, &V_X1, true);
+            if ev.problems.is_empty() {
+                missed.push(c.name);
+            } else {
+                caught += 1;
+            }
+        }
+        report.push_str(&format!(
+            "SELF-CHECK mutant '{name}': caught by the checker in {caught}/{applicable} applicable MUST cases\n"
+        ));
+        if !missed.is_empty() {
+            problems.push(format!("mutant '{name}' NOT caught in: {}", missed.join(", ")));
+        }
+    }
+    report
+}
+
+/// Phase of [`oracle_self_check_standins_mutants_and_perfect`]: contract
+/// breakers must be flagged by the invariant checks.
+fn self_check_breakers(must: &[&Case], problems: &mut Vec<String>) -> String {
+    let mut report = String::new();
+    for (name, kind) in [
+        ("drop-one-object (coverage)", Breaker::DropOne),
+        ("report-a-block-twice (exactly-once)", Breaker::DuplicateBlock),
+        ("alternate-block-order-between-calls (determinism)", Breaker::Flaky),
+        ("block-box-that-does-not-enclose-its-members", Breaker::ShrinkBox),
+    ] {
+        let (mut applicable, mut flagged) = (0, 0);
+        let mut missed = vec![];
+        for c in &must {
+            let ok = c.check_groups
+                && !c.degenerate
+                && !c.dup_ids
+                && !c.heavy
+                && match kind {
+                    Breaker::DropOne => c.expect.iter().any(|g| g.len() >= 2),
+                    Breaker::DuplicateBlock | Breaker::ShrinkBox => !c.expect.is_empty(),
+                    Breaker::Flaky => c.expect.len() >= 2,
+                };
+            if !ok {
+                continue;
+            }
+            applicable += 1;
+            let base = perfect(c, Mutation::None);
+            let flip = std::cell::Cell::new(false);
+            let det = |f: &[Frag], s: &[Shape]| {
+                let mut b = base(f, s);
+                match kind {
+                    Breaker::DropOne => {
+                        if let Some(blk) = b.iter_mut().find(|x| x.objects().len() >= 2) {
+                            if let Some(l) = blk.lines.iter_mut().rev().find(|l| !l.objects.is_empty()) {
+                                l.objects.pop();
+                            }
+                        }
+                    }
+                    Breaker::DuplicateBlock => {
+                        if let Some(first) = b.first().cloned() {
+                            b.push(first);
+                        }
+                    }
+                    Breaker::Flaky => {
+                        flip.set(!flip.get());
+                        if flip.get() {
+                            b.reverse();
+                        }
+                    }
+                    Breaker::ShrinkBox => {
+                        for blk in b.iter_mut() {
+                            blk.right = blk.left - 5.0;
+                        }
+                    }
+                }
+                b
+            };
+            let ev = evaluate(c, &det, &V_X1, false);
+            if ev.problems.iter().any(|p| p.starts_with("INV")) {
+                flagged += 1;
+            } else {
+                missed.push(c.name);
+            }
+        }
+        report.push_str(&format!(
+            "SELF-CHECK contract breaker '{name}': flagged by the invariant checks in {flagged}/{applicable} applicable MUST cases\n"
+        ));
+        if !missed.is_empty() {
+            problems.push(format!("contract breaker '{name}' NOT flagged in: {}", missed.join(", ")));
+        }
+    }
+    report
+}
