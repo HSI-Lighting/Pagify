@@ -5168,7 +5168,7 @@ fn self_check_mutants(must: &[&Case], problems: &mut Vec<String>) -> String {
     ] {
         let (mut applicable, mut caught) = (0, 0);
         let mut missed = vec![];
-        for c in &must {
+        for c in must {
             let groups_ok = c.check_groups
                 && match m {
                     Mutation::Split | Mutation::Peel => c.expect.iter().any(|g| g.len() >= 2),
@@ -5209,7 +5209,7 @@ fn self_check_breakers(must: &[&Case], problems: &mut Vec<String>) -> String {
     ] {
         let (mut applicable, mut flagged) = (0, 0);
         let mut missed = vec![];
-        for c in &must {
+        for c in must {
             let ok = c.check_groups
                 && !c.degenerate
                 && !c.dup_ids
