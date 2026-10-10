@@ -7691,3 +7691,70 @@ fn matching_properties_finds_the_sample_the_selection_only_starts_inside() {
         a.size
     );
 }
+
+/// Whether page `page` of the open document has any text on it — the way these
+/// tests tell a blank page from the fixture's own, to see where a paste landed.
+fn page_has_text(app: &PagifyApp, page: usize) -> bool {
+    !app.tab().doc.as_ref().expect("open").session.text_runs(page).expect("runs").is_empty()
+}
+
+/// A two-page document, `[blank, text]`, with page `copied` copied.
+fn blank_then_text_with_page_copied(copied: usize) -> PagifyApp {
+    let mut app = app("text-lines.pdf");
+    app.insert_page();
+    assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 2, "setup");
+    assert!(!page_has_text(&app, 0) && page_has_text(&app, 1), "setup: expected [blank, text]");
+    app.tab_mut().organize_selected = vec![copied];
+    assert!(app.copy_organize_selection(), "setup: copy");
+    app
+}
+
+/// **A pasted page lands below (after) the selected page.** It used to land above
+/// it; changed on request. The text page is copied and the blank one selected, so
+/// "below" is `[blank, text, text]` and the old "above" would have been
+/// `[text, blank, text]`.
+#[test]
+fn a_pasted_page_lands_below_the_selected_page() {
+    let mut app = blank_then_text_with_page_copied(1);
+    app.tab_mut().organize_selected = vec![0];
+    app.paste_organize_selection();
+    assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 3, "{}", said(&app));
+    assert!(!page_has_text(&app, 0), "the paste landed above the selected page");
+    assert!(page_has_text(&app, 1), "the pasted page is not right after the selected one");
+    assert!(page_has_text(&app, 2), "the original text page should now be last");
+}
+
+/// The selected page is the last one: the paste goes after it, at the end. The
+/// blank page is copied, so `[blank, text, blank]` is below and `[blank, blank,
+/// text]` would be above.
+#[test]
+fn a_page_pasted_below_the_last_page_goes_to_the_end() {
+    let mut app = blank_then_text_with_page_copied(0);
+    app.tab_mut().organize_selected = vec![1];
+    app.paste_organize_selection();
+    assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 3, "{}", said(&app));
+    assert!(page_has_text(&app, 1), "the text page was pushed down, so the paste went above it");
+    assert!(!page_has_text(&app, 2), "the pasted blank page should be last");
+}
+
+/// With several pages selected, the paste goes below the **last** of them — not
+/// below the first, and not above.
+#[test]
+fn with_several_pages_selected_the_paste_goes_below_the_last_one() {
+    let mut app = blank_then_text_with_page_copied(0);
+    app.tab_mut().organize_selected = vec![0, 1];
+    app.paste_organize_selection();
+    assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 3, "{}", said(&app));
+    assert!(page_has_text(&app, 1), "the paste landed above the last selected page");
+    assert!(!page_has_text(&app, 2), "the pasted page should come after both selected pages");
+}
+
+/// With nothing selected, a paste still goes to the end of the document.
+#[test]
+fn with_nothing_selected_a_paste_still_goes_to_the_end() {
+    let mut app = blank_then_text_with_page_copied(0);
+    app.tab_mut().organize_selected.clear();
+    app.paste_organize_selection();
+    assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 3, "{}", said(&app));
+    assert!(page_has_text(&app, 1) && !page_has_text(&app, 2));
+}

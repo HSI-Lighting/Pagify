@@ -8806,16 +8806,20 @@ impl PagifyApp {
 
     /// Paste Organize's own clipboard into the current tab — the same
     /// document it was copied from, or a different one entirely. Lands
-    /// right above (before) whichever page is currently selected, or at the
-    /// end of the document when nothing is selected.
+    /// right below (after) whichever page is currently selected — the last
+    /// of them when several are — or at the end of the document when
+    /// nothing is selected.
+    ///
+    /// Used to land above the selection; changed on request.
     fn paste_organize_selection(&mut self) {
         let Some((temp_file, page_count)) = self.current_page_clipboard() else {
             self.say_info("nothing to paste — copy some pages first.");
             return;
         };
-        let at = match self.tab_mut().organize_selected.iter().copied().min() {
-            Some(p) => p,
-            None => self.tab_mut().doc.as_ref().map(|d| d.page_count).unwrap_or(0),
+        let end = self.tab_mut().doc.as_ref().map(|d| d.page_count).unwrap_or(0);
+        let at = match self.tab_mut().organize_selected.iter().copied().max() {
+            Some(p) => (p + 1).min(end),
+            None => end,
         };
         let result = match &self.tab_mut().doc {
             Some(doc) => doc.session.import_from(&temp_file, &(0..page_count).collect::<Vec<_>>(), at),
