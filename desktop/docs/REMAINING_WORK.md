@@ -118,14 +118,17 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   `group`/`grab`/`marquee` (`SelectionState`), and finally `secure_state`
   (9 passcode/redaction fields), `undo_state` (3) and `tool_state` (2).
   **`DocTab` is at 20 fields — its 25 target is met.** `PagifyApp` is at
-  **41** (target 15): `FacesState` (10), `UpdateState` (2) and a partial
-  `ClipboardState` (3) are in. Remaining groups: the clipboard fields that
-  collide with `hub.rs`'s own (`object_clipboard`/`paste_count`/
-  `page_clipboard` — scoped pass), `predefined`/`signatures`/`pad`/
-  `signature_list`/`snippets` plus their paths, preferences (`defaults`,
-  `draw_fill`, `snaps`, `ortho`, `grid_pt`), the render worker trio, the
-  UI toggles, and `pending_update`/`handover`/`win`. `Doc` already
-  delegates caches.
+  **27** (target 15): `FacesState` (10), `UpdateState` (2),
+  `ClipboardState` (3 of 6), `LibraryState` (6), `PrefsState` (4),
+  `RenderState` (3) and `UiState` (5) are in. Remaining: the fields whose
+  names collide with other structs — `signatures`/`predefined`/`ortho`
+  (methods or types share the name) and the clipboard trio
+  (`object_clipboard`/`paste_count`/`page_clipboard` also live on
+  `hub.rs`'s window struct) — which need receiver-scoped rewrites; plus
+  `tabs`/`active_tab`/`cmd`/`recorder`/`recent`/`outlined_fonts`/
+  `recogniser`/`mark`/`signature_textures`/`session_log`/`handover`/
+  `win`/`replay_depth`/`pending_update` (some of these will stay: they
+  are the struct's own root state). `Doc` already delegates caches.
 3. **Event-returning transitions — DONE.** `ToolEffect` +
   `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
   `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
