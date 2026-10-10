@@ -516,6 +516,22 @@ struct EditState {
     new_text_box: Option<NewTextBox>,
 }
 
+/// The modal and panel state a tab can have open: search, spelling and its
+/// scan, bookmarks, the link and article-box prompts, and the extract-range
+/// dialog. One group so a tab's panels are one thing to hand around.
+struct PanelsState {
+    pending_link: Option<PendingLink>,
+    extract_ask: Option<ExtractAsk>,
+    pending_article_box: Option<PendingArticleBox>,
+    bookmark_panel: Option<BookmarkPanel>,
+    find_needle: String,
+    find_hits: Vec<(usize, std::ops::Range<usize>)>,
+    find_at: usize,
+    find_replace: Option<FindReplace>,
+    spell_scan: Option<SpellScan>,
+    spelling: Option<SpellCheck>,
+}
+
 struct DocTab {
     doc: Option<Doc>,
     markup: Markup,
@@ -560,13 +576,12 @@ struct DocTab {
     /// field) is what says the web-link tool is still armed: it stays
     /// armed through this dialog being open, closed, or never opened at
     /// all, which is why the two are separate.
-    pending_link: Option<PendingLink>,
+    /// The modal and panel state: search, spelling, bookmarks, link and
+    /// article-box prompts and the extract dialog — see [`PanelsState`].
+    panels: PanelsState,
     /// The Extract dialog, while it is open on this tab.
-    extract_ask: Option<ExtractAsk>,
     /// A drawn Article Box rectangle, waiting for its title.
-    pending_article_box: Option<PendingArticleBox>,
     /// The Bookmarks panel, while it is open.
-    bookmark_panel: Option<BookmarkPanel>,
     /// Every page this document's own outline points at — read once and
     /// kept current rather than re-walked every frame, so the small icon
     /// `draw_pages` paints in a bookmarked page's corner costs a `HashSet`
@@ -651,10 +666,7 @@ struct DocTab {
     /// Where a text drag began. `None` means a drag is selecting marks instead.
     text_drag: Option<AppPoint>,
 
-    find_needle: String,
     /// Every match, as (page, character range).
-    find_hits: Vec<(usize, std::ops::Range<usize>)>,
-    find_at: usize,
     /// Where the current match is, waiting for the next frame to scroll to it.
     ///
     /// **A page to go to is not a word to show.** Find used to ask for the
@@ -841,11 +853,8 @@ struct DocTab {
     /// window, changed while the same question is being asked.
     password_plus: bool,
     /// The Search & Replace panel, while it is open.
-    find_replace: Option<FindReplace>,
     /// The Check Spelling panel, while it is open.
-    spelling: Option<SpellCheck>,
     /// The scan feeding [`Self::spelling`], while it is still running.
-    spell_scan: Option<SpellScan>,
     /// What a drag on the page means. Set by Hand and Select.
     pointer: pagify_shell::verbs::PointerMode,
     /// **Requested from use: Hand should look like the tool in hand when a
@@ -921,10 +930,7 @@ impl DocTab {
             anchor_offset: None,
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
-            pending_link: None,
-            extract_ask: None,
-            pending_article_box: None,
-            bookmark_panel: None,
+            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             selection_page: 0,
@@ -941,9 +947,6 @@ impl DocTab {
             selected_image: None,
             text_selection: None,
             text_drag: None,
-            find_needle: String::new(),
-            find_hits: Vec::new(),
-            find_at: 0,
             reveal: None,
             saved_revision: 0,
             picked_layer: None,
@@ -976,9 +979,6 @@ impl DocTab {
             password_field_focused: false,
             password_problem: None,
             password_plus: false,
-            find_replace: None,
-            spelling: None,
-            spell_scan: None,
             pointer: Default::default(),
             hand_shown_before_any_tool_is_picked: true,
             drag_from: None,
@@ -2943,7 +2943,7 @@ impl PagifyApp {
         if std::mem::take(&mut self.clipboard_mirror_wanted) {
             ctx.copy_text(COPIED_IN_PAGIFY.to_string());
         }
-        if keys.find_next && !self.tab_mut().find_hits.is_empty() {
+        if keys.find_next && !self.tab_mut().panels.find_hits.is_empty() {
             self.find_step(true);
         }
 
@@ -4659,7 +4659,7 @@ impl PagifyApp {
                             doc.rendered_is_stale();
                         }
                         self.tab_mut().text_selection = None;
-                        self.tab_mut().find_hits.clear();
+                        self.tab_mut().panels.find_hits.clear();
                     }
                     Err(e) => self.say_error(format!("page {}: {e}", page + 1)),
                 }
@@ -6169,7 +6169,7 @@ impl PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
         Ok(())
     }
 
@@ -6249,7 +6249,7 @@ impl PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
         // Said the way the label says it: counter-clockwise is positive.
         Ok(format!("turned {:.0}\u{b0} on page {} — `undo` turns it back.", -degrees, page + 1))
     }
@@ -6271,7 +6271,7 @@ impl PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
         Ok(format!(
             "resized to {:.0}% across and {:.0}% down on page {}.",
             sx * 100.0,
@@ -7051,7 +7051,7 @@ impl PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
         Ok(format!(
             "moved {what} by {:.0} across and {:.0} down on page {}.",
             by.0,
@@ -7185,13 +7185,13 @@ impl PagifyApp {
         let session = doc.session.clone();
         let page_count = doc.page_count;
 
-        self.tab_mut().find_hits.clear();
-        self.tab_mut().find_needle = needle.to_string();
+        self.tab_mut().panels.find_hits.clear();
+        self.tab_mut().panels.find_needle = needle.to_string();
 
         for page in 0..page_count {
             let Ok(chars) = session.characters(page) else { continue };
             for hit in chars.find(needle) {
-                self.tab_mut().find_hits.push((page, hit));
+                self.tab_mut().panels.find_hits.push((page, hit));
             }
         }
         true
@@ -7202,19 +7202,19 @@ impl PagifyApp {
         if !self.search(needle) {
             return;
         }
-        self.tab_mut().find_at = 0;
+        self.tab_mut().panels.find_at = 0;
 
-        if self.tab().find_hits.is_empty() {
+        if self.tab().panels.find_hits.is_empty() {
             self.say_info(format!("`{needle}` — no matches."));
             return;
         }
 
         let pages = {
-            let mut seen: Vec<usize> = self.tab().find_hits.iter().map(|(p, _)| *p).collect();
+            let mut seen: Vec<usize> = self.tab().panels.find_hits.iter().map(|(p, _)| *p).collect();
             seen.dedup();
             seen.len()
         };
-        let count = self.tab().find_hits.len();
+        let count = self.tab().panels.find_hits.len();
         self.say_info(format!(
             "{count} match{} on {pages} page{}. `findnext` steps through them.",
             if count == 1 { "" } else { "es" },
@@ -7224,22 +7224,22 @@ impl PagifyApp {
     }
 
     fn find_step(&mut self, forward: bool) {
-        if self.tab_mut().find_hits.is_empty() {
+        if self.tab_mut().panels.find_hits.is_empty() {
             self.say_error("nothing to step through — `find <text>` first.");
             return;
         }
-        let count = self.tab_mut().find_hits.len();
+        let count = self.tab_mut().panels.find_hits.len();
         let next = if forward {
-            (self.tab_mut().find_at + 1) % count
+            (self.tab_mut().panels.find_at + 1) % count
         } else {
-            (self.tab_mut().find_at + count - 1) % count
+            (self.tab_mut().panels.find_at + count - 1) % count
         };
         self.go_to_hit(next);
     }
 
     fn go_to_hit(&mut self, index: usize) {
-        let Some((page, range)) = self.tab_mut().find_hits.get(index).cloned() else { return };
-        self.tab_mut().find_at = index;
+        let Some((page, range)) = self.tab_mut().panels.find_hits.get(index).cloned() else { return };
+        self.tab_mut().panels.find_at = index;
 
         // **Where the word is, not only which page it is on.** Every way of
         // finding something ends here, so this is the one place that makes
@@ -7267,7 +7267,7 @@ impl PagifyApp {
         self.tab_mut().text_selection = Some(range);
         let current_page = self.tab().page;
         self.tab_mut().selection_page = current_page;
-        let total = self.tab().find_hits.len();
+        let total = self.tab().panels.find_hits.len();
         self.say_info(format!("match {} of {total}", index + 1));
     }
 
@@ -7333,7 +7333,7 @@ impl PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
 
         if replaced == 0 {
             return Ok(format!("\"{needle}\" was not found."));
@@ -7346,7 +7346,7 @@ impl PagifyApp {
         ))
     }
 
-    /// Replace just the current match — `self.tab_mut().find_hits[self.tab_mut().find_at]` —
+    /// Replace just the current match — `self.tab_mut().panels.find_hits[self.tab_mut().panels.find_at]` —
     /// and step to whatever is now the next one, leaving every other match
     /// exactly as it was.
     ///
@@ -7372,17 +7372,17 @@ impl PagifyApp {
     /// holds either: in "the cat and the dog" the second "the" is the match
     /// the reader stepped to, and it is the one that changes.
     fn replace_current(&mut self, needle: &str, replacement: &str) -> Result<String, String> {
-        if self.tab().find_hits.is_empty() || self.tab().find_needle != needle {
+        if self.tab().panels.find_hits.is_empty() || self.tab().panels.find_needle != needle {
             self.find(needle);
-            return match self.tab().find_hits.len() {
+            return match self.tab().panels.find_hits.len() {
                 0 => Err(format!("\"{needle}\" was not found.")),
                 n => Ok(format!(
                     "match 1 of {n} — press Replace again to replace it, or Find Next to leave it."
                 )),
             };
         }
-        let find_at = self.tab().find_at;
-        let Some((page, range)) = self.tab().find_hits.get(find_at).cloned() else {
+        let find_at = self.tab().panels.find_at;
+        let Some((page, range)) = self.tab().panels.find_hits.get(find_at).cloned() else {
             return Err(format!("\"{needle}\" was not found."));
         };
         let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
@@ -7416,7 +7416,7 @@ impl PagifyApp {
         // Which of the run's own matches this is: the matches come in reading
         // order, so it is the one after as many as the earlier hits that sit
         // in this same run — found the same way, by where they are.
-        let earlier = self.tab().find_hits[..find_at]
+        let earlier = self.tab().panels.find_hits[..self.tab().panels.find_at]
             .iter()
             .filter(|(p, r)| {
                 *p == page
@@ -7451,16 +7451,16 @@ impl PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
 
         self.search(needle);
-        let left = self.tab().find_hits.len();
+        let left = self.tab().panels.find_hits.len();
         if left == 0 {
             return Ok(format!("replaced the last \"{needle}\" — none left."));
         }
         // The first match from there on, or the first of all when there is
         // none: Replace runs round the document the way Find Next does.
-        let next = self.tab().find_hits.iter().position(|(p, r)| (*p, r.start) >= resume).unwrap_or(0);
+        let next = self.tab().panels.find_hits.iter().position(|(p, r)| (*p, r.start) >= resume).unwrap_or(0);
         self.go_to_hit(next);
         Ok(format!("replaced 1 occurrence of \"{needle}\" — {left} left. `undo` puts it back."))
     }
@@ -7534,8 +7534,8 @@ impl PagifyApp {
             }
         });
         // Replacing a scan still running drops it, which stops it.
-        self.tab_mut().spell_scan = Some(SpellScan { done, stop, pages: page_count });
-        self.tab_mut().spelling =
+        self.tab_mut().panels.spell_scan = Some(SpellScan { done, stop, pages: page_count });
+        self.tab_mut().panels.spelling =
             Some(SpellCheck { scanning: Some((0, page_count)), ..SpellCheck::default() });
     }
 
@@ -7543,7 +7543,7 @@ impl PagifyApp {
     /// at the end the words, which turn the panel from "checking" into the
     /// first word to review.
     fn collect_spell_scan(&mut self, ctx: &egui::Context) {
-        let Some(scan) = &self.tab().spell_scan else { return };
+        let Some(scan) = &self.tab().panels.spell_scan else { return };
         let (mut checked, mut finished, mut ended) = (None, None, false);
         loop {
             match scan.done.try_recv() {
@@ -7567,20 +7567,20 @@ impl PagifyApp {
         let pages = scan.pages;
 
         if let Some(n) = checked {
-            if let Some(panel) = self.tab_mut().spelling.as_mut() {
+            if let Some(panel) = self.tab_mut().panels.spelling.as_mut() {
                 panel.scanning = Some((n, pages));
             }
         }
         if ended {
             // The thread went away without an answer and nobody asked it to.
-            self.tab_mut().spell_scan = None;
-            self.tab_mut().spelling = None;
+            self.tab_mut().panels.spell_scan = None;
+            self.tab_mut().panels.spelling = None;
             self.say_error("the spelling check stopped before it finished.");
             return;
         }
         let Some((found, skipped_pages, chinese)) = finished else { return };
 
-        self.tab_mut().spell_scan = None;
+        self.tab_mut().panels.spell_scan = None;
         let total_found = found.len();
         let mut panel =
             SpellCheck { found, total_found, skipped_pages, chinese, ..SpellCheck::default() };
@@ -7597,7 +7597,7 @@ impl PagifyApp {
             // of health for pages nothing looked at.
             self.say_info("no misspelled words found in what could be checked.");
         }
-        self.tab_mut().spelling = Some(panel);
+        self.tab_mut().panels.spelling = Some(panel);
     }
 
     /// Block until the scan has reported.
@@ -7607,7 +7607,7 @@ impl PagifyApp {
     fn wait_for_spell_scan(&mut self) {
         let ctx = egui::Context::default();
         for _ in 0..1200 {
-            if self.tab().spell_scan.is_none() {
+            if self.tab().panels.spell_scan.is_none() {
                 return;
             }
             self.collect_spell_scan(&ctx);
@@ -7696,7 +7696,7 @@ impl PagifyApp {
             Ok(_) => {
                 self.say_info(format!("bookmarked \"{title}\"."));
                 let entries = self.sync_bookmarks();
-                self.tab_mut().bookmark_panel = Some(BookmarkPanel { entries });
+                self.tab_mut().panels.bookmark_panel = Some(BookmarkPanel { entries });
             }
             Err(e) => self.say_error(format!("{e}")),
         }
@@ -7713,8 +7713,8 @@ impl PagifyApp {
     fn sync_bookmarks(&mut self) -> Vec<(String, usize)> {
         let entries = self.tab_mut().doc.as_ref().and_then(|d| d.session.bookmarks().ok()).unwrap_or_default();
         self.tab_mut().bookmarked_pages = entries.iter().map(|(_, page)| *page).collect();
-        if self.tab_mut().bookmark_panel.is_some() {
-            self.tab_mut().bookmark_panel = Some(BookmarkPanel { entries: entries.clone() });
+        if self.tab_mut().panels.bookmark_panel.is_some() {
+            self.tab_mut().panels.bookmark_panel = Some(BookmarkPanel { entries: entries.clone() });
         }
         entries
     }
@@ -7724,11 +7724,11 @@ impl PagifyApp {
     /// mockup's own rail header (`code.html:296-322`). Unlike
     /// `add_bookmark_here`, this never writes to the document.
     fn toggle_bookmark_panel(&mut self) {
-        if self.tab_mut().bookmark_panel.is_some() {
-            self.tab_mut().bookmark_panel = None;
+        if self.tab_mut().panels.bookmark_panel.is_some() {
+            self.tab_mut().panels.bookmark_panel = None;
         } else {
             let entries = self.sync_bookmarks();
-            self.tab_mut().bookmark_panel = Some(BookmarkPanel { entries });
+            self.tab_mut().panels.bookmark_panel = Some(BookmarkPanel { entries });
         }
     }
 
@@ -7760,7 +7760,7 @@ impl PagifyApp {
             return;
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().pending_link = Some(PendingLink { page, rects, url: String::new() });
+        self.tab_mut().panels.pending_link = Some(PendingLink { page, rects, url: String::new() });
     }
 
     /// A text selection's line rects, in the engine's own coordinate type —
@@ -9612,7 +9612,7 @@ impl PagifyApp {
                     doc.rendered_is_stale();
                 }
                 self.tab_mut().text_selection = None;
-                self.tab_mut().find_hits.clear();
+                self.tab_mut().panels.find_hits.clear();
                 Ok(format!(
                     "locked {} character{} on page {} — `unlock` and the passcode bring them back.",
                     report.characters,
@@ -9728,7 +9728,7 @@ impl PagifyApp {
                     doc.rendered_is_stale();
                 }
                 self.tab_mut().text_selection = None;
-                self.tab_mut().find_hits.clear();
+                self.tab_mut().panels.find_hits.clear();
                 // Says how many were *newly* locked, which can be fewer than
                 // were asked for: a page already locked keeps the way back it
                 // has rather than being sealed again over its blank self.
@@ -9796,7 +9796,7 @@ impl PagifyApp {
             })
         });
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
 
         // **Say when nothing will look different.** The order changed, and
         // that is real — but if nothing else is drawn where this thing is, the
@@ -10064,7 +10064,7 @@ impl PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
         self.tab_mut().selected_image = None;
     }
 
@@ -10092,7 +10092,7 @@ impl PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
         Ok(format!(
             "unlocked {restored} page{}.",
             if restored == 1 { "" } else { "s" }
@@ -10157,7 +10157,7 @@ impl PagifyApp {
                 }
                 // The words are gone, so anything holding on to them is stale.
                 self.tab_mut().text_selection = None;
-                self.tab_mut().find_hits.clear();
+                self.tab_mut().panels.find_hits.clear();
                 Ok(format!(
                     "redacted an area of page {} — saving will rewrite the whole file.",
                     page + 1
@@ -10281,10 +10281,10 @@ impl PagifyApp {
         if self.tab_mut().edit.new_text_box.take().is_some() {
             self.say_info("nothing was added.");
         }
-        if self.tab_mut().pending_link.take().is_some() {
+        if self.tab_mut().panels.pending_link.take().is_some() {
             self.say_info("nothing was linked.");
         }
-        if self.tab_mut().pending_article_box.take().is_some() {
+        if self.tab_mut().panels.pending_article_box.take().is_some() {
             self.say_info("nothing was added.");
         }
     }
@@ -10379,7 +10379,7 @@ impl PagifyApp {
                 // selection built from the pre-undo text would otherwise
                 // keep answering as if the edit were still there.
                 self.tab_mut().text_selection = None;
-                self.tab_mut().find_hits.clear();
+                self.tab_mut().panels.find_hits.clear();
                 // Undoing or redoing an `AddBookmark` is the one document
                 // change with nothing else here to notice it by — no page
                 // raster changes, no object list to compare — so the
@@ -10896,7 +10896,7 @@ impl PagifyApp {
         } else {
             compact_page_spec(&self.tab().organize_selected)
         };
-        self.tab_mut().extract_ask = Some(ExtractAsk { pages, ..Default::default() });
+        self.tab_mut().panels.extract_ask = Some(ExtractAsk { pages, ..Default::default() });
     }
 
     /// Where to write the extracted pages: the system's Save box, started in the
@@ -13258,7 +13258,7 @@ impl PagifyApp {
         // appears well away from the cause.
         self.refresh_after_page_change();
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
         self.say_info(said);
     }
 
@@ -15498,13 +15498,13 @@ fn wrap_typed_last_line(
         let selection =
             (page == self.tab_mut().selection_page).then(|| self.tab_mut().text_selection.clone()).flatten();
         let hits: Vec<std::ops::Range<usize>> = self.tab_mut()
-            .find_hits
+            .panels.find_hits
             .iter()
             .filter(|(p, _)| *p == page)
             .map(|(_, range)| range.clone())
             .collect();
-        let find_at = self.tab().find_at;
-        let current = self.tab().find_hits.get(find_at).cloned();
+        let find_at = self.tab().panels.find_at;
+        let current = self.tab().panels.find_hits.get(find_at).cloned();
 
         // **Before asking the engine for the page's text, not after.** This
         // runs for every visible page on every frame, and extracting the

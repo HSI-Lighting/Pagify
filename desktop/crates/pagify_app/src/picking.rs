@@ -144,7 +144,7 @@ impl crate::PagifyApp {
                 "type a passcode to lock it with, or Escape to give up.",
             ),
             ToolEffect::OpenArticleBoxPrompt(pending) => {
-                self.tab_mut().pending_article_box = Some(pending);
+                self.tab_mut().panels.pending_article_box = Some(pending);
             }
             ToolEffect::None | ToolEffect::Cancelled => {
                 unreachable!("on_click never returns these — only on_pointer/on_cancel do")

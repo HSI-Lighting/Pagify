@@ -22,7 +22,7 @@ fn open_panel(h: &mut Harness<'static, PagifyApp>) {
 fn found_words(h: &Harness<'static, PagifyApp>) -> Vec<String> {
     h.state()
         .tab()
-        .spelling
+        .panels.spelling
         .as_ref()
         .map(|p| p.found.iter().map(|m| m.word.clone()).collect())
         .unwrap_or_default()
@@ -135,7 +135,7 @@ fn the_next_word_shows_its_own_suggestions_after_an_ignore() {
             "\"{stale}\" is a suggestion for the word that was ignored, not for this one"
         );
     }
-    let panel = h.state().tab().spelling.as_ref().unwrap();
+    let panel = h.state().tab().panels.spelling.as_ref().unwrap();
     assert_eq!(panel.replacement, "definitely", "Change to: should start on the new word's best");
 }
 
@@ -268,7 +268,7 @@ fn a_change_the_engine_refuses_says_so_and_keeps_the_word_in_the_list() {
     let mut h = typo_harness("a tpyo here");
     open_panel(&mut h);
     // A control character no font has a glyph for: the engine refuses.
-    h.state_mut().tab_mut().spelling.as_mut().unwrap().replacement = "t\u{2}po".into();
+    h.state_mut().tab_mut().panels.spelling.as_mut().unwrap().replacement = "t\u{2}po".into();
     h.get_by_label("Change").click();
     h.run_steps(4);
 
@@ -285,7 +285,7 @@ fn a_change_the_engine_refuses_says_so_and_keeps_the_word_in_the_list() {
 fn a_change_all_the_engine_refuses_says_so_and_keeps_the_word_in_the_list() {
     let mut h = typo_harness("a tpyo here");
     open_panel(&mut h);
-    h.state_mut().tab_mut().spelling.as_mut().unwrap().replacement = "t\u{2}po".into();
+    h.state_mut().tab_mut().panels.spelling.as_mut().unwrap().replacement = "t\u{2}po".into();
     h.get_by_label("Change All").click();
     h.run_steps(4);
 
@@ -302,14 +302,14 @@ fn a_change_all_the_engine_refuses_says_so_and_keeps_the_word_in_the_list() {
 fn a_refusal_is_cleared_by_the_next_action() {
     let mut h = typo_harness("a tpyo here");
     open_panel(&mut h);
-    h.state_mut().tab_mut().spelling.as_mut().unwrap().replacement = "t\u{2}po".into();
+    h.state_mut().tab_mut().panels.spelling.as_mut().unwrap().replacement = "t\u{2}po".into();
     h.get_by_label("Change").click();
     h.run_steps(3);
-    assert!(h.state().tab().spelling.as_ref().unwrap().notice.is_some());
+    assert!(h.state().tab().panels.spelling.as_ref().unwrap().notice.is_some());
 
     h.get_by_label("Ignore").click();
     h.run_steps(3);
-    let panel = h.state().tab().spelling.as_ref().unwrap();
+    let panel = h.state().tab().panels.spelling.as_ref().unwrap();
     assert!(panel.notice.is_none(), "{:?}", panel.notice);
     assert!(panel.found.is_empty(), "Ignore should still drop the word");
 }
@@ -319,7 +319,7 @@ fn a_refusal_is_cleared_by_the_next_action() {
 fn a_change_that_works_fixes_the_page_and_moves_on() {
     let mut h = typo_harness("a tpyo here");
     open_panel(&mut h);
-    h.state_mut().tab_mut().spelling.as_mut().unwrap().replacement = "typo".into();
+    h.state_mut().tab_mut().panels.spelling.as_mut().unwrap().replacement = "typo".into();
     h.get_by_label("Change").click();
     h.run_steps(4);
 
@@ -358,27 +358,27 @@ fn opening_the_panel_starts_a_scan_and_returns_without_waiting_for_it() {
     let mut h = typo_harness("a tpyo here");
     h.state_mut().submit("spelling");
     let tab = h.state().tab();
-    assert!(tab.spell_scan.is_some(), "no scan was started");
-    let panel = tab.spelling.as_ref().expect("the panel did not open at once");
+    assert!(tab.panels.spell_scan.is_some(), "no scan was started");
+    let panel = tab.panels.spelling.as_ref().expect("the panel did not open at once");
     assert!(panel.scanning.is_some() && panel.found.is_empty(), "words were read before any frame ran");
 
     h.state_mut().wait_for_spell_scan();
     h.run_steps(3);
-    assert!(h.state().tab().spelling.as_ref().unwrap().scanning.is_none());
+    assert!(h.state().tab().panels.spelling.as_ref().unwrap().scanning.is_none());
     assert_eq!(found_words(&h), ["tpyo"]);
 }
 
 #[test]
 fn while_the_scan_runs_the_panel_shows_how_far_it_is_and_can_be_cancelled() {
     let mut h = typo_harness("a tpyo here");
-    h.state_mut().tab_mut().spelling =
+    h.state_mut().tab_mut().panels.spelling =
         Some(SpellCheck { scanning: Some((3, 10)), ..SpellCheck::default() });
     h.run_steps(3);
     h.get_by_label_contains("page 3 of 10");
     h.get_by_label("Cancel").click();
     h.run_steps(3);
-    assert!(h.state().tab().spelling.is_none(), "Cancel left the panel open");
-    assert!(h.state().tab().spell_scan.is_none());
+    assert!(h.state().tab().panels.spelling.is_none(), "Cancel left the panel open");
+    assert!(h.state().tab().panels.spell_scan.is_none());
 }
 
 /// A scan nobody is waiting for must not carry on reading a document.

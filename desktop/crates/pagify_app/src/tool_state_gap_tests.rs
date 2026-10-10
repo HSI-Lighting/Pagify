@@ -83,12 +83,12 @@ fn the_central_escape_does_not_close_the_link_prompt() {
     app.tab_mut().text_selection = Some(range);
     app.tab_mut().selection_page = 0;
     app.submit("weblinks");
-    assert!(app.tab_mut().pending_link.is_some(), "setup: the link prompt should have opened");
+    assert!(app.tab_mut().panels.pending_link.is_some(), "setup: the link prompt should have opened");
 
     app.escape();
 
     assert!(
-        app.tab_mut().pending_link.is_some(),
+        app.tab_mut().panels.pending_link.is_some(),
         "today, the central Escape handler never looks at pending_link at all — \
          only the link-prompt panel's own separate ctx.input(Escape) check \
          (not exercised by this test, which calls escape() directly with no \

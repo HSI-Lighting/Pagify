@@ -693,7 +693,7 @@ impl crate::PagifyApp {
                                 doc.rendered_is_stale();
                             }
                             self.tab_mut().text_selection = None;
-                            self.tab_mut().find_hits.clear();
+                            self.tab_mut().panels.find_hits.clear();
                             let said = done.describe();
                             if done.is_clean() {
                                 self.say_info(if done.removed().is_empty() {
@@ -889,7 +889,7 @@ impl crate::PagifyApp {
                     doc.rendered_is_stale();
                 }
                 self.tab_mut().text_selection = None;
-                self.tab_mut().find_hits.clear();
+                self.tab_mut().panels.find_hits.clear();
                 if partly.is_empty() && left.is_empty() {
                     self.say_info(format!("{gone} redacted — gone for good. Save to write it out."));
                 } else {
@@ -1143,7 +1143,7 @@ impl crate::PagifyApp {
             Verb::Reflow => self.reflow(),
             Verb::Find(needle) => self.find(&needle),
             Verb::FindStep { forward } => self.find_step(forward),
-            Verb::Replace => self.tab_mut().find_replace = Some(FindReplace::default()),
+            Verb::Replace => self.tab_mut().panels.find_replace = Some(FindReplace::default()),
             Verb::Spelling => self.open_spell_check(),
             Verb::Bookmark => self.add_bookmark_here(),
             Verb::ArticleBox => {

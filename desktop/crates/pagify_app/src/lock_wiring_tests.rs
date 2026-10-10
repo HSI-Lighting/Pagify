@@ -2418,7 +2418,7 @@ fn the_predefined_text_panel_opens_and_says_when_it_is_empty() {
 fn the_search_and_replace_panel_opens_from_its_command() {
     let mut app = app("two-column.pdf");
     app.submit("replace");
-    assert!(app.tab_mut().find_replace.is_some(), "the panel did not open");
+    assert!(app.tab_mut().panels.find_replace.is_some(), "the panel did not open");
 }
 
 #[test]
@@ -2426,7 +2426,7 @@ fn bookmarking_the_page_opens_the_panel_with_a_default_title() {
     let mut app = app("two-column.pdf");
     app.submit("bookmark");
 
-    let panel = app.tab_mut().bookmark_panel.as_ref().expect("the panel did not open");
+    let panel = app.tab_mut().panels.bookmark_panel.as_ref().expect("the panel did not open");
     assert_eq!(panel.entries, vec![("Page 1".to_string(), 0)]);
 }
 
@@ -2460,7 +2460,7 @@ fn bookmarking_with_a_selection_uses_it_as_the_title() {
 
     app.submit("bookmark");
 
-    let panel = app.tab_mut().bookmark_panel.as_ref().expect("the panel did not open");
+    let panel = app.tab_mut().panels.bookmark_panel.as_ref().expect("the panel did not open");
     assert_eq!(panel.entries.len(), 1);
     assert_eq!(panel.entries[0].0.to_lowercase(), "the");
     assert_eq!(panel.entries[0].1, 0);
@@ -2487,7 +2487,7 @@ fn weblinks_arms_when_nothing_is_selected() {
     let mut app = app("two-column.pdf");
     app.submit("weblinks");
     assert!(app.tab_mut().tool.is_some(), "the tool was not armed");
-    assert!(app.tab_mut().pending_link.is_none());
+    assert!(app.tab_mut().panels.pending_link.is_none());
 }
 
 #[test]
@@ -2499,7 +2499,7 @@ fn weblinks_opens_the_prompt_when_text_is_already_selected() {
 
     app.submit("weblinks");
 
-    assert!(app.tab_mut().pending_link.is_some(), "the prompt did not open");
+    assert!(app.tab_mut().panels.pending_link.is_some(), "the prompt did not open");
     assert!(app.tab_mut().text_selection.is_none(), "the selection should have been consumed");
     assert!(app.tab_mut().tool.is_none(), "arming is only for when nothing was selected yet");
 }

@@ -79,7 +79,7 @@ impl crate::PagifyApp {
     /// behaviour. A word's properties are kept by `replace_all`/
     /// `replace_current` themselves, not by anything drawn here.
     pub(crate) fn draw_find_replace(&mut self, ctx: &egui::Context) {
-        let Some(mut panel) = self.tab_mut().find_replace.take() else { return };
+        let Some(mut panel) = self.tab_mut().panels.find_replace.take() else { return };
 
         let mut open = true;
         let mut done = false;
@@ -195,7 +195,7 @@ impl crate::PagifyApp {
         }
 
         if let Some(forward) = step {
-            if self.tab_mut().find_hits.is_empty() || self.tab_mut().find_needle != panel.find {
+            if self.tab_mut().panels.find_hits.is_empty() || self.tab_mut().panels.find_needle != panel.find {
                 self.find(&panel.find);
             } else {
                 self.find_step(forward);
@@ -217,7 +217,7 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.tab_mut().find_replace = Some(panel);
+        self.tab_mut().panels.find_replace = Some(panel);
     }
 
     /// The Check Spelling panel — one word at a time, its own suggestions,
@@ -228,7 +228,7 @@ impl crate::PagifyApp {
     /// `draw_find_replace` documents: a spelling pass is watched against
     /// the page as it goes, not from behind a dimmed overlay of it.
     pub(crate) fn draw_spell_check(&mut self, ctx: &egui::Context) {
-        let Some(mut panel) = self.tab_mut().spelling.take() else { return };
+        let Some(mut panel) = self.tab_mut().panels.spelling.take() else { return };
 
         let mut open = true;
         let mut done = false;
@@ -369,7 +369,7 @@ impl crate::PagifyApp {
             return;
         }
 
-        self.tab_mut().spelling = Some(panel);
+        self.tab_mut().panels.spelling = Some(panel);
     }
 
     /// The action the spell dialog's buttons asked for, applied to the word in
@@ -456,7 +456,7 @@ impl crate::PagifyApp {
 
     /// The Bookmarks panel — every bookmark, click to jump.
     pub(crate) fn draw_bookmark_panel(&mut self, ctx: &egui::Context) {
-        let Some(panel) = self.tab_mut().bookmark_panel.take() else { return };
+        let Some(panel) = self.tab_mut().panels.bookmark_panel.take() else { return };
         let mut open = true;
         let mut go_to_page: Option<usize> = None;
 
@@ -487,11 +487,11 @@ impl crate::PagifyApp {
         if !open {
             return;
         }
-        self.tab_mut().bookmark_panel = Some(panel);
+        self.tab_mut().panels.bookmark_panel = Some(panel);
     }
 
     pub(crate) fn draw_link_prompt(&mut self, ctx: &egui::Context) {
-        let Some(mut pending) = self.tab_mut().pending_link.take() else { return };
+        let Some(mut pending) = self.tab_mut().panels.pending_link.take() else { return };
 
         let mut open = true;
         let mut done = false;
@@ -546,11 +546,11 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.tab_mut().pending_link = Some(pending);
+        self.tab_mut().panels.pending_link = Some(pending);
     }
 
     pub(crate) fn draw_article_box_prompt(&mut self, ctx: &egui::Context) {
-        let Some(mut pending) = self.tab_mut().pending_article_box.take() else { return };
+        let Some(mut pending) = self.tab_mut().panels.pending_article_box.take() else { return };
 
         let mut open = true;
         let mut done = false;
@@ -596,7 +596,7 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.tab_mut().pending_article_box = Some(pending);
+        self.tab_mut().panels.pending_article_box = Some(pending);
     }
 
     /// Ask for a password, whatever it is for, in one window.
@@ -1245,7 +1245,7 @@ impl crate::PagifyApp {
     }
 
     pub(crate) fn draw_extract_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut ask) = self.tab_mut().extract_ask.take() else { return };
+        let Some(mut ask) = self.tab_mut().panels.extract_ask.take() else { return };
         let Some(count) = self.tab().doc.as_ref().map(|d| d.page_count) else { return };
         let current = self.tab().page;
         let selected = self.tab().organize_selected.clone();
@@ -1327,7 +1327,7 @@ impl crate::PagifyApp {
                 },
             }
         }
-        self.tab_mut().extract_ask = Some(ask);
+        self.tab_mut().panels.extract_ask = Some(ask);
     }
 
     /// Layers a sharper render of whatever's actually on screen over the

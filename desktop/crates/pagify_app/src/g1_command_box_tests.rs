@@ -198,7 +198,7 @@ fn an_extract_button_asks_in_a_dialog_and_leaves_the_box_alone() {
     assert_eq!(echoes(&h), before, "Extract ran a command");
     assert!(errors(&h).is_empty(), "Extract raised an error: {:?}", errors(&h));
     assert_eq!(h.state().cmd.input(), "", "Extract left words in the box");
-    assert!(h.state().tab().extract_ask.is_some(), "the dialog did not open");
+    assert!(h.state().tab().panels.extract_ask.is_some(), "the dialog did not open");
     assert_eq!(h.state().tab().doc.as_ref().map(|d| d.page_count), Some(5), "Extract changed the document");
 }
 
@@ -342,12 +342,12 @@ fn the_extract_card_with_a_document_open_asks_for_its_pages_in_a_dialog() {
     assert!(errors(&h).is_empty(), "raised an error: {:?}", errors(&h));
     assert!(echoes(&h).is_empty(), "ran a command: {:?}", echoes(&h));
     assert_eq!(h.state().cmd.input(), "", "the box was filled instead of a dialog opening");
-    let ask = h.state().tab().extract_ask.clone().expect("the dialog did not open");
+    let ask = h.state().tab().panels.extract_ask.clone().expect("the dialog did not open");
     assert_eq!(ask.pages, "1", "with nothing selected it offers the page on screen");
     h.get_by_label("Extract pages");
     h.get_by_label("Cancel").click();
     h.run_steps(3);
-    assert!(h.state().tab().extract_ask.is_none(), "Cancel left the dialog open");
+    assert!(h.state().tab().panels.extract_ask.is_none(), "Cancel left the dialog open");
 }
 
 #[test]
@@ -356,14 +356,14 @@ fn the_extract_dialog_offers_the_selected_pages_and_says_what_is_wrong_with_a_ra
     h.state_mut().tab_mut().organize_selected = vec![0, 1, 2, 4];
     h.state_mut().open_extract_dialog();
     h.run_steps(3);
-    assert_eq!(h.state().tab().extract_ask.clone().unwrap().pages, "1-3,5");
+    assert_eq!(h.state().tab().panels.extract_ask.clone().unwrap().pages, "1-3,5");
 
     // A range outside the document is refused in the dialog, which stays
     // open with the reason — the Save box is never reached.
-    h.state_mut().tab_mut().extract_ask.as_mut().unwrap().pages = "999".into();
+    h.state_mut().tab_mut().panels.extract_ask.as_mut().unwrap().pages = "999".into();
     h.get_by_label("Extract\u{2026}").click();
     h.run_steps(3);
-    let ask = h.state().tab().extract_ask.clone().expect("the dialog closed on a bad range");
+    let ask = h.state().tab().panels.extract_ask.clone().expect("the dialog closed on a bad range");
     assert!(ask.problem.is_some(), "no reason shown");
     assert_eq!(ask.pages, "999", "what was typed was thrown away");
 }

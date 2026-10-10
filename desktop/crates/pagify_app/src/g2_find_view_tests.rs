@@ -128,7 +128,7 @@ fn find_brings_a_match_low_on_the_page_into_view() {
     h.state_mut().submit("find zebra");
     h.run_steps(8);
 
-    assert_eq!(h.state().tab().find_hits.len(), 1);
+    assert_eq!(h.state().tab().panels.find_hits.len(), 1);
     assert_match_in_view(&h, "Find on a zoomed page");
 }
 
@@ -140,7 +140,7 @@ fn the_find_button_brings_the_match_into_view_too() {
     h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.5);
     h.state_mut().submit("replace");
     h.run_steps(2);
-    h.state_mut().tab_mut().find_replace.as_mut().expect("the panel").find = "zebra".into();
+    h.state_mut().tab_mut().panels.find_replace.as_mut().expect("the panel").find = "zebra".into();
     h.run_steps(2);
 
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Find").click();
@@ -169,12 +169,12 @@ fn find_next_on_another_page_reveals_the_match_not_just_the_page() {
 
     h.state_mut().submit("find zebra");
     h.run_steps(8);
-    assert_eq!(h.state().tab().find_at, 0);
+    assert_eq!(h.state().tab().panels.find_at, 0);
     assert_match_in_view(&h, "the first match");
 
     h.state_mut().submit("findnext");
     h.run_steps(8);
-    assert_eq!(h.state().tab().find_at, 1);
+    assert_eq!(h.state().tab().panels.find_at, 1);
     assert_eq!(h.state().tab().page, 2, "the match is on the third page");
     assert_match_in_view(&h, "the match on the third page");
 }
@@ -193,13 +193,13 @@ fn stepping_back_and_wrapping_reveal_the_match_too() {
     // Forward from the last one wraps to the first, at the top.
     h.state_mut().submit("findnext");
     h.run_steps(8);
-    assert_eq!(h.state().tab().find_at, 0, "stepping on from the last did not wrap");
+    assert_eq!(h.state().tab().panels.find_at, 0, "stepping on from the last did not wrap");
     assert_match_in_view(&h, "wrapping round to the first match");
 
     // And back from the first wraps to the last, at the bottom.
     h.state_mut().submit("findprev");
     h.run_steps(8);
-    assert_eq!(h.state().tab().find_at, 1, "stepping back from the first did not wrap");
+    assert_eq!(h.state().tab().panels.find_at, 1, "stepping back from the first did not wrap");
     assert_match_in_view(&h, "wrapping back to the last match");
 }
 
@@ -358,7 +358,7 @@ fn a_match_already_in_view_does_not_move_the_page() {
 
     h.state_mut().submit("findnext");
     h.run_steps(8);
-    assert_eq!(h.state().tab().find_at, 1);
+    assert_eq!(h.state().tab().panels.find_at, 1);
     assert_match_in_view(&h, "the second of two");
     assert_eq!(
         h.state().tab().scroll_offset,
@@ -466,7 +466,7 @@ fn in_a_turned_view_find_does_not_scroll_to_a_box_that_is_not_where_the_word_is(
     h.state_mut().submit("find zebra");
     h.run_steps(6);
 
-    assert_eq!(h.state().tab().find_hits.len(), 1);
+    assert_eq!(h.state().tab().panels.find_hits.len(), 1);
     assert_eq!(h.state().tab().scroll_offset, egui::Vec2::ZERO, "the view went somewhere for a box that is not there");
 }
 
@@ -481,7 +481,7 @@ fn in_a_turned_view_find_still_goes_to_the_page() {
     h.state_mut().submit("findnext");
     h.run_steps(6);
 
-    assert_eq!(h.state().tab().find_at, 1);
+    assert_eq!(h.state().tab().panels.find_at, 1);
     assert_eq!(h.state().tab().page, 2, "Find did not go to the page the match is on");
     assert!(h.state().tab().reveal.is_none());
     let scale = h.state().tab().last_view.expect("drawn").scale;
@@ -545,15 +545,15 @@ fn replace_goes_on_to_the_match_after_the_one_it_replaced() {
     app.find("the");
     app.find_step(true);
     app.find_step(true);
-    assert_eq!(app.tab().find_at, 2);
-    let (page, was) = app.tab().find_hits[2].clone();
-    let before = app.tab().find_hits.len();
+    assert_eq!(app.tab().panels.find_at, 2);
+    let (page, was) = app.tab().panels.find_hits[2].clone();
+    let before = app.tab().panels.find_hits.len();
 
     app.replace_current("the", "XYZ").expect("replace failed");
 
-    assert_eq!(app.tab().find_hits.len(), before - 1);
-    let at = app.tab().find_at;
-    let (now_page, now) = app.tab().find_hits[at].clone();
+    assert_eq!(app.tab().panels.find_hits.len(), before - 1);
+    let at = app.tab().panels.find_at;
+    let (now_page, now) = app.tab().panels.find_hits[at].clone();
     assert!(
         (now_page, now.start) >= (page, was.start),
         "after replacing match 3 the view went back to match {} (page {now_page}, character {})",
@@ -572,11 +572,11 @@ fn replace_goes_on_to_the_match_after_the_one_it_replaced() {
 fn a_replacement_containing_the_search_term_is_stepped_past() {
     let mut app = open_two_column();
     app.find("the");
-    let (page, was) = app.tab().find_hits[0].clone();
+    let (page, was) = app.tab().panels.find_hits[0].clone();
 
     app.replace_current("the", "other").expect("replace failed");
 
-    let (now_page, now) = app.tab().find_hits[app.tab().find_at].clone();
+    let (now_page, now) = app.tab().panels.find_hits[app.tab().panels.find_at].clone();
     assert!(
         (now_page, now.start) >= (page, was.start + "other".chars().count()),
         "the view stayed on the word just replaced (character {} of page {now_page})",
@@ -591,18 +591,18 @@ fn pressing_find_again_with_the_same_word_steps_to_the_next_match() {
     let mut h = harness("two-column.pdf");
     h.state_mut().submit("replace");
     h.run_steps(2);
-    h.state_mut().tab_mut().find_replace.as_mut().expect("the panel").find = "the".into();
+    h.state_mut().tab_mut().panels.find_replace.as_mut().expect("the panel").find = "the".into();
     h.run_steps(2);
 
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Find").click();
     h.run_steps(3);
-    assert_eq!(h.state().tab().find_at, 0);
+    assert_eq!(h.state().tab().panels.find_at, 0);
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Find").click();
     h.run_steps(3);
-    assert_eq!(h.state().tab().find_at, 1, "the second Find went back to the first match");
+    assert_eq!(h.state().tab().panels.find_at, 1, "the second Find went back to the first match");
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Find").click();
     h.run_steps(3);
-    assert_eq!(h.state().tab().find_at, 2);
+    assert_eq!(h.state().tab().panels.find_at, 2);
 }
 
 /// A different word is a new search, from the first match.
@@ -614,14 +614,14 @@ fn find_with_a_different_word_starts_again_from_the_first_match() {
     h.state_mut().submit("findnext");
     h.state_mut().submit("replace");
     h.run_steps(2);
-    h.state_mut().tab_mut().find_replace.as_mut().expect("the panel").find = "and".into();
+    h.state_mut().tab_mut().panels.find_replace.as_mut().expect("the panel").find = "and".into();
     h.run_steps(2);
 
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Find").click();
     h.run_steps(3);
 
-    assert_eq!(h.state().tab().find_needle, "and");
-    assert_eq!(h.state().tab().find_at, 0);
+    assert_eq!(h.state().tab().panels.find_needle, "and");
+    assert_eq!(h.state().tab().panels.find_at, 0);
 }
 
 /// **A match is shown before it is replaced.** Replace with a word that had
@@ -636,7 +636,7 @@ fn replace_shows_the_match_before_replacing_it() {
     let said = app.replace_current("fox", "wolf").expect("it should show the match");
     assert!(said.contains("replace"), "it did not say what to do next: {said}");
     assert_eq!(run_texts(&app, 0), before, "the first press replaced a match nobody had seen");
-    assert_eq!(app.tab().find_hits.len(), 1);
+    assert_eq!(app.tab().panels.find_hits.len(), 1);
     assert!(app.tab().text_selection.is_some(), "the match was not shown");
 
     let said = app.replace_current("fox", "wolf").expect("replace failed");
@@ -652,9 +652,9 @@ fn replace_changes_the_occurrence_you_are_on_not_the_first_in_its_line() {
     let path = written("twice", &[(612.0, 792.0, vec![(72.0, 100.0, "the cat and the dog")])]);
     let mut app = PagifyApp::new(Some(&path));
     app.find("the");
-    assert_eq!(app.tab().find_hits.len(), 2);
+    assert_eq!(app.tab().panels.find_hits.len(), 2);
     app.find_step(true);
-    assert_eq!(app.tab().find_at, 1);
+    assert_eq!(app.tab().panels.find_at, 1);
 
     app.replace_current("the", "a").expect("replace failed");
 
@@ -669,7 +669,7 @@ fn enter_in_the_find_field_steps_on_every_time() {
     let mut h = harness("two-column.pdf");
     h.state_mut().submit("replace");
     h.run_steps(2);
-    h.state_mut().tab_mut().find_replace.as_mut().expect("the panel").find = "the".into();
+    h.state_mut().tab_mut().panels.find_replace.as_mut().expect("the panel").find = "the".into();
     h.run_steps(2);
     // The panel's field, not the command box's: it is the one holding "the".
     h.get_all_by_role(egui::accesskit::Role::TextInput)
@@ -681,7 +681,7 @@ fn enter_in_the_find_field_steps_on_every_time() {
     for expected in 0..3 {
         h.key_press(egui::Key::Enter);
         h.run_steps(3);
-        assert_eq!(h.state().tab().find_at, expected, "Enter number {} did not step on", expected + 1);
+        assert_eq!(h.state().tab().panels.find_at, expected, "Enter number {} did not step on", expected + 1);
     }
 }
 
@@ -731,7 +731,7 @@ fn only_a_page_with_something_to_highlight_is_asked_for_its_text() {
     h.state_mut().submit("find zebra");
     h.run_steps(4);
 
-    assert_eq!(h.state().tab().find_hits.len(), 1);
+    assert_eq!(h.state().tab().panels.find_hits.len(), 1);
     assert_eq!(
         h.state().tab().doc.as_ref().unwrap().caches.text.as_ref().map(|(p, _)| *p),
         Some(0),

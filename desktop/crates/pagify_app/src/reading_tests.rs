@@ -16,8 +16,8 @@ fn find_reports_what_it_found_and_lands_on_the_first_match() {
     let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
     app.submit("find fox");
 
-    assert_eq!(app.tab_mut().find_hits.len(), 1, "history:\n{}", said(&app));
-    assert_eq!(app.tab_mut().find_at, 0);
+    assert_eq!(app.tab_mut().panels.find_hits.len(), 1, "history:\n{}", said(&app));
+    assert_eq!(app.tab_mut().panels.find_at, 0);
     // The match is also the selection, so ⌘C copies what was found.
     assert!(app.tab_mut().text_selection.is_some(), "the match was not selected");
 }
@@ -36,7 +36,7 @@ fn a_match_selects_exactly_the_words_searched_for() {
 fn search_is_case_insensitive() {
     let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
     app.submit("find QUICK");
-    assert_eq!(app.tab_mut().find_hits.len(), 1, "history:\n{}", said(&app));
+    assert_eq!(app.tab_mut().panels.find_hits.len(), 1, "history:\n{}", said(&app));
 }
 
 #[test]
@@ -44,16 +44,16 @@ fn stepping_wraps_round_rather_than_stopping_dead() {
     // Two columns of prose, so there is more than one of a common word.
     let mut app = PagifyApp::new(Some(&fixture("two-column.pdf")));
     app.submit("find the");
-    let count = app.tab_mut().find_hits.len();
+    let count = app.tab_mut().panels.find_hits.len();
     assert!(count > 2, "only {count} matches — is the fixture right?");
 
     for _ in 0..count {
         app.submit("findnext");
     }
-    assert_eq!(app.tab_mut().find_at, 0, "stepping through every match did not wrap");
+    assert_eq!(app.tab_mut().panels.find_at, 0, "stepping through every match did not wrap");
 
     app.submit("findprev");
-    assert_eq!(app.tab_mut().find_at, count - 1, "stepping back from the first did not wrap");
+    assert_eq!(app.tab_mut().panels.find_at, count - 1, "stepping back from the first did not wrap");
 }
 
 #[test]
@@ -61,7 +61,7 @@ fn a_search_that_finds_nothing_says_so_and_changes_nothing() {
     let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
     app.submit("find zzzznotpresent");
 
-    assert!(app.tab_mut().find_hits.is_empty());
+    assert!(app.tab_mut().panels.find_hits.is_empty());
     assert!(app.tab_mut().text_selection.is_none(), "a failed search left a selection behind");
     assert!(said(&app).contains("no matches"), "no explanation:\n{}", said(&app));
 }
@@ -79,7 +79,7 @@ fn find_crosses_pages_and_jumps_to_the_page_the_match_is_on() {
     // No text in that fixture at all — the honest result is nothing found,
     // and crucially not a panic or a jump to a page that has no match.
     app.submit("find anything");
-    assert!(app.tab_mut().find_hits.is_empty());
+    assert!(app.tab_mut().panels.find_hits.is_empty());
     assert_eq!(app.tab_mut().page, 0);
 }
 
@@ -172,7 +172,7 @@ fn replace_all_needs_something_to_search_for() {
 fn replace_current_changes_only_the_current_match() {
     let mut app = PagifyApp::new(Some(&fixture("two-column.pdf")));
     app.find("the");
-    let before_count = app.tab_mut().find_hits.len();
+    let before_count = app.tab_mut().panels.find_hits.len();
     assert!(before_count > 2, "only {before_count} matches — is the fixture right?");
     let before_style = app.tab_mut().doc.as_ref().unwrap().session.text_runs(0).expect("runs");
 
@@ -183,7 +183,7 @@ fn replace_current_changes_only_the_current_match() {
 
     app.find("the");
     assert_eq!(
-        app.tab_mut().find_hits.len(),
+        app.tab_mut().panels.find_hits.len(),
         before_count - 1,
         "should have changed exactly one match"
     );
@@ -220,5 +220,5 @@ fn replace_current_says_when_none_are_left() {
     app.find("fox");
     let said = app.replace_current("fox", "wolf").expect("replace failed");
     assert!(said.contains("none left"), "{said}");
-    assert!(app.tab_mut().find_hits.is_empty());
+    assert!(app.tab_mut().panels.find_hits.is_empty());
 }

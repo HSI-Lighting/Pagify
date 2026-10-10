@@ -792,7 +792,7 @@ impl crate::PagifyApp {
                     doc.rendered_is_stale();
                 }
                 self.tab_mut().text_selection = None;
-                self.tab_mut().find_hits.clear();
+                self.tab_mut().panels.find_hits.clear();
 
                 // A pick made through the font button is not a surprise
                 // fallback — say it as the choice it was, not as the
@@ -974,7 +974,7 @@ impl crate::PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
         if failed.is_none() && renumbers {
             // Every object number of the page moved. `layers` is a list read
             // before it; a join names objects by number and would now name
@@ -1251,7 +1251,7 @@ impl crate::PagifyApp {
             doc.rendered_is_stale();
         }
         self.tab_mut().text_selection = None;
-        self.tab_mut().find_hits.clear();
+        self.tab_mut().panels.find_hits.clear();
         Ok(format!(
             "replaced the drawn word with \"{text}\" on page {}, set in {face}.{} It is \
              real text now — and this took two steps, so `undo` twice puts the \
