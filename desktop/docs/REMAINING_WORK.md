@@ -122,13 +122,16 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   `command_plan::plan(&Verb) -> Option<Vec<Effect>>` is the decision half
   (pure, with tests); `dispatch::act` tries it first and otherwise falls
   through to the old handlers, and `dispatch::apply_effect` is the doing
-  half. Three domains are ported: document/view/app (11 verbs),
-  objects/stacking (8) and measurement/recording (7), with mutation
-  coverage equal to before. Porting the rest is mechanical against this
-  pattern: add `Effect` variants (scroll-to-rect, refresh, ask-unsaved,
-  dialogs, selection ops), extend `plan`, move each handler body into
-  `apply_effect`, delete the handler — one domain per commit. Remaining
-  domains: tools, signing, security, navigation/edit, files,
+  half. Four domains are ported: document/view/app (11 verbs),
+  objects/stacking (8), measurement/recording (7) and tools (9), with
+  mutation coverage equal to before. `plan(verb, env)` now takes a small
+  `CommandEnv` (has_doc / page / page_height / tool_armed) and makes the
+  real decisions: the document guards and the kernel-to-app `Pick` flip
+  are computed in the shell and unit-tested (four plan tests). Porting the
+  rest is the same recipe — add `Effect` variants (scroll-to-rect,
+  refresh, ask-unsaved, dialogs, selection ops), extend `plan`, move each
+  handler body into `apply_effect`, delete the handler, one domain per
+  commit. Remaining domains: signing, security, navigation/edit, files,
   text-and-find (plus `run()`'s dispatch prologue).
 5. **File splits — DONE for both monoliths.** `session.rs` (1,817) is
   `session/mod.rs` (475) plus fourteen `impl Session` families;
