@@ -1261,7 +1261,7 @@ fn a_pasted_words_own_narrow_letters_read_back_the_same_as_the_original() {
     }
     let mut app = PagifyApp::new(Some(MARINA));
     app.submit("editobject");
-    app.tab_mut().page = 1;
+    app.tab_mut().view_state.page = 1;
     let before: std::collections::HashSet<usize> = text_runs(&app, 1).iter().map(|r| r.object).collect();
     let src = text_runs(&app, 1).into_iter().find(|r| r.object == 2844).expect("the Power Input: label");
     assert_eq!(src.text, "Power Input:", "setup: the fixture's own label changed under this test");

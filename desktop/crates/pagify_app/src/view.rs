@@ -42,7 +42,7 @@ impl crate::PagifyApp {
     pub(crate) fn resolved_zoom(&self) -> f32 {
         let (w, h) = self.page_extent(self.tab().zoom_settle.zoom_basis);
         let available = (self.tab().view_state.canvas_pt - egui::vec2(24.0, 24.0)).max(egui::vec2(1.0, 1.0));
-        match self.tab().zoom {
+        match self.tab().view_state.zoom {
             ZoomMode::Factor(f) => f,
             ZoomMode::Width => {
                 ((available.x / w) / Self::DISPLAY_DPI_SCALE).clamp(0.05, Self::MAX_ZOOM)
@@ -58,7 +58,7 @@ impl crate::PagifyApp {
             return;
         };
         let last = page_count.saturating_sub(1);
-        let current_page = self.tab().page;
+        let current_page = self.tab().view_state.page;
         let wanted = match target {
             PageTarget::Number(n) => n - 1,
             PageTarget::Next => current_page.saturating_add(1),
@@ -70,7 +70,7 @@ impl crate::PagifyApp {
             self.say_error(format!("there are only {page_count} pages."));
             return;
         }
-        self.tab_mut().page = wanted;
+        self.tab_mut().view_state.page = wanted;
         self.tab_mut().zoom_settle.zoom_basis = wanted;
         let scroll_pt = self.tab().doc.as_ref().map(|d| d.strip.scroll_to(wanted)).unwrap_or(0.0);
         self.tab_mut().view_state.scroll_pt = scroll_pt;
@@ -81,7 +81,7 @@ impl crate::PagifyApp {
     pub(crate) fn set_zoom(&mut self, target: ZoomTarget) {
         // Choosing Fit or Width fits the page being read now: see `zoom_basis`.
         if matches!(target, ZoomTarget::Fit | ZoomTarget::Width) {
-            let page = self.tab().page;
+            let page = self.tab().view_state.page;
             self.tab_mut().zoom_settle.zoom_basis = page;
         }
         let current = self.resolved_zoom();
@@ -91,7 +91,7 @@ impl crate::PagifyApp {
         // pinch paths below were independently capped lower (at a literal
         // `16.0`, not `Self::MAX_ZOOM`). One inconsistent cap in three places
         // is worse than one cap in one place.
-        self.tab_mut().zoom = match target {
+        self.tab_mut().view_state.zoom = match target {
             ZoomTarget::Factor(f) => ZoomMode::Factor(f.clamp(0.05, Self::MAX_ZOOM)),
             ZoomTarget::In => ZoomMode::Factor((current * 1.25).clamp(0.05, Self::MAX_ZOOM)),
             ZoomTarget::Out => ZoomMode::Factor((current / 1.25).clamp(0.05, Self::MAX_ZOOM)),
@@ -108,8 +108,8 @@ impl crate::PagifyApp {
             Rotation::Clockwise180 => 2,
             Rotation::Clockwise270 => 3,
         };
-        let turned = (quarters(self.tab_mut().rotation) + degrees.rem_euclid(360) / 90) % 4;
-        self.tab_mut().rotation = match turned {
+        let turned = (quarters(self.tab_mut().view_state.rotation) + degrees.rem_euclid(360) / 90) % 4;
+        self.tab_mut().view_state.rotation = match turned {
             0 => Rotation::None,
             1 => Rotation::Clockwise90,
             2 => Rotation::Clockwise180,
@@ -121,8 +121,8 @@ impl crate::PagifyApp {
         // still laid every page out, and was drawing it, in the frame of the
         // page upright — so a quarter turn squeezed the page into a frame of
         // the wrong proportions.
-        let sideways = self.tab_mut().rotation.swaps_axes();
-        let page = self.tab_mut().page;
+        let sideways = self.tab_mut().view_state.rotation.swaps_axes();
+        let page = self.tab_mut().view_state.page;
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
             doc.strip = doc.strip.retarget(doc.strip.layout(), sideways);

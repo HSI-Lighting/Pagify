@@ -48,7 +48,7 @@ fn opened(name: &str, bytes: &[u8]) -> Harness<'static, PagifyApp> {
 
 fn a_character_on_screen(h: &mut Harness<'static, PagifyApp>) -> egui::Pos2 {
     let app = h.state_mut();
-    let page = app.tab_mut().page;
+    let page = app.tab_mut().view_state.page;
     let chars = app.characters(page).expect("no characters");
     let r = chars.line_rects(0..1).into_iter().next().expect("no character box");
     let mid = AppPoint { x: ((r.left + r.right) / 2.0) as f64, y: ((r.top + r.bottom) / 2.0) as f64 };

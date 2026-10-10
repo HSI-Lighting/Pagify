@@ -5728,7 +5728,7 @@ fn closing_a_document_lets_go_of_its_passcode() {
 #[test]
 fn locking_a_selection_across_lines_sends_the_lines_not_their_union() {
     let mut app = app("two-column.pdf");
-    let page = app.tab_mut().page;
+    let page = app.tab_mut().view_state.page;
     let chars = app.characters(page).expect("characters");
     let text: String = chars.text();
     let phrase = "luminaire housing is formed from";
@@ -5987,7 +5987,7 @@ fn distance_to_outline_finds_the_nearest_contour_not_the_smallest_box() {
 #[test]
 fn a_two_point_line_is_not_dropped_as_too_short_to_be_real() {
     let mut app = app("single-page.pdf");
-    app.tab_mut().page = 0;
+    app.tab_mut().view_state.page = 0;
     app.stamp_line(0, AppPoint { x: 100.0, y: 700.0 }, AppPoint { x: 500.0, y: 700.0 })
         .expect("stamp a line");
 
@@ -6807,7 +6807,7 @@ fn one_badge_unlocks_its_own_image_and_leaves_the_others_sealed() {
         eprintln!("skipping: the catalogue is present but would not open");
         return;
     }
-    app.tab_mut().page = 40;
+    app.tab_mut().view_state.page = 40;
 
     let images = app.images_on(40);
     if images.len() < 2 {

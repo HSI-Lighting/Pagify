@@ -1059,7 +1059,7 @@ impl crate::PagifyApp {
                     // Straight on to the click, for somebody who reached for
                     // the tool wanting to sign rather than to draw.
                     if pad.then_place && self.tab_mut().doc.is_some() {
-                        let page = self.tab_mut().page;
+                        let page = self.tab_mut().view_state.page;
                         self.arm_tool(Tool::Signature, page);
                     }
                 }
@@ -1247,7 +1247,7 @@ impl crate::PagifyApp {
     pub(crate) fn draw_extract_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut ask) = self.tab_mut().panels.extract_ask.take() else { return };
         let Some(count) = self.tab().doc.as_ref().map(|d| d.page_count) else { return };
-        let current = self.tab().page;
+        let current = self.tab().view_state.page;
         let selected = self.tab().organize.organize_selected.clone();
 
         let mut go = false;
@@ -1351,7 +1351,7 @@ impl crate::PagifyApp {
         // The detail is rendered from the page upright, in page coordinates; laid
         // over a turned view it would show a different part of the page from the
         // one under it.
-        if !matches!(self.tab().rotation, Rotation::None) {
+        if !matches!(self.tab().view_state.rotation, Rotation::None) {
             return;
         }
         let (w, h) = self.tab_mut()

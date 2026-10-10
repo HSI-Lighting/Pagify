@@ -63,7 +63,7 @@ fn a_point_on_a_link_names_the_page_it_goes_to_and_the_smallest_link_wins() {
 fn clicking_a_link_goes_to_its_page() {
     let mut h = harness_from(app());
     h.run_steps(3);
-    assert_eq!(h.state().tab().page, 0);
+    assert_eq!(h.state().tab().view_state.page, 0);
     let at = h
         .state()
         .tab()
@@ -71,7 +71,7 @@ fn clicking_a_link_goes_to_its_page() {
         .expect("the page was never drawn")
         .to_screen(AppPoint { x: 15.0, y: 40.0 });
     click(&mut h, at);
-    assert_eq!(h.state().tab().page, 2, "the click did not go to the linked page");
+    assert_eq!(h.state().tab().view_state.page, 2, "the click did not go to the linked page");
 }
 
 #[test]

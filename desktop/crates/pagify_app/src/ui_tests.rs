@@ -75,7 +75,7 @@ fn nearby_zoom_levels_during_one_gesture_share_a_texture() {
 /// Where the page is on screen, and a point on its first character.
 fn a_character_on_screen(h: &mut Harness<'static, PagifyApp>) -> egui::Pos2 {
     let app = h.state_mut();
-    let page = app.tab_mut().page;
+    let page = app.tab_mut().view_state.page;
     let chars = app.characters(page).expect("no characters").clone();
     let r = chars.line_rects(0..1).into_iter().next().expect("no character box");
     let mid = egui::pos2((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
@@ -150,7 +150,7 @@ fn scrolling_through_pages_of_different_sizes_neither_changes_the_zoom_nor_flips
                 .expect("page");
             h.state_mut().refresh_after_page_change();
         }
-        h.state_mut().tab_mut().zoom = mode;
+        h.state_mut().tab_mut().view_state.zoom = mode;
         h.run_steps(20);
         let first_zoom = h.state().resolved_zoom();
         h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 500.0)));
@@ -168,18 +168,18 @@ fn scrolling_through_pages_of_different_sizes_neither_changes_the_zoom_nor_flips
                     h.state().resolved_zoom(),
                     first_zoom,
                     "{mode:?}: the zoom changed while scrolling (step {step}, page {})",
-                    h.state().tab().page
+                    h.state().tab().view_state.page
                 );
             }
         }
         // And once the scrolling stops (egui's smooth scroll takes a
         // moment to come to rest) nothing keeps moving.
         h.run_steps(60);
-        let (page, offset) = (h.state().tab().page, h.state().tab().view_state.scroll_offset);
+        let (page, offset) = (h.state().tab().view_state.page, h.state().tab().view_state.scroll_offset);
         for _ in 0..30 {
             h.run_steps(1);
             assert_eq!(
-                (h.state().tab().page, h.state().tab().view_state.scroll_offset),
+                (h.state().tab().view_state.page, h.state().tab().view_state.scroll_offset),
                 (page, offset),
                 "{mode:?}: the view is still moving with no input"
             );
@@ -836,7 +836,7 @@ fn a_click_in_the_organize_grid_selects_the_page_and_goes_to_it() {
     h.run_steps(3);
 
     assert_eq!(h.state().tab().organize.organize_selected, vec![3], "the clicked page was not selected");
-    assert_eq!(h.state().tab().page, 3, "the view did not go to the clicked page");
+    assert_eq!(h.state().tab().view_state.page, 3, "the view did not go to the clicked page");
 }
 
 /// A long document scrolls in the Organize grid — down, and only down:
@@ -2305,7 +2305,7 @@ fn locking_a_page_leaves_no_stale_thumbnail_of_it() {
 ///
 /// Not committed — they are 80 MB and 500 kB of someone's real work — so
 /// these skip when the files are not there. They are here because a
-/// one-page fixture hid the defect completely: `self.tab_mut().page` never followed
+/// one-page fixture hid the defect completely: `self.tab_mut().view_state.page` never followed
 /// the scroll, so on any document long enough to scroll, the pointer talked
 /// to page 1 while the reader was somewhere else entirely.
 fn real_file(name: &str) -> Option<String> {
@@ -2359,13 +2359,13 @@ fn selection_works_after_scrolling_into_a_long_document() {
         eprintln!("skipping: catalogue not in ~/Downloads");
         return;
     };
-    assert_eq!(h.state().tab().page, 0);
+    assert_eq!(h.state().tab().view_state.page, 0);
 
     // Far enough in that the current page must have moved with it.
     for _ in 0..6 {
         wheel(&mut h, 900.0);
     }
-    let landed = h.state().tab().page;
+    let landed = h.state().tab().view_state.page;
     assert!(landed > 0, "scrolling six screens did not change the current page");
 
     let start = a_character_on_screen(&mut h);
@@ -2417,7 +2417,7 @@ fn selection_works_on_the_test_report() {
     assert!(
         app.tab().selection.text_selection.is_some(),
         "nothing selected on page {} of the report",
-        app.tab().page + 1
+        app.tab().view_state.page + 1
     );
 }
 
@@ -2753,7 +2753,7 @@ fn what_is_copied_is_what_was_selected() {
 
     let expected = {
         let app = h.state_mut();
-        let page = app.tab_mut().page;
+        let page = app.tab_mut().view_state.page;
         let range = app.tab_mut().selection.text_selection.clone().expect("no selection");
         app.characters(page).expect("characters").text_of(range)
     };
@@ -2802,7 +2802,7 @@ fn zooming_holds_the_point_on_a_scrolling_document() {
         eprintln!("skipping: catalogue not in ~/Downloads");
         return;
     };
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(2.5);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(2.5);
     h.run_steps(3);
     for _ in 0..4 {
         wheel(&mut h, 900.0);
@@ -2878,16 +2878,16 @@ fn a_jump_to_a_page_is_not_undone_by_the_scroll_catching_up() {
         eprintln!("skipping: catalogue not in ~/Downloads");
         return;
     };
-    assert_eq!(h.state().tab().page, 0);
+    assert_eq!(h.state().tab().view_state.page, 0);
 
     h.state_mut().act(Verb::Page(PageTarget::Number(12)));
     h.run_steps(6);
 
     assert_eq!(
-        h.state().tab().page,
+        h.state().tab().view_state.page,
         11,
         "the jump was undone; the view slid back to page {}",
-        h.state().tab().page + 1
+        h.state().tab().view_state.page + 1
     );
 }
 
@@ -2902,7 +2902,7 @@ fn the_page_is_still_drawn_at_extreme_zoom() {
     let mut h = harness("text-lines.pdf");
 
     for scale in [4.0f32, 8.0, 12.0, 16.0] {
-        h.state_mut().tab_mut().zoom = ZoomMode::Factor(scale);
+        h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(scale);
         h.run_steps(3);
         assert!(
             h.state().tab().view_state.last_view.is_some(),
@@ -2948,7 +2948,7 @@ fn zooming_in_can_go_well_past_the_old_sixteen_hundred_percent_ceiling() {
 #[test]
 fn the_page_can_still_be_pointed_at_when_zoomed_right_in() {
     let mut h = harness("text-lines.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(14.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(14.0);
     h.run_steps(3);
 
     let view = h.state().tab().view_state.last_view.expect("nothing drawn");
@@ -2965,13 +2965,13 @@ fn the_page_can_still_be_pointed_at_when_zoomed_right_in() {
 #[test]
 fn a_page_smaller_than_the_window_is_centred() {
     let mut h = harness("single-page.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(0.5);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(0.5);
     h.run_steps(3);
 
     let (view, page_w) = {
         let app = h.state();
         let view = app.tab().view_state.last_view.expect("nothing drawn");
-        let (w, _) = app.tab().doc.as_ref().unwrap().strip.size_of(app.tab().page).unwrap();
+        let (w, _) = app.tab().doc.as_ref().unwrap().strip.size_of(app.tab().view_state.page).unwrap();
         (view, w)
     };
 
@@ -2993,7 +2993,7 @@ fn a_page_smaller_than_the_window_is_centred() {
 #[test]
 fn a_page_larger_than_the_window_is_not_centred() {
     let mut h = harness("single-page.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(8.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(8.0);
     h.run_steps(3);
 
     let viewport = h.state().tab().view_state.viewport_rect.expect("no viewport");
@@ -4269,7 +4269,7 @@ fn zooming_holds_the_point_under_the_cursor() {
     // can actually scroll. While the whole page fits in the window there is
     // no offset to move, so it can only grow — correctly, and with nothing
     // to hold still.
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(3.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(3.0);
     h.run_steps(3);
 
     let at = egui::pos2(700.0, 600.0);
@@ -4308,7 +4308,7 @@ fn zooming_out_holds_the_point_too() {
     // the scrollable range, and it gets clamped. That is the document
     // running out, not the anchor being wrong, and a test that ignores the
     // difference measures the clamp instead of the thing it is named after.
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(10.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(10.0);
     h.run_steps(3);
     h.state_mut().tab_mut().view_state.anchor_offset = Some(egui::vec2(1200.0, 2500.0));
     h.run_steps(3);
@@ -4350,7 +4350,7 @@ fn zooming_out_holds_the_point_too() {
 #[test]
 fn actual_size_matches_the_96_dpi_convention_other_readers_use() {
     let mut h = harness("text-lines.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(1.0);
     h.run_steps(3);
     let scale = h.state().tab().view_state.last_view.expect("page never drawn").scale;
     assert!(
@@ -4367,7 +4367,7 @@ fn the_middle_button_pans() {
     // Zoomed in, so there is somewhere to pan *to*. At Fit the whole strip
     // is inside the window and the offset cannot move — which is correct,
     // and would have made this test pass for the wrong reason.
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
     h.run_steps(3);
     let before = h.state().tab().view_state.scroll_offset;
 
@@ -4392,7 +4392,7 @@ fn the_middle_button_pans() {
 #[test]
 fn panning_with_the_middle_button_leaves_an_armed_tool_alone() {
     let mut h = harness("pages-ladder.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
     h.state_mut().submit("line");
     h.run_steps(3);
 
@@ -4412,7 +4412,7 @@ fn panning_with_the_middle_button_leaves_an_armed_tool_alone() {
 #[test]
 fn hand_mode_actually_moves_the_page() {
     let mut h = harness("pages-ladder.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
     h.state_mut().submit("hand");
     h.run_steps(3);
     let before = h.state().tab().view_state.scroll_offset;
@@ -4517,7 +4517,7 @@ fn a_click_that_wandered_a_pixel_still_counts() {
     h.run_steps(2);
 
     let app = h.state();
-    let marks = app.tab().markup.existing(app.tab().page).map(|l| l.len()).unwrap_or(0);
+    let marks = app.tab().markup.existing(app.tab().view_state.page).map(|l| l.len()).unwrap_or(0);
     assert_eq!(
         marks, 1,
         "two clicks that each moved a pixel drew nothing.\n{}",
@@ -4537,7 +4537,7 @@ fn the_line_tool_draws_where_it_is_clicked() {
     h.run_steps(2);
 
     let app = h.state();
-    let marks = app.tab().markup.existing(app.tab().page).map(|l| l.len()).unwrap_or(0);
+    let marks = app.tab().markup.existing(app.tab().view_state.page).map(|l| l.len()).unwrap_or(0);
     assert_eq!(
         marks, 1,
         "two clicks on the page drew nothing.\n{}",

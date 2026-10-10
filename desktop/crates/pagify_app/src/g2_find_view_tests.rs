@@ -83,7 +83,7 @@ fn assert_match_in_view(h: &Harness<'static, PagifyApp>, what: &str) {
         "{what}: the current match was painted {} times (window {view:?}, scrolled to {:?}, page {})",
         painted.len(),
         h.state().tab().view_state.scroll_offset,
-        h.state().tab().page,
+        h.state().tab().view_state.page,
     );
     assert!(
         view.contains_rect(painted[0]),
@@ -121,7 +121,7 @@ fn assert_below_the_fold(h: &Harness<'static, PagifyApp>, down_to: f32, zoom: f3
 #[test]
 fn find_brings_a_match_low_on_the_page_into_view() {
     let mut h = open_text_pdf("low", &tall_page_with_a_match_low_down());
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.5);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(1.5);
     h.run_steps(4);
     assert_below_the_fold(&h, 720.0, 1.5);
 
@@ -137,7 +137,7 @@ fn find_brings_a_match_low_on_the_page_into_view() {
 #[test]
 fn the_find_button_brings_the_match_into_view_too() {
     let mut h = open_text_pdf("button", &tall_page_with_a_match_low_down());
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.5);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(1.5);
     h.state_mut().submit("replace");
     h.run_steps(2);
     h.state_mut().tab_mut().panels.find_replace.as_mut().expect("the panel").find = "zebra".into();
@@ -164,7 +164,7 @@ fn three_pages_with_a_match_at_each_end() -> Vec<Page> {
 #[test]
 fn find_next_on_another_page_reveals_the_match_not_just_the_page() {
     let mut h = open_text_pdf("pages", &three_pages_with_a_match_at_each_end());
-    h.state_mut().tab_mut().zoom = ZoomMode::Width;
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Width;
     h.run_steps(4);
 
     h.state_mut().submit("find zebra");
@@ -175,14 +175,14 @@ fn find_next_on_another_page_reveals_the_match_not_just_the_page() {
     h.state_mut().submit("findnext");
     h.run_steps(8);
     assert_eq!(h.state().tab().panels.find_at, 1);
-    assert_eq!(h.state().tab().page, 2, "the match is on the third page");
+    assert_eq!(h.state().tab().view_state.page, 2, "the match is on the third page");
     assert_match_in_view(&h, "the match on the third page");
 }
 
 #[test]
 fn stepping_back_and_wrapping_reveal_the_match_too() {
     let mut h = open_text_pdf("wrap", &three_pages_with_a_match_at_each_end());
-    h.state_mut().tab_mut().zoom = ZoomMode::Width;
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Width;
     h.run_steps(4);
     h.state_mut().submit("find zebra");
     h.run_steps(6);
@@ -211,7 +211,7 @@ fn a_match_in_the_middle_of_a_tall_page_is_centred() {
         "middle",
         &[(612.0, 3000.0, vec![(72.0, 100.0, "the start"), (72.0, 1500.0, "the zebra")])],
     );
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(1.0);
     h.run_steps(4);
     // A zoom now keeps the middle of the page in the middle of the window,
     // which for this page is the zebra itself. The match has to start out of
@@ -255,7 +255,7 @@ fn thirty_pages() -> Vec<Page> {
 fn narrowing_the_page_area_does_not_move_the_reader_in_width_zoom() {
     for mode in [ZoomMode::Width, ZoomMode::Fit] {
         let mut h = open_text_pdf("narrowing", &thirty_pages());
-        h.state_mut().tab_mut().zoom = mode;
+        h.state_mut().tab_mut().view_state.zoom = mode;
         h.run_steps(4);
         h.state_mut().act(Verb::Page(PageTarget::Number(15)));
         h.run_steps(4);
@@ -269,14 +269,14 @@ fn narrowing_the_page_area_does_not_move_the_reader_in_width_zoom() {
             modifiers: Default::default(),
         });
         h.run_steps(4);
-        let (page, before) = (h.state().tab().page, middle_of_the_window_pt(&h));
+        let (page, before) = (h.state().tab().view_state.page, middle_of_the_window_pt(&h));
         assert_eq!(page, 14, "{mode:?}: setup: the reader should be on page 15");
 
         let rail = h.state().show_thumbs;
         h.state_mut().show_thumbs = !rail;
         h.run_steps(6);
         let after = middle_of_the_window_pt(&h);
-        assert_eq!(h.state().tab().page, page, "{mode:?}: the reader was moved to another page");
+        assert_eq!(h.state().tab().view_state.page, page, "{mode:?}: the reader was moved to another page");
         assert!(
             (after - before).abs() < 2.0,
             "{mode:?}: the middle of the window moved from {before} to {after} (page points)"
@@ -294,7 +294,7 @@ fn narrowing_the_page_area_does_not_move_the_reader_in_width_zoom() {
 #[test]
 fn an_ordinary_scroll_is_not_undone_by_the_view_restore() {
     let mut h = open_text_pdf("scrolling", &thirty_pages());
-    h.state_mut().tab_mut().zoom = ZoomMode::Width;
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Width;
     h.run_steps(4);
     let start = h.state().tab().view_state.scroll_offset.y;
     h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 500.0)));
@@ -318,7 +318,7 @@ fn an_ordinary_scroll_is_not_undone_by_the_view_restore() {
 #[test]
 fn each_document_has_its_own_scroll_state() {
     let mut h = open_text_pdf("own-state", &thirty_pages());
-    h.state_mut().tab_mut().zoom = ZoomMode::Width;
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Width;
     h.run_steps(3);
     h.state_mut().act(Verb::Page(PageTarget::Number(20)));
     h.run_steps(4);
@@ -348,7 +348,7 @@ fn a_match_already_in_view_does_not_move_the_page() {
             vec![(72.0, 100.0, "the start"), (72.0, 1400.0, "the zebra one"), (72.0, 1500.0, "the zebra two")],
         )],
     );
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(1.0);
     h.run_steps(4);
 
     h.state_mut().submit("find zebra");
@@ -372,7 +372,7 @@ fn a_match_already_in_view_does_not_move_the_page() {
 #[test]
 fn a_match_at_the_top_left_corner_is_in_view_with_the_view_at_the_corner() {
     let mut h = open_text_pdf("corner", &[(612.0, 792.0, vec![(2.0, 12.0, "zebra")])]);
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(6.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(6.0);
     h.run_steps(4);
 
     h.state_mut().submit("find zebra");
@@ -388,7 +388,7 @@ fn a_match_at_the_top_left_corner_is_in_view_with_the_view_at_the_corner() {
 #[test]
 fn a_match_off_to_the_side_of_a_zoomed_in_page_is_found() {
     let mut h = open_text_pdf("side", &[(612.0, 792.0, vec![(72.0, 100.0, "the start"), (480.0, 150.0, "zebra")])]);
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
     h.run_steps(4);
     let view = h.state().tab().view_state.viewport_rect.expect("drawn");
     assert!(
@@ -415,7 +415,7 @@ fn a_match_on_the_right_hand_page_of_a_facing_view_is_found() {
         ],
     );
     h.state_mut().submit("viewfacing");
-    h.state_mut().tab_mut().zoom = ZoomMode::Width;
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Width;
     h.run_steps(6);
 
     h.state_mut().submit("find zebra");
@@ -435,12 +435,12 @@ fn a_footer_at_fit_keeps_the_page_top_where_going_to_the_page_put_it() {
     // end of the strip, so "centre it" and "the page top" are the same place.
     let page = |footer: &'static str| (612.0, 792.0, vec![(72.0, 100.0, "a page"), (72.0, 772.0, footer)]);
     let mut h = open_text_pdf("footer", &[page("one"), page("zebra"), page("three")]);
-    assert!(matches!(h.state().tab().zoom, ZoomMode::Fit), "Fit is the default zoom");
+    assert!(matches!(h.state().tab().view_state.zoom, ZoomMode::Fit), "Fit is the default zoom");
 
     h.state_mut().submit("find zebra");
     h.run_steps(8);
 
-    assert_eq!(h.state().tab().page, 1);
+    assert_eq!(h.state().tab().view_state.page, 1);
     assert_match_in_view(&h, "a footer at Fit");
     let scale = h.state().tab().view_state.last_view.expect("drawn").scale;
     let page_top = h.state().tab().doc.as_ref().expect("doc").strip.scroll_to(1) * scale;
@@ -458,10 +458,10 @@ fn a_footer_at_fit_keeps_the_page_top_where_going_to_the_page_put_it() {
 #[test]
 fn in_a_turned_view_find_does_not_scroll_to_a_box_that_is_not_where_the_word_is() {
     let mut h = open_text_pdf("turned-one", &tall_page_with_a_match_low_down());
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.5);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(1.5);
     h.state_mut().submit("rotate 90");
     h.run_steps(4);
-    assert!(!matches!(h.state().tab().rotation, Rotation::None), "the view did not turn");
+    assert!(!matches!(h.state().tab().view_state.rotation, Rotation::None), "the view did not turn");
 
     h.state_mut().submit("find zebra");
     h.run_steps(6);
@@ -475,14 +475,14 @@ fn in_a_turned_view_find_still_goes_to_the_page() {
     let mut h = open_text_pdf("turned", &three_pages_with_a_match_at_each_end());
     h.state_mut().submit("rotate 90");
     h.run_steps(4);
-    assert!(!matches!(h.state().tab().rotation, Rotation::None), "the view did not turn");
+    assert!(!matches!(h.state().tab().view_state.rotation, Rotation::None), "the view did not turn");
 
     h.state_mut().submit("find zebra");
     h.state_mut().submit("findnext");
     h.run_steps(6);
 
     assert_eq!(h.state().tab().panels.find_at, 1);
-    assert_eq!(h.state().tab().page, 2, "Find did not go to the page the match is on");
+    assert_eq!(h.state().tab().view_state.page, 2, "Find did not go to the page the match is on");
     assert!(h.state().tab().view_state.reveal.is_none());
     let scale = h.state().tab().view_state.last_view.expect("drawn").scale;
     let page_top = h.state().tab().doc.as_ref().expect("doc").strip.scroll_to(2) * scale;
@@ -705,7 +705,7 @@ fn pages_in_view(h: &Harness<'static, PagifyApp>, zoom: f32) -> usize {
 #[test]
 fn nothing_asks_for_page_text_when_there_is_nothing_to_highlight() {
     let mut h = open_text_pdf("quiet", &three_text_pages());
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(0.3);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(0.3);
     h.run_steps(4);
     assert!(pages_in_view(&h, 0.3) >= 2, "the test needs more than one page on screen");
 
@@ -724,7 +724,7 @@ fn nothing_asks_for_page_text_when_there_is_nothing_to_highlight() {
 #[test]
 fn only_a_page_with_something_to_highlight_is_asked_for_its_text() {
     let mut h = open_text_pdf("one-hit", &three_text_pages());
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(0.3);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(0.3);
     h.run_steps(4);
     assert!(pages_in_view(&h, 0.3) >= 2, "the test needs more than one page on screen");
 
@@ -748,7 +748,7 @@ fn only_a_page_with_something_to_highlight_is_asked_for_its_text() {
 #[test]
 fn visiting_the_file_tab_does_not_put_the_view_back_at_the_top() {
     let mut h = harness("pages-ladder.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(2.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(2.0);
     h.run_steps(3);
     h.state_mut().pan(egui::vec2(0.0, -700.0));
     h.run_steps(4);

@@ -18,7 +18,7 @@ fn at(x: f64, y: f64) -> AppPoint {
 }
 
 fn marks(app: &PagifyApp) -> usize {
-    app.tab().markup.existing(app.tab().page).map(|l| l.len()).unwrap_or(0)
+    app.tab().markup.existing(app.tab().view_state.page).map(|l| l.len()).unwrap_or(0)
 }
 
 fn said(app: &PagifyApp) -> String {
@@ -310,22 +310,22 @@ fn opening_another_file_does_not_ask() {
 fn each_tab_keeps_its_own_page_and_zoom_across_a_switch() {
     let mut app = app("pages-ladder.pdf");
     app.submit("page 3");
-    app.tab_mut().zoom = ZoomMode::Factor(2.0);
-    let (page_a, zoom_a) = (app.tab().page, app.tab().zoom);
+    app.tab_mut().view_state.zoom = ZoomMode::Factor(2.0);
+    let (page_a, zoom_a) = (app.tab().view_state.page, app.tab().view_state.zoom);
 
     app.submit(&format!("open \"{}\"", fixture("pages-ladder.pdf")));
     assert_eq!(app.tabs.len(), 2, "opening another file should have made a second tab");
     app.submit("page 1");
-    app.tab_mut().zoom = ZoomMode::Factor(1.0);
+    app.tab_mut().view_state.zoom = ZoomMode::Factor(1.0);
 
     // The newest tab is the leftmost: the first document is now the second.
     app.active_tab = 1;
-    assert_eq!(app.tab().page, page_a, "switching back lost the first tab's page");
-    assert_eq!(app.tab().zoom, zoom_a, "switching back lost the first tab's zoom");
+    assert_eq!(app.tab().view_state.page, page_a, "switching back lost the first tab's page");
+    assert_eq!(app.tab().view_state.zoom, zoom_a, "switching back lost the first tab's zoom");
 
     app.active_tab = 0;
-    assert_ne!(app.tab().page, page_a, "the second tab's own page should be unaffected");
-    assert_eq!(app.tab().zoom, ZoomMode::Factor(1.0));
+    assert_ne!(app.tab().view_state.page, page_a, "the second tab's own page should be unaffected");
+    assert_eq!(app.tab().view_state.zoom, ZoomMode::Factor(1.0));
 }
 
 /// Closing a tab with unsaved marks prompts, exactly like closing today's

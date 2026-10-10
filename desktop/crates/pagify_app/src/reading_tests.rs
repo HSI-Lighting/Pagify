@@ -80,7 +80,7 @@ fn find_crosses_pages_and_jumps_to_the_page_the_match_is_on() {
     // and crucially not a panic or a jump to a page that has no match.
     app.submit("find anything");
     assert!(app.tab_mut().panels.find_hits.is_empty());
-    assert_eq!(app.tab_mut().page, 0);
+    assert_eq!(app.tab_mut().view_state.page, 0);
 }
 
 #[test]

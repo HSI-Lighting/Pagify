@@ -227,7 +227,7 @@ impl crate::PagifyApp {
                 //
                 // Pointer picks arrive in app space instead, so this is the one
                 // place that converts, through the module that owns the flip.
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 let height = self.tab_mut()
                     .doc
                     .as_ref()
@@ -253,7 +253,7 @@ impl crate::PagifyApp {
                 }
             },
             Verb::EditObject => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -261,7 +261,7 @@ impl crate::PagifyApp {
                 self.take_up_object_tool(true, page);
             }
             Verb::MoveThing => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -269,7 +269,7 @@ impl crate::PagifyApp {
                 self.take_up_object_tool(false, page);
             }
             Verb::SignLine => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -277,7 +277,7 @@ impl crate::PagifyApp {
                 self.arm_tool(Tool::SignLine, page);
             }
             Verb::SignRectangle => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -360,7 +360,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 match what.as_deref().and_then(pdf_core::document::FillMark::parse) {
                     // A tick, a cross or a dot: one click each.
                     Some(mark) => self.arm_tool(Tool::Fill(mark), page),
@@ -434,7 +434,7 @@ impl crate::PagifyApp {
                     );
                     return;
                 }
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -595,7 +595,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Whiteout, page);
                 }
             }
@@ -603,7 +603,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Draw(DrawKind::Arrow), page);
                 }
             }
@@ -619,7 +619,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Redact, page);
                 }
             }
@@ -926,7 +926,7 @@ impl crate::PagifyApp {
                 self.show_layers = !self.show_layers;
                 if self.show_layers {
                     self.forget_layers();
-                    let page = self.tab().page;
+                    let page = self.tab().view_state.page;
                     let count = self.layers_on(page).len();
                     self.say_info(format!(
                         "layers: page {} draws {count} thing{}, topmost first. \
@@ -946,7 +946,7 @@ impl crate::PagifyApp {
                 self.repair_locks(true);
             }
             Verb::Opacity(percent) => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 let target = self.tab_mut()
                     .selected
                     .as_ref()
@@ -969,7 +969,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Lock, page);
                 }
             }
@@ -1016,7 +1016,7 @@ impl crate::PagifyApp {
                 // for one thing lands in another.
                 if let Some(armed) = self.tab_mut().tool.take() {
                     if armed.kind.cancel_drops_checkpoint() {
-                        let page = self.tab().page;
+                        let page = self.tab().view_state.page;
                         if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
                             layer.forget_last_step();
                         }
@@ -1150,7 +1150,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::ArticleBox, page);
                 }
             }
@@ -1172,7 +1172,7 @@ impl crate::PagifyApp {
     fn act_measurement(&mut self, verb: Verb) {
         match verb {
             Verb::Calibrate { distance, unit } => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 self.arm_tool(Tool::Calibrate { distance, unit }, page);
             }
             Verb::Scale => {
@@ -1180,7 +1180,7 @@ impl crate::PagifyApp {
                 self.say_info(d);
             }
             Verb::Measure(kind) => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 self.arm_tool(Tool::Measure(kind), page);
             }
 

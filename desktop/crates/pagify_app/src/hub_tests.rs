@@ -35,7 +35,7 @@ fn name_of(tab: &DocTab) -> String {
 }
 
 fn marks(tab: &DocTab) -> usize {
-    tab.markup.existing(tab.page).map(|l| l.len()).unwrap_or(0)
+    tab.markup.existing(tab.view_state.page).map(|l| l.len()).unwrap_or(0)
 }
 
 fn rect(l: f32, t: f32, r: f32, b: f32) -> Rect {
@@ -347,11 +347,11 @@ fn a_moved_tab_keeps_its_unsaved_marks_and_its_undo_history() {
 fn a_moved_tab_keeps_its_page_zoom_and_view() {
     let mut from = app_with(&["pages-ladder.pdf"]);
     from.submit("page 3");
-    from.tab_mut().zoom = ZoomMode::Factor(2.0);
+    from.tab_mut().view_state.zoom = ZoomMode::Factor(2.0);
     from.tab_mut().view_state.scroll_offset = vec2(0.0, 1234.0);
     from.tab_mut().ribbon = Tab::Edit;
     from.tab_mut().selection.text_selection = Some(3..9);
-    let (page, zoom) = (from.tab().page, from.tab().zoom);
+    let (page, zoom) = (from.tab().view_state.page, from.tab().view_state.zoom);
     assert!(page > 0, "test assumption: the tab is not on its first page");
 
     // A second tab, so the first can leave.
@@ -362,8 +362,8 @@ fn a_moved_tab_keeps_its_page_zoom_and_view() {
     to.take_in_tab(moving, None);
 
     let tab = to.tab();
-    assert_eq!(tab.page, page, "the page was lost");
-    assert_eq!(tab.zoom, zoom, "the zoom was lost");
+    assert_eq!(tab.view_state.page, page, "the page was lost");
+    assert_eq!(tab.view_state.zoom, zoom, "the zoom was lost");
     assert_eq!(tab.ribbon, Tab::Edit, "the ribbon tab was lost");
     assert_eq!(tab.selection.text_selection, Some(3..9), "the selection was lost");
     // The window it arrives in has never held this scroll position: it is asked
@@ -378,7 +378,7 @@ fn a_moved_tab_keeps_its_page_zoom_and_view() {
 #[test]
 fn a_moved_tab_comes_up_in_the_new_window_where_it_was_left_on_the_page() {
     let mut app = app_with(&["pages-ladder.pdf"]);
-    app.tab_mut().zoom = ZoomMode::Factor(1.5);
+    app.tab_mut().view_state.zoom = ZoomMode::Factor(1.5);
     app.tab_mut().view_state.anchor_offset = Some(vec2(0.0, 600.0));
     let mut h = harness_from(app);
     h.run_steps(6);

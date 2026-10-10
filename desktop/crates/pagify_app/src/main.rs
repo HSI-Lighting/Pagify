@@ -279,9 +279,9 @@ struct FindReplace {
 /// earlier fix changing that run's length never invalidates a later one.
 #[derive(Debug, Clone, PartialEq)]
 struct Misspelling {
-    page: usize,
     object: usize,
     word: String,
+    page: usize,
 }
 
 /// The Check Spelling panel, while it is open.
@@ -697,6 +697,13 @@ struct SelectionState {
 /// live on `DocTab` — their names collide with locals, so they need
 /// scoped renames rather than a bulk rewrite.
 struct ViewState {
+    page: usize,
+    zoom: ZoomMode,
+    rotation: Rotation,
+    /// Where the reader was looking at the end of the last frame, so a change of
+    /// zoom, window or pages puts them back at the same place on the page and
+    /// not at the same pixel offset.
+    view: Option<pagify_shell::reader::ViewSnapshot>,
     /// The mapping for the page under the pointer, and which page it is.
     ///
     /// Not always the current page, and the index matters: a `PageView` maps to
@@ -763,13 +770,6 @@ struct DocTab {
     /// see [`ArmedTool`]'s own doc.
     tool: Option<ArmedTool>,
 
-    page: usize,
-    zoom: ZoomMode,
-    rotation: Rotation,
-    /// Where the reader was looking at the end of the last frame, so a change of
-    /// zoom, window or pages puts them back at the same place on the page and
-    /// not at the same pixel offset.
-    view: Option<pagify_shell::reader::ViewSnapshot>,
     /// The page editors: the one paragraph open for retyping **on the page**
     /// where it sits, and a brand new run being composed — see [`EditState`].
     edit: EditState,
@@ -952,11 +952,7 @@ impl DocTab {
             markup: Markup::default(),
             calibration: Calibration::default(),
             tool: None,
-            page: 0,
-            zoom: ZoomMode::Fit,
-            rotation: Rotation::None,
-            view_state: ViewState { hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, },
-            view: None,
+            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
             panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
@@ -2898,7 +2894,7 @@ impl PagifyApp {
 
         if keys.escape && self.escape() == Escaped::ReturnedToPointer {
             ctx.memory_mut(|m| m.surrender_focus(command_id));
-            let page = self.tab().page;
+            let page = self.tab().view_state.page;
             if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
                 layer.clear_selection();
             }
@@ -3315,7 +3311,7 @@ impl PagifyApp {
                     {
                         *submitted = self.cmd.submit(Submit::Button);
                     }
-                    let page = self.tab().page;
+                    let page = self.tab().view_state.page;
                     let marks = self.tab().markup.existing(page).map(|l| l.len()).unwrap_or(0);
                     let page_count = self.tab().doc.as_ref().map(|d| d.page_count);
                     let calibrated = self.tab().calibration.is_calibrated();
@@ -3364,7 +3360,7 @@ impl PagifyApp {
                     // every one of sixty frames a second for a passive
                     // readout nobody asked to see live.
                     if let Some(page_count) = self.tab_mut().doc.as_ref().map(|d| d.page_count) {
-                        let page = self.tab_mut().page;
+                        let page = self.tab_mut().view_state.page;
                         ui.colored_label(theme::ink_faint(), format!("page {} of {page_count}", page + 1));
                         ui.add_space(8.0);
                     }
@@ -3769,7 +3765,7 @@ impl PagifyApp {
         let mut restack_to: Option<(usize, pdf_core::document::Stacking)> = None;
         let mut opacity_to: Option<(usize, f32)> = None;
         if self.show_layers && !backstage && self.tab_mut().doc.is_some() {
-            let page = self.tab_mut().page;
+            let page = self.tab_mut().view_state.page;
             let picked = self.tab_mut().selection.picked_layer;
             let entries: Vec<pdf_core::document::DrawnObject> = self.layers_on(page).to_vec();
             let mut pick: Option<usize> = None;
@@ -3908,14 +3904,14 @@ impl PagifyApp {
             }
         }
         if let Some((object, where_to)) = restack_to {
-            let page = self.tab_mut().page;
+            let page = self.tab_mut().view_state.page;
             match self.restack(page, object, where_to) {
                 Ok(said) => self.say_info(said),
                 Err(e) => self.say_error(e),
             }
         }
         if let Some((object, alpha)) = opacity_to {
-            let page = self.tab_mut().page;
+            let page = self.tab_mut().view_state.page;
             let kept = self.tab_mut().selection.picked_layer;
             match self.set_opacity_of(page, object, alpha) {
                 Ok(said) => self.say_info(said),
@@ -4415,7 +4411,7 @@ impl PagifyApp {
         // No range means the page in front of you. That is what a button press
         // means, and a button that silently read 149 pages would be a trap.
         let queue: Vec<usize> = if spec.trim().is_empty() {
-            vec![self.tab().page]
+            vec![self.tab().view_state.page]
         } else {
             match pagify_shell::organize::parse_range(spec, page_count) {
                 Ok(pages) => pages,
@@ -7137,7 +7133,7 @@ impl PagifyApp {
     fn reflow(&mut self) {
         use pdf_core::document::layout;
 
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
         let Some(doc) = &self.tab_mut().doc else {
             self.say_error("nothing open.");
             return;
@@ -7248,8 +7244,8 @@ impl PagifyApp {
         let spot = self
             .characters(page)
             .and_then(|chars| chars.line_rects(range.clone()).first().copied())
-            .filter(|_| matches!(self.tab().rotation, Rotation::None));
-        if spot.is_some() || page != self.tab_mut().page {
+            .filter(|_| matches!(self.tab().view_state.rotation, Rotation::None));
+        if spot.is_some() || page != self.tab_mut().view_state.page {
             // Through `go_to` rather than by hand, so the scroll position, the
             // page-size cache and the raster cache all move together — they are
             // three things that must not disagree about which page is showing.
@@ -7262,7 +7258,7 @@ impl PagifyApp {
         self.tab_mut().view_state.reveal = spot.map(|rect| Reveal { page, rect });
         // The match is also the selection, so ⌘C copies what was found.
         self.tab_mut().selection.text_selection = Some(range);
-        let current_page = self.tab().page;
+        let current_page = self.tab().view_state.page;
         self.tab_mut().organize.selection_page = current_page;
         let total = self.tab().panels.find_hits.len();
         self.say_info(format!("match {} of {total}", index + 1));
@@ -7675,7 +7671,7 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
         let title = self.tab_mut()
             .selection.text_selection
             .clone()
@@ -7741,7 +7737,7 @@ impl PagifyApp {
         if self.tab_mut().selection.text_selection.is_some() {
             self.open_link_prompt_from_selection();
         } else {
-            let page = self.tab_mut().page;
+            let page = self.tab_mut().view_state.page;
             self.arm_tool(Tool::Link, page);
         }
     }
@@ -8138,7 +8134,7 @@ impl PagifyApp {
     /// active is the one ⌘C means. Returns whether it found something to
     /// take, so the caller knows whether to fall back to the text path.
     fn copy_object_selection(&mut self) -> bool {
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
         if let Some(sel) = self.tab_mut().selection.placed_image_selected.clone().filter(|s| s.page == page) {
             let mark = self.tab_mut()
                 .doc
@@ -8641,7 +8637,7 @@ impl PagifyApp {
         };
         self.paste_count += 1;
         let step = Self::PASTE_STEP * self.paste_count as f64;
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
 
         match clip {
             // Words have no place of their own to be copied beside: they are
@@ -9111,7 +9107,7 @@ impl PagifyApp {
         #[cfg(target_os = "windows")]
         {
             use raw_window_handle::HasWindowHandle as _;
-            let current_page = self.tab_mut().page;
+            let current_page = self.tab_mut().view_state.page;
             let hwnd = match frame.window_handle().map(|h| h.as_raw()) {
                 Ok(raw_window_handle::RawWindowHandle::Win32(win32)) => {
                     windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut std::ffi::c_void)
@@ -9246,7 +9242,7 @@ impl PagifyApp {
             }
             return;
         };
-        let page = self.tab().page;
+        let page = self.tab().view_state.page;
 
         let Ok(verdict) = session.classify(page) else {
             if asked {
@@ -9389,7 +9385,7 @@ impl PagifyApp {
 
 
     fn draw(&mut self, command: cad_kernel::parser::Command) {
-        let page = self.tab().page;
+        let page = self.tab().view_state.page;
         let Some(doc) = self.tab().doc.as_ref() else {
             self.say_error("open a document before drawing on it.");
             return;
@@ -9562,7 +9558,7 @@ impl PagifyApp {
                 other => unreachable!("on_cancel only returns Cancelled or Say, got {other:?}"),
             }
             if drops_checkpoint {
-                let page = self.tab().page;
+                let page = self.tab().view_state.page;
                 if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
                     layer.forget_last_step();
                 }
@@ -9905,7 +9901,7 @@ impl PagifyApp {
 
     /// Move whatever the layer rail has picked, or say why it cannot.
     fn restack_picked(&mut self, where_to: pdf_core::document::Stacking) {
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
         let Some(at) = self.tab_mut().selection.picked_layer else {
             self.say_info("pick something in the layer rail first — `layers` opens it.");
             return;
@@ -10302,7 +10298,7 @@ impl PagifyApp {
     /// of text, since the layer would win every time whether or not it was
     /// the more recent of the two.
     fn track_undo_recency(&mut self) {
-        let page = self.tab().page;
+        let page = self.tab().view_state.page;
         let layer_edits = self.tab().markup.existing(page).map(|l| l.edits()).unwrap_or(0);
         if layer_edits != self.tab_mut().last_layer_edits {
             self.tab_mut().last_layer_edits = layer_edits;
@@ -10339,7 +10335,7 @@ impl PagifyApp {
     /// `false` means there was nothing there to step — not an error, just
     /// this stack's turn to defer to [`Self::try_doc_undo_redo`].
     fn try_layer_undo_redo(&mut self, undo: bool) -> bool {
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
         let Some(layer) = self.tab_mut().markup.existing_mut(page) else { return false };
         let stepped = if undo { layer.undo() } else { layer.redo() };
         match stepped {
@@ -10861,7 +10857,7 @@ impl PagifyApp {
             // one-up every time a page was added or removed — and the turn the
             // view is at is kept for the same reason.
             doc.strip = Strip::with_layout_turned(&sizes, PAGE_GAP_PT, doc.strip.layout(), doc.strip.turned());
-            self.tab_mut().page = self.tab_mut().page.min(count.saturating_sub(1));
+            self.tab_mut().view_state.page = self.tab_mut().view_state.page.min(count.saturating_sub(1));
             self.tab_mut().zoom_settle.zoom_basis = self.tab_mut().zoom_settle.zoom_basis.min(count.saturating_sub(1));
         }
     }
@@ -10889,7 +10885,7 @@ impl PagifyApp {
             return;
         }
         let pages = if self.tab().organize.organize_selected.is_empty() {
-            (self.tab().page + 1).to_string()
+            (self.tab().view_state.page + 1).to_string()
         } else {
             compact_page_spec(&self.tab().organize.organize_selected)
         };
@@ -11081,7 +11077,7 @@ impl PagifyApp {
         };
         let page_count = self.tab().doc.as_ref().map(|d| d.page_count).unwrap_or(0);
         let pages = if spec.trim().is_empty() {
-            vec![self.tab().page]
+            vec![self.tab().view_state.page]
         } else {
             match pagify_shell::organize::parse_range(spec, page_count) {
                 Ok(pages) => pages,
@@ -11109,7 +11105,7 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
         self.arm_tool(Tool::PickText, page);
     }
 
@@ -11594,7 +11590,7 @@ impl PagifyApp {
                 Err(e) => self.say_error(e),
             }
         } else {
-            let page = self.tab_mut().page;
+            let page = self.tab_mut().view_state.page;
             self.arm_tool(Tool::MatchProperties { sample: None }, page);
         }
     }
@@ -12692,7 +12688,7 @@ impl PagifyApp {
             return;
         }
         let text = text.trim().to_string();
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
         // **Reported from use: adding text meant typing the words into the
         // command box before knowing where they would land** — "totally
         // confusing and unintuitive". Bare `addtext` now drags out a box to
@@ -13086,7 +13082,7 @@ impl PagifyApp {
         let photo = decoded.to_rgba8();
         let (width, height) = photo.dimensions();
 
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
         self.arm_tool(Tool::PlaceImage { rgba: photo.into_raw(), width, height }, page);
     }
 
@@ -13144,7 +13140,7 @@ impl PagifyApp {
         // The strip is a different shape, so where the window was pointing no
         // longer means the same thing. Going back to the page the reader was on
         // is the only answer that survives the change.
-        let page = self.tab().page;
+        let page = self.tab().view_state.page;
         let Some(doc) = &mut self.tab_mut().doc else {
             self.say_error("nothing open.");
             return;
@@ -13260,7 +13256,7 @@ impl PagifyApp {
     }
 
     fn insert_page(&mut self) {
-        let at = self.tab().page;
+        let at = self.tab().view_state.page;
         let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
             self.say_error("nothing open.");
             return;
@@ -13283,7 +13279,7 @@ impl PagifyApp {
     }
 
     fn import(&mut self, source: &std::path::Path, spec: &str) {
-        let at = self.tab().page;
+        let at = self.tab().view_state.page;
         self.import_at(source, spec, at)
     }
 
@@ -13315,7 +13311,7 @@ impl PagifyApp {
     /// Where pages inserted "here" go: just after the last selected page, or
     /// just after the current one.
     fn page_after_selection(&self) -> usize {
-        let last = self.tab().organize.organize_selected.iter().copied().max().unwrap_or(self.tab().page);
+        let last = self.tab().organize.organize_selected.iter().copied().max().unwrap_or(self.tab().view_state.page);
         let count = self.tab().doc.as_ref().map_or(0, |d| d.page_count);
         (last + 1).min(count)
     }
@@ -13417,7 +13413,7 @@ impl PagifyApp {
     /// foreign mark — that would mean reconstructing geometry nobody recorded —
     /// but it can say what is there and take one away.
     fn list_marks(&mut self) {
-        let page = self.tab().page;
+        let page = self.tab().view_state.page;
         let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
             self.say_error("nothing open.");
             return;
@@ -13455,7 +13451,7 @@ impl PagifyApp {
     /// indices therefore have gaps — a number the user can see is the only one
     /// they can act on.
     fn remove_mark(&mut self, n: usize) {
-        let page = self.tab().page;
+        let page = self.tab().view_state.page;
         let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
             self.say_error("nothing open.");
             return;
@@ -13553,7 +13549,7 @@ impl PagifyApp {
     /// (rather than staying inline in `ui()`) so it can be called directly
     /// from a test without a real frame to drive `keys.delete` through.
     fn delete_selection(&mut self) {
-        let page = self.tab_mut().page;
+        let page = self.tab_mut().view_state.page;
         if let Some(sel) = self.tab_mut().selection.signature_selected.clone().filter(|s| s.page == page) {
             match self.remove_annotation_at(sel.page, sel.index) {
                 Ok(()) => {
@@ -13636,7 +13632,7 @@ impl PagifyApp {
             // Nothing selected: pick the tool up rather than refuse. It stays
             // in hand until Escape or another tool, so a run of passages can be
             // marked without going back to the ribbon between each.
-            let page = self.tab_mut().page;
+            let page = self.tab_mut().view_state.page;
             self.arm_tool(Tool::Markup(kind), page);
             return;
         };
@@ -13706,7 +13702,7 @@ impl PagifyApp {
     }
 
     fn add_note(&mut self, text: String) {
-        let page = self.tab().page;
+        let page = self.tab().view_state.page;
         let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
             self.say_error("nothing open.");
             return;
@@ -13991,7 +13987,7 @@ impl PagifyApp {
             scale.min(Self::whole_page_scale_ceiling(ctx, w, h))
         };
 
-        let rotation = self.tab().rotation;
+        let rotation = self.tab().view_state.rotation;
         // **Quantised, not the raw continuous value.** A pinch or a
         // scroll-wheel zoom changes `scale` by a hair every single frame,
         // and keying on that directly — as this used to — made every one
@@ -15119,7 +15115,7 @@ fn wrap_typed_last_line(
         }
         let text_page = self.tab_mut().edit.editing_run.as_ref().map(|e| e.page);
         let new_text_page = self.tab_mut().edit.new_text_box.as_ref().map(|b| b.page);
-        let page = text_page.or(new_text_page).unwrap_or(self.tab_mut().page);
+        let page = text_page.or(new_text_page).unwrap_or(self.tab_mut().view_state.page);
         let has_shapes = text_page.is_none()
             && new_text_page.is_none()
             && self.tab_mut().markup.existing(page).is_some_and(|l| !l.selection().is_empty());
@@ -15343,7 +15339,7 @@ fn wrap_typed_last_line(
         }
 
         if self.font_picker_open {
-            let page = self.tab_mut().edit.editing_run.as_ref().map(|e| e.page).unwrap_or(self.tab_mut().page);
+            let page = self.tab_mut().edit.editing_run.as_ref().map(|e| e.page).unwrap_or(self.tab_mut().view_state.page);
             self.draw_font_picker(ui, page);
         }
     }

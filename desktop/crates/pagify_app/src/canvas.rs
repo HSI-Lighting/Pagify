@@ -667,7 +667,7 @@ impl crate::PagifyApp {
         cell_rects: &mut Vec<(usize, egui::Rect)>,
         cell_width: f32,
     ) -> Option<usize> {
-        let current = page == self.tab_mut().page;
+        let current = page == self.tab_mut().view_state.page;
         let selected = self.tab_mut().organize.organize_selected.contains(&page);
         // **Reported from use, with a screenshot, twice.** First "fill the
         // thumbnails in the ribbon, it's too small", which was answered by
@@ -948,7 +948,7 @@ impl crate::PagifyApp {
 
                 // The page you are looking at is the page you are working on.
                 //
-                // Nothing kept `self.tab_mut().page` in step with the scroll: it moved
+                // Nothing kept `self.tab_mut().view_state.page` in step with the scroll: it moved
                 // only for `page next` and friends. On a one-page fixture that
                 // is invisibly correct, and on a 149-page catalogue it means
                 // the pointer talks to page 1 while the reader is on page 40 —
@@ -979,7 +979,7 @@ impl crate::PagifyApp {
                         // the page it was made on, which `selection_page`
                         // remembers, and scrolling past is not a decision to
                         // discard it.
-                        self.tab_mut().page = page;
+                        self.tab_mut().view_state.page = page;
                     }
                 }
 
@@ -1062,7 +1062,7 @@ impl crate::PagifyApp {
                                 egui::Color32::WHITE,
                             );
                         }
-                        if page == self.tab_mut().page {
+                        if page == self.tab_mut().view_state.page {
                             self.tab_mut().view_state.last_view = Some(view);
                         }
                         // Zoom anchors against the page under the cursor, which
@@ -1179,7 +1179,7 @@ impl crate::PagifyApp {
                     // pointer is beside the page rather than on it — the strip
                     // is wider than the paper.
                     let anchor_on =
-                        self.tab_mut().view_state.hover_view.or_else(|| self.tab_mut().view_state.last_view.map(|v| (self.tab_mut().page, v)));
+                        self.tab_mut().view_state.hover_view.or_else(|| self.tab_mut().view_state.last_view.map(|v| (self.tab_mut().view_state.page, v)));
                     if let Some((index, view)) = anchor_on {
                         // Where this page sits in the strip, in strip points.
                         //
@@ -1230,7 +1230,7 @@ impl crate::PagifyApp {
                         let with_strip = egui::vec2(sx, sy) * (after_screen - before_screen);
                         self.tab_mut().view_state.anchor_offset = Some(self.tab_mut().view_state.scroll_offset + moved + with_strip);
                     }
-                    self.tab_mut().zoom = ZoomMode::Factor(after);
+                    self.tab_mut().view_state.zoom = ZoomMode::Factor(after);
                     zoom = after;
 
                     // The gesture belongs to the zoom. Left in place, the same
@@ -1317,7 +1317,7 @@ impl crate::PagifyApp {
             // pages are not what they were last frame: keep the reader at the
             // same place on the page rather than at the same pixel offset.
             let tab = self.tab();
-            tab.view.zip(tab.doc.as_ref()).and_then(|(seen, doc)| {
+            tab.view_state.view.zip(tab.doc.as_ref()).and_then(|(seen, doc)| {
                 seen.restored(&doc.strip, zoom, (viewport.width(), viewport.height()))
             })
         } {
@@ -1378,7 +1378,7 @@ impl crate::PagifyApp {
                 (offset.x, offset.y),
             )
         });
-        self.tab_mut().view = seen;
+        self.tab_mut().view_state.view = seen;
                 if let Some(target) = prefetch_targets(visible, page_count, 2).first().copied() {
             // The same quantised scale the draw uses. Prefetching at the raw
             // zoom would warm a texture the next frame does not ask for.
