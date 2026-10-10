@@ -108,11 +108,14 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   OrganizeState` (4), `zoom_settle: ZoomState` (4) — commits `5d4a448`,
   `cb193c2`, `4dddd55`, each `.field` → `.group.field` with compile+suite
   verification, and the fields' rationale docs moved with them.
-  `paste_ghost` stayed on `PagifyApp` (app-wide clipboard ghost). Next:
-  `ViewState` for page/zoom/scroll/rotation — those names collide with
-  locals, so they need targeted `tab().field` renames, not a blunt
-  rewrite — then `SelectionState` (selected/group/grab/handle/marquee and
-  the signature/image selections) and folding the armed-tool leftovers
+  `paste_ghost` stayed on `PagifyApp` (app-wide clipboard ghost).
+  `selection: SelectionState` now holds nineteen of the gesture fields
+  (commit `f3d07b4`) — signature/picture selections, handles, text
+  selection and drag, markup grab, right-click capture, opacity draft,
+  selected image, picked layer, group grab. Next: the targeted pass for
+  `selected`/`group`/`grab`/`marquee` (they collide with other types and
+  locals, so renames must be scoped), `ViewState` for page/zoom/scroll/
+  rotation (same collision problem), and folding the armed-tool leftovers
   into `tool.rs`. `Doc` already delegates caches.
 3. **Event-returning transitions — DONE.** `ToolEffect` +
   `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
