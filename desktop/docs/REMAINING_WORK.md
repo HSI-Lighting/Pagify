@@ -85,10 +85,10 @@ grep -E 'this function has too many lines' clippy.txt | sort -t'(' -k2 -rn
 ```
 
 Current inventory (clippy, 2026-10-10): **nothing over 150 lines**. The
-largest are `replace_outlined_word` 150, `draw_ribbon` 147,
-`draw_passcode_dialog` 145, the sweep test 142, `main.rs:3762` 139,
-`draw_pages` 139 and the fuzz/`pick_wiring` test helpers 138/136. 45
-functions remain over 100 — split opportunistically, not as a program.
+largest are `draw_passcode_dialog` 145, the sweep test 142, then 139
+(`draw_ribbon_actions`, `draw_pages`), 138 (`pick_wiring` helper) and
+136 (`blocks_review_fuzz`, `segment`). 44 functions remain over 100 —
+split opportunistically, not as a program.
 
 Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105/103/102,
 `main.rs` 139/135/123/118/108/105/102/102/102, `panels.rs` 136/123/102/102,
@@ -118,10 +118,18 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
   the Enter/Escape rules live in `Tool::on_key`; both property tests are in
   `tool_transition_tests.rs` (cancel, and the `on_key` matrix).
-4. **`Effect`-returning command executor (Phase 4b).** Move command semantics
-  into the shell: `execute(verb, ...) -> Vec<Effect>` with `Effect` covering
-  Say/ScrollTo/OpenDialog/Refresh/AskUnsaved/Quit; `pagify_app::dispatch`
-  becomes an effect applier. `verbs::parse` is already split by domain.
+4. **`Effect`-returning command executor (Phase 4b) — STARTED.** The shell's
+  `command_plan::plan(&Verb) -> Option<Vec<Effect>>` is the decision half
+  (pure, with tests); `dispatch::act` tries it first and otherwise falls
+  through to the old handlers, and `dispatch::apply_effect` is the doing
+  half. Three domains are ported: document/view/app (11 verbs),
+  objects/stacking (8) and measurement/recording (7), with mutation
+  coverage equal to before. Porting the rest is mechanical against this
+  pattern: add `Effect` variants (scroll-to-rect, refresh, ask-unsaved,
+  dialogs, selection ops), extend `plan`, move each handler body into
+  `apply_effect`, delete the handler — one domain per commit. Remaining
+  domains: tools, signing, security, navigation/edit, files,
+  text-and-find (plus `run()`'s dispatch prologue).
 5. **File splits — DONE for both monoliths.** `session.rs` (1,817) is
   `session/mod.rs` (475) plus fourteen `impl Session` families;
   `blocks.rs` (2,292) is `blocks/mod.rs` (900) plus `furniture`/`rows`/
@@ -131,11 +139,14 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   (`pub use <family>::*`); moved items got `pub(super)`. Shell suite green
   (634/0) after every commit. Remaining splits are only the big shell test
   files, to do when next touched.
-6. **CI gates.** Only once the Windows suite is green: add a workflow running
-  `cargo test` (Windows runner, with `PAGIFY_PDFIUM_LIB`) plus clippy without
-  `-D warnings`; add `clippy.toml` (`too-many-lines-threshold = 150`,
-  `too-many-arguments-threshold = 7`, `type-complexity-threshold = 250`) and
-  gate new/changed files, not the whole tree.
+6. **CI gates.** Partial: `desktop/clippy.toml` carries the review's
+  thresholds (150 / 7 / 250, commit `c8e5434`) and
+  `desktop/docs/ci-checks.yml` is a ready-to-use compile+clippy workflow —
+  it could not be pushed into `.github/workflows/` because the push token
+  lacks the `workflow` scope; copy it there from a scoped clone. Full
+  gating still waits on a green Windows run: a Windows-runner job with
+  `PAGIFY_PDFIUM_LIB` running `cargo test`, then `-D warnings` scoped to
+  new/changed files, not the whole tree.
 
 ### 2.3 Known traps and small follow-ups
 

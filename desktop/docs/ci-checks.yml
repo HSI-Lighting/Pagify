@@ -1,0 +1,47 @@
+# Ready-to-use GitHub Actions workflow.
+#
+# **Not in `.github/workflows/` yet**: this machine's push token has no
+# `workflow` scope, so GitHub refuses workflow files. To enable the checks,
+# copy this file to `.github/workflows/checks.yml` from a clone whose token
+# has the `workflow` scope (or add it in the GitHub web editor).
+#
+# Compile-level checks for the desktop workspace.
+#
+# **What this does not do, deliberately:** run the test suites. They need a
+# PDFium binary (`PAGIFY_PDFIUM_LIB`) and the owner's real fixture files, and
+# several of them are machine-specific (see desktop/docs/REMAINING_WORK.md).
+# A green run here means "it builds and clippy is quiet at the default
+# levels"; the full gate is `cargo test` on the Windows machine.
+name: checks
+
+on:
+  push:
+    branches: [main, pagify-windows-refactor, pagify-desktop-windows]
+  pull_request:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+      - name: cargo check (all targets)
+        run: cargo check --workspace --all-targets
+      - name: cargo clippy (all targets, structural lints informational)
+        run: |
+          cargo clippy --workspace --all-targets -- \
+            -W clippy::too_many_lines \
+            -W clippy::too_many_arguments \
+            -W clippy::type_complexity

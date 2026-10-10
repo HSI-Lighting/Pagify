@@ -25,9 +25,9 @@ its extracted methods dead; repair commits `3fc46fa` (ui re-split over the
 merged body) and `3ec8898` (per-tab consts restored) put it back. Clippy's
 measure (non-comment lines) at 2026-10-08 after the repair: the largest
 functions left: **no function anywhere exceeds 150 lines** (clippy
-2026-10-10; the largest is `replace_outlined_word` at exactly 150, then
-`draw_ribbon` 147 and `draw_passcode_dialog` 145). 45 functions remain
-over 100, most between 100 and 140.
+2026-10-10; the largest are now `draw_passcode_dialog` 145, the sweep
+test 142, then 139/139/138). 44 functions remain over 100, most between
+100 and 140.
 Phase 2: one `Tool` enum and one `ArmedTool` (`PendingKind`/`Pending` deleted),
 with click/pointer/cancel/preview transitions in `tool.rs` and the thin
 `picking.rs` apply path; the state fields (`editing_run`, `grab`, `handle`,
@@ -40,8 +40,10 @@ against the §5 targets of 25/15 — including folding `editing_run`, `grab`,
 `handle` and the selections into `Tool`; the rest of `main.rs` (≈16.9k lines)
 and the >2k-line test files (`lock_wiring_tests` 7.5k, `ui_tests` 4.5k);
 keyboard transitions are done (`Tool::on_key`/`ToolKey` own the Enter/Escape
-rules, with a property test); the shell `Effect` executor for commands
-(tool-level `ToolEffect` exists, command-level does not); the `blocks.rs`/`block_input.rs`
+rules, with a property test); the shell `Effect` executor for commands has
+begun (`pagify_shell::command_plan` plans the document/view/app domain into
+`Effect`s that `dispatch::apply_effect` runs; the rest of the domains still
+route through the old handlers until ported); the `blocks.rs`/`block_input.rs`
 (5.3k lines) and `session.rs` (1.8k/116 methods) splits; `clippy.toml` and CI
 gates.
 
