@@ -8,6 +8,7 @@ use crate::{
     signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, SignatureList,
     SignaturePad, SnippetList, Tab, Tool,
 };
+use pagify_shell::command_plan::Effect;
 use pagify_shell::command::{Dispatch, Kind};
 use pagify_shell::verbs::{self, SignatureAction, Verb};
 
@@ -50,19 +51,15 @@ impl crate::PagifyApp {
     }
 
     pub(crate) fn act(&mut self, verb: Verb) {
+        // Phase 4b: the document/view/app verbs are planned in the shell
+        // (DESIGN_REVIEW.md §3.4); everything else still routes below.
+        if let Some(effects) = pagify_shell::command_plan::plan(&verb) {
+            for effect in effects {
+                self.apply_effect(effect);
+            }
+            return;
+        }
         match verb {
-            Verb::Open(..)
-            | Verb::OpenDialog
-            | Verb::Close { .. }
-            | Verb::Quit { .. }
-            | Verb::Page(..)
-            | Verb::Zoom(..)
-            | Verb::RotatePage(..)
-            | Verb::TextLayer
-            | Verb::Pdfium
-            | Verb::Version
-            | Verb::CheckUpdate
-            => self.act_document(verb),
             Verb::Pick(..)
             | Verb::Sensitivity(..)
             | Verb::FillSign(..)
@@ -155,18 +152,18 @@ impl crate::PagifyApp {
             | Verb::Help(..)
             | Verb::Planned { .. }
             => self.act_measurement(verb),
+            // Ported domains never reach here: `plan` above claimed them.
+            other => unreachable!("an unplanned verb fell through the router: {other:?}"),
         }
     }
 
-    /// One domain of [`Self::act`]: 11 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_document(&mut self, verb: Verb) {
-        match verb {
-            // Opening lands in its own tab now, so it never puts this one's
-            // unsaved work at risk — see `open_with`.
-            Verb::Open(path) => self.open(&path.to_string_lossy()),
-            Verb::OpenDialog => self.open_dialog(),
-            Verb::Close { force } => {
+    /// Apply one planned [`Effect`] — the doing half of the shell's planning
+    /// (`command_plan::plan`). The bodies are the ones `act_document` ran.
+    fn apply_effect(&mut self, effect: Effect) {
+        match effect {
+            Effect::OpenPath(path) => self.open(&path.to_string_lossy()),
+            Effect::OpenFileDialog => self.open_dialog(),
+            Effect::CloseDocument { force } => {
                 if !force && self.would_lose_work() {
                     self.tab_mut().closing = Some(Closing::Document);
                     return;
@@ -181,7 +178,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                 }
             }
-            Verb::Quit { force } => {
+            Effect::Quit { force } => {
                 if !force {
                     if let Some(index) = self.tab_with_unsaved_work() {
                         self.active_tab = index;
@@ -193,22 +190,15 @@ impl crate::PagifyApp {
                 }
                 self.leave(if force { hub::Leaving::Now } else { hub::Leaving::Program });
             }
-            Verb::Page(target) => self.go_to(target),
-            Verb::Zoom(target) => self.set_zoom(target),
-            Verb::RotatePage(degrees) => self.rotate_view(degrees),
-            Verb::TextLayer => self.report_text_layer(true),
-            Verb::Pdfium => {
-                let d = pagify_shell::pdfium::describe();
-                self.say_info(d);
-            }
-            Verb::Version => self.say_info(format!("Pagify {}", pagify_shell::VERSION)),
-            Verb::CheckUpdate => {
-                self.spawn_update_check();
-                self.say_info("checking for a newer build…");
-            }
-            _ => unreachable!("act_document was handed a verb from another domain"),
+            Effect::GoTo(target) => self.go_to(target),
+            Effect::Zoom(target) => self.set_zoom(target),
+            Effect::RotatePage(degrees) => self.rotate_view(degrees),
+            Effect::ReportTextLayer => self.report_text_layer(true),
+            Effect::Say(text) => self.say_info(text),
+            Effect::CheckUpdate => self.spawn_update_check(),
         }
     }
+
 
     /// One domain of [`Self::act`]: 9 verbs, moved out
     /// whole so the router above stays a table of contents.

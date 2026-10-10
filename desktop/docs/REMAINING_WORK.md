@@ -118,10 +118,16 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
   the Enter/Escape rules live in `Tool::on_key`; both property tests are in
   `tool_transition_tests.rs` (cancel, and the `on_key` matrix).
-4. **`Effect`-returning command executor (Phase 4b).** Move command semantics
-  into the shell: `execute(verb, ...) -> Vec<Effect>` with `Effect` covering
-  Say/ScrollTo/OpenDialog/Refresh/AskUnsaved/Quit; `pagify_app::dispatch`
-  becomes an effect applier. `verbs::parse` is already split by domain.
+4. **`Effect`-returning command executor (Phase 4b) — STARTED.** The shell's
+  `command_plan::plan(&Verb) -> Option<Vec<Effect>>` is the decision half
+  (pure, with tests); `dispatch::act` tries it first and otherwise falls
+  through to the old handlers, and `dispatch::apply_effect` is the doing
+  half. The first domain is ported: the eleven document/view/app verbs
+  (`open`/`close`/`quit`/`page`/`zoom`/`rotate`/`textlayer`/`pdfium`/
+  `version`/`checkupdate`), with mutation coverage equal to before. Porting
+  the remaining domains is mechanical against this pattern: add `Effect`
+  variants (scroll-to-rect, refresh, ask-unsaved, dialogs, selection ops),
+  extend `plan`, and move each handler body into `apply_effect`.
 5. **File splits — DONE for both monoliths.** `session.rs` (1,817) is
   `session/mod.rs` (475) plus fourteen `impl Session` families;
   `blocks.rs` (2,292) is `blocks/mod.rs` (900) plus `furniture`/`rows`/

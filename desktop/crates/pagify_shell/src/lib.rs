@@ -17,6 +17,7 @@ pub mod automate;
 pub mod block_input;
 pub mod blocks;
 pub mod command;
+pub mod command_plan;
 pub mod commit;
 pub mod diagnose;
 pub mod editor;
