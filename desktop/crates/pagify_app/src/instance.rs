@@ -1015,7 +1015,7 @@ mod tests {
         assert!(run_until(&mut h, |_| is_gone(&sent)), "the request was not taken");
         h.step();
         let app = h.state_mut();
-        assert!(app.tab_mut().awaiting_password.is_some(), "an encrypted file did not ask for its password");
+        assert!(app.tab_mut().secure_state.awaiting_password.is_some(), "an encrypted file did not ask for its password");
         assert_eq!(app.tabs.len(), 1, "a tab was made for a file that has not been opened yet");
 
         // The existing flow: the next line typed is the password (see `consume_password_line`).

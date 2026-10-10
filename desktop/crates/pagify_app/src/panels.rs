@@ -1083,7 +1083,7 @@ impl crate::PagifyApp {
     pub(crate) fn draw_passcode_dialog(&mut self, ctx: &egui::Context) {
         use pagify_shell::passphrase;
 
-        let Some(waiting) = self.tab_mut().awaiting_password.clone() else { return };
+        let Some(waiting) = self.tab_mut().secure_state.awaiting_password.clone() else { return };
 
         // What is being asked, in three questions.
         let confirming =
@@ -1111,14 +1111,14 @@ impl crate::PagifyApp {
             ui.add_space(10.0);
 
             let field = ui.add(
-                egui::TextEdit::singleline(&mut *self.tab_mut().password_typed)
+                egui::TextEdit::singleline(&mut *self.tab_mut().secure_state.password_typed)
                     .password(true)
                     .desired_width(f32::INFINITY)
                     .hint_text("password"),
             );
-            if !self.tab_mut().password_field_focused {
+            if !self.tab_mut().secure_state.password_field_focused {
                 field.request_focus();
-                self.tab_mut().password_field_focused = true;
+                self.tab_mut().secure_state.password_field_focused = true;
             }
             if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 submitted = true;
@@ -1128,8 +1128,8 @@ impl crate::PagifyApp {
             // is being chosen, which is the only time it can be acted on.
             if ruled && !confirming {
                 ui.add_space(8.0);
-                let missing = passphrase::unmet(&self.tab_mut().password_typed);
-                let here = self.tab_mut().password_typed.chars().count();
+                let missing = passphrase::unmet(&self.tab_mut().secure_state.password_typed);
+                let here = self.tab_mut().secure_state.password_typed.chars().count();
                 for (wanted, said) in [
                     (
                         passphrase::Unmet::TooShort { need: passphrase::LEAST, have: here },
@@ -1160,11 +1160,11 @@ impl crate::PagifyApp {
             if let Awaiting::Secure(options) = &waiting {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.tab_mut().password_plus, false, "Secure");
-                    ui.selectable_value(&mut self.tab_mut().password_plus, true, "Secure Plus");
+                    ui.selectable_value(&mut self.tab_mut().secure_state.password_plus, false, "Secure");
+                    ui.selectable_value(&mut self.tab_mut().secure_state.password_plus, true, "Secure Plus");
                 });
                 ui.add_space(4.0);
-                if self.tab_mut().password_plus {
+                if self.tab_mut().secure_state.password_plus {
                     // Said before it is chosen, not discovered afterwards.
                     ui.colored_label(
                         theme::danger(),
@@ -1197,16 +1197,16 @@ impl crate::PagifyApp {
                 }
             }
 
-            if let Some(said) = &self.tab_mut().password_problem {
+            if let Some(said) = &self.tab_mut().secure_state.password_problem {
                 ui.add_space(6.0);
                 ui.colored_label(theme::danger(), said);
             }
 
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                let ready = !self.tab_mut().password_typed.is_empty()
+                let ready = !self.tab_mut().secure_state.password_typed.is_empty()
                     && !restrictions_would_be_lost
-                    && (!ruled || confirming || passphrase::is_strong_enough(&self.tab_mut().password_typed));
+                    && (!ruled || confirming || passphrase::is_strong_enough(&self.tab_mut().secure_state.password_typed));
                 if ui.add_enabled(ready, egui::Button::new(act)).clicked() {
                     submitted = true;
                 }
@@ -1220,11 +1220,11 @@ impl crate::PagifyApp {
             gave_up = true;
         }
         if gave_up {
-            self.tab_mut().awaiting_password = None;
+            self.tab_mut().secure_state.awaiting_password = None;
             // `Zeroizing` wipes on drop; taking the value drops it.
-            drop(std::mem::take(&mut self.tab_mut().password_typed));
-            self.tab_mut().password_problem = None;
-            self.tab_mut().password_field_focused = false;
+            drop(std::mem::take(&mut self.tab_mut().secure_state.password_typed));
+            self.tab_mut().secure_state.password_problem = None;
+            self.tab_mut().secure_state.password_field_focused = false;
             self.say_info(match waiting {
                 Awaiting::Open(_) => "left it unopened.",
                 Awaiting::Unlock | Awaiting::UnlockItem(_) => "nothing was unlocked.",
@@ -1235,11 +1235,11 @@ impl crate::PagifyApp {
             });
             return;
         }
-        if !submitted || self.tab_mut().password_typed.is_empty() {
+        if !submitted || self.tab_mut().secure_state.password_typed.is_empty() {
             return;
         }
 
-        let typed = std::mem::take(&mut self.tab_mut().password_typed);
+        let typed = std::mem::take(&mut self.tab_mut().secure_state.password_typed);
         let _ = choosing;
         self.answer_passcode(&typed);
     }

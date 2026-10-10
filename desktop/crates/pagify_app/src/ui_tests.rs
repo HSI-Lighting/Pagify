@@ -2083,7 +2083,7 @@ fn clicking_a_padlock_asks_for_the_passcode() {
     click(&mut h, middle);
 
     assert!(
-        matches!(h.state().tab().awaiting_password, Some(Awaiting::UnlockItem(_))),
+        matches!(h.state().tab().secure_state.awaiting_password, Some(Awaiting::UnlockItem(_))),
         "clicking the padlock did not ask for a passcode"
     );
 }
@@ -2122,7 +2122,7 @@ fn a_second_lock_uses_the_passcode_the_document_already_has() {
 
     // And it takes the passcode straight through — no rule, no second
     // typing, because nothing is being chosen.
-    h.state_mut().tab_mut().password_typed = String::from(strong).into();
+    h.state_mut().tab_mut().secure_state.password_typed = String::from(strong).into();
     h.run();
     h.get_by_label_contains("Unlock document").click();
     h.run_steps(3);
@@ -2175,7 +2175,7 @@ fn locking_asks_in_a_window_and_holds_out_for_a_strong_passcode() {
     // absent — a disabled widget is still in the accessibility tree — so
     // the property to check is that pressing it locks nothing and leaves
     // the window up.
-    h.state_mut().tab_mut().password_typed = String::from("short").into();
+    h.state_mut().tab_mut().secure_state.password_typed = String::from("short").into();
     h.run();
     h.get_by_label_contains("Lock document").click();
     h.run();
@@ -2242,7 +2242,7 @@ fn a_document_that_wants_a_password_asks_for_one_in_a_window() {
     h.get_by_label_contains("This document needs a password");
 
     // Type into it and press Open, as a person would.
-    h.state_mut().tab_mut().password_typed = String::from("pagify").into();
+    h.state_mut().tab_mut().secure_state.password_typed = String::from("pagify").into();
     h.run_steps(1);
     // Exact, because the ribbon has an "Open..." of its own.
     h.get_by_label("Open").click();
@@ -2250,7 +2250,7 @@ fn a_document_that_wants_a_password_asks_for_one_in_a_window() {
 
     assert!(h.state().tab().doc.is_some(), "the window did not open the document");
     assert!(
-        h.state().tab().awaiting_password.is_none(),
+        h.state().tab().secure_state.awaiting_password.is_none(),
         "the window is still asking after it opened"
     );
 }
@@ -4559,7 +4559,7 @@ fn a_placed_picture_is_selected_and_moved_by_the_object_tool() {
     h.state_mut().place_image_at(0, AppPoint { x: 150.0, y: 300.0 }, rgba, 4, 4).expect("placed");
     h.state_mut().submit("editobject");
     h.run_steps(3);
-    assert!(h.state_mut().tab_mut().object_tool.is_some(), "setup: the object tool should be in hand");
+    assert!(h.state_mut().tab_mut().tool_state.object_tool.is_some(), "setup: the object tool should be in hand");
 
     let marks = |h: &mut Harness<'static, PagifyApp>| {
         h.state_mut().tab_mut().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks")

@@ -1608,7 +1608,7 @@ impl crate::PagifyApp {
         if let Some(id) = asked {
             // Always asks, even with a passcode held — see
             // `a_held_passcode_does_not_unlock_anything`.
-            self.tab_mut().awaiting_password = Some(Awaiting::UnlockItem(id));
+            self.tab_mut().secure_state.awaiting_password = Some(Awaiting::UnlockItem(id));
             self.say_info("type the passcode this was locked with, or Escape to give up.");
         }
     }
@@ -1753,7 +1753,7 @@ impl crate::PagifyApp {
         // The object tool takes the pointer whole while it is in hand — its
         // clicks select and its drags move or resize, none of which is a mark
         // or a text selection.
-        if self.tab_mut().object_tool.is_some() {
+        if self.tab_mut().tool_state.object_tool.is_some() {
             self.interact_objects(ui, &response, page, at, view);
             return;
         }

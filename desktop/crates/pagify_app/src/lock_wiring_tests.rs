@@ -496,7 +496,7 @@ fn the_password_window_offers_secure_and_secure_plus() {
 fn choosing_secure_plus_uses_pagifys_own_handler() {
     let mut app = app("two-column.pdf");
     app.submit("secure");
-    app.tab_mut().password_plus = true;
+    app.tab_mut().secure_state.password_plus = true;
     app.answer_passcode("Correct-Horse-99-Battery");
     app.answer_passcode("Correct-Horse-99-Battery");
 
@@ -563,7 +563,7 @@ fn signing_says_that_a_later_edit_is_outside_it() {
 
     app.submit(&format!("certify {}", certificate.display()));
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Certificate(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Certificate(_))),
         "it did not ask for the certificate's password:\n{}",
         said(&app)
     );
@@ -1746,9 +1746,9 @@ fn a_line_the_producer_split_across_two_runs_is_not_missing_a_chunk() {
 /// both showed as active on the ribbon at once.** `take_up_object_tool`
 /// already clears `self.tab_mut().tool` when Edit Object is picked up; `arm_tool`
 /// (what Edit Text and every other picked-then-clicked tool goes
-/// through) did not clear `self.tab_mut().object_tool` back — so using Edit
+/// through) did not clear `self.tab_mut().tool_state.object_tool` back — so using Edit
 /// Object and then Edit Text left both armed, and since
-/// `self.tab_mut().object_tool.is_some()` is checked first and takes the pointer
+/// `self.tab_mut().tool_state.object_tool.is_some()` is checked first and takes the pointer
 /// outright, every click after that went to Edit Object's own
 /// character-drilling selection instead of the paragraph pick Edit Text
 /// was meant to make.
@@ -1756,11 +1756,11 @@ fn a_line_the_producer_split_across_two_runs_is_not_missing_a_chunk() {
 fn arming_edit_text_after_edit_object_puts_the_object_tool_down() {
     let mut app = app("two-column.pdf");
     app.submit("editobject");
-    assert!(app.tab_mut().object_tool.is_some(), "editobject should have armed the object tool");
+    assert!(app.tab_mut().tool_state.object_tool.is_some(), "editobject should have armed the object tool");
 
     app.submit("edittext");
 
-    assert!(app.tab_mut().object_tool.is_none(), "arming Edit Text should have put the object tool down");
+    assert!(app.tab_mut().tool_state.object_tool.is_none(), "arming Edit Text should have put the object tool down");
     assert!(
         app.tab_mut().tool.is_some(),
         "Edit Text itself should still have armed its own click-to-pick"
@@ -1775,12 +1775,12 @@ fn arming_any_pending_tool_after_edit_object_puts_it_down() {
     for command in ["edittext", "line", "circle", "redact"] {
         let mut app = app("two-column.pdf");
         app.submit("editobject");
-        assert!(app.tab_mut().object_tool.is_some(), "{command}: editobject should have armed the object tool");
+        assert!(app.tab_mut().tool_state.object_tool.is_some(), "{command}: editobject should have armed the object tool");
 
         app.submit(command);
 
         assert!(
-            app.tab_mut().object_tool.is_none(),
+            app.tab_mut().tool_state.object_tool.is_none(),
             "{command}: arming it should have put the object tool down"
         );
         assert!(app.tab_mut().tool.is_some(), "{command}: should itself be armed");
@@ -1823,7 +1823,7 @@ fn taking_up_edit_object_puts_an_open_run_editor_down() {
         app.tab_mut().edit.editing_run.is_none(),
         "taking up Edit Object should have put the open run editor down"
     );
-    assert!(app.tab_mut().object_tool.is_some(), "Edit Object itself should still be armed");
+    assert!(app.tab_mut().tool_state.object_tool.is_some(), "Edit Object itself should still be armed");
 }
 
 /// The same fix, for arming a `pending`-based tool over an open run
@@ -3292,12 +3292,12 @@ fn edit_object_prefers_the_picture_and_move_prefers_the_words() {
 fn both_moving_tools_arm_and_say_what_they_take() {
     let mut first = app("two-column.pdf");
     first.submit("editobject");
-    assert_eq!(first.tab().object_tool, Some(true), "edit object did not arm:\n{}", said(&first));
+    assert_eq!(first.tab().tool_state.object_tool, Some(true), "edit object did not arm:\n{}", said(&first));
     assert!(said(&first).contains("picture"), "{}", said(&first));
 
     let mut second = app("two-column.pdf");
     second.submit("moveobject");
-    assert_eq!(second.tab().object_tool, Some(false));
+    assert_eq!(second.tab().tool_state.object_tool, Some(false));
     assert!(said(&second).contains("words or a picture"), "{}", said(&second));
 }
 
@@ -3589,7 +3589,7 @@ fn clicking_a_line_in_edit_object_does_not_select_the_paragraph() {
 /// **The paragraph detector has exactly one production caller — Edit
 /// Text's own `pick_text_run` — and Edit Object's character split
 /// (`split_run_into_characters`) is only ever reachable through a
-/// different tool, gated behind its own `self.tab_mut().object_tool`.** The two
+/// different tool, gated behind its own `self.tab_mut().tool_state.object_tool`.** The two
 /// can never fire back to back in one action: reaching the detector
 /// with a just-split letter as its seed always means a tool switch (and
 /// therefore real, elapsed use) happened first, never that the split
@@ -4497,7 +4497,7 @@ fn the_status_says_what_a_password_permits() {
 fn secure_readonly_under_secure_plus_is_refused_not_silently_dropped() {
     let mut app = app("two-column.pdf");
     app.submit("secure readonly");
-    app.tab_mut().password_plus = true;
+    app.tab_mut().secure_state.password_plus = true;
     app.answer_passcode("Correct-Horse-99-Battery");
     app.answer_passcode("Correct-Horse-99-Battery");
 
@@ -4541,7 +4541,7 @@ fn the_password_window_says_secure_plus_would_lose_the_restriction() {
 fn the_status_of_a_secure_plus_document_says_only_pagify_opens_it() {
     let mut app = app("two-column.pdf");
     app.submit("secure");
-    app.tab_mut().password_plus = true;
+    app.tab_mut().secure_state.password_plus = true;
     app.answer_passcode("Correct-Horse-99-Battery");
     app.answer_passcode("Correct-Horse-99-Battery");
 
@@ -4821,7 +4821,7 @@ fn validating_a_signed_document_separates_unchanged_from_who_signed_it() {
 fn signing_with_a_missing_certificate_says_so_at_once() {
     let mut app = app("two-column.pdf");
     app.submit("certify /tmp/there-is-no-such-certificate.p12");
-    assert!(app.tab_mut().awaiting_password.is_none(), "it asked for a password anyway");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "it asked for a password anyway");
     assert!(said(&app).contains("no such file"), "{}", said(&app));
 }
 
@@ -5199,7 +5199,7 @@ fn a_first_password_over_a_plain_original_is_still_held_back() {
     app.answer_passcode("Correct-Horse-99-Battery");
     app.submit("save");
 
-    assert!(app.tab_mut().asking_to_secure.is_some(), "it wrote over the only plain copy without asking");
+    assert!(app.tab_mut().secure_state.asking_to_secure.is_some(), "it wrote over the only plain copy without asking");
     let bytes = std::fs::read(&out).expect("read");
     assert!(
         pdf_core::registry::exclusive(|| pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes, None)).is_ok(),
@@ -5251,7 +5251,7 @@ fn a_documents_password_can_be_changed_by_giving_the_current_one() {
 
     app.submit("secure");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::SecureCurrent(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::SecureCurrent(_))),
         "it did not ask for the current password:\n{}",
         said(&app)
     );
@@ -5259,18 +5259,18 @@ fn a_documents_password_can_be_changed_by_giving_the_current_one() {
     // A wrong one gets nowhere, and says so in the window.
     app.answer_passcode("not the password");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::SecureCurrent(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::SecureCurrent(_))),
         "a wrong current password was accepted"
     );
     assert_eq!(
-        app.tab_mut().password_problem.as_deref(),
+        app.tab_mut().secure_state.password_problem.as_deref(),
         Some("That is not this document's password.")
     );
 
     // The right one moves on to choosing a new one, under the rule.
     app.answer_passcode("pagify");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Secure(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Secure(_))),
         "the right password did not lead to choosing a new one:\n{}",
         said(&app)
     );
@@ -5393,7 +5393,7 @@ fn saving_over_the_original_is_not_done_quietly_while_a_password_is_waiting() {
     assert!(app.tab_mut().doc.as_ref().expect("doc").session.is_secured());
 
     app.submit("save");
-    assert!(app.tab_mut().asking_to_secure.is_some(), "no question was raised:\n{}", said(&app));
+    assert!(app.tab_mut().secure_state.asking_to_secure.is_some(), "no question was raised:\n{}", said(&app));
     assert!(
         !said(&app).contains("saved "),
         "the file was written without an answer:\n{}",
@@ -5407,7 +5407,7 @@ fn the_secure_verb_asks_for_a_password() {
     let mut app = app("two-column.pdf");
     app.submit("secure");
 
-    assert!(matches!(app.tab_mut().awaiting_password, Some(Awaiting::Secure(_))));
+    assert!(matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Secure(_))));
     let said = said(&app);
     assert!(
         said.contains("password"),
@@ -5426,7 +5426,7 @@ fn secure_carries_the_permissions_it_was_given() {
     only.submit("secure readonly");
 
     let told = said(&only);
-    let Some(Awaiting::Secure(options)) = only.tab().awaiting_password else {
+    let Some(Awaiting::Secure(options)) = only.tab().secure_state.awaiting_password else {
         panic!("it did not ask for a password:\n{told}");
     };
     assert!(!options.printing && !options.copying);
@@ -5435,7 +5435,7 @@ fn secure_carries_the_permissions_it_was_given() {
     // One at a time, combinable.
     let mut combined = app("two-column.pdf");
     combined.submit("secure noprint nocopy");
-    let Some(Awaiting::Secure(options)) = combined.tab().awaiting_password else {
+    let Some(Awaiting::Secure(options)) = combined.tab().secure_state.awaiting_password else {
         panic!("it did not ask for a password");
     };
     assert!(!options.printing && !options.copying);
@@ -5449,7 +5449,7 @@ fn secure_refuses_a_permission_it_does_not_understand() {
     let mut app = app("two-column.pdf");
     app.submit("secure nopriting");
 
-    assert!(app.tab_mut().awaiting_password.is_none(), "it asked for a password anyway");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "it asked for a password anyway");
     let said = said(&app);
     assert!(said.contains("nopriting"), "it did not say what it could not read: {said}");
     assert!(said.contains("noprint"), "it did not suggest the right word: {said}");
@@ -5500,7 +5500,7 @@ fn the_lock_verb_takes_the_selection_that_is_already_there() {
 
     app.submit("lock");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Lock { .. })),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Lock { .. })),
         "it did not lock the selection:\n{}",
         said(&app)
     );
@@ -5522,7 +5522,7 @@ fn the_lockarea_verb_still_arms_the_rectangle() {
 fn the_unlock_verb_declines_when_nothing_is_locked() {
     let mut app = app("text-lines.pdf");
     app.submit("unlock");
-    assert!(app.tab_mut().awaiting_password.is_none());
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none());
     assert!(said(&app).contains("nothing in this document is locked"));
 }
 
@@ -5542,7 +5542,7 @@ fn drawing_the_area_asks_for_a_passcode_and_locks_nothing_yet() {
     app.resolve_tool();
 
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Lock { page: 0, .. })),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Lock { page: 0, .. })),
         "it did not ask for a passcode"
     );
     assert_eq!(page_text(&app, 0), before, "it locked before it had a passcode");
@@ -5634,7 +5634,7 @@ fn a_second_lock_uses_the_passcode_the_first_one_was_given() {
     let mut app = app("text-lines.pdf");
 
     // The first lock asks, and is answered.
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
     app.answer_lock_passcode("a good passcode");
     assert!(
@@ -5646,7 +5646,7 @@ fn a_second_lock_uses_the_passcode_the_first_one_was_given() {
     // The second does not ask at all.
     app.ask_or_reuse_passcode(Awaiting::LockPages(vec![0]), "should never be shown");
     assert!(
-        app.tab_mut().awaiting_password.is_none(),
+        app.tab_mut().secure_state.awaiting_password.is_none(),
         "it asked again for a passcode it already had"
     );
     assert!(
@@ -5667,15 +5667,15 @@ fn a_second_lock_uses_the_passcode_the_first_one_was_given() {
 #[test]
 fn a_held_passcode_does_not_unlock_anything() {
     let mut app = app("text-lines.pdf");
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
     app.answer_lock_passcode("a good passcode");
-    assert!(app.tab_mut().held_passcode.is_some(), "the passcode was not kept");
+    assert!(app.tab_mut().secure_state.held_passcode.is_some(), "the passcode was not kept");
 
     // The gesture that brings something back still asks.
     app.submit("unlock");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Unlock)),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Unlock)),
         "unlocking did not ask for the passcode:\n{}",
         said(&app)
     );
@@ -5691,16 +5691,16 @@ fn a_held_passcode_does_not_unlock_anything() {
 #[test]
 fn a_passcode_that_is_refused_is_not_kept() {
     let mut app = app("text-lines.pdf");
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
     app.answer_lock_passcode("a good passcode");
-    assert!(app.tab_mut().held_passcode.is_some());
+    assert!(app.tab_mut().secure_state.held_passcode.is_some());
 
     // A wrong one, forced in the way a stale held passcode would arrive.
-    app.tab_mut().awaiting_password = Some(Awaiting::LockPages(vec![0]));
+    app.tab_mut().secure_state.awaiting_password = Some(Awaiting::LockPages(vec![0]));
     app.answer_lock_passcode("the wrong passcode");
     assert!(
-        app.tab_mut().held_passcode.is_none(),
+        app.tab_mut().secure_state.held_passcode.is_none(),
         "a refused passcode was kept, so every lock after it would fail quietly"
     );
 }
@@ -5709,14 +5709,14 @@ fn a_passcode_that_is_refused_is_not_kept() {
 #[test]
 fn closing_a_document_lets_go_of_its_passcode() {
     let mut app = app("text-lines.pdf");
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
     app.answer_lock_passcode("a good passcode");
-    assert!(app.tab_mut().held_passcode.is_some());
+    assert!(app.tab_mut().secure_state.held_passcode.is_some());
 
     app.submit("close!");
     assert!(app.tab_mut().doc.is_none(), "it did not close:\n{}", said(&app));
-    assert!(app.tab_mut().held_passcode.is_none(), "the passcode outlived the document");
+    assert!(app.tab_mut().secure_state.held_passcode.is_none(), "the passcode outlived the document");
 }
 
 /// **A selection over two lines locks the selection, not the two lines.**
@@ -5741,7 +5741,7 @@ fn locking_a_selection_across_lines_sends_the_lines_not_their_union() {
     app.tab_mut().selection.text_selection = Some(at..to);
     app.lock_selection();
 
-    match app.tab_mut().awaiting_password.take() {
+    match app.tab_mut().secure_state.awaiting_password.take() {
         Some(Awaiting::Lock { shapes, .. }) => {
             assert!(
                 shapes.len() >= 2,
@@ -5915,7 +5915,7 @@ fn a_click_with_the_object_tool_selects_and_moves_nothing() {
     let mut app = app("covered.pdf");
     let before = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
     app.submit("editobject");
-    assert!(app.tab_mut().object_tool.is_some(), "the tool did not arm:\n{}", said(&app));
+    assert!(app.tab_mut().tool_state.object_tool.is_some(), "the tool did not arm:\n{}", said(&app));
     assert!(app.tab_mut().tool.is_none(), "the old two-click gesture is still armed");
 
     // Bare paper: nothing selected.
@@ -6441,12 +6441,12 @@ fn saving_a_first_password_over_the_original_asks_and_can_be_declined() {
 
     // A plain save asks rather than refusing, and writes nothing yet.
     assert_eq!(app.save(None), SaveOutcome::Asking);
-    assert!(app.tab_mut().asking_to_secure.is_some(), "no question was raised");
+    assert!(app.tab_mut().secure_state.asking_to_secure.is_some(), "no question was raised");
     assert_eq!(std::fs::read(&scratch).expect("read"), before, "the file was written before the answer");
     assert!(!said(&app).contains("use `saveas"), "the old refusal is back:\n{}", said(&app));
 
     // Taking the password off and saving is one of the answers, and it works.
-    app.tab_mut().asking_to_secure = None;
+    app.tab_mut().secure_state.asking_to_secure = None;
     app.tab_mut().doc.as_ref().expect("open").session.unsecure_document().expect("unsecure");
     assert_eq!(app.save(None), SaveOutcome::Done, "{}", said(&app));
     assert!(said(&app).contains("saved"), "{}", said(&app));
@@ -6465,8 +6465,8 @@ fn a_confirmed_password_is_written_over_the_original() {
     assert_eq!(app.save(None), SaveOutcome::Asking);
 
     // The deliberate click.
-    app.tab_mut().asking_to_secure = None;
-    app.tab_mut().secure_in_place_confirmed = true;
+    app.tab_mut().secure_state.asking_to_secure = None;
+    app.tab_mut().secure_state.secure_in_place_confirmed = true;
     assert_eq!(app.save(None), SaveOutcome::Done, "{}", said(&app));
 
     // The file now needs the password; the confirmation was spent.
@@ -6475,7 +6475,7 @@ fn a_confirmed_password_is_written_over_the_original() {
         String::from_utf8_lossy(&written).contains("/Encrypt"),
         "the password was not written into the file"
     );
-    assert!(!app.tab_mut().secure_in_place_confirmed, "the confirmation must not outlive one save");
+    assert!(!app.tab_mut().secure_state.secure_in_place_confirmed, "the confirmation must not outlive one save");
     let _ = std::fs::remove_file(&scratch);
 }
 
@@ -6485,11 +6485,11 @@ fn a_confirmed_password_is_written_over_the_original() {
 fn escape_abandons_a_lock_that_was_waiting_on_a_passcode() {
     let mut app = app("text-lines.pdf");
     let before = page_text(&app, 0);
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
 
     app.escape();
-    assert!(app.tab_mut().awaiting_password.is_none());
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none());
     assert!(said(&app).contains("nothing was locked"), "{}", said(&app));
     assert_eq!(page_text(&app, 0), before);
 }
@@ -6558,7 +6558,7 @@ fn lock_all_asks_for_a_passcode_before_it_hides_anything() {
 
     app.submit("lock all");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::LockPages(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::LockPages(_))),
         "it did not ask for a passcode:\n{}",
         said(&app)
     );
@@ -6672,7 +6672,7 @@ fn the_selection_menu_asks_for_an_incomplete_lock() {
     app.tab_mut().organize.selection_page = 0;
 
     app.lock_selection();
-    match &app.tab().awaiting_password {
+    match &app.tab().secure_state.awaiting_password {
         Some(Awaiting::Lock { require_complete, .. }) => assert!(
             !*require_complete,
             "the selection would still be refused on account of what is under it"
@@ -6774,10 +6774,10 @@ fn locking_an_image_needs_a_passcode() {
 fn escape_abandons_an_image_lock_that_was_waiting_on_a_passcode() {
     let mut app = app("scan-300dpi.pdf");
     let object = app.images_on(0)[0].object;
-    app.tab_mut().awaiting_password = Some(Awaiting::LockImage { page: 0, object });
+    app.tab_mut().secure_state.awaiting_password = Some(Awaiting::LockImage { page: 0, object });
 
     app.escape();
-    assert!(app.tab_mut().awaiting_password.is_none());
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none());
     assert!(said(&app).contains("nothing was locked"), "{}", said(&app));
     assert!(app.images_on(0)[0].pixel_width > 1, "the image went anyway");
 }

@@ -419,7 +419,7 @@ impl PagifyApp {
         tab.view_state.viewport_rect = None;
         tab.view_state.anchor_offset = Some(tab.view_state.scroll_offset);
         let settled = self.tabs_are_settled();
-        if settled && self.tabs.len() == 1 && self.tabs[0].doc.is_none() && self.tabs[0].awaiting_password.is_none() {
+        if settled && self.tabs.len() == 1 && self.tabs[0].doc.is_none() && self.tabs[0].secure_state.awaiting_password.is_none() {
             self.tabs[0] = tab;
             self.active_tab = 0;
             self.name_the_tab_showing();

@@ -780,72 +780,10 @@ struct ViewState {
     copy_wanted: bool,
 }
 
-struct DocTab {
-    doc: Option<Doc>,
-    markup: Markup,
-    calibration: Calibration,
-    /// A `Tool` armed and part-way through collecting its objects/points —
-    /// see [`ArmedTool`]'s own doc.
-    tool: Option<ArmedTool>,
-
-    /// The page editors: the one paragraph open for retyping **on the page**
-    /// where it sits, and a brand new run being composed — see [`EditState`].
-    edit: EditState,
-    /// The id for the next words written onto a page.
-    ///
-    /// Distinct per mark, because `remove_text` removes **every** object
-    /// carrying an id — undoing one line of writing would otherwise take every
-    /// other line with it. Well clear of `TEXT_LAYER_ID`, which recognition
-    /// owns.
-    next_text_id: i32,
-    /// The modal and panel state: search, spelling, bookmarks, link and
-    /// article-box prompts and the extract dialog — see [`PanelsState`].
-    panels: PanelsState,
-    /// The page selection and in-flight gestures — see [`SelectionState`].
-    selection: SelectionState,
-    /// The page view — see [`ViewState`].
-    view_state: ViewState,
-    /// Every page this document's own outline points at — read once and
-    /// kept current rather than re-walked every frame, so the small icon
-    /// `draw_pages` paints in a bookmarked page's corner costs a `HashSet`
-    /// lookup per visible page, not a fresh PDFium outline walk per page
-    /// per repaint.
-    bookmarked_pages: std::collections::HashSet<usize>,
-    /// Runs a person has explicitly declared one paragraph, overriding
-    /// whatever `pagify_shell::blocks::detect`'s own geometry would find —
-    /// `(page, object numbers, top to bottom)`. Session-only: nothing is
-    /// written to the page until an edit is actually applied through it, so
-    /// there is nothing here for a save to carry and nothing a reopen needs
-    /// to restore.
-    joined_groups: Vec<JoinedGroup>,
-    /// The rail/Organize selection and drag — see [`OrganizeState`].
-    organize: OrganizeState,
-    /// Zoom settling: how a new scale waits for renders — see [`ZoomState`].
-    zoom_settle: ZoomState,
-
-
-
-    /// The object tool, when it is in hand: `true` picks pictures before
-    /// words under the pointer, `false` the other way round.
-    ///
-    /// **A selection tool, not a two-click move.** Asked for from use: a click
-    /// selects; the selected thing is moved by holding and dragging it, and
-    /// resized by dragging one of the handles on its outline. Nothing changes
-    /// in the document until the pointer is let go.
-    object_tool: Option<bool>,
-    /// Which ribbon tab this document was left on — kept per document so
-    /// switching tabs restores exactly how you left it, not just its page.
-    ribbon: Tab,
-
-    /// A page being read, off the UI thread.
-    ///
-    /// Recognition is about a second of solid CPU per page. Run in `update` it
-    /// stops the window dead — no repaint, no scrolling, no way to cancel —
-    /// and on a twenty-page document that is twenty seconds of a frozen app.
-    reading: Option<Reading>,
-    /// What the user asked to do, held while they decide what to do about
-    /// unsaved marks.
-    closing: Option<Closing>,
+/// Passcode and redaction asks on this tab — what the app is
+/// waiting to be told before it goes ahead, and the typed passcode being
+/// held for it.
+struct SecureState {
     /// A save that would write a *first* password over the only unsecured
     /// copy, waiting on the person to say what they meant.
     ///
@@ -906,18 +844,11 @@ struct DocTab {
     /// Held here rather than on the `Awaiting` because it is a toggle in the
     /// window, changed while the same question is being asked.
     password_plus: bool,
-    /// The Search & Replace panel, while it is open.
-    /// The Check Spelling panel, while it is open.
-    /// The scan feeding [`Self::spelling`], while it is still running.
-    /// What a drag on the page means. Set by Hand and Select.
-    pointer: pagify_shell::verbs::PointerMode,
-    /// **Requested from use: Hand should look like the tool in hand when a
-    /// document first opens.** `pointer` itself stays `Select` by default —
-    /// dragging over text still selects it immediately, with no tool to pick
-    /// first, which several existing behaviours and tests depend on — this
-    /// only affects which ribbon button *reads* as pressed, until the first
-    /// real ribbon click settles it one way or the other.
-    hand_shown_before_any_tool_is_picked: bool,
+}
+
+/// Undo recency: which of the two stacks — the page markup layer or
+/// the document history — last changed, polled once a frame.
+struct UndoState {
     /// Which of the two separate undo stacks — the current page's markup
     /// layer, or the document's own command history — most recently changed,
     /// tracked by polling both of their own monotonic edit counters once a
@@ -932,6 +863,97 @@ struct DocTab {
     prefer_layer_undo: bool,
     last_layer_edits: u64,
     last_doc_generation: u64,
+}
+
+/// The object tool, and whether the hand hint has been shown before any
+/// tool was picked.
+struct ToolState {
+    /// The object tool, when it is in hand: `true` picks pictures before
+    /// words under the pointer, `false` the other way round.
+    ///
+    /// **A selection tool, not a two-click move.** Asked for from use: a click
+    /// selects; the selected thing is moved by holding and dragging it, and
+    /// resized by dragging one of the handles on its outline. Nothing changes
+    /// in the document until the pointer is let go.
+    object_tool: Option<bool>,
+    /// **Requested from use: Hand should look like the tool in hand when a
+    /// document first opens.** `pointer` itself stays `Select` by default —
+    /// dragging over text still selects it immediately, with no tool to pick
+    /// first, which several existing behaviours and tests depend on — this
+    /// only affects which ribbon button *reads* as pressed, until the first
+    /// real ribbon click settles it one way or the other.
+    hand_shown_before_any_tool_is_picked: bool,
+}
+
+struct DocTab {
+    doc: Option<Doc>,
+    markup: Markup,
+    calibration: Calibration,
+    /// A `Tool` armed and part-way through collecting its objects/points —
+    /// see [`ArmedTool`]'s own doc.
+    tool: Option<ArmedTool>,
+
+    /// The page editors: the one paragraph open for retyping **on the page**
+    /// where it sits, and a brand new run being composed — see [`EditState`].
+    edit: EditState,
+    /// The id for the next words written onto a page.
+    ///
+    /// Distinct per mark, because `remove_text` removes **every** object
+    /// carrying an id — undoing one line of writing would otherwise take every
+    /// other line with it. Well clear of `TEXT_LAYER_ID`, which recognition
+    /// owns.
+    next_text_id: i32,
+    /// The modal and panel state: search, spelling, bookmarks, link and
+    /// article-box prompts and the extract dialog — see [`PanelsState`].
+    panels: PanelsState,
+    /// The page selection and in-flight gestures — see [`SelectionState`].
+    /// The passcode and redaction asks
+    secure_state: SecureState,
+    /// Which undo stack changed most recently
+    undo_state: UndoState,
+    /// The object tool and the hand hint
+    tool_state: ToolState,
+    selection: SelectionState,
+    /// The page view — see [`ViewState`].
+    view_state: ViewState,
+    /// Every page this document's own outline points at — read once and
+    /// kept current rather than re-walked every frame, so the small icon
+    /// `draw_pages` paints in a bookmarked page's corner costs a `HashSet`
+    /// lookup per visible page, not a fresh PDFium outline walk per page
+    /// per repaint.
+    bookmarked_pages: std::collections::HashSet<usize>,
+    /// Runs a person has explicitly declared one paragraph, overriding
+    /// whatever `pagify_shell::blocks::detect`'s own geometry would find —
+    /// `(page, object numbers, top to bottom)`. Session-only: nothing is
+    /// written to the page until an edit is actually applied through it, so
+    /// there is nothing here for a save to carry and nothing a reopen needs
+    /// to restore.
+    joined_groups: Vec<JoinedGroup>,
+    /// The rail/Organize selection and drag — see [`OrganizeState`].
+    organize: OrganizeState,
+    /// Zoom settling: how a new scale waits for renders — see [`ZoomState`].
+    zoom_settle: ZoomState,
+
+
+
+    /// Which ribbon tab this document was left on — kept per document so
+    /// switching tabs restores exactly how you left it, not just its page.
+    ribbon: Tab,
+
+    /// A page being read, off the UI thread.
+    ///
+    /// Recognition is about a second of solid CPU per page. Run in `update` it
+    /// stops the window dead — no repaint, no scrolling, no way to cancel —
+    /// and on a twenty-page document that is twenty seconds of a frozen app.
+    reading: Option<Reading>,
+    /// What the user asked to do, held while they decide what to do about
+    /// unsaved marks.
+    closing: Option<Closing>,
+    /// The Search & Replace panel, while it is open.
+    /// The Check Spelling panel, while it is open.
+    /// The scan feeding [`Self::spelling`], while it is still running.
+    /// What a drag on the page means. Set by Hand and Select.
+    pointer: pagify_shell::verbs::PointerMode,
 }
 
 /// A drag-to-reorder in progress in the Organize grid — which pages are
@@ -960,25 +982,14 @@ impl DocTab {
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
             zoom_settle: ZoomState { settling: 0, zoom_basis: 0, last_drawn_zoom: 0.0, zoom_changed_at: f64::NEG_INFINITY },
+            secure_state: SecureState { asking_to_secure: None, secure_in_place_confirmed: false, asking_to_redact: None, awaiting_password: None, held_passcode: None, password_typed: zeroize::Zeroizing::new(String::new()), password_field_focused: false, password_problem: None, password_plus: false, },
+            tool_state: ToolState { object_tool: None, hand_shown_before_any_tool_is_picked: false },
+            undo_state: UndoState { prefer_layer_undo: false, last_layer_edits: 0, last_doc_generation: 0 },
             selection: SelectionState { selected: None, group: Vec::new(), grab: None, marquee: None, object_hover_handle: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, signature_hover_handle: None, placed_image_selected: None, placed_image_grab: None, placed_image_hover_handle: None, },
-            object_tool: None,
             ribbon: Tab::Home,
             closing: None,
-            asking_to_secure: None,
-            secure_in_place_confirmed: false,
-            asking_to_redact: None,
             reading: None,
-            awaiting_password: None,
-            held_passcode: None,
-            password_typed: zeroize::Zeroizing::new(String::new()),
-            password_field_focused: false,
-            password_problem: None,
-            password_plus: false,
             pointer: Default::default(),
-            hand_shown_before_any_tool_is_picked: true,
-            prefer_layer_undo: false,
-            last_layer_edits: 0,
-            last_doc_generation: 0,
         }
     }
 }
@@ -2588,13 +2599,13 @@ impl PagifyApp {
                 // is part-way through collecting its clicks — a user who armed
                 // Line and looked away needs to see that it is still armed.
                 let armed = self.tab_mut().tool.as_ref().and_then(|t| t.kind.id());
-                let in_hand = match self.tab().object_tool {
+                let in_hand = match self.tab().tool_state.object_tool {
                     Some(true) => Some("editobject"),
                     Some(false) => Some("moveobject"),
                     None => None,
                 };
                 let show_hand_by_default =
-                    self.tab().hand_shown_before_any_tool_is_picked
+                    self.tab().tool_state.hand_shown_before_any_tool_is_picked
                         && self.tab().pointer == pagify_shell::verbs::PointerMode::Select;
                 let live = |command: &ribbon::Command| -> bool {
                     let c = command.text().trim();
@@ -3435,9 +3446,9 @@ impl PagifyApp {
                 let toggle_width = 26.0;
                 let input_width = (ui.available_width() - toggle_width - 8.0).max(80.0);
 
-                let is_password = self.tab().awaiting_password.is_some();
+                let is_password = self.tab().secure_state.awaiting_password.is_some();
                 let command_open = self.command_open;
-                let hint_text = match &self.tab().awaiting_password {
+                let hint_text = match &self.tab().secure_state.awaiting_password {
                     Some(
                         Awaiting::Lock { .. }
                         | Awaiting::LockPages(_)
@@ -3548,7 +3559,7 @@ impl PagifyApp {
             // The default-Hand illusion (see `hand_shown_before_any_tool_is_picked`)
             // only holds until the first real pick — from here on the ribbon
             // shows whichever tool is actually armed.
-            self.tab_mut().hand_shown_before_any_tool_is_picked = false;
+            self.tab_mut().tool_state.hand_shown_before_any_tool_is_picked = false;
             match ribbon_click(&command) {
                 // With nothing open a click that needs a document or its
                 // pages has nothing to work on: say so, once and calmly,
@@ -4751,7 +4762,7 @@ impl PagifyApp {
         // being asked must this leave the box alone, or a password prompt
         // still open at all is a plain command that was actually meant for a
         // window somewhere.
-        if self.tab_mut().awaiting_password.is_none() {
+        if self.tab_mut().secure_state.awaiting_password.is_none() {
             return false;
         }
         let typed = self.cmd.input_mut().trim().to_string();
@@ -4766,7 +4777,7 @@ impl PagifyApp {
         // typing an ordinary command crashed here. Nothing left to take
         // means nothing was actually being asked for any more; fall through
         // exactly as if this function had never been called.
-        let Some(awaiting) = self.tab_mut().awaiting_password.take() else {
+        let Some(awaiting) = self.tab_mut().secure_state.awaiting_password.take() else {
             return false;
         };
         match awaiting {
@@ -4784,14 +4795,14 @@ impl PagifyApp {
             | Awaiting::LockImage { .. }
             | Awaiting::UnlockItem(_)
             | Awaiting::Unlock) => {
-                self.tab_mut().awaiting_password = Some(other);
+                self.tab_mut().secure_state.awaiting_password = Some(other);
                 self.answer_lock_passcode(&typed);
             }
             Awaiting::LockAgain { first, then } => {
                 if typed != first {
                     self.say_error("those did not match — nothing was locked. Try again.");
                 } else {
-                    self.tab_mut().awaiting_password = Some(*then);
+                    self.tab_mut().secure_state.awaiting_password = Some(*then);
                     // The passcode is already known to be right; hand it on to
                     // whichever lock was waiting for it.
                     self.answer_lock_passcode(&typed);
@@ -4800,13 +4811,13 @@ impl PagifyApp {
             Awaiting::SecureCurrent(options) => {
                 // Handled in `answer_passcode`; the command box no longer takes
                 // passwords, so this only exists to keep the match whole.
-                self.tab_mut().awaiting_password = Some(Awaiting::SecureCurrent(options));
+                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::SecureCurrent(options));
             }
             Awaiting::Certificate(path) => {
-                self.tab_mut().awaiting_password = Some(Awaiting::Certificate(path));
+                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Certificate(path));
             }
             Awaiting::Secure(options) => {
-                self.tab_mut().awaiting_password =
+                self.tab_mut().secure_state.awaiting_password =
                     Some(Awaiting::SecureAgain { first: typed.clone(), options });
                 self.say_info("type the same password again, so a slip cannot lock you out.");
             }
@@ -5579,7 +5590,7 @@ impl PagifyApp {
     /// clicked a second time — drop it again. The usual toggle every other
     /// multi-select gesture uses.
     fn extend_selection_at(&mut self, page: usize, at: AppPoint) {
-        let Some(pictures_first) = self.tab_mut().object_tool else { return };
+        let Some(pictures_first) = self.tab_mut().tool_state.object_tool else { return };
         let Some((object, rect, what)) = self.thing_at(page, at, pictures_first) else { return };
         let mut members = std::mem::take(&mut self.tab_mut().selection.group);
         if let Some(sel) = self.tab_mut().selection.selected.take() {
@@ -5610,7 +5621,7 @@ impl PagifyApp {
         }
         self.tab_mut().tool = None;
         self.put_down_page_editors("switched to Edit Object");
-        self.tab_mut().object_tool = Some(pictures_first);
+        self.tab_mut().tool_state.object_tool = Some(pictures_first);
         self.tab_mut().selection.selected = None;
         self.tab_mut().selection.grab = None;
         self.tab_mut().selection.group = Vec::new();
@@ -5663,7 +5674,7 @@ impl PagifyApp {
     /// Edit Text, where retyping a whole paragraph actually means
     /// something; see [`Self::pick_text_run`].
     fn select_thing_at_drilling(&mut self, page: usize, at: AppPoint, drill: bool) -> bool {
-        let Some(pictures_first) = self.tab_mut().object_tool else { return false };
+        let Some(pictures_first) = self.tab_mut().tool_state.object_tool else { return false };
         match self.thing_at(page, at, pictures_first) {
             Some((object, rect, "the words")) => {
                 let (object, rect, what) = if drill {
@@ -8396,7 +8407,7 @@ impl PagifyApp {
     /// `false` when this is not the time (no such tool in hand) or there is
     /// nothing to paste, and the caller pastes the old way.
     fn start_paste_ghost(&mut self, pasted: Option<String>) -> bool {
-        let in_hand = self.tab().object_tool.is_some()
+        let in_hand = self.tab().tool_state.object_tool.is_some()
             || self.tab().edit.editing_run.is_some()
             || self.tab().tool.as_ref().is_some_and(|t| matches!(t.kind, Tool::PickText));
         if !in_hand {
@@ -9364,7 +9375,7 @@ impl PagifyApp {
             }
             return;
         }
-        if self.tab_mut().awaiting_password.is_some() {
+        if self.tab_mut().secure_state.awaiting_password.is_some() {
             self.cmd.input_mut().clear();
             self.cmd.input_mut().push_str(line);
             self.consume_password_line();
@@ -9487,7 +9498,7 @@ impl PagifyApp {
             self.tab_mut().organize.organize_anchor = None;
             self.tab_mut().organize.organize_drag = None;
         }
-        if let Some(what) = self.tab_mut().awaiting_password.take() {
+        if let Some(what) = self.tab_mut().secure_state.awaiting_password.take() {
             self.say_info(match what {
                 Awaiting::Open(_) => "gave up on the password.",
                 Awaiting::Lock { .. } | Awaiting::LockPages(_) | Awaiting::LockImage { .. } => {
@@ -9524,7 +9535,7 @@ impl PagifyApp {
         if self.tab_mut().edit.new_text_box.take().is_some() {
             self.say_info("nothing was added.");
         }
-        if self.tab_mut().object_tool.take().is_some() {
+        if self.tab_mut().tool_state.object_tool.take().is_some() {
             self.tab_mut().selection.selected = None;
             self.tab_mut().selection.grab = None;
             self.tab_mut().selection.group = Vec::new();
@@ -10111,7 +10122,7 @@ impl PagifyApp {
             .map_err(|e| format!("redact: {e}"))?;
 
         if !report.blockers().is_empty() {
-            self.tab_mut().asking_to_redact = Some(PendingRedaction { page, area, report });
+            self.tab_mut().secure_state.asking_to_redact = Some(PendingRedaction { page, area, report });
             // Not an error — the question is on screen.
             return Ok(String::new());
         }
@@ -10163,7 +10174,7 @@ impl PagifyApp {
     /// deciding needs is whether their *words* came out, and whether the thing
     /// left behind might be words itself.
     fn ask_about_redaction(&mut self, ctx: &egui::Context) {
-        let Some(asking) = self.tab_mut().asking_to_redact.clone() else { return };
+        let Some(asking) = self.tab_mut().secure_state.asking_to_redact.clone() else { return };
         let mut decision: Option<bool> = None;
 
         egui::Modal::new(egui::Id::new("redact")).show(ctx, |ui| {
@@ -10220,11 +10231,11 @@ impl PagifyApp {
         match decision {
             None => {}
             Some(false) => {
-                self.tab_mut().asking_to_redact = None;
+                self.tab_mut().secure_state.asking_to_redact = None;
                 self.say_info("nothing was redacted.");
             }
             Some(true) => {
-                self.tab_mut().asking_to_redact = None;
+                self.tab_mut().secure_state.asking_to_redact = None;
                 let notes = shared_form_notes(&asking.report);
                 match self.apply_redaction(asking.page, asking.area, true) {
                     Ok(said) => self.say_info(said + &notes),
@@ -10296,14 +10307,14 @@ impl PagifyApp {
     fn track_undo_recency(&mut self) {
         let page = self.tab().view_state.page;
         let layer_edits = self.tab().markup.existing(page).map(|l| l.edits()).unwrap_or(0);
-        if layer_edits != self.tab_mut().last_layer_edits {
-            self.tab_mut().last_layer_edits = layer_edits;
-            self.tab_mut().prefer_layer_undo = true;
+        if layer_edits != self.tab_mut().undo_state.last_layer_edits {
+            self.tab_mut().undo_state.last_layer_edits = layer_edits;
+            self.tab_mut().undo_state.prefer_layer_undo = true;
         }
         let doc_generation = self.tab_mut().doc.as_ref().map(|d| d.session.undo_generation()).unwrap_or(0);
-        if doc_generation != self.tab_mut().last_doc_generation {
-            self.tab_mut().last_doc_generation = doc_generation;
-            self.tab_mut().prefer_layer_undo = false;
+        if doc_generation != self.tab_mut().undo_state.last_doc_generation {
+            self.tab_mut().undo_state.last_doc_generation = doc_generation;
+            self.tab_mut().undo_state.prefer_layer_undo = false;
         }
     }
 
@@ -10313,7 +10324,7 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let tried = if self.tab_mut().prefer_layer_undo {
+        let tried = if self.tab_mut().undo_state.prefer_layer_undo {
             self.try_layer_undo_redo(undo) || self.try_doc_undo_redo(undo)
         } else {
             self.try_doc_undo_redo(undo) || self.try_layer_undo_redo(undo)
@@ -10393,14 +10404,14 @@ impl PagifyApp {
     /// `awaiting_password` each in their own way, which is how asking twice for
     /// the same secret became four separate places to fix.
     fn ask_or_reuse_passcode(&mut self, what: Awaiting, prompt: &str) {
-        if let Some(held) = self.tab_mut().held_passcode.clone() {
+        if let Some(held) = self.tab_mut().secure_state.held_passcode.clone() {
             // Straight through, by the same route the window takes, so a held
             // passcode and a typed one cannot drift apart.
-            self.tab_mut().awaiting_password = Some(what);
+            self.tab_mut().secure_state.awaiting_password = Some(what);
             self.answer_lock_passcode(&held);
             return;
         }
-        self.tab_mut().awaiting_password = Some(what);
+        self.tab_mut().secure_state.awaiting_password = Some(what);
         self.say_info(prompt);
     }
 
@@ -10410,7 +10421,7 @@ impl PagifyApp {
     /// not carry a secret across, and a document that is no longer on screen has
     /// no business leaving one in memory.
     fn forget_passcode(&mut self) {
-        self.tab_mut().held_passcode = None;
+        self.tab_mut().secure_state.held_passcode = None;
     }
 
     /// Hand a passcode to whichever lock is waiting for it.
@@ -10418,7 +10429,7 @@ impl PagifyApp {
     /// Its own method so the window and a test take one path — the alternative
     /// is a dialog nothing exercises.
     fn answer_lock_passcode(&mut self, typed: &str) {
-        let Some(what) = self.tab_mut().awaiting_password.take() else { return };
+        let Some(what) = self.tab_mut().secure_state.awaiting_password.take() else { return };
         match what {
             Awaiting::Lock { page, shapes, require_complete } => {
                 let done = self.lock_shapes(page, &shapes, typed.as_bytes(), require_complete);
@@ -10453,7 +10464,7 @@ impl PagifyApp {
                 Err(e) => self.say_error(e),
             },
             // Not a lock; put it back for whoever does handle it.
-            other => self.tab_mut().awaiting_password = Some(other),
+            other => self.tab_mut().secure_state.awaiting_password = Some(other),
         }
     }
 
@@ -10466,7 +10477,7 @@ impl PagifyApp {
     /// right one.
     fn hold_or_drop(&mut self, typed: &str, outcome: &Result<String, String>) {
         match outcome {
-            Ok(_) => self.tab_mut().held_passcode = Some(zeroize::Zeroizing::new(typed.to_owned())),
+            Ok(_) => self.tab_mut().secure_state.held_passcode = Some(zeroize::Zeroizing::new(typed.to_owned())),
             Err(_) => self.forget_passcode(),
         }
     }
@@ -10493,9 +10504,9 @@ impl PagifyApp {
     fn answer_passcode(&mut self, typed: &str) {
         use pagify_shell::passphrase;
 
-        let Some(waiting) = self.tab_mut().awaiting_password.clone() else { return };
-        self.tab_mut().password_field_focused = false;
-        self.tab_mut().password_problem = None;
+        let Some(waiting) = self.tab_mut().secure_state.awaiting_password.clone() else { return };
+        self.tab_mut().secure_state.password_field_focused = false;
+        self.tab_mut().secure_state.password_problem = None;
 
         let confirming =
             matches!(waiting, Awaiting::LockAgain { .. } | Awaiting::SecureAgain { .. });
@@ -10516,11 +10527,11 @@ impl PagifyApp {
         // A password being chosen goes round once more before it does anything.
         if !using && !confirming {
             if let Some(problem) = passphrase::problem(typed) {
-                self.tab_mut().password_problem = Some(problem);
+                self.tab_mut().secure_state.password_problem = Some(problem);
                 return;
             }
-            let Some(then) = self.tab_mut().awaiting_password.take() else { return };
-            self.tab_mut().awaiting_password = Some(match then {
+            let Some(then) = self.tab_mut().secure_state.awaiting_password.take() else { return };
+            self.tab_mut().secure_state.awaiting_password = Some(match then {
                 Awaiting::Secure(options) => {
                     Awaiting::SecureAgain { first: typed.to_string(), options }
                 }
@@ -10529,24 +10540,24 @@ impl PagifyApp {
             return;
         }
 
-        match self.tab_mut().awaiting_password.clone() {
+        match self.tab_mut().secure_state.awaiting_password.clone() {
             Some(Awaiting::LockAgain { first, then }) => {
                 if typed != first {
-                    self.tab_mut().awaiting_password = None;
+                    self.tab_mut().secure_state.awaiting_password = None;
                     self.say_error("those did not match — nothing was locked. Try again.");
                     return;
                 }
-                self.tab_mut().awaiting_password = Some(*then);
+                self.tab_mut().secure_state.awaiting_password = Some(*then);
                 self.answer_lock_passcode(typed);
             }
             Some(Awaiting::SecureAgain { first, options }) => {
                 if typed != first {
-                    self.tab_mut().awaiting_password = None;
+                    self.tab_mut().secure_state.awaiting_password = None;
                     self.say_error("those did not match — nothing was set. Run `secure` again.");
                     return;
                 }
-                self.tab_mut().awaiting_password = None;
-                let outcome = if self.tab_mut().password_plus {
+                self.tab_mut().secure_state.awaiting_password = None;
+                let outcome = if self.tab_mut().secure_state.password_plus {
                     // The window refuses this before a password is typed; the
                     // same rule here, for the paths that do not go through it.
                     if options != pagify_shell::verbs::SecureOptions::default() {
@@ -10569,21 +10580,21 @@ impl PagifyApp {
             Some(Awaiting::SecureCurrent(options)) => {
                 if !self.tab_mut().doc.as_ref().is_some_and(|d| d.session.password_matches(typed.as_bytes()))
                 {
-                    self.tab_mut().password_problem = Some("That is not this document's password.".into());
+                    self.tab_mut().secure_state.password_problem = Some("That is not this document's password.".into());
                     return;
                 }
                 // Right, so the old one comes off and a new one is chosen.
                 if let Some(doc) = &self.tab_mut().doc {
                     if let Err(e) = doc.session.unsecure_document() {
-                        self.tab_mut().awaiting_password = None;
+                        self.tab_mut().secure_state.awaiting_password = None;
                         self.say_error(e.to_string());
                         return;
                     }
                 }
-                self.tab_mut().awaiting_password = Some(Awaiting::Secure(options));
+                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Secure(options));
             }
             Some(Awaiting::Certificate(path)) => {
-                self.tab_mut().awaiting_password = None;
+                self.tab_mut().secure_state.awaiting_password = None;
                 match self.sign_with(&path, typed) {
                     Ok(said) => self.say_info(said),
                     Err(e) => self.say_error(e),
@@ -10601,18 +10612,18 @@ impl PagifyApp {
     /// alternative is a dialog nothing exercises, which is how the drawn-ink
     /// bug earlier in this program survived a test suite that passed.
     fn answer_open_password(&mut self, path: &str, typed: &str) {
-        self.tab_mut().awaiting_password = None;
-        self.tab_mut().password_field_focused = false;
+        self.tab_mut().secure_state.awaiting_password = None;
+        self.tab_mut().secure_state.password_field_focused = false;
         self.open_with(path, Some(typed));
         // Still asking means it was not accepted, and the window says so rather
         // than the status line underneath it.
-        self.tab_mut().password_problem = matches!(self.tab_mut().awaiting_password, Some(Awaiting::Open(_)))
+        self.tab_mut().secure_state.password_problem = matches!(self.tab_mut().secure_state.awaiting_password, Some(Awaiting::Open(_)))
             .then(|| "That password was not accepted.".to_string());
     }
 
     /// The path a document is waiting on a password for, if any.
     fn awaiting_open(&self) -> Option<String> {
-        match &self.tab().awaiting_password {
+        match &self.tab().secure_state.awaiting_password {
             Some(Awaiting::Open(path)) => Some(path.clone()),
             _ => None,
         }
@@ -10649,10 +10660,10 @@ impl PagifyApp {
         if over_the_original
             && session.is_secured()
             && !session.had_password_on_open()
-            && !std::mem::take(&mut self.tab_mut().secure_in_place_confirmed)
+            && !std::mem::take(&mut self.tab_mut().secure_state.secure_in_place_confirmed)
         {
             // Asked, not refused — see `asking_to_secure`.
-            self.tab_mut().asking_to_secure = Some(path);
+            self.tab_mut().secure_state.asking_to_secure = Some(path);
             self.say_info(
                 "this save would put a password on the file itself — choose what to do \
                  in the window.",
@@ -10733,7 +10744,7 @@ impl PagifyApp {
     /// The window that asks what a save should do about a password that has
     /// not been written yet — see `asking_to_secure`.
     fn ask_about_securing(&mut self, ctx: &egui::Context) {
-        let Some(original) = self.tab_mut().asking_to_secure.clone() else { return };
+        let Some(original) = self.tab_mut().secure_state.asking_to_secure.clone() else { return };
         let name = original
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -10782,7 +10793,7 @@ impl PagifyApp {
         }
 
         let Some(choice) = choice else { return };
-        self.tab_mut().asking_to_secure = None;
+        self.tab_mut().secure_state.asking_to_secure = None;
         match choice {
             Choice::Cancel => self.say_info("not saved."),
             Choice::SaveCopy => {
@@ -10815,7 +10826,7 @@ impl PagifyApp {
                 }
             }
             Choice::WriteOver => {
-                self.tab_mut().secure_in_place_confirmed = true;
+                self.tab_mut().secure_state.secure_in_place_confirmed = true;
                 self.save(None);
             }
         }

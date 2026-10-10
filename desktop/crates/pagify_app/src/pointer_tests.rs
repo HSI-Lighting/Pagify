@@ -668,7 +668,7 @@ fn an_encrypted_file_asks_for_its_password() {
     app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
 
     assert!(
-        app.tab_mut().awaiting_password.is_some(),
+        app.tab_mut().secure_state.awaiting_password.is_some(),
         "an encrypted file did not ask:\n{}",
         said(&app)
     );
@@ -684,7 +684,7 @@ fn an_encrypted_file_asks_for_its_password() {
 fn a_password_is_never_written_into_the_history() {
     let mut app = PagifyApp::new(None);
     app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
-    assert!(app.tab_mut().awaiting_password.is_some(), "the fixture did not ask for a password");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_some(), "the fixture did not ask for a password");
 
     app.submit("hunter2");
     let history = said(&app);
@@ -702,14 +702,14 @@ fn a_wrong_password_asks_again_rather_than_giving_up() {
     app.answer_open_password(&path, "not-the-password");
 
     assert!(
-        app.tab_mut().awaiting_password.is_some(),
+        app.tab_mut().secure_state.awaiting_password.is_some(),
         "one wrong attempt ended it:\n{}",
         said(&app)
     );
     // The window says so, where the person is looking, rather than the
     // status line underneath it.
     assert_eq!(
-        app.tab_mut().password_problem.as_deref(),
+        app.tab_mut().secure_state.password_problem.as_deref(),
         Some("That password was not accepted."),
         "the window would say nothing about the wrong password"
     );
@@ -722,7 +722,7 @@ fn the_right_password_opens_it() {
     let path = app.awaiting_open().expect("it did not ask for a password");
     app.answer_open_password(&path, "pagify");
 
-    assert!(app.tab_mut().awaiting_password.is_none(), "still asking:\n{}", said(&app));
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "still asking:\n{}", said(&app));
     assert!(app.tab_mut().doc.is_some(), "the right password did not open it:\n{}", said(&app));
 }
 
@@ -745,7 +745,7 @@ fn the_password_that_opened_the_file_locks_its_own_content_too() {
 
     app.ask_or_reuse_passcode(Awaiting::LockPages(vec![0]), "should never be shown");
     assert!(
-        app.tab_mut().awaiting_password.is_none(),
+        app.tab_mut().secure_state.awaiting_password.is_none(),
         "it asked for a passcode it was already given to open the file"
     );
     assert!(
@@ -772,11 +772,11 @@ fn the_password_that_opened_the_file_locks_its_own_content_too() {
 fn typing_the_right_password_and_submitting_opens_it() {
     let mut app = PagifyApp::new(None);
     app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
-    assert!(app.tab_mut().awaiting_password.is_some(), "the fixture did not ask for a password");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_some(), "the fixture did not ask for a password");
 
     app.submit("pagify");
 
-    assert!(app.tab_mut().awaiting_password.is_none(), "still asking:\n{}", said(&app));
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "still asking:\n{}", said(&app));
     assert!(app.tab_mut().doc.is_some(), "typing the right password did not open it:\n{}", said(&app));
 }
 
@@ -785,7 +785,7 @@ fn escape_gives_up_on_the_password() {
     let mut app = PagifyApp::new(None);
     app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
     app.escape();
-    assert!(app.tab_mut().awaiting_password.is_none(), "escape did not give up");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "escape did not give up");
 }
 
 // -- the two standing tools -------------------------------------------

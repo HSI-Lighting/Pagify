@@ -89,7 +89,7 @@ fn redacting_a_clear_area_destroys_the_text() {
     // "The quick brown fox" sits at L40.3 T49.8 R165.2 B62.8.
     let outcome = app.redact(0, AppPoint::new(35.0, 45.0), AppPoint::new(170.0, 66.0));
     assert!(outcome.is_ok(), "{outcome:?}");
-    assert!(app.tab_mut().asking_to_redact.is_none(), "it asked about a clear area");
+    assert!(app.tab_mut().secure_state.asking_to_redact.is_none(), "it asked about a clear area");
 
     let after = page_text(&app, 0);
     assert!(!after.contains("The quick brown fox"), "the words survived: {after:?}");
@@ -122,7 +122,7 @@ fn an_outlined_page_now_offers_a_real_redaction_with_the_bundled_font() {
     let outcome = app.redact(0, AppPoint::new(10.0, 10.0), AppPoint::new(300.0, 300.0));
     assert!(outcome.is_ok(), "a font-assisted redaction was refused outright: {outcome:?}");
 
-    let asking = app.tab_mut().asking_to_redact.as_ref().expect(
+    let asking = app.tab_mut().secure_state.asking_to_redact.as_ref().expect(
         "a broad rectangle over real outlined type matched everything — unexpected, \
          but not itself wrong; if this legitimately now clears in one step, this test's \
          premise needs revisiting rather than the assertion loosened blindly",
@@ -149,7 +149,7 @@ fn a_scan_is_refused_the_same_way() {
     let mut app = app("scan-300dpi.pdf");
     let outcome = app.redact(0, AppPoint::new(50.0, 50.0), AppPoint::new(200.0, 100.0));
     assert!(outcome.is_err());
-    assert!(app.tab_mut().asking_to_redact.is_none());
+    assert!(app.tab_mut().secure_state.asking_to_redact.is_none());
 }
 
 #[test]

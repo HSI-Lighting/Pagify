@@ -658,7 +658,7 @@ impl crate::PagifyApp {
                 // A document that already has one is *changed*, not refused:
                 // the current password first, then the new one.
                 if doc.session.already_has_password() {
-                    self.tab_mut().awaiting_password = Some(Awaiting::SecureCurrent(options));
+                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::SecureCurrent(options));
                     self.say_info("this document has a password — type it to change it.");
                     return;
                 }
@@ -669,7 +669,7 @@ impl crate::PagifyApp {
                     return;
                 }
                 let allowed = options.describe();
-                self.tab_mut().awaiting_password = Some(Awaiting::Secure(options));
+                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Secure(options));
                 self.say_info(format!(
                     "type a password for this document, or Escape to give up. \
                      Anyone opening the file will be asked for it — {allowed}."
@@ -786,7 +786,7 @@ impl crate::PagifyApp {
                             self.say_error(format!("{}: no such file.", path.display()));
                             return;
                         }
-                        self.tab_mut().awaiting_password = Some(Awaiting::Certificate(path));
+                        self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Certificate(path));
                         self.say_info("type the certificate's password, or Escape to give up.");
                     }
                 }
@@ -997,7 +997,7 @@ impl crate::PagifyApp {
                 } else {
                     // Unlike locking, this always asks even when a passcode is
                     // held — see `a_held_passcode_does_not_unlock_anything`.
-                    self.tab_mut().awaiting_password = Some(Awaiting::Unlock);
+                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Unlock);
                     self.say_info("type the passcode this was locked with, or Escape to give up.");
                 }
             }

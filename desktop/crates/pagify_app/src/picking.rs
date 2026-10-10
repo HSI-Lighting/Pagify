@@ -36,9 +36,9 @@ impl crate::PagifyApp {
         // buttons lit at once.** Worse than the cosmetic double-highlight:
         // every click kept reaching the object tool's own click-to-select
         // instead of resolving the pick this was arming, because
-        // `interact` checks `self.tab_mut().object_tool.is_some()` first
+        // `interact` checks `self.tab_mut().tool_state.object_tool.is_some()` first
         // and takes the pointer outright when it is.
-        if self.tab_mut().object_tool.take().is_some() {
+        if self.tab_mut().tool_state.object_tool.take().is_some() {
             self.tab_mut().selection.selected = None;
             self.tab_mut().selection.grab = None;
             self.tab_mut().selection.group = Vec::new();

@@ -120,7 +120,7 @@ impl crate::PagifyApp {
         match opened {
             Err(PdfError::PasswordRequired) | Err(PdfError::IncorrectPassword) => {
                 let again = password.is_some();
-                self.tab_mut().awaiting_password = Some(Awaiting::Open(path.to_string()));
+                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Open(path.to_string()));
                 self.say_info(if again {
                     "that password was not accepted — type it again, or Escape to give up."
                 } else {
@@ -218,7 +218,7 @@ impl crate::PagifyApp {
                 // so a document whose content really is sealed under a
                 // different passcode only ever asks once more, not every time.
                 if let Some(password) = password {
-                    self.tab_mut().held_passcode = Some(zeroize::Zeroizing::new(password.to_owned()));
+                    self.tab_mut().secure_state.held_passcode = Some(zeroize::Zeroizing::new(password.to_owned()));
                 }
                 self.tab_mut().view_state.saved_revision = self.tab_mut().markup.revision();
 
