@@ -1886,13 +1886,7 @@ impl Document for PdfiumDocument {
         let operations = content::parse(&stream)?;
         let placed = content::placed(&operations);
 
-        let pictures = self.images_on(page_index)?;
-        let names = self.image_names(&file, &page)?;
-        let drawn = image_operators(&operations, &names);
-
-        let painted = path_operators(&operations);
-
-        let height = self.page_size(page_index)?.height_pt;
+        let spans = self.span_tables(page_index, &file, &page, &operations, &placed)?;
         let fonts = self.page_fonts(&file, &page);
         let codes_in = |p: &content::Placed| -> usize {
             let width = p
@@ -1914,53 +1908,7 @@ impl Document for PdfiumDocument {
         let mut byte_ranges: Vec<std::ops::Range<usize>> = Vec::with_capacity(objects.len());
 
         for &object in objects {
-            let span: std::ops::Range<usize> = 'span: {
-                if let Some(which) = pictures.iter().position(|i| i.object == object) {
-                    if drawn.len() != pictures.len() {
-                        return Err(PdfError::Unsupported(
-                            "this page draws its pictures in a way this cannot follow",
-                        ));
-                    }
-                    let at = drawn[which];
-                    break 'span match frame_scope(&operations, at..at + 1) {
-                        Some((open, close)) => match placeholder_before(&operations, open) {
-                            Some(first) => first..close + 1,
-                            None => open..close + 1,
-                        },
-                        None => at..at + 1,
-                    };
-                }
-
-                if let Some((which, paths)) = self.path_ordinal(page_index, object)? {
-                    if painted.len() != paths {
-                        return Err(PdfError::Unsupported(
-                            "this page paints its shapes in a way this cannot follow",
-                        ));
-                    }
-                    let (pspan, clips) = painted
-                        .get(which)
-                        .cloned()
-                        .ok_or(PdfError::Unsupported("that shape is not painted on this page"))?;
-                    if clips {
-                        return Err(PdfError::Unsupported(
-                            "this shape also sets a clipping path, which cannot be removed alone",
-                        ));
-                    }
-                    break 'span match frame_scope(&operations, pspan.clone()) {
-                        Some((open, close)) => open..close + 1,
-                        None => pspan,
-                    };
-                }
-
-                if let Some(run) = self.text_run_at(page_index, object)? {
-                    let order = self.text_order(page_index, object);
-                    let (first, last, _) =
-                        run_operators(&run, height, &placed, &operations, &codes_in, order)?;
-                    break 'span first..last + 1;
-                }
-
-                return Err(PdfError::Unsupported("that is not something this can remove"));
-            };
+            let span = self.operator_span(page_index, object, &spans, &codes_in)?;
 
             let from = operations[span.start].span.start;
             let to = operations[span.end - 1].span.end;
@@ -7309,6 +7257,7 @@ impl PdfiumDocument {
                 &parts,
                 mine,
                 &[],
+                None,
                 &mut cuts,
             );
         }
@@ -7325,7 +7274,7 @@ impl PdfiumDocument {
                 cuts.cut_whole.push(p.origin.operation);
             }
         }
-        let Cuts { mut edits, mut cut_whole, spilled, characters } = cuts;
+        let Cuts { mut edits, mut cut_whole, spilled, characters, .. } = cuts;
         cut_whole.sort_unstable();
         cut_whole.dedup();
         for index in &cut_whole {
@@ -7391,6 +7340,320 @@ fn font_to_unicode(
     let decoded = crate::pdf::content::decode(&dict, bytes.get(range)?)?;
     Some(crate::pdf::cmap::parse(&decoded))
 }
+
+    /// A page's stream, read once, with the tables that say which operators
+    /// draw a picture or a shape — see [`Self::operator_span`].
+    fn span_tables<'a>(
+        &self,
+        page_index: usize,
+        file: &crate::pdf::File<'_>,
+        page: &crate::pdf::Object,
+        operations: &'a [crate::pdf::content::Operation],
+        placed: &'a [crate::pdf::content::Placed],
+    ) -> Result<SpanTables<'a>> {
+        let pictures = self.images_on(page_index)?;
+        let names = self.image_names(file, page)?;
+        let mut shape_number = std::collections::HashMap::new();
+        for (index, drawn) in self.object_census(page_index)?.iter().enumerate() {
+            if drawn.kind as u32 == pdfium_render::prelude::FPDF_PAGEOBJ_PATH {
+                let next = shape_number.len();
+                shape_number.insert(index, next);
+            }
+        }
+        Ok(SpanTables {
+            operations,
+            placed,
+            drawn: image_operators(operations, &names),
+            pictures,
+            painted: path_operators(operations),
+            height: self.page_size(page_index)?.height_pt,
+            shapes: shape_number.len(),
+            shape_number,
+            text_objects: self.text_objects_in_order(page_index).unwrap_or_default(),
+        })
+    }
+
+    /// **Which operators of the stream draw `object`** — a picture with its
+    /// frame and placeholder, a shape with the frame it sits in, or a run of
+    /// words — as the half-open range of operations to cut out.
+    ///
+    /// Shared by [`Self::remove_objects`] and the byte-level redaction, so that
+    /// both refuse, and both succeed, on exactly the same pages.
+    fn operator_span(
+        &self,
+        page_index: usize,
+        object: usize,
+        spans: &SpanTables<'_>,
+        codes_in: &dyn Fn(&crate::pdf::content::Placed) -> usize,
+    ) -> Result<std::ops::Range<usize>> {
+        let operations = spans.operations;
+
+        if let Some(which) = spans.pictures.iter().position(|i| i.object == object) {
+            if spans.drawn.len() != spans.pictures.len() {
+                return Err(PdfError::Unsupported(
+                    "this page draws its pictures in a way this cannot follow",
+                ));
+            }
+            let at = spans.drawn[which];
+            return Ok(match frame_scope(operations, at..at + 1) {
+                Some((open, close)) => match placeholder_before(operations, open) {
+                    Some(first) => first..close + 1,
+                    None => open..close + 1,
+                },
+                None => at..at + 1,
+            });
+        }
+
+        if let Some((which, paths)) = spans.path_ordinal(object) {
+            if spans.painted.len() != paths {
+                return Err(PdfError::Unsupported(
+                    "this page paints its shapes in a way this cannot follow",
+                ));
+            }
+            let (pspan, clips) = spans
+                .painted
+                .get(which)
+                .cloned()
+                .ok_or(PdfError::Unsupported("that shape is not painted on this page"))?;
+            if clips {
+                return Err(PdfError::Unsupported(
+                    "this shape also sets a clipping path, which cannot be removed alone",
+                ));
+            }
+            return Ok(match frame_scope(operations, pspan.clone()) {
+                Some((open, close)) => open..close + 1,
+                None => pspan,
+            });
+        }
+
+        if let Some(run) = self.text_run_at(page_index, object)? {
+            let order = spans.text_order(object);
+            let (first, last, _) =
+                run_operators(&run, spans.height, spans.placed, operations, codes_in, order)?;
+            return Ok(first..last + 1);
+        }
+
+        Err(PdfError::Unsupported("that is not something this can remove"))
+    }
+
+    /// **A redaction, applied to the content stream instead of through PDFium.**
+    ///
+    /// The survey ([`Self::redact_inner`]) has already decided what must go; this
+    /// carries that out by cutting exactly those operators out of the page's own
+    /// stream and appending the mark, so every other byte of the page — fonts,
+    /// colours, shadings, spacing — is copied through as it was.
+    ///
+    /// **Why not PDFium's way.** Removing objects through its object model and
+    /// then calling `FPDFPage_GenerateContent` re-emits *every* object of the
+    /// page, and on pages from Illustrator or InDesign that is lossy: fonts that
+    /// share a name merge, `Tc`/`Tw` go, shadings and CMYK colours turn black.
+    /// Measured on a real 49-page datasheet, redacting one word changed 3–35% of
+    /// the page's pixels outside the area and took 13 other runs with it.
+    ///
+    /// Returns the edited file and what it was edited from, without touching the
+    /// document: **a refusal here changes nothing**, and the caller falls back.
+    /// It refuses wherever it would have to guess:
+    ///
+    /// - a run whose operators cannot be told from their neighbours;
+    /// - a run covered only in part that cannot be sliced exactly — the
+    ///   survey's own answer is to keep the rest, and taking the whole run
+    ///   would be taking more than was asked;
+    /// - words that are cut out whole while more of the line follows them with
+    ///   nothing to keep the pen where it was;
+    /// - edits whose bytes overlap, which `content::splice` would silently skip;
+    /// - a page whose stream ends inside a text object, or leaves a transform
+    ///   that cannot be undone, where the mark could not be placed exactly.
+    fn redact_in_stream(
+        &self,
+        request: &Redaction,
+        cuts_in: &[TextCut],
+        removals: &[usize],
+        marks: &[FS_RECTF],
+    ) -> Result<(EditBase, Vec<u8>)> {
+        use crate::pdf::content;
+
+        let page_index = request.page_index;
+        // **Never appended to the file.** An edit to a signed document normally
+        // goes in as a new revision, which keeps the old bytes — the words this is
+        // here to destroy — right behind it. A redaction is always a full rewrite.
+        let base = EditBase { bytes: self.readable_bytes()?, exact: false };
+        let file = crate::pdf::File::parse(&base.bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, streams) = self.page_content(&file, &page)?;
+        let operations = content::parse(&stream)?;
+        let closing = closing_state(&operations)
+            .ok_or(PdfError::Unsupported("this page's content stops inside a text object"))?;
+        let placed = content::placed(&operations);
+        let spans = self.span_tables(page_index, &file, &page, &operations, &placed)?;
+        let fonts = self.page_fonts(&file, &page);
+        let codes_in = |p: &content::Placed| -> usize {
+            let width = p
+                .font
+                .as_ref()
+                .zip(fonts.as_ref())
+                .and_then(|(name, dict)| code_width(&file, dict, name))
+                .unwrap_or(1)
+                .max(1);
+            content::pieces(&operations[p.origin.operation])
+                .iter()
+                .map(|piece| match piece {
+                    content::Piece::Codes(bytes) => bytes.len() / width,
+                    content::Piece::Kern(_) => 0,
+                })
+                .sum()
+        };
+
+        let mut edits: Vec<(std::ops::Range<usize>, Vec<u8>)> = Vec::new();
+
+        // Shapes and pictures that lie wholly inside the area go with every
+        // operator that draws them.
+        for &object in removals {
+            let span = self.operator_span(page_index, object, &spans, &codes_in)?;
+            let from = operations[span.start].span.start;
+            let to = operations[span.end - 1].span.end;
+            edits.push((from..to, Vec::new()));
+        }
+
+        // Words: each run's covered characters out of its own operators.
+        //
+        // A run is read through a text layer that costs about as much to load
+        // for one run as for all of them, so past a handful the whole page is
+        // read once.
+        let all_runs: Option<std::collections::HashMap<usize, crate::document::TextRun>> =
+            (cuts_in.len() > 6)
+                .then(|| self.text_runs(page_index).ok())
+                .flatten()
+                .map(|runs| runs.into_iter().map(|run| (run.object, run)).collect());
+        let mut cuts = Cuts { strict: true, ..Cuts::default() };
+        let ctx = CutContext { file: &file, bytes: &base.bytes, fonts: fonts.clone(), operations: &operations };
+        for cut in cuts_in {
+            let found = match &all_runs {
+                Some(all) => all.get(&cut.object).cloned(),
+                None => self.text_run_at(page_index, cut.object)?,
+            };
+            let run = match found {
+                Some(run) => run,
+                // Only spaces: nothing in it to destroy, and leaving it in the
+                // stream keeps the words around it exactly where they are.
+                None if cut.text.trim().is_empty() => continue,
+                None => return Err(PdfError::Unsupported("those words are no longer on the page")),
+            };
+            let order = spans.text_order(cut.object);
+            let (first, last, continues) =
+                run_operators(&run, spans.height, &placed, &operations, &codes_in, order)?;
+            let parts: Vec<&content::Placed> = placed
+                .iter()
+                .filter(|p| (first..=last).contains(&p.origin.operation))
+                .collect();
+            if parts.is_empty() {
+                return Err(PdfError::Unsupported("some of that text is drawn in a way this cannot cut out"));
+            }
+            let mine: Vec<(usize, Rect)> = cut.boxes.iter().copied().enumerate().collect();
+            let whole_before = cuts.cut_whole.len();
+            Self::cut_run(&ctx, request, &cut.text, &run.rect, &parts, mine, &cut.loose, Some(&cut.covered), &mut cuts);
+            if continues && cuts.cut_whole.len() > whole_before {
+                return Err(PdfError::Unsupported(
+                    "taking these words out would pull the rest of their line towards them",
+                ));
+            }
+        }
+        if cuts.unsliced > 0 {
+            return Err(PdfError::Unsupported(
+                "some of these words are covered only in part and cannot be cut apart exactly",
+            ));
+        }
+        edits.extend(cuts.edits);
+        for index in cuts.cut_whole {
+            edits.push((operations[index].span.clone(), Vec::new()));
+        }
+
+        // `splice` skips an edit that overlaps an earlier one without a word,
+        // which here would leave covered words on the page.
+        edits.sort_by_key(|(range, _)| (range.start, range.end));
+        if edits.windows(2).any(|pair| pair[1].0.start < pair[0].0.end) {
+            return Err(PdfError::Unsupported("two of the things to remove share the same operators"));
+        }
+
+        let mut edited = content::splice(&stream, &edits);
+        if let Some(fill) = request.fill {
+            for rect in marks {
+                edited.extend_from_slice(&mark_in_user_space(rect, fill, &closing)?);
+            }
+        }
+
+        let mut replacements = Vec::new();
+        for (index, (number, dict)) in streams.iter().enumerate() {
+            let data = if index == 0 { edited.clone() } else { Vec::new() };
+            let packed = content::encode(&data)?;
+            let mut dict = dict.clone();
+            dict.set(b"Filter", crate::pdf::Object::Name(b"FlateDecode".to_vec()));
+            dict.remove(b"DecodeParms");
+            replacements.push((*number, crate::pdf::write_stream(&dict, &packed)));
+        }
+        let rewritten = Self::write_edit(&base, &file, &replacements, &[])?;
+        Ok((base, rewritten))
+    }
+
+    /// What a redaction done through PDFium changed **outside** the area, or `None`
+    /// if nothing — the check that stands between that path and a damaged page.
+    ///
+    /// `FPDFPage_GenerateContent` re-emits every object, and on some pages (see
+    /// [`Self::redact_in_stream`]) that changes far more than the area. Looked
+    /// for two ways, because they miss different things: the picture of the page,
+    /// outside the area and a margin round it, and the text on the page, outside
+    /// it, which can lose a word without a pixel moving.
+    fn redaction_harm(before: &[u8], after: &[u8], request: &Redaction) -> Result<Option<String>> {
+        let before = Self::open_bytes(before.to_vec(), None)?;
+        let after = Self::open_bytes(after.to_vec(), None)?;
+        let page_index = request.page_index;
+        let size = before.page_size(page_index)?;
+        let area = request.area;
+
+        let outside = |run: &crate::document::TextRun| !crate::document::redact::overlaps(&run.rect, &area);
+        let (words_before, words_after) = (
+            before.text_runs(page_index)?.iter().filter(|r| outside(r)).count(),
+            after.text_runs(page_index)?.iter().filter(|r| outside(r)).count(),
+        );
+        if words_before != words_after {
+            return Ok(Some(format!(
+                "{} runs of text outside the area went missing",
+                words_before.saturating_sub(words_after)
+            )));
+        }
+
+        let render = |doc: &PdfiumDocument| -> Result<crate::render::Bitmap> {
+            doc.page(page_index)?.render_region(&RegionRequest {
+                crop: Rect { left: 0.0, top: 0.0, right: size.width_pt, bottom: size.height_pt },
+                scale: 1.0,
+                ..RegionRequest::default()
+            })
+        };
+        let (a, b) = (render(&before)?, render(&after)?);
+        if (a.width, a.height) != (b.width, b.height) {
+            return Ok(Some("the page changed size".to_string()));
+        }
+        // The mark's own edge is not damage, so a few points round the area are
+        // not looked at.
+        const MARGIN: f32 = 4.0;
+        let mut changed = 0usize;
+        for y in 0..a.height as usize {
+            for x in 0..a.width as usize {
+                let (px, py) = (x as f32, y as f32);
+                if px >= area.left - MARGIN && px <= area.right + MARGIN && py >= area.top - MARGIN && py <= area.bottom + MARGIN {
+                    continue;
+                }
+                let at = y * a.stride + x * 4;
+                let difference: i32 = (0..3).map(|c| (i32::from(a.data[at + c]) - i32::from(b.data[at + c])).abs()).sum();
+                if difference > 30 {
+                    changed += 1;
+                }
+            }
+        }
+        // Antialiasing differences are a handful of pixels; a regenerated page
+        // is thousands.
+        let allowed = (a.width as usize * a.height as usize) / 10_000;
+        Ok((changed > allowed).then(|| format!("{changed} pixels outside the area changed")))
+    }
 
 /// The font dictionary in force for a page, inherited if need be.
     fn page_fonts(
@@ -12890,9 +13153,9 @@ impl PdfiumDocument {
                     unreadable.insert(object);
                     marks.entry(object).or_default().push(Marked { covered: true, left: 0.0 });
                     boxes.entry(object).or_default().push(Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 });
+                    loose_boxes.entry(object).or_default().push(Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 });
                     if inside_form[object] {
                         walked.entry(object).or_default().push('\u{FFFD}');
-                        loose_boxes.entry(object).or_default().push(Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 });
                     }
                     continue;
                 }
@@ -12905,16 +13168,19 @@ impl PdfiumDocument {
                     .or_default()
                     .push(Marked { covered: overlaps(&glyph, &area), left: l as f32 });
                 boxes.entry(object).or_default().push(glyph);
+                // The advance box, which tiles the line — the glyph's own box
+                // stops at its ink. Kept for every run now, not only those in
+                // forms: it is what keeps the words after a cut where they were.
+                let mut wide = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
+                let loose = if unsafe { bindings.FPDFText_GetLooseCharBox(text_page, index, &mut wide) } != 0 {
+                    let (l, t) = space.to_top_left(wide.left, wide.top);
+                    let (r, b) = space.to_top_left(wide.right, wide.bottom);
+                    Rect { left: l.min(r), top: t.min(b), right: l.max(r), bottom: t.max(b) }
+                } else {
+                    glyph
+                };
+                loose_boxes.entry(object).or_default().push(loose);
                 if inside_form[object] {
-                    let mut wide = FS_RECTF { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 };
-                    let loose = if unsafe { bindings.FPDFText_GetLooseCharBox(text_page, index, &mut wide) } != 0 {
-                        let (l, t) = space.to_top_left(wide.left, wide.top);
-                        let (r, b) = space.to_top_left(wide.right, wide.bottom);
-                        Rect { left: l.min(r), top: t.min(b), right: l.max(r), bottom: t.max(b) }
-                    } else {
-                        glyph
-                    };
-                    loose_boxes.entry(object).or_default().push(loose);
                     let unicode = unsafe { bindings.FPDFText_GetUnicode(text_page, index) };
                     walked
                         .entry(object)
@@ -13235,6 +13501,91 @@ impl PdfiumDocument {
 
         // ------------------------------------------------------------- apply --
 
+        // **At the content-stream level first.** PDFium's way — remove objects
+        // through its model, then regenerate the whole page — rewrites every
+        // operator on the page, and on pages from Illustrator or InDesign that
+        // changes fonts, spacing and colours far outside the area. See
+        // `redact_in_stream`, which refuses without touching anything wherever it
+        // cannot follow the page, and the guarded fallback below.
+        let was_secured = self.already_secured;
+        let plus = self.secure_plus;
+        let permissions = self.permissions();
+        let mut stream_refusal = String::new();
+        {
+            let mut cuts_in: Vec<TextCut> = Vec::new();
+            let mut removals: Vec<usize> = Vec::new();
+            for (position, act) in &plan {
+                let handle = objects[*position];
+                if unsafe { bindings.FPDFPageObj_GetType(handle) } as u32 != FPDF_PAGEOBJ_TEXT {
+                    removals.push(*position);
+                    continue;
+                }
+                let mut text = texts.get(position).cloned().unwrap_or_default();
+                let mut characters = text.chars().count();
+                let measured = boxes.get(position).cloned().unwrap_or_default();
+                let advances = loose_boxes.get(position).cloned().unwrap_or_default();
+                // PDFium can end an object's string with a space of its own, which
+                // has no box. Left in, the boxes would look misaligned with the
+                // text and a word on a line that goes on could not be taken out
+                // with its width kept.
+                if matches!(act, Act::Remove)
+                    && measured.len() + 1 == characters
+                    && text.ends_with(char::is_whitespace)
+                {
+                    text.pop();
+                    characters -= 1;
+                }
+                let (boxes_here, covered) = match act {
+                    // Taken whole. Its boxes only help keep the line's spacing,
+                    // so they are used only where they line up with the text.
+                    Act::Remove => (
+                        if measured.len() == characters { measured } else { Vec::new() },
+                        vec![true; characters],
+                    ),
+                    Act::Rewrite(_) => (
+                        measured,
+                        marks.get(position).map(|m| m.iter().map(|c| c.covered).collect()).unwrap_or_default(),
+                    ),
+                };
+                cuts_in.push(TextCut { object: *position, text, boxes: boxes_here, loose: advances, covered });
+            }
+            let mark_rects = [to_pdf_rect(&space, &area)];
+            match self.redact_in_stream(request, &cuts_in, &removals, &mark_rects) {
+                Err(PdfError::Unsupported(why)) => stream_refusal = why.to_string(),
+                Err(other) => stream_refusal = other.to_string(),
+                Ok((base, rewritten)) => {
+                // The page handle has to be gone before the document it belongs
+                // to is replaced.
+                drop(raw);
+                self.redacted = true;
+                self.adopt_edit(&base, rewritten, was_secured, plus, permissions)?;
+
+                // Annotations are not page content: removing one through PDFium
+                // does not regenerate anything.
+                if !doomed.is_empty() {
+                    let page = RawPage::open(self.document.handle(), page_number)?;
+                    // Backwards: removing an annotation renumbers the ones after it.
+                    for index in doomed.iter().rev() {
+                        unsafe { bindings.FPDFPage_RemoveAnnot(page.handle, *index) };
+                    }
+                }
+                if !form_plan.cuts.is_empty() {
+                    self.apply_form_cuts(request, &nested_covered, &form_paths)?;
+                }
+                self.touch();
+                return Ok(report);
+                }
+            }
+        }
+
+        // What follows is PDFium's own way, reached only where the page's stream
+        // could not be followed. It is **checked after the fact**: the page as it
+        // was is kept, and put back — with a refusal — if anything outside the
+        // area changed. A redaction that damages the rest of the page, silently,
+        // is worse than none.
+        let before = self.edit_base()?;
+        let was_redacted = self.redacted;
+
         // **Set before the first destructive call, not after the last one.**
         // Removal and rewrite happen through PDFium's live object model one
         // object at a time, and nothing here can undo an earlier one if a
@@ -13314,6 +13665,22 @@ impl PdfiumDocument {
         drop(raw);
         if !form_plan.cuts.is_empty() {
             self.apply_form_cuts(request, &nested_covered, &form_paths)?;
+        }
+
+        // **Proved harmless, or put back.** Anything this cannot prove — a check
+        // that itself failed included — is treated as damage.
+        let after = self.readable_bytes()?;
+        let harm = match Self::redaction_harm(&before.bytes, &after, request) {
+            Ok(None) => None,
+            Ok(Some(why)) => Some(why),
+            Err(e) => Some(format!("it could not be checked: {e}")),
+        };
+        if let Some(why) = harm {
+            self.adopt_edit(&before, before.bytes.clone(), was_secured, plus, permissions)?;
+            self.redacted = was_redacted;
+            return Err(PdfError::IncompleteRedaction(format!(
+                "redacting here would change the page outside the area ({why}), so nothing was changed (this page's content could not be edited directly because {stream_refusal})"
+            )));
         }
 
         self.touch();
@@ -13638,7 +14005,7 @@ impl PdfiumDocument {
                     })
                 });
                 let run_rect = run_rect.unwrap_or(Rect { left: 0.0, top: 0.0, right: 0.0, bottom: 0.0 });
-                Self::cut_run(&ctx, request, &run.text, &run_rect, &parts, mine, &run.loose, &mut cuts);
+                Self::cut_run(&ctx, request, &run.text, &run_rect, &parts, mine, &run.loose, None, &mut cuts);
                 handled += 1;
             }
             if handled == 0 {
@@ -13652,7 +14019,7 @@ impl PdfiumDocument {
             // place: an operator continuing another reports the origin of
             // the one before it, and on a real catalogue's footer that took
             // ` Lighting` for starting where `HSI` did.
-            let Cuts { mut edits, mut cut_whole, spilled, characters } = cuts;
+            let Cuts { mut edits, mut cut_whole, spilled, characters, .. } = cuts;
             cut_whole.sort_unstable();
             cut_whole.dedup();
             for index in &cut_whole {
@@ -13994,6 +14361,136 @@ impl PdfiumDocument {
 }
 
 
+/// What the survey decided for one text object of the page, in the terms the
+/// byte-level apply needs — see [`PdfiumDocument::redact_in_stream`].
+struct TextCut {
+    /// The object's index on the page.
+    object: usize,
+    /// The words the object draws.
+    text: String,
+    /// One box per character, page space, top-left origin. Empty where they
+    /// cannot be trusted to line up with the text, in which case the object is
+    /// taken whole.
+    boxes: Vec<Rect>,
+    /// The same characters' advance boxes, which tile the line exactly.
+    loose: Vec<Rect>,
+    /// Which characters the area covers.
+    covered: Vec<bool>,
+}
+
+/// What a stream leaves open at its end: how many `q`s are unclosed, and the
+/// transform in force once they are closed — the page-level `cm`s an
+/// Illustrator or InDesign page opens with and never undoes. `None` where the
+/// stream stops inside a text object, where a rectangle cannot be drawn.
+///
+/// What a mark appended to the stream has to undo to be in the page's own
+/// coordinates, which is what its rectangle is written in.
+fn closing_state(operations: &[crate::pdf::content::Operation]) -> Option<(usize, [f32; 6])> {
+    let mut ctm = IDENTITY_MATRIX;
+    let mut saved: Vec<[f32; 6]> = Vec::new();
+    let mut in_text = false;
+    for operation in operations {
+        match operation.operator.as_slice() {
+            b"q" => saved.push(ctm),
+            // A stray `Q` is ignored, as readers do.
+            b"Q" => {
+                if let Some(back) = saved.pop() {
+                    ctm = back;
+                }
+            }
+            b"cm" => {
+                let numbers: Vec<f32> =
+                    operation.operands.iter().filter_map(|o| o.as_f64()).map(|v| v as f32).collect();
+                if numbers.len() == 6 {
+                    ctm = matrices([numbers[0], numbers[1], numbers[2], numbers[3], numbers[4], numbers[5]], ctm);
+                }
+            }
+            b"BT" => in_text = true,
+            b"ET" => in_text = false,
+            _ => {}
+        }
+    }
+    if in_text {
+        return None;
+    }
+    // Closing every open `q` puts the transform back to what it was before the
+    // first of them.
+    let open = saved.len();
+    Some((open, saved.first().copied().unwrap_or(ctm)))
+}
+
+/// A filled rectangle in the page's own (PDF, y-up) coordinates — see
+/// [`mark`], which takes the same thing from the top-left page space — written
+/// to follow a stream that ends as [`closing_state`] says: its open `q`s closed,
+/// and whatever transform it left undone for the length of the mark.
+fn mark_in_user_space(
+    rect: &FS_RECTF,
+    fill: crate::document::Color,
+    closing: &(usize, [f32; 6]),
+) -> Result<Vec<u8>> {
+    let (r, g, b) = (
+        f32::from(fill.r) / 255.0,
+        f32::from(fill.g) / 255.0,
+        f32::from(fill.b) / 255.0,
+    );
+    let mut out = b"\n".to_vec();
+    for _ in 0..closing.0 {
+        out.extend_from_slice(b"Q\n");
+    }
+    out.extend_from_slice(b"q\n");
+    if closing.1 != IDENTITY_MATRIX {
+        let undo = inverse(closing.1)
+            .ok_or(PdfError::Unsupported("this page's content leaves a transform that cannot be undone"))?;
+        out.extend_from_slice(&concat_matrix(&undo)?);
+        out.push(b'\n');
+    }
+    out.extend_from_slice(
+        format!(
+            "{r} {g} {b} rg\n{} {} {} {} re\nf\nQ\n",
+            rect.left,
+            rect.bottom,
+            rect.right - rect.left,
+            rect.top - rect.bottom
+        )
+        .as_bytes(),
+    );
+    Ok(out)
+}
+
+/// The tables that say which operators of a page's stream draw each kind of
+/// object, built once per edit — see [`PdfiumDocument::operator_span`].
+struct SpanTables<'a> {
+    operations: &'a [crate::pdf::content::Operation],
+    placed: &'a [crate::pdf::content::Placed],
+    pictures: Vec<crate::document::PageImage>,
+    /// The operation that draws each picture, in the order the page draws them.
+    drawn: Vec<usize>,
+    /// The operations that paint each shape, and whether each also sets a clip.
+    painted: Vec<(std::ops::Range<usize>, bool)>,
+    height: f32,
+    /// For each object that is a shape: which shape it is, in the order the page
+    /// paints them. **Read once.** [`PdfiumDocument::path_ordinal`] walks every
+    /// object on the page to answer for one, which for the hundreds a large
+    /// redaction removes was seconds.
+    shape_number: std::collections::HashMap<usize, usize>,
+    shapes: usize,
+    /// The page's text objects, in drawing order — see [`PdfiumDocument::text_order`].
+    text_objects: Vec<usize>,
+}
+
+impl SpanTables<'_> {
+    /// `(which shape, how many shapes)`, as [`PdfiumDocument::path_ordinal`].
+    fn path_ordinal(&self, object: usize) -> Option<(usize, usize)> {
+        self.shape_number.get(&object).map(|which| (*which, self.shapes))
+    }
+
+    /// `(which text object, how many)`, as [`PdfiumDocument::text_order`].
+    fn text_order(&self, object: usize) -> Option<(usize, usize)> {
+        let which = self.text_objects.iter().position(|o| *o == object)?;
+        Some((which, self.text_objects.len()))
+    }
+}
+
 /// Everything a cut needs to know about the stream it is cutting from.
 struct CutContext<'a> {
     file: &'a crate::pdf::File<'a>,
@@ -14013,6 +14510,13 @@ struct Cuts {
     /// Runs cut whole that reached beyond the area.
     spilled: Vec<String>,
     characters: usize,
+    /// **Refuse to take more than was covered.** Set by a redaction, which has
+    /// already decided character by character what is covered: a run that is
+    /// only partly covered and cannot be sliced is counted in [`Self::unsliced`]
+    /// and left alone, where a lock — which hides its whole line on purpose —
+    /// takes it whole.
+    strict: bool,
+    unsliced: usize,
 }
 
 impl PdfiumDocument {
@@ -14032,6 +14536,9 @@ impl PdfiumDocument {
         parts: &[&crate::pdf::content::Placed],
         mine: Vec<(usize, Rect)>,
         loose: &[Rect],
+        // Which of `mine` are covered, where the caller has already decided —
+        // otherwise any character the request touches.
+        covered: Option<&[bool]>,
         cuts: &mut Cuts,
     ) {
         use crate::pdf::content;
@@ -14099,7 +14606,10 @@ impl PdfiumDocument {
         let covered_chars: Vec<usize> = mine
             .iter()
             .enumerate()
-            .filter(|(_, (_, r))| request.touches(r))
+            .filter(|(n, (_, r))| match covered {
+                Some(covered) => covered.get(*n).copied().unwrap_or(false),
+                None => request.touches(r),
+            })
             .map(|(n, _)| n)
             .collect();
 
@@ -14129,6 +14639,18 @@ impl PdfiumDocument {
             })
             .unwrap_or_default();
         let starts: Vec<(usize, usize)> = first_char.iter().map(|(c, ch)| (*c, *ch)).collect();
+        // What the last glyph of the run moves the pen by beyond its own box: the
+        // character spacing in force, and the word spacing if it is a space. The
+        // advance box stops short of both, and the words after a run that was
+        // taken out would close up by exactly this.
+        let trailing: f32 = parts
+            .last()
+            .map(|part| {
+                let space = widths.last().copied().flatten() == Some(1)
+                    && codes_of(&ctx.operations[part.origin.operation], 1).last() == Some(&32);
+                (part.char_spacing + if space { part.word_spacing } else { 0.0 }) * part.scale
+            })
+            .unwrap_or(0.0);
         let advance_of = |code: usize| -> f32 {
             let Some(position) = starts.iter().position(|(c, _)| *c == code) else {
                 // Owns no character, so it moved the pen by nothing that
@@ -14146,7 +14668,7 @@ impl PdfiumDocument {
             let right_of = |i: usize| loose.get(mine[i].0).map(|r| r.right).unwrap_or(mine[i].1.right);
             match starts.get(position + 1) {
                 Some((_, next)) => left_of(*next) - left_of(from),
-                None => right_of(mine.len() - 1) - left_of(from),
+                None => right_of(mine.len() - 1) - left_of(from) + trailing,
             }
         };
 
@@ -14204,6 +14726,10 @@ impl PdfiumDocument {
             }
             cuts.characters += covered_chars.len();
         } else {
+            if cuts.strict && covered_chars.len() < mine.len() {
+                cuts.unsliced += 1;
+                return;
+            }
             cuts.characters += run_text.chars().count();
             if measured {
                 // **Taken whole, but the space it took is kept.** A fragment
@@ -16640,6 +17166,8 @@ mod order_tests {
             size: 10.0,
             line: at,
             scale: 1.0,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
             axis: (1.0, 0.0),
         }
     }

@@ -206,6 +206,9 @@ pub struct Placed {
     /// matrix, so leaving it out overstated every gap by an order of magnitude
     /// — which looked exactly like the text having been shoved sideways.
     pub scale: f32,
+    /// `Tc` and `Tw` in force here — see [`State::char_spacing`].
+    pub char_spacing: f32,
+    pub word_spacing: f32,
     /// The direction the text runs in on the page — the text matrix's x-axis, as
     /// a unit vector. What says whether a point is *along this line*: where a
     /// continuation of the run is drawn is somewhere further down it, and the
@@ -281,6 +284,13 @@ pub struct State {
     /// where an object's opacity lives. Saved and restored with `q`/`Q` like
     /// the rest of the graphics state.
     pub ext_gstate: Option<Vec<u8>>,
+    /// Character spacing, from `Tc` (and `"`): what the pen moves by after
+    /// **every** glyph, on top of the glyph's own width. A glyph's advance box
+    /// stops before it, so a run taken out of a line has to give it back or the
+    /// words after it close up by one character space.
+    pub char_spacing: f32,
+    /// Word spacing, from `Tw` (and `"`): added after a single-byte code 32 only.
+    pub word_spacing: f32,
     /// Text rise, from `Ts`: how far glyphs are drawn above the baseline.
     ///
     /// **Not a pen movement.** Rise offsets where a glyph is painted and leaves
@@ -314,7 +324,10 @@ pub fn follows_a_show_on_its_line(operations: &[Operation], at: usize) -> bool {
 pub fn states(operations: &[Operation]) -> Vec<State> {
     let mut out = Vec::with_capacity(operations.len());
     let mut ctm = IDENTITY;
-    let mut stack: Vec<([f32; 6], Option<Vec<u8>>)> = Vec::new();
+    // Saved by `q` with the transform: character and word spacing are part of
+    // the graphics state, so a `Q` puts them back.
+    let mut stack: Vec<([f32; 6], Option<Vec<u8>>, f32, f32)> = Vec::new();
+    let (mut char_spacing, mut word_spacing) = (0.0f32, 0.0f32);
     // The text matrix, and the line matrix each new line starts from.
     let (mut text, mut line) = (IDENTITY, IDENTITY);
     let mut leading = 0.0f32;
@@ -327,11 +340,23 @@ pub fn states(operations: &[Operation]) -> Vec<State> {
 
     for operation in operations {
         match operation.operator.as_slice() {
-            b"q" => stack.push((ctm, ext_gstate.clone())),
+            b"q" => stack.push((ctm, ext_gstate.clone(), char_spacing, word_spacing)),
             b"Q" => {
-                let (c, g) = stack.pop().unwrap_or((IDENTITY, None));
+                let (c, g, tc, tw) = stack.pop().unwrap_or((IDENTITY, None, 0.0, 0.0));
                 ctm = c;
                 ext_gstate = g;
+                char_spacing = tc;
+                word_spacing = tw;
+            }
+            b"Tc" => {
+                if let Some(n) = numbers(&operation.operands, 1) {
+                    char_spacing = n[0];
+                }
+            }
+            b"Tw" => {
+                if let Some(n) = numbers(&operation.operands, 1) {
+                    word_spacing = n[0];
+                }
             }
             b"gs" => {
                 if let Some(Object::Name(name)) = operation.operands.first() {
@@ -410,6 +435,16 @@ pub fn states(operations: &[Operation]) -> Vec<State> {
             _ => {}
         }
 
+        // `"` sets both spacings, then does what `'` does.
+        if operation.operator.as_slice() == b"\"" {
+            if let (Some(aw), Some(ac)) = (
+                operation.operands.first().and_then(Object::as_f64),
+                operation.operands.get(1).and_then(Object::as_f64),
+            ) {
+                word_spacing = aw as f32;
+                char_spacing = ac as f32;
+            }
+        }
         // `'` and `"` move to the next line before drawing.
         if operation.shows_text() && matches!(operation.operator.as_slice(), b"'" | b"\"") {
             line = multiply([1.0, 0.0, 0.0, 1.0, 0.0, -leading], line);
@@ -425,6 +460,8 @@ pub fn states(operations: &[Operation]) -> Vec<State> {
             size,
             horizontal_scale,
             ext_gstate: ext_gstate.clone(),
+            char_spacing,
+            word_spacing,
             rise,
             line_number,
         });
@@ -468,6 +505,8 @@ pub fn placed(operations: &[Operation]) -> Vec<Placed> {
                 font: state.font,
                 size: state.size,
                 scale,
+                char_spacing: state.char_spacing,
+                word_spacing: state.word_spacing,
                 line: state.line_number,
                 axis,
             }

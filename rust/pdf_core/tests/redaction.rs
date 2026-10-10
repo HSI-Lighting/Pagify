@@ -203,6 +203,12 @@ fn a_word_taken_from_the_middle_of_a_line_leaves_the_rest() {
 }
 
 /// The surviving tail must stay where it was rather than sliding into the gap.
+///
+/// Asked of where the word's **glyphs** are before and after — not of how the
+/// engine happens to rebuild the line. This used to look for the tail as a text
+/// run of its own, which is how PDFium's rewrite left it; a redaction made in the
+/// content stream keeps the line as one object with a gap where the word was, and
+/// the property that matters is the same: `throughout` has not moved.
 #[test]
 fn the_tail_of_a_split_line_keeps_its_position() {
     let Some(_) = skip_without_pdfium() else { return };
@@ -216,22 +222,28 @@ fn the_tail_of_a_split_line_keeps_its_position() {
         "control: the tail is not there to begin with"
     );
     let area = box_around(source.as_ref(), 0, "IP65");
+    let tail_before = box_around(source.as_ref(), 0, "throughout");
+    let head_before = box_around(source.as_ref(), 0, "rated");
     drop(source);
 
     let (doc, _) = redact_and_reopen("two-column.pdf", &Redaction::new(0, area));
-    let run = doc
-        .text_runs(0)
-        .expect("runs")
-        .into_iter()
-        .find(|r| r.text.contains("throughout"))
-        .expect("the tail survived as a run");
+    let tail_after = box_around(doc.as_ref(), 0, "throughout");
+    let head_after = box_around(doc.as_ref(), 0, "rated");
 
     // It began after "rated to IP65 " — well right of the line's own origin at
     // 50.7. Rebuilt from the origin it would start there instead.
     assert!(
-        run.rect.left > 100.0,
-        "the tail slid left into the gap the redaction made: it starts at {}",
-        run.rect.left
+        (tail_after.left - tail_before.left).abs() < 0.5 && (tail_after.top - tail_before.top).abs() < 0.5,
+        "the tail moved: it began at {} and now begins at {}",
+        tail_before.left,
+        tail_after.left
+    );
+    assert!(tail_after.left > 100.0, "the tail slid left into the gap: it starts at {}", tail_after.left);
+    assert!(
+        (head_after.left - head_before.left).abs() < 0.5,
+        "the head of the line moved: {} -> {}",
+        head_before.left,
+        head_after.left
     );
 }
 
