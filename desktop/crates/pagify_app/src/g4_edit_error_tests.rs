@@ -85,13 +85,13 @@ fn editing_the_kerned_page(typed: &str) -> Harness<'static, PagifyApp> {
     let at = a_character_on_screen(&mut h);
     click(&mut h, at);
     h.run_steps(2);
-    h.state_mut().tab_mut().editing_run.as_mut().expect("no editor opened").buffer = typed.into();
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("no editor opened").buffer = typed.into();
     h
 }
 
 /// Somewhere well clear of the open editor's own box, on bare paper.
 fn clear_of_the_editor(h: &Harness<'static, PagifyApp>) -> egui::Pos2 {
-    let run = h.state().tab().editing_run.clone().expect("no editor is open");
+    let run = h.state().tab().edit.editing_run.clone().expect("no editor is open");
     let view = h.state().tab().last_view.expect("the page was never drawn");
     let corner = view.to_screen(AppPoint {
         x: run.rect.left.max(run.rect.right) as f64,
@@ -213,13 +213,13 @@ fn a_refused_paragraph_apply_reads_as_a_refusal_too() {
     let at = a_character_on_screen(&mut h);
     click(&mut h, at);
     h.run_steps(2);
-    let edit = h.state().tab().editing_run.clone().expect("no editor opened");
+    let edit = h.state().tab().edit.editing_run.clone().expect("no editor opened");
     assert!(
         edit.lines.iter().map(|(objects, _)| objects.len()).sum::<usize>() > 1,
         "this is not the paragraph path: {:?}",
         edit.lines
     );
-    h.state_mut().tab_mut().editing_run.as_mut().expect("no editor").buffer = "Aaaa Bbbb Cccc".into();
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("no editor").buffer = "Aaaa Bbbb Cccc".into();
     h.state_mut().apply_editing_page();
     h.run_steps(2);
 
@@ -250,7 +250,7 @@ fn editing_first_thing_of(content: &[u8]) -> Harness<'static, PagifyApp> {
     let at = a_character_on_screen(&mut h);
     click(&mut h, at);
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_some(), "no editor opened");
+    assert!(h.state().tab().edit.editing_run.is_some(), "no editor opened");
     h
 }
 
@@ -263,7 +263,7 @@ fn typing_a_run_away_deletes_it_and_undo_puts_it_back() {
         b"BT /F1 12 Tf 72 700 Td (Hello) Tj ET BT /F1 12 Tf 72 400 Td (Elsewhere) Tj ET",
     );
     assert!(page_text(&mut h).contains("Hello"));
-    h.state_mut().tab_mut().editing_run.as_mut().expect("editor").buffer.clear();
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editor").buffer.clear();
     h.state_mut().apply_editing_page();
     h.run_steps(2);
 
@@ -285,7 +285,7 @@ fn a_box_left_with_only_spaces_deletes_too() {
     let mut h = editing_first_thing_of(
         b"BT /F1 12 Tf 72 700 Td (Hello) Tj ET BT /F1 12 Tf 72 400 Td (Elsewhere) Tj ET",
     );
-    h.state_mut().tab_mut().editing_run.as_mut().expect("editor").buffer = "  \n ".into();
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editor").buffer = "  \n ".into();
     h.state_mut().apply_editing_page();
     h.run_steps(2);
 
@@ -301,9 +301,9 @@ fn typing_a_whole_paragraph_away_deletes_every_line_in_one_undo() {
           (Second line of the words that run) Tj T* (Third line of the words that go) Tj ET \
           BT /F1 12 Tf 72 400 Td (Elsewhere) Tj ET",
     );
-    let lines = h.state().tab().editing_run.as_ref().expect("editor").lines.len();
+    let lines = h.state().tab().edit.editing_run.as_ref().expect("editor").lines.len();
     assert_eq!(lines, 3, "this page's three lines were not picked as one paragraph");
-    h.state_mut().tab_mut().editing_run.as_mut().expect("editor").buffer.clear();
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editor").buffer.clear();
     h.state_mut().apply_editing_page();
     h.run_steps(2);
 
@@ -557,11 +557,11 @@ fn dragging_the_right_edge_wraps_the_words_and_dragging_it_back_unwraps_them() {
     let grips_now = grips(&h);
     assert_eq!(grips_now.len(), 2, "the box has no grips: {grips_now:?}");
     let (left, right) = (grips_now[0], grips_now[1]);
-    assert!(!h.state().tab().editing_run.as_ref().unwrap().buffer.contains('\n'));
+    assert!(!h.state().tab().edit.editing_run.as_ref().unwrap().buffer.contains('\n'));
 
     drag(&mut h, right, right - egui::vec2((right.x - left.x) * 0.55, 0.0));
     h.run_steps(3);
-    let narrow = h.state().tab().editing_run.as_ref().unwrap().clone();
+    let narrow = h.state().tab().edit.editing_run.as_ref().unwrap().clone();
     assert!(narrow.box_resize.width_pt.is_some(), "the drag did not set a width");
     assert!(narrow.buffer.contains('\n'), "narrowing the box did not wrap the words: {:?}", narrow.buffer);
     assert_eq!(narrow.buffer.replace('\n', " "), "Hello big wide world there", "the words changed");
@@ -570,7 +570,7 @@ fn dragging_the_right_edge_wraps_the_words_and_dragging_it_back_unwraps_them() {
     let back_out = now.last().copied().expect("a grip");
     drag(&mut h, back_out, back_out + egui::vec2(400.0, 0.0));
     h.run_steps(3);
-    let wide = h.state().tab().editing_run.as_ref().unwrap().clone();
+    let wide = h.state().tab().edit.editing_run.as_ref().unwrap().clone();
     assert!(!wide.buffer.contains('\n'), "widening the box left the words folded: {:?}", wide.buffer);
     assert_eq!(wide.buffer, "Hello big wide world there");
 }
@@ -583,7 +583,7 @@ fn a_narrowed_box_applies_as_the_lines_it_showed() {
     let (left, right) = (grips_now[0], grips_now[1]);
     drag(&mut h, right, right - egui::vec2((right.x - left.x) * 0.6, 0.0));
     h.run_steps(3);
-    let lines = h.state().tab().editing_run.as_ref().unwrap().buffer.matches('\n').count() + 1;
+    let lines = h.state().tab().edit.editing_run.as_ref().unwrap().buffer.matches('\n').count() + 1;
     assert!(lines >= 2);
 
     h.state_mut().apply_editing_page();
@@ -604,7 +604,7 @@ fn dragging_the_left_edge_moves_the_run_with_it() {
     let left = grips(&h)[0];
     drag(&mut h, left, left + egui::vec2(30.0, 0.0));
     h.run_steps(3);
-    let shift = h.state().tab().editing_run.as_ref().unwrap().box_resize.left_shift_pt;
+    let shift = h.state().tab().edit.editing_run.as_ref().unwrap().box_resize.left_shift_pt;
     assert!(shift > 1.0, "the left grip did not move the box: {shift}");
 
     h.state_mut().apply_editing_page();
@@ -623,11 +623,11 @@ fn a_new_text_box_is_resized_from_its_eight_handles() {
     let all = grips(&h);
     assert_eq!(all.len(), 8, "the box has {} handles: {all:?}", all.len());
 
-    let before = h.state().tab().new_text_box.as_ref().unwrap().rect;
+    let before = h.state().tab().edit.new_text_box.as_ref().unwrap().rect;
     let corner = all.iter().copied().max_by(|a, b| (a.x + a.y).total_cmp(&(b.x + b.y))).unwrap();
     drag(&mut h, corner, corner + egui::vec2(60.0, 30.0));
     h.run_steps(3);
-    let grown = h.state().tab().new_text_box.as_ref().unwrap().rect;
+    let grown = h.state().tab().edit.new_text_box.as_ref().unwrap().rect;
     // The page re-fits while the panel settles, so only the size of the move is
     // checked: a 60 x 30 px drag, at a zoom of about two, is about 30 x 15 points.
     assert!((15.0..45.0).contains(&(grown.right - before.right)), "right edge: {before:?} -> {grown:?}");
@@ -638,7 +638,7 @@ fn a_new_text_box_is_resized_from_its_eight_handles() {
     let left = grips(&h).into_iter().min_by(|a, b| a.x.total_cmp(&b.x)).unwrap();
     drag(&mut h, left, left + egui::vec2(20.0, 0.0));
     h.run_steps(3);
-    let narrowed = h.state().tab().new_text_box.as_ref().unwrap().rect;
+    let narrowed = h.state().tab().edit.new_text_box.as_ref().unwrap().rect;
     assert!(narrowed.left > grown.left + 5.0, "{grown:?} -> {narrowed:?}");
     assert_eq!((narrowed.right, narrowed.top, narrowed.bottom), (grown.right, grown.top, grown.bottom));
 }
@@ -666,12 +666,12 @@ fn the_style_panel_has_the_text_controls_and_no_position_row() {
 fn bold_picks_the_bold_face_of_the_same_family_and_says_when_there_is_none() {
     let mut h = editing_first_thing_of(WORDS);
     h.state_mut().pick_style_face(Some("Montserrat-Regular"), true, false);
-    let face = h.state().tab().editing_run.as_ref().unwrap().style.face.clone();
+    let face = h.state().tab().edit.editing_run.as_ref().unwrap().style.face.clone();
     assert!(face.as_deref().is_some_and(|f| f.to_ascii_lowercase().contains("bold")), "not a bold face: {face:?}");
 
     let before = face;
     h.state_mut().pick_style_face(Some("Zzyzx Sans"), true, false);
-    assert_eq!(h.state().tab().editing_run.as_ref().unwrap().style.face, before, "the face changed with no bold to change to");
+    assert_eq!(h.state().tab().edit.editing_run.as_ref().unwrap().style.face, before, "the face changed with no bold to change to");
     let said = errors(&h);
     assert!(said.last().is_some_and(|e| e.contains("no bold face of zzyzx sans")), "{said:?}");
 }
@@ -683,19 +683,19 @@ fn a_new_box_takes_its_alignment_from_the_style_panel() {
     let mut h = harness("text-lines.pdf");
     h.state_mut().begin_text_box(0, AppPoint { x: 20.0, y: 100.0 }, AppPoint { x: 120.0, y: 160.0 }).expect("a box");
     h.run_steps(3);
-    assert_eq!(h.state().tab().new_text_box.as_ref().unwrap().align, TextAlign::Left);
+    assert_eq!(h.state().tab().edit.new_text_box.as_ref().unwrap().align, TextAlign::Left);
     let centre = h.get_by_label("Align centre").rect().center();
     click(&mut h, centre);
     h.run_steps(2);
-    assert_eq!(h.state().tab().new_text_box.as_ref().unwrap().align, TextAlign::Center);
+    assert_eq!(h.state().tab().edit.new_text_box.as_ref().unwrap().align, TextAlign::Center);
     let right = h.get_by_label("Align right").rect().center();
     click(&mut h, right);
     h.run_steps(2);
-    assert_eq!(h.state().tab().new_text_box.as_ref().unwrap().align, TextAlign::Right);
+    assert_eq!(h.state().tab().edit.new_text_box.as_ref().unwrap().align, TextAlign::Right);
     let justify = h.get_by_label("Justify").rect().center();
     click(&mut h, justify);
     h.run_steps(2);
-    assert_eq!(h.state().tab().new_text_box.as_ref().unwrap().align, TextAlign::Right);
+    assert_eq!(h.state().tab().edit.new_text_box.as_ref().unwrap().align, TextAlign::Right);
 }
 
 /// A paragraph's lines are the page's own — no grips on it.
@@ -816,7 +816,7 @@ fn the_click_that_closes_an_editor_picks_once_not_twice() {
     let at = a_character_on_screen(&mut h);
     click(&mut h, at);
     h.run_steps(2);
-    h.state_mut().tab_mut().editing_run.as_mut().expect("no run was picked").buffer = "REPLACED".into();
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("no run was picked").buffer = "REPLACED".into();
 
     let away = clear_of_the_editor(&h);
     click(&mut h, away);
@@ -850,7 +850,7 @@ fn a_refused_click_away_apply_leaves_its_refusal_on_screen_and_the_tool_armed() 
     click(&mut h, away);
     h.run_steps(2);
 
-    let kept = h.state().tab().editing_run.as_ref().expect("the refused edit's box was closed with its words");
+    let kept = h.state().tab().edit.editing_run.as_ref().expect("the refused edit's box was closed with its words");
     assert_eq!(kept.buffer, "Jello", "the typing was thrown away");
     let said = errors(&h);
     assert_eq!(said.len(), 1, "one click, one error — the refusal: {said:?}");
@@ -861,7 +861,7 @@ fn a_refused_click_away_apply_leaves_its_refusal_on_screen_and_the_tool_armed() 
     // The second click away from the same refused edit lets it go, and picks.
     click(&mut h, away);
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_none(), "the same refused edit was kept a second time");
+    assert!(h.state().tab().edit.editing_run.is_none(), "the same refused edit was kept a second time");
     assert!(h.state().text_to_offer.is_none() || h.state().text_to_offer.as_deref() == Some("Jello"));
     assert!(h.state().tab().tool.is_some(), "the tool should be back in hand for the next click");
     assert!(

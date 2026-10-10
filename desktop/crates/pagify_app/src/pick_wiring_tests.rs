@@ -141,7 +141,7 @@ fn clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block() {
 
         for &seed in &ids {
             ran += 1;
-            app.tab_mut().editing_run = None;
+            app.tab_mut().edit.editing_run = None;
             let started = std::time::Instant::now();
             let outcome = app.pick_text_run(0, centre(&runs[&seed].rect));
             times.push(started.elapsed());
@@ -153,7 +153,7 @@ fn clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block() {
                     continue;
                 }
             };
-            let Some(edit) = app.tab().editing_run.as_ref() else {
+            let Some(edit) = app.tab().edit.editing_run.as_ref() else {
                 failures.push(format!("{who}: no editor opened"));
                 continue;
             };
@@ -279,7 +279,7 @@ fn the_hyphen_before_a_drawn_line_stays_in_the_buffer_and_on_the_page_when_the_l
     let runs: HashMap<usize, TextRun> = text_runs(&app, 0).into_iter().map(|r| (r.object, r)).collect();
     assert!(runs[&9].text.ends_with('\u{2}'), "setup: object 9 ends in the hyphen code: {:?}", runs[&9].text);
     app.pick_text_run(0, centre(&runs[&8].rect)).expect("picked");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
     assert_eq!(edit.lines.len(), 2, "setup: the two written lines above the drawn one: {:?}", edit.buffer);
     assert_eq!(edit.frozen, [false, false]);
 
@@ -303,7 +303,7 @@ fn the_hyphen_before_a_drawn_line_stays_in_the_buffer_and_on_the_page_when_the_l
     let mut typed: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
     typed[1] = typed[1].replacen("technology", "technologies", 1);
     assert_ne!(typed[1], lines[1], "setup: the word is on the line");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed.join("\n");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed.join("\n");
     app.apply_editing_page();
     let said = app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n");
     assert!(said.contains("paragraph changed"), "the apply did not go through:\n{said}");
@@ -325,9 +325,9 @@ fn the_hyphen_before_a_drawn_line_stays_in_the_buffer_and_on_the_page_when_the_l
 
     // And the detector still reads it as a hyphenated line end: the same nine
     // lines, the same words, the hyphen once.
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     app.pick_text_run(0, centre(&after[&8].rect)).expect("picked again");
-    let again = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    let again = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
     assert_eq!(again.lines.len(), 2, "the paragraph reopens as the same two lines: {:?}", again.buffer);
     let lines_again: Vec<&str> = again.buffer.split('\n').collect();
     assert_eq!(lines_again[1], typed[1], "line 1 reopens as it was typed");
@@ -392,7 +392,7 @@ fn retyping_one_line_of_the_datasheets_paragraph_writes_only_that_line() {
     assert!(app.tab().doc.is_some(), "the datasheet is on this machine but would not open");
     let runs: HashMap<usize, TextRun> = text_runs(&app, 0).into_iter().map(|r| (r.object, r)).collect();
     app.pick_text_run(0, centre(&runs[&986].rect)).expect("picked");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
     // The 13 lines are cut at the two with a drawn word in them (lines 8 and 10); a click on its first line
     // opens the eight above the first of them.
     assert_eq!(edit.lines.len(), 8, "setup: the user's paragraph, cut above its first drawn line");
@@ -406,7 +406,7 @@ fn retyping_one_line_of_the_datasheets_paragraph_writes_only_that_line() {
     retyped[target] = format!("{} industry", typed_lines[target].trim_end());
 
     let before = tests_support::runs_in_order(&app);
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped.join("\n");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped.join("\n");
     let started = std::time::Instant::now();
     app.apply_editing_page();
     eprintln!("timing: retyping one line of the 13-line datasheet paragraph took {:?}", started.elapsed());
@@ -502,7 +502,7 @@ fn every_click_writes_exactly_one_content_free_pick_line_to_the_session_log() {
     app.tab_mut().text_selection = Some(0..total);
     app.tab_mut().selection_page = 0;
     app.join_selected_text().expect("join");
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let (outcome, line) = click_logged(&mut app, &log, 0, centre(&b.rect));
     assert!(outcome.is_ok(), "{outcome:?}");
     assert_eq!(field(&line, "path"), "joined", "{line}");
@@ -592,7 +592,7 @@ fn a_page_read_before_an_edit_or_an_undo_is_not_used_after_it() {
 
     let (_, line) = click_logged(&mut app, &log, 0, at);
     assert_eq!(field(&line, "cache"), "miss", "{line}");
-    assert_eq!(app.tab().editing_run.as_ref().expect("picked").buffer.trim(), first.text.trim());
+    assert_eq!(app.tab().edit.editing_run.as_ref().expect("picked").buffer.trim(), first.text.trim());
     let (_, line) = click_logged(&mut app, &log, 0, at);
     assert_eq!(field(&line, "cache"), "hit", "nothing moved: {line}");
 
@@ -608,7 +608,7 @@ fn a_page_read_before_an_edit_or_an_undo_is_not_used_after_it() {
     let (_, line) = click_logged(&mut app, &log, 0, at);
     assert_eq!(field(&line, "cache"), "miss", "the history moved, so the page is read again: {line}");
     assert_eq!(
-        app.tab().editing_run.as_ref().expect("picked").buffer.trim(),
+        app.tab().edit.editing_run.as_ref().expect("picked").buffer.trim(),
         "CHANGED UNDERNEATH THE CACHE",
         "a stale reading would still offer the old words"
     );
@@ -618,21 +618,21 @@ fn a_page_read_before_an_edit_or_an_undo_is_not_used_after_it() {
     assert!(undone);
     let (_, line) = click_logged(&mut app, &log, 0, at);
     assert_eq!(field(&line, "cache"), "miss", "{line}");
-    assert_eq!(app.tab().editing_run.as_ref().expect("picked").buffer.trim(), first.text.trim());
+    assert_eq!(app.tab().edit.editing_run.as_ref().expect("picked").buffer.trim(), first.text.trim());
     let (_, line) = click_logged(&mut app, &log, 0, at);
     assert_eq!(field(&line, "cache"), "hit", "{line}");
 
     // Through the app's own paths: an apply, then the app's own undo.
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "TYPED IN THE BOX".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "TYPED IN THE BOX".to_string();
     app.apply_editing_page();
     let (_, line) = click_logged(&mut app, &log, 0, at);
     assert_eq!(field(&line, "cache"), "miss", "an apply makes the next click read the page again: {line}");
-    assert_eq!(app.tab().editing_run.as_ref().expect("picked").buffer.trim(), "TYPED IN THE BOX");
-    app.tab_mut().editing_run = None;
+    assert_eq!(app.tab().edit.editing_run.as_ref().expect("picked").buffer.trim(), "TYPED IN THE BOX");
+    app.tab_mut().edit.editing_run = None;
     app.submit("undo");
     let (_, line) = click_logged(&mut app, &log, 0, at);
     assert_eq!(field(&line, "cache"), "miss", "{line}");
-    assert_eq!(app.tab().editing_run.as_ref().expect("picked").buffer.trim(), first.text.trim());
+    assert_eq!(app.tab().edit.editing_run.as_ref().expect("picked").buffer.trim(), first.text.trim());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -687,7 +687,7 @@ fn edit_text_still_opens_the_run_when_the_pages_text_cannot_be_read_in_one_pass(
     tests_support::SNAPSHOT_FAILS.with(|fails| fails.set(true));
     let (outcome, line) = click_logged(&mut app, &log, 0, centre(&middle.rect));
     assert!(outcome.expect("still picked").starts_with("edit the words on the page"), "{line}");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened");
     assert_eq!(edit.lines, vec![(vec![middle.object], middle.rect)], "the run alone, not its paragraph");
     assert_eq!(edit.buffer.trim(), middle.text.trim());
     assert_eq!(field(&line, "path"), "single", "{line}");
@@ -704,7 +704,7 @@ fn edit_text_still_opens_the_run_when_the_pages_text_cannot_be_read_in_one_pass(
 
     // And the moment it can be read again, the paragraph is back.
     tests_support::SNAPSHOT_FAILS.with(|fails| fails.set(false));
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let (_, line) = click_logged(&mut app, &log, 0, centre(&middle.rect));
     assert_eq!((field(&line, "path"), field(&line, "lines")), ("block", "8"), "{line}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -736,7 +736,7 @@ fn the_background_is_sampled_from_one_picture_per_state_of_the_page() {
     );
 
     // The page moves: the next click makes a new picture.
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "ONE\nTWO\nTHREE\nFOUR\nFIVE\nSIX\nSEVEN\nEIGHT".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "ONE\nTWO\nTHREE\nFOUR\nFIVE\nSIX\nSEVEN\nEIGHT".to_string();
     app.apply_editing_page();
     assert!(kept(&app).is_none(), "an apply leaves the old picture behind");
     // At the left end of a line: the words there are short now.
@@ -781,10 +781,10 @@ fn a_page_with_no_text_objects_still_reaches_the_drawn_words() {
 
     let (outcome, line) = click_logged(&mut app, &log, 0, centre(&word.rect));
     assert!(outcome.expect("a drawn word").contains("drawn, not written"), "{line}");
-    assert!(app.tab().editing_run.as_ref().expect("an editor opened").drawn);
+    assert!(app.tab().edit.editing_run.as_ref().expect("an editor opened").drawn);
     assert_eq!(field(&line, "path"), "drawn", "{line}");
 
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let (outcome, line) = click_logged(&mut app, &log, 0, AppPoint { x: 2.0, y: 2.0 });
     let said = outcome.expect_err("bare paper");
     assert!(said.contains("no text there"), "{said}");
@@ -845,9 +845,9 @@ fn a_block_with_lines_drawn_as_shapes_opens_as_the_written_lines_around_the_clic
     let (mut clicked, mut alone) = (0, 0);
     for (line_index, line) in block.lines.iter().enumerate() {
         for &seed in &line.objects {
-            app.tab_mut().editing_run = None;
+            app.tab_mut().edit.editing_run = None;
             let said = app.pick_text_run(0, centre(&page.runs[&seed].rect)).expect("picked");
-            let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+            let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened");
             clicked += 1;
             // A word on a line that is partly drawn opens alone — see
             // `clicking_any_word_of_the_datasheets_blocks_opens_exactly_that_block`.
@@ -920,7 +920,7 @@ fn retyping_beside_lines_drawn_as_shapes_writes_only_the_retyped_line() {
     // with nothing but drawn lines under it is now what it looks like: one run.
     let said = app.pick_text_run(0, centre(&page.runs[&first].rect)).expect("picked");
     assert!(!said.contains("drawn as shapes"), "{said}");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
     assert_eq!(edit.lines.len(), 1, "the drawn lines came along: {said}");
     assert_eq!(edit.frozen, [false]);
     assert!(!edit.buffer.contains(block_input::OUTLINED_PLACEHOLDER), "{:?}", edit.buffer);
@@ -928,7 +928,7 @@ fn retyping_beside_lines_drawn_as_shapes_writes_only_the_retyped_line() {
 
     let words_before: HashMap<usize, (String, pdf_core::document::Color)> =
         text_runs(&app, 0).into_iter().map(|r| (r.object, (r.text, r.color))).collect();
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = format!("{} RETYPED", edit.buffer.trim_end());
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = format!("{} RETYPED", edit.buffer.trim_end());
     app.apply_editing_page();
     let words_after: HashMap<usize, (String, pdf_core::document::Color)> =
         text_runs(&app, 0).into_iter().map(|r| (r.object, (r.text, r.color))).collect();
@@ -985,7 +985,7 @@ fn apply_sweep() {
                 *tally.entry("the click was refused".into()).or_default() += 1;
                 continue;
             }
-            let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+            let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
             let typed: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
             let Some(target) = (0..typed.len()).find(|&i| !edit.frozen[i] && !edit.lines[i].0.is_empty() && words(&typed[i]).is_some()) else {
                 *tally.entry("no line of plain words to retype".into()).or_default() += 1;
@@ -994,7 +994,7 @@ fn apply_sweep() {
             let mut retyped = typed.clone();
             retyped[target] = format!("{} {}", typed[target].trim_end(), words(&typed[target]).expect("a word"));
             let before = tests_support::runs_on_page(&app, page);
-            app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped.join("\n");
+            app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped.join("\n");
             let history = app.cmd.history().len();
             app.apply_editing_page();
             let said: Vec<String> = app.cmd.history().iter().skip(history).map(|e| e.text.clone()).collect();
@@ -1061,7 +1061,7 @@ fn pick_timings() {
                 runs.iter().filter(|r| r.text.trim().chars().count() > 4).step_by(25).take(24).collect();
             let mut later: Vec<std::time::Duration> = Vec::new();
             for (i, run) in targets.iter().enumerate() {
-                app.tab_mut().editing_run = None;
+                app.tab_mut().edit.editing_run = None;
                 let started = std::time::Instant::now();
                 let _ = app.pick_text_run(page, centre(&run.rect));
                 let took = started.elapsed();
@@ -1107,9 +1107,9 @@ fn apply_timings() {
     let runs: HashMap<usize, TextRun> = text_runs(&app, 0).into_iter().map(|r| (r.object, r)).collect();
     let session = app.tab().doc.as_ref().expect("open").session.clone();
     for (what, every_line) in [("one line", false), ("every line", true)] {
-        app.tab_mut().editing_run = None;
+        app.tab_mut().edit.editing_run = None;
         app.pick_text_run(0, centre(&runs[&986].rect)).expect("picked");
-        let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+        let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
         let objects: usize = edit.lines.iter().map(|(o, _)| o.len()).sum();
         let typed: Vec<String> = edit
             .buffer
@@ -1123,7 +1123,7 @@ fn apply_timings() {
                 }
             })
             .collect();
-        app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed.join("\n");
+        app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed.join("\n");
         let started = std::time::Instant::now();
         app.apply_editing_page();
         let applied = started.elapsed();
@@ -1205,12 +1205,12 @@ fn paragraph_census() {
             let at = centre(&run.rect);
             let resolved = block_input::pick_seed(&page_blocks, at.x as f32, at.y as f32, HIT_TOLERANCE_PT as f32)
                 .map(|(object, _)| object);
-            app.tab_mut().editing_run = None;
+            app.tab_mut().edit.editing_run = None;
             let started = std::time::Instant::now();
             let outcome = app.pick_text_run(page, at);
             let pick_ms = started.elapsed().as_secs_f32() * 1000.0;
             let line = newest_pick_line(&log, &mut after);
-            let edit = app.tab().editing_run.as_ref();
+            let edit = app.tab().edit.editing_run.as_ref();
             let record = serde_json::json!({
                 "page": page + 1,
                 "seed": seed,
@@ -1511,7 +1511,7 @@ fn retyping_a_digit_the_labels_font_never_drew_is_written_in_a_font_that_can_dra
     }
     let mut app = PagifyApp::new(Some(RING600));
     app.pick_text_run(0, AppPoint { x: 440.0, y: 168.5 }).expect("the dimension is clickable");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "500mm".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "500mm".to_string();
     assert!(!app.apply_editing_page(), "the edit was refused: {}", said(&app));
 
     let said = said(&app);
@@ -1533,7 +1533,7 @@ fn retyping_the_dimension_with_letters_its_font_kept_changes_no_font() {
     }
     let mut app = PagifyApp::new(Some(RING600));
     app.pick_text_run(0, AppPoint { x: 440.0, y: 168.5 }).expect("the dimension is clickable");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "660mm".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "660mm".to_string();
     assert!(!app.apply_editing_page(), "the edit was refused: {}", said(&app));
     assert!(!said(&app).contains("Written in"), "a font was swapped for words it could draw: {}", said(&app));
 }
@@ -1581,16 +1581,16 @@ fn a_paragraph_with_a_drawn_line_in_it_opens_as_the_two_paragraphs_around_it() {
 
     // Above the drawn line.
     let said = app.pick_text_run(0, centre(&page.runs[&block.lines[0].objects[0]].rect)).expect("picked");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened");
     assert_eq!(edit.lines.len(), 2, "the paragraph above the drawn line is its first two lines: {said}");
     assert!(!edit.buffer.contains(block_input::OUTLINED_PLACEHOLDER), "{:?}", edit.buffer);
     assert!(edit.frozen.iter().all(|f| !f), "{said}");
     assert!(!said.contains("drawn as shapes"), "{said}");
 
     // Below it.
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     app.pick_text_run(0, centre(&page.runs[&block.lines[3].objects[0]].rect)).expect("picked");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened");
     assert!(!edit.buffer.contains(block_input::OUTLINED_PLACEHOLDER), "{:?}", edit.buffer);
     assert!(
         edit.lines.iter().flat_map(|(objects, _)| objects).all(|o| block.lines[3].objects.contains(o)),
@@ -1693,8 +1693,8 @@ fn replacing_a_drawn_word_takes_off_its_shape_and_nothing_else() {
     let before = page_pixels(&app);
 
     app.pick_text_run(0, AppPoint { x: 297.8, y: 93.8 }).expect("a drawn word was not picked");
-    assert!(app.tab().editing_run.as_ref().is_some_and(|e| e.drawn), "setup: the click did not pick a drawn word");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "S".to_string();
+    assert!(app.tab().edit.editing_run.as_ref().is_some_and(|e| e.drawn), "setup: the click did not pick a drawn word");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "S".to_string();
     app.apply_editing_page();
     let told = said(&app);
     assert!(told.contains("replaced the drawn word"), "{told}");
@@ -1721,7 +1721,7 @@ fn undoing_a_drawn_word_replacement_twice_restores_the_page_exactly() {
     app.submit("edittext");
     let before = page_pixels(&app);
     app.pick_text_run(0, AppPoint { x: 297.8, y: 93.8 }).expect("a drawn word was not picked");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "S".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "S".to_string();
     app.apply_editing_page();
     assert_ne!(pixels_that_differ(&before, &page_pixels(&app)), 0, "setup: the replacement changed nothing");
 
@@ -1753,8 +1753,8 @@ fn a_line_can_be_added_to_a_paragraph_in_a_pdf_printed_from_excel() {
         .find(|r| r.text.trim() == "Chip and driver replacement")
         .expect("the description is on the page");
     app.pick_text_run(0, centre(&run.rect)).expect("the description is clickable");
-    let typed = format!("{}\nA third line added by hand", app.tab().editing_run.as_ref().expect("editing").buffer.trim_end());
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed;
+    let typed = format!("{}\nA third line added by hand", app.tab().edit.editing_run.as_ref().expect("editing").buffer.trim_end());
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed;
     assert!(!app.apply_editing_page(), "the edit was refused: {}", said(&app));
 
     let said = said(&app);
@@ -1808,8 +1808,8 @@ fn a_new_line_of_letters_the_documents_font_has_stays_in_the_documents_font() {
         .find(|r| r.text.trim() == "Chip and driver replacement")
         .expect("the description is on the page");
     app.pick_text_run(0, centre(&run.rect)).expect("the description is clickable");
-    let typed = format!("{}\nChip and driver", app.tab().editing_run.as_ref().expect("editing").buffer.trim_end());
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed;
+    let typed = format!("{}\nChip and driver", app.tab().edit.editing_run.as_ref().expect("editing").buffer.trim_end());
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed;
     assert!(!app.apply_editing_page(), "the edit was refused: {}", said(&app));
 
     let said = said(&app);

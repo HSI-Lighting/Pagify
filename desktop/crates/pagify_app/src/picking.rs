@@ -61,11 +61,11 @@ impl crate::PagifyApp {
     pub(crate) fn leave_editor_by_click(&mut self) -> bool {
         let already_refused = self
             .tab()
-            .editing_run
+            .edit.editing_run
             .as_ref()
             .is_some_and(|edit| edit.refusal.as_ref().is_some_and(|refusal| refusal.matches(edit)));
         if already_refused {
-            if let Some(edit) = self.tab_mut().editing_run.take() {
+            if let Some(edit) = self.tab_mut().edit.editing_run.take() {
                 self.offer_typed_text(&edit);
                 // The reason was said when it was refused, and is not said again:
                 // it can hold the very words that were typed, and the log is not
@@ -77,7 +77,7 @@ impl crate::PagifyApp {
             return false;
         }
         self.apply_editing_page();
-        self.tab().editing_run.is_some()
+        self.tab().edit.editing_run.is_some()
     }
 
     // -- picks --------------------------------------------------------------
@@ -156,7 +156,7 @@ impl crate::PagifyApp {
         // Back in hand, ready for the next one, quietly after a failure so
         // the error stays the last thing said — see `arm_tool_without_saying`'s
         // doc.
-        if repeats && self.tab_mut().editing_run.is_none() {
+        if repeats && self.tab_mut().edit.editing_run.is_none() {
             if failed {
                 self.arm_tool_without_saying(kind_for_rearm, page);
             } else {

@@ -193,7 +193,7 @@ impl crate::PagifyApp {
                     .into(),
             );
         }
-        self.tab_mut().editing_run = Some(EditingRun {
+        self.tab_mut().edit.editing_run = Some(EditingRun {
             page,
             object: run.object,
             look_object: run.object,

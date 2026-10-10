@@ -498,7 +498,7 @@ impl crate::PagifyApp {
 
         // While a box is open, the others stay outlined but nothing is lit:
         // the pointer is for the editor.
-        let editing = self.tab().editing_run.is_some();
+        let editing = self.tab().edit.editing_run.is_some();
         let under = view.to_page(pointer);
         let boxes = pagify_shell::block_input::piece_boxes(&blocks);
         let inside = |b: &pagify_shell::block_input::PieceBox| {
@@ -1643,7 +1643,7 @@ impl crate::PagifyApp {
         // apart, because a failed pick re-arms the tool and the armed-tool
         // block then took the same, still-fresh click a second time.
         let mut answered_above = false;
-        if (response.clicked() || response.drag_started()) && self.tab_mut().editing_run.is_some() {
+        if (response.clicked() || response.drag_started()) && self.tab_mut().edit.editing_run.is_some() {
             let errors_before = self.errors_said;
             // Applies it — or, an edit the engine already refused and that has not
             // changed since, lets it go. An edit that is refused **stays open** with
@@ -1660,7 +1660,7 @@ impl crate::PagifyApp {
             // is actually under it. Re-armed and resolved right here, at
             // this same point, rather than left for a click that will not
             // come again on its own.
-            if self.tab_mut().editing_run.is_none() {
+            if self.tab_mut().edit.editing_run.is_none() {
                 if self.errors_said != errors_before {
                     // **Not when the apply was refused.** Whatever the pick
                     // under the click said next would cover the refusal, and

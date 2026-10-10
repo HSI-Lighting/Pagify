@@ -1587,7 +1587,7 @@ fn a_text_box_too_small_to_type_into_is_refused() {
         AppPoint { x: 52.0, y: 501.0 },
     );
     assert!(result.is_err(), "a two-point box should have been refused");
-    assert!(h.state().tab().new_text_box.is_none());
+    assert!(h.state().tab().edit.new_text_box.is_none());
 }
 
 /// A box smaller than the default font size is not refused — the font
@@ -1599,7 +1599,7 @@ fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 508.0 })
         .expect("a box above the noise floor should open");
     assert_eq!(
-        h.state().tab().new_text_box.as_ref().map(|b| b.size),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size),
         Some(8.0),
         "an 8pt-tall box should have shrunk the font to 8pt, not refused or kept the 14pt default"
     );
@@ -1608,7 +1608,7 @@ fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 55.0, y: 540.0 })
         .expect("a narrow box above the noise floor should open");
     assert_eq!(
-        h.state().tab().new_text_box.as_ref().map(|b| b.size),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size),
         Some(5.0),
         "a 5pt-wide box should have shrunk the font to 5pt too, not just gone by height"
     );
@@ -1617,7 +1617,7 @@ fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
         .expect("a normal box should still open");
     assert_eq!(
-        h.state().tab().new_text_box.as_ref().map(|b| b.size),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size),
         Some(14.0),
         "a box already bigger than the default should keep the usual default size"
     );
@@ -1636,15 +1636,15 @@ fn dragging_out_a_text_box_and_inserting_writes_a_real_run() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
         .expect("box opened");
     h.run_steps(2);
-    assert!(h.state().tab().new_text_box.is_some(), "the box should be open");
+    assert!(h.state().tab().edit.new_text_box.is_some(), "the box should be open");
 
-    h.state_mut().tab_mut().new_text_box.as_mut().expect("open").buffer = "Hello there".to_string();
+    h.state_mut().tab_mut().edit.new_text_box.as_mut().expect("open").buffer = "Hello there".to_string();
     h.run_steps(1);
 
     h.get_by_label_contains("Add to Page").click();
     h.run_steps(2);
 
-    assert!(h.state().tab().new_text_box.is_none(), "Add to Page should have closed the box");
+    assert!(h.state().tab().edit.new_text_box.is_none(), "Add to Page should have closed the box");
     let text = h.state().tab().doc
         .as_ref()
         .expect("open")
@@ -1665,13 +1665,13 @@ fn canceling_a_new_text_box_writes_nothing() {
     h.state_mut()
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
         .expect("box opened");
-    h.state_mut().tab_mut().new_text_box.as_mut().expect("open").buffer = "should not appear".to_string();
+    h.state_mut().tab_mut().edit.new_text_box.as_mut().expect("open").buffer = "should not appear".to_string();
     h.run_steps(2);
 
     h.get_by_label_contains("Cancel").click();
     h.run_steps(1);
 
-    assert!(h.state().tab().new_text_box.is_none(), "Cancel should have closed the box");
+    assert!(h.state().tab().edit.new_text_box.is_none(), "Cancel should have closed the box");
     let text = h.state().tab().doc
         .as_ref()
         .expect("open")
@@ -1739,11 +1739,11 @@ fn escaping_a_new_text_box_discards_it() {
     h.state_mut()
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
         .expect("box opened");
-    assert!(h.state().tab().new_text_box.is_some());
+    assert!(h.state().tab().edit.new_text_box.is_some());
 
     h.state_mut().escape();
 
-    assert!(h.state().tab().new_text_box.is_none(), "Escape should have discarded the box");
+    assert!(h.state().tab().edit.new_text_box.is_none(), "Escape should have discarded the box");
 }
 
 /// **The alignment picked in the panel actually moves where the line
@@ -1760,13 +1760,13 @@ fn right_aligned_text_lands_near_the_boxs_right_edge() {
         .begin_text_box(0, AppPoint { x: left, y: 500.0 }, AppPoint { x: right, y: 540.0 })
         .expect("box opened");
     h.run_steps(2);
-    h.state_mut().tab_mut().new_text_box.as_mut().expect("open").buffer = "Hi".to_string();
+    h.state_mut().tab_mut().edit.new_text_box.as_mut().expect("open").buffer = "Hi".to_string();
     h.run_steps(1);
 
     h.get_by_label("Align right").click();
     h.run_steps(1);
     assert_eq!(
-        h.state().tab().new_text_box.as_ref().map(|b| b.align),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.align),
         Some(TextAlign::Right),
         "clicking Right should have picked it"
     );
@@ -3107,13 +3107,13 @@ fn clicking_a_run_offers_its_words_and_retyping_replaces_them() {
     let word = a_character_on_screen(&mut h);
     click(&mut h, word);
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_some(), "clicking a run did not open it");
+    assert!(h.state().tab().edit.editing_run.is_some(), "clicking a run did not open it");
 
     // The run's own words go into the box, ready to be edited — a run is
     // usually a sentence, and retyping one from scratch is not editing.
     // The editor opens **on the page**, holding the run's own words —
     // editing a word is a thing you do to the word.
-    let run = h.state().tab().editing_run.as_ref().cloned().expect("no run was picked");
+    let run = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run was picked");
     assert!(!run.buffer.is_empty(), "the editor opened empty");
     assert_eq!(
         run.buffer.trim(),
@@ -3145,7 +3145,7 @@ fn typing_past_the_runs_own_width_starts_a_new_line() {
     let word = a_character_on_screen(&mut h);
     click(&mut h, word);
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_some(), "clicking a run did not open it");
+    assert!(h.state().tab().edit.editing_run.is_some(), "clicking a run did not open it");
 
     // Long enough that no run's own on-screen width could hold it on
     // one line, whatever fixture or font this runs against — the point
@@ -3156,7 +3156,7 @@ fn typing_past_the_runs_own_width_starts_a_new_line() {
         h.run_steps(1);
     }
 
-    let buffer = h.state().tab().editing_run.as_ref().expect("still editing").buffer.clone();
+    let buffer = h.state().tab().edit.editing_run.as_ref().expect("still editing").buffer.clone();
     assert!(
         buffer.contains('\n'),
         "typing past the box's own width did not start a new line:\n{buffer}"
@@ -3205,13 +3205,13 @@ fn typing_long_then_deleting_in_a_real_paragraph_does_not_corrupt_it() {
     click(&mut h, at);
     h.run_steps(2);
     let line_count =
-        h.state().tab().editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
+        h.state().tab().edit.editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
     assert!(line_count > 1, "clicking the COB paragraph did not open a multi-line paragraph");
 
     let wanted: std::collections::HashSet<usize> = h
         .state()
         .tab()
-        .editing_run
+        .edit.editing_run
         .as_ref()
         .unwrap()
         .lines
@@ -3261,7 +3261,7 @@ fn typing_long_then_deleting_in_a_real_paragraph_does_not_corrupt_it() {
     // exactly as many `\n` as this paragraph's own structure already
     // has; any more would be exactly the misrouting auto-wrap used to
     // cause here.
-    let buffer = h.state().tab().editing_run.as_ref().expect("still editing").buffer.clone();
+    let buffer = h.state().tab().edit.editing_run.as_ref().expect("still editing").buffer.clone();
     let newline_count = buffer.matches('\n').count();
     assert!(
         newline_count <= line_count - 1,
@@ -3294,7 +3294,7 @@ fn typing_long_then_deleting_in_a_real_paragraph_does_not_corrupt_it() {
     });
     click(&mut h, far_corner);
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_none(), "the editor should have applied and closed");
+    assert!(h.state().tab().edit.editing_run.is_none(), "the editor should have applied and closed");
 
     let after: std::collections::HashMap<usize, pdf_core::document::TextRun> = h
         .state_mut()
@@ -3347,8 +3347,8 @@ fn clicking_away_from_the_editor_applies_it() {
     click(&mut h, word);
     h.run_steps(2);
 
-    let run = h.state().tab().editing_run.clone().expect("no run was picked");
-    h.state_mut().tab_mut().editing_run.as_mut().expect("no run was picked").buffer =
+    let run = h.state().tab().edit.editing_run.clone().expect("no run was picked");
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("no run was picked").buffer =
         "REPLACED".to_string();
 
     // Somewhere else on the page entirely, well clear of the editor's
@@ -3362,7 +3362,7 @@ fn clicking_away_from_the_editor_applies_it() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().editing_run.is_none(),
+        h.state().tab().edit.editing_run.is_none(),
         "the editor should have closed once its change was applied"
     );
     let app = h.state_mut();
@@ -3409,7 +3409,7 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
     let opened: std::collections::BTreeSet<usize> = h
         .state()
         .tab()
-        .editing_run
+        .edit.editing_run
         .as_ref()
         .expect("the first click opened nothing")
         .lines
@@ -3419,8 +3419,8 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
     assert_eq!(opened, left, "setup: the first click should open the left column");
 
     // ...is retyped...
-    let retyped = h.state().tab().editing_run.as_ref().unwrap().buffer.replacen('e', "E", 1);
-    h.state_mut().tab_mut().editing_run.as_mut().unwrap().buffer = retyped.clone();
+    let retyped = h.state().tab().edit.editing_run.as_ref().unwrap().buffer.replacen('e', "E", 1);
+    h.state_mut().tab_mut().edit.editing_run.as_mut().unwrap().buffer = retyped.clone();
 
     // ...and a click on the right column applies that and opens this.
     let at = screen(&mut h, inside(*right.iter().next().unwrap()));
@@ -3430,7 +3430,7 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
     let now: std::collections::BTreeSet<usize> = h
         .state()
         .tab()
-        .editing_run
+        .edit.editing_run
         .as_ref()
         .expect("the click on other text opened nothing")
         .lines
@@ -3492,10 +3492,10 @@ fn the_editor_draws_over_a_paragraph_with_lines_drawn_as_shapes() {
         .find(|b| b.lines.len() == 19 && b.lines.iter().filter(|l| !l.outlined.is_empty()).count() == 3)
         .expect("the 19-line block");
     for (word, lines, frozen) in [(986usize, 13usize, 2usize), (long.lines[0].objects[0], 19, 3)] {
-        h.state_mut().tab_mut().editing_run = None;
+        h.state_mut().tab_mut().edit.editing_run = None;
         h.state_mut().pick_text_run(0, centre(word)).expect("picked");
         h.run_steps(4);
-        let edit = h.state().tab().editing_run.as_ref().expect("the editor is still open after drawing");
+        let edit = h.state().tab().edit.editing_run.as_ref().expect("the editor is still open after drawing");
         assert_eq!(edit.lines.len(), lines);
         assert_eq!(edit.frozen.iter().filter(|f| **f).count(), frozen);
         assert_eq!(edit.buffer.split('\n').count(), lines, "drawing changed the buffer");
@@ -3535,10 +3535,10 @@ fn arming_and_click_to_apply_work_on_the_real_camino_page() {
     let run = h
         .state()
         .tab()
-        .editing_run
+        .edit.editing_run
         .clone()
         .expect("clicking a word did not open an editor on the real page");
-    h.state_mut().tab_mut().editing_run.as_mut().unwrap().buffer = "REPLACED TEXT".into();
+    h.state_mut().tab_mut().edit.editing_run.as_mut().unwrap().buffer = "REPLACED TEXT".into();
 
     // Somewhere else on the page entirely, well clear of the editor's
     // own box — same technique as `clicking_away_from_the_editor_applies_it`.
@@ -3587,7 +3587,7 @@ fn opening_the_font_picker_takes_focus_off_the_run_editor() {
     h.state_mut().pick_text_run(0, at).expect("a run was here");
     h.run_steps(2);
 
-    let run = h.state().tab().editing_run.as_ref().cloned().expect("no run was picked");
+    let run = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run was picked");
     let editor_id = egui::Id::new(("run-editor", run.page, run.object));
 
     // Confirms the setup as much as it does anything: the editor
@@ -3632,7 +3632,7 @@ fn pressing_enter_in_the_run_editor_does_not_apply_it() {
     click(&mut h, word);
     h.run_steps(2);
 
-    let original = h.state().tab().editing_run.as_ref().cloned().expect("no run").original;
+    let original = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run").original;
 
     // Clear what is there and type over it, through the field itself.
     h.input_mut().events.push(egui::Event::Key {
@@ -3657,13 +3657,13 @@ fn pressing_enter_in_the_run_editor_does_not_apply_it() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().editing_run.is_some(),
+        h.state().tab().edit.editing_run.is_some(),
         "Enter closed the editor — it should take a click on Apply, not a keystroke"
     );
     // A newline, not nothing — Enter now adds a line here the same way
     // it already did in a paragraph's own box — but still no submit.
     assert_eq!(
-        h.state().tab().editing_run.as_ref().unwrap().buffer,
+        h.state().tab().edit.editing_run.as_ref().unwrap().buffer,
         "TYPED\n",
         "Enter should have added a line, and nothing more, still unapplied"
     );
@@ -3688,8 +3688,8 @@ fn the_run_editor_apply_button_can_be_pressed() {
     click(&mut h, word);
     h.run_steps(2);
 
-    let run = h.state().tab().editing_run.as_ref().cloned().expect("no run was picked");
-    h.state_mut().tab_mut().editing_run.as_mut().expect("editing").buffer = "REPLACED".into();
+    let run = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run was picked");
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "REPLACED".into();
     h.run_steps(1);
 
     let apply = h.get_by_label("Apply");
@@ -3697,7 +3697,7 @@ fn the_run_editor_apply_button_can_be_pressed() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().editing_run.is_none(),
+        h.state().tab().edit.editing_run.is_none(),
         "Apply did not finish the edit"
     );
     let app = h.state_mut();
@@ -3813,7 +3813,7 @@ fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
     h.run_steps(3);
     let answered = h.state().tab().tool.as_ref().is_some_and(|t| t.page != armed_for)
         || h.state().cmd.history().len() > before
-        || h.state().tab().editing_run.is_some();
+        || h.state().tab().edit.editing_run.is_some();
 
     assert!(
         answered,
@@ -3907,7 +3907,7 @@ fn editing_words_does_not_change_how_they_look() {
 
     let before = {
         let app = h.state();
-        let edit = app.tab().editing_run.as_ref().expect("no run");
+        let edit = app.tab().edit.editing_run.as_ref().expect("no run");
         app.tab().doc
             .as_ref()
             .unwrap()
@@ -3954,14 +3954,14 @@ fn a_run_can_be_recoloured_from_the_editor() {
 
     let object = {
         let app = h.state_mut();
-        let edit = app.tab_mut().editing_run.as_mut().expect("no run");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("no run");
         edit.style.color =
             Some(pdf_core::document::Color { r: 250, g: 40, b: 40, a: 255 });
         edit.style.size = Some(22.0);
         edit.object
     };
     // Applying with the words untouched: only the look changes.
-    let words = h.state().tab().editing_run.as_ref().unwrap().original.clone();
+    let words = h.state().tab().edit.editing_run.as_ref().unwrap().original.clone();
     h.state_mut().submit(&words);
     h.run_steps(2);
 
@@ -3998,13 +3998,13 @@ fn a_runs_size_can_be_changed_alone_without_touching_its_colour() {
 
     let (object, before_color, new_size) = {
         let app = h.state_mut();
-        let edit = app.tab_mut().editing_run.as_mut().expect("no run");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("no run");
         let before_color = edit.style.color;
         let new_size = edit.style.size.unwrap_or(12.0) + 8.0;
         edit.style.size = Some(new_size);
         (edit.object, before_color, new_size)
     };
-    let words = h.state().tab().editing_run.as_ref().unwrap().original.clone();
+    let words = h.state().tab().edit.editing_run.as_ref().unwrap().original.clone();
     h.state_mut().submit(&words);
     h.run_steps(2);
 
@@ -4029,7 +4029,7 @@ fn an_edited_run_can_be_undone() {
     let at = a_character_on_screen(&mut h);
     click(&mut h, at);
     h.run_steps(2);
-    let original = h.state().tab().editing_run.as_ref().cloned().expect("no run").original;
+    let original = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run").original;
 
     h.state_mut().submit("REPLACED");
     h.run_steps(2);
@@ -4053,11 +4053,11 @@ fn escape_leaves_the_words_as_they_were() {
     let at = a_character_on_screen(&mut h);
     click(&mut h, at);
     h.run_steps(2);
-    let original = h.state().tab().editing_run.as_ref().cloned().expect("no run").original;
+    let original = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run").original;
 
     h.state_mut().escape();
     h.run_steps(1);
-    assert!(h.state().tab().editing_run.is_none(), "escape did not stop the edit");
+    assert!(h.state().tab().edit.editing_run.is_none(), "escape did not stop the edit");
 
     let app = h.state_mut();
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
@@ -4098,7 +4098,7 @@ fn clicking_bare_paper_says_there_is_no_text_there() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(said.contains("no text there"), "no explanation:\n{said}");
-    assert!(h.state().tab().editing_run.is_none());
+    assert!(h.state().tab().edit.editing_run.is_none());
 }
 
 /// Words written onto a page are **real text objects**, not a picture of

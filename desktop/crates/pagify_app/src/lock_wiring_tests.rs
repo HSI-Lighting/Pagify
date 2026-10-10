@@ -33,7 +33,7 @@ fn a_dense_paragraphs_background_sample_is_not_left_a_few_shades_under_white() {
     }
     assert!(found, "the 'VEGA is the perfect choice' paragraph was not found — has the fixture changed?");
 
-    let background = app.tab_mut().editing_run.as_ref().expect("still editing").background;
+    let background = app.tab_mut().edit.editing_run.as_ref().expect("still editing").background;
     assert_eq!(
         background,
         pdf_core::document::Color { r: 255, g: 255, b: 255, a: 255 },
@@ -1067,7 +1067,7 @@ fn edit_text_recovers_a_line_that_was_split_into_characters() {
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert_eq!(
         edit.buffer.trim(),
         original_text.trim(),
@@ -1116,11 +1116,11 @@ fn retyping_a_line_split_into_several_objects_does_not_leave_stale_text_behind()
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
     assert!(
-        app.tab_mut().editing_run.as_ref().unwrap().lines.iter().any(|(objects, _)| objects.len() > 1),
+        app.tab_mut().edit.editing_run.as_ref().unwrap().lines.iter().any(|(objects, _)| objects.len() > 1),
         "setup: the recovered line must carry several objects, or this proves nothing"
     );
 
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = "REPLACED".to_string();
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = "REPLACED".to_string();
     app.apply_editing_page();
 
     let page_text: String = app.tab_mut().doc.as_ref().unwrap().session.characters(0).map(|c| c.text().to_string()).unwrap_or_default();
@@ -1243,19 +1243,19 @@ fn joining_two_distant_runs_opens_them_as_one_paragraph_and_persists() {
     let message = app.join_selected_text().expect("join should succeed");
     assert!(message.contains("paragraph"), "should have opened the paragraph editor: {message}");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened an editor");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened an editor");
     assert!(edit.buffer.contains(a.text.trim()), "joined text should include the topmost run");
     assert!(edit.buffer.contains(b.text.trim()), "joined text should include the bottommost run");
 
     // Persists: closing the editor and clicking the *other* run reopens
     // the same joined group, not just the run under the pointer.
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let at_b = AppPoint {
         x: ((b.rect.left + b.rect.right) / 2.0) as f64,
         y: ((b.rect.top + b.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at_b).expect("b should still be there");
-    let reopened = app.tab_mut().editing_run.as_ref().expect("should have reopened");
+    let reopened = app.tab_mut().edit.editing_run.as_ref().expect("should have reopened");
     assert!(
         reopened.lines.iter().flat_map(|(objects, _)| objects).any(|o| *o == a.object),
         "reopening on b should have brought a's run back in too"
@@ -1281,13 +1281,13 @@ fn splitting_a_joined_pair_edits_them_separately_again() {
     assert!(app.group_containing(0, a.object).is_none(), "the group should be gone for both runs");
     assert!(app.group_containing(0, b.object).is_none());
 
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let at_b = AppPoint {
         x: ((b.rect.left + b.rect.right) / 2.0) as f64,
         y: ((b.rect.top + b.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at_b).expect("b should still be there");
-    let reopened = app.tab_mut().editing_run.as_ref().expect("should have reopened");
+    let reopened = app.tab_mut().edit.editing_run.as_ref().expect("should have reopened");
     assert!(
         !reopened.lines.iter().flat_map(|(objects, _)| objects).any(|o| *o == a.object),
         "after splitting, editing b should not bring a's run back in"
@@ -1535,7 +1535,7 @@ fn a_heading_does_not_merge_into_the_body_beneath_it() {
         y: ((heading.rect.top + heading.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at).expect("the heading was here");
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert!(
         !edit.buffer.contains("ordinary body"),
         "the heading's own edit swallowed the body beneath it: {:?}",
@@ -1547,7 +1547,7 @@ fn a_heading_does_not_merge_into_the_body_beneath_it() {
         y: ((body.rect.top + body.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at).expect("the body was here");
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert!(
         !edit.buffer.contains("Description"),
         "the body's own edit reached up and swallowed the heading above it: {:?}",
@@ -1597,7 +1597,7 @@ fn opening_a_paragraph_invents_no_wrap_hyphen_the_page_never_drew() {
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert!(
         edit.buffer.contains("heat dis\nsipation"),
         "the two lines should join exactly as the page has them, no hyphen between: {:?}",
@@ -1629,7 +1629,7 @@ fn a_single_run_can_grow_a_second_line_in_its_own_style() {
     app.pick_text_run(0, at).expect("picked");
 
     {
-        let edit = app.tab_mut().editing_run.as_mut().expect("editing");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("editing");
         let original = edit.buffer.clone();
         edit.buffer = format!("{original}\nSecond line");
     }
@@ -1729,7 +1729,7 @@ fn a_line_the_producer_split_across_two_runs_is_not_missing_a_chunk() {
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert!(
         edit.buffer.contains("Camino elitee-plus 3.0 is a powerful accent light"),
         "the split line's second run is missing from the reconstructed text: {:?}",
@@ -1791,7 +1791,7 @@ fn arming_any_pending_tool_after_edit_object_puts_it_down() {
 /// got split into individual characters the moment Edit Object was
 /// clicked without an Escape in between.** `take_up_object_tool` cleared
 /// `self.tab_mut().tool` and the object-tool's own selection state, but never
-/// `self.tab_mut().editing_run` — so the run Edit Text still thought it was
+/// `self.tab_mut().edit.editing_run` — so the run Edit Text still thought it was
 /// editing sat there, orphaned, while Edit Object's own click handler
 /// went on to split whatever the next click landed on into individual
 /// characters, with nothing to say a different tool had already claimed
@@ -1815,12 +1815,12 @@ fn taking_up_edit_object_puts_an_open_run_editor_down() {
         y: ((word.rect.top + word.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at).expect("a run was here");
-    assert!(app.tab_mut().editing_run.is_some(), "setup: the run editor should be open");
+    assert!(app.tab_mut().edit.editing_run.is_some(), "setup: the run editor should be open");
 
     app.take_up_object_tool(true, 0);
 
     assert!(
-        app.tab_mut().editing_run.is_none(),
+        app.tab_mut().edit.editing_run.is_none(),
         "taking up Edit Object should have put the open run editor down"
     );
     assert!(app.tab_mut().object_tool.is_some(), "Edit Object itself should still be armed");
@@ -1843,12 +1843,12 @@ fn arming_a_pending_tool_puts_an_open_run_editor_down() {
         y: ((word.rect.top + word.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at).expect("a run was here");
-    assert!(app.tab_mut().editing_run.is_some(), "setup: the run editor should be open");
+    assert!(app.tab_mut().edit.editing_run.is_some(), "setup: the run editor should be open");
 
     app.arm_tool(Tool::Draw(DrawKind::Line), 0);
 
     assert!(
-        app.tab_mut().editing_run.is_none(),
+        app.tab_mut().edit.editing_run.is_none(),
         "arming a different tool should have put the open run editor down"
     );
     assert!(app.tab_mut().tool.is_some(), "the newly armed tool should itself be armed");
@@ -2537,7 +2537,7 @@ fn jointext_joins_an_already_made_selection_at_once() {
 
     app.submit("jointext");
 
-    assert!(app.tab_mut().editing_run.is_some(), "should have opened the joined paragraph editor");
+    assert!(app.tab_mut().edit.editing_run.is_some(), "should have opened the joined paragraph editor");
     assert!(app.group_containing(0, a.object).is_some(), "the two runs should now be a joined group");
 }
 
@@ -2804,7 +2804,7 @@ fn editing_to_letters_the_document_lacks_writes_a_font_in() {
     .expect("picked");
 
     // Characters a subset font is unlikely to carry.
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "Zwölf Ünique".into();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "Zwölf Ünique".into();
     app.apply_editing_page();
 
     let told = said(&app);
@@ -2874,7 +2874,7 @@ fn picking_a_font_writes_the_run_in_it() {
     // "unchanged", and it must not be judged against `was` the way a
     // size/colour/position tweak is (see `changed_look` in
     // `apply_one_edit`).
-    app.tab_mut().editing_run.as_mut().expect("editing").style.face = Some(picked.clone());
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").style.face = Some(picked.clone());
     app.apply_editing_page();
 
     let told = said(&app);
@@ -2915,7 +2915,7 @@ fn picking_a_font_writes_the_run_in_it() {
         },
     )
     .expect("picked again");
-    app.tab_mut().editing_run.as_mut().expect("editing").style.face = Some("NotARealFontName".into());
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").style.face = Some("NotARealFontName".into());
     app.apply_editing_page();
     let refused = said(&app);
     assert!(
@@ -3035,7 +3035,7 @@ fn a_word_replaced_by_itself_lands_where_it_was() {
         },
     )
     .expect("picked");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = same.clone();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = same.clone();
     app.apply_editing_page();
 
     let said = said(&app);
@@ -3115,7 +3115,7 @@ fn extracting_skips_a_page_that_already_has_text() {
     )
     .expect("picked");
     assert!(
-        app.tab_mut().editing_run.as_ref().is_some_and(|e| !e.drawn),
+        app.tab_mut().edit.editing_run.as_ref().is_some_and(|e| !e.drawn),
         "it picked something other than the page's own words"
     );
 }
@@ -3162,9 +3162,9 @@ fn a_drawn_word_can_be_replaced_with_real_text() {
         )
         .expect("a drawn word was not picked");
     assert!(told.contains("drawn, not written"), "{told}");
-    assert!(app.tab_mut().editing_run.as_ref().is_some_and(|e| e.drawn));
+    assert!(app.tab_mut().edit.editing_run.as_ref().is_some_and(|e| e.drawn));
 
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "REPLACED".into();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "REPLACED".into();
     app.apply_editing_page();
 
     let said = said(&app);
@@ -3253,7 +3253,7 @@ fn editing_drawn_words_says_they_will_be_replaced() {
         "it did not say the face changes: {told}"
     );
     assert!(
-        app.tab_mut().editing_run.as_ref().is_some_and(|e| e.drawn),
+        app.tab_mut().edit.editing_run.as_ref().is_some_and(|e| e.drawn),
         "the edit did not remember what it had picked"
     );
 }
@@ -3429,7 +3429,7 @@ fn clicking_a_line_in_edit_text_opens_the_whole_paragraph_it_sits_in() {
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("edit text should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("edit text should have opened");
     let opened: std::collections::HashSet<usize> =
         edit.lines.iter().flat_map(|(o, _)| o.iter().copied()).collect();
     assert_eq!(
@@ -3462,7 +3462,7 @@ fn open_left_column_paragraph(app: &mut PagifyApp) -> Vec<usize> {
 
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
-    app.tab_mut().editing_run
+    app.tab_mut().edit.editing_run
         .as_ref()
         .expect("edit text should have opened")
         .lines
@@ -3480,7 +3480,7 @@ fn applying_a_paragraph_edit_rewrites_each_line_in_place() {
     let objects = open_left_column_paragraph(&mut app);
 
     let new_text = "ONE\nTWO\nTHREE\nFOUR\nFIVE\nSIX\nSEVEN\nEIGHT";
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = new_text.to_string();
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = new_text.to_string();
     app.apply_editing_page();
 
     let after = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
@@ -3512,7 +3512,7 @@ fn applying_a_grown_paragraph_edit_adds_new_lines_below() {
 
     let mut new_text: Vec<String> = (0..objects.len()).map(|i| format!("L{i}")).collect();
     new_text.push("EXTRALINE".to_string());
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = new_text.join("\n");
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = new_text.join("\n");
     app.apply_editing_page();
 
     let after = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
@@ -3546,7 +3546,7 @@ fn applying_a_shrunk_paragraph_edit_removes_the_extra_lines() {
     let objects = open_left_column_paragraph(&mut app);
     let before = tests_support::runs_in_order(&app);
 
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = "ONLYONE".to_string();
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = "ONLYONE".to_string();
     app.apply_editing_page();
     let after = tests_support::runs_in_order(&app);
 
@@ -4203,14 +4203,14 @@ fn a_click_just_outside_a_word_still_picks_it() {
     };
     app.pick_text_run(0, just_above).expect("a near miss should still pick");
     assert_eq!(
-        app.tab_mut().editing_run.as_ref().map(|e| e.object),
+        app.tab_mut().edit.editing_run.as_ref().map(|e| e.object),
         Some(target.object),
         "it picked a different run"
     );
 
     // And a click nowhere near anything is still nothing.
     let mut app = app;
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let miles_away = AppPoint {
         x: (target.rect.left) as f64,
         y: (target.rect.bottom + 200.0) as f64,
@@ -4251,9 +4251,9 @@ fn editing_the_words_of_a_run_leaves_every_other_run_where_it_was() {
         y: ((target.rect.top + target.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, middle).expect("picked");
-    let picked = app.tab_mut().editing_run.as_ref().expect("editing").object;
+    let picked = app.tab_mut().edit.editing_run.as_ref().expect("editing").object;
 
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "Replaced".into();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "Replaced".into();
     app.apply_editing_page();
 
     let after = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
@@ -4328,7 +4328,7 @@ fn changing_a_runs_colour_leaves_it_where_it_was() {
     .expect("picked");
 
     // Only the colour, and the words left alone.
-    let edit = app.tab_mut().editing_run.as_mut().expect("editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("editing");
     let object = edit.object;
     edit.style.color = Some(pdf_core::document::Color { r: 200, g: 0, b: 0, a: 255 });
     app.apply_editing_page();
@@ -6915,7 +6915,7 @@ fn editing_is_fast_on_a_real_busy_page() {
         pick_time.as_millis() < BUSY_PAGE_BUDGET_MS,
         "picking a word took {pick_time:?} on a busy page"
     );
-    let picked = app.tab().editing_run.as_ref().expect("an editor opened");
+    let picked = app.tab().edit.editing_run.as_ref().expect("an editor opened");
     assert_eq!(
         (picked.lines.len(), picked.lines[0].0.len()),
         (1, 1),
@@ -6927,7 +6927,7 @@ fn editing_is_fast_on_a_real_busy_page() {
     // substitution — this measures the plain edit, not that separate
     // (and separately expensive) concern.
     let safe_replacement: String = target.text.trim().chars().rev().collect();
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = safe_replacement.clone();
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = safe_replacement.clone();
 
     let t1 = std::time::Instant::now();
     app.apply_editing_page();
@@ -6983,17 +6983,17 @@ fn editing_a_paragraph_is_fast_on_a_real_busy_page() {
             y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
         };
         if app.pick_text_run(0, at).is_ok() {
-            let lines = app.tab_mut().editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
+            let lines = app.tab_mut().edit.editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
             if lines > 1 {
                 line_count = lines;
                 break;
             }
         }
-        app.tab_mut().editing_run = None;
+        app.tab_mut().edit.editing_run = None;
     }
     assert!(line_count > 1, "no multi-line paragraph found on this page to test against");
 
-    let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
     // Reversed per line, not something new — same reasoning as the
     // single-run test: isolate the plain edit from font substitution.
     let reversed_lines: Vec<String> =
@@ -7076,7 +7076,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
             y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
         };
         if app.pick_text_run(0, at).is_ok() {
-            found_paragraph = app.tab_mut().editing_run.is_some();
+            found_paragraph = app.tab_mut().edit.editing_run.is_some();
         }
         break;
     }
@@ -7086,7 +7086,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
     );
     let all_objects: Vec<usize> = app
         .tab_mut()
-        .editing_run
+        .edit.editing_run
         .as_ref()
         .unwrap()
         .lines
@@ -7094,7 +7094,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
         .flat_map(|(objs, _)| objs.iter().copied())
         .collect();
     assert!(
-        app.tab_mut().editing_run.as_ref().unwrap().lines.iter().any(|(objs, _)| objs.len() > 1),
+        app.tab_mut().edit.editing_run.as_ref().unwrap().lines.iter().any(|(objs, _)| objs.len() > 1),
         "setup: the paragraph has a line made of several pieces, or nothing here could show a difference"
     );
 
@@ -7103,7 +7103,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
     let picture_before = tests_support::picture(&app);
 
     // First edit: reversed per line, so every line is retyped.
-    let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
     edit.buffer =
         edit.buffer.split('\n').map(|line| line.chars().rev().collect::<String>()).collect::<Vec<_>>().join("\n");
     app.apply_editing_page();
@@ -7142,7 +7142,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
                 x: ((run.rect.left + run.rect.right) / 2.0) as f64,
                 y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
             };
-            if app.pick_text_run(0, at).is_ok() && app.tab_mut().editing_run.is_some() {
+            if app.pick_text_run(0, at).is_ok() && app.tab_mut().edit.editing_run.is_some() {
                 re_picked = true;
                 break;
             }
@@ -7150,7 +7150,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
     }
     assert!(re_picked, "could not pick the same paragraph again after undo");
 
-    let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
     let lines = edit.lines.clone();
     let frozen = edit.frozen.clone();
     let kept_line_count = (lines.len() / 2).max(1);
@@ -7230,7 +7230,7 @@ fn inserting_a_line_mid_paragraph_does_not_shift_the_lines_after_it() {
             y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
         };
         if app.pick_text_run(0, at).is_ok() {
-            found_paragraph = app.tab_mut().editing_run.is_some();
+            found_paragraph = app.tab_mut().edit.editing_run.is_some();
         }
         break;
     }
@@ -7242,7 +7242,7 @@ fn inserting_a_line_mid_paragraph_does_not_shift_the_lines_after_it() {
     // Snapshot everything needed out of `edit` as owned values before
     // touching `app` again — `edit` borrows it, and `apply_editing_page`
     // below takes `editing_run` outright.
-    let edit = app.tab_mut().editing_run.as_ref().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("still editing");
     let original_lines: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
     let lines_before = edit.lines.clone();
     assert!(
@@ -7279,7 +7279,7 @@ fn inserting_a_line_mid_paragraph_does_not_shift_the_lines_after_it() {
     // its own rather than folded in here.
     let mut new_lines = original_lines.clone();
     new_lines.insert(1, String::new());
-    let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
     edit.buffer = new_lines.join("\n");
     app.apply_editing_page();
 
@@ -7405,21 +7405,21 @@ fn merging_any_two_adjacent_lines_does_not_corrupt_the_others() {
                 y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
             };
             let _ = app.pick_text_run(0, at);
-            return app.tab_mut().editing_run.is_some();
+            return app.tab_mut().edit.editing_run.is_some();
         }
         false
     }
 
     assert!(pick_cob_paragraph(&mut app), "the 'COB' paragraph was not found — has the fixture changed?");
-    let line_count = app.tab_mut().editing_run.as_ref().unwrap().lines.len();
+    let line_count = app.tab_mut().edit.editing_run.as_ref().unwrap().lines.len();
     assert!(line_count >= 2, "need at least two lines to merge");
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
 
     let picture_start = tests_support::picture(&app);
     for merge_at in 0..line_count - 1 {
         assert!(pick_cob_paragraph(&mut app), "merge_at={merge_at}: could not re-pick the paragraph");
 
-        let edit = app.tab_mut().editing_run.as_ref().expect("still editing");
+        let edit = app.tab_mut().edit.editing_run.as_ref().expect("still editing");
         let original_lines: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
         let lines_before = edit.lines.clone();
         assert_eq!(original_lines.len(), line_count, "merge_at={merge_at}: line count drifted between picks");
@@ -7437,7 +7437,7 @@ fn merging_any_two_adjacent_lines_does_not_corrupt_the_others() {
         new_lines[merge_at] = format!("{}{}", new_lines[merge_at], second);
 
         let merged_text = new_lines[merge_at].clone();
-        let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
         edit.buffer = new_lines.join("\n");
         app.apply_editing_page();
         let after = tests_support::runs_in_order(&app);
@@ -7510,12 +7510,12 @@ fn diag_camino_successive_paragraph_edits() {
                 y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
             };
             if app.pick_text_run(0, at).is_ok() {
-                let lines = app.tab_mut().editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
+                let lines = app.tab_mut().edit.editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
                 if lines > 1 {
                     line_count = lines;
                     let objects: Vec<usize> = app
                         .tab_mut()
-                        .editing_run
+                        .edit.editing_run
                         .as_ref()
                         .unwrap()
                         .lines
@@ -7526,7 +7526,7 @@ fn diag_camino_successive_paragraph_edits() {
                     break;
                 }
             }
-            app.tab_mut().editing_run = None;
+            app.tab_mut().edit.editing_run = None;
             tried.insert(run.object);
         }
         if line_count == 0 {
@@ -7534,7 +7534,7 @@ fn diag_camino_successive_paragraph_edits() {
             break;
         }
 
-        let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
         edit.buffer = edit
             .buffer
             .split('\n')

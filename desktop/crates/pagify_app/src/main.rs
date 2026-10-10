@@ -504,6 +504,18 @@ struct Reveal {
 /// [`PagifyApp::tab`]/[`PagifyApp::tab_mut`] rather than held directly, so a
 /// method written before tabs existed keeps its own shape — only the access
 /// path in front of a field changed.
+/// The page editors `DocTab` can have open: the paragraph being retyped where
+/// it sits (`pick_text_run`/`pick_paragraph`), and a brand new text box being
+/// composed. Never both at once — `addtext`, like every tool, clears the
+/// other selection mechanisms when it is armed.
+struct EditState {
+    /// The one paragraph, if any, open for retyping **on the page**, where it
+    /// sits — set by a single click.
+    editing_run: Option<EditingRun>,
+    /// A brand new run being composed — see [`NewTextBox`].
+    new_text_box: Option<NewTextBox>,
+}
+
 struct DocTab {
     doc: Option<Doc>,
     markup: Markup,
@@ -533,17 +545,9 @@ struct DocTab {
     /// Set when a zoom needs the scroll offset moved with it, applied on the
     /// next frame's `ScrollArea`.
     anchor_offset: Option<egui::Vec2>,
-    /// The one paragraph, if any, open for retyping **on the page**, where it
-    /// sits — set by a single click (`pick_text_run`/`pick_paragraph`).
-    ///
-    /// Not in the command box. Editing a word is a thing you do to the word,
-    /// and looking somewhere else to do it means holding the page in your head
-    /// while you type — which is exactly what an editor should not ask of you.
-    editing_run: Option<EditingRun>,
-    /// A brand new run being composed — see [`NewTextBox`]. Never live at
-    /// the same time as `editing_run`: `addtext` clears the other selection
-    /// mechanisms the same way every other tool does when it is armed.
-    new_text_box: Option<NewTextBox>,
+    /// The page editors: the one paragraph open for retyping **on the page**
+    /// where it sits, and a brand new run being composed — see [`EditState`].
+    edit: EditState,
     /// The id for the next words written onto a page.
     ///
     /// Distinct per mark, because `remove_text` removes **every** object
@@ -915,8 +919,7 @@ impl DocTab {
             scroll_offset: egui::Vec2::ZERO,
             view: None,
             anchor_offset: None,
-            editing_run: None,
-            new_text_box: None,
+            edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
             pending_link: None,
             extract_ask: None,
@@ -8373,7 +8376,7 @@ impl PagifyApp {
     /// the whole text object is the thing copied (with a selection, the box's
     /// own copy of the characters is what is meant, and is left alone).
     fn copy_editing_run(&mut self, ctx: &egui::Context) -> bool {
-        let Some(edit) = self.tab().editing_run.clone() else { return false };
+        let Some(edit) = self.tab().edit.editing_run.clone() else { return false };
         let id = egui::Id::new(("run-editor", edit.page, edit.object));
         let has_selection = egui::TextEdit::load_state(ctx, id)
             .and_then(|state| state.cursor.char_range())
@@ -8405,7 +8408,7 @@ impl PagifyApp {
     /// nothing to paste, and the caller pastes the old way.
     fn start_paste_ghost(&mut self, pasted: Option<String>) -> bool {
         let in_hand = self.tab().object_tool.is_some()
-            || self.tab().editing_run.is_some()
+            || self.tab().edit.editing_run.is_some()
             || self.tab().tool.as_ref().is_some_and(|t| matches!(t.kind, Tool::PickText));
         if !in_hand {
             return false;
@@ -9361,14 +9364,14 @@ impl PagifyApp {
         // A run open for editing takes the line: the words being typed are
         // text, not a command, and this is the path tests and recordings use in
         // place of typing into the box on the page.
-        if let Some(edit) = self.tab_mut().editing_run.as_mut() {
+        if let Some(edit) = self.tab_mut().edit.editing_run.as_mut() {
             edit.buffer = line.to_string();
             // **Not kept open when the engine refuses it**, as an apply from the page
             // is: nobody is at the box to correct the words — this is a script, a
             // recording or a test — and the line after this one must run as the command
             // it is, not be taken for more words to type into a box left open.
             if self.apply_editing_page() {
-                self.tab_mut().editing_run = None;
+                self.tab_mut().edit.editing_run = None;
             }
             return;
         }
@@ -9515,7 +9518,7 @@ impl PagifyApp {
         // had nothing to lose. When typed changes actually existed, say so,
         // so a reported "my edit disappeared" can be matched to an Escape in
         // the log rather than left as an open question.
-        if let Some(edit) = self.tab_mut().editing_run.take() {
+        if let Some(edit) = self.tab_mut().edit.editing_run.take() {
             if self.edit_has_changes(&edit) {
                 // Words the engine refused are not simply dropped: they go to the
                 // clipboard, and the line says so.
@@ -9529,7 +9532,7 @@ impl PagifyApp {
                 self.say_info("left as it was.");
             }
         }
-        if self.tab_mut().new_text_box.take().is_some() {
+        if self.tab_mut().edit.new_text_box.take().is_some() {
             self.say_info("nothing was added.");
         }
         if self.tab_mut().object_tool.take().is_some() {
@@ -10261,7 +10264,7 @@ impl PagifyApp {
         // tool, picking up Edit Object, starting a new text box), so a
         // discard-with-changes shows up in the session log as exactly which
         // of those it was, not just that *something* closed the editor.
-        if let Some(edit) = self.tab_mut().editing_run.take() {
+        if let Some(edit) = self.tab_mut().edit.editing_run.take() {
             if self.edit_has_changes(&edit) {
                 if edit.refusal.is_some() {
                     self.offer_typed_text(&edit);
@@ -10275,7 +10278,7 @@ impl PagifyApp {
                 self.say_info("left as it was.");
             }
         }
-        if self.tab_mut().new_text_box.take().is_some() {
+        if self.tab_mut().edit.new_text_box.take().is_some() {
             self.say_info("nothing was added.");
         }
         if self.tab_mut().pending_link.take().is_some() {
@@ -11330,7 +11333,7 @@ impl PagifyApp {
         // `pick_text_run_traced`'s matching call — but from whichever look won
         // the tally, not always the first line's.
         self.want_document_face_for(page, look_object, styles.get(&look_object).map(|style| style.font));
-        self.tab_mut().editing_run = Some(edit);
+        self.tab_mut().edit.editing_run = Some(edit);
 
         // **Said at the pick, not discovered at the apply**: a line the page
         // draws as shapes can be read and retyped here but is never written.
@@ -12152,7 +12155,7 @@ impl PagifyApp {
             .cloned()?;
         let placed = found.placement()?;
 
-        self.tab_mut().editing_run = Some(EditingRun {
+        self.tab_mut().edit.editing_run = Some(EditingRun {
             page,
             // No page object owns these words; they are shapes.
             object: usize::MAX,
@@ -12361,7 +12364,7 @@ impl PagifyApp {
     /// would not go on, new lines that could not be added — moved the history, and
     /// its editor is **not** brought back: those words are on the page now.
     fn apply_editing_page(&mut self) -> bool {
-        let Some(mut edit) = self.tab_mut().editing_run.take() else { return false };
+        let Some(mut edit) = self.tab_mut().edit.editing_run.take() else { return false };
         // A box dragged by its left edge has moved the run with it: the new
         // start is part of what is applied. From where the run started, not
         // from `style.at`, so applying it again after a refusal is the same.
@@ -12412,7 +12415,7 @@ impl PagifyApp {
         let mut kept = backup;
         kept.render_epoch = self.render_epoch();
         kept.refusal = Some(EditRefusal { reason, buffer: kept.buffer.clone(), style: kept.style.clone() });
-        self.tab_mut().editing_run = Some(kept);
+        self.tab_mut().edit.editing_run = Some(kept);
         true
     }
 
@@ -12471,10 +12474,10 @@ impl PagifyApp {
 
     /// Per frame: an open editor whose page changed under it is closed.
     fn close_editor_if_stale(&mut self) {
-        if !self.tab().editing_run.as_ref().is_some_and(|edit| self.editor_is_stale(edit)) {
+        if !self.tab().edit.editing_run.as_ref().is_some_and(|edit| self.editor_is_stale(edit)) {
             return;
         }
-        if let Some(edit) = self.tab_mut().editing_run.take() {
+        if let Some(edit) = self.tab_mut().edit.editing_run.take() {
             if self.edit_has_changes(&edit) {
                 self.let_go_of_stale_editor(&edit);
             } else {
@@ -12782,7 +12785,7 @@ impl PagifyApp {
             return Err("text: that box is too small to type into.".into());
         }
 
-        // **Was a bare `self.tab_mut().editing_run = None`, the only place in
+        // **Was a bare `self.tab_mut().edit.editing_run = None`, the only place in
         // the file that discarded an open run editor without going through
         // `put_down_page_editors`.** Every other tool switch that can
         // abandon an in-progress edit — Escape, a different tool, re-arming
@@ -12805,7 +12808,7 @@ impl PagifyApp {
         // the box being refused for not fitting a size nobody asked for.
         let size = (rect.right - rect.left).min(rect.bottom - rect.top).min(14.0);
 
-        self.tab_mut().new_text_box = Some(NewTextBox {
+        self.tab_mut().edit.new_text_box = Some(NewTextBox {
             page,
             rect,
             buffer: String::new(),
@@ -12927,7 +12930,7 @@ impl PagifyApp {
     /// widget uses internally too), so what lands on the page is what was
     /// seen in the box.
     fn apply_new_text_box(&mut self, ui: &egui::Ui) {
-        let Some(new_text) = self.tab_mut().new_text_box.take() else { return };
+        let Some(new_text) = self.tab_mut().edit.new_text_box.take() else { return };
         let typed = new_text.buffer.trim();
         if typed.is_empty() {
             self.say_info("nothing typed — the box was left empty.");
@@ -14534,7 +14537,7 @@ impl PagifyApp {
         let face_ready = self.editor_face.is_some() && self.editor_face_ready;
         let coverage = self.editor_face_coverage.clone();
 
-        let Some(edit) = self.tab_mut().editing_run.as_mut() else { return };
+        let Some(edit) = self.tab_mut().edit.editing_run.as_mut() else { return };
         if edit.page != page {
             return;
         }
@@ -14998,7 +15001,7 @@ fn wrap_typed_last_line(
     /// [`Self::apply_new_text_box`], from the same width and font size, so
     /// what gets written matches what was typed.
     fn draw_new_text_box(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
-        let Some(new_text) = &mut self.tab_mut().new_text_box else { return };
+        let Some(new_text) = &mut self.tab_mut().edit.new_text_box else { return };
         if new_text.page != page {
             return;
         }
@@ -15117,8 +15120,8 @@ fn wrap_typed_last_line(
         if let Some(text) = self.text_to_offer.take() {
             ui.ctx().copy_text(text);
         }
-        let text_page = self.tab_mut().editing_run.as_ref().map(|e| e.page);
-        let new_text_page = self.tab_mut().new_text_box.as_ref().map(|b| b.page);
+        let text_page = self.tab_mut().edit.editing_run.as_ref().map(|e| e.page);
+        let new_text_page = self.tab_mut().edit.new_text_box.as_ref().map(|b| b.page);
         let page = text_page.or(new_text_page).unwrap_or(self.tab_mut().page);
         let has_shapes = text_page.is_none()
             && new_text_page.is_none()
@@ -15161,7 +15164,7 @@ fn wrap_typed_last_line(
     /// since a box being composed has no existing run to seed a size or
     /// position from.
     fn draw_new_text_properties(&mut self, ui: &mut egui::Ui, page: usize) {
-        if self.tab().new_text_box.is_none() {
+        if self.tab().edit.new_text_box.is_none() {
             return;
         }
         self.draw_text_style(ui, true);
@@ -15175,7 +15178,7 @@ fn wrap_typed_last_line(
                 self.apply_new_text_box(ui);
             }
             if ui.button("Cancel").clicked() {
-                self.tab_mut().new_text_box = None;
+                self.tab_mut().edit.new_text_box = None;
             }
         });
 
@@ -15197,7 +15200,7 @@ fn wrap_typed_last_line(
         use text_style_panel as tsp;
         let black = pdf_core::document::Color { r: 0, g: 0, b: 0, a: 255 };
         let (face, size, color, align) = if new_box {
-            let Some(b) = self.tab().new_text_box.as_ref() else { return };
+            let Some(b) = self.tab().edit.new_text_box.as_ref() else { return };
             let align = match b.align {
                 TextAlign::Left => tsp::Align::Left,
                 TextAlign::Center => tsp::Align::Center,
@@ -15205,7 +15208,7 @@ fn wrap_typed_last_line(
             };
             (b.face.clone(), b.size, b.color, Some(align))
         } else {
-            let Some(e) = self.tab().editing_run.as_ref() else { return };
+            let Some(e) = self.tab().edit.editing_run.as_ref() else { return };
             // An explicit pick wins; short of that, the run's own current font
             // beats a flat "(automatic)" that never said which font that meant.
             (
@@ -15252,20 +15255,20 @@ fn wrap_typed_last_line(
         }
         if let Some(new_size) = changes.size {
             if new_box {
-                if let Some(b) = self.tab_mut().new_text_box.as_mut() {
+                if let Some(b) = self.tab_mut().edit.new_text_box.as_mut() {
                     b.size = new_size;
                 }
-            } else if let Some(e) = self.tab_mut().editing_run.as_mut() {
+            } else if let Some(e) = self.tab_mut().edit.editing_run.as_mut() {
                 e.style.size = Some(new_size);
             }
         }
         if let Some([r, g, b]) = changes.color {
             let new = pdf_core::document::Color { r, g, b, a: color.a };
             if new_box {
-                if let Some(held) = self.tab_mut().new_text_box.as_mut() {
+                if let Some(held) = self.tab_mut().edit.new_text_box.as_mut() {
                     held.color = new;
                 }
-            } else if let Some(e) = self.tab_mut().editing_run.as_mut() {
+            } else if let Some(e) = self.tab_mut().edit.editing_run.as_mut() {
                 e.style.color = Some(new);
             }
         }
@@ -15279,7 +15282,7 @@ fn wrap_typed_last_line(
                 tsp::Align::Right => Some(TextAlign::Right),
                 tsp::Align::Justify => None,
             };
-            if let (Some(picked), Some(b)) = (picked, self.tab_mut().new_text_box.as_mut()) {
+            if let (Some(picked), Some(b)) = (picked, self.tab_mut().edit.new_text_box.as_mut()) {
                 b.align = picked;
             }
         }
@@ -15325,7 +15328,7 @@ fn wrap_typed_last_line(
     /// [`Self::draw_run_editor`] for the box those words are still typed
     /// into, which stays on the page.
     fn draw_run_properties(&mut self, ui: &mut egui::Ui) {
-        let Some(edit) = self.tab().editing_run.as_ref() else { return };
+        let Some(edit) = self.tab().edit.editing_run.as_ref() else { return };
         let refusal_said = edit.refusal.as_ref().map(|refusal| format!("Not applied: {}", refusal.reason));
         self.draw_text_style(ui, false);
 
@@ -15343,7 +15346,7 @@ fn wrap_typed_last_line(
         }
 
         if self.font_picker_open {
-            let page = self.tab_mut().editing_run.as_ref().map(|e| e.page).unwrap_or(self.tab_mut().page);
+            let page = self.tab_mut().edit.editing_run.as_ref().map(|e| e.page).unwrap_or(self.tab_mut().page);
             self.draw_font_picker(ui, page);
         }
     }
@@ -15450,9 +15453,9 @@ fn wrap_typed_last_line(
                     }
                 }
             }
-            if let Some(edit) = self.tab_mut().editing_run.as_mut() {
+            if let Some(edit) = self.tab_mut().edit.editing_run.as_mut() {
                 edit.style.face = face;
-            } else if let Some(new_text) = &mut self.tab_mut().new_text_box {
+            } else if let Some(new_text) = &mut self.tab_mut().edit.new_text_box {
                 new_text.face = face;
             }
         }
