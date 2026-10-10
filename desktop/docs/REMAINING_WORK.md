@@ -110,13 +110,15 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   verification, and the fields' rationale docs moved with them.
   `paste_ghost` stayed on `PagifyApp` (app-wide clipboard ghost).
   `selection: SelectionState` now holds nineteen of the gesture fields
-  (commit `f3d07b4`) — signature/picture selections, handles, text
-  selection and drag, markup grab, right-click capture, opacity draft,
-  selected image, picked layer, group grab. Next: the targeted pass for
-  `selected`/`group`/`grab`/`marquee` (they collide with other types and
-  locals, so renames must be scoped), `ViewState` for page/zoom/scroll/
-  rotation (same collision problem), and folding the armed-tool leftovers
-  into `tool.rs`. `Doc` already delegates caches.
+  (commit `f3d07b4`), and `view_state: ViewState` holds twelve of the
+  view fields (hover/last view, viewport, scroll offsets, deferred pan/
+  scroll-to, canvas point, reveal, saved revision, queued copy — commit
+  `c81eb0e`). **`DocTab` is at 39 fields** (target 25). Next: the scoped
+  pass for `page`/`zoom`/`rotation`/`view` (into `ViewState`) and
+  `selected`/`group`/`grab`/`marquee` (into `SelectionState`) — these
+  collide with locals and other types, so renames must be receiver-scoped,
+  not bulk. Then folding the armed-tool leftovers into `tool.rs`. `Doc`
+  already delegates caches.
 3. **Event-returning transitions — DONE.** `ToolEffect` +
   `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
   `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
