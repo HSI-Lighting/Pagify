@@ -413,7 +413,7 @@ fn an_editor_whose_page_changed_is_closed_on_the_next_frame() {
     let run = runs[runs.len() / 2].clone();
     h.state_mut().submit("edittext");
     h.run_steps(1);
-    let at = h.state().tab().last_view.expect("the page was drawn").to_screen(centre(&run.rect));
+    let at = h.state().tab().view_state.last_view.expect("the page was drawn").to_screen(centre(&run.rect));
     crate::ui_tests::click(&mut h, at);
     h.run_steps(2);
     assert!(h.state().tab().edit.editing_run.is_some(), "setup: the click opened an editor");
@@ -938,7 +938,7 @@ fn a_refusal_is_shown_beside_apply_and_a_click_away_does_not_pick_what_is_under_
     h.state_mut().submit("edittext");
     h.run_steps(1);
     let screen = |h: &egui_kittest::Harness<'static, PagifyApp>, run: &TextRun| {
-        h.state().tab().last_view.expect("the page was drawn").to_screen(centre(&run.rect))
+        h.state().tab().view_state.last_view.expect("the page was drawn").to_screen(centre(&run.rect))
     };
     let at = screen(&h, &target);
     crate::ui_tests::click(&mut h, at);

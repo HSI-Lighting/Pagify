@@ -41,7 +41,7 @@ impl crate::PagifyApp {
     /// factor back out before handing back a *logical* one.
     pub(crate) fn resolved_zoom(&self) -> f32 {
         let (w, h) = self.page_extent(self.tab().zoom_settle.zoom_basis);
-        let available = (self.tab().canvas_pt - egui::vec2(24.0, 24.0)).max(egui::vec2(1.0, 1.0));
+        let available = (self.tab().view_state.canvas_pt - egui::vec2(24.0, 24.0)).max(egui::vec2(1.0, 1.0));
         match self.tab().zoom {
             ZoomMode::Factor(f) => f,
             ZoomMode::Width => {
@@ -73,8 +73,8 @@ impl crate::PagifyApp {
         self.tab_mut().page = wanted;
         self.tab_mut().zoom_settle.zoom_basis = wanted;
         let scroll_pt = self.tab().doc.as_ref().map(|d| d.strip.scroll_to(wanted)).unwrap_or(0.0);
-        self.tab_mut().scroll_pt = scroll_pt;
-        self.tab_mut().scroll_to_pt = Some(scroll_pt);
+        self.tab_mut().view_state.scroll_pt = scroll_pt;
+        self.tab_mut().view_state.scroll_to_pt = Some(scroll_pt);
         self.tab_mut().zoom_settle.settling = 3;
     }
 
@@ -130,7 +130,7 @@ impl crate::PagifyApp {
         // The rows changed height, so wherever the view was is now somewhere
         // else; keep the page that was being read in view.
         let top = self.tab_mut().doc.as_ref().and_then(|d| d.strip.top_of(page));
-        self.tab_mut().scroll_to_pt = top;
+        self.tab_mut().view_state.scroll_to_pt = top;
         self.tab_mut().zoom_settle.settling = 3;
     }
 }

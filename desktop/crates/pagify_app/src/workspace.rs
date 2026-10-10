@@ -220,7 +220,7 @@ impl crate::PagifyApp {
                 if let Some(password) = password {
                     self.tab_mut().held_passcode = Some(zeroize::Zeroizing::new(password.to_owned()));
                 }
-                self.tab_mut().saved_revision = self.tab_mut().markup.revision();
+                self.tab_mut().view_state.saved_revision = self.tab_mut().markup.revision();
 
                 // **A badge over a picture that is still there is finished
                 // now, not carried.** Documents written while a lock could
@@ -233,7 +233,7 @@ impl crate::PagifyApp {
                 // — otherwise selection silently doing nothing is left for the
                 // reader to work out.
                 self.report_text_layer(false);
-                self.tab_mut().scroll_pt = 0.0;
+                self.tab_mut().view_state.scroll_pt = 0.0;
                 self.tab_mut().tool = None;
                 // A fresh document's own bookmarks, not whatever the last
                 // one left behind — the panel is closed already (nothing

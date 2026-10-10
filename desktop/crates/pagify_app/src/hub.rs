@@ -416,8 +416,8 @@ impl PagifyApp {
         // one has not yet. And the strip's own scroll position is asked for again
         // on the first frame here, because this window's scroll area has never
         // held it.
-        tab.viewport_rect = None;
-        tab.anchor_offset = Some(tab.scroll_offset);
+        tab.view_state.viewport_rect = None;
+        tab.view_state.anchor_offset = Some(tab.view_state.scroll_offset);
         let settled = self.tabs_are_settled();
         if settled && self.tabs.len() == 1 && self.tabs[0].doc.is_none() && self.tabs[0].awaiting_password.is_none() {
             self.tabs[0] = tab;

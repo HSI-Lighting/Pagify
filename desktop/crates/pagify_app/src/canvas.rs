@@ -1063,14 +1063,14 @@ impl crate::PagifyApp {
                             );
                         }
                         if page == self.tab_mut().page {
-                            self.tab_mut().last_view = Some(view);
+                            self.tab_mut().view_state.last_view = Some(view);
                         }
                         // Zoom anchors against the page under the cursor, which
                         // on a scrolling strip is often not the current one.
                         // Anchoring with another page's mapping puts the fixed
                         // point on the wrong page and the view slides.
                         if hover.is_some_and(|p| rect.contains(p)) {
-                            self.tab_mut().hover_view = Some((page, view));
+                            self.tab_mut().view_state.hover_view = Some((page, view));
                         }
                         // Every visible page is live, not just the current one:
                         // you interact with what you are pointing at, and only
@@ -1179,7 +1179,7 @@ impl crate::PagifyApp {
                     // pointer is beside the page rather than on it — the strip
                     // is wider than the paper.
                     let anchor_on =
-                        self.tab_mut().hover_view.or_else(|| self.tab_mut().last_view.map(|v| (self.tab_mut().page, v)));
+                        self.tab_mut().view_state.hover_view.or_else(|| self.tab_mut().view_state.last_view.map(|v| (self.tab_mut().page, v)));
                     if let Some((index, view)) = anchor_on {
                         // Where this page sits in the strip, in strip points.
                         //
@@ -1228,7 +1228,7 @@ impl crate::PagifyApp {
                         );
                         let moved = view.origin.to_vec2() - origin_after;
                         let with_strip = egui::vec2(sx, sy) * (after_screen - before_screen);
-                        self.tab_mut().anchor_offset = Some(self.tab_mut().scroll_offset + moved + with_strip);
+                        self.tab_mut().view_state.anchor_offset = Some(self.tab_mut().view_state.scroll_offset + moved + with_strip);
                     }
                     self.tab_mut().zoom = ZoomMode::Factor(after);
                     zoom = after;
@@ -1258,7 +1258,7 @@ impl crate::PagifyApp {
         strip_height: f32,
     ) -> (egui::ScrollArea, Option<egui::Vec2>) {
         let mut forced: Option<egui::Vec2> = None;
-        if let Some(by) = self.tab_mut().pan_by.take() {
+        if let Some(by) = self.tab_mut().view_state.pan_by.take() {
             // Clamped to what can actually be scrolled to.
             //
             // Without the upper bound the offset keeps growing past the end of
@@ -1267,20 +1267,20 @@ impl crate::PagifyApp {
             // the drag reverses. That is the bounce at the edges.
             let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
             let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let to = (self.tab_mut().scroll_offset + by).clamp(egui::Vec2::ZERO, room);
+            let to = (self.tab_mut().view_state.scroll_offset + by).clamp(egui::Vec2::ZERO, room);
             forced = Some(to);
             area = area.scroll_offset(to);
-        } else if let Some(Reveal { page, rect }) = self.tab_mut().reveal.take() {
+        } else if let Some(Reveal { page, rect }) = self.tab_mut().view_state.reveal.take() {
             // A word to show, not a page: scrolled just far enough, on both
             // axes, and never by a change of zoom. `go_to` asked for the page's
             // top along with it — that is what a word in the first screenful
             // settles for, and the request is taken here, or it would fire a
             // frame late and undo this.
-            let page_top = self.tab_mut().scroll_to_pt.take();
-            self.tab_mut().anchor_offset = None;
+            let page_top = self.tab_mut().view_state.scroll_to_pt.take();
+            self.tab_mut().view_state.anchor_offset = None;
             let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
             let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let at = self.tab().scroll_offset;
+            let at = self.tab().view_state.scroll_offset;
             let place = self.tab().doc.as_ref().and_then(|d| Some((d.strip.left_of(page)?, d.strip.top_of(page)?)));
             let to = match place {
                 Some((left, top)) => {
@@ -1302,11 +1302,11 @@ impl crate::PagifyApp {
             };
             forced = Some(to);
             area = area.scroll_offset(to);
-        } else if let Some(y) = self.tab_mut().scroll_to_pt.take() {
+        } else if let Some(y) = self.tab_mut().view_state.scroll_to_pt.take() {
             // 12.0 is the strip's top padding, the same constant the page
             // origins are laid out from.
-            area = area.scroll_offset(egui::vec2(self.tab_mut().scroll_offset.x, y * zoom));
-        } else if let Some(offset) = self.tab_mut().anchor_offset.take() {
+            area = area.scroll_offset(egui::vec2(self.tab_mut().view_state.scroll_offset.x, y * zoom));
+        } else if let Some(offset) = self.tab_mut().view_state.anchor_offset.take() {
             let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
             let room = (content - viewport.size()).max(egui::Vec2::ZERO);
             let to = offset.clamp(egui::Vec2::ZERO, room);
@@ -1367,8 +1367,8 @@ impl crate::PagifyApp {
         // the page was *actually drawn* this frame. Mixing an intended offset
         // with an observed origin means the two describe different moments, and
         // the difference accumulates into the page sliding away as you zoom.
-        self.tab_mut().scroll_offset = offset;
-        self.tab_mut().viewport_rect = Some(inner_rect);
+        self.tab_mut().view_state.scroll_offset = offset;
+        self.tab_mut().view_state.viewport_rect = Some(inner_rect);
         // Where the reader is looking now, for the next frame to compare with.
         let seen = self.tab().doc.as_ref().and_then(|doc| {
             pagify_shell::reader::ViewSnapshot::capture(
@@ -2152,7 +2152,7 @@ impl crate::PagifyApp {
     /// and Split the joined text. Moved out whole.
     fn context_menu_text(&mut self, ui: &mut egui::Ui, page: usize, over_text: bool) {
                 if over_text && ui.button("Copy").clicked() {
-                    self.tab_mut().copy_wanted = true;
+                    self.tab_mut().view_state.copy_wanted = true;
                     ui.close();
                 }
 

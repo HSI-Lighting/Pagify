@@ -67,7 +67,7 @@ fn clicking_a_link_goes_to_its_page() {
     let at = h
         .state()
         .tab()
-        .last_view
+        .view_state.last_view
         .expect("the page was never drawn")
         .to_screen(AppPoint { x: 15.0, y: 40.0 });
     click(&mut h, at);

@@ -75,21 +75,21 @@ fn painted_current_match(h: &Harness<'static, PagifyApp>) -> Vec<egui::Rect> {
 }
 
 fn assert_match_in_view(h: &Harness<'static, PagifyApp>, what: &str) {
-    let view = h.state().tab().viewport_rect.expect("the page was never drawn");
+    let view = h.state().tab().view_state.viewport_rect.expect("the page was never drawn");
     let painted = painted_current_match(h);
     assert_eq!(
         painted.len(),
         1,
         "{what}: the current match was painted {} times (window {view:?}, scrolled to {:?}, page {})",
         painted.len(),
-        h.state().tab().scroll_offset,
+        h.state().tab().view_state.scroll_offset,
         h.state().tab().page,
     );
     assert!(
         view.contains_rect(painted[0]),
         "{what}: the match is painted at {:?}, outside the window {view:?} (scrolled to {:?})",
         painted[0],
-        h.state().tab().scroll_offset,
+        h.state().tab().view_state.scroll_offset,
     );
 }
 
@@ -104,7 +104,7 @@ fn tall_page_with_a_match_low_down() -> Vec<Page> {
 }
 
 fn assert_below_the_fold(h: &Harness<'static, PagifyApp>, down_to: f32, zoom: f32) {
-    let view = h.state().tab().viewport_rect.expect("the page was never drawn");
+    let view = h.state().tab().view_state.viewport_rect.expect("the page was never drawn");
     let at = down_to * zoom * PagifyApp::DISPLAY_DPI_SCALE;
     assert!(
         view.height() < at,
@@ -216,14 +216,14 @@ fn a_match_in_the_middle_of_a_tall_page_is_centred() {
     // A zoom now keeps the middle of the page in the middle of the window,
     // which for this page is the zebra itself. The match has to start out of
     // sight for finding it to have anything to do.
-    h.state_mut().tab_mut().scroll_to_pt = Some(0.0);
+    h.state_mut().tab_mut().view_state.scroll_to_pt = Some(0.0);
     h.run_steps(3);
 
     h.state_mut().submit("find zebra");
     h.run_steps(8);
 
     assert_match_in_view(&h, "a match in the middle of a tall page");
-    let view = h.state().tab().viewport_rect.expect("drawn");
+    let view = h.state().tab().view_state.viewport_rect.expect("drawn");
     let wash = painted_current_match(&h)[0];
     assert!(
         (wash.center().y - view.center().y).abs() < 2.0,
@@ -237,9 +237,9 @@ fn a_match_in_the_middle_of_a_tall_page_is_centred() {
 
 /// Where in the strip, in page points, the middle of the window is.
 fn middle_of_the_window_pt(h: &Harness<'static, PagifyApp>) -> f32 {
-    let view = h.state().tab().viewport_rect.expect("the page was never drawn");
+    let view = h.state().tab().view_state.viewport_rect.expect("the page was never drawn");
     let zoom = h.state().resolved_zoom() * PagifyApp::DISPLAY_DPI_SCALE;
-    (h.state().tab().scroll_offset.y + view.height() / 2.0 - STRIP_PAD_PX) / zoom
+    (h.state().tab().view_state.scroll_offset.y + view.height() / 2.0 - STRIP_PAD_PX) / zoom
 }
 
 fn thirty_pages() -> Vec<Page> {
@@ -296,7 +296,7 @@ fn an_ordinary_scroll_is_not_undone_by_the_view_restore() {
     let mut h = open_text_pdf("scrolling", &thirty_pages());
     h.state_mut().tab_mut().zoom = ZoomMode::Width;
     h.run_steps(4);
-    let start = h.state().tab().scroll_offset.y;
+    let start = h.state().tab().view_state.scroll_offset.y;
     h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 500.0)));
     h.run_steps(2);
     for _ in 0..4 {
@@ -309,7 +309,7 @@ fn an_ordinary_scroll_is_not_undone_by_the_view_restore() {
         h.run_steps(2);
     }
     h.run_steps(6);
-    let moved = h.state().tab().scroll_offset.y - start;
+    let moved = h.state().tab().view_state.scroll_offset.y - start;
     assert!(moved > 400.0, "the scroll went only {moved} px");
 }
 
@@ -322,16 +322,16 @@ fn each_document_has_its_own_scroll_state() {
     h.run_steps(3);
     h.state_mut().act(Verb::Page(PageTarget::Number(20)));
     h.run_steps(4);
-    let deep = h.state().tab().scroll_offset.y;
+    let deep = h.state().tab().view_state.scroll_offset.y;
     assert!(deep > 5_000.0, "setup: not far enough down ({deep})");
 
     // A second document opened in a new tab starts at its own top.
     h.state_mut().submit(&format!("open \"{}\"", fixture("single-page.pdf")));
     h.run_steps(6);
     assert!(
-        h.state().tab().scroll_offset.y < 100.0,
+        h.state().tab().view_state.scroll_offset.y < 100.0,
         "the new document inherited the other's offset: {}",
-        h.state().tab().scroll_offset.y
+        h.state().tab().view_state.scroll_offset.y
     );
 }
 
@@ -354,14 +354,14 @@ fn a_match_already_in_view_does_not_move_the_page() {
     h.state_mut().submit("find zebra");
     h.run_steps(8);
     assert_match_in_view(&h, "the first of two");
-    let after_find = h.state().tab().scroll_offset;
+    let after_find = h.state().tab().view_state.scroll_offset;
 
     h.state_mut().submit("findnext");
     h.run_steps(8);
     assert_eq!(h.state().tab().panels.find_at, 1);
     assert_match_in_view(&h, "the second of two");
     assert_eq!(
-        h.state().tab().scroll_offset,
+        h.state().tab().view_state.scroll_offset,
         after_find,
         "the second match was already on screen, but the view moved"
     );
@@ -379,7 +379,7 @@ fn a_match_at_the_top_left_corner_is_in_view_with_the_view_at_the_corner() {
     h.run_steps(8);
 
     assert_match_in_view(&h, "a match in the page's corner");
-    assert_eq!(h.state().tab().scroll_offset, egui::Vec2::ZERO, "the view went past the corner");
+    assert_eq!(h.state().tab().view_state.scroll_offset, egui::Vec2::ZERO, "the view went past the corner");
 }
 
 /// Sideways too: on a page zoomed past the window's width a match off to the
@@ -390,7 +390,7 @@ fn a_match_off_to_the_side_of_a_zoomed_in_page_is_found() {
     let mut h = open_text_pdf("side", &[(612.0, 792.0, vec![(72.0, 100.0, "the start"), (480.0, 150.0, "zebra")])]);
     h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
     h.run_steps(4);
-    let view = h.state().tab().viewport_rect.expect("drawn");
+    let view = h.state().tab().view_state.viewport_rect.expect("drawn");
     assert!(
         view.width() < 480.0 * 4.0 * PagifyApp::DISPLAY_DPI_SCALE,
         "the fixture is not wide enough to prove anything: {view:?}"
@@ -442,12 +442,12 @@ fn a_footer_at_fit_keeps_the_page_top_where_going_to_the_page_put_it() {
 
     assert_eq!(h.state().tab().page, 1);
     assert_match_in_view(&h, "a footer at Fit");
-    let scale = h.state().tab().last_view.expect("drawn").scale;
+    let scale = h.state().tab().view_state.last_view.expect("drawn").scale;
     let page_top = h.state().tab().doc.as_ref().expect("doc").strip.scroll_to(1) * scale;
     assert!(
-        (h.state().tab().scroll_offset.y - page_top).abs() < 1.0,
+        (h.state().tab().view_state.scroll_offset.y - page_top).abs() < 1.0,
         "the view is at {}, not at the top of the page ({page_top})",
-        h.state().tab().scroll_offset.y
+        h.state().tab().view_state.scroll_offset.y
     );
 }
 
@@ -467,7 +467,7 @@ fn in_a_turned_view_find_does_not_scroll_to_a_box_that_is_not_where_the_word_is(
     h.run_steps(6);
 
     assert_eq!(h.state().tab().panels.find_hits.len(), 1);
-    assert_eq!(h.state().tab().scroll_offset, egui::Vec2::ZERO, "the view went somewhere for a box that is not there");
+    assert_eq!(h.state().tab().view_state.scroll_offset, egui::Vec2::ZERO, "the view went somewhere for a box that is not there");
 }
 
 #[test]
@@ -483,13 +483,13 @@ fn in_a_turned_view_find_still_goes_to_the_page() {
 
     assert_eq!(h.state().tab().panels.find_at, 1);
     assert_eq!(h.state().tab().page, 2, "Find did not go to the page the match is on");
-    assert!(h.state().tab().reveal.is_none());
-    let scale = h.state().tab().last_view.expect("drawn").scale;
+    assert!(h.state().tab().view_state.reveal.is_none());
+    let scale = h.state().tab().view_state.last_view.expect("drawn").scale;
     let page_top = h.state().tab().doc.as_ref().expect("doc").strip.scroll_to(2) * scale;
     assert!(
-        (h.state().tab().scroll_offset.y - page_top).abs() < 1.0,
+        (h.state().tab().view_state.scroll_offset.y - page_top).abs() < 1.0,
         "the view is at {}, not at the top of the page ({page_top})",
-        h.state().tab().scroll_offset.y
+        h.state().tab().view_state.scroll_offset.y
     );
 }
 
@@ -693,7 +693,7 @@ fn three_text_pages() -> Vec<Page> {
 }
 
 fn pages_in_view(h: &Harness<'static, PagifyApp>, zoom: f32) -> usize {
-    let view = h.state().tab().viewport_rect.expect("drawn");
+    let view = h.state().tab().view_state.viewport_rect.expect("drawn");
     let strip = &h.state().tab().doc.as_ref().expect("doc").strip;
     strip.visible(0.0, view.height() / (zoom * PagifyApp::DISPLAY_DPI_SCALE)).len()
 }
@@ -752,7 +752,7 @@ fn visiting_the_file_tab_does_not_put_the_view_back_at_the_top() {
     h.run_steps(3);
     h.state_mut().pan(egui::vec2(0.0, -700.0));
     h.run_steps(4);
-    let scrolled = h.state().tab().scroll_offset;
+    let scrolled = h.state().tab().view_state.scroll_offset;
     assert!(scrolled.y > 300.0, "the document did not scroll: {scrolled:?}");
 
     h.state_mut().tab_mut().ribbon = Tab::File;
@@ -761,7 +761,7 @@ fn visiting_the_file_tab_does_not_put_the_view_back_at_the_top() {
     h.run_steps(3);
 
     assert_eq!(
-        h.state().tab().scroll_offset,
+        h.state().tab().view_state.scroll_offset,
         scrolled,
         "going to the File tab and back moved the document"
     );

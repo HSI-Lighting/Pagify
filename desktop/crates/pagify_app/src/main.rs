@@ -690,6 +690,71 @@ struct SelectionState {
     placed_image_hover_handle: Option<Handle>,
 }
 
+/// The page view `DocTab` carries beyond the current page and zoom:
+/// hover and last-seen views, the viewport, the scroll offsets and the
+/// deferred scroll/pan requests, the reveal target, the saved revision
+/// and the queued copy. `page`/`zoom`/`rotation`/`view` themselves still
+/// live on `DocTab` — their names collide with locals, so they need
+/// scoped renames rather than a bulk rewrite.
+struct ViewState {
+    /// The mapping for the page under the pointer, and which page it is.
+    ///
+    /// Not always the current page, and the index matters: a `PageView` maps to
+    /// coordinates *within its own page*, so two views cannot be compared
+    /// without knowing which pages they belong to.
+    hover_view: Option<(usize, PageView)>,
+    /// The scroll area's own viewport, from the last frame.
+    ///
+    /// Zoom anchoring has to measure the pointer against the rectangle that is
+    /// actually scrolling, not the panel around it — they differ by the margins
+    /// and the scrollbar, and the difference shows up as the page creeping away
+    /// from the cursor as you zoom.
+    viewport_rect: Option<egui::Rect>,
+    /// Set when a zoom needs the scroll offset moved with it, applied on the
+    /// next frame's `ScrollArea`.
+    anchor_offset: Option<egui::Vec2>,
+    /// Where the current page was last drawn on screen.
+    ///
+    /// Recorded because it is the only place that knows it: the mapping is
+    /// built inside the draw loop from the scroll offset and the zoom, and
+    /// nothing outside can reconstruct where a point on the page ended up. The
+    /// UI tests need it to put the pointer on a character.
+    last_view: Option<PageView>,
+    /// Where the page strip is scrolled to, kept so zooming can hold the point
+    /// under the cursor still.
+    scroll_offset: egui::Vec2,
+    scroll_pt: f32,
+    /// Screen pixels the view should move by, accumulated from a pan gesture
+    /// and applied to the scroll area on the next frame.
+    ///
+    /// It has to go through the scroll area, because the scroll area owns the
+    /// offset. Hand mode used to write to `scroll_pt`, which nothing reads —
+    /// so dragging with the Hand tool moved nothing at all.
+    pan_by: Option<egui::Vec2>,
+    /// A page to bring into view, in strip points from the top.
+    ///
+    /// `page next` set `scroll_pt` and nothing ever read it — the scroll area
+    /// owns its own offset — so going to a page changed which page was
+    /// *current* without moving the window to it.
+    scroll_to_pt: Option<f32>,
+    canvas_pt: egui::Vec2,
+    /// Every match, as (page, character range).
+    /// Where the current match is, waiting for the next frame to scroll to it.
+    ///
+    /// **A page to go to is not a word to show.** Find used to ask for the
+    /// page only, so on any page taller than the window the highlighted word
+    /// could be below the fold — reported from use as "it jumps to the page but
+    /// the match is not in view".
+    reveal: Option<Reveal>,
+    /// The markup revision at the last successful save. Anything above it is
+    /// work that closing would throw away.
+    saved_revision: u64,
+    /// A copy was asked for by something with no `egui::Context` to hand — a
+    /// typed `copy`, a ribbon button, a menu item. Carried out at the end of
+    /// the frame, where the context is available.
+    copy_wanted: bool,
+}
+
 struct DocTab {
     doc: Option<Doc>,
     markup: Markup,
@@ -701,24 +766,10 @@ struct DocTab {
     page: usize,
     zoom: ZoomMode,
     rotation: Rotation,
-    scroll_pt: f32,
-    /// Where the current page was last drawn on screen.
-    ///
-    /// Recorded because it is the only place that knows it: the mapping is
-    /// built inside the draw loop from the scroll offset and the zoom, and
-    /// nothing outside can reconstruct where a point on the page ended up. The
-    /// UI tests need it to put the pointer on a character.
-    last_view: Option<PageView>,
-    /// Where the page strip is scrolled to, kept so zooming can hold the point
-    /// under the cursor still.
-    scroll_offset: egui::Vec2,
     /// Where the reader was looking at the end of the last frame, so a change of
     /// zoom, window or pages puts them back at the same place on the page and
     /// not at the same pixel offset.
     view: Option<pagify_shell::reader::ViewSnapshot>,
-    /// Set when a zoom needs the scroll offset moved with it, applied on the
-    /// next frame's `ScrollArea`.
-    anchor_offset: Option<egui::Vec2>,
     /// The page editors: the one paragraph open for retyping **on the page**
     /// where it sits, and a brand new run being composed — see [`EditState`].
     edit: EditState,
@@ -734,6 +785,8 @@ struct DocTab {
     panels: PanelsState,
     /// The page selection and in-flight gestures — see [`SelectionState`].
     selection: SelectionState,
+    /// The page view — see [`ViewState`].
+    view_state: ViewState,
     /// Every page this document's own outline points at — read once and
     /// kept current rather than re-walked every frame, so the small icon
     /// `draw_pages` paints in a bookmarked page's corner costs a `HashSet`
@@ -751,51 +804,9 @@ struct DocTab {
     organize: OrganizeState,
     /// Zoom settling: how a new scale waits for renders — see [`ZoomState`].
     zoom_settle: ZoomState,
-    /// The mapping for the page under the pointer, and which page it is.
-    ///
-    /// Not always the current page, and the index matters: a `PageView` maps to
-    /// coordinates *within its own page*, so two views cannot be compared
-    /// without knowing which pages they belong to.
-    hover_view: Option<(usize, PageView)>,
-    /// The scroll area's own viewport, from the last frame.
-    ///
-    /// Zoom anchoring has to measure the pointer against the rectangle that is
-    /// actually scrolling, not the panel around it — they differ by the margins
-    /// and the scrollbar, and the difference shows up as the page creeping away
-    /// from the cursor as you zoom.
-    viewport_rect: Option<egui::Rect>,
-    /// A copy was asked for by something with no `egui::Context` to hand — a
-    /// typed `copy`, a ribbon button, a menu item. Carried out at the end of
-    /// the frame, where the context is available.
-    copy_wanted: bool,
-    /// Screen pixels the view should move by, accumulated from a pan gesture
-    /// and applied to the scroll area on the next frame.
-    ///
-    /// It has to go through the scroll area, because the scroll area owns the
-    /// offset. Hand mode used to write to `scroll_pt`, which nothing reads —
-    /// so dragging with the Hand tool moved nothing at all.
-    pan_by: Option<egui::Vec2>,
-    /// A page to bring into view, in strip points from the top.
-    ///
-    /// `page next` set `scroll_pt` and nothing ever read it — the scroll area
-    /// owns its own offset — so going to a page changed which page was
-    /// *current* without moving the window to it.
-    scroll_to_pt: Option<f32>,
-    canvas_pt: egui::Vec2,
 
 
 
-    /// Every match, as (page, character range).
-    /// Where the current match is, waiting for the next frame to scroll to it.
-    ///
-    /// **A page to go to is not a word to show.** Find used to ask for the
-    /// page only, so on any page taller than the window the highlighted word
-    /// could be below the fold — reported from use as "it jumps to the page but
-    /// the match is not in view".
-    reveal: Option<Reveal>,
-    /// The markup revision at the last successful save. Anything above it is
-    /// work that closing would throw away.
-    saved_revision: u64,
     /// The object tool, when it is in hand: `true` picks pictures before
     /// words under the pointer, `false` the other way round.
     ///
@@ -944,11 +955,8 @@ impl DocTab {
             page: 0,
             zoom: ZoomMode::Fit,
             rotation: Rotation::None,
-            scroll_pt: 0.0,
-            last_view: None,
-            scroll_offset: egui::Vec2::ZERO,
+            view_state: ViewState { hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, },
             view: None,
-            anchor_offset: None,
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
             panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
@@ -956,15 +964,7 @@ impl DocTab {
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
             zoom_settle: ZoomState { settling: 0, zoom_basis: 0, last_drawn_zoom: 0.0, zoom_changed_at: f64::NEG_INFINITY },
-            hover_view: None,
-            viewport_rect: None,
-            copy_wanted: false,
-            pan_by: None,
-            scroll_to_pt: None,
-            canvas_pt: egui::vec2(800.0, 600.0),
             selection: SelectionState { object_hover_handle: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, signature_hover_handle: None, placed_image_selected: None, placed_image_grab: None, placed_image_hover_handle: None, },
-            reveal: None,
-            saved_revision: 0,
             object_tool: None,
             selected: None,
             grab: None,
@@ -2928,7 +2928,7 @@ impl PagifyApp {
         } else if keys.copy && self.copy_editing_run(&ctx) {
             // handled — the run or paragraph open in the editor, copied whole
             // because nothing inside its box was selected.
-        } else if keys.copy || std::mem::take(&mut self.tab_mut().copy_wanted) {
+        } else if keys.copy || std::mem::take(&mut self.tab_mut().view_state.copy_wanted) {
             self.copy_selection(&ctx);
         }
         // See `clipboard_mirror_wanted`'s own doc comment: a page/object copy
@@ -3943,7 +3943,7 @@ impl PagifyApp {
         // -- the pages ---------------------------------------------------------
         let mut home_command: Option<String> = None;
         egui::CentralPanel::default_margins().show(ui, |ui| {
-            self.tab_mut().canvas_pt = ui.available_size();
+            self.tab_mut().view_state.canvas_pt = ui.available_size();
 
             // **The command box's own placeholder says "type a command" —
             // make that literally true from the first frame.** Nothing on
@@ -4175,8 +4175,8 @@ impl PagifyApp {
     ///
     /// Dragging the paper moves the paper, so the offset goes the other way.
     fn pan(&mut self, by: egui::Vec2) {
-        let total = self.tab_mut().pan_by.unwrap_or(egui::Vec2::ZERO) - by;
-        self.tab_mut().pan_by = Some(total);
+        let total = self.tab_mut().view_state.pan_by.unwrap_or(egui::Vec2::ZERO) - by;
+        self.tab_mut().view_state.pan_by = Some(total);
     }
 
     /// Ask what to do about unsaved marks, and do it.
@@ -4844,7 +4844,7 @@ impl PagifyApp {
     /// the window behind an open dialog.
     /// Marks that closing right now would discard, and the pages they are on.
     fn unsaved(&self) -> Option<(usize, usize)> {
-        if self.tab().markup.revision() == self.tab().saved_revision {
+        if self.tab().markup.revision() == self.tab().view_state.saved_revision {
             return None;
         }
         let (marks, pages) = self.tab().markup.unsaved();
@@ -7259,7 +7259,7 @@ impl PagifyApp {
             // is in the first screenful, and costs nothing when it is not.
             self.go_to(PageTarget::Number(page + 1));
         }
-        self.tab_mut().reveal = spot.map(|rect| Reveal { page, rect });
+        self.tab_mut().view_state.reveal = spot.map(|rect| Reveal { page, rect });
         // The match is also the selection, so ⌘C copies what was found.
         self.tab_mut().selection.text_selection = Some(range);
         let current_page = self.tab().page;
@@ -10708,7 +10708,7 @@ impl PagifyApp {
         let signatures_lost = if incremental { 0 } else { session.signature_count() };
         match session.save_to(&path, incremental) {
             Ok(()) => {
-                self.tab_mut().saved_revision = self.tab_mut().markup.revision();
+                self.tab_mut().view_state.saved_revision = self.tab_mut().markup.revision();
                 self.say_info(format!(
                     "saved {} ({stored} marks){}.",
                     path.display(),
@@ -12939,7 +12939,7 @@ impl PagifyApp {
         // frame earlier. A zoom between typing and pressing it would shift
         // the wrap very slightly; not worth guarding against for how rare
         // and how small a miss that is.
-        let scale = self.tab_mut().last_view.map(|v| v.scale).unwrap_or(1.0).max(0.01);
+        let scale = self.tab_mut().view_state.last_view.map(|v| v.scale).unwrap_or(1.0).max(0.01);
         let box_width_pt = new_text.rect.right - new_text.rect.left;
         let size_px = (new_text.size * scale).max(1.0);
 
@@ -13154,7 +13154,7 @@ impl PagifyApp {
             doc.strip = Strip::with_layout_turned(&sizes, PAGE_GAP_PT, layout, doc.strip.turned());
         }
         let scroll_to_pt = doc.strip.top_of(page);
-        self.tab_mut().scroll_to_pt = scroll_to_pt;
+        self.tab_mut().view_state.scroll_to_pt = scroll_to_pt;
         self.tab_mut().zoom_settle.settling = 3;
 
         self.say_info(match layout {

@@ -348,7 +348,7 @@ fn a_moved_tab_keeps_its_page_zoom_and_view() {
     let mut from = app_with(&["pages-ladder.pdf"]);
     from.submit("page 3");
     from.tab_mut().zoom = ZoomMode::Factor(2.0);
-    from.tab_mut().scroll_offset = vec2(0.0, 1234.0);
+    from.tab_mut().view_state.scroll_offset = vec2(0.0, 1234.0);
     from.tab_mut().ribbon = Tab::Edit;
     from.tab_mut().selection.text_selection = Some(3..9);
     let (page, zoom) = (from.tab().page, from.tab().zoom);
@@ -368,8 +368,8 @@ fn a_moved_tab_keeps_its_page_zoom_and_view() {
     assert_eq!(tab.selection.text_selection, Some(3..9), "the selection was lost");
     // The window it arrives in has never held this scroll position: it is asked
     // for on the first frame there.
-    assert_eq!(tab.anchor_offset, Some(vec2(0.0, 1234.0)), "the place on the page is not asked for again");
-    assert!(tab.viewport_rect.is_none(), "the old window's page area was carried into the new one");
+    assert_eq!(tab.view_state.anchor_offset, Some(vec2(0.0, 1234.0)), "the place on the page is not asked for again");
+    assert!(tab.view_state.viewport_rect.is_none(), "the old window's page area was carried into the new one");
 }
 
 /// The scroll position is held by the scroll area of the window the tab is in —
@@ -379,10 +379,10 @@ fn a_moved_tab_keeps_its_page_zoom_and_view() {
 fn a_moved_tab_comes_up_in_the_new_window_where_it_was_left_on_the_page() {
     let mut app = app_with(&["pages-ladder.pdf"]);
     app.tab_mut().zoom = ZoomMode::Factor(1.5);
-    app.tab_mut().anchor_offset = Some(vec2(0.0, 600.0));
+    app.tab_mut().view_state.anchor_offset = Some(vec2(0.0, 600.0));
     let mut h = harness_from(app);
     h.run_steps(6);
-    let left_at = h.state().tab().scroll_offset;
+    let left_at = h.state().tab().view_state.scroll_offset;
     assert!(left_at.y > 300.0, "test assumption: the first window did not scroll: {left_at:?}");
 
     let mut from = h.into_state();
@@ -391,7 +391,7 @@ fn a_moved_tab_comes_up_in_the_new_window_where_it_was_left_on_the_page() {
     to.take_in_tab(moving, None);
     let mut h = harness_from(to);
     h.run_steps(6);
-    let now = h.state().tab().scroll_offset;
+    let now = h.state().tab().view_state.scroll_offset;
     assert!(
         (now.y - left_at.y).abs() < 2.0,
         "the tab was left at {left_at:?} and came up at {now:?} in the other window"

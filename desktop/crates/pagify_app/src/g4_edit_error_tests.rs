@@ -52,7 +52,7 @@ fn a_character_on_screen(h: &mut Harness<'static, PagifyApp>) -> egui::Pos2 {
     let chars = app.characters(page).expect("no characters");
     let r = chars.line_rects(0..1).into_iter().next().expect("no character box");
     let mid = AppPoint { x: ((r.left + r.right) / 2.0) as f64, y: ((r.top + r.bottom) / 2.0) as f64 };
-    app.tab_mut().last_view.expect("the page was never drawn").to_screen(mid)
+    app.tab_mut().view_state.last_view.expect("the page was never drawn").to_screen(mid)
 }
 
 fn history(h: &Harness<'static, PagifyApp>) -> Vec<(String, bool)> {
@@ -92,7 +92,7 @@ fn editing_the_kerned_page(typed: &str) -> Harness<'static, PagifyApp> {
 /// Somewhere well clear of the open editor's own box, on bare paper.
 fn clear_of_the_editor(h: &Harness<'static, PagifyApp>) -> egui::Pos2 {
     let run = h.state().tab().edit.editing_run.clone().expect("no editor is open");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let corner = view.to_screen(AppPoint {
         x: run.rect.left.max(run.rect.right) as f64,
         y: run.rect.top.max(run.rect.bottom) as f64,
@@ -106,7 +106,7 @@ fn bare_paper_below_the_text(h: &Harness<'static, PagifyApp>) -> egui::Pos2 {
     let app = h.state();
     let runs = app.tab().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
     let lowest = runs.iter().map(|r| r.rect.top.max(r.rect.bottom)).fold(0.0f32, f32::max);
-    let view = app.tab().last_view.expect("page never drawn");
+    let view = app.tab().view_state.last_view.expect("page never drawn");
     view.to_screen(AppPoint { x: 40.0, y: (lowest + 30.0) as f64 })
 }
 
@@ -332,7 +332,7 @@ fn a_box_left_as_it_was_is_still_not_an_edit() {
 
 /// Where a click puts a paste down, on the page.
 fn page_spot(h: &Harness<'static, PagifyApp>, x: f64, y: f64) -> egui::Pos2 {
-    h.state().tab().last_view.expect("the page was never drawn").to_screen(AppPoint { x, y })
+    h.state().tab().view_state.last_view.expect("the page was never drawn").to_screen(AppPoint { x, y })
 }
 
 fn occurrences(h: &mut Harness<'static, PagifyApp>, words: &str) -> usize {

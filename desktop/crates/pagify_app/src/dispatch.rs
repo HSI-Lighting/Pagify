@@ -1042,7 +1042,7 @@ impl crate::PagifyApp {
             // at its own declaration).
             Verb::CopyText => {
                 if !self.copy_organize_selection() && !self.copy_object_selection() {
-                    self.tab_mut().copy_wanted = true;
+                    self.tab_mut().view_state.copy_wanted = true;
                 }
             }
             // Same precedence ⌘V's own keyboard dispatch already has: a

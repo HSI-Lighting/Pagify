@@ -80,7 +80,7 @@ fn a_character_on_screen(h: &mut Harness<'static, PagifyApp>) -> egui::Pos2 {
     let r = chars.line_rects(0..1).into_iter().next().expect("no character box");
     let mid = egui::pos2((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
 
-    let view = app.tab_mut().last_view.expect("the page was never drawn, so nothing can be clicked");
+    let view = app.tab_mut().view_state.last_view.expect("the page was never drawn, so nothing can be clicked");
     view.to_screen(AppPoint { x: mid.x as f64, y: mid.y as f64 })
 }
 
@@ -175,11 +175,11 @@ fn scrolling_through_pages_of_different_sizes_neither_changes_the_zoom_nor_flips
         // And once the scrolling stops (egui's smooth scroll takes a
         // moment to come to rest) nothing keeps moving.
         h.run_steps(60);
-        let (page, offset) = (h.state().tab().page, h.state().tab().scroll_offset);
+        let (page, offset) = (h.state().tab().page, h.state().tab().view_state.scroll_offset);
         for _ in 0..30 {
             h.run_steps(1);
             assert_eq!(
-                (h.state().tab().page, h.state().tab().scroll_offset),
+                (h.state().tab().page, h.state().tab().view_state.scroll_offset),
                 (page, offset),
                 "{mode:?}: the view is still moving with no input"
             );
@@ -1040,7 +1040,7 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
         "the page was never rendered at all: {before:?}"
     );
 
-    let centre = h.state().tab().viewport_rect.expect("the page was never drawn").center();
+    let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();
     h.input_mut().events.push(egui::Event::PointerMoved(centre));
     h.run_steps(1);
     for _ in 0..5 {
@@ -1152,7 +1152,7 @@ fn a_heavy_page_does_not_stop_the_frames_while_it_renders() {
     let mut h = async_harness(&path.to_string_lossy());
     let before = h.state().render_stats;
 
-    let centre = h.state().tab().viewport_rect.expect("the page was never drawn").center();
+    let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();
     h.input_mut().events.push(egui::Event::PointerMoved(centre));
     h.run_steps(1);
     h.input_mut().events.push(egui::Event::Zoom(1.6));
@@ -1226,7 +1226,7 @@ fn zoom_frame_times_on_a_real_file() {
     let path = path.to_string_lossy().into_owned();
     for asynchronous in [false, true] {
         let mut h = harness_60fps(&path, asynchronous);
-        let centre = h.state().tab().viewport_rect.expect("the page was never drawn").center();
+        let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();
         h.input_mut().events.push(egui::Event::PointerMoved(centre));
         h.run_steps(1);
 
@@ -1333,7 +1333,7 @@ fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
     h.state_mut()
         .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("kept");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     h.state_mut().submit("signature");
     h.run_steps(1);
@@ -1390,7 +1390,7 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
     h.state_mut()
         .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("kept");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     h.state_mut().submit("signature");
     h.run_steps(1);
@@ -1441,7 +1441,7 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
 #[test]
 fn dragging_an_object_handle_through_the_real_pointer_path_resizes_it() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     h.state_mut().submit("editobject");
     h.run_steps(1);
@@ -1486,7 +1486,7 @@ fn dragging_a_markup_shape_through_the_real_pointer_path_moves_it() {
     h.state_mut().submit("all");
     h.run_steps(3);
 
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let before = match &h.state().tab().markup.existing(0).unwrap().objects()[0].geom {
         cad_kernel::Geom::Line(l) => *l,
         other => panic!("{other:?}"),
@@ -1794,7 +1794,7 @@ fn right_aligned_text_lands_near_the_boxs_right_edge() {
 #[test]
 fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
     let mut h = harness("forms.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     h.state_mut().submit("editobject");
     h.run_steps(1);
 
@@ -1836,7 +1836,7 @@ fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
 #[test]
 fn dragging_an_unselected_picture_starts_a_marquee_not_a_grab() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     h.state_mut().submit("editobject");
     h.run_steps(1);
 
@@ -1862,7 +1862,7 @@ fn dragging_an_unselected_picture_starts_a_marquee_not_a_grab() {
 #[test]
 fn dragging_an_already_selected_pictures_body_still_moves_it() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     h.state_mut().submit("editobject");
     h.run_steps(1);
 
@@ -2072,7 +2072,7 @@ fn clicking_a_padlock_asks_for_the_passcode() {
         let app = h.state_mut();
         let items = app.locked_items_on(0);
         assert_eq!(items.len(), 1, "nothing was locked, so there is no badge");
-        (items[0].rect, app.tab_mut().last_view.expect("the page was never drawn"))
+        (items[0].rect, app.tab_mut().view_state.last_view.expect("the page was never drawn"))
     };
 
     // The badge sits at the middle of what it stands for.
@@ -2817,7 +2817,7 @@ fn zooming_holds_the_point_on_a_scrolling_document() {
     // directly measures the gap between pages, not the anchor.
     let strip_point = |h: &Harness<'static, PagifyApp>, at: egui::Pos2| {
         let app = h.state();
-        let (page, view) = app.tab().hover_view.expect("the pointer was over no page");
+        let (page, view) = app.tab().view_state.hover_view.expect("the pointer was over no page");
         let top = app.tab().doc.as_ref().expect("open").strip.top_of(page).unwrap_or(0.0) as f64;
         let on_page = view.to_page(at);
         (on_page.x, on_page.y + top)
@@ -2905,7 +2905,7 @@ fn the_page_is_still_drawn_at_extreme_zoom() {
         h.state_mut().tab_mut().zoom = ZoomMode::Factor(scale);
         h.run_steps(3);
         assert!(
-            h.state().tab().last_view.is_some(),
+            h.state().tab().view_state.last_view.is_some(),
             "nothing was drawn at {scale}x — the page disappeared"
         );
     }
@@ -2951,7 +2951,7 @@ fn the_page_can_still_be_pointed_at_when_zoomed_right_in() {
     h.state_mut().tab_mut().zoom = ZoomMode::Factor(14.0);
     h.run_steps(3);
 
-    let view = h.state().tab().last_view.expect("nothing drawn");
+    let view = h.state().tab().view_state.last_view.expect("nothing drawn");
     let at = egui::pos2(700.0, 600.0);
     let on_page = view.to_page(at);
     assert!(
@@ -2970,12 +2970,12 @@ fn a_page_smaller_than_the_window_is_centred() {
 
     let (view, page_w) = {
         let app = h.state();
-        let view = app.tab().last_view.expect("nothing drawn");
+        let view = app.tab().view_state.last_view.expect("nothing drawn");
         let (w, _) = app.tab().doc.as_ref().unwrap().strip.size_of(app.tab().page).unwrap();
         (view, w)
     };
 
-    let viewport = h.state().tab().viewport_rect.expect("no viewport");
+    let viewport = h.state().tab().view_state.viewport_rect.expect("no viewport");
     let left = view.origin.x;
     let right = left + page_w * view.scale;
     let before = left - viewport.left();
@@ -2996,8 +2996,8 @@ fn a_page_larger_than_the_window_is_not_centred() {
     h.state_mut().tab_mut().zoom = ZoomMode::Factor(8.0);
     h.run_steps(3);
 
-    let viewport = h.state().tab().viewport_rect.expect("no viewport");
-    let view = h.state().tab().last_view.expect("nothing drawn");
+    let viewport = h.state().tab().view_state.viewport_rect.expect("no viewport");
+    let view = h.state().tab().view_state.last_view.expect("nothing drawn");
     assert!(
         view.origin.x <= viewport.left() + 14.0,
         "an oversized page was padded away from the edge ({} vs {})",
@@ -3194,7 +3194,7 @@ fn typing_long_then_deleting_in_a_real_paragraph_does_not_corrupt_it() {
         .find(|r| r.text.contains("manufacturers"))
         .cloned()
         .expect("the 'COB' paragraph's own run was not found — has the fixture changed?");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let at = view.to_screen(AppPoint {
         x: ((target.rect.left + target.rect.right) / 2.0) as f64,
         y: ((target.rect.top + target.rect.bottom) / 2.0) as f64,
@@ -3287,7 +3287,7 @@ fn typing_long_then_deleting_in_a_real_paragraph_does_not_corrupt_it() {
     // may have scrolled to keep the caret in view, which would make the
     // transform captured before any of that stale.
     let page_size = h.state_mut().tab_mut().doc.as_ref().unwrap().session.page_size(0).expect("page size");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let far_corner = view.to_screen(AppPoint {
         x: (page_size.width_pt - 5.0) as f64,
         y: (page_size.height_pt - 5.0) as f64,
@@ -3353,7 +3353,7 @@ fn clicking_away_from_the_editor_applies_it() {
 
     // Somewhere else on the page entirely, well clear of the editor's
     // own box.
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let box_right = view.to_screen(AppPoint {
         x: run.rect.left.max(run.rect.right) as f64,
         y: run.rect.top.max(run.rect.bottom) as f64,
@@ -3397,7 +3397,7 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
         AppPoint { x: ((run.rect.left + run.rect.right) / 2.0) as f64, y: ((run.rect.top + run.rect.bottom) / 2.0) as f64 }
     };
     let screen = |h: &mut Harness<'static, PagifyApp>, at: AppPoint| {
-        h.state().tab().last_view.expect("the page was never drawn").to_screen(at)
+        h.state().tab().view_state.last_view.expect("the page was never drawn").to_screen(at)
     };
 
     // The left column opens...
@@ -3542,7 +3542,7 @@ fn arming_and_click_to_apply_work_on_the_real_camino_page() {
 
     // Somewhere else on the page entirely, well clear of the editor's
     // own box — same technique as `clicking_away_from_the_editor_applies_it`.
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let box_right = view.to_screen(AppPoint {
         x: run.rect.left.max(run.rect.right) as f64,
         y: run.rect.top.max(run.rect.bottom) as f64,
@@ -3594,7 +3594,7 @@ fn opening_the_font_picker_takes_focus_off_the_run_editor() {
     // already auto-focused on open, and clicking back into it here
     // should simply leave it that way, before the rest of this test
     // proves the font picker takes the caret back off it.
-    let view = h.state().tab().last_view.expect("the page was drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
     let middle = view.to_screen(AppPoint {
         x: ((run.rect.left + run.rect.right) / 2.0) as f64,
         y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
@@ -3724,7 +3724,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
     assert!(h.state().tab().tool.is_some(), "the tool was not armed");
 
     // Nothing to preview before the first click.
-    let view = h.state().tab().last_view.expect("the page was drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
     let start = view.to_screen(AppPoint { x: 100.0, y: 100.0 });
     click(&mut h, start);
     h.run_steps(2);
@@ -3792,7 +3792,7 @@ fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
     let target = {
         let app = h.state();
         let doc = app.tab().doc.as_ref().expect("open");
-        let view = app.tab().last_view.expect("the page was drawn");
+        let view = app.tab().view_state.last_view.expect("the page was drawn");
         let here = doc.strip.top_of(armed_for).expect("a top");
         let next = armed_for + 1;
         let (Some(top), Some((w, height))) =
@@ -3862,7 +3862,7 @@ fn a_drawing_tool_still_snaps_to_what_is_there() {
     // Points inside the page, worked out from where it was actually drawn
     // — a guessed screen position lands off a 200pt-wide sheet.
     let (a, b) = {
-        let view = h.state().tab().last_view.expect("page never drawn");
+        let view = h.state().tab().view_state.last_view.expect("page never drawn");
         (
             view.to_screen(AppPoint { x: 40.0, y: 60.0 }),
             view.to_screen(AppPoint { x: 150.0, y: 60.0 }),
@@ -4083,7 +4083,7 @@ fn clicking_bare_paper_says_there_is_no_text_there() {
             .iter()
             .map(|r| r.rect.top.max(r.rect.bottom))
             .fold(0.0f32, f32::max);
-        let view = app.tab().last_view.expect("page never drawn");
+        let view = app.tab().view_state.last_view.expect("page never drawn");
         view.to_screen(AppPoint { x: 40.0, y: (lowest + 30.0) as f64 })
     };
     click(&mut h, below);
@@ -4273,7 +4273,7 @@ fn zooming_holds_the_point_under_the_cursor() {
     h.run_steps(3);
 
     let at = egui::pos2(700.0, 600.0);
-    let before = h.state().tab().last_view.expect("page never drawn").to_page(at);
+    let before = h.state().tab().view_state.last_view.expect("page never drawn").to_page(at);
 
     pinch_at(&mut h, at, 1.06, 8);
 
@@ -4284,7 +4284,7 @@ fn zooming_holds_the_point_under_the_cursor() {
         app.resolved_zoom()
     );
 
-    let after = app.tab().last_view.expect("page never drawn").to_page(at);
+    let after = app.tab().view_state.last_view.expect("page never drawn").to_page(at);
     let drift = ((after.x - before.x).powi(2) + (after.y - before.y).powi(2)).sqrt();
     assert!(
         drift < 6.0,
@@ -4310,11 +4310,11 @@ fn zooming_out_holds_the_point_too() {
     // difference measures the clamp instead of the thing it is named after.
     h.state_mut().tab_mut().zoom = ZoomMode::Factor(10.0);
     h.run_steps(3);
-    h.state_mut().tab_mut().anchor_offset = Some(egui::vec2(1200.0, 2500.0));
+    h.state_mut().tab_mut().view_state.anchor_offset = Some(egui::vec2(1200.0, 2500.0));
     h.run_steps(3);
 
     let at = egui::pos2(700.0, 600.0);
-    let before = h.state().tab().last_view.expect("page never drawn").to_page(at);
+    let before = h.state().tab().view_state.last_view.expect("page never drawn").to_page(at);
 
     pinch_at(&mut h, at, 0.985, 6);
 
@@ -4325,7 +4325,7 @@ fn zooming_out_holds_the_point_too() {
         app.resolved_zoom()
     );
 
-    let after = app.tab().last_view.expect("page never drawn").to_page(at);
+    let after = app.tab().view_state.last_view.expect("page never drawn").to_page(at);
     let drift = ((after.x - before.x).powi(2) + (after.y - before.y).powi(2)).sqrt();
     assert!(
         drift < 6.0,
@@ -4334,7 +4334,7 @@ fn zooming_out_holds_the_point_too() {
         after.x - before.x,
         after.y - before.y,
         app.resolved_zoom(),
-        app.tab().scroll_offset
+        app.tab().view_state.scroll_offset
     );
 }
 
@@ -4352,7 +4352,7 @@ fn actual_size_matches_the_96_dpi_convention_other_readers_use() {
     let mut h = harness("text-lines.pdf");
     h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.0);
     h.run_steps(3);
-    let scale = h.state().tab().last_view.expect("page never drawn").scale;
+    let scale = h.state().tab().view_state.last_view.expect("page never drawn").scale;
     assert!(
         (scale - 96.0 / 72.0).abs() < 0.01,
         "1.0 (\"100%\") should put 96/72 screen units on one PDF point, got {scale}"
@@ -4369,7 +4369,7 @@ fn the_middle_button_pans() {
     // and would have made this test pass for the wrong reason.
     h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
     h.run_steps(3);
-    let before = h.state().tab().scroll_offset;
+    let before = h.state().tab().view_state.scroll_offset;
 
     // Comfortably inside the page's own on-screen rect, not just the
     // viewport's — `DISPLAY_DPI_SCALE` (§ its own doc) widened a page at
@@ -4379,7 +4379,7 @@ fn the_middle_button_pans() {
     let from = egui::pos2(1000.0, 500.0);
     drag_with(&mut h, egui::PointerButton::Middle, from, from - egui::vec2(0.0, 200.0));
 
-    let after = h.state().tab().scroll_offset;
+    let after = h.state().tab().view_state.scroll_offset;
     assert!(
         (after.y - before.y).abs() > 20.0,
         "the middle button did not move the view ({before:?} -> {after:?})"
@@ -4415,12 +4415,12 @@ fn hand_mode_actually_moves_the_page() {
     h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
     h.state_mut().submit("hand");
     h.run_steps(3);
-    let before = h.state().tab().scroll_offset;
+    let before = h.state().tab().view_state.scroll_offset;
 
     let from = egui::pos2(1000.0, 500.0);
     drag(&mut h, from, from - egui::vec2(0.0, 200.0));
 
-    let after = h.state().tab().scroll_offset;
+    let after = h.state().tab().view_state.scroll_offset;
     assert!(
         (after.y - before.y).abs() > 20.0,
         "Hand did not move the page ({before:?} -> {after:?})"
@@ -4565,7 +4565,7 @@ fn a_placed_picture_is_selected_and_moved_by_the_object_tool() {
         h.state_mut().tab_mut().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks")
     };
     let before = marks(&mut h).remove(0);
-    let view = h.state_mut().tab_mut().last_view.expect("the page was never drawn");
+    let view = h.state_mut().tab_mut().view_state.last_view.expect("the page was never drawn");
     let centre = view.to_screen(AppPoint {
         x: ((before.rect.left + before.rect.right) / 2.0) as f64,
         y: ((before.rect.top + before.rect.bottom) / 2.0) as f64,
@@ -4608,7 +4608,7 @@ fn click_holding(h: &mut Harness<'static, PagifyApp>, at: egui::Pos2, modifiers:
 }
 
 fn screen_centre(h: &mut Harness<'static, PagifyApp>, r: pdf_core::document::Rect) -> egui::Pos2 {
-    let view = h.state_mut().tab_mut().last_view.expect("the page was never drawn");
+    let view = h.state_mut().tab_mut().view_state.last_view.expect("the page was never drawn");
     view.to_screen(AppPoint {
         x: ((r.left + r.right) / 2.0) as f64,
         y: ((r.top + r.bottom) / 2.0) as f64,

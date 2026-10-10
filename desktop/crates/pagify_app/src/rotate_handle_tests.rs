@@ -4,7 +4,7 @@ use super::*;
 /// Select the first picture of `pictures.pdf` through a real click.
 fn picture_selected() -> (egui_kittest::Harness<'static, PagifyApp>, PageView, pdf_core::document::Rect) {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     h.state_mut().submit("editobject");
     h.run_steps(1);
     let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
