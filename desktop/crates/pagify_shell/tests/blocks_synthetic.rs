@@ -1252,36 +1252,7 @@ impl Case {
 
     /// Internal consistency of the expectations (they must be a partition of the page's fragments).
     fn consistency(&self) -> Vec<String> {
-        let mut out: Vec<String> = vec![];
-        let page = &self.page;
-        for w in &page.warnings {
-            out.push(format!("generator: {w}"));
-        }
-        if !self.dup_ids {
-            let mut seen = HashSet::new();
-            for f in &page.frags {
-                if !seen.insert(f.object) {
-                    out.push(format!("object id {} used twice", f.object));
-                }
-            }
-            for s in &page.shapes {
-                if !seen.insert(s.object) {
-                    out.push(format!("object id {} (shape) used twice", s.object));
-                }
-            }
-        }
-        if !self.degenerate {
-            for (l, f) in page.frag_labels.iter().zip(page.frags.iter()) {
-                if !finite_frag(f) {
-                    out.push(format!("fragment {l} has non-finite geometry in a non-degenerate case"));
-                }
-            }
-        }
-        for (l, f) in page.frag_labels.iter().zip(page.frags.iter()) {
-            if !self.degenerate && f.size <= 0.0 {
-                out.push(format!("fragment {l} has size {} in a non-degenerate case", f.size));
-            }
-        }
+        let mut out: Vec<String> = self.consistency_basics();
         let free: HashSet<&str> = self.free.iter().map(|s| s.as_str()).collect();
         let frag_labels: BTreeSet<&str> = page.frag_labels.iter().map(|s| s.as_str()).collect();
         for l in &self.free {
@@ -1412,6 +1383,42 @@ impl Case {
                         }
                     }
                 }
+            }
+        }
+        out
+    }
+
+    /// The pre-group half of [`Self::consistency`]: generator warnings,
+    /// duplicate ids, non-finite geometry and free labels that are not text.
+    fn consistency_basics(&self) -> Vec<String> {
+        let mut out: Vec<String> = vec![];
+        let page = &self.page;
+        for w in &page.warnings {
+            out.push(format!("generator: {w}"));
+        }
+        if !self.dup_ids {
+            let mut seen = HashSet::new();
+            for f in &page.frags {
+                if !seen.insert(f.object) {
+                    out.push(format!("object id {} used twice", f.object));
+                }
+            }
+            for s in &page.shapes {
+                if !seen.insert(s.object) {
+                    out.push(format!("object id {} (shape) used twice", s.object));
+                }
+            }
+        }
+        if !self.degenerate {
+            for (l, f) in page.frag_labels.iter().zip(page.frags.iter()) {
+                if !finite_frag(f) {
+                    out.push(format!("fragment {l} has non-finite geometry in a non-degenerate case"));
+                }
+            }
+        }
+        for (l, f) in page.frag_labels.iter().zip(page.frags.iter()) {
+            if !self.degenerate && f.size <= 0.0 {
+                out.push(format!("fragment {l} has size {} in a non-degenerate case", f.size));
             }
         }
         out
