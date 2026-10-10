@@ -8,7 +8,7 @@ use crate::{
     signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, SignatureList,
     SignaturePad, SnippetList, Tab, Tool,
 };
-use pagify_shell::command_plan::Effect;
+use pagify_shell::command_plan::{CommandEnv, Effect};
 use pagify_shell::command::{Dispatch, Kind};
 use pagify_shell::verbs::{self, SignatureAction, Verb};
 
@@ -53,23 +53,13 @@ impl crate::PagifyApp {
     pub(crate) fn act(&mut self, verb: Verb) {
         // Phase 4b: the document/view/app verbs are planned in the shell
         // (DESIGN_REVIEW.md §3.4); everything else still routes below.
-        if let Some(effects) = pagify_shell::command_plan::plan(&verb) {
+        if let Some(effects) = pagify_shell::command_plan::plan(&verb, &self.command_env()) {
             for effect in effects {
                 self.apply_effect(effect);
             }
             return;
         }
         match verb {
-            Verb::Pick(..)
-            | Verb::Sensitivity(..)
-            | Verb::FillSign(..)
-            | Verb::PredefinedText(..)
-            | Verb::EditObject
-            | Verb::MoveThing
-            | Verb::SignLine
-            | Verb::SignRectangle
-            | Verb::DocumentStatus
-            => self.act_tools(verb),
             Verb::SessionLog
             | Verb::ApplySignatures
             | Verb::ManageSignatures(..)
@@ -136,6 +126,26 @@ impl crate::PagifyApp {
             => self.act_text_and_find(verb),
             // Ported domains never reach here: `plan` above claimed them.
             other => unreachable!("an unplanned verb fell through the router: {other:?}"),
+        }
+    }
+
+
+    /// The small snapshot the shell's `plan` needs to decide a verb's
+    /// effects: guards, current page and its height, and whether a pick is
+    /// waiting.
+    fn command_env(&self) -> CommandEnv {
+        let tab = self.tab();
+        let page = tab.view_state.page;
+        CommandEnv {
+            has_doc: tab.doc.is_some(),
+            page,
+            page_height: tab
+                .doc
+                .as_ref()
+                .and_then(|d| d.strip.size_of(page))
+                .map(|(_, h)| h as f64)
+                .unwrap_or(792.0),
+            tool_armed: tab.tool.is_some(),
         }
     }
 
@@ -288,41 +298,11 @@ impl crate::PagifyApp {
             }
             Effect::StopRecording => self.stop_recording(),
             Effect::Replay(path) => self.replay(&path),
-        }
-    }
-
-
-    /// One domain of [`Self::act`]: 9 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_tools(&mut self, verb: Verb) {
-        match verb {
-            Verb::Pick(at) => {
-                if self.tab_mut().tool.is_none() {
-                    self.say_error("nothing is waiting for a click.");
-                    return;
-                }
-                // A typed pick is in the *same* coordinates as a typed draw
-                // command — `l 30,250 170,250` and `pick 100,250` must refer to
-                // the same place, or every scripted pick misses. That is the
-                // kernel's page space, y up from the bottom-left, which is also
-                // the PDF's own convention.
-                //
-                // Pointer picks arrive in app space instead, so this is the one
-                // place that converts, through the module that owns the flip.
-                let page = self.tab_mut().view_state.page;
-                let height = self.tab_mut()
-                    .doc
-                    .as_ref()
-                    .and_then(|d| d.strip.size_of(page))
-                    .map(|(_, h)| h as f64)
-                    .unwrap_or(792.0);
-                let space = pagify_shell::page_space::PageSpace::new(height);
-                let in_app = space.from_kernel(cad_kernel::Vec2::new(at.x, at.y));
-                self.take_pick(in_app);
-            }
-            Verb::Sensitivity(what) => self.act_sensitivity(what),
-            Verb::FillSign(what) => self.act_fill_sign(what),
-            Verb::PredefinedText(words) => match words {
+            Effect::SayError(text) => self.say_error(text),
+            Effect::TakePick(at) => self.take_pick(at),
+            Effect::Sensitivity(what) => self.act_sensitivity(what),
+            Effect::FillSign(what) => self.act_fill_sign(what),
+            Effect::PredefinedText(words) => match words {
                 Some(text) => self.use_snippet(&text),
                 None => {
                     self.library_state.snippets = Some(SnippetList::default());
@@ -334,46 +314,18 @@ impl crate::PagifyApp {
                     }
                 }
             },
-            Verb::EditObject => {
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.take_up_object_tool(true, page);
-            }
-            Verb::MoveThing => {
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.take_up_object_tool(false, page);
-            }
-            Verb::SignLine => {
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.arm_tool(Tool::SignLine, page);
-            }
-            Verb::SignRectangle => {
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.arm_tool(Tool::SignRectangle, page);
-            }
-            Verb::DocumentStatus => {
+            Effect::TakeUpObjectTool { edit, page } => self.take_up_object_tool(edit, page),
+            Effect::ArmSignLine { page } => self.arm_tool(Tool::SignLine, page),
+            Effect::ArmSignRectangle { page } => self.arm_tool(Tool::SignRectangle, page),
+            Effect::ReportDocumentStatus => {
                 for line in self.document_status() {
                     self.say_info(line);
                 }
             }
-            _ => unreachable!("act_tools was handed a verb from another domain"),
         }
     }
+
+
 
     /// What `sensitivity` does. Moved out of `act_tools` whole.
     fn act_sensitivity(&mut self, what: Option<String>) {
