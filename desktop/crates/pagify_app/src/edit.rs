@@ -1066,60 +1066,8 @@ impl crate::PagifyApp {
         }
         let borrowed: Vec<&[u8]> = faces.iter().map(Vec::as_slice).collect();
         let (area, widened) = self.widen_outlined_word_area(page, area, &borrowed)?;
+        self.clear_outlined_shapes(page, area, &borrowed)?;
         let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
-
-        // **Taken off by the operators that draw them — not redacted.**
-        //
-        // This was a `Command::Redact`, which rebuilds the page's whole content
-        // stream from PDFium's object model, and on a page from Illustrator that
-        // rebuild is lossy. Reported from use as "the app completely destroys
-        // the pdf" after replacing one drawn word: the picture, the left column
-        // and most of the text gone and what was left shifted — measured on the
-        // page, a quarter of its pixels changed and 3,031 text runs became
-        // 2,985. What lay in the area was **one path**. `RemoveObjects` cuts
-        // exactly the operators that draw the shapes out of the stream and
-        // touches nothing else, and where it cannot follow the page it refuses
-        // before writing a byte.
-        //
-        // What the area still *crosses* is a drawn letter half taken off, and a
-        // half-replaced word is worse than a refusal — refused, as it was.
-        if let Ok(report) = doc.session.preview_redaction(page, area, &borrowed) {
-            if !report.uncleared.is_empty() {
-                return Err(
-                    "some of these drawn words reach past the part of the page that can be taken \
-                     off cleanly, so replacing them would leave half of them behind. Nothing was \
-                     changed."
-                        .into(),
-                );
-            }
-        }
-        let inside = |r: &pdf_core::document::Rect| {
-            const SLACK_PT: f32 = 0.5;
-            r.left >= area.left - SLACK_PT
-                && r.right <= area.right + SLACK_PT
-                && r.top >= area.top - SLACK_PT
-                && r.bottom <= area.bottom + SLACK_PT
-        };
-        let shapes: Vec<usize> = doc
-            .session
-            .drawn_objects(page)
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|d| matches!(d.kind, pdf_core::document::DrawnKind::Shape) && d.depth == 0 && inside(&d.rect))
-            .map(|d| d.object)
-            .collect();
-        if shapes.is_empty() {
-            return Err(
-                "no drawn shape lies wholly inside that part of the page, so there is nothing to \
-                 take off. Nothing was changed."
-                    .into(),
-            );
-        }
-        doc.session
-            .execute(pdf_core::command::Command::RemoveObjects { page_index: page, objects: shapes })
-            .map_err(|e| {
-                format!("the drawn words could not be taken off the page, so nothing was changed — {e}")
-            })?;
 
         // **The document's own face, where it can draw these letters.**
         //
@@ -1264,6 +1212,57 @@ impl crate::PagifyApp {
                 ""
             }
         ))
+    }
+
+    /// Take the drawn shapes off the page for an outlined-word replacement:
+    /// check the redaction preview clears them whole, collect the depth-0
+    /// shapes wholly inside the area, and remove them. Moved out of
+    /// `replace_outlined_word`.
+    fn clear_outlined_shapes(
+        &mut self,
+        page: usize,
+        area: pdf_core::document::Rect,
+        borrowed: &[&[u8]],
+    ) -> Result<(), String> {
+        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
+        if let Ok(report) = doc.session.preview_redaction(page, area, &borrowed) {
+            if !report.uncleared.is_empty() {
+                return Err(
+                    "some of these drawn words reach past the part of the page that can be taken \
+                     off cleanly, so replacing them would leave half of them behind. Nothing was \
+                     changed."
+                        .into(),
+                );
+            }
+        }
+        let inside = |r: &pdf_core::document::Rect| {
+            const SLACK_PT: f32 = 0.5;
+            r.left >= area.left - SLACK_PT
+                && r.right <= area.right + SLACK_PT
+                && r.top >= area.top - SLACK_PT
+                && r.bottom <= area.bottom + SLACK_PT
+        };
+        let shapes: Vec<usize> = doc
+            .session
+            .drawn_objects(page)
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .filter(|d| matches!(d.kind, pdf_core::document::DrawnKind::Shape) && d.depth == 0 && inside(&d.rect))
+            .map(|d| d.object)
+            .collect();
+        if shapes.is_empty() {
+            return Err(
+                "no drawn shape lies wholly inside that part of the page, so there is nothing to \
+                 take off. Nothing was changed."
+                    .into(),
+            );
+        }
+        doc.session
+            .execute(pdf_core::command::Command::RemoveObjects { page_index: page, objects: shapes })
+            .map_err(|e| {
+                format!("the drawn words could not be taken off the page, so nothing was changed — {e}")
+            })?;
+        Ok(())
     }
 
     /// Widen a redaction area so it contains every drawn path it crosses — a
