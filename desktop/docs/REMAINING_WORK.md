@@ -131,11 +131,14 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   (`pub use <family>::*`); moved items got `pub(super)`. Shell suite green
   (634/0) after every commit. Remaining splits are only the big shell test
   files, to do when next touched.
-6. **CI gates.** Only once the Windows suite is green: add a workflow running
-  `cargo test` (Windows runner, with `PAGIFY_PDFIUM_LIB`) plus clippy without
-  `-D warnings`; add `clippy.toml` (`too-many-lines-threshold = 150`,
-  `too-many-arguments-threshold = 7`, `type-complexity-threshold = 250`) and
-  gate new/changed files, not the whole tree.
+6. **CI gates.** Partial: `desktop/clippy.toml` carries the review's
+  thresholds (150 / 7 / 250, commit `c8e5434`) and
+  `desktop/docs/ci-checks.yml` is a ready-to-use compile+clippy workflow —
+  it could not be pushed into `.github/workflows/` because the push token
+  lacks the `workflow` scope; copy it there from a scoped clone. Full
+  gating still waits on a green Windows run: a Windows-runner job with
+  `PAGIFY_PDFIUM_LIB` running `cargo test`, then `-D warnings` scoped to
+  new/changed files, not the whole tree.
 
 ### 2.3 Known traps and small follow-ups
 
