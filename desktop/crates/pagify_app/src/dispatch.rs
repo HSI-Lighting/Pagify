@@ -28,7 +28,7 @@ impl crate::PagifyApp {
         // thing said, in red for an error, on the line under the buttons; and
         // the arrow beside the input opens the rest whenever it is wanted.
         let text = text.into();
-        self.errors_said += 1;
+        self.ui_state.errors_said += 1;
         self.session_log.record("error", &text);
         self.cmd.say(Kind::Error, text);
     }
@@ -243,7 +243,7 @@ impl crate::PagifyApp {
             Verb::PredefinedText(words) => match words {
                 Some(text) => self.use_snippet(&text),
                 None => {
-                    self.snippets = Some(SnippetList::default());
+                    self.library_state.snippets = Some(SnippetList::default());
                     if self.predefined.is_empty() {
                         self.say_info(
                             "nothing kept yet — type some words into the window, or \
@@ -395,7 +395,7 @@ impl crate::PagifyApp {
             Verb::ManageSignatures(what) => self.act_manage_signatures(what),
             Verb::Signature(SignatureAction::Draw) => {
                 let first = self.signatures.current().is_none();
-                self.pad = Some(SignaturePad {
+                self.library_state.pad = Some(SignaturePad {
                     name: if first {
                         "Signature".to_string()
                     } else {
@@ -419,7 +419,7 @@ impl crate::PagifyApp {
                 // Nothing drawn or uploaded yet needs a signature made before
                 // it can be placed. Placing does not.
                 if self.signatures.current().is_none() {
-                    self.pad = Some(SignaturePad {
+                    self.library_state.pad = Some(SignaturePad {
                         name: "Signature".to_string(),
                         // Somebody who typed bare `signature` wanted to sign,
                         // not to draw; carrying on to the click is the rest
@@ -514,7 +514,7 @@ impl crate::PagifyApp {
                 use pagify_shell::verbs::Signatures as What;
                 match what {
                     What::Open => {
-                        self.signature_list = Some(SignatureList::default());
+                        self.library_state.signature_list = Some(SignatureList::default());
                         if self.signatures.is_empty() {
                             self.say_info("no signatures yet — the window has a button to draw one.");
                         }
@@ -608,8 +608,8 @@ impl crate::PagifyApp {
                 }
             }
             Verb::ToggleFill => {
-                self.draw_fill = !self.draw_fill;
-                self.say_info(if self.draw_fill {
+                self.prefs_state.draw_fill = !self.prefs_state.draw_fill;
+                self.say_info(if self.prefs_state.draw_fill {
                     "fill: on — the next rectangle or circle is drawn filled."
                 } else {
                     "fill: off — the next rectangle or circle is drawn hollow."
@@ -923,8 +923,8 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.show_layers = !self.show_layers;
-                if self.show_layers {
+                self.ui_state.show_layers = !self.ui_state.show_layers;
+                if self.ui_state.show_layers {
                     self.forget_layers();
                     let page = self.tab().view_state.page;
                     let count = self.layers_on(page).len();

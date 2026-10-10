@@ -592,7 +592,7 @@ fn with_signature_pad(name: &str, label: &str) -> (PagifyApp, std::path::PathBuf
         .join(format!("pagify-test-signatures-{}-{label}.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
     app.signatures = Default::default();
-    app.signatures_path = Some(path.clone());
+    app.library_state.signatures_path = Some(path.clone());
     (app, path)
 }
 
@@ -613,9 +613,9 @@ fn signature_with_nothing_drawn_yet_opens_the_pad() {
     let (mut app, _path) = with_signature_pad("two-column.pdf", "opens-pad");
     app.submit("signature");
 
-    assert!(app.pad.is_some(), "the pad did not open:\n{}", said(&app));
+    assert!(app.library_state.pad.is_some(), "the pad did not open:\n{}", said(&app));
     assert!(
-        app.pad.as_ref().is_some_and(|p| p.then_place),
+        app.library_state.pad.as_ref().is_some_and(|p| p.then_place),
         "it will not carry on to the click somebody wanted"
     );
     assert!(app.tab_mut().tool.is_none(), "it armed a click with nothing to place");
@@ -632,7 +632,7 @@ fn a_drawn_signature_places_on_the_line_that_was_clicked() {
 
     // Now the tool places rather than opening the pad again.
     app.submit("signature");
-    assert!(app.pad.is_none(), "it opened the pad over a signature it already had");
+    assert!(app.library_state.pad.is_none(), "it opened the pad over a signature it already had");
     assert!(
         matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Signature)),
         "the tool was not armed:\n{}",
@@ -693,7 +693,7 @@ fn an_uploaded_signature_places_as_a_picture_on_the_line_that_was_clicked() {
     // The tool places rather than opening the pad, exactly as it does
     // for a drawn signature.
     app.submit("signature");
-    assert!(app.pad.is_none(), "it opened the pad over a signature it already had");
+    assert!(app.library_state.pad.is_none(), "it opened the pad over a signature it already had");
     assert!(
         matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Signature)),
         "the tool was not armed:
@@ -2344,7 +2344,7 @@ fn with_snippets(name: &str, label: &str) -> (PagifyApp, std::path::PathBuf) {
         .join(format!("pagify-test-predefined-{}-{label}.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
     app.predefined = Default::default();
-    app.predefined_path = Some(path.clone());
+    app.library_state.predefined_path = Some(path.clone());
     (app, path)
 }
 
@@ -2406,7 +2406,7 @@ fn writing_text_on_a_page_does_not_keep_it() {
 fn the_predefined_text_panel_opens_and_says_when_it_is_empty() {
     let (mut app, path) = with_snippets("two-column.pdf", "panel");
     app.submit("predefinedtext");
-    assert!(app.snippets.is_some(), "the panel did not open");
+    assert!(app.library_state.snippets.is_some(), "the panel did not open");
     assert!(said(&app).contains("nothing kept yet"), "{}", said(&app));
     let _ = std::fs::remove_file(&path);
 }
@@ -4739,7 +4739,7 @@ fn listing_signatures_says_which_one_is_current() {
 fn the_signature_panel_opens_and_says_when_it_is_empty() {
     let (mut app, path) = with_signature_pad("two-column.pdf", "panel");
     app.submit("managesignatures");
-    assert!(app.signature_list.is_some(), "the panel did not open");
+    assert!(app.library_state.signature_list.is_some(), "the panel did not open");
     assert!(said(&app).contains("no signatures yet"), "{}", said(&app));
     let _ = std::fs::remove_file(&path);
 }
@@ -5057,7 +5057,7 @@ fn a_recording_named_like_a_path_is_refused_and_a_good_one_lands_in_pagifys_fold
 
     let dir = std::env::temp_dir().join(format!("pagify-scripts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.scripts_dir = Some(dir.clone());
+    app.library_state.scripts_dir = Some(dir.clone());
     app.submit("record stamp every page");
     app.submit("rotate 90");
     app.submit("stop");
@@ -5758,10 +5758,10 @@ fn locking_a_selection_across_lines_sends_the_lines_not_their_union() {
 #[test]
 fn layers_lists_what_the_page_draws() {
     let mut app = app("pictures.pdf");
-    assert!(!app.show_layers, "it should start closed");
+    assert!(!app.ui_state.show_layers, "it should start closed");
 
     app.submit("layers");
-    assert!(app.show_layers, "`layers` did not open it:\n{}", said(&app));
+    assert!(app.ui_state.show_layers, "`layers` did not open it:\n{}", said(&app));
 
     let listed = app.layers_on(0).to_vec();
     assert_eq!(listed.len(), 5, "the fixture draws five things: {listed:#?}");
@@ -5771,7 +5771,7 @@ fn layers_lists_what_the_page_draws() {
     );
 
     app.submit("layers");
-    assert!(!app.show_layers, "it did not close again");
+    assert!(!app.ui_state.show_layers, "it did not close again");
 }
 
 /// **Restacking needs something picked**, and says so rather than guessing

@@ -588,7 +588,7 @@ impl Tool {
         points: &[AppPoint],
         height: f64,
     ) -> Result<String, String> {
-                let draw_fill = app.draw_fill;
+                let draw_fill = app.prefs_state.draw_fill;
                 let layer = app.tab_mut().markup.page(page, height);
                 layer.begin("draw");
                 let space = layer.space();

@@ -617,7 +617,7 @@ impl crate::PagifyApp {
     /// that named them would be a list of names for things that are already
     /// their own name.
     pub(crate) fn draw_snippet_list(&mut self, ctx: &egui::Context) {
-        let Some(mut panel) = self.snippets.take() else { return };
+        let Some(mut panel) = self.library_state.snippets.take() else { return };
 
         let mut done = false;
         let mut chosen: Option<String> = None;
@@ -733,7 +733,7 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.snippets = Some(panel);
+        self.library_state.snippets = Some(panel);
     }
 
     /// The list of signatures somebody has drawn.
@@ -743,7 +743,7 @@ impl crate::PagifyApp {
     /// places one on a page, so the preview is the thing itself rather than an
     /// impression of it.
     pub(crate) fn draw_signature_list(&mut self, ctx: &egui::Context) {
-        let Some(mut panel) = self.signature_list.take() else { return };
+        let Some(mut panel) = self.library_state.signature_list.take() else { return };
 
         let mut done = false;
         let mut action: Option<ListAction> = None;
@@ -900,7 +900,7 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.signature_list = Some(panel);
+        self.library_state.signature_list = Some(panel);
     }
 
     /// What the signature list asked for once its dialog closed: use, forget,
@@ -941,7 +941,7 @@ impl crate::PagifyApp {
                 }
             }
             Some(ListAction::Draw) => {
-                self.pad = Some(SignaturePad {
+                self.library_state.pad = Some(SignaturePad {
                     name: format!("Signature {}", self.signatures.entries().len() + 1),
                     then_place: false,
                     ..SignaturePad::default()
@@ -960,7 +960,7 @@ impl crate::PagifyApp {
     /// used to signing and because the line is what the placed signature will
     /// sit on — drawn here so the shape somebody sees is the shape they get.
     pub(crate) fn draw_signature_pad(&mut self, ctx: &egui::Context) {
-        let Some(mut pad) = self.pad.take() else { return };
+        let Some(mut pad) = self.library_state.pad.take() else { return };
 
         let mut keep = false;
         let mut gave_up = false;
@@ -1068,7 +1068,7 @@ impl crate::PagifyApp {
                     // Kept open with the strokes intact: throwing away what
                     // somebody drew because it was too small is the wrong way
                     // round.
-                    self.pad = Some(pad);
+                    self.library_state.pad = Some(pad);
                 }
             }
             return;
@@ -1077,7 +1077,7 @@ impl crate::PagifyApp {
             self.say_info("nothing was kept.");
             return;
         }
-        self.pad = Some(pad);
+        self.library_state.pad = Some(pad);
     }
 
     pub(crate) fn draw_passcode_dialog(&mut self, ctx: &egui::Context) {
@@ -1392,7 +1392,7 @@ impl crate::PagifyApp {
         // Not while the zoom is still moving: a detail made for a step it has
         // already left is a stall for nothing, and the one held — if there is
         // one — is drawn meanwhile, softer, where it was.
-        let moving = self.async_render && self.zoom_is_moving(ctx);
+        let moving = self.render_state.async_render && self.zoom_is_moving(ctx);
         if !reusable && !moving {
             let margin = egui::vec2(
                 visible_screen.width() * Self::DETAIL_MARGIN_FRAC,
@@ -1409,7 +1409,7 @@ impl crate::PagifyApp {
             let rendered_scale =
                 (region_step as f32 * pdf_core::render::cache::ZOOM_QUANTUM).min(region_scale);
 
-            if self.async_render {
+            if self.render_state.async_render {
                 // Off this thread, like the whole page: the visible part of a
                 // zoomed-in page is millions of pixels, and a render of it in the
                 // middle of a frame was a stall of its own. Not asked for again
@@ -1418,7 +1418,7 @@ impl crate::PagifyApp {
                 let Some(doc) = self.tab_mut().doc.as_ref() else { return };
                 let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
                 let pending_covers = self
-                    .renders
+                    .render_state.renders
                     .as_ref()
                     .and_then(|w| w.in_flight.get(&(doc_id, page, true)))
                     .is_some_and(|(step, _, pending)| {
@@ -1445,7 +1445,7 @@ impl crate::PagifyApp {
                     egui::TextureOptions::LINEAR,
                 );
                 doc.caches.detail = Some(DetailTile { page, zoom_step, crop, texture });
-                self.render_stats.detail_on_ui_thread += 1;
+                self.render_state.render_stats.detail_on_ui_thread += 1;
             }
         }
 

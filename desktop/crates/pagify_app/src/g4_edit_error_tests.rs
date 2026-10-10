@@ -79,7 +79,7 @@ const KERNED: &[u8] = b"BT /F1 12 Tf 72 700 Td [500 (Hello)] TJ ET";
 /// The editor open on the kerned page's run, `typed` already in its box.
 fn editing_the_kerned_page(typed: &str) -> Harness<'static, PagifyApp> {
     let mut h = opened("kerned.pdf", &page_with(KERNED, "", &[]));
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().submit("edittext");
     h.run_steps(1);
     let at = a_character_on_screen(&mut h);
@@ -207,7 +207,7 @@ fn a_refused_apply_reads_as_a_refusal_on_screen_not_as_a_missing_feature() {
 fn a_refused_paragraph_apply_reads_as_a_refusal_too() {
     let content = b"BT /F1 12 Tf 72 700 Td [500 (Same)] TJ (Same) Tj (Same) Tj (Same) Tj ET";
     let mut h = opened("paragraph.pdf", &page_with(content, "", &[]));
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().submit("edittext");
     h.run_steps(1);
     let at = a_character_on_screen(&mut h);
@@ -244,7 +244,7 @@ fn editing_first_thing_of(content: &[u8]) -> Harness<'static, PagifyApp> {
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let name = format!("typed-away-{}.pdf", NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
     let mut h = opened(&name, &page_with(content, "", &[]));
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().submit("edittext");
     h.run_steps(1);
     let at = a_character_on_screen(&mut h);
@@ -759,7 +759,7 @@ fn a_spelling_change_words_a_refusal_the_same_way() {
 #[test]
 fn a_click_on_bare_paper_stays_on_screen_beside_the_prompt_while_the_tool_is_armed() {
     let mut h = harness("text-lines.pdf");
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().submit("edittext");
     h.run_steps(1);
 
@@ -785,7 +785,7 @@ fn a_click_on_bare_paper_stays_on_screen_beside_the_prompt_while_the_tool_is_arm
 #[test]
 fn a_stale_error_does_not_stay_on_the_bar_once_the_tool_is_armed_afresh() {
     let mut h = harness("text-lines.pdf");
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().submit("edittext");
     h.run_steps(1);
     let below = bare_paper_below_the_text(&h);
@@ -810,7 +810,7 @@ fn a_stale_error_does_not_stay_on_the_bar_once_the_tool_is_armed_afresh() {
 #[test]
 fn the_click_that_closes_an_editor_picks_once_not_twice() {
     let mut h = harness("text-lines.pdf");
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().submit("edittext");
     h.run_steps(1);
     let at = a_character_on_screen(&mut h);

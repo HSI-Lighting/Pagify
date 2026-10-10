@@ -995,12 +995,12 @@ mod tests {
         let dir = scratch("window-bad");
         let mut h = running("single-page.pdf");
         let inbox = answering(&mut h, &dir);
-        let errors = h.state().errors_said;
+        let errors = h.state().ui_state.errors_said;
         let sent = write_request(&inbox, &asking_for(&["definitely-not-here.pdf"])).unwrap();
         assert!(run_until(&mut h, |_| is_gone(&sent)), "the request was not taken");
         h.step();
         let app = h.state();
-        assert!(app.errors_said > errors, "a document that failed to open said nothing");
+        assert!(app.ui_state.errors_said > errors, "a document that failed to open said nothing");
         assert_eq!(app.tabs.len(), 1, "a failed open added or removed a tab");
         assert!(app.tab().doc.is_some(), "a failed open closed the document that was open");
         let _ = fs::remove_dir_all(&dir);

@@ -272,8 +272,8 @@ fn narrowing_the_page_area_does_not_move_the_reader_in_width_zoom() {
         let (page, before) = (h.state().tab().view_state.page, middle_of_the_window_pt(&h));
         assert_eq!(page, 14, "{mode:?}: setup: the reader should be on page 15");
 
-        let rail = h.state().show_thumbs;
-        h.state_mut().show_thumbs = !rail;
+        let rail = h.state().ui_state.show_thumbs;
+        h.state_mut().ui_state.show_thumbs = !rail;
         h.run_steps(6);
         let after = middle_of_the_window_pt(&h);
         assert_eq!(h.state().tab().view_state.page, page, "{mode:?}: the reader was moved to another page");
@@ -283,7 +283,7 @@ fn narrowing_the_page_area_does_not_move_the_reader_in_width_zoom() {
         );
 
         // And putting it back puts them back.
-        h.state_mut().show_thumbs = rail;
+        h.state_mut().ui_state.show_thumbs = rail;
         h.run_steps(6);
         let again = middle_of_the_window_pt(&h);
         assert!((again - before).abs() < 2.0, "{mode:?}: {again} is not where it started, {before}");

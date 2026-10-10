@@ -1645,7 +1645,7 @@ impl crate::PagifyApp {
         // block then took the same, still-fresh click a second time.
         let mut answered_above = false;
         if (response.clicked() || response.drag_started()) && self.tab_mut().edit.editing_run.is_some() {
-            let errors_before = self.errors_said;
+            let errors_before = self.ui_state.errors_said;
             // Applies it — or, an edit the engine already refused and that has not
             // changed since, lets it go. An edit that is refused **stays open** with
             // its words, and then this click is no pick (below) and does nothing else.
@@ -1662,7 +1662,7 @@ impl crate::PagifyApp {
             // this same point, rather than left for a click that will not
             // come again on its own.
             if self.tab_mut().edit.editing_run.is_none() {
-                if self.errors_said != errors_before {
+                if self.ui_state.errors_said != errors_before {
                     // **Not when the apply was refused.** Whatever the pick
                     // under the click said next would cover the refusal, and
                     // the person would see nothing — the refusal is the
@@ -1708,7 +1708,7 @@ impl crate::PagifyApp {
         let first_point = self.tab().tool.as_ref().and_then(|p| p.points.first().copied());
         if let Some(layer) = self.tab().markup.existing(page).filter(|_| snapping) {
             let radius = HIT_TOLERANCE_PT * 3.0;
-            if let Some(snapped) = tools::snap_at(layer, at, radius, self.snaps, None, first_point) {
+            if let Some(snapped) = tools::snap_at(layer, at, radius, self.prefs_state.snaps, None, first_point) {
                 at = snapped.at;
                 self.tab_mut().selection.last_snap = Some(snapped);
             }
@@ -1719,8 +1719,8 @@ impl crate::PagifyApp {
                     at = tools::orthogonal(anchor, at);
                 }
             }
-            if self.grid_pt > 0.0 {
-                at = tools::to_grid(at, self.grid_pt);
+            if self.prefs_state.grid_pt > 0.0 {
+                at = tools::to_grid(at, self.prefs_state.grid_pt);
             }
         }
 
@@ -2114,13 +2114,13 @@ impl crate::PagifyApp {
                 self.context_menu_text(ui, page, over_text);
                 self.context_menu_protect(ui, over_text, over_image);
                 self.context_menu_layers(ui, page);
-                let shown = self.show_layers;
+                let shown = self.ui_state.show_layers;
                 if ui
                     .button(if shown { "Hide the layer list" } else { "Show all layers" })
                     .clicked()
                 {
-                    self.show_layers = !shown;
-                    if self.show_layers {
+                    self.ui_state.show_layers = !shown;
+                    if self.ui_state.show_layers {
                         self.forget_layers();
                     }
                     ui.close();

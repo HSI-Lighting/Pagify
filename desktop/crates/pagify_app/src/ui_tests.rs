@@ -465,11 +465,11 @@ fn an_error_leaves_the_history_shut_and_the_arrow_opens_and_folds_it() {
     use egui_kittest::kittest::Queryable;
 
     let mut h = harness("text-lines.pdf");
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().say_error("something went wrong here");
     h.run_steps(2);
 
-    assert!(!h.state().command_open, "an error opened the history");
+    assert!(!h.state().ui_state.command_open, "an error opened the history");
     // It is still where the reader is looking: the line under the buttons.
     assert!(
         h.query_by_label_contains("something went wrong here").is_some(),
@@ -479,12 +479,12 @@ fn an_error_leaves_the_history_shut_and_the_arrow_opens_and_folds_it() {
     let arrow = h.get_by_label("Show the history").rect();
     click(&mut h, arrow.center());
     h.run_steps(2);
-    assert!(h.state().command_open, "the arrow did not open the history");
+    assert!(h.state().ui_state.command_open, "the arrow did not open the history");
 
     let arrow = h.get_by_label("Hide the history").rect();
     click(&mut h, arrow.center());
     h.run_steps(2);
-    assert!(!h.state().command_open, "the arrow did not fold the history away");
+    assert!(!h.state().ui_state.command_open, "the arrow did not fold the history away");
 }
 
 /// **The rest of the ribbon drops down as the ribbon's own tiles.**
@@ -941,7 +941,7 @@ pub(crate) fn async_harness(path: &str) -> Harness<'static, PagifyApp> {
 pub(crate) fn harness_60fps(path: &str, asynchronous: bool) -> Harness<'static, PagifyApp> {
     let mut app = PagifyApp::new(Some(path));
     assert!(app.tab().doc.is_some(), "{path} did not open");
-    app.async_render = asynchronous;
+    app.render_state.async_render = asynchronous;
     let mut h = Harness::builder()
         .with_size(egui::vec2(1400.0, 1000.0))
         .with_step_dt(1.0 / 60.0)
@@ -962,7 +962,7 @@ pub(crate) fn until_a_render_lands(h: &mut Harness<'static, PagifyApp>, already:
     for _ in 0..600 {
         std::thread::sleep(std::time::Duration::from_millis(10));
         h.run_steps(1);
-        if h.state().render_stats.applied > already {
+        if h.state().render_state.render_stats.applied > already {
             return true;
         }
     }
@@ -985,7 +985,7 @@ pub(crate) fn until_a_render_drops(h: &mut Harness<'static, PagifyApp>, already:
     for _ in 0..3000 {
         std::thread::sleep(std::time::Duration::from_millis(10));
         h.run_steps(1);
-        if h.state().render_stats.dropped > already {
+        if h.state().render_state.render_stats.dropped > already {
             return true;
         }
     }
@@ -1032,7 +1032,7 @@ fn heavy_pdf(rects: usize) -> Vec<u8> {
 #[test]
 fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stops() {
     let mut h = async_harness(&fixture("two-column.pdf"));
-    let before = h.state().render_stats;
+    let before = h.state().render_state.render_stats;
     // The first look at a page is drawn from its thumbnail while the page
     // itself is rendered, or — with no thumbnail to show — rendered at once.
     assert!(
@@ -1048,7 +1048,7 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
         h.run_steps(1);
     }
 
-    let during = h.state().render_stats;
+    let during = h.state().render_state.render_stats;
     assert_eq!(during.on_ui_thread, before.on_ui_thread, "a zoom step rendered on the UI thread");
     assert_eq!(during.requested, before.requested, "a render was started while the zoom was still moving");
     assert!(
@@ -1059,9 +1059,9 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
     // Stopped: after the settle window a render is asked for, off this
     // thread, and lands.
     h.run_steps(12);
-    assert!(h.state().render_stats.requested > before.requested, "nothing was asked for once the zoom stopped");
+    assert!(h.state().render_state.render_stats.requested > before.requested, "nothing was asked for once the zoom stopped");
     assert!(until_a_render_lands(&mut h, before.applied), "the render never came back");
-    assert_eq!(h.state().render_stats.on_ui_thread, before.on_ui_thread, "it was rendered on the UI thread");
+    assert_eq!(h.state().render_state.render_stats.on_ui_thread, before.on_ui_thread, "it was rendered on the UI thread");
 }
 
 /// While the picture for the new size is being made, the page is drawn from
@@ -1072,12 +1072,12 @@ fn the_page_is_drawn_from_what_is_held_until_the_right_picture_arrives() {
     let mut h = async_harness(&fixture("two-column.pdf"));
     let ctx = h.ctx.clone();
     let held = h.state_mut().texture_for(&ctx, 0, 1.0).expect("a page");
-    let before = h.state().render_stats;
+    let before = h.state().render_state.render_stats;
 
     let meanwhile = h.state_mut().texture_for(&ctx, 0, 3.0).expect("a stand-in");
     assert_eq!(meanwhile.id(), held.id(), "something else was drawn while the right picture was made");
-    assert_eq!(h.state().render_stats.on_ui_thread, before.on_ui_thread, "it was rendered on the UI thread");
-    assert_eq!(h.state().render_stats.requested, before.requested + 1, "the right picture was not asked for");
+    assert_eq!(h.state().render_state.render_stats.on_ui_thread, before.on_ui_thread, "it was rendered on the UI thread");
+    assert_eq!(h.state().render_state.render_stats.requested, before.requested + 1, "the right picture was not asked for");
 
     assert!(until_a_render_lands(&mut h, before.applied), "the render never came back");
     let arrived = h.state_mut().texture_for(&ctx, 0, 3.0).expect("the page");
@@ -1108,13 +1108,13 @@ fn a_render_started_before_an_edit_is_never_put_on_screen() {
     let mut h = async_harness(&fixture("two-column.pdf"));
     let ctx = h.ctx.clone();
     let _ = h.state_mut().texture_for(&ctx, 0, 1.0).expect("a page");
-    let before = h.state().render_stats;
+    let before = h.state().render_state.render_stats;
 
     let _ = h.state_mut().texture_for(&ctx, 0, 3.0);
     // The page changes while the worker has it.
     h.state_mut().tab_mut().doc.as_mut().expect("doc").rendered_is_stale();
     assert!(until_a_render_drops(&mut h, before.dropped), "the stale render never came back");
-    let after = h.state().render_stats;
+    let after = h.state().render_state.render_stats;
     assert_eq!(after.dropped, before.dropped + 1, "the stale render was not dropped: {after:?}");
     assert!(
         h.state().tab().doc.as_ref().expect("doc").caches.textures.keys().all(|(_, step, _)| *step < 12),
@@ -1150,14 +1150,14 @@ fn a_heavy_page_does_not_stop_the_frames_while_it_renders() {
     }
 
     let mut h = async_harness(&path.to_string_lossy());
-    let before = h.state().render_stats;
+    let before = h.state().render_state.render_stats;
 
     let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();
     h.input_mut().events.push(egui::Event::PointerMoved(centre));
     h.run_steps(1);
     h.input_mut().events.push(egui::Event::Zoom(1.6));
     h.run_steps(12);
-    assert!(h.state().render_stats.requested > before.requested, "no render was started");
+    assert!(h.state().render_state.render_stats.requested > before.requested, "no render was started");
 
     let mut longest = std::time::Duration::ZERO;
     let mut landed = false;
@@ -1166,7 +1166,7 @@ fn a_heavy_page_does_not_stop_the_frames_while_it_renders() {
         let frame = std::time::Instant::now();
         h.run_steps(1);
         longest = longest.max(frame.elapsed());
-        if h.state().render_stats.applied > before.applied {
+        if h.state().render_state.render_stats.applied > before.applied {
             landed = true;
             break;
         }
@@ -1174,7 +1174,7 @@ fn a_heavy_page_does_not_stop_the_frames_while_it_renders() {
     }
     let _ = std::fs::remove_file(&path);
     assert!(landed, "the render never came back");
-    let slowest = h.state().render_stats.slowest_ms;
+    let slowest = h.state().render_state.render_stats.slowest_ms;
     assert!(slowest >= 150, "the page was not heavy enough to prove anything: a render took {slowest} ms");
     assert!(
         longest < std::time::Duration::from_millis(80),
@@ -1234,7 +1234,7 @@ fn zoom_frame_times_on_a_real_file() {
         let mut slow: Vec<String> = Vec::new();
         let mut note = |h: &Harness<'static, PagifyApp>, n: usize, took: std::time::Duration, before: RenderStats| {
             if took > std::time::Duration::from_millis(50) {
-                let now = h.state().render_stats;
+                let now = h.state().render_state.render_stats;
                 slow.push(format!(
                     "frame {n}: {took:.0?} (applied +{}, requested +{}, ui renders +{})",
                     now.applied - before.applied,
@@ -1245,7 +1245,7 @@ fn zoom_frame_times_on_a_real_file() {
         };
         for n in 0..12 {
             h.input_mut().events.push(egui::Event::Zoom(1.2));
-            let before = h.state().render_stats;
+            let before = h.state().render_state.render_stats;
             let t = std::time::Instant::now();
             h.run_steps(1);
             frames.push(t.elapsed());
@@ -1253,7 +1253,7 @@ fn zoom_frame_times_on_a_real_file() {
         }
         for n in 12..92 {
             std::thread::sleep(std::time::Duration::from_millis(10));
-            let before = h.state().render_stats;
+            let before = h.state().render_state.render_stats;
             let t = std::time::Instant::now();
             h.run_steps(1);
             frames.push(t.elapsed());
@@ -1269,7 +1269,7 @@ fn zoom_frame_times_on_a_real_file() {
             "{:>5}: longest frame {longest:>9.1?}, frames over 50 ms: {stalls:>2} of {}, time in frames {total:>9.1?}, {:?}",
             if asynchronous { "async" } else { "sync" },
             frames.len(),
-            h.state().render_stats
+            h.state().render_state.render_stats
         );
     }
 }
@@ -1329,7 +1329,7 @@ fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
         .join(format!("pagify-test-signatures-{}-real-drag.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
     h.state_mut().signatures = Default::default();
-    h.state_mut().signatures_path = Some(path.clone());
+    h.state_mut().library_state.signatures_path = Some(path.clone());
     h.state_mut()
         .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("kept");
@@ -1386,7 +1386,7 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
         .join(format!("pagify-test-signatures-{}-real-rotate.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
     h.state_mut().signatures = Default::default();
-    h.state_mut().signatures_path = Some(path.clone());
+    h.state_mut().library_state.signatures_path = Some(path.clone());
     h.state_mut()
         .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("kept");
@@ -2488,7 +2488,7 @@ fn selected_text_can_be_copied_with_the_keyboard() {
 fn a_page_selected_in_the_plain_rail_copies_without_opening_organize() {
     let mut h = harness("text-lines.pdf");
     h.state_mut().insert_page();
-    assert!(!h.state().organize_open, "the wider Organize grid was never opened");
+    assert!(!h.state().ui_state.organize_open, "the wider Organize grid was never opened");
 
     h.state_mut().tab_mut().organize.organize_selected = vec![0];
     h.event(egui::Event::Copy);
@@ -3072,7 +3072,7 @@ fn the_right_page_of_a_spread_is_its_own_page() {
 #[test]
 fn an_unbuilt_button_says_so_without_opening_the_history() {
     let mut h = harness("text-lines.pdf");
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().submit("add3d");
     h.run_steps(2);
 
@@ -3089,7 +3089,7 @@ fn an_unbuilt_button_says_so_without_opening_the_history() {
     );
 
     // And it has to be on screen, not merely in the log.
-    let shown = h.state().command_open;
+    let shown = h.state().ui_state.command_open;
     assert!(!shown, "the test is not exercising the collapsed bar");
     assert!(
         h.state().tab().tool.is_none(),
@@ -3834,7 +3834,7 @@ fn clicking_is_not_pulled_to_nearby_geometry() {
 
     // A grid coarse enough that any snapping would be unmistakable, and a
     // mark on the page so the snap engine has something to pull towards.
-    h.state_mut().grid_pt = 72.0;
+    h.state_mut().prefs_state.grid_pt = 72.0;
     h.state_mut().submit("l 20,20 300,300");
     h.run_steps(2);
 

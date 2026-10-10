@@ -1076,8 +1076,73 @@ struct ClipboardState {
     clipboard_mirror_wanted: bool,
 }
 
+/// Where the signature library, predefined-text and snippet files live on disk, and the
+/// open signature pad / list / snippet list.
+struct LibraryState {
+    signatures_path: Option<std::path::PathBuf>,
+    /// Where recorded scripts are written: Pagify's own folder, and nowhere
+    /// in a test.
+    scripts_dir: Option<std::path::PathBuf>,
+    /// The pad, while a signature is being drawn on it.
+    pad: Option<SignaturePad>,
+    /// The Manage Signatures panel, while it is open.
+    signature_list: Option<SignatureList>,
+    predefined_path: Option<std::path::PathBuf>,
+    /// The Predefined Text panel, while it is open.
+    snippets: Option<SnippetList>,
+}
+
+/// Preference defaults and the snap/grid settings the pointer obeys.
+struct PrefsState {
+    defaults: tools::Defaults,
+    /// Whether the next Rectangle or Circle is drawn filled solid rather than
+    /// hollow — chosen up front, on the Draw tab, before either tool is armed.
+    draw_fill: bool,
+    snaps: SnapSet,
+    grid_pt: f64,
+}
+
+/// The off-thread render worker, whether async rendering is on, and its stats.
+struct RenderState {
+    /// The thread that renders pages off the UI thread, started on first use —
+    /// see [`RenderWorker`].
+    renders: Option<RenderWorker>,
+    /// Whether pages are rendered off the UI thread at all. On everywhere but
+    /// in the tests, where a render that lands on some later frame would make
+    /// every test that looks at what was drawn depend on timing; the tests that
+    /// are about this turn it on.
+    async_render: bool,
+    render_stats: RenderStats,
+}
+
+/// The app-wide UI toggles: the thumbnail rail, Organize grid, Layers panel and
+/// command box, and how many errors have been said this session.
+struct UiState {
+    show_thumbs: bool,
+    /// Whether the Organize grid is showing in place of the plain thumbnail
+    /// rail — workspace-wide, the same convention `show_thumbs` itself
+    /// already uses, not per document: the two are mutually exclusive views
+    /// of whichever tab is active, not a per-tab mode.
+    organize_open: bool,
+    /// Whether the layer rail is showing.
+    show_layers: bool,
+    /// Whether the command box shows its history, or is the single line the
+    /// mockup draws. Collapsed by default — the history is worth seeing when
+    /// you are working in it and is dead space when you are reading.
+    command_open: bool,
+    /// How many errors have been said, ever — a counter, not the history,
+    /// because the history is capped and its length stops moving. Lets a caller
+    /// ask "did that gesture end in an error?" without every function it calls
+    /// having to hand a result back (see the click-away block in `interact`).
+    errors_said: u64,
+}
+
 struct PagifyApp {
     /// Every open document, in the order its tab sits — see [`DocTab`].
+    library_state: LibraryState,
+    prefs_state: PrefsState,
+    render_state: RenderState,
+    ui_state: UiState,
     clipboard_state: ClipboardState,
     faces_state: FacesState,
     update_state: UpdateState,
@@ -1101,10 +1166,6 @@ struct PagifyApp {
     /// to every tab.
     outlined_fonts: pagify_shell::outlined_fonts::OutlinedFonts,
 
-    defaults: tools::Defaults,
-    /// Whether the next Rectangle or Circle is drawn filled solid rather than
-    /// hollow — chosen up front, on the Draw tab, before either tool is armed.
-    draw_fill: bool,
     /// Decoded on the first frame — a `Context` is needed to upload it and
     /// there is none when the app is constructed.
     mark: Option<egui::TextureHandle>,
@@ -1114,26 +1175,7 @@ struct PagifyApp {
     /// costs a little memory and nothing else; the list is never large
     /// enough for that to matter.
     signature_textures: std::collections::HashMap<String, egui::TextureHandle>,
-    snaps: SnapSet,
     ortho: bool,
-    grid_pt: f64,
-    show_thumbs: bool,
-    /// Whether the Organize grid is showing in place of the plain thumbnail
-    /// rail — workspace-wide, the same convention `show_thumbs` itself
-    /// already uses, not per document: the two are mutually exclusive views
-    /// of whichever tab is active, not a per-tab mode.
-    organize_open: bool,
-    /// Whether the layer rail is showing.
-    show_layers: bool,
-    /// Whether the command box shows its history, or is the single line the
-    /// mockup draws. Collapsed by default — the history is worth seeing when
-    /// you are working in it and is dead space when you are reading.
-    command_open: bool,
-    /// How many errors have been said, ever — a counter, not the history,
-    /// because the history is capped and its length stops moving. Lets a caller
-    /// ask "did that gesture end in an error?" without every function it calls
-    /// having to hand a result back (see the click-away block in `interact`).
-    errors_said: u64,
 
     /// Loaded on first use and kept. The models are twelve megabytes and take
     /// a moment to memory-map; doing that per page would make the second page
@@ -1146,19 +1188,8 @@ struct PagifyApp {
     /// at a scratch file: writing a test signature into somebody's real
     /// settings would be a poor way to find out this works.
     signatures: pagify_shell::signatures::Signatures,
-    signatures_path: Option<std::path::PathBuf>,
-    /// Where recorded scripts are written: Pagify's own folder, and nowhere
-    /// in a test.
-    scripts_dir: Option<std::path::PathBuf>,
-    /// The pad, while a signature is being drawn on it.
-    pad: Option<SignaturePad>,
-    /// The Manage Signatures panel, while it is open.
-    signature_list: Option<SignatureList>,
     /// The words kept for writing again, and where they are kept.
     predefined: pagify_shell::predefined::Predefined,
-    predefined_path: Option<std::path::PathBuf>,
-    /// The Predefined Text panel, while it is open.
-    snippets: Option<SnippetList>,
     /// This run's on-disk transcript of every command and every line the app
     /// has said about it — see [`pagify_shell::session_log`]. One continuous
     /// transcript for the whole run, tabs included, not one per document —
@@ -1189,15 +1220,6 @@ struct PagifyApp {
     /// [`Self::copy_organize_selection`] — rather than accumulated, since a
     /// clipboard only ever needs to hold the most recent copy.
     page_clipboard: Option<PageClipboard>,
-    /// The thread that renders pages off the UI thread, started on first use —
-    /// see [`RenderWorker`].
-    renders: Option<RenderWorker>,
-    /// Whether pages are rendered off the UI thread at all. On everywhere but
-    /// in the tests, where a render that lands on some later frame would make
-    /// every test that looks at what was drawn depend on timing; the tests that
-    /// are about this turn it on.
-    async_render: bool,
-    render_stats: RenderStats,
     /// Whether this window is *the* running Pagify on its own, answering
     /// documents other launches hand over — and which window a handed-over
     /// document goes to. Not the running instance (the default) answers nothing.
@@ -2629,7 +2651,7 @@ impl PagifyApp {
                     let c = command.text().trim();
                     command.lit_by(armed)
                         || in_hand == Some(c)
-                        || (c == "fill" && self.draw_fill)
+                        || (c == "fill" && self.prefs_state.draw_fill)
                         || (c == "appearance" && theme::mode() == theme::Mode::Light)
                         || (c == "hand" && show_hand_by_default)
                         || match self.tab().pointer {
@@ -2694,7 +2716,7 @@ impl PagifyApp {
                         // about a small icon says what it means, or which way
                         // it is currently set, without this.
                         let response = if command.text() == "fill" {
-                            response.on_hover_text(if self.draw_fill {
+                            response.on_hover_text(if self.prefs_state.draw_fill {
                                 "Fill: on — the next rectangle or circle is drawn filled. \
                                  Click to draw hollow instead."
                             } else {
@@ -2999,7 +3021,7 @@ impl PagifyApp {
             // command line.
             self.cmd.input_mut().clear();
             self.cmd.input_mut().push_str("find ");
-            self.command_open = true;
+            self.ui_state.command_open = true;
             ctx.memory_mut(|m| m.request_focus(command_id));
             self.caret_to_end_of_command_box(&ctx, command_id);
         }
@@ -3180,7 +3202,7 @@ impl PagifyApp {
                         .on_hover_text("The build of Pagify you are running.");
                         if self.tab_mut().doc.is_some() {
                             ui.checkbox(&mut self.ortho, "Ortho");
-                            ui.checkbox(&mut self.show_thumbs, "Pages");
+                            ui.checkbox(&mut self.ui_state.show_thumbs, "Pages");
                         }
 
                         // **One row of tabs, the newest on the left.** Reported
@@ -3289,14 +3311,14 @@ impl PagifyApp {
             .inner_margin(egui::Margin::symmetric(14, 8));
 
         let mut bar = egui::Panel::bottom("command_bar").frame(bar_frame);
-        bar = if self.command_open {
+        bar = if self.ui_state.command_open {
             bar.resizable(true).default_size(210.0).size_range(96.0..=520.0)
         } else {
             bar.resizable(false)
         };
 
         bar.show(ui, |ui| {
-            if self.command_open {
+            if self.ui_state.command_open {
                 self.draw_command_history(ui);
             }
 
@@ -3314,7 +3336,7 @@ impl PagifyApp {
                 None => self.cmd.prompt().wants.clone(),
             };
 
-            if self.command_open {
+            if self.ui_state.command_open {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(&name)
@@ -3328,7 +3350,7 @@ impl PagifyApp {
 
             self.draw_command_row(ui, command_id, submitted, &name, &wants);
 
-            if self.command_open {
+            if self.ui_state.command_open {
                 ui.horizontal(|ui| {
                     if ui.button("Run").clicked()
                         && !self.consume_password_line()
@@ -3374,7 +3396,7 @@ impl PagifyApp {
         wants: &str,
     ) {
             ui.horizontal(|ui| {
-                if !self.command_open {
+                if !self.ui_state.command_open {
                     // The mockup's own status bar carries a couple of
                     // document stats beside the command line (`code.html:578
                     // -588`). Page count only, not its own searchable-
@@ -3465,7 +3487,7 @@ impl PagifyApp {
                 let input_width = (ui.available_width() - toggle_width - 8.0).max(80.0);
 
                 let is_password = self.tab().secure_state.awaiting_password.is_some();
-                let command_open = self.command_open;
+                let command_open = self.ui_state.command_open;
                 let hint_text = match &self.tab().secure_state.awaiting_password {
                     Some(
                         Awaiting::Lock { .. }
@@ -3504,8 +3526,8 @@ impl PagifyApp {
                     response.request_focus();
                 }
 
-                if history_toggle(ui, egui::vec2(toggle_width, 22.0), self.command_open).clicked() {
-                    self.command_open = !self.command_open;
+                if history_toggle(ui, egui::vec2(toggle_width, 22.0), self.ui_state.command_open).clicked() {
+                    self.ui_state.command_open = !self.ui_state.command_open;
                 }
             });
     }
@@ -3636,9 +3658,9 @@ impl PagifyApp {
         let mut jump_to = None;
         // Nothing open means nothing to thumbnail — an empty rail is a strip of
         // furniture that does not do anything.
-        if self.organize_open && !backstage && self.tab_mut().doc.is_some() {
+        if self.ui_state.organize_open && !backstage && self.tab_mut().doc.is_some() {
             self.draw_organize_grid(&ctx, ui);
-        } else if self.show_thumbs && !backstage && self.tab_mut().doc.is_some() {
+        } else if self.ui_state.show_thumbs && !backstage && self.tab_mut().doc.is_some() {
             let modifiers = ctx.input(|i| i.modifiers);
             let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
             let released = ctx.input(|i| i.pointer.any_released());
@@ -3712,7 +3734,7 @@ impl PagifyApp {
                             .on_hover_text("Hide the Pages rail")
                             .clicked()
                         {
-                            self.show_thumbs = false;
+                            self.ui_state.show_thumbs = false;
                         }
                     });
                 });
@@ -3770,7 +3792,7 @@ impl PagifyApp {
                             .on_hover_text("Show the Pages rail")
                             .clicked()
                         {
-                            self.show_thumbs = true;
+                            self.ui_state.show_thumbs = true;
                         }
                     });
                 });
@@ -3789,7 +3811,7 @@ impl PagifyApp {
         // rail on the far side of the page cannot.
         let mut restack_to: Option<(usize, pdf_core::document::Stacking)> = None;
         let mut opacity_to: Option<(usize, f32)> = None;
-        if self.show_layers && !backstage && self.tab_mut().doc.is_some() {
+        if self.ui_state.show_layers && !backstage && self.tab_mut().doc.is_some() {
             let page = self.tab_mut().view_state.page;
             let picked = self.tab_mut().selection.picked_layer;
             let entries: Vec<pdf_core::document::DrawnObject> = self.layers_on(page).to_vec();
@@ -3922,7 +3944,7 @@ impl PagifyApp {
                 });
 
             if !open {
-                self.show_layers = false;
+                self.ui_state.show_layers = false;
             }
             if let Some(at) = pick {
                 self.tab_mut().selection.picked_layer = Some(at);
@@ -4045,6 +4067,14 @@ impl PagifyApp {
             spelling::use_dictionary_file();
         }
         let mut app = PagifyApp {
+            library_state: LibraryState { signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() }, scripts_dir: if cfg!(test) {
+                None
+            } else {
+                pagify_shell::state::state_dir().map(|d| d.join("scripts"))
+            }, pad: None, signature_list: None, predefined_path: if cfg!(test) { None } else { pagify_shell::predefined::Predefined::path() }, snippets: None, },
+            prefs_state: PrefsState { defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
+            render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
+            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             clipboard_state: ClipboardState { paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 std::env::temp_dir().join(format!(
@@ -4071,39 +4101,20 @@ impl PagifyApp {
             } else {
                 pagify_shell::outlined_fonts::OutlinedFonts::load()
             },
-            defaults: tools::Defaults::default(),
-            draw_fill: false,
             mark: None,
             signature_textures: std::collections::HashMap::new(),
-            snaps: SnapSet::defaults(),
             ortho: false,
-            grid_pt: 0.0,
-            show_thumbs: true,
-            organize_open: false,
-            show_layers: false,
-            command_open: false,
-            errors_said: 0,
             recogniser: None,
             signatures: if quiet {
                 pagify_shell::signatures::Signatures::default()
             } else {
                 pagify_shell::signatures::Signatures::load()
             },
-            signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() },
-            scripts_dir: if cfg!(test) {
-                None
-            } else {
-                pagify_shell::state::state_dir().map(|d| d.join("scripts"))
-            },
-            pad: None,
-            signature_list: None,
             predefined: if quiet {
                 pagify_shell::predefined::Predefined::default()
             } else {
                 pagify_shell::predefined::Predefined::load()
             },
-            predefined_path: if cfg!(test) { None } else { pagify_shell::predefined::Predefined::path() },
-            snippets: None,
             // Real disk I/O under the user's actual config directory — a test
             // run must not litter it with hundreds of near-empty session
             // logs, the same reason `predefined` above skips its own real
@@ -4116,9 +4127,6 @@ impl PagifyApp {
             object_clipboard: None,
             paste_count: 0,
             page_clipboard: None,
-            renders: None,
-            async_render: !cfg!(test),
-            render_stats: RenderStats::default(),
             handover: instance::Handover::default(),
             win: hub::WindowState::default(),
             replay_depth: 0,
@@ -5002,7 +5010,7 @@ impl PagifyApp {
     /// Reported rather than swallowed, for the same reason the signatures are:
     /// "kept" when nothing was kept is worse than saying so.
     fn keep_snippets(&self) -> Result<(), String> {
-        let Some(path) = &self.predefined_path else { return Ok(()) };
+        let Some(path) = &self.library_state.predefined_path else { return Ok(()) };
         self.predefined
             .save_to(path)
             .map_err(|e| format!("could not write {}: {e}", path.display()))
@@ -5036,7 +5044,7 @@ impl PagifyApp {
     /// file that fails to save costs somebody a line in a menu, and this one
     /// costs them a drawing they were told was safe.
     fn keep_signatures(&self) -> Result<(), String> {
-        let Some(path) = &self.signatures_path else { return Ok(()) };
+        let Some(path) = &self.library_state.signatures_path else { return Ok(()) };
         self.signatures
             .save_to(path)
             .map_err(|e| format!("could not write {}: {e}", path.display()))
@@ -5093,7 +5101,7 @@ impl PagifyApp {
         // and nowhere else.
         Ok(format!(
             "kept \"{name}\" on this computer{}. `signature` places it.",
-            match &self.signatures_path {
+            match &self.library_state.signatures_path {
                 Some(path) => format!(", in {}", path.display()),
                 None => String::new(),
             }
@@ -5126,7 +5134,7 @@ impl PagifyApp {
         }
         Ok(format!(
             "kept \"{name}\" on this computer{}. `signature` places it.",
-            match &self.signatures_path {
+            match &self.library_state.signatures_path {
                 Some(path) => format!(", in {}", path.display()),
                 None => String::new(),
             }
@@ -7167,7 +7175,7 @@ impl PagifyApp {
         let measured = layout::trust(&glyphs);
         let rebuilt = layout::reconstruct(&glyphs);
 
-        self.command_open = true;
+        self.ui_state.command_open = true;
         self.say_info(format!(
             "reflowed into {} block(s) — disorder was {:.2}{}",
             rebuilt.blocks.len(),
@@ -8875,8 +8883,8 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        self.organize_open = !self.organize_open;
-        if self.organize_open {
+        self.ui_state.organize_open = !self.ui_state.organize_open;
+        if self.ui_state.organize_open {
             self.say_info("Organize — click a page to select it, drag to reorder, Escape to close.");
         } else {
             self.say_info("Organize closed — the Pages rail selects, drags, copies and pastes pages too.");
@@ -9424,10 +9432,10 @@ impl PagifyApp {
             return;
         }
 
-        let mut defaults = std::mem::take(&mut self.defaults);
+        let mut defaults = std::mem::take(&mut self.prefs_state.defaults);
         let layer = self.tab_mut().markup.page(page, height);
         let applied = tools::apply(layer, &command, &mut defaults);
-        self.defaults = defaults;
+        self.prefs_state.defaults = defaults;
 
         match applied {
             tools::Applied::Added(n) => self.say_info(format!("{n} added.")),
@@ -9495,8 +9503,8 @@ impl PagifyApp {
         if self.clipboard_state.paste_ghost.take().is_some() {
             self.say_info("nothing was pasted.");
         }
-        if self.organize_open {
-            self.organize_open = false;
+        if self.ui_state.organize_open {
+            self.ui_state.organize_open = false;
             self.say_info("Organize closed.");
         }
         if !self.tab_mut().organize.organize_selected.is_empty() || self.tab_mut().organize.organize_drag.is_some() {
@@ -9902,7 +9910,7 @@ impl PagifyApp {
 
     /// Show the layer rail with one entry picked, by its place in the list.
     fn pick_layer(&mut self, page: usize, at: usize) {
-        self.show_layers = true;
+        self.ui_state.show_layers = true;
         self.tab_mut().selection.picked_layer = Some(at);
         let told = self
             .layers_on(page)
@@ -12401,7 +12409,7 @@ impl PagifyApp {
         // of apply itself still feeling slow, the session log alone cannot
         // tell the two apart. This logs only the computation.
         let started = std::time::Instant::now();
-        let (generation, errors_before) = (self.doc_generation(), self.errors_said);
+        let (generation, errors_before) = (self.doc_generation(), self.ui_state.errors_said);
         let backup = edit.clone();
         self.apply_one_edit(edit);
         let elapsed = started.elapsed();
@@ -12409,7 +12417,7 @@ impl PagifyApp {
 
         // Refused: an error was said, and nothing was executed. (An error said
         // *after* something was written is not a refusal — see above.)
-        if self.errors_said == errors_before || self.doc_generation() != generation {
+        if self.ui_state.errors_said == errors_before || self.doc_generation() != generation {
             return false;
         }
         let refused = self.cmd.history().iter().rev().find(|said| said.kind == Kind::Error).map(|said| said.text.clone());
@@ -13744,7 +13752,7 @@ impl PagifyApp {
                 // `record ../../x` wrote `../../x.json`. Found by audit.
                 let written = pagify_shell::state::file_name_only(&script.name)
                     .and_then(|name| {
-                        self.scripts_dir
+                        self.library_state.scripts_dir
                             .as_ref()
                             .map(|dir| dir.join(format!("{name}.json")))
                             .ok_or_else(|| "there is nowhere to keep scripts on this system".into())
@@ -13904,7 +13912,7 @@ impl PagifyApp {
     /// Anything that no longer describes the page is dropped here rather than
     /// shown: a render asked for before an edit, or for a document since closed.
     fn collect_renders(&mut self, ctx: &egui::Context) {
-        let Some(worker) = self.renders.as_mut() else { return };
+        let Some(worker) = self.render_state.renders.as_mut() else { return };
         let mut arrived = Vec::new();
         while let Ok(done) = worker.done.try_recv() {
             // The slot belongs to the *newest* ask; an older answer arriving
@@ -13917,8 +13925,8 @@ impl PagifyApp {
         }
         for done in arrived {
             let Ok(image) = done.image else {
-                self.render_stats.dropped += 1;
-                if let Some(worker) = self.renders.as_mut() {
+                self.render_state.render_stats.dropped += 1;
+                if let Some(worker) = self.render_state.renders.as_mut() {
                     worker.failed.insert((done.doc, done.epoch, done.page, done.step, done.rotation as u8));
                 }
                 continue;
@@ -13929,7 +13937,7 @@ impl PagifyApp {
                 .filter_map(|t| t.doc.as_mut())
                 .find(|d| d.id == done.doc && d.render_epoch == done.epoch);
             let Some(doc) = current else {
-                self.render_stats.dropped += 1;
+                self.render_state.render_stats.dropped += 1;
                 continue;
             };
             let [width, height] = image.size;
@@ -13953,8 +13961,8 @@ impl PagifyApp {
                     doc.caches.detail = Some(DetailTile { page: done.page, zoom_step: done.step, crop, texture });
                 }
             }
-            self.render_stats.applied += 1;
-            self.render_stats.slowest_ms = self.render_stats.slowest_ms.max(done.took.as_millis());
+            self.render_state.render_stats.applied += 1;
+            self.render_state.render_stats.slowest_ms = self.render_state.render_stats.slowest_ms.max(done.took.as_millis());
             if done.took.as_millis() >= SLOW_RENDER_MS {
                 self.session_log.record(
                     "perf",
@@ -14024,8 +14032,8 @@ impl PagifyApp {
         // which a rare, already-maxed-out zoom could otherwise round past.
         let quantised = (zoom_step as f32 * pdf_core::render::cache::ZOOM_QUANTUM).min(scale);
 
-        let moving = self.async_render && self.zoom_is_moving(ctx);
-        let async_render = self.async_render;
+        let moving = self.render_state.async_render && self.zoom_is_moving(ctx);
+        let async_render = self.render_state.async_render;
         let doc = self.tab_mut().doc.as_mut()?;
 
         if let Some(existing) = doc.caches.textures.get(&key) {
@@ -14085,7 +14093,7 @@ impl PagifyApp {
         );
         doc.caches.textures.insert(key, handle.clone());
         Self::trim_scales(doc, page, zoom_step, rotation as u8);
-        self.render_stats.on_ui_thread += 1;
+        self.render_state.render_stats.on_ui_thread += 1;
         // **What a stall was, written down where it can be read.** The session
         // log had no timing at all, so "it stutters" could not be answered
         // from it.
@@ -14108,16 +14116,16 @@ impl PagifyApp {
     /// Hand a render to the worker — unless it is already working on exactly
     /// that. Starts the worker on the first ask.
     fn ask_for_render(&mut self, ctx: &egui::Context, job: RenderJob) {
-        if self.renders.is_none() {
-            self.renders = RenderWorker::start(ctx);
+        if self.render_state.renders.is_none() {
+            self.render_state.renders = RenderWorker::start(ctx);
         }
         let ask = (job.doc, job.page, job.crop.is_some());
         let want = (job.step, job.rotation as u8, job.crop);
         let refused = (job.doc, job.epoch, job.page, job.step, job.rotation as u8);
-        let Some(worker) = self.renders.as_mut() else {
+        let Some(worker) = self.render_state.renders.as_mut() else {
             // No thread to render on: back to rendering where it is drawn,
             // rather than leaving a page soft for good.
-            self.async_render = false;
+            self.render_state.async_render = false;
             return;
         };
         if worker.in_flight.get(&ask) == Some(&want) || worker.failed.contains(&refused) {
@@ -14125,11 +14133,11 @@ impl PagifyApp {
         }
         if worker.jobs.send(job).is_ok() {
             worker.in_flight.insert(ask, want);
-            self.render_stats.requested += 1;
+            self.render_state.render_stats.requested += 1;
         } else {
             // The worker has gone.
-            self.renders = None;
-            self.async_render = false;
+            self.render_state.renders = None;
+            self.render_state.async_render = false;
         }
     }
 
@@ -15473,7 +15481,7 @@ fn wrap_typed_last_line(
     /// Category" names one of several things that could be under the pointer,
     /// and the only way to know which is to see it on the page.
     fn draw_picked_layer(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
-        if !self.show_layers {
+        if !self.ui_state.show_layers {
             return;
         }
         let Some(at) = self.tab_mut().selection.picked_layer else { return };
