@@ -107,7 +107,7 @@ fn a_typed_line_with_spaces_runs_on_enter_and_is_still_recorded() {
 
     let mut h = harness("pages-ladder.pdf");
     h.state_mut().submit("record g1test");
-    assert!(h.state().recorder.is_recording());
+    assert!(h.state().recording_state.recorder.is_recording());
     focus_box(&mut h);
 
     type_text(&mut h, &format!("extract 1-2 {}", out.display()));
@@ -116,7 +116,7 @@ fn a_typed_line_with_spaces_runs_on_enter_and_is_still_recorded() {
     let wrote = out.is_file();
     let _ = std::fs::remove_file(&out);
     assert!(wrote, "the typed extract did not write its file; errors: {:?}", errors(&h));
-    assert_eq!(h.state().recorder.steps(), 1, "the fully specified line was not recorded");
+    assert_eq!(h.state().recording_state.recorder.steps(), 1, "the fully specified line was not recorded");
 }
 
 /// Ctrl+F puts `find ` in the box. A search for two words could not be
@@ -237,11 +237,11 @@ fn a_click_that_only_fills_the_box_is_not_recorded_and_keeps_the_armed_tool() {
     h.state_mut().submit("record g1test");
     h.state_mut().submit("measure");
     assert!(h.state().tab().tool.is_some(), "measure did not arm");
-    let steps = h.state().recorder.steps();
+    let steps = h.state().recording_state.recorder.steps();
 
     click_label(&mut h, "Delete");
 
-    assert_eq!(h.state().recorder.steps(), steps, "the fill was recorded");
+    assert_eq!(h.state().recording_state.recorder.steps(), steps, "the fill was recorded");
     assert!(h.state().tab().tool.is_some(), "the fill cancelled the armed tool");
     assert!(
         !h.state().cmd.history().iter().any(|e| e.text.contains("cancelled")),

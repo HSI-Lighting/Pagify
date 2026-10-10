@@ -779,7 +779,7 @@ impl crate::PagifyApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let texture = entry.image.as_ref().map(|image| {
-                                self.signature_textures
+                                self.library_state.signature_textures
                                     .entry(entry.name.clone())
                                     .or_insert_with(|| {
                                         ctx.load_texture(

@@ -1714,7 +1714,7 @@ impl crate::PagifyApp {
             }
         }
         if snapping && self.tab_mut().selection.last_snap.is_none() {
-            if self.ortho {
+            if self.prefs_state.ortho {
                 if let Some(anchor) = self.tab_mut().tool.as_ref().and_then(|p| p.points.last().copied()) {
                     at = tools::orthogonal(anchor, at);
                 }

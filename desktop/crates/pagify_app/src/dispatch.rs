@@ -1196,7 +1196,7 @@ impl crate::PagifyApp {
                         return;
                     }
                 };
-                self.recorder.start(name.clone());
+                self.recording_state.recorder.start(name.clone());
                 self.say_info(format!("recording `{name}` — every command from here is a step."));
             }
             Verb::StopRecording => self.stop_recording(),

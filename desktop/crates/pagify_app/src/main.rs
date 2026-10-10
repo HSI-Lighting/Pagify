@@ -1079,6 +1079,17 @@ struct ClipboardState {
 /// Where the signature library, predefined-text and snippet files live on disk, and the
 /// open signature pad / list / snippet list.
 struct LibraryState {
+    /// Loaded on first use and kept. The models are twelve megabytes and take
+    /// a moment to memory-map; doing that per page would make the second page
+    /// as slow as the first for no reason — and every tab's own OCR job
+    /// shares this one loaded copy rather than each paying to load it again.
+    recogniser: Option<std::sync::Arc<pdf_core::ocr::engine::OcrsRecogniser>>,
+    /// An uploaded signature's picture, ready to paint in the Manage
+    /// Signatures list — keyed by name, built the first time that entry is
+    /// drawn. A stale entry left behind by a rename or a forgotten signature
+    /// costs a little memory and nothing else; the list is never large
+    /// enough for that to matter.
+    signature_textures: std::collections::HashMap<String, egui::TextureHandle>,
     signatures_path: Option<std::path::PathBuf>,
     /// Where recorded scripts are written: Pagify's own folder, and nowhere
     /// in a test.
@@ -1094,6 +1105,7 @@ struct LibraryState {
 
 /// Preference defaults and the snap/grid settings the pointer obeys.
 struct PrefsState {
+    ortho: bool,
     defaults: tools::Defaults,
     /// Whether the next Rectangle or Circle is drawn filled solid rather than
     /// hollow — chosen up front, on the Draw tab, before either tool is armed.
@@ -1137,9 +1149,25 @@ struct UiState {
     errors_said: u64,
 }
 
+/// The session recorder and how deep a replay is running.
+struct RecordingState {
+    /// Shared across every tab — recording a macro follows what you actually
+    /// did, tab switches included, rather than one silently-incomplete
+    /// recording per document.
+    recorder: Recorder,
+    /// How many `replay`s are on the stack right now.
+    ///
+    /// A script that names itself — or two that name each other — recurses
+    /// with nothing else to stop it; `replay`'s own guard against a bad step
+    /// only catches a step that fails to *dispatch*, and a further `replay`
+    /// dispatches just fine. Found by audit.
+    replay_depth: usize,
+}
+
 struct PagifyApp {
     /// Every open document, in the order its tab sits — see [`DocTab`].
     library_state: LibraryState,
+    recording_state: RecordingState,
     prefs_state: PrefsState,
     render_state: RenderState,
     ui_state: UiState,
@@ -1153,10 +1181,6 @@ struct PagifyApp {
     active_tab: usize,
 
     cmd: CommandBox,
-    /// Shared across every tab — recording a macro follows what you actually
-    /// did, tab switches included, rather than one silently-incomplete
-    /// recording per document.
-    recorder: Recorder,
 
     recent: Recent,
 
@@ -1169,19 +1193,7 @@ struct PagifyApp {
     /// Decoded on the first frame — a `Context` is needed to upload it and
     /// there is none when the app is constructed.
     mark: Option<egui::TextureHandle>,
-    /// An uploaded signature's picture, ready to paint in the Manage
-    /// Signatures list — keyed by name, built the first time that entry is
-    /// drawn. A stale entry left behind by a rename or a forgotten signature
-    /// costs a little memory and nothing else; the list is never large
-    /// enough for that to matter.
-    signature_textures: std::collections::HashMap<String, egui::TextureHandle>,
-    ortho: bool,
 
-    /// Loaded on first use and kept. The models are twelve megabytes and take
-    /// a moment to memory-map; doing that per page would make the second page
-    /// as slow as the first for no reason — and every tab's own OCR job
-    /// shares this one loaded copy rather than each paying to load it again.
-    recogniser: Option<std::sync::Arc<pdf_core::ocr::engine::OcrsRecogniser>>,
     /// The signatures this person has drawn, and where they are kept.
     ///
     /// The path is held rather than asked for each time so a test can point it
@@ -1231,13 +1243,6 @@ struct PagifyApp {
     /// being dragged out of it, what other windows are asking of it. Idle in a
     /// program with one window, and in every test. See [`hub`].
     win: hub::WindowState,
-    /// How many `replay`s are on the stack right now.
-    ///
-    /// A script that names itself — or two that name each other — recurses
-    /// with nothing else to stop it; `replay`'s own guard against a bad step
-    /// only catches a step that fails to *dispatch*, and a further `replay`
-    /// dispatches just fine. Found by audit.
-    replay_depth: usize,
     /// A check for a newer build in [`UPDATE_FOLDER`], in progress — see
     /// [`Self::collect_update_check`]. `None` once it has reported back (or
     /// in a test, which never starts one).
@@ -2031,7 +2036,7 @@ struct PageResult {
     page: usize,
     reading: Result<pdf_core::ocr::pipeline::PageReading, String>,
     /// Set once, the run a page first needs OCR and nothing was cached yet —
-    /// so `collect_reading` can warm `self.recogniser` for next time instead
+    /// so `collect_reading` can warm `self.library_state.recogniser` for next time instead
     /// of every later call reloading the model files from disk.
     built_recogniser: Option<std::sync::Arc<pdf_core::ocr::engine::OcrsRecogniser>>,
 }
@@ -3201,7 +3206,7 @@ impl PagifyApp {
                         )
                         .on_hover_text("The build of Pagify you are running.");
                         if self.tab_mut().doc.is_some() {
-                            ui.checkbox(&mut self.ortho, "Ortho");
+                            ui.checkbox(&mut self.prefs_state.ortho, "Ortho");
                             ui.checkbox(&mut self.ui_state.show_thumbs, "Pages");
                         }
 
@@ -3371,8 +3376,8 @@ impl PagifyApp {
                             zoom_pct,
                             if marks == 1 { "" } else { "s" },
                             if calibrated { "   ·   calibrated" } else { "" },
-                            if self.recorder.is_recording() {
-                                format!("   ·   recording ({})", self.recorder.steps())
+                            if self.recording_state.recorder.is_recording() {
+                                format!("   ·   recording ({})", self.recording_state.recorder.steps())
                             } else {
                                 String::new()
                             },
@@ -3644,7 +3649,7 @@ impl PagifyApp {
                 .last()
                 .map(|e| e.text.clone())
                 .unwrap_or_default();
-            self.recorder.observe(&line);
+            self.recording_state.recorder.observe(&line);
             self.session_log.record("command", &line);
             self.run(dispatch);
         }
@@ -4067,12 +4072,13 @@ impl PagifyApp {
             spelling::use_dictionary_file();
         }
         let mut app = PagifyApp {
-            library_state: LibraryState { signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() }, scripts_dir: if cfg!(test) {
+            library_state: LibraryState { recogniser: None, signature_textures: std::collections::HashMap::new(), signatures_path: if cfg!(test) { None } else { pagify_shell::signatures::Signatures::path() }, scripts_dir: if cfg!(test) {
                 None
             } else {
                 pagify_shell::state::state_dir().map(|d| d.join("scripts"))
             }, pad: None, signature_list: None, predefined_path: if cfg!(test) { None } else { pagify_shell::predefined::Predefined::path() }, snippets: None, },
-            prefs_state: PrefsState { defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
+            recording_state: RecordingState { recorder: Recorder::default(), replay_depth: 0, },
+            prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
             render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
             ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             clipboard_state: ClipboardState { paste_ghost: None, clipboard_dir: if cfg!(test) {
@@ -4090,7 +4096,6 @@ impl PagifyApp {
             tabs: vec![DocTab::new()],
             active_tab: 0,
             cmd: CommandBox::default(),
-            recorder: Recorder::default(),
             // **Nothing of the person's own under test.** The test suite
             // constructs hundreds of apps, and every one of them was writing
             // its fixture into the real Recent Documents list and reading the
@@ -4102,9 +4107,6 @@ impl PagifyApp {
                 pagify_shell::outlined_fonts::OutlinedFonts::load()
             },
             mark: None,
-            signature_textures: std::collections::HashMap::new(),
-            ortho: false,
-            recogniser: None,
             signatures: if quiet {
                 pagify_shell::signatures::Signatures::default()
             } else {
@@ -4129,7 +4131,6 @@ impl PagifyApp {
             page_clipboard: None,
             handover: instance::Handover::default(),
             win: hub::WindowState::default(),
-            replay_depth: 0,
             pending_update: None,
         };
         app.say_info(format!("Pagify {} — type `help`, or `open <path.pdf>`.", pagify_shell::VERSION));
@@ -4383,7 +4384,7 @@ impl PagifyApp {
     }
 
     /// Find and load the OCR models fresh, with no cache — see `extract_text`,
-    /// which keeps `self.recogniser` warm across calls and only reaches this
+    /// which keeps `self.library_state.recogniser` warm across calls and only reaches this
     /// once a page in the batch actually turns out to need OCR. A page the
     /// bundled outline fonts already read needs neither the search nor the
     /// load, so neither belongs ahead of that check.
@@ -4496,7 +4497,7 @@ impl PagifyApp {
         // the batch turns out not to be covered by the bundled outline fonts.
         // A build from an earlier call is still reused here rather than
         // repeated.
-        let cached_recogniser = self.recogniser.clone();
+        let cached_recogniser = self.library_state.recogniser.clone();
         // Read now, on this thread, while `self` is still reachable — the
         // worker below is a plain `move` closure with no way back to it.
         let outlined_fonts = self.outlined_font_bytes();
@@ -4636,7 +4637,7 @@ impl PagifyApp {
         };
 
         if let Some(recogniser) = &result.built_recogniser {
-            self.recogniser = Some(recogniser.clone());
+            self.library_state.recogniser = Some(recogniser.clone());
         }
 
         let page = result.page;
@@ -9397,7 +9398,7 @@ impl PagifyApp {
         }
         if let Some(dispatch) = pagify_shell::command::dispatch(line) {
             self.cmd.say(Kind::Echo, line);
-            self.recorder.observe(line);
+            self.recording_state.recorder.observe(line);
             self.session_log.record("command", line);
             self.run(dispatch);
         }
@@ -13743,7 +13744,7 @@ impl PagifyApp {
     // -- automate -----------------------------------------------------------
 
     fn stop_recording(&mut self) {
-        match self.recorder.finish() {
+        match self.recording_state.recorder.finish() {
             None => self.say_error("not recording."),
             Some(script) => {
                 // **Into Pagify's own folder, under a name that is only a
@@ -13779,11 +13780,11 @@ impl PagifyApp {
     const MAX_REPLAY_DEPTH: usize = 16;
 
     fn replay(&mut self, path: &std::path::Path) {
-        if self.replay_depth >= Self::MAX_REPLAY_DEPTH {
+        if self.recording_state.replay_depth >= Self::MAX_REPLAY_DEPTH {
             self.say_error(format!(
                 "replay: {} scripts deep — a script is replaying itself, directly or through \
                  others. Stopped rather than recursing forever.",
-                self.replay_depth
+                self.recording_state.replay_depth
             ));
             return;
         }
@@ -13799,7 +13800,7 @@ impl PagifyApp {
         // whatever is recording, and the steps must not be borrowed from a
         // script this loop could replace.
         let steps = script.steps.clone();
-        self.replay_depth += 1;
+        self.recording_state.replay_depth += 1;
         let mut ran = 0;
         let mut stopped = None;
         for (index, line) in steps.iter().enumerate() {
@@ -13827,7 +13828,7 @@ impl PagifyApp {
                 None => {}
             }
         }
-        self.replay_depth -= 1;
+        self.recording_state.replay_depth -= 1;
         match stopped {
             None => self.say_info(format!("replayed {ran} step(s).")),
             Some((step, line, why)) => {
@@ -14497,7 +14498,7 @@ impl PagifyApp {
 
         if let Some(image) = signature.image.clone() {
             let texture = self
-                .signature_textures
+                .library_state.signature_textures
                 .entry(signature.name.clone())
                 .or_insert_with(|| {
                     ui.ctx().load_texture(

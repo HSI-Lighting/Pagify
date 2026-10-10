@@ -552,7 +552,7 @@ fn an_extracted_text_layer_can_be_undone() {
 /// calibration table on `outlined_words_are_trustworthy` itself. Unlike
 /// the tests above, this checks not just that the page became selectable
 /// but that OCR's lazy loader
-/// (`self.recogniser`) was never reached to do it: `Some` would only
+/// (`self.library_state.recogniser`) was never reached to do it: `Some` would only
 /// appear there if some page in the batch had fallen through to OCR.
 ///
 /// That is also why this one is not `#[ignore]`d and does not check
@@ -565,7 +565,7 @@ fn extract_text_on_a_same_font_outlined_page_never_touches_ocr() {
         app.characters(0).map(|c| c.len()).unwrap_or(0) < 4,
         "the fixture already has selectable text, so this proves nothing"
     );
-    assert!(app.recogniser.is_none(), "OCR was already warm before the test ran");
+    assert!(app.library_state.recogniser.is_none(), "OCR was already warm before the test ran");
 
     app.submit("extracttext");
     app.wait_for_reading();
@@ -574,7 +574,7 @@ fn extract_text_on_a_same_font_outlined_page_never_touches_ocr() {
     let after = app.characters(0).map(|c| c.len()).unwrap_or(0);
     assert!(after > 4, "nothing became selectable:\n{}", said(&app));
     assert!(
-        app.recogniser.is_none(),
+        app.library_state.recogniser.is_none(),
         "the page was read by OCR, not the vector-match fast path"
     );
 }
@@ -638,7 +638,7 @@ fn a_user_added_font_unlocks_the_fast_path_for_a_page_the_bundled_fonts_do_not_m
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
 
     let after = app.characters(0).map(|c| c.len()).unwrap_or(0);
-    let recognised_without_ocr = app.recogniser.is_none();
+    let recognised_without_ocr = app.library_state.recogniser.is_none();
 
     app.submit(&format!("outlinedfont remove {arial}"));
     // Checks that Arial specifically is gone, not that the list is empty

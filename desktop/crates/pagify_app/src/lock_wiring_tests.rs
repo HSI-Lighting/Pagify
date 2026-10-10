@@ -2315,7 +2315,7 @@ fn a_script_that_replays_itself_stops_rather_than_recursing_forever() {
     app.replay(&path);
 
     assert!(said(&app).contains("scripts deep"), "{}", said(&app));
-    assert_eq!(app.replay_depth, 0, "the depth counter was not unwound");
+    assert_eq!(app.recording_state.replay_depth, 0, "the depth counter was not unwound");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -5053,7 +5053,7 @@ fn a_recording_named_like_a_path_is_refused_and_a_good_one_lands_in_pagifys_fold
     let mut app = app("two-column.pdf");
     app.submit("record ../../x");
     assert!(said(&app).contains("not a name"), "{}", said(&app));
-    assert!(!app.recorder.is_recording(), "it recorded under a path");
+    assert!(!app.recording_state.recorder.is_recording(), "it recorded under a path");
 
     let dir = std::env::temp_dir().join(format!("pagify-scripts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
