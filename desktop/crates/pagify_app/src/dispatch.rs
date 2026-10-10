@@ -87,15 +87,6 @@ impl crate::PagifyApp {
             | Verb::HiddenData { .. }
             | Verb::Unsecure
             => self.act_security(verb),
-            Verb::Layers
-            | Verb::RepairLocks
-            | Verb::Opacity(..)
-            | Verb::BringToFront
-            | Verb::SendToBack
-            | Verb::LockArea
-            | Verb::LockPages(..)
-            | Verb::Unlock
-            => self.act_objects(verb),
             Verb::Undo
             | Verb::Redo
             | Verb::Pointer(..)
@@ -143,15 +134,6 @@ impl crate::PagifyApp {
             | Verb::RemoveMark(..)
             | Verb::Note(..)
             => self.act_text_and_find(verb),
-            Verb::Calibrate { .. }
-            | Verb::Scale
-            | Verb::Measure(..)
-            | Verb::Record(..)
-            | Verb::StopRecording
-            | Verb::Replay(..)
-            | Verb::Help(..)
-            | Verb::Planned { .. }
-            => self.act_measurement(verb),
             // Ported domains never reach here: `plan` above claimed them.
             other => unreachable!("an unplanned verb fell through the router: {other:?}"),
         }
@@ -196,6 +178,116 @@ impl crate::PagifyApp {
             Effect::ReportTextLayer => self.report_text_layer(true),
             Effect::Say(text) => self.say_info(text),
             Effect::CheckUpdate => self.spawn_update_check(),
+            Effect::ToggleLayers => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                self.ui_state.show_layers = !self.ui_state.show_layers;
+                if self.ui_state.show_layers {
+                    self.forget_layers();
+                    let page = self.tab().view_state.page;
+                    let count = self.layers_on(page).len();
+                    self.say_info(format!(
+                        "layers: page {} draws {count} thing{}, topmost first. \
+                         Pick one, then `bringtofront` or `sendtoback`.",
+                        page + 1,
+                        if count == 1 { "" } else { "s" }
+                    ));
+                } else {
+                    self.say_info("layers: closed.");
+                }
+            }
+            Effect::RepairLocks => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                self.repair_locks(true);
+            }
+            Effect::SetOpacity(percent) => {
+                let page = self.tab_mut().view_state.page;
+                let target = self.tab_mut()
+                    .selection
+                    .selected
+                    .as_ref()
+                    .filter(|s| s.page == page)
+                    .map(|s| s.object)
+                    .or_else(|| {
+                        self.tab_mut().selection.picked_layer.and_then(|at| self.layers_on(page).get(at).map(|d| d.object))
+                    });
+                match target {
+                    Some(object) => match self.set_opacity_of(page, object, percent / 100.0) {
+                        Ok(said) => self.say_info(said),
+                        Err(e) => self.say_error(e),
+                    },
+                    None => self.say_info("select something first — Edit Object, or a row in the layer list."),
+                }
+            }
+            Effect::Restack(stacking) => self.restack_picked(stacking),
+            Effect::ArmLockArea => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Lock, page);
+                }
+            }
+            Effect::LockPages(spec) => {
+                let Some(doc) = &self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                match pagify_shell::organize::parse_range(&spec, doc.page_count) {
+                    Ok(pages) => {
+                        self.ask_or_reuse_passcode(
+                            Awaiting::LockPages(pages),
+                            "type a passcode to lock these pages with, or Escape to give up.",
+                        );
+                    }
+                    Err(why) => self.say_error(why),
+                }
+            }
+            Effect::Unlock => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else if self.tab_mut().doc.as_ref().is_some_and(|d| d.session.locked_pages().is_empty()) {
+                    self.say_error("nothing in this document is locked.");
+                } else {
+                    // Unlike locking, this always asks even when a passcode is
+                    // held — see `a_held_passcode_does_not_unlock_anything`.
+                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Unlock);
+                    self.say_info("type the passcode this was locked with, or Escape to give up.");
+                }
+            }
+            Effect::ArmCalibrate { distance, unit } => {
+                let page = self.tab_mut().view_state.page;
+                self.arm_tool(Tool::Calibrate { distance, unit }, page);
+            }
+            Effect::ReportScale => {
+                let d = self.tab_mut().calibration.describe();
+                self.say_info(d);
+            }
+            Effect::ArmMeasure(kind) => {
+                let page = self.tab_mut().view_state.page;
+                self.arm_tool(Tool::Measure(kind), page);
+            }
+            Effect::Record(name) => {
+                let name = if name.trim().is_empty() { "script".to_string() } else { name };
+                // A name, checked now rather than when the script is written,
+                // so nothing is recorded under a name that cannot be kept.
+                let name = match pagify_shell::state::file_name_only(&name) {
+                    Ok(name) => name,
+                    Err(why) => {
+                        self.say_error(format!("record: {why}."));
+                        return;
+                    }
+                };
+                self.recording_state.recorder.start(name.clone());
+                self.say_info(format!("recording `{name}` — every command from here is a step."));
+            }
+            Effect::StopRecording => self.stop_recording(),
+            Effect::Replay(path) => self.replay(&path),
         }
     }
 
@@ -904,96 +996,6 @@ impl crate::PagifyApp {
     }
 
 
-    /// One domain of [`Self::act`]: 8 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_objects(&mut self, verb: Verb) {
-        match verb {
-            Verb::Layers => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.ui_state.show_layers = !self.ui_state.show_layers;
-                if self.ui_state.show_layers {
-                    self.forget_layers();
-                    let page = self.tab().view_state.page;
-                    let count = self.layers_on(page).len();
-                    self.say_info(format!(
-                        "layers: page {} draws {count} thing{}, topmost first. \
-                         Pick one, then `bringtofront` or `sendtoback`.",
-                        page + 1,
-                        if count == 1 { "" } else { "s" }
-                    ));
-                } else {
-                    self.say_info("layers: closed.");
-                }
-            }
-            Verb::RepairLocks => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.repair_locks(true);
-            }
-            Verb::Opacity(percent) => {
-                let page = self.tab_mut().view_state.page;
-                let target = self.tab_mut()
-                    .selection
-                    .selected
-                    .as_ref()
-                    .filter(|s| s.page == page)
-                    .map(|s| s.object)
-                    .or_else(|| {
-                        self.tab_mut().selection.picked_layer.and_then(|at| self.layers_on(page).get(at).map(|d| d.object))
-                    });
-                match target {
-                    Some(object) => match self.set_opacity_of(page, object, percent / 100.0) {
-                        Ok(said) => self.say_info(said),
-                        Err(e) => self.say_error(e),
-                    },
-                    None => self.say_info("select something first — Edit Object, or a row in the layer list."),
-                }
-            }
-            Verb::BringToFront => self.restack_picked(pdf_core::document::Stacking::Front),
-            Verb::SendToBack => self.restack_picked(pdf_core::document::Stacking::Back),
-            Verb::LockArea => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else {
-                    let page = self.tab_mut().view_state.page;
-                    self.arm_tool(Tool::Lock, page);
-                }
-            }
-            Verb::LockPages(spec) => {
-                let Some(doc) = &self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                match pagify_shell::organize::parse_range(&spec, doc.page_count) {
-                    Ok(pages) => {
-                        self.ask_or_reuse_passcode(
-                            Awaiting::LockPages(pages),
-                            "type a passcode to lock these pages with, or Escape to give up.",
-                        );
-                    }
-                    Err(why) => self.say_error(why),
-                }
-            }
-            Verb::Unlock => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else if self.tab_mut().doc.as_ref().is_some_and(|d| d.session.locked_pages().is_empty()) {
-                    self.say_error("nothing in this document is locked.");
-                } else {
-                    // Unlike locking, this always asks even when a passcode is
-                    // held — see `a_held_passcode_does_not_unlock_anything`.
-                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Unlock);
-                    self.say_info("type the passcode this was locked with, or Escape to give up.");
-                }
-            }
-            _ => unreachable!("act_objects was handed a verb from another domain"),
-        }
-    }
 
     /// One domain of [`Self::act`]: 19 verbs, moved out
     /// whole so the router above stays a table of contents.
@@ -1158,42 +1160,4 @@ impl crate::PagifyApp {
         }
     }
 
-    /// One domain of [`Self::act`]: 7 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_measurement(&mut self, verb: Verb) {
-        match verb {
-            Verb::Calibrate { distance, unit } => {
-                let page = self.tab_mut().view_state.page;
-                self.arm_tool(Tool::Calibrate { distance, unit }, page);
-            }
-            Verb::Scale => {
-                let d = self.tab_mut().calibration.describe();
-                self.say_info(d);
-            }
-            Verb::Measure(kind) => {
-                let page = self.tab_mut().view_state.page;
-                self.arm_tool(Tool::Measure(kind), page);
-            }
-
-            Verb::Record(name) => {
-                let name = if name.trim().is_empty() { "script".to_string() } else { name };
-                // A name, checked now rather than when the script is written,
-                // so nothing is recorded under a name that cannot be kept.
-                let name = match pagify_shell::state::file_name_only(&name) {
-                    Ok(name) => name,
-                    Err(why) => {
-                        self.say_error(format!("record: {why}."));
-                        return;
-                    }
-                };
-                self.recording_state.recorder.start(name.clone());
-                self.say_info(format!("recording `{name}` — every command from here is a step."));
-            }
-            Verb::StopRecording => self.stop_recording(),
-            Verb::Replay(path) => self.replay(&path),
-
-            Verb::Help(_) | Verb::Planned { .. } => unreachable!("handled in run()"),
-            _ => unreachable!("act_measurement was handed a verb from another domain"),
-        }
-    }
 }
