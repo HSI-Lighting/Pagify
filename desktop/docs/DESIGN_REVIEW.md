@@ -25,9 +25,9 @@ its extracted methods dead; repair commits `3fc46fa` (ui re-split over the
 merged body) and `3ec8898` (per-tab consts restored) put it back. Clippy's
 measure (non-comment lines) at 2026-10-08 after the repair: the largest
 functions left: **no function anywhere exceeds 150 lines** (clippy
-2026-10-10; the largest is `replace_outlined_word` at exactly 150, then
-`draw_ribbon` 147 and `draw_passcode_dialog` 145). 45 functions remain
-over 100, most between 100 and 140.
+2026-10-10; the largest are now `draw_passcode_dialog` 145, the sweep
+test 142, then 139/139/138). 44 functions remain over 100, most between
+100 and 140.
 Phase 2: one `Tool` enum and one `ArmedTool` (`PendingKind`/`Pending` deleted),
 with click/pointer/cancel/preview transitions in `tool.rs` and the thin
 `picking.rs` apply path; the state fields (`editing_run`, `grab`, `handle`,

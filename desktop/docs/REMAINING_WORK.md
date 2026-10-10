@@ -85,10 +85,10 @@ grep -E 'this function has too many lines' clippy.txt | sort -t'(' -k2 -rn
 ```
 
 Current inventory (clippy, 2026-10-10): **nothing over 150 lines**. The
-largest are `replace_outlined_word` 150, `draw_ribbon` 147,
-`draw_passcode_dialog` 145, the sweep test 142, `main.rs:3762` 139,
-`draw_pages` 139 and the fuzz/`pick_wiring` test helpers 138/136. 45
-functions remain over 100 — split opportunistically, not as a program.
+largest are `draw_passcode_dialog` 145, the sweep test 142, then 139
+(`draw_ribbon_actions`, `draw_pages`), 138 (`pick_wiring` helper) and
+136 (`blocks_review_fuzz`, `segment`). 44 functions remain over 100 —
+split opportunistically, not as a program.
 
 Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105/103/102,
 `main.rs` 139/135/123/118/108/105/102/102/102, `panels.rs` 136/123/102/102,
