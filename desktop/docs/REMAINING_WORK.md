@@ -84,18 +84,11 @@ Regenerate the list any time with the clippy command above and:
 grep -E 'this function has too many lines' clippy.txt | sort -t'(' -k2 -rn
 ```
 
-Current >150 (clippy non-comment lines) — **shell test helpers only**:
-
-| Function | Where | Size |
-|---|---|---|
-| `mode_bin`-area test helpers | `shell/tests/blocks_synthetic.rs` | 178 and 159 (plus several 100–125) |
-| a sweep helper | `shell/tests/replace_lines_sweep.rs:364` | 173 |
-| fuzz helpers | `shell/tests/blocks_review_fuzz.rs` | 136/121/112/103 |
-
-No production function exceeds 150 lines. The nearest are `draw_ribbon` 147
-(its action-row half is separable again), `draw_passcode_dialog` 145,
-`main.rs:3728` 139, `draw_pages` 138, `blocks::segment` 136 and
-`draw_signature_list` 136. Split test helpers only when touching those files.
+Current inventory (clippy, 2026-10-10): **nothing over 150 lines**. The
+largest are `replace_outlined_word` 150, `draw_ribbon` 147,
+`draw_passcode_dialog` 145, the sweep test 142, `main.rs:3762` 139,
+`draw_pages` 139 and the fuzz/`pick_wiring` test helpers 138/136. 45
+functions remain over 100 — split opportunistically, not as a program.
 
 Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105/103/102,
 `main.rs` 139/135/123/118/108/105/102/102/102, `panels.rs` 136/123/102/102,
