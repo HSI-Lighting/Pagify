@@ -51,8 +51,8 @@ fn said(app: &PagifyApp) -> String {
 fn log_into(app: &mut PagifyApp, tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("pagify-test-hardening-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let path = app.session_log.path().expect("the scratch folder is writable").to_path_buf();
+    app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let path = app.recording_state.session_log.path().expect("the scratch folder is writable").to_path_buf();
     (dir, path)
 }
 
@@ -124,7 +124,7 @@ fn retyping_the_color_options_heading_takes_its_faux_bold_twins_off_the_page() {
 
         let seed = runs_before.iter().find(|r| r.object == first).expect("the heading's first piece");
         app.pick_text_run(page, centre(&seed.rect)).expect("picked");
-        let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+        let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
         let pieces: Vec<usize> = (first..first + 5).collect();
         let twins: Vec<usize> = (twin_first..twin_first + 5).collect();
         assert_eq!(edit.lines.len(), 1, "{what}: the heading is one line");
@@ -138,7 +138,7 @@ fn retyping_the_color_options_heading_takes_its_faux_bold_twins_off_the_page() {
             words.join(" ")
         };
         assert_ne!(typed.trim(), edit.buffer.trim(), "{what}: setup: the words are not the same as they were");
-        app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed.clone();
+        app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed.clone();
         assert!(!app.apply_editing_page(), "{what}: refused: {}", said(&app));
         assert!(said(&app).contains("paragraph changed"), "{what}: {}", said(&app));
         let picture_after = picture(&app, page);
@@ -163,9 +163,9 @@ fn retyping_the_color_options_heading_takes_its_faux_bold_twins_off_the_page() {
         other.tab_mut().doc.as_mut().expect("open").rendered_is_stale();
         let seed = runs_on(&other, page).into_iter().find(|r| r.object == first).expect("the first piece");
         other.pick_text_run(page, centre(&seed.rect)).expect("picked");
-        let again = other.tab().editing_run.as_ref().expect("an editor opened").clone();
+        let again = other.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
         assert!(again.twins.is_empty(), "{what}: setup: no twins are left to list");
-        other.tab_mut().editing_run.as_mut().expect("editing").buffer = typed;
+        other.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed;
         other.apply_editing_page();
         assert!(said(&other).contains("paragraph changed"), "{what}: {}", said(&other));
         assert!(
@@ -230,7 +230,7 @@ fn a_page_too_heavy_to_read_opens_the_word_alone_and_reads_nothing_else() {
     let (outcome, line) = click_logged(&mut app, &log, 0, centre(&run.rect));
     let message = outcome.expect("the word opens");
     assert!(message.starts_with("opened this word alone: this page is very large"), "{message}");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened");
     assert_eq!(edit.lines, vec![(vec![run.object], run.rect)], "the word alone, not its paragraph");
     assert_eq!(edit.buffer.trim(), run.text.trim());
     assert_eq!(field(&line, "path"), "single", "{line}");
@@ -241,7 +241,7 @@ fn a_page_too_heavy_to_read_opens_the_word_alone_and_reads_nothing_else() {
     assert!(doc.caches.page_blocks.borrow().is_none(), "the page was read for paragraphs");
     assert!(doc.caches.sampling.borrow().is_none(), "the page was rendered to sample a background");
     assert_eq!(edit.background, Color { r: 255, g: 255, b: 255, a: 255 }, "the box is drawn on white");
-    assert!(app.editor_face.is_none() && app.pending_face.is_none(), "a font program was asked for");
+    assert!(app.faces_state.editor_face.is_none() && app.faces_state.pending_face.is_none(), "a font program was asked for");
     assert!(
         logged(&log, "pick-note").iter().any(|note| note.contains("too many to read for paragraphs")),
         "the guard did not say it fired: {:?}",
@@ -255,7 +255,7 @@ fn a_page_too_heavy_to_read_opens_the_word_alone_and_reads_nothing_else() {
     let again = doc.caches.weight.get().expect("the count was kept");
     let (with_words, light) = doc.caches.rect_page.borrow().as_ref().map(|(w, p)| (*w, p.clone())).expect("the page's runs were kept");
     assert!(with_words, "a heavy page's words are read once, for every click after the first");
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let _ = click_logged(&mut app, &log, 0, centre(&run.rect));
     let doc = app.tab().doc.as_ref().expect("open");
     assert_eq!(doc.caches.weight.get(), Some(again));
@@ -322,10 +322,10 @@ fn editor_with_a_rectangle(name: &str) -> PagifyApp {
     );
     let first = runs_on(&app, 0).into_iter().next().expect("a run");
     app.pick_text_run(0, centre(&first.rect)).expect("picked");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
     assert_eq!(edit.lines.len(), 4, "setup: the four lines are one paragraph");
     let retyped = edit.buffer.replacen("second", "SECOND", 1);
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
     app
 }
 
@@ -347,16 +347,16 @@ fn an_editor_whose_page_was_restacked_is_refused_and_the_page_is_untouched() {
 
     assert!(!app.apply_editing_page(), "a stale editor is not a refusal to keep");
     assert!(said(&app).contains(STALE_EDITOR_MESSAGE), "{}", said(&app));
-    assert!(app.tab().editing_run.is_none(), "the editor should be closed");
+    assert!(app.tab().edit.editing_run.is_none(), "the editor should be closed");
     let runs_after = runs_on(&app, 0);
     assert_eq!(runs_after.len(), runs_before.len());
     assert!(runs_before.iter().zip(&runs_after).all(|(a, b)| tests_support::same_run(a, b)), "the page changed");
     assert!(picture(&app, 0) == picture_before, "the page's picture changed");
     // The words that were typed are not lost with it.
     assert!(
-        app.text_to_offer.as_deref().is_some_and(|text| text.contains("SECOND")),
+        app.faces_state.text_to_offer.as_deref().is_some_and(|text| text.contains("SECOND")),
         "the typed words were not offered back: {:?}",
-        app.text_to_offer
+        app.faces_state.text_to_offer
     );
 }
 
@@ -378,15 +378,15 @@ fn an_editor_whose_view_was_turned_or_whose_history_moved_is_refused_too() {
                 // Something to undo first: picked again after it, so the editor is
                 // fresh when the undo comes.
                 let first = runs_on(&app, 0).into_iter().next().expect("a run");
-                app.tab_mut().editing_run = None;
+                app.tab_mut().edit.editing_run = None;
                 app.pick_text_run(0, centre(&first.rect)).expect("picked");
-                let retyped = app.tab().editing_run.as_ref().expect("an editor opened").buffer.replacen("first", "FIRST", 1);
-                app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+                let retyped = app.tab().edit.editing_run.as_ref().expect("an editor opened").buffer.replacen("first", "FIRST", 1);
+                app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
                 app.apply_editing_page();
-                app.tab_mut().editing_run = None;
+                app.tab_mut().edit.editing_run = None;
                 app.pick_text_run(0, centre(&first.rect)).expect("picked again");
-                let retyped = app.tab().editing_run.as_ref().expect("an editor opened").buffer.replacen("second", "SECOND", 1);
-                app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+                let retyped = app.tab().edit.editing_run.as_ref().expect("an editor opened").buffer.replacen("second", "SECOND", 1);
+                app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
                 let (undone, _) = app.tab().doc.as_ref().expect("open").session.undo().expect("undo");
                 assert!(undone, "setup: there was something to undo");
             }
@@ -394,7 +394,7 @@ fn an_editor_whose_view_was_turned_or_whose_history_moved_is_refused_too() {
         let before = runs_on(&app, 0);
         assert!(!app.apply_editing_page());
         assert!(said(&app).contains(STALE_EDITOR_MESSAGE), "{what}: {}", said(&app));
-        assert!(app.tab().editing_run.is_none(), "{what}: the editor should be closed");
+        assert!(app.tab().edit.editing_run.is_none(), "{what}: the editor should be closed");
         let after = runs_on(&app, 0);
         assert!(
             before.len() == after.len() && before.iter().zip(&after).all(|(a, b)| tests_support::same_run(a, b)),
@@ -413,21 +413,21 @@ fn an_editor_whose_page_changed_is_closed_on_the_next_frame() {
     let run = runs[runs.len() / 2].clone();
     h.state_mut().submit("edittext");
     h.run_steps(1);
-    let at = h.state().tab().last_view.expect("the page was drawn").to_screen(centre(&run.rect));
+    let at = h.state().tab().view_state.last_view.expect("the page was drawn").to_screen(centre(&run.rect));
     crate::ui_tests::click(&mut h, at);
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_some(), "setup: the click opened an editor");
-    let typed = h.state().tab().editing_run.as_ref().unwrap().buffer.replacen('e', "E", 1);
-    h.state_mut().tab_mut().editing_run.as_mut().unwrap().buffer = typed;
+    assert!(h.state().tab().edit.editing_run.is_some(), "setup: the click opened an editor");
+    let typed = h.state().tab().edit.editing_run.as_ref().unwrap().buffer.replacen('e', "E", 1);
+    h.state_mut().tab_mut().edit.editing_run.as_mut().unwrap().buffer = typed;
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_some(), "an editor over an unchanged page stays open");
+    assert!(h.state().tab().edit.editing_run.is_some(), "an editor over an unchanged page stays open");
 
     // The page is changed by a path that is not in the history.
     h.state_mut().tab_mut().doc.as_mut().expect("open").rendered_is_stale();
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_none(), "the editor was left open over a page that changed");
+    assert!(h.state().tab().edit.editing_run.is_none(), "the editor was left open over a page that changed");
     assert!(said(h.state()).contains(STALE_EDITOR_MESSAGE), "{}", said(h.state()));
-    assert!(h.state().text_to_offer.is_none(), "the typed words were left unsaid");
+    assert!(h.state().faces_state.text_to_offer.is_none(), "the typed words were left unsaid");
 }
 
 // -- joined groups -----------------------------------------------------------------
@@ -436,10 +436,10 @@ fn an_editor_whose_page_changed_is_closed_on_the_next_frame() {
 /// characters the way a person does.
 fn join_everything(app: &mut PagifyApp) {
     let total = app.characters(0).expect("characters").len();
-    app.tab_mut().text_selection = Some(0..total);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(0..total);
+    app.tab_mut().organize.selection_page = 0;
     app.join_selected_text().expect("join");
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
 }
 
 /// **A joined group is checked against the page before it is used.** Joined, then
@@ -459,7 +459,7 @@ fn a_joined_group_whose_page_changed_is_not_used_and_is_forgotten() {
     // While nothing changed the group is the editor a click opens.
     let (_, line) = click_logged(&mut app, &log, 0, centre(&middle.rect));
     assert_eq!(field(&line, "path"), "joined", "{line}");
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
 
     // Then the page changes under it: the first object to the back renumbers all the rest.
     app.restack(0, runs.len() - 1, pdf_core::document::Stacking::Back).expect("restacked");
@@ -475,7 +475,7 @@ fn a_joined_group_whose_page_changed_is_not_used_and_is_forgotten() {
     );
     // And no click anywhere on the page is a joined one any more.
     for run in &after {
-        app.tab_mut().editing_run = None;
+        app.tab_mut().edit.editing_run = None;
         let (_, line) = click_logged(&mut app, &log, 0, centre(&run.rect));
         assert_ne!(field(&line, "path"), "joined", "{line}");
     }
@@ -509,7 +509,7 @@ fn a_joined_group_is_kept_while_the_page_cannot_be_read() {
     assert_eq!(app.tab().joined_groups.len(), 1, "the join was deleted by a page that could not be read");
 
     tests_support::SNAPSHOT_FAILS.with(|fails| fails.set(false));
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let (_, line) = click_logged(&mut app, &log, 0, centre(&run.rect));
     assert_eq!(field(&line, "path"), "joined", "the join did not come back: {line}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -617,34 +617,34 @@ fn the_editor_face_is_asked_of_the_engine_once_per_font_per_state_of_the_page() 
     let mut app = PagifyApp::new(Some(MARINA));
     let runs: std::collections::HashMap<usize, TextRun> = runs_on(&app, 0).into_iter().map(|r| (r.object, r)).collect();
     app.pick_text_run(0, centre(&runs[&986].rect)).expect("picked");
-    assert_eq!(app.face_cache.entries.len(), 1, "the body font was kept");
-    let first = app.face_cache.entries[0].1.program.clone().expect("a program");
-    let face = app.editor_face;
+    assert_eq!(app.faces_state.face_cache.entries.len(), 1, "the body font was kept");
+    let first = app.faces_state.face_cache.entries[0].1.program.clone().expect("a program");
+    let face = app.faces_state.editor_face;
     assert!(face.is_some(), "setup: the editor asked for a face");
 
     // Another word of the same paragraph — the same font.
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     app.pick_text_run(0, centre(&runs[&990].rect)).expect("picked");
-    assert_eq!(app.face_cache.entries.len(), 1, "one font, one entry");
+    assert_eq!(app.faces_state.face_cache.entries.len(), 1, "one font, one entry");
     assert!(
-        std::rc::Rc::ptr_eq(&first, app.face_cache.entries[0].1.program.as_ref().expect("a program")),
+        std::rc::Rc::ptr_eq(&first, app.faces_state.face_cache.entries[0].1.program.as_ref().expect("a program")),
         "the second click asked the engine for the font again"
     );
-    assert_eq!(app.editor_face, face);
+    assert_eq!(app.faces_state.editor_face, face);
 
     // The heading above it is another font: a second entry, most recent first.
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     app.pick_text_run(0, centre(&runs[&981].rect)).expect("picked");
-    assert_eq!(app.face_cache.entries.len(), 2);
-    assert_ne!(app.editor_face, face, "the heading's own face");
+    assert_eq!(app.faces_state.face_cache.entries.len(), 2);
+    assert_ne!(app.faces_state.editor_face, face, "the heading's own face");
 
     // The page changes: nothing of the old state is served, and none of it is kept.
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     app.tab_mut().doc.as_mut().expect("open").rendered_is_stale();
     app.pick_text_run(0, centre(&runs[&986].rect)).expect("picked");
-    assert_eq!(app.face_cache.entries.len(), 1, "the old state's fonts were kept: {}", app.face_cache.entries.len());
+    assert_eq!(app.faces_state.face_cache.entries.len(), 1, "the old state's fonts were kept: {}", app.faces_state.face_cache.entries.len());
     assert!(
-        !std::rc::Rc::ptr_eq(&first, app.face_cache.entries[0].1.program.as_ref().expect("a program")),
+        !std::rc::Rc::ptr_eq(&first, app.faces_state.face_cache.entries[0].1.program.as_ref().expect("a program")),
         "a font of the page as it was served the page as it is"
     );
 }
@@ -667,7 +667,7 @@ fn clicking_beside_a_word_drawn_as_shapes_opens_that_word_alone_and_retypes_only
     let runs: std::collections::HashMap<usize, TextRun> = runs_on(&app, 0).into_iter().map(|r| (r.object, r)).collect();
     let (dir, log) = log_into(&mut app, "frozen-seed");
     for neighbour in [1025usize, 1034] {
-        app.tab_mut().editing_run = None;
+        app.tab_mut().edit.editing_run = None;
         let (outcome, line) = click_logged(&mut app, &log, 0, centre(&runs[&neighbour].rect));
         let message = outcome.expect("picked");
         assert!(
@@ -675,7 +675,7 @@ fn clicking_beside_a_word_drawn_as_shapes_opens_that_word_alone_and_retypes_only
             "object {neighbour}: {message}"
         );
         assert_eq!(field(&line, "path"), "single", "{line}");
-        let edit = app.tab().editing_run.as_ref().expect("an editor opened");
+        let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened");
         assert_eq!(edit.lines, vec![(vec![neighbour], runs[&neighbour].rect)], "object {neighbour}: the word alone");
         assert_eq!(edit.frozen, [false]);
     }
@@ -686,11 +686,11 @@ fn clicking_beside_a_word_drawn_as_shapes_opens_that_word_alone_and_retypes_only
     );
 
     // Retyped, only that word changes.
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     app.pick_text_run(0, centre(&runs[&1025].rect)).expect("picked");
     let before = runs_on(&app, 0);
-    let typed = format!("{} COB", app.tab().editing_run.as_ref().expect("an editor").buffer.trim_end());
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed.clone();
+    let typed = format!("{} COB", app.tab().edit.editing_run.as_ref().expect("an editor").buffer.trim_end());
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed.clone();
     assert!(!app.apply_editing_page(), "{}", said(&app));
     let after = runs_on(&app, 0);
     tests_support::assert_page_after("the word beside a drawn word", &before, &after, &[(1025, &typed)], &[]);
@@ -784,12 +784,12 @@ fn a_line_the_engine_cannot_stretch_is_written_ragged_and_said() {
     let mut app = open_page("cannot-stretch", &FLUSH, "");
     let first = runs_on(&app, 0).into_iter().next().expect("a run");
     app.pick_text_run(0, centre(&first.rect)).expect("picked");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
     assert_eq!(edit.lines.len(), 5, "setup: one paragraph");
     assert!(paragraph_lines::ends_at_one_margin(&edit.lines) && paragraph_should_justify(&edit.lines), "setup: justified");
     let mut lines: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
     lines[1] = "ab".to_string();
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = lines.join("\n");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = lines.join("\n");
     assert!(!app.apply_editing_page(), "{}", said(&app));
     assert!(said(&app).contains("paragraph changed"), "{}", said(&app));
     assert!(
@@ -808,7 +808,7 @@ fn a_run_with_an_unwritable_word(name: &str) -> PagifyApp {
     let mut app = open_page(name, &[(100.0, 700.0, "one lonely line")], "");
     let run = runs_on(&app, 0).into_iter().next().expect("a run");
     app.pick_text_run(0, centre(&run.rect)).expect("picked");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "\u{3A9}".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "\u{3A9}".to_string();
     app
 }
 
@@ -823,7 +823,7 @@ fn a_refused_run_keeps_its_editor_and_its_words_and_the_page_is_untouched() {
     assert!(app.apply_editing_page(), "the refusal was not reported: {}", said(&app));
     let last = app.cmd.history().last().expect("something was said").clone();
     assert!(matches!(last.kind, Kind::Error), "{last:?}");
-    let kept = app.tab().editing_run.as_ref().expect("a refused edit keeps its editor");
+    let kept = app.tab().edit.editing_run.as_ref().expect("a refused edit keeps its editor");
     assert_eq!(kept.buffer, "\u{3A9}", "the typing was thrown away");
     let refusal = kept.refusal.as_ref().expect("the refusal is remembered");
     assert_eq!(refusal.reason, last.text);
@@ -844,12 +844,12 @@ fn a_refused_run_keeps_its_editor_and_its_words_and_the_page_is_untouched() {
 fn a_second_click_away_from_the_same_refused_edit_lets_it_go_with_the_words_offered_back() {
     let mut app = a_run_with_an_unwritable_word("click-away-twice");
     assert!(app.leave_editor_by_click(), "the first click away should keep the refused editor");
-    assert!(app.tab().editing_run.is_some());
-    assert!(app.text_to_offer.is_none(), "the words were offered back while the box was still open");
+    assert!(app.tab().edit.editing_run.is_some());
+    assert!(app.faces_state.text_to_offer.is_none(), "the words were offered back while the box was still open");
 
     assert!(!app.leave_editor_by_click(), "the second click away should let it go");
-    assert!(app.tab().editing_run.is_none(), "the editor is still there");
-    assert_eq!(app.text_to_offer.as_deref(), Some("\u{3A9}"), "the typed words were not offered back");
+    assert!(app.tab().edit.editing_run.is_none(), "the editor is still there");
+    assert_eq!(app.faces_state.text_to_offer.as_deref(), Some("\u{3A9}"), "the typed words were not offered back");
     assert!(said(&app).contains("let go of the edit the engine refused"), "{}", said(&app));
     // Nothing was ever written.
     assert_eq!(runs_on(&app, 0)[0].text.trim(), "one lonely line");
@@ -861,11 +861,11 @@ fn a_second_click_away_from_the_same_refused_edit_lets_it_go_with_the_words_offe
 fn an_edit_changed_after_a_refusal_is_tried_again_by_a_click_away() {
     let mut app = a_run_with_an_unwritable_word("click-away-changed");
     assert!(app.leave_editor_by_click(), "setup: refused once");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
     assert!(!app.leave_editor_by_click(), "{}", said(&app));
-    assert!(app.tab().editing_run.is_none());
+    assert!(app.tab().edit.editing_run.is_none());
     assert_eq!(runs_on(&app, 0)[0].text.trim(), "one LONELY line");
-    assert!(app.text_to_offer.is_none(), "words that were written were offered back");
+    assert!(app.faces_state.text_to_offer.is_none(), "words that were written were offered back");
 }
 
 /// Escape lets a refused edit go too, and offers the words back.
@@ -874,16 +874,16 @@ fn escape_after_a_refusal_offers_the_words_back() {
     let mut app = a_run_with_an_unwritable_word("escape-refused");
     assert!(app.apply_editing_page());
     app.escape();
-    assert!(app.tab().editing_run.is_none());
-    assert_eq!(app.text_to_offer.as_deref(), Some("\u{3A9}"));
+    assert!(app.tab().edit.editing_run.is_none());
+    assert_eq!(app.faces_state.text_to_offer.as_deref(), Some("\u{3A9}"));
     assert!(said(&app).contains("what was typed is on the clipboard"), "{}", said(&app));
     // An Escape with nothing refused offers nothing: the clipboard is not the app's to take.
     let mut plain = open_page("escape-plain", &[(100.0, 700.0, "one lonely line")], "");
     let run = runs_on(&plain, 0).into_iter().next().expect("a run");
     plain.pick_text_run(0, centre(&run.rect)).expect("picked");
-    plain.tab_mut().editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
+    plain.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
     plain.escape();
-    assert!(plain.text_to_offer.is_none());
+    assert!(plain.faces_state.text_to_offer.is_none());
 }
 
 /// **The stamp stays good across the restore, and still refuses what it should**: the
@@ -894,14 +894,14 @@ fn escape_after_a_refusal_offers_the_words_back() {
 fn a_restored_editor_applies_when_corrected_and_is_refused_when_the_page_changed_meanwhile() {
     let mut app = a_run_with_an_unwritable_word("restore-stamp");
     assert!(app.apply_editing_page());
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
     assert!(!app.apply_editing_page(), "{}", said(&app));
     assert_eq!(runs_on(&app, 0)[0].text.trim(), "one LONELY line");
 
     let mut app = a_run_with_an_unwritable_word("restore-stale");
     assert!(app.apply_editing_page());
     app.rotate_view(90);
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
     assert!(!app.apply_editing_page());
     assert!(said(&app).contains(STALE_EDITOR_MESSAGE), "{}", said(&app));
     assert_eq!(runs_on(&app, 0)[0].text.trim(), "one lonely line", "a stale editor wrote");
@@ -917,7 +917,7 @@ fn a_typed_line_the_engine_refuses_does_not_swallow_the_next_command() {
     let run = runs_on(&app, 0).into_iter().next().expect("a run");
     app.pick_text_run(0, centre(&run.rect)).expect("picked");
     app.submit("\u{3A9}");
-    assert!(app.tab().editing_run.is_none(), "the refused line left the editor open for the next one");
+    assert!(app.tab().edit.editing_run.is_none(), "the refused line left the editor open for the next one");
     assert!(app.cmd.history().iter().any(|e| matches!(e.kind, Kind::Error)), "{}", said(&app));
     // So the next line is a command: `edittext` arms the tool rather than becoming a word.
     app.submit("edittext");
@@ -938,21 +938,21 @@ fn a_refusal_is_shown_beside_apply_and_a_click_away_does_not_pick_what_is_under_
     h.state_mut().submit("edittext");
     h.run_steps(1);
     let screen = |h: &egui_kittest::Harness<'static, PagifyApp>, run: &TextRun| {
-        h.state().tab().last_view.expect("the page was drawn").to_screen(centre(&run.rect))
+        h.state().tab().view_state.last_view.expect("the page was drawn").to_screen(centre(&run.rect))
     };
     let at = screen(&h, &target);
     crate::ui_tests::click(&mut h, at);
     h.run_steps(2);
-    let opened = h.state().tab().editing_run.as_ref().expect("a click opened the editor").clone();
+    let opened = h.state().tab().edit.editing_run.as_ref().expect("a click opened the editor").clone();
     let mut typed: Vec<String> = opened.buffer.split('\n').map(str::to_string).collect();
     typed[0] = "\u{3A9}".to_string();
-    h.state_mut().tab_mut().editing_run.as_mut().expect("editing").buffer = typed.join("\n");
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed.join("\n");
     h.run_steps(1);
 
     // Apply, refused: the box and the words stay, and the reason is on screen.
     h.get_by_label("Apply").click();
     h.run_steps(2);
-    let kept = h.state().tab().editing_run.as_ref().expect("the refused edit's box was closed");
+    let kept = h.state().tab().edit.editing_run.as_ref().expect("the refused edit's box was closed");
     assert_eq!(kept.buffer, typed.join("\n"), "the typing was thrown away");
     assert!(
         h.query_by_label_contains("Not applied").is_some(),
@@ -963,11 +963,11 @@ fn a_refusal_is_shown_beside_apply_and_a_click_away_does_not_pick_what_is_under_
     // Typed again with something else the engine refuses; the first click away is the
     // refusal's answer and picks nothing.
     typed[0] = "\u{3A8}".to_string();
-    h.state_mut().tab_mut().editing_run.as_mut().expect("editing").buffer = typed.join("\n");
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed.join("\n");
     let at = screen(&h, &other);
     crate::ui_tests::click(&mut h, at);
     h.run_steps(2);
-    let still = h.state().tab().editing_run.as_ref().expect("a refused click-away closed the box");
+    let still = h.state().tab().edit.editing_run.as_ref().expect("a refused click-away closed the box");
     assert_eq!(still.object, opened.object, "the click also picked what was under it");
     assert_eq!(still.buffer, typed.join("\n"));
 }
@@ -1008,7 +1008,7 @@ fn heavy_page_costs() {
         };
         let mut clicks = Vec::new();
         for _ in 0..4 {
-            app.tab_mut().editing_run = None;
+            app.tab_mut().edit.editing_run = None;
             let started = std::time::Instant::now();
             let _ = app.pick_text_run(page, centre(&rect));
             clicks.push(started.elapsed().as_secs_f32() * 1000.0);

@@ -249,11 +249,11 @@ mod tools_chain {
     fn the_fill_command_toggles_and_says_so() {
         let mut app = app();
         app.submit("fill");
-        assert!(app.draw_fill);
+        assert!(app.prefs_state.draw_fill);
         assert!(infos(&app).iter().any(|s| s.contains("fill: on")), "{:?}", infos(&app));
 
         app.submit("fill");
-        assert!(!app.draw_fill);
+        assert!(!app.prefs_state.draw_fill);
         assert!(infos(&app).iter().any(|s| s.contains("fill: off")), "{:?}", infos(&app));
     }
 

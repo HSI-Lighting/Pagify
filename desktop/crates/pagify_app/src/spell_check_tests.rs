@@ -18,7 +18,7 @@ fn a_clean_document_reports_nothing_to_review() {
     app.submit("spelling");
     app.wait_for_spell_scan();
 
-    let panel = app.tab_mut().spelling.as_ref().expect("the panel did not open");
+    let panel = app.tab_mut().panels.spelling.as_ref().expect("the panel did not open");
     assert!(panel.found.is_empty(), "flagged real words: {:?}", panel.found);
     assert!(said(&app).contains("no misspelled"), "{}", said(&app));
 }
@@ -35,7 +35,7 @@ fn a_typo_just_typed_in_is_found() {
 
     app.submit("spelling");
     app.wait_for_spell_scan();
-    let panel = app.tab_mut().spelling.as_ref().expect("the panel did not open");
+    let panel = app.tab_mut().panels.spelling.as_ref().expect("the panel did not open");
     assert!(
         panel.found.iter().any(|m| m.word == "tpyo"),
         "the typo was not found: {:?}",
@@ -55,7 +55,7 @@ fn an_acronym_is_not_flagged() {
 
     app.submit("spelling");
     app.wait_for_spell_scan();
-    let panel = app.tab_mut().spelling.as_ref().expect("the panel did not open");
+    let panel = app.tab_mut().panels.spelling.as_ref().expect("the panel did not open");
     assert!(
         panel.found.iter().all(|m| m.word != "PDF"),
         "an all-capitals acronym was flagged: {:?}",
@@ -100,7 +100,7 @@ fn changing_a_typo_fixes_it_and_keeps_the_runs_style() {
     // And a fresh scan no longer finds it.
     app.submit("spelling");
     app.wait_for_spell_scan();
-    let panel = app.tab_mut().spelling.as_ref().expect("panel");
+    let panel = app.tab_mut().panels.spelling.as_ref().expect("panel");
     assert!(!panel.found.iter().any(|m| m.word == "tpyo"), "still flagged after the fix");
 }
 
@@ -112,7 +112,7 @@ fn suggestions_offer_the_intended_word() {
 
     app.submit("spelling");
     app.wait_for_spell_scan();
-    let panel = app.tab_mut().spelling.as_ref().expect("panel");
+    let panel = app.tab_mut().panels.spelling.as_ref().expect("panel");
     let found = panel
         .found
         .iter()
@@ -130,6 +130,6 @@ fn the_panel_needs_a_document_open() {
     let mut app = PagifyApp::new(None);
     app.submit("spelling");
     app.wait_for_spell_scan();
-    assert!(app.tab_mut().spelling.is_none(), "opened with nothing to check");
+    assert!(app.tab_mut().panels.spelling.is_none(), "opened with nothing to check");
     assert!(said(&app).contains("nothing open"), "{}", said(&app));
 }

@@ -95,7 +95,7 @@ const ROWS: [(&str, &str); 5] = [
 fn five_lines_with_a_word_retyped(name: &str) -> (PagifyApp, Vec<TextRun>, EditingRun, String) {
     let mut app = two_piece_page(name, &ROWS);
     pick_object(&mut app, 4);
-    let edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(edit.lines.len(), 5, "setup: the five rows should be one paragraph: {:?}", edit.buffer);
     assert!(
         edit.lines.iter().all(|(objects, _)| objects.len() == 2),
@@ -112,7 +112,7 @@ fn five_lines_with_a_word_retyped(name: &str) -> (PagifyApp, Vec<TextRun>, Editi
     // its end — with the one word changed.
     let new_third = retyped.split('\n').nth(2).expect("a third line").to_string();
     assert!(new_third.contains("LABORE") && new_third.contains("dolore magna"), "{new_third:?}");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
     (app, before, edit, new_third)
 }
 
@@ -157,7 +157,7 @@ const FOUR: [(f32, f32, &str); 4] = [
 fn a_paragraph_with_frozen_lines(name: &str) -> (PagifyApp, EditingRun) {
     let mut app = open_page(name, &FOUR, "");
     pick_object(&mut app, 0);
-    let mut edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let mut edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(edit.lines.len(), 4, "setup: the four lines should be one paragraph: {:?}", edit.buffer);
     let lines = edit.lines.clone();
     let gap = Rect {
@@ -217,8 +217,8 @@ fn frozen_lines_are_never_touched_by_an_apply_and_nothing_panics() {
     // Then for real, through the apply, with a real session log to read back.
     let dir = std::env::temp_dir().join(format!("pagify-test-frozen-log-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let log_path = app.session_log.path().expect("the temp dir is writable").to_path_buf();
+    app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let log_path = app.recording_state.session_log.path().expect("the temp dir is writable").to_path_buf();
     let before = runs_by_object(&app);
     app.apply_one_edit(edit.clone());
     let after = runs_by_object(&app);
@@ -302,8 +302,8 @@ fn an_editor_built_with_an_empty_frozen_first_line_stays_aligned_through_an_appl
     // Retype the last line only, through the real apply.
     let before = runs_by_object(&app);
     let retyped = edit.buffer.replace("third", "THIRD");
-    app.tab_mut().editing_run = Some(edit);
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+    app.tab_mut().edit.editing_run = Some(edit);
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
     app.apply_editing_page();
     let after = runs_by_object(&app);
     assert_eq!(after[&0], before[&0], "the first text line was rewritten: the lines shifted");
@@ -342,7 +342,7 @@ fn a_block_with_no_text_object_at_all_cannot_be_opened() {
 fn a_paragraph_that_no_longer_lines_up_is_refused_not_guessed_at() {
     let mut app = open_page("mismatch", &FOUR, "");
     pick_object(&mut app, 0);
-    let good = app.tab().editing_run.as_ref().expect("picked").clone();
+    let good = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(good.lines.len(), 4, "setup: the four lines should be one paragraph");
 
     let mut too_few_lines_of_text = good.clone();
@@ -381,7 +381,7 @@ fn a_paragraph_that_no_longer_lines_up_is_refused_not_guessed_at() {
 fn a_block_of_one_text_object_and_a_frozen_line_is_applied_as_a_paragraph() {
     let mut app = open_page("one-and-frozen", &[(100.0, 700.0, "one lonely line")], "");
     pick_object(&mut app, 0);
-    let mut edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let mut edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(edit.lines.len(), 1, "setup: a single run");
     let rect = edit.lines[0].1;
     edit.lines.push((Vec::new(), Rect { top: rect.bottom, bottom: rect.bottom + 12.0, ..rect }));
@@ -408,7 +408,7 @@ fn a_block_of_one_text_object_and_a_frozen_line_is_applied_as_a_paragraph() {
 fn a_lone_frozen_line_is_never_rewritten() {
     let mut app = open_page("lone-frozen", &[(100.0, 700.0, "one lonely line")], "");
     pick_object(&mut app, 0);
-    let mut edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let mut edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     edit.frozen = vec![true];
     edit.buffer = "one LONELY line".to_string();
 
@@ -427,12 +427,12 @@ fn a_lone_frozen_line_is_never_rewritten() {
 fn every_way_of_picking_gives_one_frozen_flag_per_line_and_none_set() {
     let mut app = open_page("flags-single", &[(100.0, 700.0, "one lonely line")], "");
     pick_object(&mut app, 0);
-    let single = app.tab().editing_run.as_ref().expect("picked").clone();
+    let single = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!((single.lines.len(), single.frozen), (1, vec![false]));
 
     let mut app = open_page("flags-paragraph", &FOUR, "");
     pick_object(&mut app, 0);
-    let paragraph = app.tab().editing_run.as_ref().expect("picked").clone();
+    let paragraph = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(paragraph.lines.len(), 4);
     assert_eq!(paragraph.frozen, vec![false; 4]);
 }
@@ -442,21 +442,21 @@ fn every_way_of_picking_gives_one_frozen_flag_per_line_and_none_set() {
 fn every_way_of_picking_stamps_the_documents_generation() {
     let mut app = open_page("stamp-single", &[(100.0, 700.0, "one lonely line")], "");
     pick_object(&mut app, 0);
-    let single = app.tab().editing_run.as_ref().expect("picked").clone();
+    let single = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(single.doc_generation, app.doc_generation());
 
     // After the history has moved, a fresh pick carries the new number.
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "one LONELY line".to_string();
     app.apply_editing_page();
     assert_ne!(app.doc_generation(), single.doc_generation, "setup: an apply moves the generation");
     let mut app2 = open_page("stamp-paragraph", &FOUR, "");
     pick_object(&mut app2, 0);
-    let paragraph = app2.tab().editing_run.as_ref().expect("picked").clone();
+    let paragraph = app2.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(paragraph.lines.len(), 4, "setup: a paragraph, built by `build_editor_from_lines`");
     assert_eq!(paragraph.doc_generation, app2.doc_generation());
     pick_object(&mut app, 0);
     assert_eq!(
-        app.tab().editing_run.as_ref().expect("picked again").doc_generation,
+        app.tab().edit.editing_run.as_ref().expect("picked again").doc_generation,
         app.doc_generation(),
         "a fresh pick must carry the generation as it is now"
     );
@@ -471,25 +471,25 @@ fn an_edit_picked_before_an_undo_is_refused_rather_than_written_onto_other_objec
     // Some history to undo: retype the first line. This also shows a fresh
     // pick still applies.
     pick_object(&mut app, 0);
-    let retyped = app.tab().editing_run.as_ref().expect("picked").buffer.replace("first", "FIRST");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+    let retyped = app.tab().edit.editing_run.as_ref().expect("picked").buffer.replace("first", "FIRST");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
     app.apply_editing_page();
     assert!(runs_by_object(&app)[&0].0.contains("FIRST"), "setup: the first edit applied");
 
     // Pick again, then move the document under the open editor.
     pick_object(&mut app, 0);
-    let picked_at = app.tab().editing_run.as_ref().expect("picked").doc_generation;
+    let picked_at = app.tab().edit.editing_run.as_ref().expect("picked").doc_generation;
     let (undone, _) = app.tab().doc.as_ref().expect("open").session.undo().expect("undo");
     assert!(undone, "setup: there was something to undo");
     assert_ne!(app.doc_generation(), picked_at, "setup: the undo moved the generation");
     let after_undo = runs_by_object(&app);
 
-    let typed = app.tab().editing_run.as_ref().expect("still open").buffer.replace("second", "SECOND");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed;
+    let typed = app.tab().edit.editing_run.as_ref().expect("still open").buffer.replace("second", "SECOND");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed;
     app.apply_editing_page();
     assert_eq!(runs_by_object(&app), after_undo, "an edit picked before the undo was written");
     assert!(said(&app).contains(STALE_EDITOR_MESSAGE), "{}", said(&app));
-    assert!(app.tab().editing_run.is_none(), "the editor should be closed");
+    assert!(app.tab().edit.editing_run.is_none(), "the editor should be closed");
 }
 
 /// A stale editor with nothing typed in it just closes, as any other does.
@@ -497,8 +497,8 @@ fn an_edit_picked_before_an_undo_is_refused_rather_than_written_onto_other_objec
 fn a_stale_edit_with_nothing_typed_just_closes() {
     let mut app = open_page("stale-nothing", &FOUR, "");
     pick_object(&mut app, 0);
-    let retyped = app.tab().editing_run.as_ref().expect("picked").buffer.replace("first", "FIRST");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+    let retyped = app.tab().edit.editing_run.as_ref().expect("picked").buffer.replace("first", "FIRST");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
     app.apply_editing_page();
 
     pick_object(&mut app, 0);
@@ -507,7 +507,7 @@ fn a_stale_edit_with_nothing_typed_just_closes() {
     let after_undo = runs_by_object(&app);
     app.apply_editing_page();
     assert_eq!(runs_by_object(&app), after_undo);
-    assert!(app.tab().editing_run.is_none());
+    assert!(app.tab().edit.editing_run.is_none());
     assert!(!said(&app).contains("not applied"), "a no-op was refused as if it were a write: {}", said(&app));
 }
 
@@ -546,7 +546,7 @@ fn retyping_a_multi_piece_line_of_the_real_paragraph_replaces_its_pieces_and_wri
         },
     )
     .expect("picked");
-    let edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     let lines_text: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
     assert!(edit.lines.len() >= 4, "setup: need a first, a middle and a last line");
     assert!(
@@ -579,7 +579,7 @@ fn retyping_a_multi_piece_line_of_the_real_paragraph_replaces_its_pieces_and_wri
     retyped[target] = format!("{} {word}", lines_text[target].trim_end().trim_end_matches('-'));
 
     let before = runs_in_order(&app);
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped.join("\n");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped.join("\n");
     app.apply_editing_page();
     let after = runs_in_order(&app);
 
@@ -646,9 +646,9 @@ fn a_later_pick_of_the_edited_paragraph_shows_exactly_the_edited_lines() {
     let expected: Vec<String> = edit.buffer.replace("labore", "LABORE").split('\n').map(squeeze).collect();
     app.apply_editing_page();
 
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     pick_object(&mut app, 0);
-    let again = app.tab().editing_run.as_ref().expect("picked again").clone();
+    let again = app.tab().edit.editing_run.as_ref().expect("picked again").clone();
     let lines: Vec<String> = again.buffer.split('\n').map(squeeze).collect();
     assert_eq!(lines, expected, "a later pick does not read the page's own lines");
     assert_eq!(again.lines.len(), 5);
@@ -672,12 +672,12 @@ fn a_longer_first_piece_is_not_painted_over_by_the_pieces_that_were_after_it() {
     let long = "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do";
     let mut app = two_piece_page("overpaint", &[("Lorem ", "ipsum dolor"), SECOND]);
     pick_object(&mut app, 0);
-    let edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(edit.lines.len(), 2, "setup: two lines: {:?}", edit.buffer);
     let first_line_old = edit.buffer.split('\n').next().expect("a first line").to_string();
     assert!(squeeze(&first_line_old).len() < long.len(), "setup: the new line is longer");
     let typed = edit.buffer.replacen(&first_line_old, long, 1);
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed;
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed;
     app.apply_editing_page();
 
     // The same words, one piece, same place; the second row as it was.
@@ -695,12 +695,12 @@ fn a_longer_first_piece_is_not_painted_over_by_the_pieces_that_were_after_it() {
 fn deleting_a_line_removes_every_one_of_its_pieces() {
     let mut app = two_piece_page("delete-line", &ROWS);
     pick_object(&mut app, 4);
-    let edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(edit.lines.len(), 5, "setup: five lines");
     let before = runs_in_order(&app);
     let mut lines: Vec<&str> = edit.buffer.split('\n').collect();
     lines.remove(2);
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = lines.join("\n");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = lines.join("\n");
     app.apply_editing_page();
     let after = runs_in_order(&app);
     assert_page_after("a deleted line", &before, &after, &[], &edit.lines[2].0);
@@ -721,7 +721,7 @@ fn a_new_colour_reaches_every_piece_that_stays_and_undoes_with_the_replace_in_on
     let red = Color { r: 200, g: 0, b: 0, a: 255 };
     let (mut app, before, edit, new_third) = five_lines_with_a_word_retyped("recolour");
     assert!(before.iter().all(|r| r.color != red), "setup: nothing is red yet");
-    app.tab_mut().editing_run.as_mut().expect("editing").style.color = Some(red);
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").style.color = Some(red);
     let picture_before = picture(&app);
     app.apply_editing_page();
     let after = runs_in_order(&app);
@@ -750,7 +750,7 @@ fn a_new_colour_alone_recolours_the_whole_paragraph_and_removes_nothing() {
     let mut app = two_piece_page("recolour-only", &ROWS);
     pick_object(&mut app, 4);
     let before = runs_in_order(&app);
-    app.tab_mut().editing_run.as_mut().expect("editing").style.color = Some(red);
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").style.color = Some(red);
     app.apply_editing_page();
     let after = runs_in_order(&app);
     let recoloured: Vec<TextRun> = before.iter().map(|r| TextRun { color: red, ..r.clone() }).collect();
@@ -764,7 +764,7 @@ fn a_new_colour_alone_recolours_the_whole_paragraph_and_removes_nothing() {
 #[test]
 fn a_position_asked_for_is_said_not_silently_dropped() {
     let (mut app, before, edit, new_third) = five_lines_with_a_word_retyped("position");
-    app.tab_mut().editing_run.as_mut().expect("editing").style.at = Some((300.0, 300.0));
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").style.at = Some((300.0, 300.0));
     app.apply_editing_page();
     let (first, second) = (edit.lines[2].0[0], edit.lines[2].0[1]);
     assert_page_after("a position asked for", &before, &runs_in_order(&app), &[(first, &new_third)], &[second]);
@@ -784,14 +784,14 @@ fn a_position_asked_for_is_said_not_silently_dropped() {
 fn an_engine_refusal_leaves_the_page_as_it_was_and_is_said() {
     let mut app = open_page("refusal", &FOUR, "0 0 50 50 re f\n");
     pick_object(&mut app, 0);
-    let mut edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let mut edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(edit.lines.len(), 4, "setup: four lines");
     // The fifth object is the rectangle.
     edit.lines[1].0 = vec![4];
     edit.buffer = format!("{}\nan extra line", edit.buffer.replacen("second", "SECOND", 1));
     let (runs_before, picture_before) = (runs_in_order(&app), picture(&app));
     let typed = edit.buffer.clone();
-    app.tab_mut().editing_run = Some(edit);
+    app.tab_mut().edit.editing_run = Some(edit);
     assert!(app.apply_editing_page(), "the refusal was not reported as one");
     assert_eq!(runs_in_order(&app).len(), runs_before.len());
     assert!(runs_in_order(&app).iter().zip(&runs_before).all(|(a, b)| same_run(a, b)), "the page changed");
@@ -805,7 +805,7 @@ fn an_engine_refusal_leaves_the_page_as_it_was_and_is_said() {
     // **Changed with the reason**: the editor used to be closed here, with the
     // person's typing thrown away with the refusal. It stays now, with the words
     // in it and the refusal remembered (shown beside Apply).
-    let kept = app.tab().editing_run.as_ref().expect("a refused edit keeps its editor");
+    let kept = app.tab().edit.editing_run.as_ref().expect("a refused edit keeps its editor");
     assert_eq!(kept.buffer, typed, "the typing was not kept");
     assert_eq!(kept.refusal.as_ref().map(|r| r.reason.as_str()), Some(last.text.as_str()));
 }
@@ -819,12 +819,12 @@ fn a_refusal_after_a_new_colour_leaves_the_page_exactly_as_it_was() {
     let red = Color { r: 200, g: 0, b: 0, a: 255 };
     let mut app = open_page("refusal-colour", &FOUR, "0 0 50 50 re f\n");
     pick_object(&mut app, 0);
-    let mut edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let mut edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     edit.lines[1].0 = vec![1, 4]; // the line's own piece, and the rectangle as a second "piece": not text
     edit.buffer = edit.buffer.replacen("second", "SECOND", 1);
     edit.style.color = Some(red);
     let (runs_before, picture_before) = (runs_in_order(&app), picture(&app));
-    app.tab_mut().editing_run = Some(edit);
+    app.tab_mut().edit.editing_run = Some(edit);
     app.apply_editing_page();
     let last = app.cmd.history().last().expect("something was said").clone();
     assert!(matches!(last.kind, Kind::Error), "the refusal was not said as an error: {last:?}");
@@ -843,8 +843,8 @@ fn a_refusal_after_a_new_colour_leaves_the_page_exactly_as_it_was() {
 #[test]
 fn new_lines_typed_past_the_end_are_written_below_the_paragraph_after_the_replace() {
     let (mut app, before, edit, new_third) = five_lines_with_a_word_retyped("surplus");
-    let typed = format!("{}\na brand new last line", app.tab().editing_run.as_ref().unwrap().buffer);
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed;
+    let typed = format!("{}\na brand new last line", app.tab().edit.editing_run.as_ref().unwrap().buffer);
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed;
     app.apply_editing_page();
     let after = runs_in_order(&app);
     let (first, second) = (edit.lines[2].0[0], edit.lines[2].0[1]);
@@ -890,8 +890,8 @@ fn a_join_is_forgotten_when_pieces_came_off_the_page_and_kept_when_none_did() {
     let mut app = open_page("join-kept", &FOUR, "");
     pick_object(&mut app, 0);
     assert!(app.declare_group(0, vec![0, 1, 2, 3]), "setup: the join is declared");
-    let retyped = app.tab().editing_run.as_ref().expect("picked").buffer.replace("second", "SECOND");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+    let retyped = app.tab().edit.editing_run.as_ref().expect("picked").buffer.replace("second", "SECOND");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
     app.apply_editing_page();
     let kept: Vec<(usize, Vec<usize>)> =
         app.tab().joined_groups.iter().map(|group| (group.page, group.objects.clone())).collect();
@@ -912,7 +912,7 @@ fn a_font_picked_for_a_paragraph_is_written_on_every_line_in_one_step() {
     pick_object(&mut app, 0);
     let before = runs_in_order(&app);
     let picture_before = picture(&app);
-    app.tab_mut().editing_run.as_mut().expect("editing").style.face = Some(picked.clone());
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").style.face = Some(picked.clone());
     app.apply_editing_page();
     assert!(said(&app).contains("paragraph changed"), "the font pick was refused: {}", said(&app));
     let after = runs_in_order(&app);
@@ -964,10 +964,10 @@ fn a_new_colour_for_a_real_paragraph_changes_the_colour_and_nothing_else() {
             },
         )
         .expect("picked");
-        let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+        let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
         assert!(edit.lines.len() >= 5, "setup: {path}: a real paragraph");
         let picture_before = picture(&app);
-        app.tab_mut().editing_run.as_mut().expect("editing").style.color = Some(red);
+        app.tab_mut().edit.editing_run.as_mut().expect("editing").style.color = Some(red);
         app.apply_editing_page();
         assert!(said(&app).contains("paragraph changed"), "{path}: the colour was refused: {}", said(&app));
 
@@ -1006,7 +1006,7 @@ fn a_size_set_for_a_paragraph_reaches_every_line_and_undoes_in_one_step() {
     pick_object(&mut app, 4);
     let before = runs_in_order(&app);
     let picture_before = picture(&app);
-    app.tab_mut().editing_run.as_mut().expect("editing").style.size = Some(14.0);
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").style.size = Some(14.0);
     app.apply_editing_page();
     assert!(said(&app).contains("paragraph changed"), "the size was refused: {}", said(&app));
     let after = runs_in_order(&app);
@@ -1055,7 +1055,7 @@ fn open_a_justified_paragraph(path: &str, seed_text: Option<&str>) -> Option<(Pa
         },
     )
     .expect("picked");
-    let edit = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
     assert_eq!(edit.lines.len(), 13, "setup: the 13-line justified paragraph");
     assert!(paragraph_lines::ends_at_one_margin(&edit.lines), "setup: its lines end at one margin");
     Some((app, edit))
@@ -1105,7 +1105,7 @@ fn a_retyped_line_of_a_justified_paragraph_ends_where_it_ended() {
         let (target, retyped) = drop_a_word_from_a_middle_line(&edit);
         let original = edit.lines[target].1;
         let (first, rest) = edit.lines[target].0.split_first().expect("the line has objects");
-        app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+        app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
         app.apply_editing_page();
         let after = runs_in_order(&app);
         let now = after
@@ -1142,7 +1142,7 @@ fn after_editing_one_line_a_click_opens_every_line_of_the_paragraph_again() {
         any = true;
         let (target, retyped) = drop_a_word_from_a_middle_line(&edit);
         let (first, rest) = edit.lines[target].0.split_first().expect("the line has objects");
-        app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped.clone();
+        app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped.clone();
         app.apply_editing_page();
 
         // Click the retyped line itself, and a line below it.
@@ -1151,7 +1151,7 @@ fn after_editing_one_line_a_click_opens_every_line_of_the_paragraph_again() {
             ("the retyped line", renumbered(*first, rest)),
             ("the line after it", renumbered(edit.lines[target + 1].0[0], rest)),
         ] {
-            app.tab_mut().editing_run = None;
+            app.tab_mut().edit.editing_run = None;
             let run = after.iter().find(|r| r.object == object).expect("a piece");
             app.pick_text_run(
                 0,
@@ -1161,7 +1161,7 @@ fn after_editing_one_line_a_click_opens_every_line_of_the_paragraph_again() {
                 },
             )
             .expect("picked again");
-            let again = app.tab().editing_run.as_ref().expect("an editor opened").clone();
+            let again = app.tab().edit.editing_run.as_ref().expect("an editor opened").clone();
             assert_eq!(
                 again.lines.len(),
                 edit.lines.len(),
@@ -1198,7 +1198,7 @@ fn the_last_line_of_a_justified_paragraph_is_not_stretched() {
         let original = edit.lines[last].1;
         let (first, rest) = edit.lines[last].0.split_first().expect("the line has objects");
         let before = runs_in_order(&app);
-        app.tab_mut().editing_run.as_mut().expect("editing").buffer = lines.join("\n");
+        app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = lines.join("\n");
         app.apply_editing_page();
         let after = runs_in_order(&app);
         let new_text = lines[last].clone();
@@ -1236,7 +1236,7 @@ fn a_ragged_paragraphs_retyped_line_is_not_stretched() {
     ];
     let mut app = open_page("ragged", &lines, "");
     pick_object(&mut app, 0);
-    let edit = app.tab().editing_run.as_ref().expect("picked").clone();
+    let edit = app.tab().edit.editing_run.as_ref().expect("picked").clone();
     assert_eq!(edit.lines.len(), 5, "setup: five lines: {:?}", edit.buffer);
     assert!(
         !paragraph_lines::ends_at_one_margin(&edit.lines),
@@ -1246,7 +1246,7 @@ fn a_ragged_paragraphs_retyped_line_is_not_stretched() {
     let original = edit.lines[0].1;
     let mut typed: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
     typed[0] = "alpha beta gamma delta epsilon theta".to_string();
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed.join("\n");
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = typed.join("\n");
     app.apply_editing_page();
     let now = runs_in_order(&app).into_iter().next().expect("the first line");
     assert!(

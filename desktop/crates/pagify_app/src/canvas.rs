@@ -34,15 +34,15 @@ impl crate::PagifyApp {
     /// green for one a side or the middle is exactly on.
     pub(crate) fn draw_move_guides(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         let (moving, exclude): (pdf_core::document::Rect, Vec<usize>) = {
-            let single = match (self.tab().grab.clone(), self.tab().selected.clone()) {
+            let single = match (self.tab().selection.grab.clone(), self.tab().selection.selected.clone()) {
                 (Some(grab), Some(sel)) if grab.handle.is_none() && sel.page == page => {
                     Some((Self::shifted(sel.rect, grab.by), vec![sel.object]))
                 }
                 _ => None,
             };
-            let group = || match (self.tab().group_grab.clone(), self.group_bounds(page)) {
+            let group = || match (self.tab().selection.group_grab.clone(), self.group_bounds(page)) {
                 (Some(grab), Some(bounds)) if grab.handle.is_none() => {
-                    let members = self.tab().group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
+                    let members = self.tab().selection.group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
                     Some((Self::shifted(bounds, grab.by), members))
                 }
                 _ => None,
@@ -80,8 +80,8 @@ impl crate::PagifyApp {
     /// is selected by the same pointer, and two selections at once means
     /// Delete, Copy and the handles disagree about which one they mean.
     fn drop_object_selection(&mut self) {
-        self.tab_mut().selected = None;
-        self.tab_mut().group = Vec::new();
+        self.tab_mut().selection.selected = None;
+        self.tab_mut().selection.group = Vec::new();
     }
 
     /// The object tool's own pointer handling: select on click, move by
@@ -99,13 +99,13 @@ impl crate::PagifyApp {
         // `Self::object_hover_handle`'s own doc for why a drag that has just
         // started must be classified against *that*, not against a fresh
         // hit-test at `at`. Mirrors `Self::interact_signatures`.
-        let remembered_handle = self.tab_mut().object_hover_handle;
+        let remembered_handle = self.tab_mut().selection.object_hover_handle;
 
         // The cursor says what a press here would do.
-        if self.tab_mut().grab.is_none() && self.tab_mut().group_grab.is_none() {
-            if let Some(rect) = self.tab().selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
+        if self.tab_mut().selection.grab.is_none() && self.tab_mut().selection.group_grab.is_none() {
+            if let Some(rect) = self.tab().selection.selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
                 let handle = self.handle_at(at, view);
-                self.tab_mut().object_hover_handle = handle;
+                self.tab_mut().selection.object_hover_handle = handle;
                 if let Some(handle) = handle {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &rect) {
@@ -113,24 +113,25 @@ impl crate::PagifyApp {
                 }
             } else if let Some(bounds) = self.group_bounds(page) {
                 let handle = Self::handle_near(at, view, &bounds);
-                self.tab_mut().object_hover_handle = handle;
+                self.tab_mut().selection.object_hover_handle = handle;
                 if let Some(handle) = handle {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &bounds) {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
                 }
             } else {
-                self.tab_mut().object_hover_handle = None;
+                self.tab_mut().selection.object_hover_handle = None;
             }
         }
 
         if response.drag_started() {
             let on_handle = self.tab_mut()
+                .selection
                 .selected
                 .as_ref()
                 .filter(|s| s.page == page)
                 .and_then(|_| remembered_handle);
-            let on_body = self.tab_mut().selected.as_ref().is_some_and(|s| {
+            let on_body = self.tab_mut().selection.selected.as_ref().is_some_and(|s| {
                 s.page == page
                     && at.x >= s.rect.left as f64
                     && at.x <= s.rect.right as f64
@@ -140,17 +141,17 @@ impl crate::PagifyApp {
             let group_bounds = self.group_bounds(page);
             // A group's handles read from `remembered_handle` too — it is
             // whichever of the two hover branches above last ran, and
-            // `self.tab_mut().selected`/`self.tab_mut().group` are never both populated at
+            // `self.tab_mut().selection.selected`/`self.tab_mut().selection.group` are never both populated at
             // once, so it always means the right one.
             let on_group_handle = group_bounds.is_some().then(|| remembered_handle).flatten();
             let on_group_body = on_group_handle.is_none()
                 && group_bounds.as_ref().is_some_and(|b| Self::point_in_rect(at, b));
             if on_group_handle.is_some() || on_group_body {
-                self.tab_mut().group_grab = Some(Grab { handle: on_group_handle, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.group_grab = Some(Grab { handle: on_group_handle, from: at, by: (0.0, 0.0) });
             } else if on_handle.is_some() || on_body {
                 // A drag on the current selection's own body or a handle:
                 // move or resize it.
-                self.tab_mut().group = Vec::new();
+                self.tab_mut().selection.group = Vec::new();
                 // **A turn is measured from where the pointer went down, not from
                 // where egui decided it was a drag** — a few pixels along already,
                 // which at the handle's distance from the middle is several
@@ -159,7 +160,7 @@ impl crate::PagifyApp {
                     (Some(Handle::Rotate), Some(pressed)) => view.to_page(pressed),
                     _ => at,
                 };
-                self.tab_mut().grab = Some(Grab { handle: on_handle, from, by: (0.0, 0.0) });
+                self.tab_mut().selection.grab = Some(Grab { handle: on_handle, from, by: (0.0, 0.0) });
             } else {
                 // **Reported from use: dragging out a marquee across
                 // several objects kept grabbing and moving whichever one
@@ -173,20 +174,20 @@ impl crate::PagifyApp {
                 // click first, then drag its own body or a handle, which
                 // the branch above this one still covers exactly as
                 // before.
-                self.tab_mut().selected = None;
+                self.tab_mut().selection.selected = None;
                 // A picture or signature picked a moment ago is not part of
                 // what this marquee is about to select.
-                self.tab_mut().placed_image_selected = None;
-                self.tab_mut().signature_selected = None;
+                self.tab_mut().selection.placed_image_selected = None;
+                self.tab_mut().selection.signature_selected = None;
                 if !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
-                    self.tab_mut().group = Vec::new();
+                    self.tab_mut().selection.group = Vec::new();
                 }
-                self.tab_mut().marquee = Some((at, at));
+                self.tab_mut().selection.marquee = Some((at, at));
             }
         }
 
         if response.dragged() {
-            if let Some(grab) = self.tab_mut().grab.as_mut() {
+            if let Some(grab) = self.tab_mut().selection.grab.as_mut() {
                 grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
                 ui.output_mut(|o| {
                     o.cursor_icon = match grab.handle {
@@ -195,7 +196,7 @@ impl crate::PagifyApp {
                     }
                 });
             }
-            if let Some(grab) = self.tab_mut().group_grab.as_mut() {
+            if let Some(grab) = self.tab_mut().selection.group_grab.as_mut() {
                 grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
                 ui.output_mut(|o| {
                     o.cursor_icon = match grab.handle {
@@ -204,24 +205,24 @@ impl crate::PagifyApp {
                     }
                 });
             }
-            if let Some((_, current)) = self.tab_mut().marquee.as_mut() {
+            if let Some((_, current)) = self.tab_mut().selection.marquee.as_mut() {
                 *current = at;
             }
             // Pulled onto a reference line, unless Alt is held.
             let snap = !ui.input(|i| i.modifiers.alt);
             self.snap_the_move(page, view.scale, snap);
             // A turn snaps to whole steps of 15 degrees while Shift is held.
-            self.tab_mut().rotate_snap = ui.input(|i| i.modifiers.shift);
+            self.tab_mut().selection.rotate_snap = ui.input(|i| i.modifiers.shift);
         }
 
         if response.drag_stopped() {
-            if let (Some(grab), Some(sel)) = (self.tab_mut().grab.take(), self.tab_mut().selected.clone()) {
+            if let (Some(grab), Some(sel)) = (self.tab_mut().selection.grab.take(), self.tab_mut().selection.selected.clone()) {
                 self.finish_grab(sel, grab, view.scale);
             }
-            if let Some(grab) = self.tab_mut().group_grab.take() {
+            if let Some(grab) = self.tab_mut().selection.group_grab.take() {
                 self.finish_group_grab(grab, view.scale);
             }
-            if let Some((start, end)) = self.tab_mut().marquee.take() {
+            if let Some((start, end)) = self.tab_mut().selection.marquee.take() {
                 let extend = ui.input(|i| i.modifiers.shift || i.modifiers.command);
                 self.select_group_in(page, start, end, extend);
             }
@@ -232,7 +233,7 @@ impl crate::PagifyApp {
             if ui.input(|i| i.modifiers.shift || i.modifiers.command) {
                 self.extend_selection_at(page, at);
             } else {
-                self.tab_mut().group = Vec::new();
+                self.tab_mut().selection.group = Vec::new();
                 self.select_thing_at(page, at);
             }
         }
@@ -260,19 +261,19 @@ impl crate::PagifyApp {
         // `Self::signature_hover_handle`'s own doc for why a drag that has
         // just started must be classified against *that*, not against a
         // fresh hit-test at `at`.
-        let remembered_handle = self.tab_mut().signature_hover_handle;
+        let remembered_handle = self.tab_mut().selection.signature_hover_handle;
 
-        if self.tab_mut().signature_grab.is_none() {
-            if let Some(rect) = self.tab().signature_selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
+        if self.tab_mut().selection.signature_grab.is_none() {
+            if let Some(rect) = self.tab().selection.signature_selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
                 let handle = self.signature_handle_at(at, view);
-                self.tab_mut().signature_hover_handle = handle;
+                self.tab_mut().selection.signature_hover_handle = handle;
                 if let Some(handle) = handle {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &rect) {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
                 }
             } else {
-                self.tab_mut().signature_hover_handle = None;
+                self.tab_mut().selection.signature_hover_handle = None;
             }
         }
 
@@ -285,31 +286,31 @@ impl crate::PagifyApp {
             // is whatever was under the pointer the frame before that
             // slide, which for a real press is exactly where it went down.
             let on_handle = self.tab_mut()
-                .signature_selected
+                .selection.signature_selected
                 .as_ref()
                 .filter(|s| s.page == page)
                 .and_then(|_| remembered_handle);
             let on_body = self.tab_mut()
-                .signature_selected
+                .selection.signature_selected
                 .as_ref()
                 .is_some_and(|s| s.page == page && Self::point_in_rect(at, &s.rect));
             if on_handle.is_some() || on_body {
-                self.tab_mut().signature_grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.signature_grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
                 return true;
             }
             // A drag starting fresh on an unselected signature selects it
             // and carries the gesture on — the object tool's own rule for
             // the same reason: one gesture, not two.
             if let Some((index, rect, rotation)) = self.signature_at(page, at) {
-                self.tab_mut().signature_selected = Some(SignatureSelected { page, index, rect, rotation });
+                self.tab_mut().selection.signature_selected = Some(SignatureSelected { page, index, rect, rotation });
                 self.drop_object_selection();
-                self.tab_mut().signature_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.signature_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
                 return true;
             }
         }
 
         if response.dragged() {
-            if let Some(grab) = self.tab_mut().signature_grab.as_mut() {
+            if let Some(grab) = self.tab_mut().selection.signature_grab.as_mut() {
                 grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
                 ui.output_mut(|o| {
                     o.cursor_icon = match grab.handle {
@@ -322,7 +323,7 @@ impl crate::PagifyApp {
         }
 
         if response.drag_stopped() {
-            if let (Some(grab), Some(sel)) = (self.tab_mut().signature_grab.take(), self.tab_mut().signature_selected.clone()) {
+            if let (Some(grab), Some(sel)) = (self.tab_mut().selection.signature_grab.take(), self.tab_mut().selection.signature_selected.clone()) {
                 self.finish_signature_grab(sel, grab);
                 return true;
             }
@@ -330,7 +331,7 @@ impl crate::PagifyApp {
 
         if response.clicked() {
             if let Some((index, rect, rotation)) = self.signature_at(page, at) {
-                self.tab_mut().signature_selected = Some(SignatureSelected { page, index, rect, rotation });
+                self.tab_mut().selection.signature_selected = Some(SignatureSelected { page, index, rect, rotation });
                 self.drop_object_selection();
                 self.say_info("signature selected — drag to move, drag a handle to resize, drag the ring above it to turn.");
                 return true;
@@ -338,7 +339,7 @@ impl crate::PagifyApp {
             // Clicked elsewhere: deselect, but do not swallow the click —
             // it may still be a text cursor or a click somewhere else meant
             // for it, and the caller finds out by getting `false` back.
-            self.tab_mut().signature_selected = None;
+            self.tab_mut().selection.signature_selected = None;
         }
 
         false
@@ -356,46 +357,46 @@ impl crate::PagifyApp {
         at: AppPoint,
         view: PageView,
     ) -> bool {
-        let remembered_handle = self.tab_mut().placed_image_hover_handle;
+        let remembered_handle = self.tab_mut().selection.placed_image_hover_handle;
 
-        if self.tab_mut().placed_image_grab.is_none() {
-            if let Some(rect) = self.tab().placed_image_selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
+        if self.tab_mut().selection.placed_image_grab.is_none() {
+            if let Some(rect) = self.tab().selection.placed_image_selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
                 let handle = self.placed_image_handle_at(at, view);
-                self.tab_mut().placed_image_hover_handle = handle;
+                self.tab_mut().selection.placed_image_hover_handle = handle;
                 if let Some(handle) = handle {
                     ui.output_mut(|o| o.cursor_icon = handle.cursor());
                 } else if Self::point_in_rect(at, &rect) {
                     ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Grab);
                 }
             } else {
-                self.tab_mut().placed_image_hover_handle = None;
+                self.tab_mut().selection.placed_image_hover_handle = None;
             }
         }
 
         if response.drag_started() {
             let on_handle = self.tab_mut()
-                .placed_image_selected
+                .selection.placed_image_selected
                 .as_ref()
                 .filter(|s| s.page == page)
                 .and_then(|_| remembered_handle);
             let on_body = self.tab_mut()
-                .placed_image_selected
+                .selection.placed_image_selected
                 .as_ref()
                 .is_some_and(|s| s.page == page && Self::point_in_rect(at, &s.rect));
             if on_handle.is_some() || on_body {
-                self.tab_mut().placed_image_grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.placed_image_grab = Some(Grab { handle: on_handle, from: at, by: (0.0, 0.0) });
                 return true;
             }
             if let Some((index, rect, rotation)) = self.placed_image_at(page, at) {
-                self.tab_mut().placed_image_selected = Some(PlacedImageSelected { page, index, rect, rotation });
+                self.tab_mut().selection.placed_image_selected = Some(PlacedImageSelected { page, index, rect, rotation });
                 self.drop_object_selection();
-                self.tab_mut().placed_image_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.placed_image_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
                 return true;
             }
         }
 
         if response.dragged() {
-            if let Some(grab) = self.tab_mut().placed_image_grab.as_mut() {
+            if let Some(grab) = self.tab_mut().selection.placed_image_grab.as_mut() {
                 grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
                 ui.output_mut(|o| {
                     o.cursor_icon = match grab.handle {
@@ -408,7 +409,7 @@ impl crate::PagifyApp {
         }
 
         if response.drag_stopped() {
-            if let (Some(grab), Some(sel)) = (self.tab_mut().placed_image_grab.take(), self.tab_mut().placed_image_selected.clone()) {
+            if let (Some(grab), Some(sel)) = (self.tab_mut().selection.placed_image_grab.take(), self.tab_mut().selection.placed_image_selected.clone()) {
                 self.finish_placed_image_grab(sel, grab);
                 return true;
             }
@@ -416,12 +417,12 @@ impl crate::PagifyApp {
 
         if response.clicked() {
             if let Some((index, rect, rotation)) = self.placed_image_at(page, at) {
-                self.tab_mut().placed_image_selected = Some(PlacedImageSelected { page, index, rect, rotation });
+                self.tab_mut().selection.placed_image_selected = Some(PlacedImageSelected { page, index, rect, rotation });
                 self.drop_object_selection();
                 self.say_info("picture selected — drag to move, drag a handle to resize, drag the ring above it to turn.");
                 return true;
             }
-            self.tab_mut().placed_image_selected = None;
+            self.tab_mut().selection.placed_image_selected = None;
         }
 
         false
@@ -498,7 +499,7 @@ impl crate::PagifyApp {
 
         // While a box is open, the others stay outlined but nothing is lit:
         // the pointer is for the editor.
-        let editing = self.tab().editing_run.is_some();
+        let editing = self.tab().edit.editing_run.is_some();
         let under = view.to_page(pointer);
         let boxes = pagify_shell::block_input::piece_boxes(&blocks);
         let inside = |b: &pagify_shell::block_input::PieceBox| {
@@ -534,7 +535,7 @@ impl crate::PagifyApp {
     /// going.
     pub(crate) fn draw_object_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         self.draw_move_guides(ui, page, view);
-        let Some(sel) = self.tab_mut().selected.clone().filter(|s| s.page == page) else { return };
+        let Some(sel) = self.tab_mut().selection.selected.clone().filter(|s| s.page == page) else { return };
         let to_screen = |r: &pdf_core::document::Rect| {
             egui::Rect::from_min_max(
                 view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
@@ -556,8 +557,8 @@ impl crate::PagifyApp {
         // with a screenshot of what a design program shows — the shape turned
         // about its middle, a line from the middle to the pointer, and the angle
         // in a small label beside it.
-        if let Some(grab) = self.tab().grab.clone().filter(|g| g.handle == Some(Handle::Rotate)) {
-            let degrees = Self::object_turn(&sel.rect, &grab, self.tab().rotate_snap);
+        if let Some(grab) = self.tab().selection.grab.clone().filter(|g| g.handle == Some(Handle::Rotate)) {
+            let degrees = Self::object_turn(&sel.rect, &grab, self.tab().selection.rotate_snap);
             let centre = view.to_screen(AppPoint::new(
                 ((sel.rect.left + sel.rect.right) / 2.0) as f64,
                 ((sel.rect.top + sel.rect.bottom) / 2.0) as f64,
@@ -586,7 +587,7 @@ impl crate::PagifyApp {
         }
 
         // Where it is going, while it is being dragged.
-        if let Some(grab) = &self.tab_mut().grab {
+        if let Some(grab) = &self.tab_mut().selection.grab {
             let (dx, dy) = grab.by;
             let going = match grab.handle {
                 None => pdf_core::document::Rect {
@@ -667,8 +668,8 @@ impl crate::PagifyApp {
         cell_rects: &mut Vec<(usize, egui::Rect)>,
         cell_width: f32,
     ) -> Option<usize> {
-        let current = page == self.tab_mut().page;
-        let selected = self.tab_mut().organize_selected.contains(&page);
+        let current = page == self.tab_mut().view_state.page;
+        let selected = self.tab_mut().organize.organize_selected.contains(&page);
         // **Reported from use, with a screenshot, twice.** First "fill the
         // thumbnails in the ribbon, it's too small", which was answered by
         // drawing the same seventy-pixel bitmap larger. Then "the quality of
@@ -736,7 +737,7 @@ impl crate::PagifyApp {
             ui.memory_mut(|m| m.surrender_focus(command_id));
             let plain = !modifiers.command && !modifiers.shift;
             let tab = self.tab_mut();
-            Self::apply_organize_click(&mut tab.organize_selected, &mut tab.organize_anchor, page, modifiers);
+            Self::apply_organize_click(&mut tab.organize.organize_selected, &mut tab.organize.organize_anchor, page, modifiers);
             if plain {
                 jump = Some(page);
             }
@@ -747,12 +748,12 @@ impl crate::PagifyApp {
         if response.drag_started() {
             let command_id = self.command_id();
             ui.memory_mut(|m| m.surrender_focus(command_id));
-            if !self.tab_mut().organize_selected.contains(&page) {
-                self.tab_mut().organize_selected = vec![page];
-                self.tab_mut().organize_anchor = Some(page);
+            if !self.tab_mut().organize.organize_selected.contains(&page) {
+                self.tab_mut().organize.organize_selected = vec![page];
+                self.tab_mut().organize.organize_anchor = Some(page);
             }
-            let moving = self.tab_mut().organize_selected.clone();
-            self.tab_mut().organize_drag = Some(OrganizeDrag {
+            let moving = self.tab_mut().organize.organize_selected.clone();
+            self.tab_mut().organize.organize_drag = Some(OrganizeDrag {
                 moving,
                 pointer_started_at: response.interact_pointer_pos().unwrap_or(response.rect.center()),
             });
@@ -860,7 +861,7 @@ impl crate::PagifyApp {
                     }
                     Self::draw_drop_indicator(
                         ui,
-                        self.tab_mut().organize_drag.is_some(),
+                        self.tab_mut().organize.organize_drag.is_some(),
                         &cell_rects,
                         pointer_pos,
                     );
@@ -948,7 +949,7 @@ impl crate::PagifyApp {
 
                 // The page you are looking at is the page you are working on.
                 //
-                // Nothing kept `self.tab_mut().page` in step with the scroll: it moved
+                // Nothing kept `self.tab_mut().view_state.page` in step with the scroll: it moved
                 // only for `page next` and friends. On a one-page fixture that
                 // is invisibly correct, and on a 149-page catalogue it means
                 // the pointer talks to page 1 while the reader is on page 40 —
@@ -957,8 +958,8 @@ impl crate::PagifyApp {
                 //
                 // Not while the pointer is down: re-deciding the current page
                 // in the middle of a drag would drop the selection being made.
-                if self.tab_mut().settling > 0 {
-                    self.tab_mut().settling -= 1;
+                if self.tab_mut().zoom_settle.settling > 0 {
+                    self.tab_mut().zoom_settle.settling -= 1;
                 } else if !ui.ctx().input(|i| i.pointer.any_down()) {
                     let clip = ui.clip_rect();
                     let mut best: Option<(usize, f32)> = None;
@@ -979,7 +980,7 @@ impl crate::PagifyApp {
                         // the page it was made on, which `selection_page`
                         // remembers, and scrolling past is not a decision to
                         // discard it.
-                        self.tab_mut().page = page;
+                        self.tab_mut().view_state.page = page;
                     }
                 }
 
@@ -1062,15 +1063,15 @@ impl crate::PagifyApp {
                                 egui::Color32::WHITE,
                             );
                         }
-                        if page == self.tab_mut().page {
-                            self.tab_mut().last_view = Some(view);
+                        if page == self.tab_mut().view_state.page {
+                            self.tab_mut().view_state.last_view = Some(view);
                         }
                         // Zoom anchors against the page under the cursor, which
                         // on a scrolling strip is often not the current one.
                         // Anchoring with another page's mapping puts the fixed
                         // point on the wrong page and the view slides.
                         if hover.is_some_and(|p| rect.contains(p)) {
-                            self.tab_mut().hover_view = Some((page, view));
+                            self.tab_mut().view_state.hover_view = Some((page, view));
                         }
                         // Every visible page is live, not just the current one:
                         // you interact with what you are pointing at, and only
@@ -1179,7 +1180,7 @@ impl crate::PagifyApp {
                     // pointer is beside the page rather than on it — the strip
                     // is wider than the paper.
                     let anchor_on =
-                        self.tab_mut().hover_view.or_else(|| self.tab_mut().last_view.map(|v| (self.tab_mut().page, v)));
+                        self.tab_mut().view_state.hover_view.or_else(|| self.tab_mut().view_state.last_view.map(|v| (self.tab_mut().view_state.page, v)));
                     if let Some((index, view)) = anchor_on {
                         // Where this page sits in the strip, in strip points.
                         //
@@ -1228,9 +1229,9 @@ impl crate::PagifyApp {
                         );
                         let moved = view.origin.to_vec2() - origin_after;
                         let with_strip = egui::vec2(sx, sy) * (after_screen - before_screen);
-                        self.tab_mut().anchor_offset = Some(self.tab_mut().scroll_offset + moved + with_strip);
+                        self.tab_mut().view_state.anchor_offset = Some(self.tab_mut().view_state.scroll_offset + moved + with_strip);
                     }
-                    self.tab_mut().zoom = ZoomMode::Factor(after);
+                    self.tab_mut().view_state.zoom = ZoomMode::Factor(after);
                     zoom = after;
 
                     // The gesture belongs to the zoom. Left in place, the same
@@ -1258,7 +1259,7 @@ impl crate::PagifyApp {
         strip_height: f32,
     ) -> (egui::ScrollArea, Option<egui::Vec2>) {
         let mut forced: Option<egui::Vec2> = None;
-        if let Some(by) = self.tab_mut().pan_by.take() {
+        if let Some(by) = self.tab_mut().view_state.pan_by.take() {
             // Clamped to what can actually be scrolled to.
             //
             // Without the upper bound the offset keeps growing past the end of
@@ -1267,20 +1268,20 @@ impl crate::PagifyApp {
             // the drag reverses. That is the bounce at the edges.
             let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
             let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let to = (self.tab_mut().scroll_offset + by).clamp(egui::Vec2::ZERO, room);
+            let to = (self.tab_mut().view_state.scroll_offset + by).clamp(egui::Vec2::ZERO, room);
             forced = Some(to);
             area = area.scroll_offset(to);
-        } else if let Some(Reveal { page, rect }) = self.tab_mut().reveal.take() {
+        } else if let Some(Reveal { page, rect }) = self.tab_mut().view_state.reveal.take() {
             // A word to show, not a page: scrolled just far enough, on both
             // axes, and never by a change of zoom. `go_to` asked for the page's
             // top along with it — that is what a word in the first screenful
             // settles for, and the request is taken here, or it would fire a
             // frame late and undo this.
-            let page_top = self.tab_mut().scroll_to_pt.take();
-            self.tab_mut().anchor_offset = None;
+            let page_top = self.tab_mut().view_state.scroll_to_pt.take();
+            self.tab_mut().view_state.anchor_offset = None;
             let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
             let room = (content - viewport.size()).max(egui::Vec2::ZERO);
-            let at = self.tab().scroll_offset;
+            let at = self.tab().view_state.scroll_offset;
             let place = self.tab().doc.as_ref().and_then(|d| Some((d.strip.left_of(page)?, d.strip.top_of(page)?)));
             let to = match place {
                 Some((left, top)) => {
@@ -1302,11 +1303,11 @@ impl crate::PagifyApp {
             };
             forced = Some(to);
             area = area.scroll_offset(to);
-        } else if let Some(y) = self.tab_mut().scroll_to_pt.take() {
+        } else if let Some(y) = self.tab_mut().view_state.scroll_to_pt.take() {
             // 12.0 is the strip's top padding, the same constant the page
             // origins are laid out from.
-            area = area.scroll_offset(egui::vec2(self.tab_mut().scroll_offset.x, y * zoom));
-        } else if let Some(offset) = self.tab_mut().anchor_offset.take() {
+            area = area.scroll_offset(egui::vec2(self.tab_mut().view_state.scroll_offset.x, y * zoom));
+        } else if let Some(offset) = self.tab_mut().view_state.anchor_offset.take() {
             let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
             let room = (content - viewport.size()).max(egui::Vec2::ZERO);
             let to = offset.clamp(egui::Vec2::ZERO, room);
@@ -1317,7 +1318,7 @@ impl crate::PagifyApp {
             // pages are not what they were last frame: keep the reader at the
             // same place on the page rather than at the same pixel offset.
             let tab = self.tab();
-            tab.view.zip(tab.doc.as_ref()).and_then(|(seen, doc)| {
+            tab.view_state.view.zip(tab.doc.as_ref()).and_then(|(seen, doc)| {
                 seen.restored(&doc.strip, zoom, (viewport.width(), viewport.height()))
             })
         } {
@@ -1336,9 +1337,9 @@ impl crate::PagifyApp {
     fn note_zoom_and_collect_renders(&mut self, ctx: &egui::Context, zoom: f32) {
         let now = ctx.input(|i| i.time);
         let tab = self.tab_mut();
-        if (tab.last_drawn_zoom - zoom).abs() > 1e-4 {
-            tab.last_drawn_zoom = zoom;
-            tab.zoom_changed_at = now;
+        if (tab.zoom_settle.last_drawn_zoom - zoom).abs() > 1e-4 {
+            tab.zoom_settle.last_drawn_zoom = zoom;
+            tab.zoom_settle.zoom_changed_at = now;
         }
         self.collect_renders(ctx);
     }
@@ -1367,8 +1368,8 @@ impl crate::PagifyApp {
         // the page was *actually drawn* this frame. Mixing an intended offset
         // with an observed origin means the two describe different moments, and
         // the difference accumulates into the page sliding away as you zoom.
-        self.tab_mut().scroll_offset = offset;
-        self.tab_mut().viewport_rect = Some(inner_rect);
+        self.tab_mut().view_state.scroll_offset = offset;
+        self.tab_mut().view_state.viewport_rect = Some(inner_rect);
         // Where the reader is looking now, for the next frame to compare with.
         let seen = self.tab().doc.as_ref().and_then(|doc| {
             pagify_shell::reader::ViewSnapshot::capture(
@@ -1378,7 +1379,7 @@ impl crate::PagifyApp {
                 (offset.x, offset.y),
             )
         });
-        self.tab_mut().view = seen;
+        self.tab_mut().view_state.view = seen;
                 if let Some(target) = prefetch_targets(visible, page_count, 2).first().copied() {
             // The same quantised scale the draw uses. Prefetching at the raw
             // zoom would warm a texture the next frame does not ask for.
@@ -1428,7 +1429,7 @@ impl crate::PagifyApp {
         }
         let Some(cursor) = hover else { return };
         let at = tab
-            .last_snap
+            .selection.last_snap
             .as_ref()
             .map(|snapped| snapped.at)
             .unwrap_or_else(|| view.to_page(cursor));
@@ -1607,7 +1608,7 @@ impl crate::PagifyApp {
         if let Some(id) = asked {
             // Always asks, even with a passcode held — see
             // `a_held_passcode_does_not_unlock_anything`.
-            self.tab_mut().awaiting_password = Some(Awaiting::UnlockItem(id));
+            self.tab_mut().secure_state.awaiting_password = Some(Awaiting::UnlockItem(id));
             self.say_info("type the passcode this was locked with, or Escape to give up.");
         }
     }
@@ -1643,8 +1644,8 @@ impl crate::PagifyApp {
         // apart, because a failed pick re-arms the tool and the armed-tool
         // block then took the same, still-fresh click a second time.
         let mut answered_above = false;
-        if (response.clicked() || response.drag_started()) && self.tab_mut().editing_run.is_some() {
-            let errors_before = self.errors_said;
+        if (response.clicked() || response.drag_started()) && self.tab_mut().edit.editing_run.is_some() {
+            let errors_before = self.ui_state.errors_said;
             // Applies it — or, an edit the engine already refused and that has not
             // changed since, lets it go. An edit that is refused **stays open** with
             // its words, and then this click is no pick (below) and does nothing else.
@@ -1660,8 +1661,8 @@ impl crate::PagifyApp {
             // is actually under it. Re-armed and resolved right here, at
             // this same point, rather than left for a click that will not
             // come again on its own.
-            if self.tab_mut().editing_run.is_none() {
-                if self.errors_said != errors_before {
+            if self.tab_mut().edit.editing_run.is_none() {
+                if self.ui_state.errors_said != errors_before {
                     // **Not when the apply was refused.** Whatever the pick
                     // under the click said next would cover the refusal, and
                     // the person would see nothing — the refusal is the
@@ -1684,14 +1685,14 @@ impl crate::PagifyApp {
         self.show_page_context_menu(ui, &response, page, view);
 
         let Some(pointer) = response.interact_pointer_pos().or_else(|| response.hover_pos()) else {
-            self.tab_mut().last_snap = None;
+            self.tab_mut().selection.last_snap = None;
             return;
         };
         let mut at = view.to_page(pointer);
 
         // A paste picked up with ⌘V owns the pointer until it is put down: the
         // click that does it is not also a pick, a selection or a mark.
-        if self.paste_ghost.is_some() {
+        if self.clipboard_state.paste_ghost.is_some() {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Crosshair);
             if response.clicked() {
                 self.place_paste_ghost(page, at);
@@ -1702,28 +1703,28 @@ impl crate::PagifyApp {
         // Snap, then ortho, then grid — in that order, because a snap is an
         // explicit request for a specific point and must not then be nudged off
         // it by a constraint.
-        self.tab_mut().last_snap = None;
+        self.tab_mut().selection.last_snap = None;
         let snapping = self.tab().tool.as_ref().is_some_and(|p| p.kind.wants_snapping());
         let first_point = self.tab().tool.as_ref().and_then(|p| p.points.first().copied());
         if let Some(layer) = self.tab().markup.existing(page).filter(|_| snapping) {
             let radius = HIT_TOLERANCE_PT * 3.0;
-            if let Some(snapped) = tools::snap_at(layer, at, radius, self.snaps, None, first_point) {
+            if let Some(snapped) = tools::snap_at(layer, at, radius, self.prefs_state.snaps, None, first_point) {
                 at = snapped.at;
-                self.tab_mut().last_snap = Some(snapped);
+                self.tab_mut().selection.last_snap = Some(snapped);
             }
         }
-        if snapping && self.tab_mut().last_snap.is_none() {
-            if self.ortho {
+        if snapping && self.tab_mut().selection.last_snap.is_none() {
+            if self.prefs_state.ortho {
                 if let Some(anchor) = self.tab_mut().tool.as_ref().and_then(|p| p.points.last().copied()) {
                     at = tools::orthogonal(anchor, at);
                 }
             }
-            if self.grid_pt > 0.0 {
-                at = tools::to_grid(at, self.grid_pt);
+            if self.prefs_state.grid_pt > 0.0 {
+                at = tools::to_grid(at, self.prefs_state.grid_pt);
             }
         }
 
-        if let Some(snapped) = &self.tab_mut().last_snap {
+        if let Some(snapped) = &self.tab_mut().selection.last_snap {
             overlay::draw_snap(ui.painter(), view.to_screen(snapped.at), snapped.kind, theme::snap());
         }
 
@@ -1752,7 +1753,7 @@ impl crate::PagifyApp {
         // The object tool takes the pointer whole while it is in hand — its
         // clicks select and its drags move or resize, none of which is a mark
         // or a text selection.
-        if self.tab_mut().object_tool.is_some() {
+        if self.tab_mut().tool_state.object_tool.is_some() {
             self.interact_objects(ui, &response, page, at, view);
             return;
         }
@@ -1798,8 +1799,8 @@ impl crate::PagifyApp {
             if response.dragged() {
                 self.pan(response.drag_delta());
             }
-            self.tab_mut().text_drag = None;
-            self.tab_mut().drag_from = None;
+            self.tab_mut().selection.text_drag = None;
+            self.tab_mut().selection.drag_from = None;
             if !response.clicked() {
                 return;
             }
@@ -1863,14 +1864,14 @@ impl crate::PagifyApp {
         // is armed. Taking the whole gesture here the way a point/object
         // tool does would swallow that drag as a wandered-click pick instead.
         if self.tab_mut().tool.as_ref().is_some_and(|t| !t.kind.wants_selection()) {
-            self.tab_mut().text_drag = None;
+            self.tab_mut().selection.text_drag = None;
             // Not the click the click-away block above has already answered —
             // see `answered_above`.
             if response.drag_started() && !answered_above {
-                self.tab_mut().drag_from = Some(at);
+                self.tab_mut().selection.drag_from = Some(at);
             }
             if response.drag_stopped() {
-                if let Some(from) = self.tab_mut().drag_from.take() {
+                if let Some(from) = self.tab_mut().selection.drag_from.take() {
                     let wandered =
                         (from.x - at.x).abs().max((from.y - at.y).abs()) <= HIT_TOLERANCE_PT;
                     if wandered {
@@ -1922,14 +1923,14 @@ impl crate::PagifyApp {
                 .is_some();
 
             if on_rotate_handle {
-                self.tab_mut().markup_grab = Some(Grab { handle: Some(Handle::Rotate), from: at, by: (0.0, 0.0) });
-                self.tab_mut().text_drag = None;
-                self.tab_mut().drag_from = None;
+                self.tab_mut().selection.markup_grab = Some(Grab { handle: Some(Handle::Rotate), from: at, by: (0.0, 0.0) });
+                self.tab_mut().selection.text_drag = None;
+                self.tab_mut().selection.drag_from = None;
             } else if on_text {
-                self.tab_mut().text_drag = Some(at);
-                self.tab_mut().text_selection = None;
-                self.tab_mut().drag_from = None;
-                self.tab_mut().markup_grab = None;
+                self.tab_mut().selection.text_drag = Some(at);
+                self.tab_mut().selection.text_selection = None;
+                self.tab_mut().selection.drag_from = None;
+                self.tab_mut().selection.markup_grab = None;
             } else {
                 // **Reported from use: a drawn shape could only ever be
                 // moved by typing `move` and clicking twice.** A drag
@@ -1947,21 +1948,21 @@ impl crate::PagifyApp {
                         if !layer.selection().contains(&index) {
                             layer.select_at(at, HIT_TOLERANCE_PT * 3.0, shift);
                         }
-                        self.tab_mut().markup_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
-                        self.tab_mut().drag_from = None;
+                        self.tab_mut().selection.markup_grab = Some(Grab { handle: None, from: at, by: (0.0, 0.0) });
+                        self.tab_mut().selection.drag_from = None;
                     }
                     None => {
-                        self.tab_mut().drag_from = Some(at);
-                        self.tab_mut().markup_grab = None;
+                        self.tab_mut().selection.drag_from = Some(at);
+                        self.tab_mut().selection.markup_grab = None;
                     }
                 }
-                self.tab_mut().text_drag = None;
+                self.tab_mut().selection.text_drag = None;
             }
         }
 
         if response.dragged() {
-            if let Some(from) = self.tab_mut().text_drag {
-                self.tab_mut().text_selection = self
+            if let Some(from) = self.tab_mut().selection.text_drag {
+                self.tab_mut().selection.text_selection = self
                     .characters(page)
                     .and_then(|chars| {
                         chars.range_between(
@@ -1969,11 +1970,11 @@ impl crate::PagifyApp {
                             (at.x as f32, at.y as f32),
                         )
                     });
-                if self.tab_mut().text_selection.is_some() {
-                    self.tab_mut().selection_page = page;
+                if self.tab_mut().selection.text_selection.is_some() {
+                    self.tab_mut().organize.selection_page = page;
                 }
             }
-            if let Some(grab) = self.tab_mut().markup_grab.as_mut() {
+            if let Some(grab) = self.tab_mut().selection.markup_grab.as_mut() {
                 grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
                 let handle = grab.handle;
                 ui.output_mut(|o| {
@@ -1983,7 +1984,7 @@ impl crate::PagifyApp {
         }
 
         if response.drag_stopped() {
-            let selecting = self.tab_mut().text_drag.is_some() && self.tab_mut().text_selection.is_some();
+            let selecting = self.tab_mut().selection.text_drag.is_some() && self.tab_mut().selection.text_selection.is_some();
             // What a completed selection means to whichever of
             // `Markup`/`Link`/`MatchProperties` is armed (every other kind
             // is untouched by a text-selection drag) is `Tool::on_pointer`
@@ -1998,8 +1999,8 @@ impl crate::PagifyApp {
                     }
                 }
             }
-            self.tab_mut().text_drag = None;
-            if let Some(grab) = self.tab_mut().markup_grab.take() {
+            self.tab_mut().selection.text_drag = None;
+            if let Some(grab) = self.tab_mut().selection.markup_grab.take() {
                 if grab.handle == Some(Handle::Rotate) {
                     if let Some(bounds) = self.markup_selection_bounds(page) {
                         self.finish_markup_rotate(page, grab, bounds);
@@ -2007,7 +2008,7 @@ impl crate::PagifyApp {
                 } else {
                     self.finish_markup_grab(page, grab);
                 }
-            } else if let Some(from) = self.tab_mut().drag_from.take() {
+            } else if let Some(from) = self.tab_mut().selection.drag_from.take() {
                 let height = view_height(self, page);
                 let layer = self.tab_mut().markup.page(page, height);
                 if (from.x - at.x).abs() > 2.0 || (from.y - at.y).abs() > 2.0 {
@@ -2040,7 +2041,7 @@ impl crate::PagifyApp {
                     "annotation {n} on this page — `removemark {n}` takes it off."
                 ));
             } else {
-                self.tab_mut().text_selection = None;
+                self.tab_mut().selection.text_selection = None;
                 let height = view_height(self, page);
                 let shift = ui.input(|i| i.modifiers.shift);
                 let layer = self.tab_mut().markup.page(page, height);
@@ -2074,7 +2075,7 @@ impl crate::PagifyApp {
         if response.secondary_clicked() {
             if let Some(spot) = response.interact_pointer_pos() {
                 let at = view.to_page(spot);
-                self.tab_mut().selected_image = self
+                self.tab_mut().selection.selected_image = self
                     .images_on(page)
                     .into_iter()
                     .find(|i| {
@@ -2086,15 +2087,15 @@ impl crate::PagifyApp {
                     .map(|i| (page, i));
                 // Where the pointer was, kept for the menu built on a later
                 // frame — the same reason `selected_image` is kept.
-                self.tab_mut().right_clicked_at = Some((page, at));
+                self.tab_mut().selection.right_clicked_at = Some((page, at));
                 // See `right_click_text_actions`'s own doc: computed once,
                 // here, rather than by the menu on every frame it is open.
-                self.tab_mut().right_click_text_actions = Some(self.compute_right_click_text_actions(page, at));
+                self.tab_mut().selection.right_click_text_actions = Some(self.compute_right_click_text_actions(page, at));
             }
         }
 
-        let over_text = self.tab_mut().text_selection.is_some() && page == self.tab_mut().selection_page;
-        let over_image = self.tab_mut().selected_image.as_ref().is_some_and(|(p, _)| *p == page);
+        let over_text = self.tab_mut().selection.text_selection.is_some() && page == self.tab_mut().organize.selection_page;
+        let over_image = self.tab_mut().selection.selected_image.as_ref().is_some_and(|(p, _)| *p == page);
         // **Offered wherever the pointer is**, not only over a selection.
         //
         // It used to appear only over selected text or a picture, so a
@@ -2113,13 +2114,13 @@ impl crate::PagifyApp {
                 self.context_menu_text(ui, page, over_text);
                 self.context_menu_protect(ui, over_text, over_image);
                 self.context_menu_layers(ui, page);
-                let shown = self.show_layers;
+                let shown = self.ui_state.show_layers;
                 if ui
                     .button(if shown { "Hide the layer list" } else { "Show all layers" })
                     .clicked()
                 {
-                    self.show_layers = !shown;
-                    if self.show_layers {
+                    self.ui_state.show_layers = !shown;
+                    if self.ui_state.show_layers {
                         self.forget_layers();
                     }
                     ui.close();
@@ -2131,7 +2132,7 @@ impl crate::PagifyApp {
     /// the pointer. Moved out of `show_page_context_menu` whole.
     fn context_menu_link(&mut self, ui: &mut egui::Ui, page: usize) {
                 let link_here = self.tab_mut()
-                    .right_clicked_at
+                    .selection.right_clicked_at
                     .filter(|(p, _)| *p == page)
                     .and_then(|(_, at)| self.foreign_at(page, at))
                     .and_then(|n| self.link_uri_at(page, n).map(|uri| (n, uri)));
@@ -2152,7 +2153,7 @@ impl crate::PagifyApp {
     /// and Split the joined text. Moved out whole.
     fn context_menu_text(&mut self, ui: &mut egui::Ui, page: usize, over_text: bool) {
                 if over_text && ui.button("Copy").clicked() {
-                    self.tab_mut().copy_wanted = true;
+                    self.tab_mut().view_state.copy_wanted = true;
                     ui.close();
                 }
 
@@ -2161,9 +2162,9 @@ impl crate::PagifyApp {
                 // must never recompute these on its own account: it is
                 // rebuilt on every repaint of an open popup.
                 let actions_here = self.tab_mut()
-                    .right_clicked_at
+                    .selection.right_clicked_at
                     .filter(|(p, _)| *p == page)
-                    .and_then(|_| self.tab_mut().right_click_text_actions);
+                    .and_then(|_| self.tab_mut().selection.right_click_text_actions);
 
                 // A selection spanning more than one line or block can be
                 // declared one paragraph — see `join_selected_text`'s own
@@ -2213,7 +2214,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().ribbon == Tab::Protect {
                     if over_image {
                         if ui.button("🔒 Lock this image").clicked() {
-                            if let Some((page, image)) = self.tab_mut().selected_image.clone() {
+                            if let Some((page, image)) = self.tab_mut().selection.selected_image.clone() {
                                 self.ask_or_reuse_passcode(
                                     Awaiting::LockImage { page, object: image.object },
                                     "type a passcode to lock this image with, or Escape to give up.",
@@ -2238,7 +2239,7 @@ impl crate::PagifyApp {
     /// The layer half of the page context menu: the lock badge line, the
     /// topmost-first layer list and the stacking buttons. Moved out whole.
     fn context_menu_layers(&mut self, ui: &mut egui::Ui, page: usize) {
-                let spot = self.tab_mut().right_clicked_at.filter(|(p, _)| *p == page).map(|(_, at)| at);
+                let spot = self.tab_mut().selection.right_clicked_at.filter(|(p, _)| *p == page).map(|(_, at)| at);
                 if let Some(at) = spot {
                     // **A lock badge is not a layer, and says so.** The
                     // chequerboard over a locked picture reads as a grey panel,
@@ -2282,7 +2283,7 @@ impl crate::PagifyApp {
                             })
                             .collect();
                         for (index, label, grouped) in listed {
-                            let picked = self.tab_mut().picked_layer == Some(index);
+                            let picked = self.tab_mut().selection.picked_layer == Some(index);
                             let row = ui.selectable_label(
                                 picked,
                                 if grouped { format!("{label}   (in a group)") } else { label },
@@ -2296,7 +2297,7 @@ impl crate::PagifyApp {
                         // These act on what has been picked, so somebody can
                         // choose the thing that is *behind* and raise that,
                         // rather than the thing on top of it.
-                        let armed = self.tab_mut().picked_layer.is_some();
+                        let armed = self.tab_mut().selection.picked_layer.is_some();
                         for (label, to) in [
                             ("\u{E5D8}  Move the picked one up", pdf_core::document::Stacking::Up),
                             ("\u{E5DB}  Move the picked one down", pdf_core::document::Stacking::Down),

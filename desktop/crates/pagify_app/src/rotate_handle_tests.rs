@@ -4,7 +4,7 @@ use super::*;
 /// Select the first picture of `pictures.pdf` through a real click.
 fn picture_selected() -> (egui_kittest::Harness<'static, PagifyApp>, PageView, pdf_core::document::Rect) {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     h.state_mut().submit("editobject");
     h.run_steps(1);
     let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
@@ -13,7 +13,7 @@ fn picture_selected() -> (egui_kittest::Harness<'static, PagifyApp>, PageView, p
         y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
     });
     click(&mut h, middle);
-    assert!(h.state().tab().selected.is_some(), "the picture was not selected");
+    assert!(h.state().tab().selection.selected.is_some(), "the picture was not selected");
     (h, view, image.rect)
 }
 
@@ -81,7 +81,7 @@ fn while_the_handle_is_dragged_the_angle_is_shown_and_the_page_has_not_changed()
         ((rect.left + rect.right) / 2.0) as f64 + reach - from.x,
         ((rect.top + rect.bottom) / 2.0) as f64 - from.y,
     );
-    h.state_mut().tab_mut().grab =
+    h.state_mut().tab_mut().selection.grab =
         Some(Grab { handle: Some(Handle::Rotate), from, by: (to_right.0 as f32, to_right.1 as f32) });
     h.run_steps(2);
 

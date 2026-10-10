@@ -33,7 +33,7 @@ fn a_dense_paragraphs_background_sample_is_not_left_a_few_shades_under_white() {
     }
     assert!(found, "the 'VEGA is the perfect choice' paragraph was not found — has the fixture changed?");
 
-    let background = app.tab_mut().editing_run.as_ref().expect("still editing").background;
+    let background = app.tab_mut().edit.editing_run.as_ref().expect("still editing").background;
     assert_eq!(
         background,
         pdf_core::document::Color { r: 255, g: 255, b: 255, a: 255 },
@@ -214,9 +214,9 @@ fn copying_an_unsaved_page_from_one_tab_pastes_into_another() {
     app.insert_page();
     assert_eq!(app.tab().doc.as_ref().unwrap().page_count, original_count + 1);
 
-    app.tab_mut().organize_selected = vec![0];
+    app.tab_mut().organize.organize_selected = vec![0];
     assert!(app.copy_organize_selection(), "copy should have found a selection to extract");
-    assert!(app.page_clipboard.is_some(), "copy should have filled the page clipboard");
+    assert!(app.clipboard_state.page_clipboard.is_some(), "copy should have filled the page clipboard");
 
     // A second, independent tab opened fresh from the same file on disk —
     // it never saw the blank page `insert_page` added to the first tab.
@@ -225,7 +225,7 @@ fn copying_an_unsaved_page_from_one_tab_pastes_into_another() {
     let before = app.tab().doc.as_ref().unwrap().page_count;
     assert_eq!(before, original_count, "the second tab should not already have the blank page");
 
-    app.tab_mut().organize_selected.clear();
+    app.tab_mut().organize.organize_selected.clear();
     app.paste_organize_selection();
 
     let after = app.tab().doc.as_ref().unwrap().page_count;
@@ -241,16 +241,16 @@ fn copying_an_unsaved_page_from_one_tab_pastes_into_another() {
 /// cannot find the file specified". `PageClipboard`'s backing file is
 /// the same path every time (one clipboard per running app instance,
 /// not per copy — see its own doc comment), and replacing
-/// `self.page_clipboard` used to drop, and so delete, that shared path
+/// `self.clipboard_state.page_clipboard` used to drop, and so delete, that shared path
 /// *after* the second copy had already written its fresh content there.
 #[test]
 fn copying_and_pasting_twice_in_a_row_does_not_lose_the_second_copy() {
     let mut app = app("text-lines.pdf");
     let original_count = app.tab().doc.as_ref().unwrap().page_count;
 
-    app.tab_mut().organize_selected = vec![0];
+    app.tab_mut().organize.organize_selected = vec![0];
     assert!(app.copy_organize_selection(), "first copy should find a selection");
-    app.tab_mut().organize_selected.clear();
+    app.tab_mut().organize.organize_selected.clear();
     app.paste_organize_selection();
     assert_eq!(
         app.tab().doc.as_ref().unwrap().page_count,
@@ -259,9 +259,9 @@ fn copying_and_pasting_twice_in_a_row_does_not_lose_the_second_copy() {
         said(&app)
     );
 
-    app.tab_mut().organize_selected = vec![0];
+    app.tab_mut().organize.organize_selected = vec![0];
     assert!(app.copy_organize_selection(), "second copy should also report success");
-    app.tab_mut().organize_selected.clear();
+    app.tab_mut().organize.organize_selected.clear();
     app.paste_organize_selection();
     assert_eq!(
         app.tab().doc.as_ref().unwrap().page_count,
@@ -285,12 +285,12 @@ fn copying_and_pasting_twice_in_a_row_does_not_lose_the_second_copy() {
 fn pages_copied_in_one_window_paste_into_another_window() {
     let mut first = app("text-lines.pdf");
     let mut second = app("two-column.pdf");
-    second.clipboard_dir = first.clipboard_dir.clone();
+    second.clipboard_state.clipboard_dir = first.clipboard_state.clipboard_dir.clone();
     let before = second.tab().doc.as_ref().unwrap().page_count;
 
-    first.tab_mut().organize_selected = vec![0];
+    first.tab_mut().organize.organize_selected = vec![0];
     assert!(first.copy_organize_selection(), "copy should find a selection");
-    second.tab_mut().organize_selected.clear();
+    second.tab_mut().organize.organize_selected.clear();
     second.paste_organize_selection();
 
     assert_eq!(
@@ -307,10 +307,10 @@ fn pages_copied_in_one_window_paste_into_another_window() {
 fn a_copy_outlives_the_window_that_made_it() {
     let mut first = app("text-lines.pdf");
     let mut second = app("two-column.pdf");
-    second.clipboard_dir = first.clipboard_dir.clone();
+    second.clipboard_state.clipboard_dir = first.clipboard_state.clipboard_dir.clone();
     let before = second.tab().doc.as_ref().unwrap().page_count;
 
-    first.tab_mut().organize_selected = vec![0];
+    first.tab_mut().organize.organize_selected = vec![0];
     assert!(first.copy_organize_selection());
     drop(first);
     second.paste_organize_selection();
@@ -325,16 +325,16 @@ fn a_copy_outlives_the_window_that_made_it() {
 fn the_newest_copy_wins_and_a_stale_or_replaced_one_is_not_offered() {
     let mut first = app("text-lines.pdf");
     let mut second = app("two-column.pdf");
-    second.clipboard_dir = first.clipboard_dir.clone();
+    second.clipboard_state.clipboard_dir = first.clipboard_state.clipboard_dir.clone();
 
-    first.tab_mut().organize_selected = vec![0];
+    first.tab_mut().organize.organize_selected = vec![0];
     assert!(first.copy_organize_selection());
-    second.tab_mut().organize_selected = vec![0];
+    second.tab_mut().organize.organize_selected = vec![0];
     assert!(second.copy_organize_selection());
     let (newest, _) = first.current_page_clipboard().expect("a copy");
     assert_eq!(
         Some(newest),
-        second.page_clipboard.as_ref().map(|c| c.temp_file.clone()),
+        second.clipboard_state.page_clipboard.as_ref().map(|c| c.temp_file.clone()),
         "the first window did not see the second window's newer copy"
     );
 
@@ -347,10 +347,10 @@ fn the_newest_copy_wins_and_a_stale_or_replaced_one_is_not_offered() {
     // An hour-old manifest is not offered to a window with no copy of its own.
     let mut third = app("text-lines.pdf");
     let mut fourth = app("two-column.pdf");
-    fourth.clipboard_dir = third.clipboard_dir.clone();
-    third.tab_mut().organize_selected = vec![0];
+    fourth.clipboard_state.clipboard_dir = third.clipboard_state.clipboard_dir.clone();
+    third.tab_mut().organize.organize_selected = vec![0];
     assert!(third.copy_organize_selection());
-    let manifest = third.clipboard_dir.join("latest.txt");
+    let manifest = third.clipboard_state.clipboard_dir.join("latest.txt");
     let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 3600);
     std::fs::OpenOptions::new().write(true).open(&manifest).expect("manifest").set_modified(old).expect("age it");
     assert!(fourth.current_page_clipboard().is_none(), "a two-hour-old copy was offered");
@@ -496,7 +496,7 @@ fn the_password_window_offers_secure_and_secure_plus() {
 fn choosing_secure_plus_uses_pagifys_own_handler() {
     let mut app = app("two-column.pdf");
     app.submit("secure");
-    app.tab_mut().password_plus = true;
+    app.tab_mut().secure_state.password_plus = true;
     app.answer_passcode("Correct-Horse-99-Battery");
     app.answer_passcode("Correct-Horse-99-Battery");
 
@@ -563,7 +563,7 @@ fn signing_says_that_a_later_edit_is_outside_it() {
 
     app.submit(&format!("certify {}", certificate.display()));
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Certificate(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Certificate(_))),
         "it did not ask for the certificate's password:\n{}",
         said(&app)
     );
@@ -591,8 +591,8 @@ fn with_signature_pad(name: &str, label: &str) -> (PagifyApp, std::path::PathBuf
     let path = std::env::temp_dir()
         .join(format!("pagify-test-signatures-{}-{label}.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    app.signatures = Default::default();
-    app.signatures_path = Some(path.clone());
+    app.library_state.signatures = Default::default();
+    app.library_state.signatures_path = Some(path.clone());
     (app, path)
 }
 
@@ -613,9 +613,9 @@ fn signature_with_nothing_drawn_yet_opens_the_pad() {
     let (mut app, _path) = with_signature_pad("two-column.pdf", "opens-pad");
     app.submit("signature");
 
-    assert!(app.pad.is_some(), "the pad did not open:\n{}", said(&app));
+    assert!(app.library_state.pad.is_some(), "the pad did not open:\n{}", said(&app));
     assert!(
-        app.pad.as_ref().is_some_and(|p| p.then_place),
+        app.library_state.pad.as_ref().is_some_and(|p| p.then_place),
         "it will not carry on to the click somebody wanted"
     );
     assert!(app.tab_mut().tool.is_none(), "it armed a click with nothing to place");
@@ -632,7 +632,7 @@ fn a_drawn_signature_places_on_the_line_that_was_clicked() {
 
     // Now the tool places rather than opening the pad again.
     app.submit("signature");
-    assert!(app.pad.is_none(), "it opened the pad over a signature it already had");
+    assert!(app.library_state.pad.is_none(), "it opened the pad over a signature it already had");
     assert!(
         matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Signature)),
         "the tool was not armed:\n{}",
@@ -693,7 +693,7 @@ fn an_uploaded_signature_places_as_a_picture_on_the_line_that_was_clicked() {
     // The tool places rather than opening the pad, exactly as it does
     // for a drawn signature.
     app.submit("signature");
-    assert!(app.pad.is_none(), "it opened the pad over a signature it already had");
+    assert!(app.library_state.pad.is_none(), "it opened the pad over a signature it already had");
     assert!(
         matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Signature)),
         "the tool was not armed:
@@ -875,7 +875,7 @@ fn dragging_a_selected_signature_moves_it() {
     let (w0, h0) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
     let (w1, h1) = (moved.rect.right - moved.rect.left, moved.rect.bottom - moved.rect.top);
     assert!((w0 - w1).abs() < 0.5 && (h0 - h1).abs() < 0.5, "a move changed the size");
-    assert_eq!(app.tab_mut().signature_selected, Some(SignatureSelected { page: 0, index: moved.index, rect: moved.rect, rotation: moved.rotation }), "the selection did not follow the move");
+    assert_eq!(app.tab_mut().selection.signature_selected, Some(SignatureSelected { page: 0, index: moved.index, rect: moved.rect, rotation: moved.rotation }), "the selection did not follow the move");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -954,7 +954,7 @@ fn dragging_a_selected_placed_image_moves_it() {
     let (w1, h1) = (moved.rect.right - moved.rect.left, moved.rect.bottom - moved.rect.top);
     assert!((w0 - w1).abs() < 0.5 && (h0 - h1).abs() < 0.5, "a move changed the size");
     assert_eq!(
-        app.tab_mut().placed_image_selected,
+        app.tab_mut().selection.placed_image_selected,
         Some(PlacedImageSelected { page: 0, index: moved.index, rect: moved.rect, rotation: moved.rotation }),
         "the selection did not follow the move"
     );
@@ -1067,7 +1067,7 @@ fn edit_text_recovers_a_line_that_was_split_into_characters() {
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert_eq!(
         edit.buffer.trim(),
         original_text.trim(),
@@ -1116,11 +1116,11 @@ fn retyping_a_line_split_into_several_objects_does_not_leave_stale_text_behind()
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
     assert!(
-        app.tab_mut().editing_run.as_ref().unwrap().lines.iter().any(|(objects, _)| objects.len() > 1),
+        app.tab_mut().edit.editing_run.as_ref().unwrap().lines.iter().any(|(objects, _)| objects.len() > 1),
         "setup: the recovered line must carry several objects, or this proves nothing"
     );
 
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = "REPLACED".to_string();
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = "REPLACED".to_string();
     app.apply_editing_page();
 
     let page_text: String = app.tab_mut().doc.as_ref().unwrap().session.characters(0).map(|c| c.text().to_string()).unwrap_or_default();
@@ -1237,25 +1237,25 @@ fn joining_two_distant_runs_opens_them_as_one_paragraph_and_persists() {
     );
 
     let total_chars = app.characters(0).expect("characters").len();
-    app.tab_mut().text_selection = Some(0..total_chars);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(0..total_chars);
+    app.tab_mut().organize.selection_page = 0;
 
     let message = app.join_selected_text().expect("join should succeed");
     assert!(message.contains("paragraph"), "should have opened the paragraph editor: {message}");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened an editor");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened an editor");
     assert!(edit.buffer.contains(a.text.trim()), "joined text should include the topmost run");
     assert!(edit.buffer.contains(b.text.trim()), "joined text should include the bottommost run");
 
     // Persists: closing the editor and clicking the *other* run reopens
     // the same joined group, not just the run under the pointer.
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let at_b = AppPoint {
         x: ((b.rect.left + b.rect.right) / 2.0) as f64,
         y: ((b.rect.top + b.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at_b).expect("b should still be there");
-    let reopened = app.tab_mut().editing_run.as_ref().expect("should have reopened");
+    let reopened = app.tab_mut().edit.editing_run.as_ref().expect("should have reopened");
     assert!(
         reopened.lines.iter().flat_map(|(objects, _)| objects).any(|o| *o == a.object),
         "reopening on b should have brought a's run back in too"
@@ -1272,8 +1272,8 @@ fn splitting_a_joined_pair_edits_them_separately_again() {
     let b = runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
 
     let total_chars = app.characters(0).expect("characters").len();
-    app.tab_mut().text_selection = Some(0..total_chars);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(0..total_chars);
+    app.tab_mut().organize.selection_page = 0;
     app.join_selected_text().expect("join should succeed");
     assert!(app.group_containing(0, b.object).is_some(), "setup: should be joined");
 
@@ -1281,13 +1281,13 @@ fn splitting_a_joined_pair_edits_them_separately_again() {
     assert!(app.group_containing(0, a.object).is_none(), "the group should be gone for both runs");
     assert!(app.group_containing(0, b.object).is_none());
 
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let at_b = AppPoint {
         x: ((b.rect.left + b.rect.right) / 2.0) as f64,
         y: ((b.rect.top + b.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at_b).expect("b should still be there");
-    let reopened = app.tab_mut().editing_run.as_ref().expect("should have reopened");
+    let reopened = app.tab_mut().edit.editing_run.as_ref().expect("should have reopened");
     assert!(
         !reopened.lines.iter().flat_map(|(objects, _)| objects).any(|o| *o == a.object),
         "after splitting, editing b should not bring a's run back in"
@@ -1305,8 +1305,8 @@ fn joining_a_single_run_selection_is_refused() {
         .characters(0)
         .and_then(|c| c.range_between((centre.0, centre.1), (centre.0, centre.1)))
         .expect("a point inside a run's own rect should hit something");
-    app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(range);
+    app.tab_mut().organize.selection_page = 0;
     assert!(app.join_selected_text().is_err(), "one run alone is nothing to join");
 }
 
@@ -1352,8 +1352,8 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
         .characters(0)
         .and_then(|c| c.range_between(centre_a, centre_a))
         .expect("a point inside a's own rect");
-    app.tab_mut().text_selection = Some(sample_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(sample_range);
+    app.tab_mut().organize.selection_page = 0;
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
     assert!(
         matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::MatchProperties { sample: Some(_) })),
@@ -1365,8 +1365,8 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
         .characters(0)
         .and_then(|c| c.range_between(centre_b, centre_b))
         .expect("a point inside b's own rect");
-    app.tab_mut().text_selection = Some(target_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(target_range);
+    app.tab_mut().organize.selection_page = 0;
     let message = app.apply_match_properties_to_current_selection().expect("match should succeed");
     assert!(message.contains("matched"), "unexpected message: {message}");
     assert!(
@@ -1393,8 +1393,8 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
 #[test]
 fn an_empty_selection_is_refused_by_both_match_properties_steps() {
     let mut app = app("two-column.pdf");
-    app.tab_mut().text_selection = Some(0..0);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(0..0);
+    app.tab_mut().organize.selection_page = 0;
     assert!(
         app.match_properties_sample_from_current_selection().is_err(),
         "an empty selection is nothing to copy from"
@@ -1409,8 +1409,8 @@ fn an_empty_selection_is_refused_by_both_match_properties_steps() {
         objects: Vec::new(),
         points: Vec::new(),
     });
-    app.tab_mut().text_selection = Some(0..0);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(0..0);
+    app.tab_mut().organize.selection_page = 0;
     assert!(
         app.apply_match_properties_to_current_selection().is_err(),
         "an empty selection is nothing to change"
@@ -1441,8 +1441,8 @@ fn right_click_text_actions_are_computed_correctly_from_one_call() {
         .characters(0)
         .and_then(|c| c.range_between(centre_a, centre_b))
         .expect("a range covering both runs");
-    app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(range);
+    app.tab_mut().organize.selection_page = 0;
 
     let at = AppPoint { x: centre_a.0 as f64, y: centre_a.1 as f64 };
     let actions = app.compute_right_click_text_actions(0, at);
@@ -1535,7 +1535,7 @@ fn a_heading_does_not_merge_into_the_body_beneath_it() {
         y: ((heading.rect.top + heading.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at).expect("the heading was here");
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert!(
         !edit.buffer.contains("ordinary body"),
         "the heading's own edit swallowed the body beneath it: {:?}",
@@ -1547,7 +1547,7 @@ fn a_heading_does_not_merge_into_the_body_beneath_it() {
         y: ((body.rect.top + body.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at).expect("the body was here");
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert!(
         !edit.buffer.contains("Description"),
         "the body's own edit reached up and swallowed the heading above it: {:?}",
@@ -1597,7 +1597,7 @@ fn opening_a_paragraph_invents_no_wrap_hyphen_the_page_never_drew() {
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert!(
         edit.buffer.contains("heat dis\nsipation"),
         "the two lines should join exactly as the page has them, no hyphen between: {:?}",
@@ -1629,7 +1629,7 @@ fn a_single_run_can_grow_a_second_line_in_its_own_style() {
     app.pick_text_run(0, at).expect("picked");
 
     {
-        let edit = app.tab_mut().editing_run.as_mut().expect("editing");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("editing");
         let original = edit.buffer.clone();
         edit.buffer = format!("{original}\nSecond line");
     }
@@ -1729,7 +1729,7 @@ fn a_line_the_producer_split_across_two_runs_is_not_missing_a_chunk() {
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("should have opened");
     assert!(
         edit.buffer.contains("Camino elitee-plus 3.0 is a powerful accent light"),
         "the split line's second run is missing from the reconstructed text: {:?}",
@@ -1746,9 +1746,9 @@ fn a_line_the_producer_split_across_two_runs_is_not_missing_a_chunk() {
 /// both showed as active on the ribbon at once.** `take_up_object_tool`
 /// already clears `self.tab_mut().tool` when Edit Object is picked up; `arm_tool`
 /// (what Edit Text and every other picked-then-clicked tool goes
-/// through) did not clear `self.tab_mut().object_tool` back — so using Edit
+/// through) did not clear `self.tab_mut().tool_state.object_tool` back — so using Edit
 /// Object and then Edit Text left both armed, and since
-/// `self.tab_mut().object_tool.is_some()` is checked first and takes the pointer
+/// `self.tab_mut().tool_state.object_tool.is_some()` is checked first and takes the pointer
 /// outright, every click after that went to Edit Object's own
 /// character-drilling selection instead of the paragraph pick Edit Text
 /// was meant to make.
@@ -1756,11 +1756,11 @@ fn a_line_the_producer_split_across_two_runs_is_not_missing_a_chunk() {
 fn arming_edit_text_after_edit_object_puts_the_object_tool_down() {
     let mut app = app("two-column.pdf");
     app.submit("editobject");
-    assert!(app.tab_mut().object_tool.is_some(), "editobject should have armed the object tool");
+    assert!(app.tab_mut().tool_state.object_tool.is_some(), "editobject should have armed the object tool");
 
     app.submit("edittext");
 
-    assert!(app.tab_mut().object_tool.is_none(), "arming Edit Text should have put the object tool down");
+    assert!(app.tab_mut().tool_state.object_tool.is_none(), "arming Edit Text should have put the object tool down");
     assert!(
         app.tab_mut().tool.is_some(),
         "Edit Text itself should still have armed its own click-to-pick"
@@ -1775,12 +1775,12 @@ fn arming_any_pending_tool_after_edit_object_puts_it_down() {
     for command in ["edittext", "line", "circle", "redact"] {
         let mut app = app("two-column.pdf");
         app.submit("editobject");
-        assert!(app.tab_mut().object_tool.is_some(), "{command}: editobject should have armed the object tool");
+        assert!(app.tab_mut().tool_state.object_tool.is_some(), "{command}: editobject should have armed the object tool");
 
         app.submit(command);
 
         assert!(
-            app.tab_mut().object_tool.is_none(),
+            app.tab_mut().tool_state.object_tool.is_none(),
             "{command}: arming it should have put the object tool down"
         );
         assert!(app.tab_mut().tool.is_some(), "{command}: should itself be armed");
@@ -1791,7 +1791,7 @@ fn arming_any_pending_tool_after_edit_object_puts_it_down() {
 /// got split into individual characters the moment Edit Object was
 /// clicked without an Escape in between.** `take_up_object_tool` cleared
 /// `self.tab_mut().tool` and the object-tool's own selection state, but never
-/// `self.tab_mut().editing_run` — so the run Edit Text still thought it was
+/// `self.tab_mut().edit.editing_run` — so the run Edit Text still thought it was
 /// editing sat there, orphaned, while Edit Object's own click handler
 /// went on to split whatever the next click landed on into individual
 /// characters, with nothing to say a different tool had already claimed
@@ -1815,15 +1815,15 @@ fn taking_up_edit_object_puts_an_open_run_editor_down() {
         y: ((word.rect.top + word.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at).expect("a run was here");
-    assert!(app.tab_mut().editing_run.is_some(), "setup: the run editor should be open");
+    assert!(app.tab_mut().edit.editing_run.is_some(), "setup: the run editor should be open");
 
     app.take_up_object_tool(true, 0);
 
     assert!(
-        app.tab_mut().editing_run.is_none(),
+        app.tab_mut().edit.editing_run.is_none(),
         "taking up Edit Object should have put the open run editor down"
     );
-    assert!(app.tab_mut().object_tool.is_some(), "Edit Object itself should still be armed");
+    assert!(app.tab_mut().tool_state.object_tool.is_some(), "Edit Object itself should still be armed");
 }
 
 /// The same fix, for arming a `pending`-based tool over an open run
@@ -1843,12 +1843,12 @@ fn arming_a_pending_tool_puts_an_open_run_editor_down() {
         y: ((word.rect.top + word.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, at).expect("a run was here");
-    assert!(app.tab_mut().editing_run.is_some(), "setup: the run editor should be open");
+    assert!(app.tab_mut().edit.editing_run.is_some(), "setup: the run editor should be open");
 
     app.arm_tool(Tool::Draw(DrawKind::Line), 0);
 
     assert!(
-        app.tab_mut().editing_run.is_none(),
+        app.tab_mut().edit.editing_run.is_none(),
         "arming a different tool should have put the open run editor down"
     );
     assert!(app.tab_mut().tool.is_some(), "the newly armed tool should itself be armed");
@@ -1865,14 +1865,14 @@ fn deleting_a_selected_placed_picture_removes_it() {
     app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("placed");
     let mark = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
-    app.tab_mut().placed_image_selected =
+    app.tab_mut().selection.placed_image_selected =
         Some(PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     app.delete_selection();
 
     let remaining = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap();
     assert!(remaining.is_empty(), "the picture should be gone");
-    assert!(app.tab_mut().placed_image_selected.is_none(), "the selection should have cleared with it");
+    assert!(app.tab_mut().selection.placed_image_selected.is_none(), "the selection should have cleared with it");
 }
 
 #[test]
@@ -1882,14 +1882,14 @@ fn deleting_a_selected_signature_removes_it() {
     app.submit("signature");
     app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
-    app.tab_mut().signature_selected =
+    app.tab_mut().selection.signature_selected =
         Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     app.delete_selection();
 
     let remaining = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap();
     assert!(remaining.is_empty(), "the signature should be gone");
-    assert!(app.tab_mut().signature_selected.is_none(), "the selection should have cleared with it");
+    assert!(app.tab_mut().selection.signature_selected.is_none(), "the selection should have cleared with it");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2027,7 +2027,7 @@ fn copying_and_pasting_a_selected_placed_picture_makes_a_second_one() {
     app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("placed");
     let mark = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
-    app.tab_mut().placed_image_selected =
+    app.tab_mut().selection.placed_image_selected =
         Some(PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     assert!(app.copy_object_selection(), "the selected picture should have been copied");
@@ -2062,13 +2062,13 @@ fn a_negligible_drag_on_a_signature_changes_nothing() {
 
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
-    app.tab_mut().signature_selected = Some(sel.clone());
+    app.tab_mut().selection.signature_selected = Some(sel.clone());
     let grab = Grab { handle: None, from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 }, by: (0.1, -0.1) };
     app.finish_signature_grab(sel.clone(), grab);
 
     let still = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     assert_eq!(still.rect, mark.rect, "a negligible drag moved the signature");
-    assert_eq!(app.tab_mut().signature_selected, Some(sel), "the selection should be exactly what was passed in, untouched");
+    assert_eq!(app.tab_mut().selection.signature_selected, Some(sel), "the selection should be exactly what was passed in, untouched");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2084,10 +2084,10 @@ fn applying_signatures_clears_the_signature_selection() {
     app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
 
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
-    app.tab_mut().signature_selected = Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
+    app.tab_mut().selection.signature_selected = Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     app.submit("applysignatures");
-    assert!(app.tab_mut().signature_selected.is_none(), "a stale selection survived applying");
+    assert!(app.tab_mut().selection.signature_selected.is_none(), "a stale selection survived applying");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2144,7 +2144,7 @@ fn dragging_the_rotate_handle_turns_the_signature() {
     assert!((turned.rotation - 90.0).abs() < 1.0, "expected roughly a 90-degree turn, got {}", turned.rotation);
     assert_eq!(turned.rect, mark.rect, "rotating must not move the picture's own rect");
     assert_eq!(
-        app.tab_mut().signature_selected,
+        app.tab_mut().selection.signature_selected,
         Some(SignatureSelected { page: 0, index: turned.index, rect: turned.rect, rotation: turned.rotation }),
         "the selection should carry the new rotation forward"
     );
@@ -2163,7 +2163,7 @@ fn a_negligible_rotate_drag_changes_nothing() {
 
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
-    app.tab_mut().signature_selected = Some(sel.clone());
+    app.tab_mut().selection.signature_selected = Some(sel.clone());
     let centre_ish = AppPoint {
         x: ((mark.rect.left + mark.rect.right) / 2.0) as f64 + 20.0,
         y: ((mark.rect.top + mark.rect.bottom) / 2.0) as f64,
@@ -2174,7 +2174,7 @@ fn a_negligible_rotate_drag_changes_nothing() {
 
     let still = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     assert_eq!(still.rotation, 0.0, "a negligible drag should not have rotated the signature");
-    assert_eq!(app.tab_mut().signature_selected, Some(sel), "the selection should be untouched");
+    assert_eq!(app.tab_mut().selection.signature_selected, Some(sel), "the selection should be untouched");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2190,7 +2190,7 @@ fn signature_handle_at_finds_the_rotate_handle() {
     app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
 
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
-    app.tab_mut().signature_selected =
+    app.tab_mut().selection.signature_selected =
         Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     // A simple 1:1 view with the page's own origin at the screen origin.
@@ -2227,7 +2227,7 @@ fn a_picture_file_is_decoded_and_kept_by_its_own_name() {
     assert!(said(&app).contains("this computer"), "{}", said(&app));
     assert!(said(&app).contains("does not prove"), "{}", said(&app));
 
-    let kept = app.signatures.current().expect("a signature was kept");
+    let kept = app.library_state.signatures.current().expect("a signature was kept");
     let expected_name = png_path.file_stem().unwrap().to_string_lossy().into_owned();
     assert_eq!(kept.name, expected_name, "it was not named from the file");
     let stored = kept.image.as_ref().expect("it is a picture, not ink");
@@ -2290,7 +2290,7 @@ fn a_picture_declaring_an_absurd_size_is_refused_before_it_is_decoded() {
 
     app.upload_signature(&png_path);
     assert!(said(&app).contains("too large"), "{}", said(&app));
-    assert!(app.signatures.is_empty(), "something was kept from an oversized picture");
+    assert!(app.library_state.signatures.is_empty(), "something was kept from an oversized picture");
 
     let _ = std::fs::remove_file(&png_path);
     let _ = std::fs::remove_file(&sig_path);
@@ -2315,7 +2315,7 @@ fn a_script_that_replays_itself_stops_rather_than_recursing_forever() {
     app.replay(&path);
 
     assert!(said(&app).contains("scripts deep"), "{}", said(&app));
-    assert_eq!(app.replay_depth, 0, "the depth counter was not unwound");
+    assert_eq!(app.recording_state.replay_depth, 0, "the depth counter was not unwound");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2331,7 +2331,7 @@ fn a_file_that_is_not_a_picture_is_refused() {
 
     app.upload_signature(&bad_path);
     assert!(said(&app).contains("not a picture"), "{}", said(&app));
-    assert!(app.signatures.is_empty(), "something was kept from a file that could not decode");
+    assert!(app.library_state.signatures.is_empty(), "something was kept from a file that could not decode");
 
     let _ = std::fs::remove_file(&bad_path);
     let _ = std::fs::remove_file(&sig_path);
@@ -2343,8 +2343,8 @@ fn with_snippets(name: &str, label: &str) -> (PagifyApp, std::path::PathBuf) {
     let path = std::env::temp_dir()
         .join(format!("pagify-test-predefined-{}-{label}.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    app.predefined = Default::default();
-    app.predefined_path = Some(path.clone());
+    app.library_state.predefined = Default::default();
+    app.library_state.predefined_path = Some(path.clone());
     (app, path)
 }
 
@@ -2355,7 +2355,7 @@ fn predefined_text_keeps_the_words_and_waits_for_a_click() {
     app.submit("predefinedtext Jane Smith");
 
     assert!(said(&app).contains("this computer"), "{}", said(&app));
-    assert_eq!(app.predefined.current(), Some("Jane Smith"));
+    assert_eq!(app.library_state.predefined.current(), Some("Jane Smith"));
     assert!(
         matches!(app.tab_mut().tool.as_ref().map(|t| &t.kind), Some(Tool::Write(t)) if t == "Jane Smith"),
         "it did not arm the click that writes them:\n{}",
@@ -2379,8 +2379,8 @@ fn using_kept_words_again_keeps_no_second_copy() {
     app.submit("predefinedtext jane@example.com");
     app.submit("predefinedtext Jane Smith");
 
-    assert_eq!(app.predefined.entries().len(), 2, "{:?}", app.predefined.entries());
-    assert_eq!(app.predefined.current(), Some("Jane Smith"), "using it did not bring it back");
+    assert_eq!(app.library_state.predefined.entries().len(), 2, "{:?}", app.library_state.predefined.entries());
+    assert_eq!(app.library_state.predefined.current(), Some("Jane Smith"), "using it did not bring it back");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -2396,7 +2396,7 @@ fn writing_text_on_a_page_does_not_keep_it() {
     app.write_text_at(0, AppPoint { x: 100.0, y: 200.0 }, "Something private")
         .expect("written");
 
-    assert!(app.predefined.is_empty(), "the typewriter filled the list: {:?}", app.predefined.entries());
+    assert!(app.library_state.predefined.is_empty(), "the typewriter filled the list: {:?}", app.library_state.predefined.entries());
     assert!(!path.exists(), "it wrote a list nobody asked for");
     let _ = std::fs::remove_file(&path);
 }
@@ -2406,7 +2406,7 @@ fn writing_text_on_a_page_does_not_keep_it() {
 fn the_predefined_text_panel_opens_and_says_when_it_is_empty() {
     let (mut app, path) = with_snippets("two-column.pdf", "panel");
     app.submit("predefinedtext");
-    assert!(app.snippets.is_some(), "the panel did not open");
+    assert!(app.library_state.snippets.is_some(), "the panel did not open");
     assert!(said(&app).contains("nothing kept yet"), "{}", said(&app));
     let _ = std::fs::remove_file(&path);
 }
@@ -2418,7 +2418,7 @@ fn the_predefined_text_panel_opens_and_says_when_it_is_empty() {
 fn the_search_and_replace_panel_opens_from_its_command() {
     let mut app = app("two-column.pdf");
     app.submit("replace");
-    assert!(app.tab_mut().find_replace.is_some(), "the panel did not open");
+    assert!(app.tab_mut().panels.find_replace.is_some(), "the panel did not open");
 }
 
 #[test]
@@ -2426,7 +2426,7 @@ fn bookmarking_the_page_opens_the_panel_with_a_default_title() {
     let mut app = app("two-column.pdf");
     app.submit("bookmark");
 
-    let panel = app.tab_mut().bookmark_panel.as_ref().expect("the panel did not open");
+    let panel = app.tab_mut().panels.bookmark_panel.as_ref().expect("the panel did not open");
     assert_eq!(panel.entries, vec![("Page 1".to_string(), 0)]);
 }
 
@@ -2455,12 +2455,12 @@ fn bookmarking_a_page_marks_it_for_the_corner_icon() {
 fn bookmarking_with_a_selection_uses_it_as_the_title() {
     let mut app = app("two-column.pdf");
     let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
-    app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(range);
+    app.tab_mut().organize.selection_page = 0;
 
     app.submit("bookmark");
 
-    let panel = app.tab_mut().bookmark_panel.as_ref().expect("the panel did not open");
+    let panel = app.tab_mut().panels.bookmark_panel.as_ref().expect("the panel did not open");
     assert_eq!(panel.entries.len(), 1);
     assert_eq!(panel.entries[0].0.to_lowercase(), "the");
     assert_eq!(panel.entries[0].1, 0);
@@ -2487,20 +2487,20 @@ fn weblinks_arms_when_nothing_is_selected() {
     let mut app = app("two-column.pdf");
     app.submit("weblinks");
     assert!(app.tab_mut().tool.is_some(), "the tool was not armed");
-    assert!(app.tab_mut().pending_link.is_none());
+    assert!(app.tab_mut().panels.pending_link.is_none());
 }
 
 #[test]
 fn weblinks_opens_the_prompt_when_text_is_already_selected() {
     let mut app = app("two-column.pdf");
     let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
-    app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(range);
+    app.tab_mut().organize.selection_page = 0;
 
     app.submit("weblinks");
 
-    assert!(app.tab_mut().pending_link.is_some(), "the prompt did not open");
-    assert!(app.tab_mut().text_selection.is_none(), "the selection should have been consumed");
+    assert!(app.tab_mut().panels.pending_link.is_some(), "the prompt did not open");
+    assert!(app.tab_mut().selection.text_selection.is_none(), "the selection should have been consumed");
     assert!(app.tab_mut().tool.is_none(), "arming is only for when nothing was selected yet");
 }
 
@@ -2532,12 +2532,12 @@ fn jointext_joins_an_already_made_selection_at_once() {
         .characters(0)
         .and_then(|c| c.range_between(centre_a, centre_b))
         .expect("a range covering both runs");
-    app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(range);
+    app.tab_mut().organize.selection_page = 0;
 
     app.submit("jointext");
 
-    assert!(app.tab_mut().editing_run.is_some(), "should have opened the joined paragraph editor");
+    assert!(app.tab_mut().edit.editing_run.is_some(), "should have opened the joined paragraph editor");
     assert!(app.group_containing(0, a.object).is_some(), "the two runs should now be a joined group");
 }
 
@@ -2804,7 +2804,7 @@ fn editing_to_letters_the_document_lacks_writes_a_font_in() {
     .expect("picked");
 
     // Characters a subset font is unlikely to carry.
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "Zwölf Ünique".into();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "Zwölf Ünique".into();
     app.apply_editing_page();
 
     let told = said(&app);
@@ -2874,7 +2874,7 @@ fn picking_a_font_writes_the_run_in_it() {
     // "unchanged", and it must not be judged against `was` the way a
     // size/colour/position tweak is (see `changed_look` in
     // `apply_one_edit`).
-    app.tab_mut().editing_run.as_mut().expect("editing").style.face = Some(picked.clone());
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").style.face = Some(picked.clone());
     app.apply_editing_page();
 
     let told = said(&app);
@@ -2915,7 +2915,7 @@ fn picking_a_font_writes_the_run_in_it() {
         },
     )
     .expect("picked again");
-    app.tab_mut().editing_run.as_mut().expect("editing").style.face = Some("NotARealFontName".into());
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").style.face = Some("NotARealFontName".into());
     app.apply_editing_page();
     let refused = said(&app);
     assert!(
@@ -2940,8 +2940,8 @@ fn commands_and_outcomes_both_reach_the_session_log() {
     let dir = std::env::temp_dir()
         .join(format!("pagify-test-session-log-wiring-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let log_path = app.session_log.path().expect("the temp dir is writable").to_path_buf();
+    app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let log_path = app.recording_state.session_log.path().expect("the temp dir is writable").to_path_buf();
 
     app.submit("zoom fit");
     app.say_error("a deliberate test error");
@@ -3035,7 +3035,7 @@ fn a_word_replaced_by_itself_lands_where_it_was() {
         },
     )
     .expect("picked");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = same.clone();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = same.clone();
     app.apply_editing_page();
 
     let said = said(&app);
@@ -3115,7 +3115,7 @@ fn extracting_skips_a_page_that_already_has_text() {
     )
     .expect("picked");
     assert!(
-        app.tab_mut().editing_run.as_ref().is_some_and(|e| !e.drawn),
+        app.tab_mut().edit.editing_run.as_ref().is_some_and(|e| !e.drawn),
         "it picked something other than the page's own words"
     );
 }
@@ -3162,9 +3162,9 @@ fn a_drawn_word_can_be_replaced_with_real_text() {
         )
         .expect("a drawn word was not picked");
     assert!(told.contains("drawn, not written"), "{told}");
-    assert!(app.tab_mut().editing_run.as_ref().is_some_and(|e| e.drawn));
+    assert!(app.tab_mut().edit.editing_run.as_ref().is_some_and(|e| e.drawn));
 
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "REPLACED".into();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "REPLACED".into();
     app.apply_editing_page();
 
     let said = said(&app);
@@ -3253,7 +3253,7 @@ fn editing_drawn_words_says_they_will_be_replaced() {
         "it did not say the face changes: {told}"
     );
     assert!(
-        app.tab_mut().editing_run.as_ref().is_some_and(|e| e.drawn),
+        app.tab_mut().edit.editing_run.as_ref().is_some_and(|e| e.drawn),
         "the edit did not remember what it had picked"
     );
 }
@@ -3292,12 +3292,12 @@ fn edit_object_prefers_the_picture_and_move_prefers_the_words() {
 fn both_moving_tools_arm_and_say_what_they_take() {
     let mut first = app("two-column.pdf");
     first.submit("editobject");
-    assert_eq!(first.tab().object_tool, Some(true), "edit object did not arm:\n{}", said(&first));
+    assert_eq!(first.tab().tool_state.object_tool, Some(true), "edit object did not arm:\n{}", said(&first));
     assert!(said(&first).contains("picture"), "{}", said(&first));
 
     let mut second = app("two-column.pdf");
     second.submit("moveobject");
-    assert_eq!(second.tab().object_tool, Some(false));
+    assert_eq!(second.tab().tool_state.object_tool, Some(false));
     assert!(said(&second).contains("words or a picture"), "{}", said(&second));
 }
 
@@ -3376,8 +3376,8 @@ fn dragging_a_rectangle_over_two_pictures_selects_both() {
         AppPoint { x: (bounds.right + pad) as f64, y: (bounds.bottom + pad) as f64 },
         false,
     );
-    assert!(app.tab_mut().selected.is_none(), "a group should not also leave a single selection");
-    assert_eq!(app.tab_mut().group.len(), 2, "both pictures should be in the group: {:?}", app.tab_mut().group);
+    assert!(app.tab_mut().selection.selected.is_none(), "a group should not also leave a single selection");
+    assert_eq!(app.tab_mut().selection.group.len(), 2, "both pictures should be in the group: {:?}", app.tab_mut().selection.group);
     assert!(said(&app).contains("2 things selected"), "{}", said(&app));
 }
 
@@ -3396,8 +3396,8 @@ fn a_marquee_over_just_one_thing_selects_it_normally() {
         AppPoint { x: (target.rect.right + pad) as f64, y: (target.rect.bottom + pad) as f64 },
         false,
     );
-    assert!(app.tab_mut().group.is_empty(), "one thing should not become a group");
-    assert_eq!(app.tab_mut().selected.as_ref().map(|s| s.object), Some(target.object));
+    assert!(app.tab_mut().selection.group.is_empty(), "one thing should not become a group");
+    assert_eq!(app.tab_mut().selection.selected.as_ref().map(|s| s.object), Some(target.object));
 }
 
 /// **Clicking one line of a paragraph in Edit Text opens the whole
@@ -3429,7 +3429,7 @@ fn clicking_a_line_in_edit_text_opens_the_whole_paragraph_it_sits_in() {
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("edit text should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("edit text should have opened");
     let opened: std::collections::HashSet<usize> =
         edit.lines.iter().flat_map(|(o, _)| o.iter().copied()).collect();
     assert_eq!(
@@ -3462,7 +3462,7 @@ fn open_left_column_paragraph(app: &mut PagifyApp) -> Vec<usize> {
 
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
-    app.tab_mut().editing_run
+    app.tab_mut().edit.editing_run
         .as_ref()
         .expect("edit text should have opened")
         .lines
@@ -3480,7 +3480,7 @@ fn applying_a_paragraph_edit_rewrites_each_line_in_place() {
     let objects = open_left_column_paragraph(&mut app);
 
     let new_text = "ONE\nTWO\nTHREE\nFOUR\nFIVE\nSIX\nSEVEN\nEIGHT";
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = new_text.to_string();
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = new_text.to_string();
     app.apply_editing_page();
 
     let after = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
@@ -3512,7 +3512,7 @@ fn applying_a_grown_paragraph_edit_adds_new_lines_below() {
 
     let mut new_text: Vec<String> = (0..objects.len()).map(|i| format!("L{i}")).collect();
     new_text.push("EXTRALINE".to_string());
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = new_text.join("\n");
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = new_text.join("\n");
     app.apply_editing_page();
 
     let after = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
@@ -3546,7 +3546,7 @@ fn applying_a_shrunk_paragraph_edit_removes_the_extra_lines() {
     let objects = open_left_column_paragraph(&mut app);
     let before = tests_support::runs_in_order(&app);
 
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = "ONLYONE".to_string();
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = "ONLYONE".to_string();
     app.apply_editing_page();
     let after = tests_support::runs_in_order(&app);
 
@@ -3582,14 +3582,14 @@ fn clicking_a_line_in_edit_object_does_not_select_the_paragraph() {
 
     app.select_thing_at(0, at);
 
-    assert!(app.tab_mut().group.is_empty(), "edit object grouped a click into a paragraph");
-    assert!(app.tab_mut().selected.is_some(), "the click should still have selected something");
+    assert!(app.tab_mut().selection.group.is_empty(), "edit object grouped a click into a paragraph");
+    assert!(app.tab_mut().selection.selected.is_some(), "the click should still have selected something");
 }
 
 /// **The paragraph detector has exactly one production caller — Edit
 /// Text's own `pick_text_run` — and Edit Object's character split
 /// (`split_run_into_characters`) is only ever reachable through a
-/// different tool, gated behind its own `self.tab_mut().object_tool`.** The two
+/// different tool, gated behind its own `self.tab_mut().tool_state.object_tool`.** The two
 /// can never fire back to back in one action: reaching the detector
 /// with a just-split letter as its seed always means a tool switch (and
 /// therefore real, elapsed use) happened first, never that the split
@@ -3678,7 +3678,7 @@ fn a_marquee_that_only_clips_a_picture_does_not_select_it() {
         false,
     );
     assert_ne!(
-        app.tab_mut().selected.as_ref().map(|s| s.object),
+        app.tab_mut().selection.selected.as_ref().map(|s| s.object),
         Some(target.object),
         "a picture only half inside the marquee was selected"
     );
@@ -3697,11 +3697,11 @@ fn shift_clicking_a_second_picture_adds_it_to_the_selection() {
         y: ((r.top + r.bottom) / 2.0) as f64,
     };
     app.select_thing_at(0, at(first.rect));
-    assert_eq!(app.tab_mut().selected.as_ref().map(|s| s.object), Some(first.object));
+    assert_eq!(app.tab_mut().selection.selected.as_ref().map(|s| s.object), Some(first.object));
 
     app.extend_selection_at(0, at(second.rect));
-    assert!(app.tab_mut().selected.is_none(), "a two-member selection must be a group, not `selected`");
-    let objects: Vec<usize> = app.tab_mut().group.iter().map(|s| s.object).collect();
+    assert!(app.tab_mut().selection.selected.is_none(), "a two-member selection must be a group, not `selected`");
+    let objects: Vec<usize> = app.tab_mut().selection.group.iter().map(|s| s.object).collect();
     assert!(objects.contains(&first.object) && objects.contains(&second.object), "{objects:?}");
 }
 
@@ -3713,7 +3713,7 @@ fn shift_clicking_a_selected_picture_again_removes_it() {
     app.submit("editobject");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
     let (first, second) = (pictures[0].clone(), pictures[1].clone());
-    app.tab_mut().group = vec![
+    app.tab_mut().selection.group = vec![
         Selected { page: 0, object: first.object, rect: first.rect, what: "the picture" },
         Selected { page: 0, object: second.object, rect: second.rect, what: "the picture" },
     ];
@@ -3725,8 +3725,8 @@ fn shift_clicking_a_selected_picture_again_removes_it() {
             y: ((first.rect.top + first.rect.bottom) / 2.0) as f64,
         },
     );
-    assert_eq!(app.tab_mut().group.len(), 0, "removing one of two should leave one, folded into `selected`");
-    assert_eq!(app.tab_mut().selected.as_ref().map(|s| s.object), Some(second.object));
+    assert_eq!(app.tab_mut().selection.group.len(), 0, "removing one of two should leave one, folded into `selected`");
+    assert_eq!(app.tab_mut().selection.selected.as_ref().map(|s| s.object), Some(second.object));
 }
 
 /// **Shift-dragging a marquee adds to the selection rather than
@@ -3737,7 +3737,7 @@ fn shift_dragging_a_marquee_extends_an_existing_selection() {
     app.submit("editobject");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
     let (first, second) = (pictures[0].clone(), pictures[1].clone());
-    app.tab_mut().selected = Some(Selected { page: 0, object: first.object, rect: first.rect, what: "the picture" });
+    app.tab_mut().selection.selected = Some(Selected { page: 0, object: first.object, rect: first.rect, what: "the picture" });
 
     let pad = 5.0;
     app.select_group_in(
@@ -3746,8 +3746,8 @@ fn shift_dragging_a_marquee_extends_an_existing_selection() {
         AppPoint { x: (second.rect.right + pad) as f64, y: (second.rect.bottom + pad) as f64 },
         true,
     );
-    assert!(app.tab_mut().selected.is_none());
-    let objects: Vec<usize> = app.tab_mut().group.iter().map(|s| s.object).collect();
+    assert!(app.tab_mut().selection.selected.is_none());
+    let objects: Vec<usize> = app.tab_mut().selection.group.iter().map(|s| s.object).collect();
     assert!(
         objects.contains(&first.object) && objects.contains(&second.object),
         "the extended marquee lost the picture already selected: {objects:?}"
@@ -3760,7 +3760,7 @@ fn dragging_the_group_moves_every_member_by_the_same_amount() {
     let mut app = app("pictures.pdf");
     app.submit("editobject");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
-    app.tab_mut().group = pictures
+    app.tab_mut().selection.group = pictures
         .iter()
         .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
         .collect();
@@ -3779,7 +3779,7 @@ fn dragging_the_group_moves_every_member_by_the_same_amount() {
             before.rect
         );
     }
-    assert_eq!(app.tab_mut().group.len(), 2, "the group should still hold both, at their new spots");
+    assert_eq!(app.tab_mut().selection.group.len(), 2, "the group should still hold both, at their new spots");
 }
 
 /// **Dragging one of the group's own handles resizes every member about
@@ -3790,7 +3790,7 @@ fn resizing_the_group_scales_every_member_about_the_same_anchor() {
     let mut app = app("pictures.pdf");
     app.submit("editobject");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
-    app.tab_mut().group = pictures
+    app.tab_mut().selection.group = pictures
         .iter()
         .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
         .collect();
@@ -3820,7 +3820,7 @@ fn resizing_the_group_scales_every_member_about_the_same_anchor() {
             now.rect
         );
     }
-    assert_eq!(app.tab_mut().group.len(), 2, "the group should still hold both, at their new sizes");
+    assert_eq!(app.tab_mut().selection.group.len(), 2, "the group should still hold both, at their new sizes");
     let bounds_after = app.group_bounds(0).expect("bounds");
     assert!(
         (bounds_after.right - bounds_after.left - w * 2.0).abs() < 1.0,
@@ -3840,14 +3840,14 @@ fn deleting_the_group_removes_every_member() {
     assert_eq!(before.len(), 5, "the fixture should draw five things");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
     assert_eq!(pictures.len(), 2);
-    app.tab_mut().group = pictures
+    app.tab_mut().selection.group = pictures
         .iter()
         .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
         .collect();
 
     app.delete_group();
 
-    assert!(app.tab_mut().group.is_empty(), "the group should be spent after deleting it");
+    assert!(app.tab_mut().selection.group.is_empty(), "the group should be spent after deleting it");
     let after = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
     assert!(after.is_empty(), "both pictures should be gone: {after:?}");
     let remaining = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
@@ -3870,12 +3870,12 @@ fn copying_a_group_overwrites_whatever_was_copied_before_it() {
 
     // An earlier, single-item copy — the "previously selected object" that
     // must not survive the group copy below.
-    app.tab_mut().selected =
+    app.tab_mut().selection.selected =
         Some(Selected { page: 0, object: pictures[0].object, rect: pictures[0].rect, what: "the picture" });
     assert!(app.copy_object_selection(), "the first, single copy should succeed");
 
-    app.tab_mut().selected = None;
-    app.tab_mut().group = pictures
+    app.tab_mut().selection.selected = None;
+    app.tab_mut().selection.group = pictures
         .iter()
         .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
         .collect();
@@ -3917,7 +3917,7 @@ fn a_text_groups_own_offsets_are_each_members_left_edge_not_its_centre() {
         "need two differently-sized runs for a centre-vs-edge mix-up to show: {a:?} {b:?}"
     );
 
-    app.tab_mut().group = vec![
+    app.tab_mut().selection.group = vec![
         Selected { page: 0, object: a.object, rect: a.rect, what: "the words" },
         Selected { page: 0, object: b.object, rect: b.rect, what: "the words" },
     ];
@@ -3925,7 +3925,7 @@ fn a_text_groups_own_offsets_are_each_members_left_edge_not_its_centre() {
     let (cx, cy) = ((bounds.left + bounds.right) / 2.0, (bounds.top + bounds.bottom) / 2.0);
 
     assert!(app.copy_object_selection());
-    let Some(ObjectClipboard::Group(items)) = app.object_clipboard.clone() else {
+    let Some(ObjectClipboard::Group(items)) = app.clipboard_state.object_clipboard.clone() else {
         panic!("expected a Group on the clipboard");
     };
     assert_eq!(items.len(), 2);
@@ -3953,13 +3953,13 @@ fn copying_and_pasting_words_logs_their_shape_but_never_their_text() {
     let mut app = app("two-column.pdf");
     let dir = std::env::temp_dir().join(format!("pagify-test-copy-paste-log-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let log_path = app.session_log.path().expect("the temp dir is writable").to_path_buf();
+    app.recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let log_path = app.recording_state.session_log.path().expect("the temp dir is writable").to_path_buf();
 
     app.submit("editobject");
     let runs = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
     let target = runs.iter().find(|r| r.text.trim().chars().count() > 5).cloned().expect("a run with words");
-    app.tab_mut().selected = Some(Selected { page: 0, object: target.object, rect: target.rect, what: "the words" });
+    app.tab_mut().selection.selected = Some(Selected { page: 0, object: target.object, rect: target.rect, what: "the words" });
 
     assert!(app.copy_object_selection(), "the selected run should have been copied");
     assert!(app.start_paste_ghost(None), "a copy should have something to pick up");
@@ -4077,7 +4077,7 @@ fn clicking_a_run_splits_it_and_selects_one_letter() {
     };
     app.select_thing_at(0, at);
 
-    let sel = app.tab_mut().selected.clone().expect("something should be selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("something should be selected");
     assert_eq!(sel.what, "the letter", "should have split down to one letter:\n{}", said(&app));
     let width = sel.rect.right - sel.rect.left;
     let run_width = target.rect.right - target.rect.left;
@@ -4093,7 +4093,7 @@ fn clicking_a_run_splits_it_and_selects_one_letter() {
     // Clicking the very same spot again is a no-op split — still one
     // letter selected, not an error and not a second split on top of it.
     app.select_thing_at(0, at);
-    assert_eq!(app.tab_mut().selected.as_ref().map(|s| s.what), Some("the letter"));
+    assert_eq!(app.tab_mut().selection.selected.as_ref().map(|s| s.what), Some("the letter"));
     let again = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("objects").len();
     assert_eq!(again, after_objects, "clicking an already-split letter should change nothing further");
 }
@@ -4163,19 +4163,19 @@ fn picking_a_run_asks_for_the_face_it_is_drawn_in() {
                 "the run's font came back as something no reader could parse"
             );
             assert!(
-                app.pending_face.is_some() || app.editor_face.is_some(),
+                app.faces_state.pending_face.is_some() || app.faces_state.editor_face.is_some(),
                 "the editor did not ask for the face the words are drawn in"
             );
         }
         None => {
             // A named font — nothing in the file to install.
-            assert!(app.editor_face.is_none(), "it installed a face that is not there");
+            assert!(app.faces_state.editor_face.is_none(), "it installed a face that is not there");
         }
     }
 
     // And it is never used before egui has had a frame to build it.
     assert!(
-        !app.editor_face_ready,
+        !app.faces_state.editor_face_ready,
         "the face was marked usable on the frame it was asked for"
     );
 }
@@ -4203,14 +4203,14 @@ fn a_click_just_outside_a_word_still_picks_it() {
     };
     app.pick_text_run(0, just_above).expect("a near miss should still pick");
     assert_eq!(
-        app.tab_mut().editing_run.as_ref().map(|e| e.object),
+        app.tab_mut().edit.editing_run.as_ref().map(|e| e.object),
         Some(target.object),
         "it picked a different run"
     );
 
     // And a click nowhere near anything is still nothing.
     let mut app = app;
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
     let miles_away = AppPoint {
         x: (target.rect.left) as f64,
         y: (target.rect.bottom + 200.0) as f64,
@@ -4251,9 +4251,9 @@ fn editing_the_words_of_a_run_leaves_every_other_run_where_it_was() {
         y: ((target.rect.top + target.rect.bottom) / 2.0) as f64,
     };
     app.pick_text_run(0, middle).expect("picked");
-    let picked = app.tab_mut().editing_run.as_ref().expect("editing").object;
+    let picked = app.tab_mut().edit.editing_run.as_ref().expect("editing").object;
 
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = "Replaced".into();
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "Replaced".into();
     app.apply_editing_page();
 
     let after = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
@@ -4328,7 +4328,7 @@ fn changing_a_runs_colour_leaves_it_where_it_was() {
     .expect("picked");
 
     // Only the colour, and the words left alone.
-    let edit = app.tab_mut().editing_run.as_mut().expect("editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("editing");
     let object = edit.object;
     edit.style.color = Some(pdf_core::document::Color { r: 200, g: 0, b: 0, a: 255 });
     app.apply_editing_page();
@@ -4497,7 +4497,7 @@ fn the_status_says_what_a_password_permits() {
 fn secure_readonly_under_secure_plus_is_refused_not_silently_dropped() {
     let mut app = app("two-column.pdf");
     app.submit("secure readonly");
-    app.tab_mut().password_plus = true;
+    app.tab_mut().secure_state.password_plus = true;
     app.answer_passcode("Correct-Horse-99-Battery");
     app.answer_passcode("Correct-Horse-99-Battery");
 
@@ -4541,7 +4541,7 @@ fn the_password_window_says_secure_plus_would_lose_the_restriction() {
 fn the_status_of_a_secure_plus_document_says_only_pagify_opens_it() {
     let mut app = app("two-column.pdf");
     app.submit("secure");
-    app.tab_mut().password_plus = true;
+    app.tab_mut().secure_state.password_plus = true;
     app.answer_passcode("Correct-Horse-99-Battery");
     app.answer_passcode("Correct-Horse-99-Battery");
 
@@ -4652,10 +4652,10 @@ fn managing_signatures_chooses_which_one_a_click_places() {
     let (mut app, path) = with_signature_pad("two-column.pdf", "choose");
     app.save_drawn_signature("work", &scrawl()).expect("kept");
     app.save_drawn_signature("personal", &scrawl()).expect("kept");
-    assert_eq!(app.signatures.current().map(|s| s.name.as_str()), Some("personal"));
+    assert_eq!(app.library_state.signatures.current().map(|s| s.name.as_str()), Some("personal"));
 
     app.submit("managesignatures use work");
-    assert_eq!(app.signatures.current().map(|s| s.name.as_str()), Some("work"));
+    assert_eq!(app.library_state.signatures.current().map(|s| s.name.as_str()), Some("work"));
     assert!(said(&app).contains("now places"), "{}", said(&app));
 
     // And it is on disk, not only in this window.
@@ -4675,7 +4675,7 @@ fn choosing_a_signature_that_is_not_there_says_what_is() {
     let told = said(&app);
     assert!(told.contains("no signature called"), "{told}");
     assert!(told.contains("work"), "it did not say what there is: {told}");
-    assert_eq!(app.signatures.current().map(|s| s.name.as_str()), Some("work"));
+    assert_eq!(app.library_state.signatures.current().map(|s| s.name.as_str()), Some("work"));
 
     let _ = std::fs::remove_file(&path);
 }
@@ -4690,9 +4690,9 @@ fn forgetting_a_signature_says_that_undo_does_not_reach_it() {
     app.submit("managesignatures delete work");
     let told = said(&app);
     assert!(told.contains("undo"), "it did not say undo will not help: {told}");
-    assert!(app.signatures.find("work").is_none(), "it is still there");
+    assert!(app.library_state.signatures.find("work").is_none(), "it is still there");
     // The remaining one is a real signature, not a dangling choice.
-    assert_eq!(app.signatures.current().map(|s| s.name.as_str()), Some("personal"));
+    assert_eq!(app.library_state.signatures.current().map(|s| s.name.as_str()), Some("personal"));
     assert!(
         pagify_shell::signatures::Signatures::load_from(&path).find("work").is_none(),
         "it came back from disk"
@@ -4710,11 +4710,11 @@ fn renaming_will_not_quietly_destroy_another_drawing() {
 
     app.submit("managesignatures rename work");
     assert!(said(&app).contains("already called that"), "{}", said(&app));
-    assert_eq!(app.signatures.entries().len(), 2, "a drawing was destroyed");
+    assert_eq!(app.library_state.signatures.entries().len(), 2, "a drawing was destroyed");
 
     app.submit("managesignatures rename my mark");
-    assert!(app.signatures.find("my mark").is_some(), "{}", said(&app));
-    assert!(app.signatures.find("personal").is_none());
+    assert!(app.library_state.signatures.find("my mark").is_some(), "{}", said(&app));
+    assert!(app.library_state.signatures.find("personal").is_none());
 
     let _ = std::fs::remove_file(&path);
 }
@@ -4739,7 +4739,7 @@ fn listing_signatures_says_which_one_is_current() {
 fn the_signature_panel_opens_and_says_when_it_is_empty() {
     let (mut app, path) = with_signature_pad("two-column.pdf", "panel");
     app.submit("managesignatures");
-    assert!(app.signature_list.is_some(), "the panel did not open");
+    assert!(app.library_state.signature_list.is_some(), "the panel did not open");
     assert!(said(&app).contains("no signatures yet"), "{}", said(&app));
     let _ = std::fs::remove_file(&path);
 }
@@ -4750,7 +4750,7 @@ fn too_little_to_be_a_signature_is_refused() {
     let (mut app, path) = with_signature_pad("two-column.pdf", "smudge");
     let told = app.save_drawn_signature("mine", &[vec![(4.0, 4.0)]]).expect_err("refused");
     assert!(told.contains("draw across the pad"), "{told}");
-    assert!(app.signatures.is_empty(), "a smudge was kept anyway");
+    assert!(app.library_state.signatures.is_empty(), "a smudge was kept anyway");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -4821,7 +4821,7 @@ fn validating_a_signed_document_separates_unchanged_from_who_signed_it() {
 fn signing_with_a_missing_certificate_says_so_at_once() {
     let mut app = app("two-column.pdf");
     app.submit("certify /tmp/there-is-no-such-certificate.p12");
-    assert!(app.tab_mut().awaiting_password.is_none(), "it asked for a password anyway");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "it asked for a password anyway");
     assert!(said(&app).contains("no such file"), "{}", said(&app));
 }
 
@@ -5053,11 +5053,11 @@ fn a_recording_named_like_a_path_is_refused_and_a_good_one_lands_in_pagifys_fold
     let mut app = app("two-column.pdf");
     app.submit("record ../../x");
     assert!(said(&app).contains("not a name"), "{}", said(&app));
-    assert!(!app.recorder.is_recording(), "it recorded under a path");
+    assert!(!app.recording_state.recorder.is_recording(), "it recorded under a path");
 
     let dir = std::env::temp_dir().join(format!("pagify-scripts-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    app.scripts_dir = Some(dir.clone());
+    app.library_state.scripts_dir = Some(dir.clone());
     app.submit("record stamp every page");
     app.submit("rotate 90");
     app.submit("stop");
@@ -5076,11 +5076,11 @@ fn a_recording_named_like_a_path_is_refused_and_a_good_one_lands_in_pagifys_fold
 #[test]
 fn clearhistory_forgets_the_recent_list_and_says_where_the_rest_is_kept() {
     let mut app = app("two-column.pdf");
-    app.recent.record(std::path::Path::new("/tmp/something.pdf"), 3, 0);
-    assert!(!app.recent.entries.is_empty());
+    app.library_state.recent.record(std::path::Path::new("/tmp/something.pdf"), 3, 0);
+    assert!(!app.library_state.recent.entries.is_empty());
     app.submit("clearhistory");
     let told = said(&app);
-    assert!(app.recent.entries.is_empty(), "the list was not cleared: {told}");
+    assert!(app.library_state.recent.entries.is_empty(), "the list was not cleared: {told}");
     assert!(told.contains("recent-documents list is gone"), "{told}");
     assert!(told.contains("signatures.json"), "it did not say what else is kept: {told}");
     assert!(told.contains("outlined_fonts.json"), "it did not mention outlined_fonts.json: {told}");
@@ -5199,7 +5199,7 @@ fn a_first_password_over_a_plain_original_is_still_held_back() {
     app.answer_passcode("Correct-Horse-99-Battery");
     app.submit("save");
 
-    assert!(app.tab_mut().asking_to_secure.is_some(), "it wrote over the only plain copy without asking");
+    assert!(app.tab_mut().secure_state.asking_to_secure.is_some(), "it wrote over the only plain copy without asking");
     let bytes = std::fs::read(&out).expect("read");
     assert!(
         pdf_core::registry::exclusive(|| pdf_core::document::pdfium_doc::PdfiumDocument::open_bytes(bytes, None)).is_ok(),
@@ -5251,7 +5251,7 @@ fn a_documents_password_can_be_changed_by_giving_the_current_one() {
 
     app.submit("secure");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::SecureCurrent(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::SecureCurrent(_))),
         "it did not ask for the current password:\n{}",
         said(&app)
     );
@@ -5259,18 +5259,18 @@ fn a_documents_password_can_be_changed_by_giving_the_current_one() {
     // A wrong one gets nowhere, and says so in the window.
     app.answer_passcode("not the password");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::SecureCurrent(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::SecureCurrent(_))),
         "a wrong current password was accepted"
     );
     assert_eq!(
-        app.tab_mut().password_problem.as_deref(),
+        app.tab_mut().secure_state.password_problem.as_deref(),
         Some("That is not this document's password.")
     );
 
     // The right one moves on to choosing a new one, under the rule.
     app.answer_passcode("pagify");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Secure(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Secure(_))),
         "the right password did not lead to choosing a new one:\n{}",
         said(&app)
     );
@@ -5393,7 +5393,7 @@ fn saving_over_the_original_is_not_done_quietly_while_a_password_is_waiting() {
     assert!(app.tab_mut().doc.as_ref().expect("doc").session.is_secured());
 
     app.submit("save");
-    assert!(app.tab_mut().asking_to_secure.is_some(), "no question was raised:\n{}", said(&app));
+    assert!(app.tab_mut().secure_state.asking_to_secure.is_some(), "no question was raised:\n{}", said(&app));
     assert!(
         !said(&app).contains("saved "),
         "the file was written without an answer:\n{}",
@@ -5407,7 +5407,7 @@ fn the_secure_verb_asks_for_a_password() {
     let mut app = app("two-column.pdf");
     app.submit("secure");
 
-    assert!(matches!(app.tab_mut().awaiting_password, Some(Awaiting::Secure(_))));
+    assert!(matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Secure(_))));
     let said = said(&app);
     assert!(
         said.contains("password"),
@@ -5426,7 +5426,7 @@ fn secure_carries_the_permissions_it_was_given() {
     only.submit("secure readonly");
 
     let told = said(&only);
-    let Some(Awaiting::Secure(options)) = only.tab().awaiting_password else {
+    let Some(Awaiting::Secure(options)) = only.tab().secure_state.awaiting_password else {
         panic!("it did not ask for a password:\n{told}");
     };
     assert!(!options.printing && !options.copying);
@@ -5435,7 +5435,7 @@ fn secure_carries_the_permissions_it_was_given() {
     // One at a time, combinable.
     let mut combined = app("two-column.pdf");
     combined.submit("secure noprint nocopy");
-    let Some(Awaiting::Secure(options)) = combined.tab().awaiting_password else {
+    let Some(Awaiting::Secure(options)) = combined.tab().secure_state.awaiting_password else {
         panic!("it did not ask for a password");
     };
     assert!(!options.printing && !options.copying);
@@ -5449,7 +5449,7 @@ fn secure_refuses_a_permission_it_does_not_understand() {
     let mut app = app("two-column.pdf");
     app.submit("secure nopriting");
 
-    assert!(app.tab_mut().awaiting_password.is_none(), "it asked for a password anyway");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "it asked for a password anyway");
     let said = said(&app);
     assert!(said.contains("nopriting"), "it did not say what it could not read: {said}");
     assert!(said.contains("noprint"), "it did not suggest the right word: {said}");
@@ -5495,12 +5495,12 @@ fn the_lock_verb_takes_the_selection_that_is_already_there() {
     let mut app = app("text-lines.pdf");
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let chars = app.characters(0).expect("characters").clone();
-    app.tab_mut().text_selection = Some(0..chars.len().min(8));
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(0..chars.len().min(8));
+    app.tab_mut().organize.selection_page = 0;
 
     app.submit("lock");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Lock { .. })),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Lock { .. })),
         "it did not lock the selection:\n{}",
         said(&app)
     );
@@ -5522,7 +5522,7 @@ fn the_lockarea_verb_still_arms_the_rectangle() {
 fn the_unlock_verb_declines_when_nothing_is_locked() {
     let mut app = app("text-lines.pdf");
     app.submit("unlock");
-    assert!(app.tab_mut().awaiting_password.is_none());
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none());
     assert!(said(&app).contains("nothing in this document is locked"));
 }
 
@@ -5542,7 +5542,7 @@ fn drawing_the_area_asks_for_a_passcode_and_locks_nothing_yet() {
     app.resolve_tool();
 
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Lock { page: 0, .. })),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Lock { page: 0, .. })),
         "it did not ask for a passcode"
     );
     assert_eq!(page_text(&app, 0), before, "it locked before it had a passcode");
@@ -5634,7 +5634,7 @@ fn a_second_lock_uses_the_passcode_the_first_one_was_given() {
     let mut app = app("text-lines.pdf");
 
     // The first lock asks, and is answered.
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
     app.answer_lock_passcode("a good passcode");
     assert!(
@@ -5646,7 +5646,7 @@ fn a_second_lock_uses_the_passcode_the_first_one_was_given() {
     // The second does not ask at all.
     app.ask_or_reuse_passcode(Awaiting::LockPages(vec![0]), "should never be shown");
     assert!(
-        app.tab_mut().awaiting_password.is_none(),
+        app.tab_mut().secure_state.awaiting_password.is_none(),
         "it asked again for a passcode it already had"
     );
     assert!(
@@ -5667,15 +5667,15 @@ fn a_second_lock_uses_the_passcode_the_first_one_was_given() {
 #[test]
 fn a_held_passcode_does_not_unlock_anything() {
     let mut app = app("text-lines.pdf");
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
     app.answer_lock_passcode("a good passcode");
-    assert!(app.tab_mut().held_passcode.is_some(), "the passcode was not kept");
+    assert!(app.tab_mut().secure_state.held_passcode.is_some(), "the passcode was not kept");
 
     // The gesture that brings something back still asks.
     app.submit("unlock");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::Unlock)),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::Unlock)),
         "unlocking did not ask for the passcode:\n{}",
         said(&app)
     );
@@ -5691,16 +5691,16 @@ fn a_held_passcode_does_not_unlock_anything() {
 #[test]
 fn a_passcode_that_is_refused_is_not_kept() {
     let mut app = app("text-lines.pdf");
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
     app.answer_lock_passcode("a good passcode");
-    assert!(app.tab_mut().held_passcode.is_some());
+    assert!(app.tab_mut().secure_state.held_passcode.is_some());
 
     // A wrong one, forced in the way a stale held passcode would arrive.
-    app.tab_mut().awaiting_password = Some(Awaiting::LockPages(vec![0]));
+    app.tab_mut().secure_state.awaiting_password = Some(Awaiting::LockPages(vec![0]));
     app.answer_lock_passcode("the wrong passcode");
     assert!(
-        app.tab_mut().held_passcode.is_none(),
+        app.tab_mut().secure_state.held_passcode.is_none(),
         "a refused passcode was kept, so every lock after it would fail quietly"
     );
 }
@@ -5709,14 +5709,14 @@ fn a_passcode_that_is_refused_is_not_kept() {
 #[test]
 fn closing_a_document_lets_go_of_its_passcode() {
     let mut app = app("text-lines.pdf");
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
     app.answer_lock_passcode("a good passcode");
-    assert!(app.tab_mut().held_passcode.is_some());
+    assert!(app.tab_mut().secure_state.held_passcode.is_some());
 
     app.submit("close!");
     assert!(app.tab_mut().doc.is_none(), "it did not close:\n{}", said(&app));
-    assert!(app.tab_mut().held_passcode.is_none(), "the passcode outlived the document");
+    assert!(app.tab_mut().secure_state.held_passcode.is_none(), "the passcode outlived the document");
 }
 
 /// **A selection over two lines locks the selection, not the two lines.**
@@ -5728,7 +5728,7 @@ fn closing_a_document_lets_go_of_its_passcode() {
 #[test]
 fn locking_a_selection_across_lines_sends_the_lines_not_their_union() {
     let mut app = app("two-column.pdf");
-    let page = app.tab_mut().page;
+    let page = app.tab_mut().view_state.page;
     let chars = app.characters(page).expect("characters");
     let text: String = chars.text();
     let phrase = "luminaire housing is formed from";
@@ -5737,11 +5737,11 @@ fn locking_a_selection_across_lines_sends_the_lines_not_their_union() {
     // Past the line break, so the selection is genuinely two lines.
     let to = at + phrase.chars().count() + 8;
 
-    app.tab_mut().selection_page = page;
-    app.tab_mut().text_selection = Some(at..to);
+    app.tab_mut().organize.selection_page = page;
+    app.tab_mut().selection.text_selection = Some(at..to);
     app.lock_selection();
 
-    match app.tab_mut().awaiting_password.take() {
+    match app.tab_mut().secure_state.awaiting_password.take() {
         Some(Awaiting::Lock { shapes, .. }) => {
             assert!(
                 shapes.len() >= 2,
@@ -5758,10 +5758,10 @@ fn locking_a_selection_across_lines_sends_the_lines_not_their_union() {
 #[test]
 fn layers_lists_what_the_page_draws() {
     let mut app = app("pictures.pdf");
-    assert!(!app.show_layers, "it should start closed");
+    assert!(!app.ui_state.show_layers, "it should start closed");
 
     app.submit("layers");
-    assert!(app.show_layers, "`layers` did not open it:\n{}", said(&app));
+    assert!(app.ui_state.show_layers, "`layers` did not open it:\n{}", said(&app));
 
     let listed = app.layers_on(0).to_vec();
     assert_eq!(listed.len(), 5, "the fixture draws five things: {listed:#?}");
@@ -5771,7 +5771,7 @@ fn layers_lists_what_the_page_draws() {
     );
 
     app.submit("layers");
-    assert!(!app.show_layers, "it did not close again");
+    assert!(!app.ui_state.show_layers, "it did not close again");
 }
 
 /// **Restacking needs something picked**, and says so rather than guessing
@@ -5796,7 +5796,7 @@ fn a_picked_layer_can_be_brought_to_the_front() {
     // for when something has covered it.
     let bottom = listed.first().cloned().expect("something is drawn");
 
-    app.tab_mut().picked_layer = Some(bottom.object);
+    app.tab_mut().selection.picked_layer = Some(bottom.object);
     app.submit("bringtofront");
     assert!(
         said(&app).contains("brought to the front"),
@@ -5815,7 +5815,7 @@ fn a_picked_layer_can_be_brought_to_the_front() {
     // And the pick follows it to its new place, so the next move acts on
     // the same thing rather than on whatever now sits at the old row.
     assert_eq!(
-        app.tab_mut().picked_layer,
+        app.tab_mut().selection.picked_layer,
         Some(now.len() - 1),
         "the pick did not follow the thing it was on"
     );
@@ -5915,22 +5915,22 @@ fn a_click_with_the_object_tool_selects_and_moves_nothing() {
     let mut app = app("covered.pdf");
     let before = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
     app.submit("editobject");
-    assert!(app.tab_mut().object_tool.is_some(), "the tool did not arm:\n{}", said(&app));
+    assert!(app.tab_mut().tool_state.object_tool.is_some(), "the tool did not arm:\n{}", said(&app));
     assert!(app.tab_mut().tool.is_none(), "the old two-click gesture is still armed");
 
     // Bare paper: nothing selected.
     assert!(!app.select_thing_at(0, AppPoint { x: 590.0, y: 780.0 }));
-    assert!(app.tab_mut().selected.is_none());
+    assert!(app.tab_mut().selection.selected.is_none());
 
     // The panel's far corner, where nothing else is: selected, named, and
     // picked in the layer list — and the page untouched.
     let panel = before.iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).expect("panel");
     let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
     assert!(app.select_thing_at(0, corner));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     assert_eq!(sel.what, "the shape");
     assert!(said(&app).contains("the shape selected"), "{}", said(&app));
-    let picked = app.tab_mut().picked_layer.and_then(|at| app.layers_on(0).get(at).cloned());
+    let picked = app.tab_mut().selection.picked_layer.and_then(|at| app.layers_on(0).get(at).cloned());
     assert_eq!(picked.map(|d| d.kind), Some(pdf_core::document::DrawnKind::Shape));
     let after = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
     assert_eq!(after.len(), before.len());
@@ -5987,7 +5987,7 @@ fn distance_to_outline_finds_the_nearest_contour_not_the_smallest_box() {
 #[test]
 fn a_two_point_line_is_not_dropped_as_too_short_to_be_real() {
     let mut app = app("single-page.pdf");
-    app.tab_mut().page = 0;
+    app.tab_mut().view_state.page = 0;
     app.stamp_line(0, AppPoint { x: 100.0, y: 700.0 }, AppPoint { x: 500.0, y: 700.0 })
         .expect("stamp a line");
 
@@ -6006,7 +6006,7 @@ fn a_two_point_line_is_not_dropped_as_too_short_to_be_real() {
         app.select_thing_at(0, AppPoint { x: 300.0, y: 700.0 }),
         "clicking the middle of the line should select it"
     );
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     assert_eq!(sel.what, "the shape");
 }
 
@@ -6018,15 +6018,15 @@ fn dragging_a_selection_moves_it_when_let_go() {
     let panel = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
     let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
     assert!(app.select_thing_at(0, corner));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
 
     // Mid-drag, nothing has changed in the document.
-    app.tab_mut().grab = Some(Grab { handle: None, from: corner, by: (30.0, 18.0) });
+    app.tab_mut().selection.grab = Some(Grab { handle: None, from: corner, by: (30.0, 18.0) });
     let unmoved = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
     assert_eq!(unmoved.rect, panel.rect, "the page changed before the pointer was let go");
 
     // Let go.
-    let grab = app.tab_mut().grab.take().expect("grab");
+    let grab = app.tab_mut().selection.grab.take().expect("grab");
     app.finish_grab(sel, grab, 1.0);
     let moved = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
     assert!(
@@ -6036,7 +6036,7 @@ fn dragging_a_selection_moves_it_when_let_go() {
         moved.rect
     );
     // And it is still selected, where it now is.
-    let still = app.tab_mut().selected.clone().expect("still selected");
+    let still = app.tab_mut().selection.selected.clone().expect("still selected");
     assert!((still.rect.left - moved.rect.left).abs() < 0.5, "the selection did not follow the thing");
 }
 
@@ -6058,13 +6058,13 @@ fn text_placed_by_add_text_can_be_selected_and_dragged_like_any_other_run() {
         app.select_thing_at_drilling(0, at, false),
         "the freshly written words were not found"
     );
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     assert_eq!(sel.what, "the words");
 
     let grab = Grab { handle: None, from: at, by: (25.0, 12.0) };
     app.finish_grab(sel.clone(), grab, 1.0);
 
-    let moved = app.tab_mut().selected.clone().expect("still selected after the drag");
+    let moved = app.tab_mut().selection.selected.clone().expect("still selected after the drag");
     assert_eq!(moved.what, "the words", "the drag left it split down to a single letter");
     assert!(
         (moved.rect.left - sel.rect.left - 25.0).abs() < 1.0
@@ -6097,7 +6097,7 @@ fn dragging_an_isolated_line_of_text_moves_the_whole_line_not_one_letter() {
     // The exact shape of `interact_objects`'s own drag-start branch:
     // select fresh, then drag the body.
     assert!(app.select_thing_at_drilling(0, at, false));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     let leftmost = |rects: &[(usize, pdf_core::document::Rect)]| {
         rects.iter().map(|(_, r)| r.left).fold(f32::INFINITY, f32::min)
     };
@@ -6135,7 +6135,7 @@ fn undo_puts_a_dragged_object_back() {
         .expect("panel");
     let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
     assert!(app.select_thing_at(0, corner));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
 
     app.finish_grab(sel, Grab { handle: None, from: corner, by: (30.0, 18.0) }, 1.0);
     let moved = app
@@ -6190,7 +6190,7 @@ fn a_tiny_wobble_does_not_move_the_selection_but_a_real_drag_still_does() {
     // Not necessarily the panel itself: `covered.pdf` draws a picture
     // right under it, and Edit Object looks at pictures first — tracked
     // by whatever `select_thing_at` actually picked up, not assumed.
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     let object = sel.object;
     let before = app
         .layers_on(0)
@@ -6235,7 +6235,7 @@ fn dragging_a_handle_resizes_about_the_opposite_corner() {
     let panel = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
     let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
     assert!(app.select_thing_at(0, corner));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
 
     // Drag the bottom-right handle in by half the width and height.
     let (w, h) = (panel.rect.right - panel.rect.left, panel.rect.bottom - panel.rect.top);
@@ -6281,7 +6281,7 @@ fn a_picked_layer_can_be_nudged_up_and_stays_picked() {
     let mut app = app("covered.pdf");
     let listed = app.layers_on(0).to_vec();
     let picture_at = listed.iter().position(|d| d.kind == pdf_core::document::DrawnKind::Picture).expect("the picture");
-    app.tab_mut().picked_layer = Some(picture_at);
+    app.tab_mut().selection.picked_layer = Some(picture_at);
 
     // Up passes the panel it was under, and says so.
     app.restack_picked(pdf_core::document::Stacking::Up);
@@ -6291,7 +6291,7 @@ fn a_picked_layer_can_be_nudged_up_and_stays_picked() {
     let panel_now = now.iter().position(|d| d.kind == pdf_core::document::DrawnKind::Shape).expect("panel");
     assert!(picture_now > panel_now, "the picture should now be over the panel: {now:#?}");
     // Still picked, at its new row, so the next nudge acts on the same thing.
-    assert_eq!(app.tab_mut().picked_layer, Some(picture_now), "the pick did not follow the thing it was on");
+    assert_eq!(app.tab_mut().selection.picked_layer, Some(picture_now), "the pick did not follow the thing it was on");
 
     // Down puts it back under.
     app.restack_picked(pdf_core::document::Stacking::Down);
@@ -6441,12 +6441,12 @@ fn saving_a_first_password_over_the_original_asks_and_can_be_declined() {
 
     // A plain save asks rather than refusing, and writes nothing yet.
     assert_eq!(app.save(None), SaveOutcome::Asking);
-    assert!(app.tab_mut().asking_to_secure.is_some(), "no question was raised");
+    assert!(app.tab_mut().secure_state.asking_to_secure.is_some(), "no question was raised");
     assert_eq!(std::fs::read(&scratch).expect("read"), before, "the file was written before the answer");
     assert!(!said(&app).contains("use `saveas"), "the old refusal is back:\n{}", said(&app));
 
     // Taking the password off and saving is one of the answers, and it works.
-    app.tab_mut().asking_to_secure = None;
+    app.tab_mut().secure_state.asking_to_secure = None;
     app.tab_mut().doc.as_ref().expect("open").session.unsecure_document().expect("unsecure");
     assert_eq!(app.save(None), SaveOutcome::Done, "{}", said(&app));
     assert!(said(&app).contains("saved"), "{}", said(&app));
@@ -6465,8 +6465,8 @@ fn a_confirmed_password_is_written_over_the_original() {
     assert_eq!(app.save(None), SaveOutcome::Asking);
 
     // The deliberate click.
-    app.tab_mut().asking_to_secure = None;
-    app.tab_mut().secure_in_place_confirmed = true;
+    app.tab_mut().secure_state.asking_to_secure = None;
+    app.tab_mut().secure_state.secure_in_place_confirmed = true;
     assert_eq!(app.save(None), SaveOutcome::Done, "{}", said(&app));
 
     // The file now needs the password; the confirmation was spent.
@@ -6475,7 +6475,7 @@ fn a_confirmed_password_is_written_over_the_original() {
         String::from_utf8_lossy(&written).contains("/Encrypt"),
         "the password was not written into the file"
     );
-    assert!(!app.tab_mut().secure_in_place_confirmed, "the confirmation must not outlive one save");
+    assert!(!app.tab_mut().secure_state.secure_in_place_confirmed, "the confirmation must not outlive one save");
     let _ = std::fs::remove_file(&scratch);
 }
 
@@ -6485,11 +6485,11 @@ fn a_confirmed_password_is_written_over_the_original() {
 fn escape_abandons_a_lock_that_was_waiting_on_a_passcode() {
     let mut app = app("text-lines.pdf");
     let before = page_text(&app, 0);
-    app.tab_mut().awaiting_password =
+    app.tab_mut().secure_state.awaiting_password =
         Some(Awaiting::Lock { page: 0, shapes: vec![fox_area()], require_complete: true });
 
     app.escape();
-    assert!(app.tab_mut().awaiting_password.is_none());
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none());
     assert!(said(&app).contains("nothing was locked"), "{}", said(&app));
     assert_eq!(page_text(&app, 0), before);
 }
@@ -6558,7 +6558,7 @@ fn lock_all_asks_for_a_passcode_before_it_hides_anything() {
 
     app.submit("lock all");
     assert!(
-        matches!(app.tab_mut().awaiting_password, Some(Awaiting::LockPages(_))),
+        matches!(app.tab_mut().secure_state.awaiting_password, Some(Awaiting::LockPages(_))),
         "it did not ask for a passcode:\n{}",
         said(&app)
     );
@@ -6668,11 +6668,11 @@ fn the_selection_menu_asks_for_an_incomplete_lock() {
     let mut app = app("text-lines.pdf");
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let chars = app.characters(0).expect("characters").clone();
-    app.tab_mut().text_selection = Some(0..chars.len().min(8));
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(0..chars.len().min(8));
+    app.tab_mut().organize.selection_page = 0;
 
     app.lock_selection();
-    match &app.tab().awaiting_password {
+    match &app.tab().secure_state.awaiting_password {
         Some(Awaiting::Lock { require_complete, .. }) => assert!(
             !*require_complete,
             "the selection would still be refused on account of what is under it"
@@ -6774,10 +6774,10 @@ fn locking_an_image_needs_a_passcode() {
 fn escape_abandons_an_image_lock_that_was_waiting_on_a_passcode() {
     let mut app = app("scan-300dpi.pdf");
     let object = app.images_on(0)[0].object;
-    app.tab_mut().awaiting_password = Some(Awaiting::LockImage { page: 0, object });
+    app.tab_mut().secure_state.awaiting_password = Some(Awaiting::LockImage { page: 0, object });
 
     app.escape();
-    assert!(app.tab_mut().awaiting_password.is_none());
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none());
     assert!(said(&app).contains("nothing was locked"), "{}", said(&app));
     assert!(app.images_on(0)[0].pixel_width > 1, "the image went anyway");
 }
@@ -6807,7 +6807,7 @@ fn one_badge_unlocks_its_own_image_and_leaves_the_others_sealed() {
         eprintln!("skipping: the catalogue is present but would not open");
         return;
     }
-    app.tab_mut().page = 40;
+    app.tab_mut().view_state.page = 40;
 
     let images = app.images_on(40);
     if images.len() < 2 {
@@ -6915,7 +6915,7 @@ fn editing_is_fast_on_a_real_busy_page() {
         pick_time.as_millis() < BUSY_PAGE_BUDGET_MS,
         "picking a word took {pick_time:?} on a busy page"
     );
-    let picked = app.tab().editing_run.as_ref().expect("an editor opened");
+    let picked = app.tab().edit.editing_run.as_ref().expect("an editor opened");
     assert_eq!(
         (picked.lines.len(), picked.lines[0].0.len()),
         (1, 1),
@@ -6927,7 +6927,7 @@ fn editing_is_fast_on_a_real_busy_page() {
     // substitution — this measures the plain edit, not that separate
     // (and separately expensive) concern.
     let safe_replacement: String = target.text.trim().chars().rev().collect();
-    app.tab_mut().editing_run.as_mut().unwrap().buffer = safe_replacement.clone();
+    app.tab_mut().edit.editing_run.as_mut().unwrap().buffer = safe_replacement.clone();
 
     let t1 = std::time::Instant::now();
     app.apply_editing_page();
@@ -6983,17 +6983,17 @@ fn editing_a_paragraph_is_fast_on_a_real_busy_page() {
             y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
         };
         if app.pick_text_run(0, at).is_ok() {
-            let lines = app.tab_mut().editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
+            let lines = app.tab_mut().edit.editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
             if lines > 1 {
                 line_count = lines;
                 break;
             }
         }
-        app.tab_mut().editing_run = None;
+        app.tab_mut().edit.editing_run = None;
     }
     assert!(line_count > 1, "no multi-line paragraph found on this page to test against");
 
-    let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
     // Reversed per line, not something new — same reasoning as the
     // single-run test: isolate the plain edit from font substitution.
     let reversed_lines: Vec<String> =
@@ -7076,7 +7076,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
             y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
         };
         if app.pick_text_run(0, at).is_ok() {
-            found_paragraph = app.tab_mut().editing_run.is_some();
+            found_paragraph = app.tab_mut().edit.editing_run.is_some();
         }
         break;
     }
@@ -7086,7 +7086,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
     );
     let all_objects: Vec<usize> = app
         .tab_mut()
-        .editing_run
+        .edit.editing_run
         .as_ref()
         .unwrap()
         .lines
@@ -7094,7 +7094,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
         .flat_map(|(objs, _)| objs.iter().copied())
         .collect();
     assert!(
-        app.tab_mut().editing_run.as_ref().unwrap().lines.iter().any(|(objs, _)| objs.len() > 1),
+        app.tab_mut().edit.editing_run.as_ref().unwrap().lines.iter().any(|(objs, _)| objs.len() > 1),
         "setup: the paragraph has a line made of several pieces, or nothing here could show a difference"
     );
 
@@ -7103,7 +7103,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
     let picture_before = tests_support::picture(&app);
 
     // First edit: reversed per line, so every line is retyped.
-    let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
     edit.buffer =
         edit.buffer.split('\n').map(|line| line.chars().rev().collect::<String>()).collect::<Vec<_>>().join("\n");
     app.apply_editing_page();
@@ -7142,7 +7142,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
                 x: ((run.rect.left + run.rect.right) / 2.0) as f64,
                 y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
             };
-            if app.pick_text_run(0, at).is_ok() && app.tab_mut().editing_run.is_some() {
+            if app.pick_text_run(0, at).is_ok() && app.tab_mut().edit.editing_run.is_some() {
                 re_picked = true;
                 break;
             }
@@ -7150,7 +7150,7 @@ fn undo_then_a_shorter_paragraph_edit_does_not_corrupt_the_page() {
     }
     assert!(re_picked, "could not pick the same paragraph again after undo");
 
-    let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
     let lines = edit.lines.clone();
     let frozen = edit.frozen.clone();
     let kept_line_count = (lines.len() / 2).max(1);
@@ -7230,7 +7230,7 @@ fn inserting_a_line_mid_paragraph_does_not_shift_the_lines_after_it() {
             y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
         };
         if app.pick_text_run(0, at).is_ok() {
-            found_paragraph = app.tab_mut().editing_run.is_some();
+            found_paragraph = app.tab_mut().edit.editing_run.is_some();
         }
         break;
     }
@@ -7242,7 +7242,7 @@ fn inserting_a_line_mid_paragraph_does_not_shift_the_lines_after_it() {
     // Snapshot everything needed out of `edit` as owned values before
     // touching `app` again — `edit` borrows it, and `apply_editing_page`
     // below takes `editing_run` outright.
-    let edit = app.tab_mut().editing_run.as_ref().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("still editing");
     let original_lines: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
     let lines_before = edit.lines.clone();
     assert!(
@@ -7279,7 +7279,7 @@ fn inserting_a_line_mid_paragraph_does_not_shift_the_lines_after_it() {
     // its own rather than folded in here.
     let mut new_lines = original_lines.clone();
     new_lines.insert(1, String::new());
-    let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+    let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
     edit.buffer = new_lines.join("\n");
     app.apply_editing_page();
 
@@ -7405,21 +7405,21 @@ fn merging_any_two_adjacent_lines_does_not_corrupt_the_others() {
                 y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
             };
             let _ = app.pick_text_run(0, at);
-            return app.tab_mut().editing_run.is_some();
+            return app.tab_mut().edit.editing_run.is_some();
         }
         false
     }
 
     assert!(pick_cob_paragraph(&mut app), "the 'COB' paragraph was not found — has the fixture changed?");
-    let line_count = app.tab_mut().editing_run.as_ref().unwrap().lines.len();
+    let line_count = app.tab_mut().edit.editing_run.as_ref().unwrap().lines.len();
     assert!(line_count >= 2, "need at least two lines to merge");
-    app.tab_mut().editing_run = None;
+    app.tab_mut().edit.editing_run = None;
 
     let picture_start = tests_support::picture(&app);
     for merge_at in 0..line_count - 1 {
         assert!(pick_cob_paragraph(&mut app), "merge_at={merge_at}: could not re-pick the paragraph");
 
-        let edit = app.tab_mut().editing_run.as_ref().expect("still editing");
+        let edit = app.tab_mut().edit.editing_run.as_ref().expect("still editing");
         let original_lines: Vec<String> = edit.buffer.split('\n').map(str::to_string).collect();
         let lines_before = edit.lines.clone();
         assert_eq!(original_lines.len(), line_count, "merge_at={merge_at}: line count drifted between picks");
@@ -7437,7 +7437,7 @@ fn merging_any_two_adjacent_lines_does_not_corrupt_the_others() {
         new_lines[merge_at] = format!("{}{}", new_lines[merge_at], second);
 
         let merged_text = new_lines[merge_at].clone();
-        let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
         edit.buffer = new_lines.join("\n");
         app.apply_editing_page();
         let after = tests_support::runs_in_order(&app);
@@ -7510,12 +7510,12 @@ fn diag_camino_successive_paragraph_edits() {
                 y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
             };
             if app.pick_text_run(0, at).is_ok() {
-                let lines = app.tab_mut().editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
+                let lines = app.tab_mut().edit.editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
                 if lines > 1 {
                     line_count = lines;
                     let objects: Vec<usize> = app
                         .tab_mut()
-                        .editing_run
+                        .edit.editing_run
                         .as_ref()
                         .unwrap()
                         .lines
@@ -7526,7 +7526,7 @@ fn diag_camino_successive_paragraph_edits() {
                     break;
                 }
             }
-            app.tab_mut().editing_run = None;
+            app.tab_mut().edit.editing_run = None;
             tried.insert(run.object);
         }
         if line_count == 0 {
@@ -7534,7 +7534,7 @@ fn diag_camino_successive_paragraph_edits() {
             break;
         }
 
-        let edit = app.tab_mut().editing_run.as_mut().expect("still editing");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("still editing");
         edit.buffer = edit
             .buffer
             .split('\n')
@@ -7580,13 +7580,13 @@ fn matching_properties_does_not_corrupt_the_page() {
     let from = (278.0, 305.0);
     let to = (300.0, 305.0);
     let sample_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
-    app.tab_mut().text_selection = Some(sample_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(sample_range);
+    app.tab_mut().organize.selection_page = 0;
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
 
     let target_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
-    app.tab_mut().text_selection = Some(target_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(target_range);
+    app.tab_mut().organize.selection_page = 0;
     app.apply_match_properties_to_current_selection().expect("match should succeed");
 
     app.tab_mut().doc.as_mut().unwrap().caches.text = None; // force a fresh read — `characters()` caches per page
@@ -7640,8 +7640,8 @@ fn matching_properties_on_a_small_selection_is_fast_on_a_busy_page() {
     let from = (278.0, 305.0);
     let to = (300.0, 305.0);
     let sample_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
-    app.tab_mut().text_selection = Some(sample_range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(sample_range);
+    app.tab_mut().organize.selection_page = 0;
 
     let started = std::time::Instant::now();
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
@@ -7675,8 +7675,8 @@ fn matching_properties_finds_the_sample_the_selection_only_starts_inside() {
     let from = (a.rect.right - 1.0, (a.rect.top + a.rect.bottom) / 2.0);
     let to = ((b.rect.left + b.rect.right) / 2.0, (b.rect.top + b.rect.bottom) / 2.0);
     let range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
-    app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(range);
+    app.tab_mut().organize.selection_page = 0;
 
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
     let sample = match app.tab_mut().tool.as_ref().map(|t| &t.kind) {
@@ -7704,7 +7704,7 @@ fn blank_then_text_with_page_copied(copied: usize) -> PagifyApp {
     app.insert_page();
     assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 2, "setup");
     assert!(!page_has_text(&app, 0) && page_has_text(&app, 1), "setup: expected [blank, text]");
-    app.tab_mut().organize_selected = vec![copied];
+    app.tab_mut().organize.organize_selected = vec![copied];
     assert!(app.copy_organize_selection(), "setup: copy");
     app
 }
@@ -7716,7 +7716,7 @@ fn blank_then_text_with_page_copied(copied: usize) -> PagifyApp {
 #[test]
 fn a_pasted_page_lands_below_the_selected_page() {
     let mut app = blank_then_text_with_page_copied(1);
-    app.tab_mut().organize_selected = vec![0];
+    app.tab_mut().organize.organize_selected = vec![0];
     app.paste_organize_selection();
     assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 3, "{}", said(&app));
     assert!(!page_has_text(&app, 0), "the paste landed above the selected page");
@@ -7730,7 +7730,7 @@ fn a_pasted_page_lands_below_the_selected_page() {
 #[test]
 fn a_page_pasted_below_the_last_page_goes_to_the_end() {
     let mut app = blank_then_text_with_page_copied(0);
-    app.tab_mut().organize_selected = vec![1];
+    app.tab_mut().organize.organize_selected = vec![1];
     app.paste_organize_selection();
     assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 3, "{}", said(&app));
     assert!(page_has_text(&app, 1), "the text page was pushed down, so the paste went above it");
@@ -7742,7 +7742,7 @@ fn a_page_pasted_below_the_last_page_goes_to_the_end() {
 #[test]
 fn with_several_pages_selected_the_paste_goes_below_the_last_one() {
     let mut app = blank_then_text_with_page_copied(0);
-    app.tab_mut().organize_selected = vec![0, 1];
+    app.tab_mut().organize.organize_selected = vec![0, 1];
     app.paste_organize_selection();
     assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 3, "{}", said(&app));
     assert!(page_has_text(&app, 1), "the paste landed above the last selected page");
@@ -7753,7 +7753,7 @@ fn with_several_pages_selected_the_paste_goes_below_the_last_one() {
 #[test]
 fn with_nothing_selected_a_paste_still_goes_to_the_end() {
     let mut app = blank_then_text_with_page_copied(0);
-    app.tab_mut().organize_selected.clear();
+    app.tab_mut().organize.organize_selected.clear();
     app.paste_organize_selection();
     assert_eq!(app.tab().doc.as_ref().unwrap().page_count, 3, "{}", said(&app));
     assert!(page_has_text(&app, 1) && !page_has_text(&app, 2));

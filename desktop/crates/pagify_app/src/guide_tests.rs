@@ -23,14 +23,14 @@ fn two_objects(app: &mut PagifyApp) -> (Selected, pdf_core::document::Rect) {
 fn dragging_close_to_another_things_edge_lands_exactly_on_it() {
     let mut app = PagifyApp::new(Some(&ui_fixture("covered.pdf")));
     let (sel, other) = two_objects(&mut app);
-    app.tab_mut().selected = Some(sel.clone());
+    app.tab_mut().selection.selected = Some(sel.clone());
     // Where the drag would put its left edge: 3 points past the other thing's.
     let dx = other.left + 3.0 - sel.rect.left;
-    app.tab_mut().grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+    app.tab_mut().selection.grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
 
     app.snap_the_move(0, 1.0, true);
 
-    let by = app.tab().grab.as_ref().unwrap().by;
+    let by = app.tab().selection.grab.as_ref().unwrap().by;
     let targets: Vec<f32> = {
         let t = app.guide_targets(0, &[sel.object]);
         t.iter().flat_map(|r| [r.left, (r.left + r.right) / 2.0, r.right]).chain([0.0]).collect()
@@ -48,22 +48,22 @@ fn dragging_close_to_another_things_edge_lands_exactly_on_it() {
 fn holding_alt_shows_the_lines_but_pulls_nothing() {
     let mut app = PagifyApp::new(Some(&ui_fixture("covered.pdf")));
     let (sel, other) = two_objects(&mut app);
-    app.tab_mut().selected = Some(sel.clone());
+    app.tab_mut().selection.selected = Some(sel.clone());
     let dx = other.left + 3.0 - sel.rect.left;
-    app.tab_mut().grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+    app.tab_mut().selection.grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
     app.snap_the_move(0, 1.0, false);
-    assert_eq!(app.tab().grab.as_ref().unwrap().by, (dx, 0.0));
+    assert_eq!(app.tab().selection.grab.as_ref().unwrap().by, (dx, 0.0));
 }
 
 #[test]
 fn a_resize_is_not_pulled_onto_anything() {
     let mut app = PagifyApp::new(Some(&ui_fixture("covered.pdf")));
     let (sel, other) = two_objects(&mut app);
-    app.tab_mut().selected = Some(sel.clone());
+    app.tab_mut().selection.selected = Some(sel.clone());
     let dx = other.left + 3.0 - sel.rect.left;
-    app.tab_mut().grab = Some(Grab { handle: Some(Handle::Right), from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+    app.tab_mut().selection.grab = Some(Grab { handle: Some(Handle::Right), from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
     app.snap_the_move(0, 1.0, true);
-    assert_eq!(app.tab().grab.as_ref().unwrap().by, (dx, 0.0));
+    assert_eq!(app.tab().selection.grab.as_ref().unwrap().by, (dx, 0.0));
 }
 
 /// The lines of this frame, by colour: how many green ones were drawn.
@@ -93,24 +93,24 @@ fn the_lines_are_drawn_only_while_something_is_being_moved() {
         two_objects(app)
     };
     h.state_mut().submit("editobject");
-    h.state_mut().tab_mut().selected = Some(sel.clone());
+    h.state_mut().tab_mut().selection.selected = Some(sel.clone());
     h.run_steps(3);
     assert_eq!(lines_drawn(&h), (0, 0), "lines were drawn for a selection that is not being moved");
 
     // Dragged so its left edge is on the other thing's: a green line.
     let dx = other.left - sel.rect.left;
-    h.state_mut().tab_mut().grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+    h.state_mut().tab_mut().selection.grab = Some(Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
     h.run_steps(2);
     let (_, green) = lines_drawn(&h);
     assert!(green >= 1, "no green line while a thing sits on another's edge");
 
     // Let go: gone again.
-    h.state_mut().tab_mut().grab = None;
+    h.state_mut().tab_mut().selection.grab = None;
     h.run_steps(2);
     assert_eq!(lines_drawn(&h), (0, 0), "the lines stayed after the move");
 
     // And a resize shows none.
-    h.state_mut().tab_mut().grab = Some(Grab { handle: Some(Handle::Right), from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
+    h.state_mut().tab_mut().selection.grab = Some(Grab { handle: Some(Handle::Right), from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, 0.0) });
     h.run_steps(2);
     assert_eq!(lines_drawn(&h), (0, 0), "lines were drawn for a resize");
 }

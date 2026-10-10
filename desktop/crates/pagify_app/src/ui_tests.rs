@@ -75,12 +75,12 @@ fn nearby_zoom_levels_during_one_gesture_share_a_texture() {
 /// Where the page is on screen, and a point on its first character.
 fn a_character_on_screen(h: &mut Harness<'static, PagifyApp>) -> egui::Pos2 {
     let app = h.state_mut();
-    let page = app.tab_mut().page;
+    let page = app.tab_mut().view_state.page;
     let chars = app.characters(page).expect("no characters").clone();
     let r = chars.line_rects(0..1).into_iter().next().expect("no character box");
     let mid = egui::pos2((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
 
-    let view = app.tab_mut().last_view.expect("the page was never drawn, so nothing can be clicked");
+    let view = app.tab_mut().view_state.last_view.expect("the page was never drawn, so nothing can be clicked");
     view.to_screen(AppPoint { x: mid.x as f64, y: mid.y as f64 })
 }
 
@@ -150,7 +150,7 @@ fn scrolling_through_pages_of_different_sizes_neither_changes_the_zoom_nor_flips
                 .expect("page");
             h.state_mut().refresh_after_page_change();
         }
-        h.state_mut().tab_mut().zoom = mode;
+        h.state_mut().tab_mut().view_state.zoom = mode;
         h.run_steps(20);
         let first_zoom = h.state().resolved_zoom();
         h.input_mut().events.push(egui::Event::PointerMoved(egui::pos2(700.0, 500.0)));
@@ -168,18 +168,18 @@ fn scrolling_through_pages_of_different_sizes_neither_changes_the_zoom_nor_flips
                     h.state().resolved_zoom(),
                     first_zoom,
                     "{mode:?}: the zoom changed while scrolling (step {step}, page {})",
-                    h.state().tab().page
+                    h.state().tab().view_state.page
                 );
             }
         }
         // And once the scrolling stops (egui's smooth scroll takes a
         // moment to come to rest) nothing keeps moving.
         h.run_steps(60);
-        let (page, offset) = (h.state().tab().page, h.state().tab().scroll_offset);
+        let (page, offset) = (h.state().tab().view_state.page, h.state().tab().view_state.scroll_offset);
         for _ in 0..30 {
             h.run_steps(1);
             assert_eq!(
-                (h.state().tab().page, h.state().tab().scroll_offset),
+                (h.state().tab().view_state.page, h.state().tab().view_state.scroll_offset),
                 (page, offset),
                 "{mode:?}: the view is still moving with no input"
             );
@@ -465,11 +465,11 @@ fn an_error_leaves_the_history_shut_and_the_arrow_opens_and_folds_it() {
     use egui_kittest::kittest::Queryable;
 
     let mut h = harness("text-lines.pdf");
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().say_error("something went wrong here");
     h.run_steps(2);
 
-    assert!(!h.state().command_open, "an error opened the history");
+    assert!(!h.state().ui_state.command_open, "an error opened the history");
     // It is still where the reader is looking: the line under the buttons.
     assert!(
         h.query_by_label_contains("something went wrong here").is_some(),
@@ -479,12 +479,12 @@ fn an_error_leaves_the_history_shut_and_the_arrow_opens_and_folds_it() {
     let arrow = h.get_by_label("Show the history").rect();
     click(&mut h, arrow.center());
     h.run_steps(2);
-    assert!(h.state().command_open, "the arrow did not open the history");
+    assert!(h.state().ui_state.command_open, "the arrow did not open the history");
 
     let arrow = h.get_by_label("Hide the history").rect();
     click(&mut h, arrow.center());
     h.run_steps(2);
-    assert!(!h.state().command_open, "the arrow did not fold the history away");
+    assert!(!h.state().ui_state.command_open, "the arrow did not fold the history away");
 }
 
 /// **The rest of the ribbon drops down as the ribbon's own tiles.**
@@ -835,8 +835,8 @@ fn a_click_in_the_organize_grid_selects_the_page_and_goes_to_it() {
     click(&mut h, rects[3].center());
     h.run_steps(3);
 
-    assert_eq!(h.state().tab().organize_selected, vec![3], "the clicked page was not selected");
-    assert_eq!(h.state().tab().page, 3, "the view did not go to the clicked page");
+    assert_eq!(h.state().tab().organize.organize_selected, vec![3], "the clicked page was not selected");
+    assert_eq!(h.state().tab().view_state.page, 3, "the view did not go to the clicked page");
 }
 
 /// A long document scrolls in the Organize grid — down, and only down:
@@ -911,7 +911,7 @@ fn pages_from_another_pdf_can_be_inserted_from_the_pages_rail() {
     );
 
     let before = h.state().tab().doc.as_ref().expect("doc").page_count;
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
     let at = h.state().page_after_selection();
     assert_eq!(at, 1, "pages are not put in just after the selected one");
 
@@ -941,7 +941,7 @@ pub(crate) fn async_harness(path: &str) -> Harness<'static, PagifyApp> {
 pub(crate) fn harness_60fps(path: &str, asynchronous: bool) -> Harness<'static, PagifyApp> {
     let mut app = PagifyApp::new(Some(path));
     assert!(app.tab().doc.is_some(), "{path} did not open");
-    app.async_render = asynchronous;
+    app.render_state.async_render = asynchronous;
     let mut h = Harness::builder()
         .with_size(egui::vec2(1400.0, 1000.0))
         .with_step_dt(1.0 / 60.0)
@@ -962,7 +962,7 @@ pub(crate) fn until_a_render_lands(h: &mut Harness<'static, PagifyApp>, already:
     for _ in 0..600 {
         std::thread::sleep(std::time::Duration::from_millis(10));
         h.run_steps(1);
-        if h.state().render_stats.applied > already {
+        if h.state().render_state.render_stats.applied > already {
             return true;
         }
     }
@@ -985,7 +985,7 @@ pub(crate) fn until_a_render_drops(h: &mut Harness<'static, PagifyApp>, already:
     for _ in 0..3000 {
         std::thread::sleep(std::time::Duration::from_millis(10));
         h.run_steps(1);
-        if h.state().render_stats.dropped > already {
+        if h.state().render_state.render_stats.dropped > already {
             return true;
         }
     }
@@ -1032,7 +1032,7 @@ fn heavy_pdf(rects: usize) -> Vec<u8> {
 #[test]
 fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stops() {
     let mut h = async_harness(&fixture("two-column.pdf"));
-    let before = h.state().render_stats;
+    let before = h.state().render_state.render_stats;
     // The first look at a page is drawn from its thumbnail while the page
     // itself is rendered, or — with no thumbnail to show — rendered at once.
     assert!(
@@ -1040,7 +1040,7 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
         "the page was never rendered at all: {before:?}"
     );
 
-    let centre = h.state().tab().viewport_rect.expect("the page was never drawn").center();
+    let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();
     h.input_mut().events.push(egui::Event::PointerMoved(centre));
     h.run_steps(1);
     for _ in 0..5 {
@@ -1048,7 +1048,7 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
         h.run_steps(1);
     }
 
-    let during = h.state().render_stats;
+    let during = h.state().render_state.render_stats;
     assert_eq!(during.on_ui_thread, before.on_ui_thread, "a zoom step rendered on the UI thread");
     assert_eq!(during.requested, before.requested, "a render was started while the zoom was still moving");
     assert!(
@@ -1059,9 +1059,9 @@ fn a_zoom_does_not_render_on_the_ui_thread_while_it_moves_and_lands_once_it_stop
     // Stopped: after the settle window a render is asked for, off this
     // thread, and lands.
     h.run_steps(12);
-    assert!(h.state().render_stats.requested > before.requested, "nothing was asked for once the zoom stopped");
+    assert!(h.state().render_state.render_stats.requested > before.requested, "nothing was asked for once the zoom stopped");
     assert!(until_a_render_lands(&mut h, before.applied), "the render never came back");
-    assert_eq!(h.state().render_stats.on_ui_thread, before.on_ui_thread, "it was rendered on the UI thread");
+    assert_eq!(h.state().render_state.render_stats.on_ui_thread, before.on_ui_thread, "it was rendered on the UI thread");
 }
 
 /// While the picture for the new size is being made, the page is drawn from
@@ -1072,12 +1072,12 @@ fn the_page_is_drawn_from_what_is_held_until_the_right_picture_arrives() {
     let mut h = async_harness(&fixture("two-column.pdf"));
     let ctx = h.ctx.clone();
     let held = h.state_mut().texture_for(&ctx, 0, 1.0).expect("a page");
-    let before = h.state().render_stats;
+    let before = h.state().render_state.render_stats;
 
     let meanwhile = h.state_mut().texture_for(&ctx, 0, 3.0).expect("a stand-in");
     assert_eq!(meanwhile.id(), held.id(), "something else was drawn while the right picture was made");
-    assert_eq!(h.state().render_stats.on_ui_thread, before.on_ui_thread, "it was rendered on the UI thread");
-    assert_eq!(h.state().render_stats.requested, before.requested + 1, "the right picture was not asked for");
+    assert_eq!(h.state().render_state.render_stats.on_ui_thread, before.on_ui_thread, "it was rendered on the UI thread");
+    assert_eq!(h.state().render_state.render_stats.requested, before.requested + 1, "the right picture was not asked for");
 
     assert!(until_a_render_lands(&mut h, before.applied), "the render never came back");
     let arrived = h.state_mut().texture_for(&ctx, 0, 3.0).expect("the page");
@@ -1108,13 +1108,13 @@ fn a_render_started_before_an_edit_is_never_put_on_screen() {
     let mut h = async_harness(&fixture("two-column.pdf"));
     let ctx = h.ctx.clone();
     let _ = h.state_mut().texture_for(&ctx, 0, 1.0).expect("a page");
-    let before = h.state().render_stats;
+    let before = h.state().render_state.render_stats;
 
     let _ = h.state_mut().texture_for(&ctx, 0, 3.0);
     // The page changes while the worker has it.
     h.state_mut().tab_mut().doc.as_mut().expect("doc").rendered_is_stale();
     assert!(until_a_render_drops(&mut h, before.dropped), "the stale render never came back");
-    let after = h.state().render_stats;
+    let after = h.state().render_state.render_stats;
     assert_eq!(after.dropped, before.dropped + 1, "the stale render was not dropped: {after:?}");
     assert!(
         h.state().tab().doc.as_ref().expect("doc").caches.textures.keys().all(|(_, step, _)| *step < 12),
@@ -1150,14 +1150,14 @@ fn a_heavy_page_does_not_stop_the_frames_while_it_renders() {
     }
 
     let mut h = async_harness(&path.to_string_lossy());
-    let before = h.state().render_stats;
+    let before = h.state().render_state.render_stats;
 
-    let centre = h.state().tab().viewport_rect.expect("the page was never drawn").center();
+    let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();
     h.input_mut().events.push(egui::Event::PointerMoved(centre));
     h.run_steps(1);
     h.input_mut().events.push(egui::Event::Zoom(1.6));
     h.run_steps(12);
-    assert!(h.state().render_stats.requested > before.requested, "no render was started");
+    assert!(h.state().render_state.render_stats.requested > before.requested, "no render was started");
 
     let mut longest = std::time::Duration::ZERO;
     let mut landed = false;
@@ -1166,7 +1166,7 @@ fn a_heavy_page_does_not_stop_the_frames_while_it_renders() {
         let frame = std::time::Instant::now();
         h.run_steps(1);
         longest = longest.max(frame.elapsed());
-        if h.state().render_stats.applied > before.applied {
+        if h.state().render_state.render_stats.applied > before.applied {
             landed = true;
             break;
         }
@@ -1174,7 +1174,7 @@ fn a_heavy_page_does_not_stop_the_frames_while_it_renders() {
     }
     let _ = std::fs::remove_file(&path);
     assert!(landed, "the render never came back");
-    let slowest = h.state().render_stats.slowest_ms;
+    let slowest = h.state().render_state.render_stats.slowest_ms;
     assert!(slowest >= 150, "the page was not heavy enough to prove anything: a render took {slowest} ms");
     assert!(
         longest < std::time::Duration::from_millis(80),
@@ -1226,7 +1226,7 @@ fn zoom_frame_times_on_a_real_file() {
     let path = path.to_string_lossy().into_owned();
     for asynchronous in [false, true] {
         let mut h = harness_60fps(&path, asynchronous);
-        let centre = h.state().tab().viewport_rect.expect("the page was never drawn").center();
+        let centre = h.state().tab().view_state.viewport_rect.expect("the page was never drawn").center();
         h.input_mut().events.push(egui::Event::PointerMoved(centre));
         h.run_steps(1);
 
@@ -1234,7 +1234,7 @@ fn zoom_frame_times_on_a_real_file() {
         let mut slow: Vec<String> = Vec::new();
         let mut note = |h: &Harness<'static, PagifyApp>, n: usize, took: std::time::Duration, before: RenderStats| {
             if took > std::time::Duration::from_millis(50) {
-                let now = h.state().render_stats;
+                let now = h.state().render_state.render_stats;
                 slow.push(format!(
                     "frame {n}: {took:.0?} (applied +{}, requested +{}, ui renders +{})",
                     now.applied - before.applied,
@@ -1245,7 +1245,7 @@ fn zoom_frame_times_on_a_real_file() {
         };
         for n in 0..12 {
             h.input_mut().events.push(egui::Event::Zoom(1.2));
-            let before = h.state().render_stats;
+            let before = h.state().render_state.render_stats;
             let t = std::time::Instant::now();
             h.run_steps(1);
             frames.push(t.elapsed());
@@ -1253,7 +1253,7 @@ fn zoom_frame_times_on_a_real_file() {
         }
         for n in 12..92 {
             std::thread::sleep(std::time::Duration::from_millis(10));
-            let before = h.state().render_stats;
+            let before = h.state().render_state.render_stats;
             let t = std::time::Instant::now();
             h.run_steps(1);
             frames.push(t.elapsed());
@@ -1269,7 +1269,7 @@ fn zoom_frame_times_on_a_real_file() {
             "{:>5}: longest frame {longest:>9.1?}, frames over 50 ms: {stalls:>2} of {}, time in frames {total:>9.1?}, {:?}",
             if asynchronous { "async" } else { "sync" },
             frames.len(),
-            h.state().render_stats
+            h.state().render_state.render_stats
         );
     }
 }
@@ -1328,12 +1328,12 @@ fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
     let path = std::env::temp_dir()
         .join(format!("pagify-test-signatures-{}-real-drag.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    h.state_mut().signatures = Default::default();
-    h.state_mut().signatures_path = Some(path.clone());
+    h.state_mut().library_state.signatures = Default::default();
+    h.state_mut().library_state.signatures_path = Some(path.clone());
     h.state_mut()
         .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("kept");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     h.state_mut().submit("signature");
     h.run_steps(1);
@@ -1352,7 +1352,7 @@ fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
     });
     click(&mut h, middle);
     assert!(
-        h.state().tab().signature_selected.is_some(),
+        h.state().tab().selection.signature_selected.is_some(),
         "clicking the signature through a real pointer event did not select it"
     );
 
@@ -1385,12 +1385,12 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
     let path = std::env::temp_dir()
         .join(format!("pagify-test-signatures-{}-real-rotate.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    h.state_mut().signatures = Default::default();
-    h.state_mut().signatures_path = Some(path.clone());
+    h.state_mut().library_state.signatures = Default::default();
+    h.state_mut().library_state.signatures_path = Some(path.clone());
     h.state_mut()
         .save_uploaded_signature("mine", solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("kept");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     h.state_mut().submit("signature");
     h.run_steps(1);
@@ -1409,7 +1409,7 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
     });
     click(&mut h, middle);
     assert!(
-        h.state().tab().signature_selected.is_some(),
+        h.state().tab().selection.signature_selected.is_some(),
         "clicking the signature did not select it"
     );
 
@@ -1441,7 +1441,7 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
 #[test]
 fn dragging_an_object_handle_through_the_real_pointer_path_resizes_it() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
 
     h.state_mut().submit("editobject");
     h.run_steps(1);
@@ -1453,7 +1453,7 @@ fn dragging_an_object_handle_through_the_real_pointer_path_resizes_it() {
     });
     click(&mut h, middle);
     assert!(
-        h.state().tab().selected.is_some(),
+        h.state().tab().selection.selected.is_some(),
         "clicking the picture through a real pointer event did not select it"
     );
 
@@ -1486,7 +1486,7 @@ fn dragging_a_markup_shape_through_the_real_pointer_path_moves_it() {
     h.state_mut().submit("all");
     h.run_steps(3);
 
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let before = match &h.state().tab().markup.existing(0).unwrap().objects()[0].geom {
         cad_kernel::Geom::Line(l) => *l,
         other => panic!("{other:?}"),
@@ -1587,7 +1587,7 @@ fn a_text_box_too_small_to_type_into_is_refused() {
         AppPoint { x: 52.0, y: 501.0 },
     );
     assert!(result.is_err(), "a two-point box should have been refused");
-    assert!(h.state().tab().new_text_box.is_none());
+    assert!(h.state().tab().edit.new_text_box.is_none());
 }
 
 /// A box smaller than the default font size is not refused — the font
@@ -1599,7 +1599,7 @@ fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 508.0 })
         .expect("a box above the noise floor should open");
     assert_eq!(
-        h.state().tab().new_text_box.as_ref().map(|b| b.size),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size),
         Some(8.0),
         "an 8pt-tall box should have shrunk the font to 8pt, not refused or kept the 14pt default"
     );
@@ -1608,7 +1608,7 @@ fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 55.0, y: 540.0 })
         .expect("a narrow box above the noise floor should open");
     assert_eq!(
-        h.state().tab().new_text_box.as_ref().map(|b| b.size),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size),
         Some(5.0),
         "a 5pt-wide box should have shrunk the font to 5pt too, not just gone by height"
     );
@@ -1617,7 +1617,7 @@ fn a_text_box_smaller_than_the_default_font_shrinks_the_font_to_fit() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
         .expect("a normal box should still open");
     assert_eq!(
-        h.state().tab().new_text_box.as_ref().map(|b| b.size),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.size),
         Some(14.0),
         "a box already bigger than the default should keep the usual default size"
     );
@@ -1636,15 +1636,15 @@ fn dragging_out_a_text_box_and_inserting_writes_a_real_run() {
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
         .expect("box opened");
     h.run_steps(2);
-    assert!(h.state().tab().new_text_box.is_some(), "the box should be open");
+    assert!(h.state().tab().edit.new_text_box.is_some(), "the box should be open");
 
-    h.state_mut().tab_mut().new_text_box.as_mut().expect("open").buffer = "Hello there".to_string();
+    h.state_mut().tab_mut().edit.new_text_box.as_mut().expect("open").buffer = "Hello there".to_string();
     h.run_steps(1);
 
     h.get_by_label_contains("Add to Page").click();
     h.run_steps(2);
 
-    assert!(h.state().tab().new_text_box.is_none(), "Add to Page should have closed the box");
+    assert!(h.state().tab().edit.new_text_box.is_none(), "Add to Page should have closed the box");
     let text = h.state().tab().doc
         .as_ref()
         .expect("open")
@@ -1665,13 +1665,13 @@ fn canceling_a_new_text_box_writes_nothing() {
     h.state_mut()
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
         .expect("box opened");
-    h.state_mut().tab_mut().new_text_box.as_mut().expect("open").buffer = "should not appear".to_string();
+    h.state_mut().tab_mut().edit.new_text_box.as_mut().expect("open").buffer = "should not appear".to_string();
     h.run_steps(2);
 
     h.get_by_label_contains("Cancel").click();
     h.run_steps(1);
 
-    assert!(h.state().tab().new_text_box.is_none(), "Cancel should have closed the box");
+    assert!(h.state().tab().edit.new_text_box.is_none(), "Cancel should have closed the box");
     let text = h.state().tab().doc
         .as_ref()
         .expect("open")
@@ -1689,14 +1689,14 @@ fn clicking_later_dismisses_the_update_prompt_without_updating() {
     use egui_kittest::kittest::Queryable;
 
     let mut h = harness("two-column.pdf");
-    h.state_mut().update_available = Some(("9.9.9".to_string(), std::env::temp_dir()));
+    h.state_mut().update_state.update_available = Some(("9.9.9".to_string(), std::env::temp_dir()));
     h.run_steps(2);
 
     h.get_by_label_contains("Later").click();
     h.run_steps(1);
 
-    assert!(h.state().update_available.is_none(), "Later should have dismissed the prompt");
-    assert!(h.state().pending_update.is_none(), "Later must never stage an update");
+    assert!(h.state().update_state.update_available.is_none(), "Later should have dismissed the prompt");
+    assert!(h.state().hub_state.pending_update.is_none(), "Later must never stage an update");
     assert!(h.state().tab().closing.is_none(), "Later must never start a quit");
 }
 
@@ -1715,14 +1715,14 @@ fn clicking_update_now_stages_it_and_asks_about_unsaved_work_first() {
     assert!(h.state().unsaved().is_some(), "test assumption: the mark should count as unsaved");
 
     let source = std::env::temp_dir();
-    h.state_mut().update_available = Some(("9.9.9".to_string(), source.clone()));
+    h.state_mut().update_state.update_available = Some(("9.9.9".to_string(), source.clone()));
     h.run_steps(2);
 
     h.get_by_label_contains("Update now").click();
     h.run_steps(1);
 
-    assert!(h.state().update_available.is_none(), "the prompt should have closed");
-    assert_eq!(h.state().pending_update, Some(source), "Update now should have staged the update");
+    assert!(h.state().update_state.update_available.is_none(), "the prompt should have closed");
+    assert_eq!(h.state().hub_state.pending_update, Some(source), "Update now should have staged the update");
     assert_eq!(
         h.state().tab().closing,
         Some(Closing::Program),
@@ -1739,11 +1739,11 @@ fn escaping_a_new_text_box_discards_it() {
     h.state_mut()
         .begin_text_box(0, AppPoint { x: 50.0, y: 500.0 }, AppPoint { x: 250.0, y: 540.0 })
         .expect("box opened");
-    assert!(h.state().tab().new_text_box.is_some());
+    assert!(h.state().tab().edit.new_text_box.is_some());
 
     h.state_mut().escape();
 
-    assert!(h.state().tab().new_text_box.is_none(), "Escape should have discarded the box");
+    assert!(h.state().tab().edit.new_text_box.is_none(), "Escape should have discarded the box");
 }
 
 /// **The alignment picked in the panel actually moves where the line
@@ -1760,13 +1760,13 @@ fn right_aligned_text_lands_near_the_boxs_right_edge() {
         .begin_text_box(0, AppPoint { x: left, y: 500.0 }, AppPoint { x: right, y: 540.0 })
         .expect("box opened");
     h.run_steps(2);
-    h.state_mut().tab_mut().new_text_box.as_mut().expect("open").buffer = "Hi".to_string();
+    h.state_mut().tab_mut().edit.new_text_box.as_mut().expect("open").buffer = "Hi".to_string();
     h.run_steps(1);
 
     h.get_by_label("Align right").click();
     h.run_steps(1);
     assert_eq!(
-        h.state().tab().new_text_box.as_ref().map(|b| b.align),
+        h.state().tab().edit.new_text_box.as_ref().map(|b| b.align),
         Some(TextAlign::Right),
         "clicking Right should have picked it"
     );
@@ -1794,7 +1794,7 @@ fn right_aligned_text_lands_near_the_boxs_right_edge() {
 #[test]
 fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
     let mut h = harness("forms.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     h.state_mut().submit("editobject");
     h.run_steps(1);
 
@@ -1806,12 +1806,12 @@ fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
     let to = view.to_screen(AppPoint { x: inside_group.x + 60.0, y: inside_group.y + 40.0 });
     drag(&mut h, from, to);
     let grabbed_the_group =
-        h.state().tab().selected.as_ref().is_some_and(|s| s.what == "the group it is drawn in");
+        h.state().tab().selection.selected.as_ref().is_some_and(|s| s.what == "the group it is drawn in");
     assert!(
         !grabbed_the_group,
         "a drag starting inside the form's shape grabbed the whole group instead of \
          starting a marquee: {:?}",
-        h.state().tab().selected
+        h.state().tab().selection.selected
     );
 
     // The same spot, clicked rather than dragged, still reaches the
@@ -1819,10 +1819,10 @@ fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
     // starts, not about taking the click away from it.
     click(&mut h, from);
     assert_eq!(
-        h.state().tab().selected.as_ref().map(|s| s.what),
+        h.state().tab().selection.selected.as_ref().map(|s| s.what),
         Some("the group it is drawn in"),
         "a plain click on the same spot should still select the group: {:?}",
-        h.state().tab().selected
+        h.state().tab().selection.selected
     );
 }
 
@@ -1836,12 +1836,12 @@ fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
 #[test]
 fn dragging_an_unselected_picture_starts_a_marquee_not_a_grab() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     h.state_mut().submit("editobject");
     h.run_steps(1);
 
     let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
-    assert!(h.state().tab().selected.is_none(), "nothing should be selected yet");
+    assert!(h.state().tab().selection.selected.is_none(), "nothing should be selected yet");
     let middle = view.to_screen(AppPoint {
         x: ((image.rect.left + image.rect.right) / 2.0) as f64,
         y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
@@ -1862,7 +1862,7 @@ fn dragging_an_unselected_picture_starts_a_marquee_not_a_grab() {
 #[test]
 fn dragging_an_already_selected_pictures_body_still_moves_it() {
     let mut h = harness("pictures.pdf");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     h.state_mut().submit("editobject");
     h.run_steps(1);
 
@@ -1872,7 +1872,7 @@ fn dragging_an_already_selected_pictures_body_still_moves_it() {
         y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
     });
     click(&mut h, middle);
-    assert!(h.state().tab().selected.is_some(), "the click should have selected the picture");
+    assert!(h.state().tab().selection.selected.is_some(), "the click should have selected the picture");
 
     drag(&mut h, middle, middle + egui::vec2(60.0, 40.0));
 
@@ -1900,7 +1900,7 @@ fn the_home_screen_renders_the_outlined_fonts_panel() {
     // when nothing has been added, and it was reading the settings file of
     // whoever ran it — so adding a font to your own copy of the program
     // broke the suite. What is on this machine is not what is under test.
-    app.outlined_fonts = Default::default();
+    app.faces_state.outlined_fonts = Default::default();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1400.0, 1000.0))
         .build_ui_state(
@@ -1932,7 +1932,7 @@ fn the_home_screen_renders_the_outlined_fonts_panel() {
 #[test]
 fn the_command_box_is_focused_on_a_fresh_home_screen() {
     let mut app = PagifyApp::new(None);
-    app.outlined_fonts = Default::default();
+    app.faces_state.outlined_fonts = Default::default();
     let mut h = Harness::builder()
         .with_size(egui::vec2(1400.0, 1000.0))
         .build_ui_state(
@@ -2003,7 +2003,7 @@ fn a_configured_font_shows_its_name_and_a_way_to_remove_it() {
             },
             app,
         );
-    h.state_mut().outlined_fonts.paths = vec![PathBuf::from(arial)];
+    h.state_mut().faces_state.outlined_fonts.paths = vec![PathBuf::from(arial)];
     h.run_steps(4);
 
     h.get_by_label_contains("Arial.ttf");
@@ -2072,7 +2072,7 @@ fn clicking_a_padlock_asks_for_the_passcode() {
         let app = h.state_mut();
         let items = app.locked_items_on(0);
         assert_eq!(items.len(), 1, "nothing was locked, so there is no badge");
-        (items[0].rect, app.tab_mut().last_view.expect("the page was never drawn"))
+        (items[0].rect, app.tab_mut().view_state.last_view.expect("the page was never drawn"))
     };
 
     // The badge sits at the middle of what it stands for.
@@ -2083,7 +2083,7 @@ fn clicking_a_padlock_asks_for_the_passcode() {
     click(&mut h, middle);
 
     assert!(
-        matches!(h.state().tab().awaiting_password, Some(Awaiting::UnlockItem(_))),
+        matches!(h.state().tab().secure_state.awaiting_password, Some(Awaiting::UnlockItem(_))),
         "clicking the padlock did not ask for a passcode"
     );
 }
@@ -2122,7 +2122,7 @@ fn a_second_lock_uses_the_passcode_the_document_already_has() {
 
     // And it takes the passcode straight through — no rule, no second
     // typing, because nothing is being chosen.
-    h.state_mut().tab_mut().password_typed = String::from(strong).into();
+    h.state_mut().tab_mut().secure_state.password_typed = String::from(strong).into();
     h.run();
     h.get_by_label_contains("Unlock document").click();
     h.run_steps(3);
@@ -2175,7 +2175,7 @@ fn locking_asks_in_a_window_and_holds_out_for_a_strong_passcode() {
     // absent — a disabled widget is still in the accessibility tree — so
     // the property to check is that pressing it locks nothing and leaves
     // the window up.
-    h.state_mut().tab_mut().password_typed = String::from("short").into();
+    h.state_mut().tab_mut().secure_state.password_typed = String::from("short").into();
     h.run();
     h.get_by_label_contains("Lock document").click();
     h.run();
@@ -2242,7 +2242,7 @@ fn a_document_that_wants_a_password_asks_for_one_in_a_window() {
     h.get_by_label_contains("This document needs a password");
 
     // Type into it and press Open, as a person would.
-    h.state_mut().tab_mut().password_typed = String::from("pagify").into();
+    h.state_mut().tab_mut().secure_state.password_typed = String::from("pagify").into();
     h.run_steps(1);
     // Exact, because the ribbon has an "Open..." of its own.
     h.get_by_label("Open").click();
@@ -2250,7 +2250,7 @@ fn a_document_that_wants_a_password_asks_for_one_in_a_window() {
 
     assert!(h.state().tab().doc.is_some(), "the window did not open the document");
     assert!(
-        h.state().tab().awaiting_password.is_none(),
+        h.state().tab().secure_state.awaiting_password.is_none(),
         "the window is still asking after it opened"
     );
 }
@@ -2305,7 +2305,7 @@ fn locking_a_page_leaves_no_stale_thumbnail_of_it() {
 ///
 /// Not committed — they are 80 MB and 500 kB of someone's real work — so
 /// these skip when the files are not there. They are here because a
-/// one-page fixture hid the defect completely: `self.tab_mut().page` never followed
+/// one-page fixture hid the defect completely: `self.tab_mut().view_state.page` never followed
 /// the scroll, so on any document long enough to scroll, the pointer talked
 /// to page 1 while the reader was somewhere else entirely.
 fn real_file(name: &str) -> Option<String> {
@@ -2359,13 +2359,13 @@ fn selection_works_after_scrolling_into_a_long_document() {
         eprintln!("skipping: catalogue not in ~/Downloads");
         return;
     };
-    assert_eq!(h.state().tab().page, 0);
+    assert_eq!(h.state().tab().view_state.page, 0);
 
     // Far enough in that the current page must have moved with it.
     for _ in 0..6 {
         wheel(&mut h, 900.0);
     }
-    let landed = h.state().tab().page;
+    let landed = h.state().tab().view_state.page;
     assert!(landed > 0, "scrolling six screens did not change the current page");
 
     let start = a_character_on_screen(&mut h);
@@ -2373,7 +2373,7 @@ fn selection_works_after_scrolling_into_a_long_document() {
 
     let app = h.state();
     assert!(
-        app.tab().text_selection.is_some(),
+        app.tab().selection.text_selection.is_some(),
         "nothing selected on page {} of the catalogue.\npointer: {:?}  tool armed: {:?}",
         landed + 1,
         app.tab().pointer,
@@ -2415,9 +2415,9 @@ fn selection_works_on_the_test_report() {
 
     let app = h.state();
     assert!(
-        app.tab().text_selection.is_some(),
+        app.tab().selection.text_selection.is_some(),
         "nothing selected on page {} of the report",
-        app.tab().page + 1
+        app.tab().view_state.page + 1
     );
 }
 
@@ -2450,7 +2450,7 @@ fn selected_text_can_be_copied_with_the_keyboard() {
     let mut h = harness("text-lines.pdf");
     let start = a_character_on_screen(&mut h);
     drag(&mut h, start, start + egui::vec2(160.0, 0.0));
-    assert!(h.state().tab().text_selection.is_some(), "nothing was selected to copy");
+    assert!(h.state().tab().selection.text_selection.is_some(), "nothing was selected to copy");
 
     // `Event::Copy` directly, not a raw `Key::C` press: that is what a
     // real ⌘C actually produces (egui-winit intercepts it and never also
@@ -2471,7 +2471,7 @@ fn selected_text_can_be_copied_with_the_keyboard() {
     assert!(
         said.contains("characters copied"),
         "\u{2318}C copied nothing.\nselection: {:?}\n{said}",
-        h.state().tab().text_selection
+        h.state().tab().selection.text_selection
     );
 }
 
@@ -2488,14 +2488,14 @@ fn selected_text_can_be_copied_with_the_keyboard() {
 fn a_page_selected_in_the_plain_rail_copies_without_opening_organize() {
     let mut h = harness("text-lines.pdf");
     h.state_mut().insert_page();
-    assert!(!h.state().organize_open, "the wider Organize grid was never opened");
+    assert!(!h.state().ui_state.organize_open, "the wider Organize grid was never opened");
 
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
     h.event(egui::Event::Copy);
     h.run_steps(3);
 
     assert!(
-        h.state().page_clipboard.is_some(),
+        h.state().clipboard_state.page_clipboard.is_some(),
         "⌘C on a page selected outside Organize should have filled the page clipboard"
     );
 }
@@ -2527,7 +2527,7 @@ fn copying_still_works_after_several_real_drag_reorders() {
     h.run_steps(2);
 
     assert!(
-        !h.state().tab().organize_selected.is_empty(),
+        !h.state().tab().organize.organize_selected.is_empty(),
         "a page should still be selected after dragging it"
     );
 
@@ -2536,7 +2536,7 @@ fn copying_still_works_after_several_real_drag_reorders() {
 
     let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
     assert!(
-        h.state().page_clipboard.is_some(),
+        h.state().clipboard_state.page_clipboard.is_some(),
         "⌘C after several real drag-reorders should still copy — said: {said:?}"
     );
 }
@@ -2556,7 +2556,7 @@ fn copying_works_after_a_real_plain_click_on_a_thumbnail() {
     h.run_steps(2);
 
     assert!(
-        !h.state().tab().organize_selected.is_empty(),
+        !h.state().tab().organize.organize_selected.is_empty(),
         "a plain click should have selected the page it landed on"
     );
 
@@ -2564,7 +2564,7 @@ fn copying_works_after_a_real_plain_click_on_a_thumbnail() {
     h.run_steps(3);
 
     let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
-    assert!(h.state().page_clipboard.is_some(), "⌘C after a plain click should copy — said: {said:?}");
+    assert!(h.state().clipboard_state.page_clipboard.is_some(), "⌘C after a plain click should copy — said: {said:?}");
 }
 
 /// The typed command, not the keyboard shortcut — §7 says they must
@@ -2573,13 +2573,13 @@ fn copying_works_after_a_real_plain_click_on_a_thumbnail() {
 fn the_typed_copy_command_also_copies_a_selected_page() {
     let mut h = harness("text-lines.pdf");
     h.state_mut().insert_page();
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
 
     h.state_mut().submit("copy");
     h.run_steps(2);
 
     assert!(
-        h.state().page_clipboard.is_some(),
+        h.state().clipboard_state.page_clipboard.is_some(),
         "typing `copy` with a page selected should copy it, same as ⌘C"
     );
 }
@@ -2595,10 +2595,10 @@ fn the_typed_paste_command_exists_and_pastes_a_copied_page() {
     let before = h.state().tab().doc.as_ref().unwrap().page_count;
 
     h.state_mut().insert_page();
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
     h.state_mut().submit("copy");
     h.run_steps(1);
-    assert!(h.state().page_clipboard.is_some(), "the copy half of this didn't take");
+    assert!(h.state().clipboard_state.page_clipboard.is_some(), "the copy half of this didn't take");
 
     h.state_mut().submit("paste");
     h.run_steps(1);
@@ -2629,7 +2629,7 @@ fn pasting_after_a_real_copy_adds_a_page() {
 
     h.event(egui::Event::Copy);
     h.run_steps(3);
-    assert!(h.state().page_clipboard.is_some(), "the copy half of this didn't take");
+    assert!(h.state().clipboard_state.page_clipboard.is_some(), "the copy half of this didn't take");
 
     h.event(egui::Event::Paste("placeholder".to_string()));
     h.run_steps(3);
@@ -2667,15 +2667,15 @@ fn the_shortcut_still_copies_and_pastes_while_the_command_box_has_focus() {
         "test setup: the command box should have focus"
     );
 
-    h.state_mut().tab_mut().organize_selected = vec![0];
+    h.state_mut().tab_mut().organize.organize_selected = vec![0];
     h.event(egui::Event::Copy);
     h.run_steps(3);
     assert!(
-        h.state().page_clipboard.is_some(),
+        h.state().clipboard_state.page_clipboard.is_some(),
         "\u{2318}C should still copy the selected page while the command box has focus"
     );
 
-    h.state_mut().tab_mut().organize_selected.clear();
+    h.state_mut().tab_mut().organize.organize_selected.clear();
     let before = h.state().tab().doc.as_ref().unwrap().page_count;
     h.event(egui::Event::Paste("placeholder".to_string()));
     h.run_steps(3);
@@ -2753,8 +2753,8 @@ fn what_is_copied_is_what_was_selected() {
 
     let expected = {
         let app = h.state_mut();
-        let page = app.tab_mut().page;
-        let range = app.tab_mut().text_selection.clone().expect("no selection");
+        let page = app.tab_mut().view_state.page;
+        let range = app.tab_mut().selection.text_selection.clone().expect("no selection");
         app.characters(page).expect("characters").text_of(range)
     };
 
@@ -2802,7 +2802,7 @@ fn zooming_holds_the_point_on_a_scrolling_document() {
         eprintln!("skipping: catalogue not in ~/Downloads");
         return;
     };
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(2.5);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(2.5);
     h.run_steps(3);
     for _ in 0..4 {
         wheel(&mut h, 900.0);
@@ -2817,7 +2817,7 @@ fn zooming_holds_the_point_on_a_scrolling_document() {
     // directly measures the gap between pages, not the anchor.
     let strip_point = |h: &Harness<'static, PagifyApp>, at: egui::Pos2| {
         let app = h.state();
-        let (page, view) = app.tab().hover_view.expect("the pointer was over no page");
+        let (page, view) = app.tab().view_state.hover_view.expect("the pointer was over no page");
         let top = app.tab().doc.as_ref().expect("open").strip.top_of(page).unwrap_or(0.0) as f64;
         let on_page = view.to_page(at);
         (on_page.x, on_page.y + top)
@@ -2854,15 +2854,15 @@ fn a_selection_survives_scrolling() {
 
     let start = a_character_on_screen(&mut h);
     drag(&mut h, start, start + egui::vec2(150.0, 0.0));
-    let selected = h.state().tab().text_selection.clone();
+    let selected = h.state().tab().selection.text_selection.clone();
     assert!(selected.is_some(), "nothing was selected to begin with");
-    let on_page = h.state().tab().selection_page;
+    let on_page = h.state().tab().organize.selection_page;
 
     // A nudge, not a jump to another page.
     wheel(&mut h, 60.0);
 
-    assert_eq!(h.state().tab().text_selection, selected, "the wheel threw the selection away");
-    assert_eq!(h.state().tab().selection_page, on_page, "the selection changed page");
+    assert_eq!(h.state().tab().selection.text_selection, selected, "the wheel threw the selection away");
+    assert_eq!(h.state().tab().organize.selection_page, on_page, "the selection changed page");
 
     h.state_mut().submit("copy");
     h.run_steps(1);
@@ -2878,16 +2878,16 @@ fn a_jump_to_a_page_is_not_undone_by_the_scroll_catching_up() {
         eprintln!("skipping: catalogue not in ~/Downloads");
         return;
     };
-    assert_eq!(h.state().tab().page, 0);
+    assert_eq!(h.state().tab().view_state.page, 0);
 
     h.state_mut().act(Verb::Page(PageTarget::Number(12)));
     h.run_steps(6);
 
     assert_eq!(
-        h.state().tab().page,
+        h.state().tab().view_state.page,
         11,
         "the jump was undone; the view slid back to page {}",
-        h.state().tab().page + 1
+        h.state().tab().view_state.page + 1
     );
 }
 
@@ -2902,10 +2902,10 @@ fn the_page_is_still_drawn_at_extreme_zoom() {
     let mut h = harness("text-lines.pdf");
 
     for scale in [4.0f32, 8.0, 12.0, 16.0] {
-        h.state_mut().tab_mut().zoom = ZoomMode::Factor(scale);
+        h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(scale);
         h.run_steps(3);
         assert!(
-            h.state().tab().last_view.is_some(),
+            h.state().tab().view_state.last_view.is_some(),
             "nothing was drawn at {scale}x — the page disappeared"
         );
     }
@@ -2948,10 +2948,10 @@ fn zooming_in_can_go_well_past_the_old_sixteen_hundred_percent_ceiling() {
 #[test]
 fn the_page_can_still_be_pointed_at_when_zoomed_right_in() {
     let mut h = harness("text-lines.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(14.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(14.0);
     h.run_steps(3);
 
-    let view = h.state().tab().last_view.expect("nothing drawn");
+    let view = h.state().tab().view_state.last_view.expect("nothing drawn");
     let at = egui::pos2(700.0, 600.0);
     let on_page = view.to_page(at);
     assert!(
@@ -2965,17 +2965,17 @@ fn the_page_can_still_be_pointed_at_when_zoomed_right_in() {
 #[test]
 fn a_page_smaller_than_the_window_is_centred() {
     let mut h = harness("single-page.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(0.5);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(0.5);
     h.run_steps(3);
 
     let (view, page_w) = {
         let app = h.state();
-        let view = app.tab().last_view.expect("nothing drawn");
-        let (w, _) = app.tab().doc.as_ref().unwrap().strip.size_of(app.tab().page).unwrap();
+        let view = app.tab().view_state.last_view.expect("nothing drawn");
+        let (w, _) = app.tab().doc.as_ref().unwrap().strip.size_of(app.tab().view_state.page).unwrap();
         (view, w)
     };
 
-    let viewport = h.state().tab().viewport_rect.expect("no viewport");
+    let viewport = h.state().tab().view_state.viewport_rect.expect("no viewport");
     let left = view.origin.x;
     let right = left + page_w * view.scale;
     let before = left - viewport.left();
@@ -2993,11 +2993,11 @@ fn a_page_smaller_than_the_window_is_centred() {
 #[test]
 fn a_page_larger_than_the_window_is_not_centred() {
     let mut h = harness("single-page.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(8.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(8.0);
     h.run_steps(3);
 
-    let viewport = h.state().tab().viewport_rect.expect("no viewport");
-    let view = h.state().tab().last_view.expect("nothing drawn");
+    let viewport = h.state().tab().view_state.viewport_rect.expect("no viewport");
+    let view = h.state().tab().view_state.last_view.expect("nothing drawn");
     assert!(
         view.origin.x <= viewport.left() + 14.0,
         "an oversized page was padded away from the edge ({} vs {})",
@@ -3072,7 +3072,7 @@ fn the_right_page_of_a_spread_is_its_own_page() {
 #[test]
 fn an_unbuilt_button_says_so_without_opening_the_history() {
     let mut h = harness("text-lines.pdf");
-    h.state_mut().command_open = false;
+    h.state_mut().ui_state.command_open = false;
     h.state_mut().submit("add3d");
     h.run_steps(2);
 
@@ -3089,7 +3089,7 @@ fn an_unbuilt_button_says_so_without_opening_the_history() {
     );
 
     // And it has to be on screen, not merely in the log.
-    let shown = h.state().command_open;
+    let shown = h.state().ui_state.command_open;
     assert!(!shown, "the test is not exercising the collapsed bar");
     assert!(
         h.state().tab().tool.is_none(),
@@ -3107,13 +3107,13 @@ fn clicking_a_run_offers_its_words_and_retyping_replaces_them() {
     let word = a_character_on_screen(&mut h);
     click(&mut h, word);
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_some(), "clicking a run did not open it");
+    assert!(h.state().tab().edit.editing_run.is_some(), "clicking a run did not open it");
 
     // The run's own words go into the box, ready to be edited — a run is
     // usually a sentence, and retyping one from scratch is not editing.
     // The editor opens **on the page**, holding the run's own words —
     // editing a word is a thing you do to the word.
-    let run = h.state().tab().editing_run.as_ref().cloned().expect("no run was picked");
+    let run = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run was picked");
     assert!(!run.buffer.is_empty(), "the editor opened empty");
     assert_eq!(
         run.buffer.trim(),
@@ -3145,7 +3145,7 @@ fn typing_past_the_runs_own_width_starts_a_new_line() {
     let word = a_character_on_screen(&mut h);
     click(&mut h, word);
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_some(), "clicking a run did not open it");
+    assert!(h.state().tab().edit.editing_run.is_some(), "clicking a run did not open it");
 
     // Long enough that no run's own on-screen width could hold it on
     // one line, whatever fixture or font this runs against — the point
@@ -3156,7 +3156,7 @@ fn typing_past_the_runs_own_width_starts_a_new_line() {
         h.run_steps(1);
     }
 
-    let buffer = h.state().tab().editing_run.as_ref().expect("still editing").buffer.clone();
+    let buffer = h.state().tab().edit.editing_run.as_ref().expect("still editing").buffer.clone();
     assert!(
         buffer.contains('\n'),
         "typing past the box's own width did not start a new line:\n{buffer}"
@@ -3194,7 +3194,7 @@ fn typing_long_then_deleting_in_a_real_paragraph_does_not_corrupt_it() {
         .find(|r| r.text.contains("manufacturers"))
         .cloned()
         .expect("the 'COB' paragraph's own run was not found — has the fixture changed?");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let at = view.to_screen(AppPoint {
         x: ((target.rect.left + target.rect.right) / 2.0) as f64,
         y: ((target.rect.top + target.rect.bottom) / 2.0) as f64,
@@ -3205,13 +3205,13 @@ fn typing_long_then_deleting_in_a_real_paragraph_does_not_corrupt_it() {
     click(&mut h, at);
     h.run_steps(2);
     let line_count =
-        h.state().tab().editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
+        h.state().tab().edit.editing_run.as_ref().map(|e| e.lines.len()).unwrap_or(0);
     assert!(line_count > 1, "clicking the COB paragraph did not open a multi-line paragraph");
 
     let wanted: std::collections::HashSet<usize> = h
         .state()
         .tab()
-        .editing_run
+        .edit.editing_run
         .as_ref()
         .unwrap()
         .lines
@@ -3261,7 +3261,7 @@ fn typing_long_then_deleting_in_a_real_paragraph_does_not_corrupt_it() {
     // exactly as many `\n` as this paragraph's own structure already
     // has; any more would be exactly the misrouting auto-wrap used to
     // cause here.
-    let buffer = h.state().tab().editing_run.as_ref().expect("still editing").buffer.clone();
+    let buffer = h.state().tab().edit.editing_run.as_ref().expect("still editing").buffer.clone();
     let newline_count = buffer.matches('\n').count();
     assert!(
         newline_count <= line_count - 1,
@@ -3287,14 +3287,14 @@ fn typing_long_then_deleting_in_a_real_paragraph_does_not_corrupt_it() {
     // may have scrolled to keep the caret in view, which would make the
     // transform captured before any of that stale.
     let page_size = h.state_mut().tab_mut().doc.as_ref().unwrap().session.page_size(0).expect("page size");
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let far_corner = view.to_screen(AppPoint {
         x: (page_size.width_pt - 5.0) as f64,
         y: (page_size.height_pt - 5.0) as f64,
     });
     click(&mut h, far_corner);
     h.run_steps(2);
-    assert!(h.state().tab().editing_run.is_none(), "the editor should have applied and closed");
+    assert!(h.state().tab().edit.editing_run.is_none(), "the editor should have applied and closed");
 
     let after: std::collections::HashMap<usize, pdf_core::document::TextRun> = h
         .state_mut()
@@ -3347,13 +3347,13 @@ fn clicking_away_from_the_editor_applies_it() {
     click(&mut h, word);
     h.run_steps(2);
 
-    let run = h.state().tab().editing_run.clone().expect("no run was picked");
-    h.state_mut().tab_mut().editing_run.as_mut().expect("no run was picked").buffer =
+    let run = h.state().tab().edit.editing_run.clone().expect("no run was picked");
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("no run was picked").buffer =
         "REPLACED".to_string();
 
     // Somewhere else on the page entirely, well clear of the editor's
     // own box.
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let box_right = view.to_screen(AppPoint {
         x: run.rect.left.max(run.rect.right) as f64,
         y: run.rect.top.max(run.rect.bottom) as f64,
@@ -3362,7 +3362,7 @@ fn clicking_away_from_the_editor_applies_it() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().editing_run.is_none(),
+        h.state().tab().edit.editing_run.is_none(),
         "the editor should have closed once its change was applied"
     );
     let app = h.state_mut();
@@ -3383,8 +3383,8 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
     let mut h = harness("two-column.pdf");
     let dir = std::env::temp_dir().join(format!("pagify-test-chain-click-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
-    h.state_mut().session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
-    let log_path = h.state().session_log.path().expect("the scratch folder is writable").to_path_buf();
+    h.state_mut().recording_state.session_log = pagify_shell::session_log::SessionLog::start_in(dir.clone());
+    let log_path = h.state().recording_state.session_log.path().expect("the scratch folder is writable").to_path_buf();
 
     let runs = h.state_mut().tab_mut().doc.as_ref().unwrap().session.text_runs(0).expect("runs");
     let left: std::collections::BTreeSet<usize> =
@@ -3397,7 +3397,7 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
         AppPoint { x: ((run.rect.left + run.rect.right) / 2.0) as f64, y: ((run.rect.top + run.rect.bottom) / 2.0) as f64 }
     };
     let screen = |h: &mut Harness<'static, PagifyApp>, at: AppPoint| {
-        h.state().tab().last_view.expect("the page was never drawn").to_screen(at)
+        h.state().tab().view_state.last_view.expect("the page was never drawn").to_screen(at)
     };
 
     // The left column opens...
@@ -3409,7 +3409,7 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
     let opened: std::collections::BTreeSet<usize> = h
         .state()
         .tab()
-        .editing_run
+        .edit.editing_run
         .as_ref()
         .expect("the first click opened nothing")
         .lines
@@ -3419,8 +3419,8 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
     assert_eq!(opened, left, "setup: the first click should open the left column");
 
     // ...is retyped...
-    let retyped = h.state().tab().editing_run.as_ref().unwrap().buffer.replacen('e', "E", 1);
-    h.state_mut().tab_mut().editing_run.as_mut().unwrap().buffer = retyped.clone();
+    let retyped = h.state().tab().edit.editing_run.as_ref().unwrap().buffer.replacen('e', "E", 1);
+    h.state_mut().tab_mut().edit.editing_run.as_mut().unwrap().buffer = retyped.clone();
 
     // ...and a click on the right column applies that and opens this.
     let at = screen(&mut h, inside(*right.iter().next().unwrap()));
@@ -3430,7 +3430,7 @@ fn clicking_on_other_text_applies_the_open_edit_and_picks_from_the_edited_page()
     let now: std::collections::BTreeSet<usize> = h
         .state()
         .tab()
-        .editing_run
+        .edit.editing_run
         .as_ref()
         .expect("the click on other text opened nothing")
         .lines
@@ -3492,10 +3492,10 @@ fn the_editor_draws_over_a_paragraph_with_lines_drawn_as_shapes() {
         .find(|b| b.lines.len() == 19 && b.lines.iter().filter(|l| !l.outlined.is_empty()).count() == 3)
         .expect("the 19-line block");
     for (word, lines, frozen) in [(986usize, 13usize, 2usize), (long.lines[0].objects[0], 19, 3)] {
-        h.state_mut().tab_mut().editing_run = None;
+        h.state_mut().tab_mut().edit.editing_run = None;
         h.state_mut().pick_text_run(0, centre(word)).expect("picked");
         h.run_steps(4);
-        let edit = h.state().tab().editing_run.as_ref().expect("the editor is still open after drawing");
+        let edit = h.state().tab().edit.editing_run.as_ref().expect("the editor is still open after drawing");
         assert_eq!(edit.lines.len(), lines);
         assert_eq!(edit.frozen.iter().filter(|f| **f).count(), frozen);
         assert_eq!(edit.buffer.split('\n').count(), lines, "drawing changed the buffer");
@@ -3535,14 +3535,14 @@ fn arming_and_click_to_apply_work_on_the_real_camino_page() {
     let run = h
         .state()
         .tab()
-        .editing_run
+        .edit.editing_run
         .clone()
         .expect("clicking a word did not open an editor on the real page");
-    h.state_mut().tab_mut().editing_run.as_mut().unwrap().buffer = "REPLACED TEXT".into();
+    h.state_mut().tab_mut().edit.editing_run.as_mut().unwrap().buffer = "REPLACED TEXT".into();
 
     // Somewhere else on the page entirely, well clear of the editor's
     // own box — same technique as `clicking_away_from_the_editor_applies_it`.
-    let view = h.state().tab().last_view.expect("the page was never drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was never drawn");
     let box_right = view.to_screen(AppPoint {
         x: run.rect.left.max(run.rect.right) as f64,
         y: run.rect.top.max(run.rect.bottom) as f64,
@@ -3587,14 +3587,14 @@ fn opening_the_font_picker_takes_focus_off_the_run_editor() {
     h.state_mut().pick_text_run(0, at).expect("a run was here");
     h.run_steps(2);
 
-    let run = h.state().tab().editing_run.as_ref().cloned().expect("no run was picked");
+    let run = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run was picked");
     let editor_id = egui::Id::new(("run-editor", run.page, run.object));
 
     // Confirms the setup as much as it does anything: the editor
     // already auto-focused on open, and clicking back into it here
     // should simply leave it that way, before the rest of this test
     // proves the font picker takes the caret back off it.
-    let view = h.state().tab().last_view.expect("the page was drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
     let middle = view.to_screen(AppPoint {
         x: ((run.rect.left + run.rect.right) / 2.0) as f64,
         y: ((run.rect.top + run.rect.bottom) / 2.0) as f64,
@@ -3603,7 +3603,7 @@ fn opening_the_font_picker_takes_focus_off_the_run_editor() {
     h.run_steps(2);
     assert!(h.ctx.memory(|m| m.has_focus(editor_id)), "setup: the editor should hold the caret");
 
-    h.state_mut().font_picker_open = true;
+    h.state_mut().faces_state.font_picker_open = true;
     h.run_steps(2);
 
     assert!(
@@ -3632,7 +3632,7 @@ fn pressing_enter_in_the_run_editor_does_not_apply_it() {
     click(&mut h, word);
     h.run_steps(2);
 
-    let original = h.state().tab().editing_run.as_ref().cloned().expect("no run").original;
+    let original = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run").original;
 
     // Clear what is there and type over it, through the field itself.
     h.input_mut().events.push(egui::Event::Key {
@@ -3657,13 +3657,13 @@ fn pressing_enter_in_the_run_editor_does_not_apply_it() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().editing_run.is_some(),
+        h.state().tab().edit.editing_run.is_some(),
         "Enter closed the editor — it should take a click on Apply, not a keystroke"
     );
     // A newline, not nothing — Enter now adds a line here the same way
     // it already did in a paragraph's own box — but still no submit.
     assert_eq!(
-        h.state().tab().editing_run.as_ref().unwrap().buffer,
+        h.state().tab().edit.editing_run.as_ref().unwrap().buffer,
         "TYPED\n",
         "Enter should have added a line, and nothing more, still unapplied"
     );
@@ -3688,8 +3688,8 @@ fn the_run_editor_apply_button_can_be_pressed() {
     click(&mut h, word);
     h.run_steps(2);
 
-    let run = h.state().tab().editing_run.as_ref().cloned().expect("no run was picked");
-    h.state_mut().tab_mut().editing_run.as_mut().expect("editing").buffer = "REPLACED".into();
+    let run = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run was picked");
+    h.state_mut().tab_mut().edit.editing_run.as_mut().expect("editing").buffer = "REPLACED".into();
     h.run_steps(1);
 
     let apply = h.get_by_label("Apply");
@@ -3697,7 +3697,7 @@ fn the_run_editor_apply_button_can_be_pressed() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().editing_run.is_none(),
+        h.state().tab().edit.editing_run.is_none(),
         "Apply did not finish the edit"
     );
     let app = h.state_mut();
@@ -3724,7 +3724,7 @@ fn a_half_placed_tool_previews_what_it_would_make() {
     assert!(h.state().tab().tool.is_some(), "the tool was not armed");
 
     // Nothing to preview before the first click.
-    let view = h.state().tab().last_view.expect("the page was drawn");
+    let view = h.state().tab().view_state.last_view.expect("the page was drawn");
     let start = view.to_screen(AppPoint { x: 100.0, y: 100.0 });
     click(&mut h, start);
     h.run_steps(2);
@@ -3792,7 +3792,7 @@ fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
     let target = {
         let app = h.state();
         let doc = app.tab().doc.as_ref().expect("open");
-        let view = app.tab().last_view.expect("the page was drawn");
+        let view = app.tab().view_state.last_view.expect("the page was drawn");
         let here = doc.strip.top_of(armed_for).expect("a top");
         let next = armed_for + 1;
         let (Some(top), Some((w, height))) =
@@ -3813,7 +3813,7 @@ fn a_tool_that_has_collected_nothing_answers_a_click_on_another_page() {
     h.run_steps(3);
     let answered = h.state().tab().tool.as_ref().is_some_and(|t| t.page != armed_for)
         || h.state().cmd.history().len() > before
-        || h.state().tab().editing_run.is_some();
+        || h.state().tab().edit.editing_run.is_some();
 
     assert!(
         answered,
@@ -3834,7 +3834,7 @@ fn clicking_is_not_pulled_to_nearby_geometry() {
 
     // A grid coarse enough that any snapping would be unmistakable, and a
     // mark on the page so the snap engine has something to pull towards.
-    h.state_mut().grid_pt = 72.0;
+    h.state_mut().prefs_state.grid_pt = 72.0;
     h.state_mut().submit("l 20,20 300,300");
     h.run_steps(2);
 
@@ -3842,10 +3842,10 @@ fn clicking_is_not_pulled_to_nearby_geometry() {
     drag(&mut h, start, start + egui::vec2(150.0, 0.0));
 
     assert!(
-        h.state().tab().text_selection.is_some(),
+        h.state().tab().selection.text_selection.is_some(),
         "the drag was snapped off the text and selected nothing"
     );
-    assert!(h.state().tab().last_snap.is_none(), "a snap was applied with no tool in hand");
+    assert!(h.state().tab().selection.last_snap.is_none(), "a snap was applied with no tool in hand");
 }
 
 /// And it must still snap when a tool *is* placing points — that is what it
@@ -3862,7 +3862,7 @@ fn a_drawing_tool_still_snaps_to_what_is_there() {
     // Points inside the page, worked out from where it was actually drawn
     // — a guessed screen position lands off a 200pt-wide sheet.
     let (a, b) = {
-        let view = h.state().tab().last_view.expect("page never drawn");
+        let view = h.state().tab().view_state.last_view.expect("page never drawn");
         (
             view.to_screen(AppPoint { x: 40.0, y: 60.0 }),
             view.to_screen(AppPoint { x: 150.0, y: 60.0 }),
@@ -3886,7 +3886,7 @@ fn a_drawing_tool_still_snaps_to_what_is_there() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().last_snap.is_some(),
+        h.state().tab().selection.last_snap.is_some(),
         "the line tool did not snap to the end of the line beside it"
     );
 }
@@ -3907,7 +3907,7 @@ fn editing_words_does_not_change_how_they_look() {
 
     let before = {
         let app = h.state();
-        let edit = app.tab().editing_run.as_ref().expect("no run");
+        let edit = app.tab().edit.editing_run.as_ref().expect("no run");
         app.tab().doc
             .as_ref()
             .unwrap()
@@ -3954,14 +3954,14 @@ fn a_run_can_be_recoloured_from_the_editor() {
 
     let object = {
         let app = h.state_mut();
-        let edit = app.tab_mut().editing_run.as_mut().expect("no run");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("no run");
         edit.style.color =
             Some(pdf_core::document::Color { r: 250, g: 40, b: 40, a: 255 });
         edit.style.size = Some(22.0);
         edit.object
     };
     // Applying with the words untouched: only the look changes.
-    let words = h.state().tab().editing_run.as_ref().unwrap().original.clone();
+    let words = h.state().tab().edit.editing_run.as_ref().unwrap().original.clone();
     h.state_mut().submit(&words);
     h.run_steps(2);
 
@@ -3998,13 +3998,13 @@ fn a_runs_size_can_be_changed_alone_without_touching_its_colour() {
 
     let (object, before_color, new_size) = {
         let app = h.state_mut();
-        let edit = app.tab_mut().editing_run.as_mut().expect("no run");
+        let edit = app.tab_mut().edit.editing_run.as_mut().expect("no run");
         let before_color = edit.style.color;
         let new_size = edit.style.size.unwrap_or(12.0) + 8.0;
         edit.style.size = Some(new_size);
         (edit.object, before_color, new_size)
     };
-    let words = h.state().tab().editing_run.as_ref().unwrap().original.clone();
+    let words = h.state().tab().edit.editing_run.as_ref().unwrap().original.clone();
     h.state_mut().submit(&words);
     h.run_steps(2);
 
@@ -4029,7 +4029,7 @@ fn an_edited_run_can_be_undone() {
     let at = a_character_on_screen(&mut h);
     click(&mut h, at);
     h.run_steps(2);
-    let original = h.state().tab().editing_run.as_ref().cloned().expect("no run").original;
+    let original = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run").original;
 
     h.state_mut().submit("REPLACED");
     h.run_steps(2);
@@ -4053,11 +4053,11 @@ fn escape_leaves_the_words_as_they_were() {
     let at = a_character_on_screen(&mut h);
     click(&mut h, at);
     h.run_steps(2);
-    let original = h.state().tab().editing_run.as_ref().cloned().expect("no run").original;
+    let original = h.state().tab().edit.editing_run.as_ref().cloned().expect("no run").original;
 
     h.state_mut().escape();
     h.run_steps(1);
-    assert!(h.state().tab().editing_run.is_none(), "escape did not stop the edit");
+    assert!(h.state().tab().edit.editing_run.is_none(), "escape did not stop the edit");
 
     let app = h.state_mut();
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
@@ -4083,7 +4083,7 @@ fn clicking_bare_paper_says_there_is_no_text_there() {
             .iter()
             .map(|r| r.rect.top.max(r.rect.bottom))
             .fold(0.0f32, f32::max);
-        let view = app.tab().last_view.expect("page never drawn");
+        let view = app.tab().view_state.last_view.expect("page never drawn");
         view.to_screen(AppPoint { x: 40.0, y: (lowest + 30.0) as f64 })
     };
     click(&mut h, below);
@@ -4098,7 +4098,7 @@ fn clicking_bare_paper_says_there_is_no_text_there() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(said.contains("no text there"), "no explanation:\n{said}");
-    assert!(h.state().tab().editing_run.is_none());
+    assert!(h.state().tab().edit.editing_run.is_none());
 }
 
 /// Words written onto a page are **real text objects**, not a picture of
@@ -4239,7 +4239,7 @@ fn a_tool_pressed_with_text_already_selected_marks_it_at_once() {
     let mut h = harness("text-lines.pdf");
     let start = a_character_on_screen(&mut h);
     drag(&mut h, start, start + egui::vec2(150.0, 0.0));
-    assert!(h.state().tab().text_selection.is_some());
+    assert!(h.state().tab().selection.text_selection.is_some());
 
     h.state_mut().submit("highlight");
     h.run_steps(1);
@@ -4269,11 +4269,11 @@ fn zooming_holds_the_point_under_the_cursor() {
     // can actually scroll. While the whole page fits in the window there is
     // no offset to move, so it can only grow — correctly, and with nothing
     // to hold still.
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(3.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(3.0);
     h.run_steps(3);
 
     let at = egui::pos2(700.0, 600.0);
-    let before = h.state().tab().last_view.expect("page never drawn").to_page(at);
+    let before = h.state().tab().view_state.last_view.expect("page never drawn").to_page(at);
 
     pinch_at(&mut h, at, 1.06, 8);
 
@@ -4284,7 +4284,7 @@ fn zooming_holds_the_point_under_the_cursor() {
         app.resolved_zoom()
     );
 
-    let after = app.tab().last_view.expect("page never drawn").to_page(at);
+    let after = app.tab().view_state.last_view.expect("page never drawn").to_page(at);
     let drift = ((after.x - before.x).powi(2) + (after.y - before.y).powi(2)).sqrt();
     assert!(
         drift < 6.0,
@@ -4308,13 +4308,13 @@ fn zooming_out_holds_the_point_too() {
     // the scrollable range, and it gets clamped. That is the document
     // running out, not the anchor being wrong, and a test that ignores the
     // difference measures the clamp instead of the thing it is named after.
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(10.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(10.0);
     h.run_steps(3);
-    h.state_mut().tab_mut().anchor_offset = Some(egui::vec2(1200.0, 2500.0));
+    h.state_mut().tab_mut().view_state.anchor_offset = Some(egui::vec2(1200.0, 2500.0));
     h.run_steps(3);
 
     let at = egui::pos2(700.0, 600.0);
-    let before = h.state().tab().last_view.expect("page never drawn").to_page(at);
+    let before = h.state().tab().view_state.last_view.expect("page never drawn").to_page(at);
 
     pinch_at(&mut h, at, 0.985, 6);
 
@@ -4325,7 +4325,7 @@ fn zooming_out_holds_the_point_too() {
         app.resolved_zoom()
     );
 
-    let after = app.tab().last_view.expect("page never drawn").to_page(at);
+    let after = app.tab().view_state.last_view.expect("page never drawn").to_page(at);
     let drift = ((after.x - before.x).powi(2) + (after.y - before.y).powi(2)).sqrt();
     assert!(
         drift < 6.0,
@@ -4334,7 +4334,7 @@ fn zooming_out_holds_the_point_too() {
         after.x - before.x,
         after.y - before.y,
         app.resolved_zoom(),
-        app.tab().scroll_offset
+        app.tab().view_state.scroll_offset
     );
 }
 
@@ -4350,9 +4350,9 @@ fn zooming_out_holds_the_point_too() {
 #[test]
 fn actual_size_matches_the_96_dpi_convention_other_readers_use() {
     let mut h = harness("text-lines.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(1.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(1.0);
     h.run_steps(3);
-    let scale = h.state().tab().last_view.expect("page never drawn").scale;
+    let scale = h.state().tab().view_state.last_view.expect("page never drawn").scale;
     assert!(
         (scale - 96.0 / 72.0).abs() < 0.01,
         "1.0 (\"100%\") should put 96/72 screen units on one PDF point, got {scale}"
@@ -4367,9 +4367,9 @@ fn the_middle_button_pans() {
     // Zoomed in, so there is somewhere to pan *to*. At Fit the whole strip
     // is inside the window and the offset cannot move — which is correct,
     // and would have made this test pass for the wrong reason.
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
     h.run_steps(3);
-    let before = h.state().tab().scroll_offset;
+    let before = h.state().tab().view_state.scroll_offset;
 
     // Comfortably inside the page's own on-screen rect, not just the
     // viewport's — `DISPLAY_DPI_SCALE` (§ its own doc) widened a page at
@@ -4379,7 +4379,7 @@ fn the_middle_button_pans() {
     let from = egui::pos2(1000.0, 500.0);
     drag_with(&mut h, egui::PointerButton::Middle, from, from - egui::vec2(0.0, 200.0));
 
-    let after = h.state().tab().scroll_offset;
+    let after = h.state().tab().view_state.scroll_offset;
     assert!(
         (after.y - before.y).abs() > 20.0,
         "the middle button did not move the view ({before:?} -> {after:?})"
@@ -4392,7 +4392,7 @@ fn the_middle_button_pans() {
 #[test]
 fn panning_with_the_middle_button_leaves_an_armed_tool_alone() {
     let mut h = harness("pages-ladder.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
     h.state_mut().submit("line");
     h.run_steps(3);
 
@@ -4412,15 +4412,15 @@ fn panning_with_the_middle_button_leaves_an_armed_tool_alone() {
 #[test]
 fn hand_mode_actually_moves_the_page() {
     let mut h = harness("pages-ladder.pdf");
-    h.state_mut().tab_mut().zoom = ZoomMode::Factor(4.0);
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(4.0);
     h.state_mut().submit("hand");
     h.run_steps(3);
-    let before = h.state().tab().scroll_offset;
+    let before = h.state().tab().view_state.scroll_offset;
 
     let from = egui::pos2(1000.0, 500.0);
     drag(&mut h, from, from - egui::vec2(0.0, 200.0));
 
-    let after = h.state().tab().scroll_offset;
+    let after = h.state().tab().view_state.scroll_offset;
     assert!(
         (after.y - before.y).abs() > 20.0,
         "Hand did not move the page ({before:?} -> {after:?})"
@@ -4437,7 +4437,7 @@ fn dragging_over_text_selects_it() {
 
     let app = h.state();
     assert!(
-        app.tab().text_selection.is_some(),
+        app.tab().selection.text_selection.is_some(),
         "a drag across text selected nothing.\npointer mode: {:?}\nfrom {start:?} to {end:?}\n{}",
         app.tab().pointer,
         app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n")
@@ -4457,7 +4457,7 @@ fn hand_mode_stops_selection_and_select_gives_it_back() {
     h.run_steps(2);
     drag(&mut h, start, end);
     assert!(
-        h.state().tab().text_selection.is_none(),
+        h.state().tab().selection.text_selection.is_none(),
         "Hand mode selected text, so a drag both scrolls and selects"
     );
 
@@ -4465,7 +4465,7 @@ fn hand_mode_stops_selection_and_select_gives_it_back() {
     h.run_steps(2);
     drag(&mut h, start, end);
     assert!(
-        h.state().tab().text_selection.is_some(),
+        h.state().tab().selection.text_selection.is_some(),
         "Select did not give selection back, which would make Hand a one-way trip"
     );
 }
@@ -4486,7 +4486,7 @@ fn an_armed_tool_takes_the_click_and_escape_gives_it_back() {
 
     drag(&mut h, start, end);
     assert!(
-        h.state().tab().text_selection.is_none(),
+        h.state().tab().selection.text_selection.is_none(),
         "an armed tool let the drag select as well, so a click would do two things"
     );
 
@@ -4496,7 +4496,7 @@ fn an_armed_tool_takes_the_click_and_escape_gives_it_back() {
 
     drag(&mut h, start, end);
     assert!(
-        h.state().tab().text_selection.is_some(),
+        h.state().tab().selection.text_selection.is_some(),
         "selection did not come back after escape"
     );
 }
@@ -4517,7 +4517,7 @@ fn a_click_that_wandered_a_pixel_still_counts() {
     h.run_steps(2);
 
     let app = h.state();
-    let marks = app.tab().markup.existing(app.tab().page).map(|l| l.len()).unwrap_or(0);
+    let marks = app.tab().markup.existing(app.tab().view_state.page).map(|l| l.len()).unwrap_or(0);
     assert_eq!(
         marks, 1,
         "two clicks that each moved a pixel drew nothing.\n{}",
@@ -4537,7 +4537,7 @@ fn the_line_tool_draws_where_it_is_clicked() {
     h.run_steps(2);
 
     let app = h.state();
-    let marks = app.tab().markup.existing(app.tab().page).map(|l| l.len()).unwrap_or(0);
+    let marks = app.tab().markup.existing(app.tab().view_state.page).map(|l| l.len()).unwrap_or(0);
     assert_eq!(
         marks, 1,
         "two clicks on the page drew nothing.\n{}",
@@ -4559,13 +4559,13 @@ fn a_placed_picture_is_selected_and_moved_by_the_object_tool() {
     h.state_mut().place_image_at(0, AppPoint { x: 150.0, y: 300.0 }, rgba, 4, 4).expect("placed");
     h.state_mut().submit("editobject");
     h.run_steps(3);
-    assert!(h.state_mut().tab_mut().object_tool.is_some(), "setup: the object tool should be in hand");
+    assert!(h.state_mut().tab_mut().tool_state.object_tool.is_some(), "setup: the object tool should be in hand");
 
     let marks = |h: &mut Harness<'static, PagifyApp>| {
         h.state_mut().tab_mut().doc.as_ref().expect("open").session.placed_image_marks(0).expect("marks")
     };
     let before = marks(&mut h).remove(0);
-    let view = h.state_mut().tab_mut().last_view.expect("the page was never drawn");
+    let view = h.state_mut().tab_mut().view_state.last_view.expect("the page was never drawn");
     let centre = view.to_screen(AppPoint {
         x: ((before.rect.left + before.rect.right) / 2.0) as f64,
         y: ((before.rect.top + before.rect.bottom) / 2.0) as f64,
@@ -4573,7 +4573,7 @@ fn a_placed_picture_is_selected_and_moved_by_the_object_tool() {
 
     click(&mut h, centre);
     assert!(
-        h.state_mut().tab_mut().placed_image_selected.is_some(),
+        h.state_mut().tab_mut().selection.placed_image_selected.is_some(),
         "clicking the picture with the object tool in hand did not select it"
     );
 
@@ -4608,7 +4608,7 @@ fn click_holding(h: &mut Harness<'static, PagifyApp>, at: egui::Pos2, modifiers:
 }
 
 fn screen_centre(h: &mut Harness<'static, PagifyApp>, r: pdf_core::document::Rect) -> egui::Pos2 {
-    let view = h.state_mut().tab_mut().last_view.expect("the page was never drawn");
+    let view = h.state_mut().tab_mut().view_state.last_view.expect("the page was never drawn");
     view.to_screen(AppPoint {
         x: ((r.left + r.right) / 2.0) as f64,
         y: ((r.top + r.bottom) / 2.0) as f64,
@@ -4628,10 +4628,10 @@ fn ctrl_clicking_adds_to_and_removes_from_the_selection_through_the_real_pointer
     let (a, b) = (screen_centre(&mut h, first.rect), screen_centre(&mut h, second.rect));
 
     click(&mut h, a);
-    assert_eq!(h.state_mut().tab_mut().selected.as_ref().map(|s| s.object), Some(first.object), "setup");
+    assert_eq!(h.state_mut().tab_mut().selection.selected.as_ref().map(|s| s.object), Some(first.object), "setup");
 
     click_holding(&mut h, b, egui::Modifiers::COMMAND);
-    let objects: Vec<usize> = h.state_mut().tab_mut().group.iter().map(|s| s.object).collect();
+    let objects: Vec<usize> = h.state_mut().tab_mut().selection.group.iter().map(|s| s.object).collect();
     assert!(
         objects.contains(&first.object) && objects.contains(&second.object),
         "Ctrl-click did not add the second picture: group {objects:?}"
@@ -4639,7 +4639,7 @@ fn ctrl_clicking_adds_to_and_removes_from_the_selection_through_the_real_pointer
 
     click_holding(&mut h, a, egui::Modifiers::COMMAND);
     assert_eq!(
-        h.state_mut().tab_mut().selected.as_ref().map(|s| s.object),
+        h.state_mut().tab_mut().selection.selected.as_ref().map(|s| s.object),
         Some(second.object),
         "Ctrl-clicking a selected picture did not take it out"
     );
@@ -4667,7 +4667,7 @@ fn moving_a_group_is_one_undo_step() {
         AppPoint { x: area.right as f64, y: area.bottom as f64 },
         false,
     );
-    let members = h.state_mut().tab_mut().group.len();
+    let members = h.state_mut().tab_mut().selection.group.len();
     assert!(members >= 2, "setup: the marquee should have selected several runs, got {members}");
 
     let where_are = |h: &mut Harness<'static, PagifyApp>| -> Vec<(usize, f32, f32)> {
@@ -4703,7 +4703,7 @@ fn a_group_move_that_one_member_refuses_moves_none_of_them() {
     h.run_steps(3);
     let runs = h.state_mut().tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
     let (good, other) = (runs[0].clone(), runs[1].clone());
-    h.state_mut().tab_mut().group = vec![
+    h.state_mut().tab_mut().selection.group = vec![
         Selected { page: 0, object: good.object, rect: good.rect, what: "the text" },
         Selected { page: 0, object: other.object, rect: other.rect, what: "the text" },
         Selected { page: 0, object: 999_999, rect: other.rect, what: "the text" },
@@ -4731,7 +4731,7 @@ fn a_whole_paragraph_moves_undoes_and_moves_again_on_the_real_datasheet() {
         AppPoint { x: 146.0, y: 409.0 },
         false,
     );
-    let members = h.state_mut().tab_mut().group.len();
+    let members = h.state_mut().tab_mut().selection.group.len();
     assert!(members >= 20, "setup: expected the paragraph's pieces to be selected, got {members}");
 
     let where_are = |h: &mut Harness<'static, PagifyApp>| -> Vec<(usize, f32, f32)> {
@@ -4739,7 +4739,7 @@ fn a_whole_paragraph_moves_undoes_and_moves_again_on_the_real_datasheet() {
         runs.iter().map(|r| (r.object, r.rect.left, r.rect.top)).collect()
     };
     let before = where_are(&mut h);
-    let members_before: Vec<usize> = h.state_mut().tab_mut().group.iter().map(|m| m.object).collect();
+    let members_before: Vec<usize> = h.state_mut().tab_mut().selection.group.iter().map(|m| m.object).collect();
     let grab = |dx, dy| Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, dy) };
 
     let started = std::time::Instant::now();

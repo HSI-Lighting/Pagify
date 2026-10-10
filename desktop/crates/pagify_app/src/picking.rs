@@ -36,14 +36,14 @@ impl crate::PagifyApp {
         // buttons lit at once.** Worse than the cosmetic double-highlight:
         // every click kept reaching the object tool's own click-to-select
         // instead of resolving the pick this was arming, because
-        // `interact` checks `self.tab_mut().object_tool.is_some()` first
+        // `interact` checks `self.tab_mut().tool_state.object_tool.is_some()` first
         // and takes the pointer outright when it is.
-        if self.tab_mut().object_tool.take().is_some() {
-            self.tab_mut().selected = None;
-            self.tab_mut().grab = None;
-            self.tab_mut().group = Vec::new();
-            self.tab_mut().marquee = None;
-            self.tab_mut().group_grab = None;
+        if self.tab_mut().tool_state.object_tool.take().is_some() {
+            self.tab_mut().selection.selected = None;
+            self.tab_mut().selection.grab = None;
+            self.tab_mut().selection.group = Vec::new();
+            self.tab_mut().selection.marquee = None;
+            self.tab_mut().selection.group_grab = None;
         }
         self.put_down_page_editors("armed a different tool");
         self.tab_mut().tool = Some(ArmedTool { kind: tool, page, objects: Vec::new(), points: Vec::new() });
@@ -61,11 +61,11 @@ impl crate::PagifyApp {
     pub(crate) fn leave_editor_by_click(&mut self) -> bool {
         let already_refused = self
             .tab()
-            .editing_run
+            .edit.editing_run
             .as_ref()
             .is_some_and(|edit| edit.refusal.as_ref().is_some_and(|refusal| refusal.matches(edit)));
         if already_refused {
-            if let Some(edit) = self.tab_mut().editing_run.take() {
+            if let Some(edit) = self.tab_mut().edit.editing_run.take() {
                 self.offer_typed_text(&edit);
                 // The reason was said when it was refused, and is not said again:
                 // it can hold the very words that were typed, and the log is not
@@ -77,7 +77,7 @@ impl crate::PagifyApp {
             return false;
         }
         self.apply_editing_page();
-        self.tab().editing_run.is_some()
+        self.tab().edit.editing_run.is_some()
     }
 
     // -- picks --------------------------------------------------------------
@@ -144,7 +144,7 @@ impl crate::PagifyApp {
                 "type a passcode to lock it with, or Escape to give up.",
             ),
             ToolEffect::OpenArticleBoxPrompt(pending) => {
-                self.tab_mut().pending_article_box = Some(pending);
+                self.tab_mut().panels.pending_article_box = Some(pending);
             }
             ToolEffect::None | ToolEffect::Cancelled => {
                 unreachable!("on_click never returns these — only on_pointer/on_cancel do")
@@ -156,7 +156,7 @@ impl crate::PagifyApp {
         // Back in hand, ready for the next one, quietly after a failure so
         // the error stays the last thing said — see `arm_tool_without_saying`'s
         // doc.
-        if repeats && self.tab_mut().editing_run.is_none() {
+        if repeats && self.tab_mut().edit.editing_run.is_none() {
             if failed {
                 self.arm_tool_without_saying(kind_for_rearm, page);
             } else {

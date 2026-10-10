@@ -18,7 +18,7 @@ fn said(app: &PagifyApp) -> String {
 }
 
 fn marks(app: &PagifyApp) -> usize {
-    app.tab().markup.existing(app.tab().page).map(|l| l.len()).unwrap_or(0)
+    app.tab().markup.existing(app.tab().view_state.page).map(|l| l.len()).unwrap_or(0)
 }
 
 /// The defect this fixes: the app answered "nothing to undo" while three

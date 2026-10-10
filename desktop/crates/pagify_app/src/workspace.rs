@@ -81,7 +81,7 @@ impl crate::PagifyApp {
     /// to decide: a window going is only that, and the program ends when no
     /// window is left (see [`hub::plan`]).
     pub(crate) fn leave(&mut self, how: hub::Leaving) {
-        self.win.leaving = Some(how);
+        self.hub_state.win.leaving = Some(how);
     }
 
     /// Carry out an update staged by **Update now**, then exit — what the
@@ -120,7 +120,7 @@ impl crate::PagifyApp {
         match opened {
             Err(PdfError::PasswordRequired) | Err(PdfError::IncorrectPassword) => {
                 let again = password.is_some();
-                self.tab_mut().awaiting_password = Some(Awaiting::Open(path.to_string()));
+                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Open(path.to_string()));
                 self.say_info(if again {
                     "that password was not accepted — type it again, or Escape to give up."
                 } else {
@@ -175,9 +175,9 @@ impl crate::PagifyApp {
                 if self.tab_mut().ribbon == Tab::File {
                     self.tab_mut().ribbon = Tab::Home;
                 }
-                self.recent.record(session.path(), page_count, pagify_shell::recent::now());
+                self.library_state.recent.record(session.path(), page_count, pagify_shell::recent::now());
                 if !cfg!(test) {
-                    self.recent.save();
+                    self.library_state.recent.save();
                 }
                 self.cmd.prompt_mut().document = Some(name.clone());
                 self.say_info(format!(
@@ -203,8 +203,8 @@ impl crate::PagifyApp {
                     page_count,
                     caches: Default::default(),
                 });
-                self.tab_mut().page = 0;
-                self.tab_mut().zoom_basis = 0;
+                self.tab_mut().view_state.page = 0;
+                self.tab_mut().zoom_settle.zoom_basis = 0;
                 // A passcode belongs to the document it was typed for, and this
                 // is a different one.
                 self.forget_passcode();
@@ -218,9 +218,9 @@ impl crate::PagifyApp {
                 // so a document whose content really is sealed under a
                 // different passcode only ever asks once more, not every time.
                 if let Some(password) = password {
-                    self.tab_mut().held_passcode = Some(zeroize::Zeroizing::new(password.to_owned()));
+                    self.tab_mut().secure_state.held_passcode = Some(zeroize::Zeroizing::new(password.to_owned()));
                 }
-                self.tab_mut().saved_revision = self.tab_mut().markup.revision();
+                self.tab_mut().view_state.saved_revision = self.tab_mut().markup.revision();
 
                 // **A badge over a picture that is still there is finished
                 // now, not carried.** Documents written while a lock could
@@ -233,7 +233,7 @@ impl crate::PagifyApp {
                 // — otherwise selection silently doing nothing is left for the
                 // reader to work out.
                 self.report_text_layer(false);
-                self.tab_mut().scroll_pt = 0.0;
+                self.tab_mut().view_state.scroll_pt = 0.0;
                 self.tab_mut().tool = None;
                 // A fresh document's own bookmarks, not whatever the last
                 // one left behind — the panel is closed already (nothing
@@ -244,7 +244,7 @@ impl crate::PagifyApp {
             }
             Err(e) => {
                 // The raw error goes in the session log whatever is shown.
-                self.session_log.record("open-error", &format!("{path}: {e}"));
+                self.recording_state.session_log.record("open-error", &format!("{path}: {e}"));
                 match e {
                     // The library itself is missing: where it was looked for is
                     // the one useful thing to say.

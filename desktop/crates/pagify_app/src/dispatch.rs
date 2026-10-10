@@ -14,7 +14,7 @@ use pagify_shell::verbs::{self, SignatureAction, Verb};
 impl crate::PagifyApp {
     pub(crate) fn say_info(&mut self, text: impl Into<String>) {
         let text = text.into();
-        self.session_log.record("info", &text);
+        self.recording_state.session_log.record("info", &text);
         self.cmd.say(Kind::Info, text);
     }
 
@@ -28,8 +28,8 @@ impl crate::PagifyApp {
         // thing said, in red for an error, on the line under the buttons; and
         // the arrow beside the input opens the rest whenever it is wanted.
         let text = text.into();
-        self.errors_said += 1;
-        self.session_log.record("error", &text);
+        self.ui_state.errors_said += 1;
+        self.recording_state.session_log.record("error", &text);
         self.cmd.say(Kind::Error, text);
     }
 
@@ -187,7 +187,7 @@ impl crate::PagifyApp {
                         self.active_tab = index;
                         self.tab_mut().closing = Some(Closing::Program);
                         // The whole program, not just this window.
-                        self.win.closing_leaves = hub::Leaving::Program;
+                        self.hub_state.win.closing_leaves = hub::Leaving::Program;
                         return;
                     }
                 }
@@ -227,7 +227,7 @@ impl crate::PagifyApp {
                 //
                 // Pointer picks arrive in app space instead, so this is the one
                 // place that converts, through the module that owns the flip.
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 let height = self.tab_mut()
                     .doc
                     .as_ref()
@@ -243,8 +243,8 @@ impl crate::PagifyApp {
             Verb::PredefinedText(words) => match words {
                 Some(text) => self.use_snippet(&text),
                 None => {
-                    self.snippets = Some(SnippetList::default());
-                    if self.predefined.is_empty() {
+                    self.library_state.snippets = Some(SnippetList::default());
+                    if self.library_state.predefined.is_empty() {
                         self.say_info(
                             "nothing kept yet — type some words into the window, or \
                              `predefinedtext Jane Smith` to keep and write them at once.",
@@ -253,7 +253,7 @@ impl crate::PagifyApp {
                 }
             },
             Verb::EditObject => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -261,7 +261,7 @@ impl crate::PagifyApp {
                 self.take_up_object_tool(true, page);
             }
             Verb::MoveThing => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -269,7 +269,7 @@ impl crate::PagifyApp {
                 self.take_up_object_tool(false, page);
             }
             Verb::SignLine => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -277,7 +277,7 @@ impl crate::PagifyApp {
                 self.arm_tool(Tool::SignLine, page);
             }
             Verb::SignRectangle => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -360,7 +360,7 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 match what.as_deref().and_then(pdf_core::document::FillMark::parse) {
                     // A tick, a cross or a dot: one click each.
                     Some(mark) => self.arm_tool(Tool::Fill(mark), page),
@@ -382,7 +382,7 @@ impl crate::PagifyApp {
     /// whole so the router above stays a table of contents.
     fn act_signing(&mut self, verb: Verb) {
         match verb {
-            Verb::SessionLog => match self.session_log.path() {
+            Verb::SessionLog => match self.recording_state.session_log.path() {
                 Some(path) => self.say_info(format!(
                     "recording every command and outcome to {} — send it along with a bug report.",
                     path.display()
@@ -394,12 +394,12 @@ impl crate::PagifyApp {
             Verb::ApplySignatures => self.act_apply_signatures(),
             Verb::ManageSignatures(what) => self.act_manage_signatures(what),
             Verb::Signature(SignatureAction::Draw) => {
-                let first = self.signatures.current().is_none();
-                self.pad = Some(SignaturePad {
+                let first = self.library_state.signatures.current().is_none();
+                self.library_state.pad = Some(SignaturePad {
                     name: if first {
                         "Signature".to_string()
                     } else {
-                        format!("Signature {}", self.signatures.entries().len() + 1)
+                        format!("Signature {}", self.library_state.signatures.entries().len() + 1)
                     },
                     // An explicit `signature draw` is a request to draw, not
                     // to sign — unlike bare `signature` with nothing made yet,
@@ -418,8 +418,8 @@ impl crate::PagifyApp {
             Verb::Signature(SignatureAction::Place) => {
                 // Nothing drawn or uploaded yet needs a signature made before
                 // it can be placed. Placing does not.
-                if self.signatures.current().is_none() {
-                    self.pad = Some(SignaturePad {
+                if self.library_state.signatures.current().is_none() {
+                    self.library_state.pad = Some(SignaturePad {
                         name: "Signature".to_string(),
                         // Somebody who typed bare `signature` wanted to sign,
                         // not to draw; carrying on to the click is the rest
@@ -434,7 +434,7 @@ impl crate::PagifyApp {
                     );
                     return;
                 }
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                     return;
@@ -486,13 +486,13 @@ impl crate::PagifyApp {
                 // a selection naming one by its old annotation index would
                 // be pointing at nothing, or worse, at whatever else now
                 // sits at that index.
-                self.tab_mut().signature_selected = None;
-                self.tab_mut().signature_grab = None;
+                self.tab_mut().selection.signature_selected = None;
+                self.tab_mut().selection.signature_grab = None;
                 // Any other annotation on the page — including a selected
                 // placed picture — just had its own index shift under it,
                 // for the same reason.
-                self.tab_mut().placed_image_selected = None;
-                self.tab_mut().placed_image_grab = None;
+                self.tab_mut().selection.placed_image_selected = None;
+                self.tab_mut().selection.placed_image_grab = None;
                 // **Says the two things that matter and are not obvious**: that
                 // they can no longer be picked up, and that the way back is to
                 // close without saving rather than to press undo.
@@ -514,8 +514,8 @@ impl crate::PagifyApp {
                 use pagify_shell::verbs::Signatures as What;
                 match what {
                     What::Open => {
-                        self.signature_list = Some(SignatureList::default());
-                        if self.signatures.is_empty() {
+                        self.library_state.signature_list = Some(SignatureList::default());
+                        if self.library_state.signatures.is_empty() {
                             self.say_info("no signatures yet — the window has a button to draw one.");
                         }
                     }
@@ -524,10 +524,10 @@ impl crate::PagifyApp {
                         self.say_info(said);
                     }
                     What::Use(name) => {
-                        if self.signatures.choose(&name) {
+                        if self.library_state.signatures.choose(&name) {
                             match self.keep_signatures() {
                                 Ok(()) => {
-                                    let chosen = self
+                                    let chosen = self.library_state
                                         .signatures
                                         .current()
                                         .map(|s| s.name.clone())
@@ -545,7 +545,7 @@ impl crate::PagifyApp {
                         }
                     }
                     What::Forget(name) => {
-                        if self.signatures.remove(&name) {
+                        if self.library_state.signatures.remove(&name) {
                             match self.keep_signatures() {
                                 // Said plainly: this one does not come back.
                                 Ok(()) => self.say_info(format!(
@@ -563,13 +563,13 @@ impl crate::PagifyApp {
                         }
                     }
                     What::Rename(to) => {
-                        let Some(from) = self.signatures.current().map(|s| s.name.clone()) else {
+                        let Some(from) = self.library_state.signatures.current().map(|s| s.name.clone()) else {
                             self.say_error(
                                 "no signatures drawn yet — `signature draw` makes one.",
                             );
                             return;
                         };
-                        match self.signatures.rename(&from, &to) {
+                        match self.library_state.signatures.rename(&from, &to) {
                             Ok(()) => match self.keep_signatures() {
                                 Ok(()) => self.say_info(format!("\"{from}\" is now \"{to}\".")),
                                 Err(e) => self.say_error(e),
@@ -595,7 +595,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Whiteout, page);
                 }
             }
@@ -603,13 +603,13 @@ impl crate::PagifyApp {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Draw(DrawKind::Arrow), page);
                 }
             }
             Verb::ToggleFill => {
-                self.draw_fill = !self.draw_fill;
-                self.say_info(if self.draw_fill {
+                self.prefs_state.draw_fill = !self.prefs_state.draw_fill;
+                self.say_info(if self.prefs_state.draw_fill {
                     "fill: on — the next rectangle or circle is drawn filled."
                 } else {
                     "fill: off — the next rectangle or circle is drawn hollow."
@@ -619,7 +619,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Redact, page);
                 }
             }
@@ -635,7 +635,7 @@ impl crate::PagifyApp {
                 // on the page is taken as the answer; otherwise it says to make
                 // one, and the rectangle stays available for the cases a
                 // selection cannot express, like an area of a scan.
-                if self.tab_mut().text_selection.is_some() {
+                if self.tab_mut().selection.text_selection.is_some() {
                     self.lock_selection();
                     return;
                 }
@@ -658,7 +658,7 @@ impl crate::PagifyApp {
                 // A document that already has one is *changed*, not refused:
                 // the current password first, then the new one.
                 if doc.session.already_has_password() {
-                    self.tab_mut().awaiting_password = Some(Awaiting::SecureCurrent(options));
+                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::SecureCurrent(options));
                     self.say_info("this document has a password — type it to change it.");
                     return;
                 }
@@ -669,7 +669,7 @@ impl crate::PagifyApp {
                     return;
                 }
                 let allowed = options.describe();
-                self.tab_mut().awaiting_password = Some(Awaiting::Secure(options));
+                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Secure(options));
                 self.say_info(format!(
                     "type a password for this document, or Escape to give up. \
                      Anyone opening the file will be asked for it — {allowed}."
@@ -692,8 +692,8 @@ impl crate::PagifyApp {
                             if let Some(doc) = &mut self.tab_mut().doc {
                                 doc.rendered_is_stale();
                             }
-                            self.tab_mut().text_selection = None;
-                            self.tab_mut().find_hits.clear();
+                            self.tab_mut().selection.text_selection = None;
+                            self.tab_mut().panels.find_hits.clear();
                             let said = done.describe();
                             if done.is_clean() {
                                 self.say_info(if done.removed().is_empty() {
@@ -786,7 +786,7 @@ impl crate::PagifyApp {
                             self.say_error(format!("{}: no such file.", path.display()));
                             return;
                         }
-                        self.tab_mut().awaiting_password = Some(Awaiting::Certificate(path));
+                        self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Certificate(path));
                         self.say_info("type the certificate's password, or Escape to give up.");
                     }
                 }
@@ -888,8 +888,8 @@ impl crate::PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().text_selection = None;
-                self.tab_mut().find_hits.clear();
+                self.tab_mut().selection.text_selection = None;
+                self.tab_mut().panels.find_hits.clear();
                 if partly.is_empty() && left.is_empty() {
                     self.say_info(format!("{gone} redacted — gone for good. Save to write it out."));
                 } else {
@@ -923,10 +923,10 @@ impl crate::PagifyApp {
                     self.say_error("nothing open.");
                     return;
                 }
-                self.show_layers = !self.show_layers;
-                if self.show_layers {
+                self.ui_state.show_layers = !self.ui_state.show_layers;
+                if self.ui_state.show_layers {
                     self.forget_layers();
-                    let page = self.tab().page;
+                    let page = self.tab().view_state.page;
                     let count = self.layers_on(page).len();
                     self.say_info(format!(
                         "layers: page {} draws {count} thing{}, topmost first. \
@@ -946,14 +946,15 @@ impl crate::PagifyApp {
                 self.repair_locks(true);
             }
             Verb::Opacity(percent) => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 let target = self.tab_mut()
+                    .selection
                     .selected
                     .as_ref()
                     .filter(|s| s.page == page)
                     .map(|s| s.object)
                     .or_else(|| {
-                        self.tab_mut().picked_layer.and_then(|at| self.layers_on(page).get(at).map(|d| d.object))
+                        self.tab_mut().selection.picked_layer.and_then(|at| self.layers_on(page).get(at).map(|d| d.object))
                     });
                 match target {
                     Some(object) => match self.set_opacity_of(page, object, percent / 100.0) {
@@ -969,7 +970,7 @@ impl crate::PagifyApp {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Lock, page);
                 }
             }
@@ -996,7 +997,7 @@ impl crate::PagifyApp {
                 } else {
                     // Unlike locking, this always asks even when a passcode is
                     // held — see `a_held_passcode_does_not_unlock_anything`.
-                    self.tab_mut().awaiting_password = Some(Awaiting::Unlock);
+                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Unlock);
                     self.say_info("type the passcode this was locked with, or Escape to give up.");
                 }
             }
@@ -1016,7 +1017,7 @@ impl crate::PagifyApp {
                 // for one thing lands in another.
                 if let Some(armed) = self.tab_mut().tool.take() {
                     if armed.kind.cancel_drops_checkpoint() {
-                        let page = self.tab().page;
+                        let page = self.tab().view_state.page;
                         if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
                             layer.forget_last_step();
                         }
@@ -1042,7 +1043,7 @@ impl crate::PagifyApp {
             // at its own declaration).
             Verb::CopyText => {
                 if !self.copy_organize_selection() && !self.copy_object_selection() {
-                    self.tab_mut().copy_wanted = true;
+                    self.tab_mut().view_state.copy_wanted = true;
                 }
             }
             // Same precedence ⌘V's own keyboard dispatch already has: a
@@ -1083,7 +1084,7 @@ impl crate::PagifyApp {
                 let where_kept = pagify_shell::state::state_dir()
                     .map(|d| d.display().to_string())
                     .unwrap_or_else(|| "nowhere on this system".into());
-                match self.recent.forget_all() {
+                match self.library_state.recent.forget_all() {
                     Ok(()) => self.say_info(format!(
                         "the recent-documents list is gone. Pagify keeps its own files in \
                          {where_kept}: predefined.json (saved texts), signatures.json (drawn \
@@ -1143,14 +1144,14 @@ impl crate::PagifyApp {
             Verb::Reflow => self.reflow(),
             Verb::Find(needle) => self.find(&needle),
             Verb::FindStep { forward } => self.find_step(forward),
-            Verb::Replace => self.tab_mut().find_replace = Some(FindReplace::default()),
+            Verb::Replace => self.tab_mut().panels.find_replace = Some(FindReplace::default()),
             Verb::Spelling => self.open_spell_check(),
             Verb::Bookmark => self.add_bookmark_here(),
             Verb::ArticleBox => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
                 } else {
-                    let page = self.tab_mut().page;
+                    let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::ArticleBox, page);
                 }
             }
@@ -1172,7 +1173,7 @@ impl crate::PagifyApp {
     fn act_measurement(&mut self, verb: Verb) {
         match verb {
             Verb::Calibrate { distance, unit } => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 self.arm_tool(Tool::Calibrate { distance, unit }, page);
             }
             Verb::Scale => {
@@ -1180,7 +1181,7 @@ impl crate::PagifyApp {
                 self.say_info(d);
             }
             Verb::Measure(kind) => {
-                let page = self.tab_mut().page;
+                let page = self.tab_mut().view_state.page;
                 self.arm_tool(Tool::Measure(kind), page);
             }
 
@@ -1195,7 +1196,7 @@ impl crate::PagifyApp {
                         return;
                     }
                 };
-                self.recorder.start(name.clone());
+                self.recording_state.recorder.start(name.clone());
                 self.say_info(format!("recording `{name}` — every command from here is a step."));
             }
             Verb::StopRecording => self.stop_recording(),

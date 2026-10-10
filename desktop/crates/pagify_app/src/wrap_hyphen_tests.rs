@@ -95,11 +95,11 @@ fn applying_a_paragraph_never_writes_a_hyphen_the_page_did_not_show() {
     let mut app = open_page("apply", &THREE_LINES, "");
     pick_middle_line(&mut app);
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("the paragraph should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("the paragraph should have opened");
     assert_eq!(edit.lines.len(), 3, "setup: all three lines should be one paragraph");
     let objects: Vec<usize> = edit.lines.iter().map(|(o, _)| o[0]).collect();
     let retyped = edit.buffer.replace("delta", "DELTA");
-    app.tab_mut().editing_run.as_mut().expect("editing").buffer = retyped;
+    app.tab_mut().edit.editing_run.as_mut().expect("editing").buffer = retyped;
     app.apply_editing_page();
 
     let after: std::collections::HashMap<usize, String> = app
@@ -171,7 +171,7 @@ fn open_three_lines(name: &str, mark: bool) -> PagifyApp {
 #[test]
 fn opening_a_paragraph_restores_a_hyphen_the_page_draws() {
     let mut app = open_three_lines("marked", true);
-    let edit = app.tab_mut().editing_run.as_ref().expect("the paragraph should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("the paragraph should have opened");
     assert_eq!(edit.lines.len(), 3, "setup: all three lines should be one paragraph");
     assert_eq!(
         edit.buffer, "alpha beta gam-\nma delta epsi\nlon zeta eta",
@@ -184,7 +184,7 @@ fn opening_a_paragraph_restores_a_hyphen_the_page_draws() {
 #[test]
 fn opening_the_same_paragraph_without_the_mark_shows_no_hyphen() {
     let mut app = open_three_lines("unmarked", false);
-    let edit = app.tab_mut().editing_run.as_ref().expect("the paragraph should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("the paragraph should have opened");
     assert_eq!(edit.lines.len(), 3, "setup: all three lines should be one paragraph");
     assert_eq!(edit.buffer, "alpha beta gam\nma delta epsi\nlon zeta eta");
 }
@@ -218,7 +218,7 @@ fn the_box_opens_in_the_look_most_of_the_text_has() {
     app.submit("edittext");
     app.pick_text_run(0, at).expect("a run was here");
 
-    let edit = app.tab_mut().editing_run.as_ref().expect("the paragraph should have opened");
+    let edit = app.tab_mut().edit.editing_run.as_ref().expect("the paragraph should have opened");
     assert_eq!(edit.lines.len(), 2, "setup: both lines should be one paragraph: {:?}", edit.buffer);
     assert!(
         edit.lines.iter().all(|(objects, _)| objects.len() == 2),
@@ -273,7 +273,7 @@ fn on_real_pages_the_box_shows_a_wrap_hyphen_exactly_where_the_text_carries_one(
         app.submit("edittext");
         app.pick_text_run(0, at).expect("a run was here");
 
-        let edit = app.tab_mut().editing_run.as_ref().expect("the paragraph should have opened").clone();
+        let edit = app.tab_mut().edit.editing_run.as_ref().expect("the paragraph should have opened").clone();
         let wanted: std::collections::HashSet<usize> =
             edit.lines.iter().flat_map(|(objects, _)| objects.iter().copied()).collect();
         let text_of: std::collections::HashMap<usize, String> = app

@@ -18,7 +18,7 @@ fn at(x: f64, y: f64) -> AppPoint {
 }
 
 fn marks(app: &PagifyApp) -> usize {
-    app.tab().markup.existing(app.tab().page).map(|l| l.len()).unwrap_or(0)
+    app.tab().markup.existing(app.tab().view_state.page).map(|l| l.len()).unwrap_or(0)
 }
 
 fn said(app: &PagifyApp) -> String {
@@ -310,22 +310,22 @@ fn opening_another_file_does_not_ask() {
 fn each_tab_keeps_its_own_page_and_zoom_across_a_switch() {
     let mut app = app("pages-ladder.pdf");
     app.submit("page 3");
-    app.tab_mut().zoom = ZoomMode::Factor(2.0);
-    let (page_a, zoom_a) = (app.tab().page, app.tab().zoom);
+    app.tab_mut().view_state.zoom = ZoomMode::Factor(2.0);
+    let (page_a, zoom_a) = (app.tab().view_state.page, app.tab().view_state.zoom);
 
     app.submit(&format!("open \"{}\"", fixture("pages-ladder.pdf")));
     assert_eq!(app.tabs.len(), 2, "opening another file should have made a second tab");
     app.submit("page 1");
-    app.tab_mut().zoom = ZoomMode::Factor(1.0);
+    app.tab_mut().view_state.zoom = ZoomMode::Factor(1.0);
 
     // The newest tab is the leftmost: the first document is now the second.
     app.active_tab = 1;
-    assert_eq!(app.tab().page, page_a, "switching back lost the first tab's page");
-    assert_eq!(app.tab().zoom, zoom_a, "switching back lost the first tab's zoom");
+    assert_eq!(app.tab().view_state.page, page_a, "switching back lost the first tab's page");
+    assert_eq!(app.tab().view_state.zoom, zoom_a, "switching back lost the first tab's zoom");
 
     app.active_tab = 0;
-    assert_ne!(app.tab().page, page_a, "the second tab's own page should be unaffected");
-    assert_eq!(app.tab().zoom, ZoomMode::Factor(1.0));
+    assert_ne!(app.tab().view_state.page, page_a, "the second tab's own page should be unaffected");
+    assert_eq!(app.tab().view_state.zoom, ZoomMode::Factor(1.0));
 }
 
 /// Closing a tab with unsaved marks prompts, exactly like closing today's
@@ -423,8 +423,8 @@ fn marking_the_selection_writes_one_annotation_per_selection() {
         let mut app = app("text-lines.pdf");
         let chars = app.characters(0).expect("characters").clone();
         let n = chars.len().min(12);
-        app.tab_mut().text_selection = Some(0..n);
-        app.tab_mut().selection_page = 0;
+        app.tab_mut().selection.text_selection = Some(0..n);
+        app.tab_mut().organize.selection_page = 0;
 
         app.submit(command);
 
@@ -454,8 +454,8 @@ fn a_selection_over_several_lines_is_a_single_mark() {
         let chars = app.characters(0).expect("characters");
         (chars.len(), chars.line_rects(0..chars.len()).len())
     };
-    app.tab_mut().text_selection = Some(0..len);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(0..len);
+    app.tab_mut().organize.selection_page = 0;
 
     assert!(lines > 1, "the fixture is only one line, so this proves nothing");
 
@@ -552,7 +552,7 @@ fn an_extracted_text_layer_can_be_undone() {
 /// calibration table on `outlined_words_are_trustworthy` itself. Unlike
 /// the tests above, this checks not just that the page became selectable
 /// but that OCR's lazy loader
-/// (`self.recogniser`) was never reached to do it: `Some` would only
+/// (`self.library_state.recogniser`) was never reached to do it: `Some` would only
 /// appear there if some page in the batch had fallen through to OCR.
 ///
 /// That is also why this one is not `#[ignore]`d and does not check
@@ -565,7 +565,7 @@ fn extract_text_on_a_same_font_outlined_page_never_touches_ocr() {
         app.characters(0).map(|c| c.len()).unwrap_or(0) < 4,
         "the fixture already has selectable text, so this proves nothing"
     );
-    assert!(app.recogniser.is_none(), "OCR was already warm before the test ran");
+    assert!(app.library_state.recogniser.is_none(), "OCR was already warm before the test ran");
 
     app.submit("extracttext");
     app.wait_for_reading();
@@ -574,7 +574,7 @@ fn extract_text_on_a_same_font_outlined_page_never_touches_ocr() {
     let after = app.characters(0).map(|c| c.len()).unwrap_or(0);
     assert!(after > 4, "nothing became selectable:\n{}", said(&app));
     assert!(
-        app.recogniser.is_none(),
+        app.library_state.recogniser.is_none(),
         "the page was read by OCR, not the vector-match fast path"
     );
 }
@@ -595,7 +595,7 @@ fn outlinedfont_reports_a_clear_error_for_a_bad_path() {
     let mut app = PagifyApp::new(None);
     app.submit(&format!("outlinedfont {bad}"));
     assert!(said(&app).contains("could not read"), "unhelpful error:\n{}", said(&app));
-    assert!(!app.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(bad)));
+    assert!(!app.faces_state.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(bad)));
 }
 
 /// The end-to-end proof that adding a font actually changes what
@@ -628,7 +628,7 @@ fn a_user_added_font_unlocks_the_fast_path_for_a_page_the_bundled_fonts_do_not_m
 
     app.submit(&format!("outlinedfont {arial}"));
     assert!(
-        app.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(arial)),
+        app.faces_state.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(arial)),
         "the font was not added:\n{}",
         said(&app)
     );
@@ -638,14 +638,14 @@ fn a_user_added_font_unlocks_the_fast_path_for_a_page_the_bundled_fonts_do_not_m
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
 
     let after = app.characters(0).map(|c| c.len()).unwrap_or(0);
-    let recognised_without_ocr = app.recogniser.is_none();
+    let recognised_without_ocr = app.library_state.recogniser.is_none();
 
     app.submit(&format!("outlinedfont remove {arial}"));
     // Checks that Arial specifically is gone, not that the list is empty
     // outright — see the bad-path test above for why: another test's own
     // font may legitimately share this same on-disk settings file.
     assert!(
-        !app.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(arial)),
+        !app.faces_state.outlined_fonts.paths.iter().any(|p| p == std::path::Path::new(arial)),
         "cleanup left the font on the list"
     );
 
@@ -668,7 +668,7 @@ fn an_encrypted_file_asks_for_its_password() {
     app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
 
     assert!(
-        app.tab_mut().awaiting_password.is_some(),
+        app.tab_mut().secure_state.awaiting_password.is_some(),
         "an encrypted file did not ask:\n{}",
         said(&app)
     );
@@ -684,7 +684,7 @@ fn an_encrypted_file_asks_for_its_password() {
 fn a_password_is_never_written_into_the_history() {
     let mut app = PagifyApp::new(None);
     app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
-    assert!(app.tab_mut().awaiting_password.is_some(), "the fixture did not ask for a password");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_some(), "the fixture did not ask for a password");
 
     app.submit("hunter2");
     let history = said(&app);
@@ -702,14 +702,14 @@ fn a_wrong_password_asks_again_rather_than_giving_up() {
     app.answer_open_password(&path, "not-the-password");
 
     assert!(
-        app.tab_mut().awaiting_password.is_some(),
+        app.tab_mut().secure_state.awaiting_password.is_some(),
         "one wrong attempt ended it:\n{}",
         said(&app)
     );
     // The window says so, where the person is looking, rather than the
     // status line underneath it.
     assert_eq!(
-        app.tab_mut().password_problem.as_deref(),
+        app.tab_mut().secure_state.password_problem.as_deref(),
         Some("That password was not accepted."),
         "the window would say nothing about the wrong password"
     );
@@ -722,7 +722,7 @@ fn the_right_password_opens_it() {
     let path = app.awaiting_open().expect("it did not ask for a password");
     app.answer_open_password(&path, "pagify");
 
-    assert!(app.tab_mut().awaiting_password.is_none(), "still asking:\n{}", said(&app));
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "still asking:\n{}", said(&app));
     assert!(app.tab_mut().doc.is_some(), "the right password did not open it:\n{}", said(&app));
 }
 
@@ -745,7 +745,7 @@ fn the_password_that_opened_the_file_locks_its_own_content_too() {
 
     app.ask_or_reuse_passcode(Awaiting::LockPages(vec![0]), "should never be shown");
     assert!(
-        app.tab_mut().awaiting_password.is_none(),
+        app.tab_mut().secure_state.awaiting_password.is_none(),
         "it asked for a passcode it was already given to open the file"
     );
     assert!(
@@ -772,11 +772,11 @@ fn the_password_that_opened_the_file_locks_its_own_content_too() {
 fn typing_the_right_password_and_submitting_opens_it() {
     let mut app = PagifyApp::new(None);
     app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
-    assert!(app.tab_mut().awaiting_password.is_some(), "the fixture did not ask for a password");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_some(), "the fixture did not ask for a password");
 
     app.submit("pagify");
 
-    assert!(app.tab_mut().awaiting_password.is_none(), "still asking:\n{}", said(&app));
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "still asking:\n{}", said(&app));
     assert!(app.tab_mut().doc.is_some(), "typing the right password did not open it:\n{}", said(&app));
 }
 
@@ -785,7 +785,7 @@ fn escape_gives_up_on_the_password() {
     let mut app = PagifyApp::new(None);
     app.submit(&format!("open \"{}\"", fixture("encrypted.pdf")));
     app.escape();
-    assert!(app.tab_mut().awaiting_password.is_none(), "escape did not give up");
+    assert!(app.tab_mut().secure_state.awaiting_password.is_none(), "escape did not give up");
 }
 
 // -- the two standing tools -------------------------------------------

@@ -52,12 +52,12 @@ fn said(app: &PagifyApp) -> String {
 fn arming_a_markup_tool_now_puts_down_the_object_tool_already_in_hand() {
     let mut app = app("two-column.pdf");
     app.submit("editobject");
-    assert!(app.tab_mut().object_tool.is_some(), "setup: the object tool should have armed");
+    assert!(app.tab_mut().tool_state.object_tool.is_some(), "setup: the object tool should have armed");
 
     app.submit("highlight");
     assert!(app.tab_mut().tool.is_some(), "setup: the markup tool should have armed");
     assert!(
-        app.tab_mut().object_tool.is_none(),
+        app.tab_mut().tool_state.object_tool.is_none(),
         "arming a markup tool after the object tool should put the object \
          tool down, the same way every other Tool kind already does"
     );
@@ -80,15 +80,15 @@ fn arming_a_markup_tool_now_puts_down_the_object_tool_already_in_hand() {
 fn the_central_escape_does_not_close_the_link_prompt() {
     let mut app = app("two-column.pdf");
     let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
-    app.tab_mut().text_selection = Some(range);
-    app.tab_mut().selection_page = 0;
+    app.tab_mut().selection.text_selection = Some(range);
+    app.tab_mut().organize.selection_page = 0;
     app.submit("weblinks");
-    assert!(app.tab_mut().pending_link.is_some(), "setup: the link prompt should have opened");
+    assert!(app.tab_mut().panels.pending_link.is_some(), "setup: the link prompt should have opened");
 
     app.escape();
 
     assert!(
-        app.tab_mut().pending_link.is_some(),
+        app.tab_mut().panels.pending_link.is_some(),
         "today, the central Escape handler never looks at pending_link at all — \
          only the link-prompt panel's own separate ctx.input(Escape) check \
          (not exercised by this test, which calls escape() directly with no \

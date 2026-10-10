@@ -57,7 +57,7 @@ fn how_many_tabs_fit_never_wraps_and_never_leaves_the_strip_empty() {
 fn many_tabs_are_one_row_with_the_newest_on_the_left_and_the_page_keeps_its_space() {
     let mut one = harness(MANY[0]);
     one.run_steps(4);
-    let page_top_with_one = one.state().tab().viewport_rect.expect("drawn").top();
+    let page_top_with_one = one.state().tab().view_state.viewport_rect.expect("drawn").top();
 
     let h = many_tabs();
     let shown = drawn(&h);
@@ -75,7 +75,7 @@ fn many_tabs_are_one_row_with_the_newest_on_the_left_and_the_page_keeps_its_spac
     assert_eq!(order, expected, "the tabs are not newest-first");
 
     // The page starts where it did with one tab: the strip did not grow.
-    let page_top_with_many = h.state().tab().viewport_rect.expect("drawn").top();
+    let page_top_with_many = h.state().tab().view_state.viewport_rect.expect("drawn").top();
     assert!(
         (page_top_with_many - page_top_with_one).abs() < 1.0,
         "the page area moved from {page_top_with_one} to {page_top_with_many}: the tab strip is taller"

@@ -375,40 +375,7 @@ fn every_block_with_more_than_one_object_takes_a_retyped_line_and_undoes_cleanly
     let started = Instant::now();
     let reader = Session::open(&pdf).expect("open the datasheet");
     let pages = reader.page_count().expect("page count");
-    let mut tallies: BTreeMap<usize, Tally> = BTreeMap::new();
-    let mut jobs: Vec<Job> = Vec::new();
-    for page in 0..pages {
-        let tally = tallies.entry(page).or_default();
-        let snapshot = reader.page_text_snapshot(page).expect("snapshot");
-        let runs = snapshot.runs.clone();
-        let pb = build_page_blocks(page, 0, 0, snapshot);
-        for block in 0..pb.blocks.len() {
-            if pb.blocks[block].objects().len() <= 1 {
-                continue;
-            }
-            tally.blocks_with_more_than_one_object += 1;
-            // The app opens a block as a paragraph only when the guard passes it (a refused block opens the one
-            // word, as it always did): a block it refuses is never retyped line by line, so it is not swept.
-            if check_editor_invariants(&pb, block).is_err() {
-                tally.guard_refused += 1;
-                continue;
-            }
-            let lines = editor_lines(&pb, block);
-            let texts = line_texts(&pb, &lines);
-            let Some((i, line)) = lines.iter().enumerate().find(|(_, l)| !l.frozen && !l.objects.is_empty()) else {
-                tally.no_plain_line += 1;
-                continue;
-            };
-            jobs.push(Job {
-                page,
-                block,
-                first: line.objects[0],
-                rest: line.objects[1..].to_vec(),
-                hidden: hidden_pieces(&pb, &runs, &line.objects),
-                text: one_word_changed(&texts[i]),
-            });
-        }
-    }
+    let (mut tallies, jobs) = sweep_collect_jobs(&reader, pages);
     drop(reader);
     println!(
         "{} blocks with more than one text object; {} attempts to make",
@@ -553,4 +520,45 @@ fn every_block_with_more_than_one_object_takes_a_retyped_line_and_undoes_cleanly
     }
     assert_eq!(unexplained, 0, "{unexplained} of {attempted} edits are neither done nor explained");
     assert_eq!(ok + second_ok + limits, attempted, "every attempt is done or explained");
+}
+
+/// Collect the sweep's jobs: every block with more than one text object that
+/// the editor guard accepts, one plain line to retype in each. Part of
+/// [`every_block_with_more_than_one_object_takes_a_retyped_line_and_undoes_cleanly`].
+fn sweep_collect_jobs(reader: &Session, pages: usize) -> (BTreeMap<usize, Tally>, Vec<Job>) {
+    let mut tallies: BTreeMap<usize, Tally> = BTreeMap::new();
+    let mut jobs: Vec<Job> = Vec::new();
+    for page in 0..pages {
+        let tally = tallies.entry(page).or_default();
+        let snapshot = reader.page_text_snapshot(page).expect("snapshot");
+        let runs = snapshot.runs.clone();
+        let pb = build_page_blocks(page, 0, 0, snapshot);
+        for block in 0..pb.blocks.len() {
+            if pb.blocks[block].objects().len() <= 1 {
+                continue;
+            }
+            tally.blocks_with_more_than_one_object += 1;
+            // The app opens a block as a paragraph only when the guard passes it (a refused block opens the one
+            // word, as it always did): a block it refuses is never retyped line by line, so it is not swept.
+            if check_editor_invariants(&pb, block).is_err() {
+                tally.guard_refused += 1;
+                continue;
+            }
+            let lines = editor_lines(&pb, block);
+            let texts = line_texts(&pb, &lines);
+            let Some((i, line)) = lines.iter().enumerate().find(|(_, l)| !l.frozen && !l.objects.is_empty()) else {
+                tally.no_plain_line += 1;
+                continue;
+            };
+            jobs.push(Job {
+                page,
+                block,
+                first: line.objects[0],
+                rest: line.objects[1..].to_vec(),
+                hidden: hidden_pieces(&pb, &runs, &line.objects),
+                text: one_word_changed(&texts[i]),
+            });
+        }
+    }
+    (tallies, jobs)
 }

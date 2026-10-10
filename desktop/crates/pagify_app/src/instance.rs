@@ -509,10 +509,10 @@ impl PagifyApp {
     /// costs one atomic load.
     pub(crate) fn take_handover(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().focused) == Some(true) {
-            self.handover.note_focus(ctx.viewport_id());
+            self.hub_state.handover.note_focus(ctx.viewport_id());
         }
-        for request in self.handover.take() {
-            let window = self.handover.target_window();
+        for request in self.hub_state.handover.take() {
+            let window = self.hub_state.handover.target_window();
             self.open_handed_over(&request, ctx, window);
         }
     }
@@ -920,7 +920,7 @@ mod tests {
         let Lock::Held(lock) = take_lock(&dir.join("instance.lock")) else { panic!("no lock") };
         let inbox = dir.join("inbox");
         let ctx = h.ctx.clone();
-        h.state_mut().handover =
+        h.state_mut().hub_state.handover =
             Handover::watch_every(Primary { lock, inbox: inbox.clone() }, ctx, Duration::from_millis(20));
         inbox
     }
@@ -995,12 +995,12 @@ mod tests {
         let dir = scratch("window-bad");
         let mut h = running("single-page.pdf");
         let inbox = answering(&mut h, &dir);
-        let errors = h.state().errors_said;
+        let errors = h.state().ui_state.errors_said;
         let sent = write_request(&inbox, &asking_for(&["definitely-not-here.pdf"])).unwrap();
         assert!(run_until(&mut h, |_| is_gone(&sent)), "the request was not taken");
         h.step();
         let app = h.state();
-        assert!(app.errors_said > errors, "a document that failed to open said nothing");
+        assert!(app.ui_state.errors_said > errors, "a document that failed to open said nothing");
         assert_eq!(app.tabs.len(), 1, "a failed open added or removed a tab");
         assert!(app.tab().doc.is_some(), "a failed open closed the document that was open");
         let _ = fs::remove_dir_all(&dir);
@@ -1015,7 +1015,7 @@ mod tests {
         assert!(run_until(&mut h, |_| is_gone(&sent)), "the request was not taken");
         h.step();
         let app = h.state_mut();
-        assert!(app.tab_mut().awaiting_password.is_some(), "an encrypted file did not ask for its password");
+        assert!(app.tab_mut().secure_state.awaiting_password.is_some(), "an encrypted file did not ask for its password");
         assert_eq!(app.tabs.len(), 1, "a tab was made for a file that has not been opened yet");
 
         // The existing flow: the next line typed is the password (see `consume_password_line`).

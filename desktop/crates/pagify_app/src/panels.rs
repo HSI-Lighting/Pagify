@@ -20,7 +20,7 @@ impl crate::PagifyApp {
     /// `ask_about_unsaved`'s modal: a local decision set inside the closure,
     /// acted on once it returns.
     pub(crate) fn draw_update_prompt(&mut self, ctx: &egui::Context) {
-        let Some((version, source)) = self.update_available.clone() else { return };
+        let Some((version, source)) = self.update_state.update_available.clone() else { return };
         // `Some(true)` = update now, `Some(false)` = later — just the two
         // outcomes this dialog has, not `Decision`'s three (that one is
         // `ask_about_unsaved`'s own, for a different question).
@@ -48,14 +48,14 @@ impl crate::PagifyApp {
         }
         match decision {
             None => {}
-            Some(false) => self.update_available = None,
+            Some(false) => self.update_state.update_available = None,
             Some(true) => {
                 // The same walk a plain `quit` makes — an update is a quit
                 // that relaunches a newer build, not a second "is anything
                 // unsaved" check of its own. `exit_program` is where it actually
                 // happens, once every tab has agreed it is safe to close.
-                self.update_available = None;
-                self.pending_update = Some(source);
+                self.update_state.update_available = None;
+                self.hub_state.pending_update = Some(source);
                 self.act(Verb::Quit { force: false });
             }
         }
@@ -79,7 +79,7 @@ impl crate::PagifyApp {
     /// behaviour. A word's properties are kept by `replace_all`/
     /// `replace_current` themselves, not by anything drawn here.
     pub(crate) fn draw_find_replace(&mut self, ctx: &egui::Context) {
-        let Some(mut panel) = self.tab_mut().find_replace.take() else { return };
+        let Some(mut panel) = self.tab_mut().panels.find_replace.take() else { return };
 
         let mut open = true;
         let mut done = false;
@@ -195,7 +195,7 @@ impl crate::PagifyApp {
         }
 
         if let Some(forward) = step {
-            if self.tab_mut().find_hits.is_empty() || self.tab_mut().find_needle != panel.find {
+            if self.tab_mut().panels.find_hits.is_empty() || self.tab_mut().panels.find_needle != panel.find {
                 self.find(&panel.find);
             } else {
                 self.find_step(forward);
@@ -217,7 +217,7 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.tab_mut().find_replace = Some(panel);
+        self.tab_mut().panels.find_replace = Some(panel);
     }
 
     /// The Check Spelling panel — one word at a time, its own suggestions,
@@ -228,7 +228,7 @@ impl crate::PagifyApp {
     /// `draw_find_replace` documents: a spelling pass is watched against
     /// the page as it goes, not from behind a dimmed overlay of it.
     pub(crate) fn draw_spell_check(&mut self, ctx: &egui::Context) {
-        let Some(mut panel) = self.tab_mut().spelling.take() else { return };
+        let Some(mut panel) = self.tab_mut().panels.spelling.take() else { return };
 
         let mut open = true;
         let mut done = false;
@@ -369,7 +369,7 @@ impl crate::PagifyApp {
             return;
         }
 
-        self.tab_mut().spelling = Some(panel);
+        self.tab_mut().panels.spelling = Some(panel);
     }
 
     /// The action the spell dialog's buttons asked for, applied to the word in
@@ -456,7 +456,7 @@ impl crate::PagifyApp {
 
     /// The Bookmarks panel — every bookmark, click to jump.
     pub(crate) fn draw_bookmark_panel(&mut self, ctx: &egui::Context) {
-        let Some(panel) = self.tab_mut().bookmark_panel.take() else { return };
+        let Some(panel) = self.tab_mut().panels.bookmark_panel.take() else { return };
         let mut open = true;
         let mut go_to_page: Option<usize> = None;
 
@@ -487,11 +487,11 @@ impl crate::PagifyApp {
         if !open {
             return;
         }
-        self.tab_mut().bookmark_panel = Some(panel);
+        self.tab_mut().panels.bookmark_panel = Some(panel);
     }
 
     pub(crate) fn draw_link_prompt(&mut self, ctx: &egui::Context) {
-        let Some(mut pending) = self.tab_mut().pending_link.take() else { return };
+        let Some(mut pending) = self.tab_mut().panels.pending_link.take() else { return };
 
         let mut open = true;
         let mut done = false;
@@ -546,11 +546,11 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.tab_mut().pending_link = Some(pending);
+        self.tab_mut().panels.pending_link = Some(pending);
     }
 
     pub(crate) fn draw_article_box_prompt(&mut self, ctx: &egui::Context) {
-        let Some(mut pending) = self.tab_mut().pending_article_box.take() else { return };
+        let Some(mut pending) = self.tab_mut().panels.pending_article_box.take() else { return };
 
         let mut open = true;
         let mut done = false;
@@ -596,7 +596,7 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.tab_mut().pending_article_box = Some(pending);
+        self.tab_mut().panels.pending_article_box = Some(pending);
     }
 
     /// Ask for a password, whatever it is for, in one window.
@@ -617,13 +617,13 @@ impl crate::PagifyApp {
     /// that named them would be a list of names for things that are already
     /// their own name.
     pub(crate) fn draw_snippet_list(&mut self, ctx: &egui::Context) {
-        let Some(mut panel) = self.snippets.take() else { return };
+        let Some(mut panel) = self.library_state.snippets.take() else { return };
 
         let mut done = false;
         let mut chosen: Option<String> = None;
         let mut doomed: Option<String> = None;
         let mut add = false;
-        let kept: Vec<String> = self.predefined.entries().to_vec();
+        let kept: Vec<String> = self.library_state.predefined.entries().to_vec();
 
         egui::Modal::new(egui::Id::new("snippet-list")).show(ctx, |ui| {
             ui.set_width(520.0);
@@ -703,21 +703,21 @@ impl crate::PagifyApp {
         if add {
             let typed = panel.adding.trim().to_string();
             if !typed.is_empty() {
-                self.predefined.remember(&typed);
+                self.library_state.predefined.remember(&typed);
                 match self.keep_snippets() {
                     Ok(()) => {
                         panel.adding.clear();
                         self.say_info(format!("kept \"{}\".", short(&typed)));
                     }
                     Err(e) => {
-                        self.predefined.forget(&typed);
+                        self.library_state.predefined.forget(&typed);
                         self.say_error(e);
                     }
                 }
             }
         }
         if let Some(text) = doomed {
-            if self.predefined.forget(&text) {
+            if self.library_state.predefined.forget(&text) {
                 match self.keep_snippets() {
                     Ok(()) => self.say_info(format!("forgot \"{}\".", short(&text))),
                     Err(e) => self.say_error(e),
@@ -733,7 +733,7 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.snippets = Some(panel);
+        self.library_state.snippets = Some(panel);
     }
 
     /// The list of signatures somebody has drawn.
@@ -743,12 +743,12 @@ impl crate::PagifyApp {
     /// places one on a page, so the preview is the thing itself rather than an
     /// impression of it.
     pub(crate) fn draw_signature_list(&mut self, ctx: &egui::Context) {
-        let Some(mut panel) = self.signature_list.take() else { return };
+        let Some(mut panel) = self.library_state.signature_list.take() else { return };
 
         let mut done = false;
         let mut action: Option<ListAction> = None;
-        let current = self.signatures.current().map(|s| s.name.clone());
-        let entries = self.signatures.entries().to_vec();
+        let current = self.library_state.signatures.current().map(|s| s.name.clone());
+        let entries = self.library_state.signatures.entries().to_vec();
 
         egui::Modal::new(egui::Id::new("signature-list")).show(ctx, |ui| {
             ui.set_width(560.0);
@@ -779,7 +779,7 @@ impl crate::PagifyApp {
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
                             let texture = entry.image.as_ref().map(|image| {
-                                self.signature_textures
+                                self.library_state.signature_textures
                                     .entry(entry.name.clone())
                                     .or_insert_with(|| {
                                         ctx.load_texture(
@@ -900,7 +900,7 @@ impl crate::PagifyApp {
         if done {
             return;
         }
-        self.signature_list = Some(panel);
+        self.library_state.signature_list = Some(panel);
     }
 
     /// What the signature list asked for once its dialog closed: use, forget,
@@ -910,7 +910,7 @@ impl crate::PagifyApp {
     fn apply_signature_list_action(&mut self, panel: &mut SignatureList, action: Option<ListAction>) -> bool {
         match action {
             Some(ListAction::Use(name)) => {
-                if self.signatures.choose(&name) {
+                if self.library_state.signatures.choose(&name) {
                     match self.keep_signatures() {
                         Ok(()) => self.say_info(format!("`signature` now places \"{name}\".")),
                         Err(e) => self.say_error(e),
@@ -919,7 +919,7 @@ impl crate::PagifyApp {
             }
             Some(ListAction::Forget(name)) => {
                 panel.doomed = None;
-                if self.signatures.remove(&name) {
+                if self.library_state.signatures.remove(&name) {
                     match self.keep_signatures() {
                         Ok(()) => self.say_info(format!(
                             "\"{name}\" is gone — a drawing is not something undo reaches."
@@ -931,7 +931,7 @@ impl crate::PagifyApp {
             Some(ListAction::Rename(from, to)) => {
                 panel.renaming = None;
                 if !from.eq_ignore_ascii_case(&to) {
-                    match self.signatures.rename(&from, &to) {
+                    match self.library_state.signatures.rename(&from, &to) {
                         Ok(()) => match self.keep_signatures() {
                             Ok(()) => self.say_info(format!("\"{from}\" is now \"{to}\".")),
                             Err(e) => self.say_error(e),
@@ -941,8 +941,8 @@ impl crate::PagifyApp {
                 }
             }
             Some(ListAction::Draw) => {
-                self.pad = Some(SignaturePad {
-                    name: format!("Signature {}", self.signatures.entries().len() + 1),
+                self.library_state.pad = Some(SignaturePad {
+                    name: format!("Signature {}", self.library_state.signatures.entries().len() + 1),
                     then_place: false,
                     ..SignaturePad::default()
                 });
@@ -960,7 +960,7 @@ impl crate::PagifyApp {
     /// used to signing and because the line is what the placed signature will
     /// sit on — drawn here so the shape somebody sees is the shape they get.
     pub(crate) fn draw_signature_pad(&mut self, ctx: &egui::Context) {
-        let Some(mut pad) = self.pad.take() else { return };
+        let Some(mut pad) = self.library_state.pad.take() else { return };
 
         let mut keep = false;
         let mut gave_up = false;
@@ -1059,7 +1059,7 @@ impl crate::PagifyApp {
                     // Straight on to the click, for somebody who reached for
                     // the tool wanting to sign rather than to draw.
                     if pad.then_place && self.tab_mut().doc.is_some() {
-                        let page = self.tab_mut().page;
+                        let page = self.tab_mut().view_state.page;
                         self.arm_tool(Tool::Signature, page);
                     }
                 }
@@ -1068,7 +1068,7 @@ impl crate::PagifyApp {
                     // Kept open with the strokes intact: throwing away what
                     // somebody drew because it was too small is the wrong way
                     // round.
-                    self.pad = Some(pad);
+                    self.library_state.pad = Some(pad);
                 }
             }
             return;
@@ -1077,13 +1077,13 @@ impl crate::PagifyApp {
             self.say_info("nothing was kept.");
             return;
         }
-        self.pad = Some(pad);
+        self.library_state.pad = Some(pad);
     }
 
     pub(crate) fn draw_passcode_dialog(&mut self, ctx: &egui::Context) {
         use pagify_shell::passphrase;
 
-        let Some(waiting) = self.tab_mut().awaiting_password.clone() else { return };
+        let Some(waiting) = self.tab_mut().secure_state.awaiting_password.clone() else { return };
 
         // What is being asked, in three questions.
         let confirming =
@@ -1111,14 +1111,14 @@ impl crate::PagifyApp {
             ui.add_space(10.0);
 
             let field = ui.add(
-                egui::TextEdit::singleline(&mut *self.tab_mut().password_typed)
+                egui::TextEdit::singleline(&mut *self.tab_mut().secure_state.password_typed)
                     .password(true)
                     .desired_width(f32::INFINITY)
                     .hint_text("password"),
             );
-            if !self.tab_mut().password_field_focused {
+            if !self.tab_mut().secure_state.password_field_focused {
                 field.request_focus();
-                self.tab_mut().password_field_focused = true;
+                self.tab_mut().secure_state.password_field_focused = true;
             }
             if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 submitted = true;
@@ -1128,8 +1128,8 @@ impl crate::PagifyApp {
             // is being chosen, which is the only time it can be acted on.
             if ruled && !confirming {
                 ui.add_space(8.0);
-                let missing = passphrase::unmet(&self.tab_mut().password_typed);
-                let here = self.tab_mut().password_typed.chars().count();
+                let missing = passphrase::unmet(&self.tab_mut().secure_state.password_typed);
+                let here = self.tab_mut().secure_state.password_typed.chars().count();
                 for (wanted, said) in [
                     (
                         passphrase::Unmet::TooShort { need: passphrase::LEAST, have: here },
@@ -1160,11 +1160,11 @@ impl crate::PagifyApp {
             if let Awaiting::Secure(options) = &waiting {
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.tab_mut().password_plus, false, "Secure");
-                    ui.selectable_value(&mut self.tab_mut().password_plus, true, "Secure Plus");
+                    ui.selectable_value(&mut self.tab_mut().secure_state.password_plus, false, "Secure");
+                    ui.selectable_value(&mut self.tab_mut().secure_state.password_plus, true, "Secure Plus");
                 });
                 ui.add_space(4.0);
-                if self.tab_mut().password_plus {
+                if self.tab_mut().secure_state.password_plus {
                     // Said before it is chosen, not discovered afterwards.
                     ui.colored_label(
                         theme::danger(),
@@ -1197,16 +1197,16 @@ impl crate::PagifyApp {
                 }
             }
 
-            if let Some(said) = &self.tab_mut().password_problem {
+            if let Some(said) = &self.tab_mut().secure_state.password_problem {
                 ui.add_space(6.0);
                 ui.colored_label(theme::danger(), said);
             }
 
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                let ready = !self.tab_mut().password_typed.is_empty()
+                let ready = !self.tab_mut().secure_state.password_typed.is_empty()
                     && !restrictions_would_be_lost
-                    && (!ruled || confirming || passphrase::is_strong_enough(&self.tab_mut().password_typed));
+                    && (!ruled || confirming || passphrase::is_strong_enough(&self.tab_mut().secure_state.password_typed));
                 if ui.add_enabled(ready, egui::Button::new(act)).clicked() {
                     submitted = true;
                 }
@@ -1220,11 +1220,11 @@ impl crate::PagifyApp {
             gave_up = true;
         }
         if gave_up {
-            self.tab_mut().awaiting_password = None;
+            self.tab_mut().secure_state.awaiting_password = None;
             // `Zeroizing` wipes on drop; taking the value drops it.
-            drop(std::mem::take(&mut self.tab_mut().password_typed));
-            self.tab_mut().password_problem = None;
-            self.tab_mut().password_field_focused = false;
+            drop(std::mem::take(&mut self.tab_mut().secure_state.password_typed));
+            self.tab_mut().secure_state.password_problem = None;
+            self.tab_mut().secure_state.password_field_focused = false;
             self.say_info(match waiting {
                 Awaiting::Open(_) => "left it unopened.",
                 Awaiting::Unlock | Awaiting::UnlockItem(_) => "nothing was unlocked.",
@@ -1235,20 +1235,20 @@ impl crate::PagifyApp {
             });
             return;
         }
-        if !submitted || self.tab_mut().password_typed.is_empty() {
+        if !submitted || self.tab_mut().secure_state.password_typed.is_empty() {
             return;
         }
 
-        let typed = std::mem::take(&mut self.tab_mut().password_typed);
+        let typed = std::mem::take(&mut self.tab_mut().secure_state.password_typed);
         let _ = choosing;
         self.answer_passcode(&typed);
     }
 
     pub(crate) fn draw_extract_dialog(&mut self, ctx: &egui::Context) {
-        let Some(mut ask) = self.tab_mut().extract_ask.take() else { return };
+        let Some(mut ask) = self.tab_mut().panels.extract_ask.take() else { return };
         let Some(count) = self.tab().doc.as_ref().map(|d| d.page_count) else { return };
-        let current = self.tab().page;
-        let selected = self.tab().organize_selected.clone();
+        let current = self.tab().view_state.page;
+        let selected = self.tab().organize.organize_selected.clone();
 
         let mut go = false;
         let mut cancel = false;
@@ -1327,7 +1327,7 @@ impl crate::PagifyApp {
                 },
             }
         }
-        self.tab_mut().extract_ask = Some(ask);
+        self.tab_mut().panels.extract_ask = Some(ask);
     }
 
     /// Layers a sharper render of whatever's actually on screen over the
@@ -1351,7 +1351,7 @@ impl crate::PagifyApp {
         // The detail is rendered from the page upright, in page coordinates; laid
         // over a turned view it would show a different part of the page from the
         // one under it.
-        if !matches!(self.tab().rotation, Rotation::None) {
+        if !matches!(self.tab().view_state.rotation, Rotation::None) {
             return;
         }
         let (w, h) = self.tab_mut()
@@ -1392,7 +1392,7 @@ impl crate::PagifyApp {
         // Not while the zoom is still moving: a detail made for a step it has
         // already left is a stall for nothing, and the one held — if there is
         // one — is drawn meanwhile, softer, where it was.
-        let moving = self.async_render && self.zoom_is_moving(ctx);
+        let moving = self.render_state.async_render && self.zoom_is_moving(ctx);
         if !reusable && !moving {
             let margin = egui::vec2(
                 visible_screen.width() * Self::DETAIL_MARGIN_FRAC,
@@ -1409,7 +1409,7 @@ impl crate::PagifyApp {
             let rendered_scale =
                 (region_step as f32 * pdf_core::render::cache::ZOOM_QUANTUM).min(region_scale);
 
-            if self.async_render {
+            if self.render_state.async_render {
                 // Off this thread, like the whole page: the visible part of a
                 // zoomed-in page is millions of pixels, and a render of it in the
                 // middle of a frame was a stall of its own. Not asked for again
@@ -1418,7 +1418,7 @@ impl crate::PagifyApp {
                 let Some(doc) = self.tab_mut().doc.as_ref() else { return };
                 let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
                 let pending_covers = self
-                    .renders
+                    .render_state.renders
                     .as_ref()
                     .and_then(|w| w.in_flight.get(&(doc_id, page, true)))
                     .is_some_and(|(step, _, pending)| {
@@ -1445,7 +1445,7 @@ impl crate::PagifyApp {
                     egui::TextureOptions::LINEAR,
                 );
                 doc.caches.detail = Some(DetailTile { page, zoom_step, crop, texture });
-                self.render_stats.detail_on_ui_thread += 1;
+                self.render_state.render_stats.detail_on_ui_thread += 1;
             }
         }
 
