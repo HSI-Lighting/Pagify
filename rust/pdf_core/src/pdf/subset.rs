@@ -44,6 +44,40 @@ pub fn drawable_ascii(file: &File<'_>, fonts: &Dict, name: &[u8]) -> Option<BTre
     Some(drawable)
 }
 
+/// Put a font file's table directory in the order the format requires: sorted by
+/// tag, ascending.
+///
+/// **Why this exists.** Every reader here — `subsetter`, `ttf-parser` — finds a
+/// table by binary search over that directory, which is only correct when it is
+/// sorted. Microsoft Office's PDF export (Excel, Word) writes the directory in
+/// its own order (`glyf, cmap, head, hhea, hmtx, loca, maxp, name, OS/2, ...`), so
+/// the search walks past `glyf`, finds nothing, and the subsetter reports
+/// `UnknownKind` for a perfectly good TrueType font. That is what stopped a new
+/// line being added to any paragraph in a PDF printed from Excel — and
+/// `ttf-parser` fails the same way, quietly, with `None`.
+///
+/// Only the 16-byte directory records move. Offsets are absolute, so the tables
+/// themselves stay where they are and stay valid. A collection (`ttcf`), or data
+/// too short to hold the directory it declares, is left exactly as it was.
+pub fn sort_table_directory(font: &mut [u8]) {
+    if font.len() < 12 || &font[..4] == b"ttcf" {
+        return;
+    }
+    let count = u16::from_be_bytes([font[4], font[5]]) as usize;
+    let Some(directory) = font.get_mut(12..12 + 16 * count) else { return };
+    let mut records: Vec<[u8; 16]> = directory
+        .chunks_exact(16)
+        .map(|record| record.try_into().expect("16 bytes"))
+        .collect();
+    if records.windows(2).all(|pair| pair[0][..4] <= pair[1][..4]) {
+        return;
+    }
+    records.sort_by(|a, b| a[..4].cmp(&b[..4]));
+    for (slot, record) in directory.chunks_exact_mut(16).zip(&records) {
+        slot.copy_from_slice(record);
+    }
+}
+
 /// Ask the embedded font program, if it is one this can read: a TrueType or
 /// OpenType font, or a bare CFF (`/FontFile3 /Type1C`, which is not wrapped in
 /// the container the first two are).
@@ -58,12 +92,15 @@ fn program_ink(
     descriptor: &Dict,
     differences: &BTreeMap<u32, String>,
 ) -> Option<BTreeSet<u32>> {
-    let program = [&b"FontFile2"[..], b"FontFile3"].into_iter().find_map(|key| {
+    let mut program = [&b"FontFile2"[..], b"FontFile3"].into_iter().find_map(|key| {
         let Object::Stream(dict, range) = file.resolve(descriptor.get(key)?).ok()? else {
             return None;
         };
         content::decode(&dict, file.bytes().get(range)?)
     })?;
+    // Office exports an unsorted directory, which `ttf-parser` cannot search —
+    // see `sort_table_directory`.
+    sort_table_directory(&mut program);
 
     let mut out = BTreeSet::new();
     if let Ok(face) = ttf_parser::Face::parse(&program, 0) {

@@ -1729,3 +1729,98 @@ fn undoing_a_drawn_word_replacement_twice_restores_the_page_exactly() {
     app.submit("undo");
     assert_eq!(pixels_that_differ(&before, &page_pixels(&app)), 0, "two undos did not restore the page");
 }
+
+const EXCEL_QUOTE: &str = r"D:\Dropbox\1.QUOTATION\QT 2026\2141-AL FAHIM HQ - CALLIOPE-DALMA MALL-ABUDHABI-HS-2126-AJ-2141 CHIP AND DRIVER REPLACEMENT.pdf";
+
+/// **A line can be added to a paragraph in a PDF printed from Excel.**
+///
+/// Reported from use, with the log line `a new line could not be added: pdfium
+/// error: run-own-font-… could not be cut down: UnknownKind`. The new line is
+/// written in the paragraph's own font, which is cut down to the letters it needs.
+/// Office writes that font's table directory out of order (`glyf, cmap, head, …`),
+/// the subsetter finds a table by binary search, walked past `glyf` and called a
+/// TrueType font unknown. Adding a *separate* text box worked all along because it
+/// uses one of the app's own fonts, which are in order.
+#[test]
+fn a_line_can_be_added_to_a_paragraph_in_a_pdf_printed_from_excel() {
+    if !std::path::Path::new(EXCEL_QUOTE).is_file() {
+        eprintln!("skipping: the Excel quotation is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(EXCEL_QUOTE));
+    let run = text_runs(&app, 0)
+        .into_iter()
+        .find(|r| r.text.trim() == "Chip and driver replacement")
+        .expect("the description is on the page");
+    app.pick_text_run(0, centre(&run.rect)).expect("the description is clickable");
+    let typed = format!("{}\nA third line added by hand", app.tab().editing_run.as_ref().expect("editing").buffer.trim_end());
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed;
+    assert!(!app.apply_editing_page(), "the edit was refused: {}", said(&app));
+
+    let said = said(&app);
+    assert!(!said.contains("could not be added"), "the new line was not added: {said}");
+    // Excel's subset of Arial Bold holds only the letters the sheet printed and
+    // has no `b`, so the line cannot be written in it: it goes in a face that has
+    // every letter, and says so, rather than drawing a box for the `b` of "by".
+    assert!(said.contains("The new line is written in"), "the swap was not announced: {said}");
+
+    // The new line is written a glyph at a time, so it comes back as one text
+    // object per letter: read it as what is on the line below the paragraph,
+    // left to right.
+    let below = text_runs(&app, 0)
+        .into_iter()
+        .filter(|r| r.rect.left > 100.0 && r.rect.left < 330.0 && r.rect.top > 249.0 && r.rect.top < 258.0)
+        .collect::<Vec<_>>();
+    let mut below = below;
+    below.sort_by(|a, b| a.rect.left.total_cmp(&b.rect.left));
+    let line: String = below.iter().map(|r| r.text.as_str()).collect::<String>().split_whitespace().collect();
+    assert_eq!(line, "Athirdlineaddedbyhand", "the new line is not on the page; the log says: {said}");
+
+    // **And every letter is drawn.** The font here is Excel's subset of the
+    // letters the sheet uses, so a letter it never held would be extracted fine
+    // and leave a blank box — the same failure as the dimension's missing `5`.
+    let blank: Vec<&str> = below
+        .iter()
+        .filter(|r| !r.text.trim().is_empty())
+        .filter(|r| ink_per_column(&app, r.rect, 1)[0] == 0)
+        .map(|r| r.text.as_str())
+        .collect();
+    assert!(blank.is_empty(), "these letters of the new line have no ink: {blank:?}");
+    if let Ok(out) = std::env::var("PAGIFY_SAVE_EXCEL_PARAGRAPH_PNG") {
+        let area = Rect { left: 110.0, top: 228.0, right: 260.0, bottom: 262.0 };
+        let r = app.tab().doc.as_ref().expect("open").session.render_page_region(0, area, 8.0).expect("render");
+        image::save_buffer(out, &r.pixels, r.width, r.height, image::ColorType::Rgba8).expect("png");
+    }
+}
+
+/// **A new line made only of letters the paragraph's font has stays in it**, with
+/// nothing said — the swap is for the letters the Excel subset never held, not for
+/// every added line.
+#[test]
+fn a_new_line_of_letters_the_documents_font_has_stays_in_the_documents_font() {
+    if !std::path::Path::new(EXCEL_QUOTE).is_file() {
+        eprintln!("skipping: the Excel quotation is not on this machine");
+        return;
+    }
+    let mut app = PagifyApp::new(Some(EXCEL_QUOTE));
+    let run = text_runs(&app, 0)
+        .into_iter()
+        .find(|r| r.text.trim() == "Chip and driver replacement")
+        .expect("the description is on the page");
+    app.pick_text_run(0, centre(&run.rect)).expect("the description is clickable");
+    let typed = format!("{}\nChip and driver", app.tab().editing_run.as_ref().expect("editing").buffer.trim_end());
+    app.tab_mut().editing_run.as_mut().expect("editing").buffer = typed;
+    assert!(!app.apply_editing_page(), "the edit was refused: {}", said(&app));
+
+    let said = said(&app);
+    assert!(!said.contains("could not be added"), "the new line was not added: {said}");
+    assert!(!said.contains("The new line is written in"), "a swap was announced for letters the font has: {said}");
+    let line: String = text_runs(&app, 0)
+        .into_iter()
+        .filter(|r| r.rect.left > 100.0 && r.rect.left < 330.0 && r.rect.top > 249.0 && r.rect.top < 258.0)
+        .map(|r| r.text)
+        .collect::<String>()
+        .split_whitespace()
+        .collect();
+    assert_eq!(line, "Chipanddriver", "the new line is not on the page");
+}

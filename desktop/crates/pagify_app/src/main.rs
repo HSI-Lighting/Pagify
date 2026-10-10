@@ -12248,6 +12248,10 @@ impl PagifyApp {
     /// grey) regardless of what the first line actually looked like — the
     /// same gap this closes for a paragraph that grows past its own last
     /// line.
+    ///
+    /// **Returns the face it wrote in instead, when the paragraph's own could not
+    /// draw the new letters** — see [`Self::replacement_face`] — so the caller can
+    /// say so.
     fn write_extra_styled_lines(
         &mut self,
         page: usize,
@@ -12257,19 +12261,60 @@ impl PagifyApp {
         style: &pdf_core::document::TextStyle,
         face: Option<&str>,
         extra_lines: &[&str],
-    ) -> Result<(), String> {
+    ) -> Result<Option<String>, String> {
         let size = style.size.unwrap_or(12.0);
         let color = style
             .color
             .unwrap_or(pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 });
+        let (face, swapped) = match face.and_then(|own| self.replacement_face(own, &extra_lines.concat())) {
+            None => (face.map(str::to_string), None),
+            Some(other) => {
+                let said = other.clone().unwrap_or_else(|| "Helvetica".to_string());
+                (other, Some(said))
+            }
+        };
         for extra in extra_lines {
             y += gap;
             if extra.is_empty() {
                 continue;
             }
-            self.write_styled_line_at(page, (base_x, y), extra, size, color, face)?;
+            self.write_styled_line_at(page, (base_x, y), extra, size, color, face.as_deref())?;
         }
-        Ok(())
+        Ok(swapped)
+    }
+
+    /// A face to write `text` in when `own` — the paragraph's embedded font — has
+    /// no ink for some of its letters. `None` when `own` can draw them all, or when
+    /// that cannot be told; `Some(None)` when nothing registered can either, which
+    /// writes plain Helvetica.
+    ///
+    /// **Why this is asked at all.** A PDF embeds a *subset* — only the glyphs the
+    /// file already uses (Excel's has no `b` if the sheet never printed one). Shaping
+    /// a new line with it gives the missing letters glyph 0, an empty box, and
+    /// nothing says so: the text still extracts as the right words. Found by
+    /// rendering the result; an ink count does not catch it, because the box is ink.
+    fn replacement_face(&self, own: &str, text: &str) -> Option<Option<String>> {
+        let drawable = |name: &str| -> Option<bool> {
+            let bytes = pdf_core::text::font_data(name).ok()?;
+            let coverage = pdf_core::pdf::embed::outlined_chars(&bytes)?;
+            Some(text.chars().filter(|c| !c.is_whitespace()).all(|c| coverage.has(c)))
+        };
+        if drawable(own) != Some(false) {
+            return None;
+        }
+        let bold = |name: &str| {
+            pdf_core::text::font_data(name)
+                .ok()
+                .and_then(|bytes| pdf_core::pdf::embed::metrics(&bytes))
+                .is_some_and(|m| m.bold)
+        };
+        let wanted = bold(own);
+        Some(
+            self.writing_faces()
+                .into_iter()
+                .filter(|name| drawable(name) == Some(true))
+                .max_by_key(|name| bold(name) == wanted),
+        )
     }
 
 

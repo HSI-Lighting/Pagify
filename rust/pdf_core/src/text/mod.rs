@@ -67,7 +67,11 @@ fn fonts() -> &'static RwLock<HashMap<String, Arc<Vec<u8>>>> {
 }
 
 /// Take a font file under a name the app will ask for later.
-pub fn register(name: &str, data: Vec<u8>) -> Result<()> {
+pub fn register(name: &str, mut data: Vec<u8>) -> Result<()> {
+    // A font taken out of a PDF may come with its table directory unsorted
+    // (Office's export does), which the subsetter cannot read — see
+    // `sort_table_directory`.
+    crate::pdf::subset::sort_table_directory(&mut data);
     // Parsed once, here, so a font that cannot be read fails at registration
     // rather than the first time somebody types in it.
     Face::from_slice(&data, 0)

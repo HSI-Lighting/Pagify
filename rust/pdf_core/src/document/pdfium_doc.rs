@@ -1066,6 +1066,10 @@ impl Document for PdfiumDocument {
             return Ok(None);
         }
         buffer.truncate(needed);
+        // **Every reader of this finds tables by binary search**, and Office's
+        // export writes the directory out of order — see `sort_table_directory`.
+        // Done here so no caller has to remember to.
+        crate::pdf::subset::sort_table_directory(&mut buffer);
         Ok(Some(buffer))
     }
 

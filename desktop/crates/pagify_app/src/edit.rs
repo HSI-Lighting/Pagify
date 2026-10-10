@@ -818,7 +818,7 @@ impl crate::PagifyApp {
                     let gap = (edit.rect.bottom - edit.rect.top).max(12.0);
                     let base_x = edit.style.at.map(|(x, _)| x).unwrap_or(edit.rect.left);
                     let face = self.registered_face_of(&edit);
-                    if let Err(e) = self.write_extra_styled_lines(
+                    match self.write_extra_styled_lines(
                         edit.page,
                         base_x,
                         edit.rect.bottom,
@@ -827,7 +827,11 @@ impl crate::PagifyApp {
                         face.as_deref(),
                         &extra_lines,
                     ) {
-                        self.say_error(format!("the new line could not be added: {e}"));
+                        Ok(Some(other)) => self.say_info(format!(
+                            "changed to \"{typed}\". The new line is written in {other} — the document's                              own font here has only the letters it already uses, so it will not match                              its neighbours. `undo` puts it back."
+                        )),
+                        Ok(None) => {}
+                        Err(e) => self.say_error(format!("the new line could not be added: {e}")),
                     }
                 }
             }
@@ -948,10 +952,11 @@ impl crate::PagifyApp {
         // New lines go below the paragraph by position — geometric, so the
         // renumbering does not matter to them — and not at all after a refusal.
         let mut surplus_written = 0;
+        let mut new_lines_face: Option<String> = None;
         if let (None, Some(surplus)) = (&failed, &surplus) {
             surplus_written = surplus.written();
             let lines: Vec<&str> = surplus.lines.iter().map(String::as_str).collect();
-            if let Err(e) = self.write_extra_styled_lines(
+            match self.write_extra_styled_lines(
                 edit.page,
                 surplus.base_x,
                 surplus.below,
@@ -960,7 +965,8 @@ impl crate::PagifyApp {
                 surplus.face.as_deref(),
                 &lines,
             ) {
-                self.say_error(format!("a new line could not be added: {e}"));
+                Ok(other) => new_lines_face = other,
+                Err(e) => self.say_error(format!("a new line could not be added: {e}")),
             }
         }
 
@@ -1004,6 +1010,11 @@ impl crate::PagifyApp {
                     said = format!(
                         "{said} Written in {face} — the document's own font here has only the \
                          letters it already uses, so this will not match its neighbours."
+                    );
+                }
+                if let Some(face) = new_lines_face {
+                    said = format!(
+                        "{said} The new line is written in {face} — the document's own font here                          has only the letters it already uses, so it will not match its neighbours."
                     );
                 }
                 self.say_info(if ragged {

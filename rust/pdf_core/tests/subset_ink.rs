@@ -168,3 +168,36 @@ fn a_runs_own_words_are_never_refused_for_a_name_that_did_not_match() {
     doc.try_set_run_in_stream(0, run.object, "600mm").expect("its own words, in its own font");
     assert!(doc.substituted_face().is_none());
 }
+
+/// **A font whose table directory is out of order is still a font.**
+///
+/// Reported from use: no line could be added to a paragraph in a PDF printed from
+/// Excel — `run-own-font-… could not be cut down: UnknownKind`. Office writes the
+/// directory as `glyf, cmap, head, …`; `subsetter` and `ttf-parser` find a table by
+/// binary search, so they walked past `glyf` and called the font unknown.
+#[test]
+fn a_font_with_an_unsorted_table_directory_can_be_registered_and_cut_down() {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../app/src/main/assets/fonts/NotoSans-Bold.ttf");
+    let Ok(sorted) = std::fs::read(path) else { return };
+
+    // The same font with its directory written back to front: every table where
+    // it was, only the records in the wrong order.
+    let mut shuffled = sorted.clone();
+    let count = u16::from_be_bytes([shuffled[4], shuffled[5]]) as usize;
+    let mut records: Vec<Vec<u8>> = shuffled[12..12 + 16 * count].chunks(16).map(|c| c.to_vec()).collect();
+    records.reverse();
+    for (i, record) in records.iter().enumerate() {
+        shuffled[12 + 16 * i..12 + 16 * (i + 1)].copy_from_slice(record);
+    }
+    assert_ne!(shuffled[12..12 + 16 * count], sorted[12..12 + 16 * count], "setup: the directory should differ");
+
+    pdf_core::text::register("unsorted-directory-test", shuffled).expect("register");
+    let cut = pdf_core::text::subset("unsorted-directory-test", &[36, 37, 38])
+        .unwrap_or_else(|e| panic!("a font with an unsorted directory could not be cut down: {e}"));
+    assert!(!cut.data.is_empty() && cut.data.len() < sorted.len() / 4, "the subset should be small");
+
+    // And the helper leaves a directory that is already in order alone.
+    let mut again = sorted.clone();
+    subset::sort_table_directory(&mut again);
+    assert_eq!(again, sorted);
+}
