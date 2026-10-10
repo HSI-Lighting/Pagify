@@ -1,0 +1,9 @@
+# Clippy thresholds from the design review (DESIGN_REVIEW.md §5), applied
+# when clippy is run with the structural lints enabled:
+#   cargo clippy --workspace --all-targets -- \
+#     -W clippy::too_many_lines -W clippy::too_many_arguments -W clippy::type_complexity
+# Nothing is denied repo-wide yet — the numbers are the refactor's targets,
+# and the tree currently meets the 150-line one.
+too-many-lines-threshold = 150
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250
