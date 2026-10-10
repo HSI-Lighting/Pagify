@@ -114,11 +114,14 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   view fields (hover/last view, viewport, scroll offsets, deferred pan/
   scroll-to, canvas point, reveal, saved revision, queued copy — commit
   `c81eb0e`), and the scoped pass has since moved `page`/`zoom`/
-  `rotation`/`view` into it too (151 qualified rewrites + compiler-guided
-  local fixes). **`DocTab` is at ~35 fields** (target 25). Next: the same
-  scoped treatment for `selected`/`group`/`grab`/`marquee` into
-  `SelectionState`. Then folding the armed-tool leftovers
-  (`object_tool`, …) into `tool.rs`. `Doc` already delegates caches.
+  `rotation`/`view` into it too, then the scoped pass for `selected`/
+  `group`/`grab`/`marquee` (`SelectionState`), and finally `secure_state`
+  (9 passcode/redaction fields), `undo_state` (3) and `tool_state` (2).
+  **`DocTab` is at 20 fields — its 25 target is met.** `PagifyApp` is
+  still ~53 (target 15): its groups (`object_clipboard`/`paste_ghost`/
+  `paste_count`/`page_clipboard` → a `Clipboard` group; editor-face and
+  font fields → a `Faces` group; update/recorder/session-log → `AppState`)
+  are the next fold. `Doc` already delegates caches.
 3. **Event-returning transitions — DONE.** `ToolEffect` +
   `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
   `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
