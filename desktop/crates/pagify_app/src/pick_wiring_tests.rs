@@ -1266,7 +1266,7 @@ fn a_pasted_words_own_narrow_letters_read_back_the_same_as_the_original() {
     let src = text_runs(&app, 1).into_iter().find(|r| r.object == 2844).expect("the Power Input: label");
     assert_eq!(src.text, "Power Input:", "setup: the fixture's own label changed under this test");
 
-    app.tab_mut().selected = Some(Selected { page: 1, object: src.object, rect: src.rect, what: "the words" });
+    app.tab_mut().selection.selected = Some(Selected { page: 1, object: src.object, rect: src.rect, what: "the words" });
     assert!(app.copy_object_selection(), "copy should succeed");
     assert!(app.start_paste_ghost(None), "should have a paste in hand");
     // A blank margin, away from any other text on the page, so nothing else
@@ -1325,7 +1325,7 @@ fn a_split_words_own_fragments_share_one_baseline_not_each_fragments_own_ascent(
         "setup: these fragments should share one real baseline: {origins:?}"
     );
 
-    app.tab_mut().group = objs
+    app.tab_mut().selection.group = objs
         .iter()
         .map(|&o| {
             let r = &by_obj[&o];
@@ -1376,7 +1376,7 @@ fn a_pasted_fragments_own_width_matches_the_original_not_a_bare_reshape() {
     let run = runs.iter().find(|r| r.object == 6).cloned().expect("the ipti fragment");
     let original_width = run.rect.right - run.rect.left;
 
-    app.tab_mut().selected = Some(Selected { page: 0, object: run.object, rect: run.rect, what: "the words" });
+    app.tab_mut().selection.selected = Some(Selected { page: 0, object: run.object, rect: run.rect, what: "the words" });
     assert!(app.copy_object_selection());
     assert!(app.start_paste_ghost(None));
     app.submit("insertpage");
@@ -1443,7 +1443,7 @@ fn deleting_a_dense_selection_does_not_cost_once_per_object() {
 
     // Now batch-delete 40 objects through the real `delete_group` path.
     let batch: Vec<&pdf_core::document::DrawnObject> = drawn.iter().skip(1).take(40).collect();
-    app.tab_mut().group =
+    app.tab_mut().selection.group =
         batch.iter().map(|d| Selected { page, object: d.object, rect: d.rect, what: "the thing" }).collect();
     let batch_len = batch.len();
 
@@ -1555,7 +1555,7 @@ fn copying_words_whose_font_cannot_be_reused_says_what_a_paste_will_use() {
         .iter()
         .find(|r| r.text == "6" && r.rect.left > 436.0 && r.rect.left < 440.0 && r.rect.top > 160.0 && r.rect.top < 170.0)
         .expect("the dimension's first digit");
-    app.tab_mut().selected = Some(Selected { page: 0, object: label.object, rect: label.rect, what: "the words" });
+    app.tab_mut().selection.selected = Some(Selected { page: 0, object: label.object, rect: label.rect, what: "the words" });
     assert!(app.copy_object_selection());
     assert!(said(&app).contains("Helvetica"), "{}", said(&app));
 }

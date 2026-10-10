@@ -374,7 +374,7 @@ fn words_picked_in_edit_object() -> (Harness<'static, PagifyApp>, pdf_core::docu
         .into_iter()
         .find(|r| r.text.trim().chars().count() > 4)
         .expect("a run with words in it");
-    h.state_mut().tab_mut().selected =
+    h.state_mut().tab_mut().selection.selected =
         Some(Selected { page: 0, object: run.object, rect: run.rect, what: "the words" });
     (h, run)
 }
@@ -496,7 +496,7 @@ fn a_picture_from_the_page_is_copied_and_pasted_where_clicked() {
         ((image.rect.top + image.rect.bottom) / 2.0) as f64,
     );
     click(&mut h, middle);
-    assert!(h.state().tab().selected.is_some(), "the picture was not picked");
+    assert!(h.state().tab().selection.selected.is_some(), "the picture was not picked");
     let marks = |h: &Harness<'static, PagifyApp>| h.state().tab().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().len();
     let before = marks(&h);
 

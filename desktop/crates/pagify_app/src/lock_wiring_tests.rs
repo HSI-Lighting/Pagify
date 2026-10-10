@@ -3376,8 +3376,8 @@ fn dragging_a_rectangle_over_two_pictures_selects_both() {
         AppPoint { x: (bounds.right + pad) as f64, y: (bounds.bottom + pad) as f64 },
         false,
     );
-    assert!(app.tab_mut().selected.is_none(), "a group should not also leave a single selection");
-    assert_eq!(app.tab_mut().group.len(), 2, "both pictures should be in the group: {:?}", app.tab_mut().group);
+    assert!(app.tab_mut().selection.selected.is_none(), "a group should not also leave a single selection");
+    assert_eq!(app.tab_mut().selection.group.len(), 2, "both pictures should be in the group: {:?}", app.tab_mut().selection.group);
     assert!(said(&app).contains("2 things selected"), "{}", said(&app));
 }
 
@@ -3396,8 +3396,8 @@ fn a_marquee_over_just_one_thing_selects_it_normally() {
         AppPoint { x: (target.rect.right + pad) as f64, y: (target.rect.bottom + pad) as f64 },
         false,
     );
-    assert!(app.tab_mut().group.is_empty(), "one thing should not become a group");
-    assert_eq!(app.tab_mut().selected.as_ref().map(|s| s.object), Some(target.object));
+    assert!(app.tab_mut().selection.group.is_empty(), "one thing should not become a group");
+    assert_eq!(app.tab_mut().selection.selected.as_ref().map(|s| s.object), Some(target.object));
 }
 
 /// **Clicking one line of a paragraph in Edit Text opens the whole
@@ -3582,8 +3582,8 @@ fn clicking_a_line_in_edit_object_does_not_select_the_paragraph() {
 
     app.select_thing_at(0, at);
 
-    assert!(app.tab_mut().group.is_empty(), "edit object grouped a click into a paragraph");
-    assert!(app.tab_mut().selected.is_some(), "the click should still have selected something");
+    assert!(app.tab_mut().selection.group.is_empty(), "edit object grouped a click into a paragraph");
+    assert!(app.tab_mut().selection.selected.is_some(), "the click should still have selected something");
 }
 
 /// **The paragraph detector has exactly one production caller — Edit
@@ -3678,7 +3678,7 @@ fn a_marquee_that_only_clips_a_picture_does_not_select_it() {
         false,
     );
     assert_ne!(
-        app.tab_mut().selected.as_ref().map(|s| s.object),
+        app.tab_mut().selection.selected.as_ref().map(|s| s.object),
         Some(target.object),
         "a picture only half inside the marquee was selected"
     );
@@ -3697,11 +3697,11 @@ fn shift_clicking_a_second_picture_adds_it_to_the_selection() {
         y: ((r.top + r.bottom) / 2.0) as f64,
     };
     app.select_thing_at(0, at(first.rect));
-    assert_eq!(app.tab_mut().selected.as_ref().map(|s| s.object), Some(first.object));
+    assert_eq!(app.tab_mut().selection.selected.as_ref().map(|s| s.object), Some(first.object));
 
     app.extend_selection_at(0, at(second.rect));
-    assert!(app.tab_mut().selected.is_none(), "a two-member selection must be a group, not `selected`");
-    let objects: Vec<usize> = app.tab_mut().group.iter().map(|s| s.object).collect();
+    assert!(app.tab_mut().selection.selected.is_none(), "a two-member selection must be a group, not `selected`");
+    let objects: Vec<usize> = app.tab_mut().selection.group.iter().map(|s| s.object).collect();
     assert!(objects.contains(&first.object) && objects.contains(&second.object), "{objects:?}");
 }
 
@@ -3713,7 +3713,7 @@ fn shift_clicking_a_selected_picture_again_removes_it() {
     app.submit("editobject");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
     let (first, second) = (pictures[0].clone(), pictures[1].clone());
-    app.tab_mut().group = vec![
+    app.tab_mut().selection.group = vec![
         Selected { page: 0, object: first.object, rect: first.rect, what: "the picture" },
         Selected { page: 0, object: second.object, rect: second.rect, what: "the picture" },
     ];
@@ -3725,8 +3725,8 @@ fn shift_clicking_a_selected_picture_again_removes_it() {
             y: ((first.rect.top + first.rect.bottom) / 2.0) as f64,
         },
     );
-    assert_eq!(app.tab_mut().group.len(), 0, "removing one of two should leave one, folded into `selected`");
-    assert_eq!(app.tab_mut().selected.as_ref().map(|s| s.object), Some(second.object));
+    assert_eq!(app.tab_mut().selection.group.len(), 0, "removing one of two should leave one, folded into `selected`");
+    assert_eq!(app.tab_mut().selection.selected.as_ref().map(|s| s.object), Some(second.object));
 }
 
 /// **Shift-dragging a marquee adds to the selection rather than
@@ -3737,7 +3737,7 @@ fn shift_dragging_a_marquee_extends_an_existing_selection() {
     app.submit("editobject");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
     let (first, second) = (pictures[0].clone(), pictures[1].clone());
-    app.tab_mut().selected = Some(Selected { page: 0, object: first.object, rect: first.rect, what: "the picture" });
+    app.tab_mut().selection.selected = Some(Selected { page: 0, object: first.object, rect: first.rect, what: "the picture" });
 
     let pad = 5.0;
     app.select_group_in(
@@ -3746,8 +3746,8 @@ fn shift_dragging_a_marquee_extends_an_existing_selection() {
         AppPoint { x: (second.rect.right + pad) as f64, y: (second.rect.bottom + pad) as f64 },
         true,
     );
-    assert!(app.tab_mut().selected.is_none());
-    let objects: Vec<usize> = app.tab_mut().group.iter().map(|s| s.object).collect();
+    assert!(app.tab_mut().selection.selected.is_none());
+    let objects: Vec<usize> = app.tab_mut().selection.group.iter().map(|s| s.object).collect();
     assert!(
         objects.contains(&first.object) && objects.contains(&second.object),
         "the extended marquee lost the picture already selected: {objects:?}"
@@ -3760,7 +3760,7 @@ fn dragging_the_group_moves_every_member_by_the_same_amount() {
     let mut app = app("pictures.pdf");
     app.submit("editobject");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
-    app.tab_mut().group = pictures
+    app.tab_mut().selection.group = pictures
         .iter()
         .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
         .collect();
@@ -3779,7 +3779,7 @@ fn dragging_the_group_moves_every_member_by_the_same_amount() {
             before.rect
         );
     }
-    assert_eq!(app.tab_mut().group.len(), 2, "the group should still hold both, at their new spots");
+    assert_eq!(app.tab_mut().selection.group.len(), 2, "the group should still hold both, at their new spots");
 }
 
 /// **Dragging one of the group's own handles resizes every member about
@@ -3790,7 +3790,7 @@ fn resizing_the_group_scales_every_member_about_the_same_anchor() {
     let mut app = app("pictures.pdf");
     app.submit("editobject");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
-    app.tab_mut().group = pictures
+    app.tab_mut().selection.group = pictures
         .iter()
         .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
         .collect();
@@ -3820,7 +3820,7 @@ fn resizing_the_group_scales_every_member_about_the_same_anchor() {
             now.rect
         );
     }
-    assert_eq!(app.tab_mut().group.len(), 2, "the group should still hold both, at their new sizes");
+    assert_eq!(app.tab_mut().selection.group.len(), 2, "the group should still hold both, at their new sizes");
     let bounds_after = app.group_bounds(0).expect("bounds");
     assert!(
         (bounds_after.right - bounds_after.left - w * 2.0).abs() < 1.0,
@@ -3840,14 +3840,14 @@ fn deleting_the_group_removes_every_member() {
     assert_eq!(before.len(), 5, "the fixture should draw five things");
     let pictures = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
     assert_eq!(pictures.len(), 2);
-    app.tab_mut().group = pictures
+    app.tab_mut().selection.group = pictures
         .iter()
         .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
         .collect();
 
     app.delete_group();
 
-    assert!(app.tab_mut().group.is_empty(), "the group should be spent after deleting it");
+    assert!(app.tab_mut().selection.group.is_empty(), "the group should be spent after deleting it");
     let after = app.tab_mut().doc.as_ref().expect("open").session.images_on(0).expect("images");
     assert!(after.is_empty(), "both pictures should be gone: {after:?}");
     let remaining = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
@@ -3870,12 +3870,12 @@ fn copying_a_group_overwrites_whatever_was_copied_before_it() {
 
     // An earlier, single-item copy — the "previously selected object" that
     // must not survive the group copy below.
-    app.tab_mut().selected =
+    app.tab_mut().selection.selected =
         Some(Selected { page: 0, object: pictures[0].object, rect: pictures[0].rect, what: "the picture" });
     assert!(app.copy_object_selection(), "the first, single copy should succeed");
 
-    app.tab_mut().selected = None;
-    app.tab_mut().group = pictures
+    app.tab_mut().selection.selected = None;
+    app.tab_mut().selection.group = pictures
         .iter()
         .map(|p| Selected { page: 0, object: p.object, rect: p.rect, what: "the picture" })
         .collect();
@@ -3917,7 +3917,7 @@ fn a_text_groups_own_offsets_are_each_members_left_edge_not_its_centre() {
         "need two differently-sized runs for a centre-vs-edge mix-up to show: {a:?} {b:?}"
     );
 
-    app.tab_mut().group = vec![
+    app.tab_mut().selection.group = vec![
         Selected { page: 0, object: a.object, rect: a.rect, what: "the words" },
         Selected { page: 0, object: b.object, rect: b.rect, what: "the words" },
     ];
@@ -3959,7 +3959,7 @@ fn copying_and_pasting_words_logs_their_shape_but_never_their_text() {
     app.submit("editobject");
     let runs = app.tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
     let target = runs.iter().find(|r| r.text.trim().chars().count() > 5).cloned().expect("a run with words");
-    app.tab_mut().selected = Some(Selected { page: 0, object: target.object, rect: target.rect, what: "the words" });
+    app.tab_mut().selection.selected = Some(Selected { page: 0, object: target.object, rect: target.rect, what: "the words" });
 
     assert!(app.copy_object_selection(), "the selected run should have been copied");
     assert!(app.start_paste_ghost(None), "a copy should have something to pick up");
@@ -4077,7 +4077,7 @@ fn clicking_a_run_splits_it_and_selects_one_letter() {
     };
     app.select_thing_at(0, at);
 
-    let sel = app.tab_mut().selected.clone().expect("something should be selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("something should be selected");
     assert_eq!(sel.what, "the letter", "should have split down to one letter:\n{}", said(&app));
     let width = sel.rect.right - sel.rect.left;
     let run_width = target.rect.right - target.rect.left;
@@ -4093,7 +4093,7 @@ fn clicking_a_run_splits_it_and_selects_one_letter() {
     // Clicking the very same spot again is a no-op split — still one
     // letter selected, not an error and not a second split on top of it.
     app.select_thing_at(0, at);
-    assert_eq!(app.tab_mut().selected.as_ref().map(|s| s.what), Some("the letter"));
+    assert_eq!(app.tab_mut().selection.selected.as_ref().map(|s| s.what), Some("the letter"));
     let again = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("objects").len();
     assert_eq!(again, after_objects, "clicking an already-split letter should change nothing further");
 }
@@ -5920,14 +5920,14 @@ fn a_click_with_the_object_tool_selects_and_moves_nothing() {
 
     // Bare paper: nothing selected.
     assert!(!app.select_thing_at(0, AppPoint { x: 590.0, y: 780.0 }));
-    assert!(app.tab_mut().selected.is_none());
+    assert!(app.tab_mut().selection.selected.is_none());
 
     // The panel's far corner, where nothing else is: selected, named, and
     // picked in the layer list — and the page untouched.
     let panel = before.iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).expect("panel");
     let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
     assert!(app.select_thing_at(0, corner));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     assert_eq!(sel.what, "the shape");
     assert!(said(&app).contains("the shape selected"), "{}", said(&app));
     let picked = app.tab_mut().selection.picked_layer.and_then(|at| app.layers_on(0).get(at).cloned());
@@ -6006,7 +6006,7 @@ fn a_two_point_line_is_not_dropped_as_too_short_to_be_real() {
         app.select_thing_at(0, AppPoint { x: 300.0, y: 700.0 }),
         "clicking the middle of the line should select it"
     );
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     assert_eq!(sel.what, "the shape");
 }
 
@@ -6018,15 +6018,15 @@ fn dragging_a_selection_moves_it_when_let_go() {
     let panel = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
     let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
     assert!(app.select_thing_at(0, corner));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
 
     // Mid-drag, nothing has changed in the document.
-    app.tab_mut().grab = Some(Grab { handle: None, from: corner, by: (30.0, 18.0) });
+    app.tab_mut().selection.grab = Some(Grab { handle: None, from: corner, by: (30.0, 18.0) });
     let unmoved = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
     assert_eq!(unmoved.rect, panel.rect, "the page changed before the pointer was let go");
 
     // Let go.
-    let grab = app.tab_mut().grab.take().expect("grab");
+    let grab = app.tab_mut().selection.grab.take().expect("grab");
     app.finish_grab(sel, grab, 1.0);
     let moved = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
     assert!(
@@ -6036,7 +6036,7 @@ fn dragging_a_selection_moves_it_when_let_go() {
         moved.rect
     );
     // And it is still selected, where it now is.
-    let still = app.tab_mut().selected.clone().expect("still selected");
+    let still = app.tab_mut().selection.selected.clone().expect("still selected");
     assert!((still.rect.left - moved.rect.left).abs() < 0.5, "the selection did not follow the thing");
 }
 
@@ -6058,13 +6058,13 @@ fn text_placed_by_add_text_can_be_selected_and_dragged_like_any_other_run() {
         app.select_thing_at_drilling(0, at, false),
         "the freshly written words were not found"
     );
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     assert_eq!(sel.what, "the words");
 
     let grab = Grab { handle: None, from: at, by: (25.0, 12.0) };
     app.finish_grab(sel.clone(), grab, 1.0);
 
-    let moved = app.tab_mut().selected.clone().expect("still selected after the drag");
+    let moved = app.tab_mut().selection.selected.clone().expect("still selected after the drag");
     assert_eq!(moved.what, "the words", "the drag left it split down to a single letter");
     assert!(
         (moved.rect.left - sel.rect.left - 25.0).abs() < 1.0
@@ -6097,7 +6097,7 @@ fn dragging_an_isolated_line_of_text_moves_the_whole_line_not_one_letter() {
     // The exact shape of `interact_objects`'s own drag-start branch:
     // select fresh, then drag the body.
     assert!(app.select_thing_at_drilling(0, at, false));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     let leftmost = |rects: &[(usize, pdf_core::document::Rect)]| {
         rects.iter().map(|(_, r)| r.left).fold(f32::INFINITY, f32::min)
     };
@@ -6135,7 +6135,7 @@ fn undo_puts_a_dragged_object_back() {
         .expect("panel");
     let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
     assert!(app.select_thing_at(0, corner));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
 
     app.finish_grab(sel, Grab { handle: None, from: corner, by: (30.0, 18.0) }, 1.0);
     let moved = app
@@ -6190,7 +6190,7 @@ fn a_tiny_wobble_does_not_move_the_selection_but_a_real_drag_still_does() {
     // Not necessarily the panel itself: `covered.pdf` draws a picture
     // right under it, and Edit Object looks at pictures first — tracked
     // by whatever `select_thing_at` actually picked up, not assumed.
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
     let object = sel.object;
     let before = app
         .layers_on(0)
@@ -6235,7 +6235,7 @@ fn dragging_a_handle_resizes_about_the_opposite_corner() {
     let panel = app.layers_on(0).iter().find(|d| d.kind == pdf_core::document::DrawnKind::Shape).cloned().expect("panel");
     let corner = AppPoint { x: (panel.rect.right - 20.0) as f64, y: (panel.rect.bottom - 20.0) as f64 };
     assert!(app.select_thing_at(0, corner));
-    let sel = app.tab_mut().selected.clone().expect("selected");
+    let sel = app.tab_mut().selection.selected.clone().expect("selected");
 
     // Drag the bottom-right handle in by half the width and height.
     let (w, h) = (panel.rect.right - panel.rect.left, panel.rect.bottom - panel.rect.top);

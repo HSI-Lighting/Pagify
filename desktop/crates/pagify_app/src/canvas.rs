@@ -34,7 +34,7 @@ impl crate::PagifyApp {
     /// green for one a side or the middle is exactly on.
     pub(crate) fn draw_move_guides(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         let (moving, exclude): (pdf_core::document::Rect, Vec<usize>) = {
-            let single = match (self.tab().grab.clone(), self.tab().selected.clone()) {
+            let single = match (self.tab().selection.grab.clone(), self.tab().selection.selected.clone()) {
                 (Some(grab), Some(sel)) if grab.handle.is_none() && sel.page == page => {
                     Some((Self::shifted(sel.rect, grab.by), vec![sel.object]))
                 }
@@ -42,7 +42,7 @@ impl crate::PagifyApp {
             };
             let group = || match (self.tab().selection.group_grab.clone(), self.group_bounds(page)) {
                 (Some(grab), Some(bounds)) if grab.handle.is_none() => {
-                    let members = self.tab().group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
+                    let members = self.tab().selection.group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
                     Some((Self::shifted(bounds, grab.by), members))
                 }
                 _ => None,
@@ -80,8 +80,8 @@ impl crate::PagifyApp {
     /// is selected by the same pointer, and two selections at once means
     /// Delete, Copy and the handles disagree about which one they mean.
     fn drop_object_selection(&mut self) {
-        self.tab_mut().selected = None;
-        self.tab_mut().group = Vec::new();
+        self.tab_mut().selection.selected = None;
+        self.tab_mut().selection.group = Vec::new();
     }
 
     /// The object tool's own pointer handling: select on click, move by
@@ -102,8 +102,8 @@ impl crate::PagifyApp {
         let remembered_handle = self.tab_mut().selection.object_hover_handle;
 
         // The cursor says what a press here would do.
-        if self.tab_mut().grab.is_none() && self.tab_mut().selection.group_grab.is_none() {
-            if let Some(rect) = self.tab().selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
+        if self.tab_mut().selection.grab.is_none() && self.tab_mut().selection.group_grab.is_none() {
+            if let Some(rect) = self.tab().selection.selected.as_ref().filter(|s| s.page == page).map(|s| s.rect) {
                 let handle = self.handle_at(at, view);
                 self.tab_mut().selection.object_hover_handle = handle;
                 if let Some(handle) = handle {
@@ -126,11 +126,12 @@ impl crate::PagifyApp {
 
         if response.drag_started() {
             let on_handle = self.tab_mut()
+                .selection
                 .selected
                 .as_ref()
                 .filter(|s| s.page == page)
                 .and_then(|_| remembered_handle);
-            let on_body = self.tab_mut().selected.as_ref().is_some_and(|s| {
+            let on_body = self.tab_mut().selection.selected.as_ref().is_some_and(|s| {
                 s.page == page
                     && at.x >= s.rect.left as f64
                     && at.x <= s.rect.right as f64
@@ -140,7 +141,7 @@ impl crate::PagifyApp {
             let group_bounds = self.group_bounds(page);
             // A group's handles read from `remembered_handle` too — it is
             // whichever of the two hover branches above last ran, and
-            // `self.tab_mut().selected`/`self.tab_mut().group` are never both populated at
+            // `self.tab_mut().selection.selected`/`self.tab_mut().selection.group` are never both populated at
             // once, so it always means the right one.
             let on_group_handle = group_bounds.is_some().then(|| remembered_handle).flatten();
             let on_group_body = on_group_handle.is_none()
@@ -150,7 +151,7 @@ impl crate::PagifyApp {
             } else if on_handle.is_some() || on_body {
                 // A drag on the current selection's own body or a handle:
                 // move or resize it.
-                self.tab_mut().group = Vec::new();
+                self.tab_mut().selection.group = Vec::new();
                 // **A turn is measured from where the pointer went down, not from
                 // where egui decided it was a drag** — a few pixels along already,
                 // which at the handle's distance from the middle is several
@@ -159,7 +160,7 @@ impl crate::PagifyApp {
                     (Some(Handle::Rotate), Some(pressed)) => view.to_page(pressed),
                     _ => at,
                 };
-                self.tab_mut().grab = Some(Grab { handle: on_handle, from, by: (0.0, 0.0) });
+                self.tab_mut().selection.grab = Some(Grab { handle: on_handle, from, by: (0.0, 0.0) });
             } else {
                 // **Reported from use: dragging out a marquee across
                 // several objects kept grabbing and moving whichever one
@@ -173,20 +174,20 @@ impl crate::PagifyApp {
                 // click first, then drag its own body or a handle, which
                 // the branch above this one still covers exactly as
                 // before.
-                self.tab_mut().selected = None;
+                self.tab_mut().selection.selected = None;
                 // A picture or signature picked a moment ago is not part of
                 // what this marquee is about to select.
                 self.tab_mut().selection.placed_image_selected = None;
                 self.tab_mut().selection.signature_selected = None;
                 if !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
-                    self.tab_mut().group = Vec::new();
+                    self.tab_mut().selection.group = Vec::new();
                 }
-                self.tab_mut().marquee = Some((at, at));
+                self.tab_mut().selection.marquee = Some((at, at));
             }
         }
 
         if response.dragged() {
-            if let Some(grab) = self.tab_mut().grab.as_mut() {
+            if let Some(grab) = self.tab_mut().selection.grab.as_mut() {
                 grab.by = ((at.x - grab.from.x) as f32, (at.y - grab.from.y) as f32);
                 ui.output_mut(|o| {
                     o.cursor_icon = match grab.handle {
@@ -204,7 +205,7 @@ impl crate::PagifyApp {
                     }
                 });
             }
-            if let Some((_, current)) = self.tab_mut().marquee.as_mut() {
+            if let Some((_, current)) = self.tab_mut().selection.marquee.as_mut() {
                 *current = at;
             }
             // Pulled onto a reference line, unless Alt is held.
@@ -215,13 +216,13 @@ impl crate::PagifyApp {
         }
 
         if response.drag_stopped() {
-            if let (Some(grab), Some(sel)) = (self.tab_mut().grab.take(), self.tab_mut().selected.clone()) {
+            if let (Some(grab), Some(sel)) = (self.tab_mut().selection.grab.take(), self.tab_mut().selection.selected.clone()) {
                 self.finish_grab(sel, grab, view.scale);
             }
             if let Some(grab) = self.tab_mut().selection.group_grab.take() {
                 self.finish_group_grab(grab, view.scale);
             }
-            if let Some((start, end)) = self.tab_mut().marquee.take() {
+            if let Some((start, end)) = self.tab_mut().selection.marquee.take() {
                 let extend = ui.input(|i| i.modifiers.shift || i.modifiers.command);
                 self.select_group_in(page, start, end, extend);
             }
@@ -232,7 +233,7 @@ impl crate::PagifyApp {
             if ui.input(|i| i.modifiers.shift || i.modifiers.command) {
                 self.extend_selection_at(page, at);
             } else {
-                self.tab_mut().group = Vec::new();
+                self.tab_mut().selection.group = Vec::new();
                 self.select_thing_at(page, at);
             }
         }
@@ -534,7 +535,7 @@ impl crate::PagifyApp {
     /// going.
     pub(crate) fn draw_object_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
         self.draw_move_guides(ui, page, view);
-        let Some(sel) = self.tab_mut().selected.clone().filter(|s| s.page == page) else { return };
+        let Some(sel) = self.tab_mut().selection.selected.clone().filter(|s| s.page == page) else { return };
         let to_screen = |r: &pdf_core::document::Rect| {
             egui::Rect::from_min_max(
                 view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
@@ -556,7 +557,7 @@ impl crate::PagifyApp {
         // with a screenshot of what a design program shows — the shape turned
         // about its middle, a line from the middle to the pointer, and the angle
         // in a small label beside it.
-        if let Some(grab) = self.tab().grab.clone().filter(|g| g.handle == Some(Handle::Rotate)) {
+        if let Some(grab) = self.tab().selection.grab.clone().filter(|g| g.handle == Some(Handle::Rotate)) {
             let degrees = Self::object_turn(&sel.rect, &grab, self.tab().selection.rotate_snap);
             let centre = view.to_screen(AppPoint::new(
                 ((sel.rect.left + sel.rect.right) / 2.0) as f64,
@@ -586,7 +587,7 @@ impl crate::PagifyApp {
         }
 
         // Where it is going, while it is being dragged.
-        if let Some(grab) = &self.tab_mut().grab {
+        if let Some(grab) = &self.tab_mut().selection.grab {
             let (dx, dy) = grab.by;
             let going = match grab.handle {
                 None => pdf_core::document::Rect {

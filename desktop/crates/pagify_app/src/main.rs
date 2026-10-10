@@ -595,6 +595,24 @@ struct ZoomState {
 /// common method names (`selected`, `group`, `grab`, `marquee`) stay on
 /// `DocTab` for now — they need targeted renames, not a bulk rewrite.
 struct SelectionState {
+    /// What the object tool has selected.
+    selected: Option<Selected>,
+    /// More than one thing, picked up together by dragging a rectangle over
+    /// empty page area — see [`Self::interact_objects`]. Moves and deletes
+    /// as a group; resizing stays a [`Self::selected`]-only, one-thing-at-a-
+    /// time action, since "resize forty characters together" has no one
+    /// obvious meaning the way "move them all by the same amount" does.
+    /// Cleared by anything that sets [`Self::selected`], and vice versa —
+    /// the object tool always has at most one of the two.
+    group: Vec<Selected>,
+    /// A drag in progress on the selection — where it started, what part of
+    /// the selection was grabbed, and how far it has come.
+    grab: Option<Grab>,
+    /// A rectangle being dragged out to build [`Self::group`]: where the
+    /// drag started, and where the pointer is now. Only the two corners —
+    /// which page objects fall inside it is worked out once, when the drag
+    /// ends, not recomputed every frame while it is still being dragged.
+    marquee: Option<(AppPoint, AppPoint)>,
     /// The handle under the pointer as of the last frame it was only
     /// *hovering* — read by [`Self::interact_objects`] when a drag starts,
     /// instead of hit-testing the drag's own current position. Same reason
@@ -815,24 +833,6 @@ struct DocTab {
     /// resized by dragging one of the handles on its outline. Nothing changes
     /// in the document until the pointer is let go.
     object_tool: Option<bool>,
-    /// What the object tool has selected.
-    selected: Option<Selected>,
-    /// A drag in progress on the selection — where it started, what part of
-    /// the selection was grabbed, and how far it has come.
-    grab: Option<Grab>,
-    /// More than one thing, picked up together by dragging a rectangle over
-    /// empty page area — see [`Self::interact_objects`]. Moves and deletes
-    /// as a group; resizing stays a [`Self::selected`]-only, one-thing-at-a-
-    /// time action, since "resize forty characters together" has no one
-    /// obvious meaning the way "move them all by the same amount" does.
-    /// Cleared by anything that sets [`Self::selected`], and vice versa —
-    /// the object tool always has at most one of the two.
-    group: Vec<Selected>,
-    /// A rectangle being dragged out to build [`Self::group`]: where the
-    /// drag started, and where the pointer is now. Only the two corners —
-    /// which page objects fall inside it is worked out once, when the drag
-    /// ends, not recomputed every frame while it is still being dragged.
-    marquee: Option<(AppPoint, AppPoint)>,
     /// Which ribbon tab this document was left on — kept per document so
     /// switching tabs restores exactly how you left it, not just its page.
     ribbon: Tab,
@@ -960,12 +960,8 @@ impl DocTab {
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
             zoom_settle: ZoomState { settling: 0, zoom_basis: 0, last_drawn_zoom: 0.0, zoom_changed_at: f64::NEG_INFINITY },
-            selection: SelectionState { object_hover_handle: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, signature_hover_handle: None, placed_image_selected: None, placed_image_grab: None, placed_image_hover_handle: None, },
+            selection: SelectionState { selected: None, group: Vec::new(), grab: None, marquee: None, object_hover_handle: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, signature_hover_handle: None, placed_image_selected: None, placed_image_grab: None, placed_image_hover_handle: None, },
             object_tool: None,
-            selected: None,
-            grab: None,
-            group: Vec::new(),
-            marquee: None,
             ribbon: Tab::Home,
             closing: None,
             asking_to_secure: None,
@@ -5554,8 +5550,8 @@ impl PagifyApp {
         };
         let mut found = self.things_in(page, rect);
         if extend {
-            let mut members = std::mem::take(&mut self.tab_mut().group);
-            if let Some(sel) = self.tab_mut().selected.take() {
+            let mut members = std::mem::take(&mut self.tab_mut().selection.group);
+            if let Some(sel) = self.tab_mut().selection.selected.take() {
                 members.push(sel);
             }
             for item in found {
@@ -5565,18 +5561,18 @@ impl PagifyApp {
             }
             found = members;
         } else {
-            self.tab_mut().selected = None;
-            self.tab_mut().group = Vec::new();
+            self.tab_mut().selection.selected = None;
+            self.tab_mut().selection.group = Vec::new();
         }
         if found.len() <= 1 {
             if let Some(sel) = found.pop() {
                 self.say_info(format!("{} selected.", sel.what));
-                self.tab_mut().selected = Some(sel);
+                self.tab_mut().selection.selected = Some(sel);
             }
             return;
         }
         self.say_info(format!("{} things selected.", found.len()));
-        self.tab_mut().group = found;
+        self.tab_mut().selection.group = found;
     }
 
     /// Shift-click: add whatever is at `at` to the current selection, or —
@@ -5585,8 +5581,8 @@ impl PagifyApp {
     fn extend_selection_at(&mut self, page: usize, at: AppPoint) {
         let Some(pictures_first) = self.tab_mut().object_tool else { return };
         let Some((object, rect, what)) = self.thing_at(page, at, pictures_first) else { return };
-        let mut members = std::mem::take(&mut self.tab_mut().group);
-        if let Some(sel) = self.tab_mut().selected.take() {
+        let mut members = std::mem::take(&mut self.tab_mut().selection.group);
+        if let Some(sel) = self.tab_mut().selection.selected.take() {
             members.push(sel);
         }
         match members.iter().position(|s| s.page == page && s.object == object) {
@@ -5600,9 +5596,9 @@ impl PagifyApp {
             }
         }
         if members.len() <= 1 {
-            self.tab_mut().selected = members.pop();
+            self.tab_mut().selection.selected = members.pop();
         } else {
-            self.tab_mut().group = members;
+            self.tab_mut().selection.group = members;
         }
     }
 
@@ -5615,10 +5611,10 @@ impl PagifyApp {
         self.tab_mut().tool = None;
         self.put_down_page_editors("switched to Edit Object");
         self.tab_mut().object_tool = Some(pictures_first);
-        self.tab_mut().selected = None;
-        self.tab_mut().grab = None;
-        self.tab_mut().group = Vec::new();
-        self.tab_mut().marquee = None;
+        self.tab_mut().selection.selected = None;
+        self.tab_mut().selection.grab = None;
+        self.tab_mut().selection.group = Vec::new();
+        self.tab_mut().selection.marquee = None;
         self.tab_mut().selection.group_grab = None;
         self.tab_mut().selection.signature_selected = None;
         self.tab_mut().selection.signature_grab = None;
@@ -5675,7 +5671,7 @@ impl PagifyApp {
                 } else {
                     (object, rect, "the words")
                 };
-                self.tab_mut().selected = Some(Selected { page, object, rect, what });
+                self.tab_mut().selection.selected = Some(Selected { page, object, rect, what });
                 if let Some(index) = self.layer_index_for(page, object, rect) {
                     self.tab_mut().selection.picked_layer = Some(index);
                 }
@@ -5683,7 +5679,7 @@ impl PagifyApp {
                 true
             }
             Some((object, rect, what)) => {
-                self.tab_mut().selected = Some(Selected { page, object, rect, what });
+                self.tab_mut().selection.selected = Some(Selected { page, object, rect, what });
                 if let Some(index) = self.layer_index_for(page, object, rect) {
                     self.tab_mut().selection.picked_layer = Some(index);
                 }
@@ -5691,7 +5687,7 @@ impl PagifyApp {
                 true
             }
             None => {
-                self.tab_mut().selected = None;
+                self.tab_mut().selection.selected = None;
                 false
             }
         }
@@ -5784,7 +5780,7 @@ impl PagifyApp {
     /// The handle under a point on the current selection, if any, allowing
     /// for the handles being drawn at a fixed size on screen.
     fn handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
-        let sel = self.tab().selected.as_ref()?;
+        let sel = self.tab().selection.selected.as_ref()?;
         // The rotate handle floats above the top edge, so it is asked first: it
         // is the one handle that is not on the rectangle itself.
         let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
@@ -5809,7 +5805,7 @@ impl PagifyApp {
     /// box its own resize handles sit on. `None` with fewer than one member
     /// there, same as no selection at all.
     fn group_bounds(&self, page: usize) -> Option<pdf_core::document::Rect> {
-        let mut members = self.tab().group.iter().filter(|m| m.page == page).map(|m| m.rect);
+        let mut members = self.tab().selection.group.iter().filter(|m| m.page == page).map(|m| m.rect);
         let mut bounds = members.next()?;
         for r in members {
             bounds.left = bounds.left.min(r.left);
@@ -5882,11 +5878,11 @@ impl PagifyApp {
     /// drawn while it moves and the place it is dropped are the same place, and
     /// letting go away from a line is not "sticky".
     fn snap_the_move(&mut self, page: usize, scale: f32, snap: bool) {
-        if let (Some(grab), Some(sel)) = (self.tab().grab.clone(), self.tab().selected.clone()) {
+        if let (Some(grab), Some(sel)) = (self.tab().selection.grab.clone(), self.tab().selection.selected.clone()) {
             if grab.handle.is_none() && sel.page == page {
                 let moving = Self::shifted(sel.rect, grab.by);
                 let (nudge, _) = self.align_for(page, moving, &[sel.object], scale, snap);
-                if let Some(g) = self.tab_mut().grab.as_mut() {
+                if let Some(g) = self.tab_mut().selection.grab.as_mut() {
                     g.by = (g.by.0 + nudge.0, g.by.1 + nudge.1);
                 }
             }
@@ -5895,7 +5891,7 @@ impl PagifyApp {
             if grab.handle.is_none() {
                 if let Some(bounds) = self.group_bounds(page) {
                     let members: Vec<usize> =
-                        self.tab().group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
+                        self.tab().selection.group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
                     let moving = Self::shifted(bounds, grab.by);
                     let (nudge, _) = self.align_for(page, moving, &members, scale, snap);
                     if let Some(g) = self.tab_mut().selection.group_grab.as_mut() {
@@ -6035,7 +6031,7 @@ impl PagifyApp {
         // at the new centre could pick a different granularity than the one
         // actually dragged.
         if !self.select_thing_at_drilling(sel.page, middle, false) {
-            self.tab_mut().selected = None;
+            self.tab_mut().selection.selected = None;
         }
     }
 
@@ -6057,7 +6053,7 @@ impl PagifyApp {
                 if (dx * scale).hypot(dy * scale) < Self::MIN_DRAG_PX {
                     return;
                 }
-                let members = std::mem::take(&mut self.tab_mut().group);
+                let members = std::mem::take(&mut self.tab_mut().selection.group);
                 let total = members.len();
                 let page = members.first().map(|m| m.page);
                 // **One command, so one `undo`.** A loop of `MoveObject`s put
@@ -6078,7 +6074,7 @@ impl PagifyApp {
                         .collect(),
                 );
                 let moved_rects = moved.is_ok();
-                self.tab_mut().group = members
+                self.tab_mut().selection.group = members
                     .into_iter()
                     .map(|mut m| {
                         if moved_rects {
@@ -6101,7 +6097,7 @@ impl PagifyApp {
                 }
             }
             Some(handle) => {
-                let Some(page) = self.tab_mut().group.first().map(|m| m.page) else { return };
+                let Some(page) = self.tab_mut().selection.group.first().map(|m| m.page) else { return };
                 let Some(bounds) = self.group_bounds(page) else { return };
                 let (sx, sy) = handle.scale(&bounds, (dx, dy));
                 if (sx - 1.0).abs() < 0.005 && (sy - 1.0).abs() < 0.005 {
@@ -6109,7 +6105,7 @@ impl PagifyApp {
                 }
                 let (ax, ay) = handle.anchor(&bounds);
                 let anchor = pdf_core::document::Point { x: ax, y: ay };
-                let members = std::mem::take(&mut self.tab_mut().group);
+                let members = std::mem::take(&mut self.tab_mut().selection.group);
                 let total = members.len();
                 let resized = self.run_group_command(
                     members
@@ -6124,7 +6120,7 @@ impl PagifyApp {
                         .collect(),
                 );
                 let resized_rects = resized.is_ok();
-                self.tab_mut().group = members
+                self.tab_mut().selection.group = members
                     .into_iter()
                     .map(|mut m| {
                         if resized_rects {
@@ -6173,7 +6169,7 @@ impl PagifyApp {
     /// after any edit, just now happening mid-batch instead of between one
     /// drag and the next.
     fn delete_group(&mut self) {
-        let members = std::mem::take(&mut self.tab_mut().group);
+        let members = std::mem::take(&mut self.tab_mut().selection.group);
         let total = members.len();
 
         // One `RemoveObjects` call per page, not one `RemoveObject` call per
@@ -6678,7 +6674,7 @@ impl PagifyApp {
         };
         let painter = ui.painter();
 
-        if let Some((start, current)) = self.tab_mut().marquee {
+        if let Some((start, current)) = self.tab_mut().selection.marquee {
             let rect = egui::Rect::from_two_pos(view.to_screen(start), view.to_screen(current));
             painter.rect_filled(rect, egui::CornerRadius::ZERO, theme::violet().gamma_multiply(0.08));
             painter.rect_stroke(
@@ -6718,7 +6714,7 @@ impl PagifyApp {
             }
         };
 
-        for member in self.tab().group.iter().filter(|m| m.page == page) {
+        for member in self.tab().selection.group.iter().filter(|m| m.page == page) {
             let outline = to_screen(&going(&member.rect));
             if self.tab().selection.group_grab.is_some() {
                 painter.rect_filled(outline, egui::CornerRadius::ZERO, theme::violet().gamma_multiply(0.10));
@@ -8183,7 +8179,7 @@ impl PagifyApp {
         // through to `copy_selection`'s "nothing selected", leaving whatever
         // `object_clipboard` already held from an earlier copy untouched:
         // `paste` then put the *previous* copy down again, silently.
-        let members: Vec<Selected> = self.tab().group.iter().filter(|s| s.page == page).cloned().collect();
+        let members: Vec<Selected> = self.tab().selection.group.iter().filter(|s| s.page == page).cloned().collect();
         if !members.is_empty() {
             let Some(bounds) = self.group_bounds(page) else { return false };
             let cx = (bounds.left + bounds.right) / 2.0;
@@ -8247,7 +8243,7 @@ impl PagifyApp {
             return true;
         }
         // A picture, shape or run of words picked with Edit Object.
-        if let Some(sel) = self.tab().selected.clone().filter(|s| s.page == page) {
+        if let Some(sel) = self.tab().selection.selected.clone().filter(|s| s.page == page) {
             return self.copy_page_object(&sel);
         }
         false
@@ -9529,10 +9525,10 @@ impl PagifyApp {
             self.say_info("nothing was added.");
         }
         if self.tab_mut().object_tool.take().is_some() {
-            self.tab_mut().selected = None;
-            self.tab_mut().grab = None;
-            self.tab_mut().group = Vec::new();
-            self.tab_mut().marquee = None;
+            self.tab_mut().selection.selected = None;
+            self.tab_mut().selection.grab = None;
+            self.tab_mut().selection.group = Vec::new();
+            self.tab_mut().selection.marquee = None;
             self.tab_mut().selection.group_grab = None;
             self.say_info("object tool put down.");
         }
@@ -12788,8 +12784,8 @@ impl PagifyApp {
         // trace, which is exactly the shape of gap that made a reported
         // corruption impossible to confirm or rule out from the log alone.
         self.put_down_page_editors("started a new text box");
-        self.tab_mut().selected = None;
-        self.tab_mut().group.clear();
+        self.tab_mut().selection.selected = None;
+        self.tab_mut().selection.group.clear();
         if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
             layer.clear_selection();
         }
@@ -13583,9 +13579,9 @@ impl PagifyApp {
         // `erase_selection` below reaches. Falling through when there is no
         // object selected keeps today's behaviour for the drawing tools
         // exactly as it was.
-        if !self.tab_mut().group.is_empty() {
+        if !self.tab_mut().selection.group.is_empty() {
             self.delete_group();
-        } else if let Some(sel) = self.tab_mut().selected.clone() {
+        } else if let Some(sel) = self.tab_mut().selection.selected.clone() {
             let result = match &self.tab_mut().doc {
                 Some(doc) => doc
                     .session
@@ -13602,7 +13598,7 @@ impl PagifyApp {
                     if let Some(doc) = &mut self.tab_mut().doc {
                         doc.rendered_is_stale();
                     }
-                    self.tab_mut().selected = None;
+                    self.tab_mut().selection.selected = None;
                     self.say_info(format!("{} removed from page {}.", sel.what, sel.page + 1));
                 }
                 Err(e) => self.say_error(e),

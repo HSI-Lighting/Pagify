@@ -1453,7 +1453,7 @@ fn dragging_an_object_handle_through_the_real_pointer_path_resizes_it() {
     });
     click(&mut h, middle);
     assert!(
-        h.state().tab().selected.is_some(),
+        h.state().tab().selection.selected.is_some(),
         "clicking the picture through a real pointer event did not select it"
     );
 
@@ -1806,12 +1806,12 @@ fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
     let to = view.to_screen(AppPoint { x: inside_group.x + 60.0, y: inside_group.y + 40.0 });
     drag(&mut h, from, to);
     let grabbed_the_group =
-        h.state().tab().selected.as_ref().is_some_and(|s| s.what == "the group it is drawn in");
+        h.state().tab().selection.selected.as_ref().is_some_and(|s| s.what == "the group it is drawn in");
     assert!(
         !grabbed_the_group,
         "a drag starting inside the form's shape grabbed the whole group instead of \
          starting a marquee: {:?}",
-        h.state().tab().selected
+        h.state().tab().selection.selected
     );
 
     // The same spot, clicked rather than dragged, still reaches the
@@ -1819,10 +1819,10 @@ fn dragging_from_inside_a_forms_own_shape_starts_a_marquee_not_a_grab() {
     // starts, not about taking the click away from it.
     click(&mut h, from);
     assert_eq!(
-        h.state().tab().selected.as_ref().map(|s| s.what),
+        h.state().tab().selection.selected.as_ref().map(|s| s.what),
         Some("the group it is drawn in"),
         "a plain click on the same spot should still select the group: {:?}",
-        h.state().tab().selected
+        h.state().tab().selection.selected
     );
 }
 
@@ -1841,7 +1841,7 @@ fn dragging_an_unselected_picture_starts_a_marquee_not_a_grab() {
     h.run_steps(1);
 
     let image = h.state().tab().doc.as_ref().unwrap().session.images_on(0).unwrap().remove(0);
-    assert!(h.state().tab().selected.is_none(), "nothing should be selected yet");
+    assert!(h.state().tab().selection.selected.is_none(), "nothing should be selected yet");
     let middle = view.to_screen(AppPoint {
         x: ((image.rect.left + image.rect.right) / 2.0) as f64,
         y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
@@ -1872,7 +1872,7 @@ fn dragging_an_already_selected_pictures_body_still_moves_it() {
         y: ((image.rect.top + image.rect.bottom) / 2.0) as f64,
     });
     click(&mut h, middle);
-    assert!(h.state().tab().selected.is_some(), "the click should have selected the picture");
+    assert!(h.state().tab().selection.selected.is_some(), "the click should have selected the picture");
 
     drag(&mut h, middle, middle + egui::vec2(60.0, 40.0));
 
@@ -4628,10 +4628,10 @@ fn ctrl_clicking_adds_to_and_removes_from_the_selection_through_the_real_pointer
     let (a, b) = (screen_centre(&mut h, first.rect), screen_centre(&mut h, second.rect));
 
     click(&mut h, a);
-    assert_eq!(h.state_mut().tab_mut().selected.as_ref().map(|s| s.object), Some(first.object), "setup");
+    assert_eq!(h.state_mut().tab_mut().selection.selected.as_ref().map(|s| s.object), Some(first.object), "setup");
 
     click_holding(&mut h, b, egui::Modifiers::COMMAND);
-    let objects: Vec<usize> = h.state_mut().tab_mut().group.iter().map(|s| s.object).collect();
+    let objects: Vec<usize> = h.state_mut().tab_mut().selection.group.iter().map(|s| s.object).collect();
     assert!(
         objects.contains(&first.object) && objects.contains(&second.object),
         "Ctrl-click did not add the second picture: group {objects:?}"
@@ -4639,7 +4639,7 @@ fn ctrl_clicking_adds_to_and_removes_from_the_selection_through_the_real_pointer
 
     click_holding(&mut h, a, egui::Modifiers::COMMAND);
     assert_eq!(
-        h.state_mut().tab_mut().selected.as_ref().map(|s| s.object),
+        h.state_mut().tab_mut().selection.selected.as_ref().map(|s| s.object),
         Some(second.object),
         "Ctrl-clicking a selected picture did not take it out"
     );
@@ -4667,7 +4667,7 @@ fn moving_a_group_is_one_undo_step() {
         AppPoint { x: area.right as f64, y: area.bottom as f64 },
         false,
     );
-    let members = h.state_mut().tab_mut().group.len();
+    let members = h.state_mut().tab_mut().selection.group.len();
     assert!(members >= 2, "setup: the marquee should have selected several runs, got {members}");
 
     let where_are = |h: &mut Harness<'static, PagifyApp>| -> Vec<(usize, f32, f32)> {
@@ -4703,7 +4703,7 @@ fn a_group_move_that_one_member_refuses_moves_none_of_them() {
     h.run_steps(3);
     let runs = h.state_mut().tab_mut().doc.as_ref().expect("open").session.text_runs(0).expect("runs");
     let (good, other) = (runs[0].clone(), runs[1].clone());
-    h.state_mut().tab_mut().group = vec![
+    h.state_mut().tab_mut().selection.group = vec![
         Selected { page: 0, object: good.object, rect: good.rect, what: "the text" },
         Selected { page: 0, object: other.object, rect: other.rect, what: "the text" },
         Selected { page: 0, object: 999_999, rect: other.rect, what: "the text" },
@@ -4731,7 +4731,7 @@ fn a_whole_paragraph_moves_undoes_and_moves_again_on_the_real_datasheet() {
         AppPoint { x: 146.0, y: 409.0 },
         false,
     );
-    let members = h.state_mut().tab_mut().group.len();
+    let members = h.state_mut().tab_mut().selection.group.len();
     assert!(members >= 20, "setup: expected the paragraph's pieces to be selected, got {members}");
 
     let where_are = |h: &mut Harness<'static, PagifyApp>| -> Vec<(usize, f32, f32)> {
@@ -4739,7 +4739,7 @@ fn a_whole_paragraph_moves_undoes_and_moves_again_on_the_real_datasheet() {
         runs.iter().map(|r| (r.object, r.rect.left, r.rect.top)).collect()
     };
     let before = where_are(&mut h);
-    let members_before: Vec<usize> = h.state_mut().tab_mut().group.iter().map(|m| m.object).collect();
+    let members_before: Vec<usize> = h.state_mut().tab_mut().selection.group.iter().map(|m| m.object).collect();
     let grab = |dx, dy| Grab { handle: None, from: AppPoint { x: 0.0, y: 0.0 }, by: (dx, dy) };
 
     let started = std::time::Instant::now();

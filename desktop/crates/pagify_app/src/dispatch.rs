@@ -948,6 +948,7 @@ impl crate::PagifyApp {
             Verb::Opacity(percent) => {
                 let page = self.tab_mut().view_state.page;
                 let target = self.tab_mut()
+                    .selection
                     .selected
                     .as_ref()
                     .filter(|s| s.page == page)

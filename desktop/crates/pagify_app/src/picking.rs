@@ -39,10 +39,10 @@ impl crate::PagifyApp {
         // `interact` checks `self.tab_mut().object_tool.is_some()` first
         // and takes the pointer outright when it is.
         if self.tab_mut().object_tool.take().is_some() {
-            self.tab_mut().selected = None;
-            self.tab_mut().grab = None;
-            self.tab_mut().group = Vec::new();
-            self.tab_mut().marquee = None;
+            self.tab_mut().selection.selected = None;
+            self.tab_mut().selection.grab = None;
+            self.tab_mut().selection.group = Vec::new();
+            self.tab_mut().selection.marquee = None;
             self.tab_mut().selection.group_grab = None;
         }
         self.put_down_page_editors("armed a different tool");
