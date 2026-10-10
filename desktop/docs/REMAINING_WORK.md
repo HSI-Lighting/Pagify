@@ -101,34 +101,18 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   carry `Command::Verb(...)`/`ToolId` instead of bare strings, and
   `Tool::id()`/`ToolId` are in `tool.rs`. Keep the command-box string parser
   as the boundary where strings become ids.
-2. **State sub-structs and folding into `Tool`.** `PagifyApp` ~53 fields
-  (target 15); `DocTab` is down from ~84 to **~66** (target 25). Done so
-  far: `edit: EditState` (`editing_run`, `new_text_box`), `panels:
-  PanelsState` (10 search/spelling/bookmark/prompt fields), `organize:
-  OrganizeState` (4), `zoom_settle: ZoomState` (4) — commits `5d4a448`,
-  `cb193c2`, `4dddd55`, each `.field` → `.group.field` with compile+suite
-  verification, and the fields' rationale docs moved with them.
-  `paste_ghost` stayed on `PagifyApp` (app-wide clipboard ghost).
-  `selection: SelectionState` now holds nineteen of the gesture fields
-  (commit `f3d07b4`), and `view_state: ViewState` holds twelve of the
-  view fields (hover/last view, viewport, scroll offsets, deferred pan/
-  scroll-to, canvas point, reveal, saved revision, queued copy — commit
-  `c81eb0e`), and the scoped pass has since moved `page`/`zoom`/
-  `rotation`/`view` into it too, then the scoped pass for `selected`/
-  `group`/`grab`/`marquee` (`SelectionState`), and finally `secure_state`
-  (9 passcode/redaction fields), `undo_state` (3) and `tool_state` (2).
-  **`DocTab` is at 20 fields — its 25 target is met.** `PagifyApp` is at
-  **27** (target 15): `FacesState` (10), `UpdateState` (2),
-  `ClipboardState` (3 of 6), `LibraryState` (6), `PrefsState` (4),
-  `RenderState` (3) and `UiState` (5) are in. Remaining: the fields whose
-  names collide with other structs — `signatures`/`predefined`/`ortho`
-  (methods or types share the name) and the clipboard trio
-  (`object_clipboard`/`paste_count`/`page_clipboard` also live on
-  `hub.rs`'s window struct) — which need receiver-scoped rewrites; plus
-  `tabs`/`active_tab`/`cmd`/`recorder`/`recent`/`outlined_fonts`/
-  `recogniser`/`mark`/`signature_textures`/`session_log`/`handover`/
-  `win`/`replay_depth`/`pending_update` (some of these will stay: they
-  are the struct's own root state). `Doc` already delegates caches.
+2. **State sub-structs — DONE, both field targets met.** `DocTab` is at
+  **20** fields (target 25) in ten groups: `EditState`, `PanelsState`,
+  `OrganizeState`, `ZoomState`, `SelectionState`, `ViewState`,
+  `SecureState`, `UndoState`, `ToolState` (+ `Doc`/`Markup`/
+  `Calibration`). `PagifyApp` is at **13** (target 15) in ten groups:
+  `FacesState`, `UpdateState`, `ClipboardState`, `LibraryState`,
+  `PrefsState`, `RenderState`, `UiState`, `RecordingState`, `HubState`
+  (+ `tabs`/`active_tab`/`cmd` which are the root itself). Every fold was
+  `.field` → `.group.field` with compile+suite verification; the final
+  scoped passes handled names shared with `hub.rs` (the `app.*` receiver
+  is always `PagifyApp`, `self.*` in hub's own impls is not) and
+  compiler-driven column patches for closure locals.
 3. **Event-returning transitions — DONE.** `ToolEffect` +
   `Tool::on_click`/`on_pointer`/`on_cancel`/`on_key`/`preview` exist in
   `tool.rs`; `canvas::draw_pending_preview`/`drag_stopped` delegate to them;
