@@ -875,7 +875,7 @@ fn dragging_a_selected_signature_moves_it() {
     let (w0, h0) = (mark.rect.right - mark.rect.left, mark.rect.bottom - mark.rect.top);
     let (w1, h1) = (moved.rect.right - moved.rect.left, moved.rect.bottom - moved.rect.top);
     assert!((w0 - w1).abs() < 0.5 && (h0 - h1).abs() < 0.5, "a move changed the size");
-    assert_eq!(app.tab_mut().signature_selected, Some(SignatureSelected { page: 0, index: moved.index, rect: moved.rect, rotation: moved.rotation }), "the selection did not follow the move");
+    assert_eq!(app.tab_mut().selection.signature_selected, Some(SignatureSelected { page: 0, index: moved.index, rect: moved.rect, rotation: moved.rotation }), "the selection did not follow the move");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -954,7 +954,7 @@ fn dragging_a_selected_placed_image_moves_it() {
     let (w1, h1) = (moved.rect.right - moved.rect.left, moved.rect.bottom - moved.rect.top);
     assert!((w0 - w1).abs() < 0.5 && (h0 - h1).abs() < 0.5, "a move changed the size");
     assert_eq!(
-        app.tab_mut().placed_image_selected,
+        app.tab_mut().selection.placed_image_selected,
         Some(PlacedImageSelected { page: 0, index: moved.index, rect: moved.rect, rotation: moved.rotation }),
         "the selection did not follow the move"
     );
@@ -1237,7 +1237,7 @@ fn joining_two_distant_runs_opens_them_as_one_paragraph_and_persists() {
     );
 
     let total_chars = app.characters(0).expect("characters").len();
-    app.tab_mut().text_selection = Some(0..total_chars);
+    app.tab_mut().selection.text_selection = Some(0..total_chars);
     app.tab_mut().organize.selection_page = 0;
 
     let message = app.join_selected_text().expect("join should succeed");
@@ -1272,7 +1272,7 @@ fn splitting_a_joined_pair_edits_them_separately_again() {
     let b = runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone();
 
     let total_chars = app.characters(0).expect("characters").len();
-    app.tab_mut().text_selection = Some(0..total_chars);
+    app.tab_mut().selection.text_selection = Some(0..total_chars);
     app.tab_mut().organize.selection_page = 0;
     app.join_selected_text().expect("join should succeed");
     assert!(app.group_containing(0, b.object).is_some(), "setup: should be joined");
@@ -1305,7 +1305,7 @@ fn joining_a_single_run_selection_is_refused() {
         .characters(0)
         .and_then(|c| c.range_between((centre.0, centre.1), (centre.0, centre.1)))
         .expect("a point inside a run's own rect should hit something");
-    app.tab_mut().text_selection = Some(range);
+    app.tab_mut().selection.text_selection = Some(range);
     app.tab_mut().organize.selection_page = 0;
     assert!(app.join_selected_text().is_err(), "one run alone is nothing to join");
 }
@@ -1352,7 +1352,7 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
         .characters(0)
         .and_then(|c| c.range_between(centre_a, centre_a))
         .expect("a point inside a's own rect");
-    app.tab_mut().text_selection = Some(sample_range);
+    app.tab_mut().selection.text_selection = Some(sample_range);
     app.tab_mut().organize.selection_page = 0;
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
     assert!(
@@ -1365,7 +1365,7 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
         .characters(0)
         .and_then(|c| c.range_between(centre_b, centre_b))
         .expect("a point inside b's own rect");
-    app.tab_mut().text_selection = Some(target_range);
+    app.tab_mut().selection.text_selection = Some(target_range);
     app.tab_mut().organize.selection_page = 0;
     let message = app.apply_match_properties_to_current_selection().expect("match should succeed");
     assert!(message.contains("matched"), "unexpected message: {message}");
@@ -1393,7 +1393,7 @@ fn matching_properties_copies_size_and_colour_to_the_target() {
 #[test]
 fn an_empty_selection_is_refused_by_both_match_properties_steps() {
     let mut app = app("two-column.pdf");
-    app.tab_mut().text_selection = Some(0..0);
+    app.tab_mut().selection.text_selection = Some(0..0);
     app.tab_mut().organize.selection_page = 0;
     assert!(
         app.match_properties_sample_from_current_selection().is_err(),
@@ -1409,7 +1409,7 @@ fn an_empty_selection_is_refused_by_both_match_properties_steps() {
         objects: Vec::new(),
         points: Vec::new(),
     });
-    app.tab_mut().text_selection = Some(0..0);
+    app.tab_mut().selection.text_selection = Some(0..0);
     app.tab_mut().organize.selection_page = 0;
     assert!(
         app.apply_match_properties_to_current_selection().is_err(),
@@ -1441,7 +1441,7 @@ fn right_click_text_actions_are_computed_correctly_from_one_call() {
         .characters(0)
         .and_then(|c| c.range_between(centre_a, centre_b))
         .expect("a range covering both runs");
-    app.tab_mut().text_selection = Some(range);
+    app.tab_mut().selection.text_selection = Some(range);
     app.tab_mut().organize.selection_page = 0;
 
     let at = AppPoint { x: centre_a.0 as f64, y: centre_a.1 as f64 };
@@ -1865,14 +1865,14 @@ fn deleting_a_selected_placed_picture_removes_it() {
     app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("placed");
     let mark = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
-    app.tab_mut().placed_image_selected =
+    app.tab_mut().selection.placed_image_selected =
         Some(PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     app.delete_selection();
 
     let remaining = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap();
     assert!(remaining.is_empty(), "the picture should be gone");
-    assert!(app.tab_mut().placed_image_selected.is_none(), "the selection should have cleared with it");
+    assert!(app.tab_mut().selection.placed_image_selected.is_none(), "the selection should have cleared with it");
 }
 
 #[test]
@@ -1882,14 +1882,14 @@ fn deleting_a_selected_signature_removes_it() {
     app.submit("signature");
     app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
-    app.tab_mut().signature_selected =
+    app.tab_mut().selection.signature_selected =
         Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     app.delete_selection();
 
     let remaining = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap();
     assert!(remaining.is_empty(), "the signature should be gone");
-    assert!(app.tab_mut().signature_selected.is_none(), "the selection should have cleared with it");
+    assert!(app.tab_mut().selection.signature_selected.is_none(), "the selection should have cleared with it");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2027,7 +2027,7 @@ fn copying_and_pasting_a_selected_placed_picture_makes_a_second_one() {
     app.place_image_at(0, AppPoint { x: 100.0, y: 400.0 }, solid_rgba(4, 4, [40, 90, 200]), 4, 4)
         .expect("placed");
     let mark = app.tab_mut().doc.as_ref().unwrap().session.placed_image_marks(0).unwrap().remove(0);
-    app.tab_mut().placed_image_selected =
+    app.tab_mut().selection.placed_image_selected =
         Some(PlacedImageSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     assert!(app.copy_object_selection(), "the selected picture should have been copied");
@@ -2062,13 +2062,13 @@ fn a_negligible_drag_on_a_signature_changes_nothing() {
 
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
-    app.tab_mut().signature_selected = Some(sel.clone());
+    app.tab_mut().selection.signature_selected = Some(sel.clone());
     let grab = Grab { handle: None, from: AppPoint { x: mark.rect.left as f64, y: mark.rect.top as f64 }, by: (0.1, -0.1) };
     app.finish_signature_grab(sel.clone(), grab);
 
     let still = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     assert_eq!(still.rect, mark.rect, "a negligible drag moved the signature");
-    assert_eq!(app.tab_mut().signature_selected, Some(sel), "the selection should be exactly what was passed in, untouched");
+    assert_eq!(app.tab_mut().selection.signature_selected, Some(sel), "the selection should be exactly what was passed in, untouched");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2084,10 +2084,10 @@ fn applying_signatures_clears_the_signature_selection() {
     app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
 
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
-    app.tab_mut().signature_selected = Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
+    app.tab_mut().selection.signature_selected = Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     app.submit("applysignatures");
-    assert!(app.tab_mut().signature_selected.is_none(), "a stale selection survived applying");
+    assert!(app.tab_mut().selection.signature_selected.is_none(), "a stale selection survived applying");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2144,7 +2144,7 @@ fn dragging_the_rotate_handle_turns_the_signature() {
     assert!((turned.rotation - 90.0).abs() < 1.0, "expected roughly a 90-degree turn, got {}", turned.rotation);
     assert_eq!(turned.rect, mark.rect, "rotating must not move the picture's own rect");
     assert_eq!(
-        app.tab_mut().signature_selected,
+        app.tab_mut().selection.signature_selected,
         Some(SignatureSelected { page: 0, index: turned.index, rect: turned.rect, rotation: turned.rotation }),
         "the selection should carry the new rotation forward"
     );
@@ -2163,7 +2163,7 @@ fn a_negligible_rotate_drag_changes_nothing() {
 
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     let sel = SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation };
-    app.tab_mut().signature_selected = Some(sel.clone());
+    app.tab_mut().selection.signature_selected = Some(sel.clone());
     let centre_ish = AppPoint {
         x: ((mark.rect.left + mark.rect.right) / 2.0) as f64 + 20.0,
         y: ((mark.rect.top + mark.rect.bottom) / 2.0) as f64,
@@ -2174,7 +2174,7 @@ fn a_negligible_rotate_drag_changes_nothing() {
 
     let still = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
     assert_eq!(still.rotation, 0.0, "a negligible drag should not have rotated the signature");
-    assert_eq!(app.tab_mut().signature_selected, Some(sel), "the selection should be untouched");
+    assert_eq!(app.tab_mut().selection.signature_selected, Some(sel), "the selection should be untouched");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -2190,7 +2190,7 @@ fn signature_handle_at_finds_the_rotate_handle() {
     app.place_signature(0, AppPoint { x: 100.0, y: 400.0 }).expect("placed");
 
     let mark = app.tab_mut().doc.as_ref().unwrap().session.image_signature_marks(0).unwrap().remove(0);
-    app.tab_mut().signature_selected =
+    app.tab_mut().selection.signature_selected =
         Some(SignatureSelected { page: 0, index: mark.index, rect: mark.rect, rotation: mark.rotation });
 
     // A simple 1:1 view with the page's own origin at the screen origin.
@@ -2455,7 +2455,7 @@ fn bookmarking_a_page_marks_it_for_the_corner_icon() {
 fn bookmarking_with_a_selection_uses_it_as_the_title() {
     let mut app = app("two-column.pdf");
     let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
-    app.tab_mut().text_selection = Some(range);
+    app.tab_mut().selection.text_selection = Some(range);
     app.tab_mut().organize.selection_page = 0;
 
     app.submit("bookmark");
@@ -2494,13 +2494,13 @@ fn weblinks_arms_when_nothing_is_selected() {
 fn weblinks_opens_the_prompt_when_text_is_already_selected() {
     let mut app = app("two-column.pdf");
     let range = app.characters(0).expect("chars").find("the").first().cloned().expect("a match");
-    app.tab_mut().text_selection = Some(range);
+    app.tab_mut().selection.text_selection = Some(range);
     app.tab_mut().organize.selection_page = 0;
 
     app.submit("weblinks");
 
     assert!(app.tab_mut().panels.pending_link.is_some(), "the prompt did not open");
-    assert!(app.tab_mut().text_selection.is_none(), "the selection should have been consumed");
+    assert!(app.tab_mut().selection.text_selection.is_none(), "the selection should have been consumed");
     assert!(app.tab_mut().tool.is_none(), "arming is only for when nothing was selected yet");
 }
 
@@ -2532,7 +2532,7 @@ fn jointext_joins_an_already_made_selection_at_once() {
         .characters(0)
         .and_then(|c| c.range_between(centre_a, centre_b))
         .expect("a range covering both runs");
-    app.tab_mut().text_selection = Some(range);
+    app.tab_mut().selection.text_selection = Some(range);
     app.tab_mut().organize.selection_page = 0;
 
     app.submit("jointext");
@@ -5495,7 +5495,7 @@ fn the_lock_verb_takes_the_selection_that_is_already_there() {
     let mut app = app("text-lines.pdf");
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let chars = app.characters(0).expect("characters").clone();
-    app.tab_mut().text_selection = Some(0..chars.len().min(8));
+    app.tab_mut().selection.text_selection = Some(0..chars.len().min(8));
     app.tab_mut().organize.selection_page = 0;
 
     app.submit("lock");
@@ -5738,7 +5738,7 @@ fn locking_a_selection_across_lines_sends_the_lines_not_their_union() {
     let to = at + phrase.chars().count() + 8;
 
     app.tab_mut().organize.selection_page = page;
-    app.tab_mut().text_selection = Some(at..to);
+    app.tab_mut().selection.text_selection = Some(at..to);
     app.lock_selection();
 
     match app.tab_mut().awaiting_password.take() {
@@ -5796,7 +5796,7 @@ fn a_picked_layer_can_be_brought_to_the_front() {
     // for when something has covered it.
     let bottom = listed.first().cloned().expect("something is drawn");
 
-    app.tab_mut().picked_layer = Some(bottom.object);
+    app.tab_mut().selection.picked_layer = Some(bottom.object);
     app.submit("bringtofront");
     assert!(
         said(&app).contains("brought to the front"),
@@ -5815,7 +5815,7 @@ fn a_picked_layer_can_be_brought_to_the_front() {
     // And the pick follows it to its new place, so the next move acts on
     // the same thing rather than on whatever now sits at the old row.
     assert_eq!(
-        app.tab_mut().picked_layer,
+        app.tab_mut().selection.picked_layer,
         Some(now.len() - 1),
         "the pick did not follow the thing it was on"
     );
@@ -5930,7 +5930,7 @@ fn a_click_with_the_object_tool_selects_and_moves_nothing() {
     let sel = app.tab_mut().selected.clone().expect("selected");
     assert_eq!(sel.what, "the shape");
     assert!(said(&app).contains("the shape selected"), "{}", said(&app));
-    let picked = app.tab_mut().picked_layer.and_then(|at| app.layers_on(0).get(at).cloned());
+    let picked = app.tab_mut().selection.picked_layer.and_then(|at| app.layers_on(0).get(at).cloned());
     assert_eq!(picked.map(|d| d.kind), Some(pdf_core::document::DrawnKind::Shape));
     let after = app.tab_mut().doc.as_ref().expect("open").session.drawn_objects(0).expect("objects");
     assert_eq!(after.len(), before.len());
@@ -6281,7 +6281,7 @@ fn a_picked_layer_can_be_nudged_up_and_stays_picked() {
     let mut app = app("covered.pdf");
     let listed = app.layers_on(0).to_vec();
     let picture_at = listed.iter().position(|d| d.kind == pdf_core::document::DrawnKind::Picture).expect("the picture");
-    app.tab_mut().picked_layer = Some(picture_at);
+    app.tab_mut().selection.picked_layer = Some(picture_at);
 
     // Up passes the panel it was under, and says so.
     app.restack_picked(pdf_core::document::Stacking::Up);
@@ -6291,7 +6291,7 @@ fn a_picked_layer_can_be_nudged_up_and_stays_picked() {
     let panel_now = now.iter().position(|d| d.kind == pdf_core::document::DrawnKind::Shape).expect("panel");
     assert!(picture_now > panel_now, "the picture should now be over the panel: {now:#?}");
     // Still picked, at its new row, so the next nudge acts on the same thing.
-    assert_eq!(app.tab_mut().picked_layer, Some(picture_now), "the pick did not follow the thing it was on");
+    assert_eq!(app.tab_mut().selection.picked_layer, Some(picture_now), "the pick did not follow the thing it was on");
 
     // Down puts it back under.
     app.restack_picked(pdf_core::document::Stacking::Down);
@@ -6668,7 +6668,7 @@ fn the_selection_menu_asks_for_an_incomplete_lock() {
     let mut app = app("text-lines.pdf");
     app.tab_mut().doc.as_mut().unwrap().caches.text = None;
     let chars = app.characters(0).expect("characters").clone();
-    app.tab_mut().text_selection = Some(0..chars.len().min(8));
+    app.tab_mut().selection.text_selection = Some(0..chars.len().min(8));
     app.tab_mut().organize.selection_page = 0;
 
     app.lock_selection();
@@ -7580,12 +7580,12 @@ fn matching_properties_does_not_corrupt_the_page() {
     let from = (278.0, 305.0);
     let to = (300.0, 305.0);
     let sample_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
-    app.tab_mut().text_selection = Some(sample_range);
+    app.tab_mut().selection.text_selection = Some(sample_range);
     app.tab_mut().organize.selection_page = 0;
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");
 
     let target_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
-    app.tab_mut().text_selection = Some(target_range);
+    app.tab_mut().selection.text_selection = Some(target_range);
     app.tab_mut().organize.selection_page = 0;
     app.apply_match_properties_to_current_selection().expect("match should succeed");
 
@@ -7640,7 +7640,7 @@ fn matching_properties_on_a_small_selection_is_fast_on_a_busy_page() {
     let from = (278.0, 305.0);
     let to = (300.0, 305.0);
     let sample_range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
-    app.tab_mut().text_selection = Some(sample_range);
+    app.tab_mut().selection.text_selection = Some(sample_range);
     app.tab_mut().organize.selection_page = 0;
 
     let started = std::time::Instant::now();
@@ -7675,7 +7675,7 @@ fn matching_properties_finds_the_sample_the_selection_only_starts_inside() {
     let from = (a.rect.right - 1.0, (a.rect.top + a.rect.bottom) / 2.0);
     let to = ((b.rect.left + b.rect.right) / 2.0, (b.rect.top + b.rect.bottom) / 2.0);
     let range = app.characters(0).and_then(|c| c.range_between(from, to)).expect("a range");
-    app.tab_mut().text_selection = Some(range);
+    app.tab_mut().selection.text_selection = Some(range);
     app.tab_mut().organize.selection_page = 0;
 
     app.match_properties_sample_from_current_selection().expect("sample should be accepted");

@@ -19,7 +19,7 @@ fn find_reports_what_it_found_and_lands_on_the_first_match() {
     assert_eq!(app.tab_mut().panels.find_hits.len(), 1, "history:\n{}", said(&app));
     assert_eq!(app.tab_mut().panels.find_at, 0);
     // The match is also the selection, so ⌘C copies what was found.
-    assert!(app.tab_mut().text_selection.is_some(), "the match was not selected");
+    assert!(app.tab_mut().selection.text_selection.is_some(), "the match was not selected");
 }
 
 #[test]
@@ -27,7 +27,7 @@ fn a_match_selects_exactly_the_words_searched_for() {
     let mut app = PagifyApp::new(Some(&fixture("text-lines.pdf")));
     app.submit("find brown");
 
-    let range = app.tab_mut().text_selection.clone().expect("a selection");
+    let range = app.tab_mut().selection.text_selection.clone().expect("a selection");
     let found = app.characters(0).expect("characters").text_of(range);
     assert_eq!(found, "brown", "the highlight is over the wrong characters");
 }
@@ -62,7 +62,7 @@ fn a_search_that_finds_nothing_says_so_and_changes_nothing() {
     app.submit("find zzzznotpresent");
 
     assert!(app.tab_mut().panels.find_hits.is_empty());
-    assert!(app.tab_mut().text_selection.is_none(), "a failed search left a selection behind");
+    assert!(app.tab_mut().selection.text_selection.is_none(), "a failed search left a selection behind");
     assert!(said(&app).contains("no matches"), "no explanation:\n{}", said(&app));
 }
 

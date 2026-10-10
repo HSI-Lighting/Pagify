@@ -842,7 +842,7 @@ impl Tool {
         match self {
             Tool::Markup(kind) => {
                 app.mark_selection(*kind);
-                app.tab_mut().text_selection = None;
+                app.tab_mut().selection.text_selection = None;
                 ToolEffect::None
             }
             Tool::Link => {

@@ -423,7 +423,7 @@ fn marking_the_selection_writes_one_annotation_per_selection() {
         let mut app = app("text-lines.pdf");
         let chars = app.characters(0).expect("characters").clone();
         let n = chars.len().min(12);
-        app.tab_mut().text_selection = Some(0..n);
+        app.tab_mut().selection.text_selection = Some(0..n);
         app.tab_mut().organize.selection_page = 0;
 
         app.submit(command);
@@ -454,7 +454,7 @@ fn a_selection_over_several_lines_is_a_single_mark() {
         let chars = app.characters(0).expect("characters");
         (chars.len(), chars.line_rects(0..chars.len()).len())
     };
-    app.tab_mut().text_selection = Some(0..len);
+    app.tab_mut().selection.text_selection = Some(0..len);
     app.tab_mut().organize.selection_page = 0;
 
     assert!(lines > 1, "the fixture is only one line, so this proves nothing");

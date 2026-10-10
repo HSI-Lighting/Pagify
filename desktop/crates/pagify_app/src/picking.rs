@@ -43,7 +43,7 @@ impl crate::PagifyApp {
             self.tab_mut().grab = None;
             self.tab_mut().group = Vec::new();
             self.tab_mut().marquee = None;
-            self.tab_mut().group_grab = None;
+            self.tab_mut().selection.group_grab = None;
         }
         self.put_down_page_editors("armed a different tool");
         self.tab_mut().tool = Some(ArmedTool { kind: tool, page, objects: Vec::new(), points: Vec::new() });

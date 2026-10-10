@@ -486,13 +486,13 @@ impl crate::PagifyApp {
                 // a selection naming one by its old annotation index would
                 // be pointing at nothing, or worse, at whatever else now
                 // sits at that index.
-                self.tab_mut().signature_selected = None;
-                self.tab_mut().signature_grab = None;
+                self.tab_mut().selection.signature_selected = None;
+                self.tab_mut().selection.signature_grab = None;
                 // Any other annotation on the page — including a selected
                 // placed picture — just had its own index shift under it,
                 // for the same reason.
-                self.tab_mut().placed_image_selected = None;
-                self.tab_mut().placed_image_grab = None;
+                self.tab_mut().selection.placed_image_selected = None;
+                self.tab_mut().selection.placed_image_grab = None;
                 // **Says the two things that matter and are not obvious**: that
                 // they can no longer be picked up, and that the way back is to
                 // close without saving rather than to press undo.
@@ -635,7 +635,7 @@ impl crate::PagifyApp {
                 // on the page is taken as the answer; otherwise it says to make
                 // one, and the rectangle stays available for the cases a
                 // selection cannot express, like an area of a scan.
-                if self.tab_mut().text_selection.is_some() {
+                if self.tab_mut().selection.text_selection.is_some() {
                     self.lock_selection();
                     return;
                 }
@@ -692,7 +692,7 @@ impl crate::PagifyApp {
                             if let Some(doc) = &mut self.tab_mut().doc {
                                 doc.rendered_is_stale();
                             }
-                            self.tab_mut().text_selection = None;
+                            self.tab_mut().selection.text_selection = None;
                             self.tab_mut().panels.find_hits.clear();
                             let said = done.describe();
                             if done.is_clean() {
@@ -888,7 +888,7 @@ impl crate::PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().text_selection = None;
+                self.tab_mut().selection.text_selection = None;
                 self.tab_mut().panels.find_hits.clear();
                 if partly.is_empty() && left.is_empty() {
                     self.say_info(format!("{gone} redacted — gone for good. Save to write it out."));
@@ -953,7 +953,7 @@ impl crate::PagifyApp {
                     .filter(|s| s.page == page)
                     .map(|s| s.object)
                     .or_else(|| {
-                        self.tab_mut().picked_layer.and_then(|at| self.layers_on(page).get(at).map(|d| d.object))
+                        self.tab_mut().selection.picked_layer.and_then(|at| self.layers_on(page).get(at).map(|d| d.object))
                     });
                 match target {
                     Some(object) => match self.set_opacity_of(page, object, percent / 100.0) {

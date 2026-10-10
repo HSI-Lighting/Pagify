@@ -350,7 +350,7 @@ fn a_moved_tab_keeps_its_page_zoom_and_view() {
     from.tab_mut().zoom = ZoomMode::Factor(2.0);
     from.tab_mut().scroll_offset = vec2(0.0, 1234.0);
     from.tab_mut().ribbon = Tab::Edit;
-    from.tab_mut().text_selection = Some(3..9);
+    from.tab_mut().selection.text_selection = Some(3..9);
     let (page, zoom) = (from.tab().page, from.tab().zoom);
     assert!(page > 0, "test assumption: the tab is not on its first page");
 
@@ -365,7 +365,7 @@ fn a_moved_tab_keeps_its_page_zoom_and_view() {
     assert_eq!(tab.page, page, "the page was lost");
     assert_eq!(tab.zoom, zoom, "the zoom was lost");
     assert_eq!(tab.ribbon, Tab::Edit, "the ribbon tab was lost");
-    assert_eq!(tab.text_selection, Some(3..9), "the selection was lost");
+    assert_eq!(tab.selection.text_selection, Some(3..9), "the selection was lost");
     // The window it arrives in has never held this scroll position: it is asked
     // for on the first frame there.
     assert_eq!(tab.anchor_offset, Some(vec2(0.0, 1234.0)), "the place on the page is not asked for again");

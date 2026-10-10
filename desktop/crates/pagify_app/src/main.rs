@@ -588,6 +588,108 @@ struct ZoomState {
     zoom_changed_at: f64,
 }
 
+/// The page selection and in-flight gestures `DocTab` carries: what is
+/// selected on the page and in the Organize grid's drag, the signature and
+/// placed-picture selections, the text selection and its drag, the pick
+/// layer, and the right-click capture. The four fields that collide with
+/// common method names (`selected`, `group`, `grab`, `marquee`) stay on
+/// `DocTab` for now — they need targeted renames, not a bulk rewrite.
+struct SelectionState {
+    /// The handle under the pointer as of the last frame it was only
+    /// *hovering* — read by [`Self::interact_objects`] when a drag starts,
+    /// instead of hit-testing the drag's own current position. Same reason
+    /// as [`Self::signature_hover_handle`]: `egui` only decides a press has
+    /// become a drag once the pointer has moved a few pixels, and by then an
+    /// eight-pixel resize handle is already behind it — a fresh hit-test at
+    /// that point reads a corner-aimed resize as a body drag instead. This
+    /// tool shared `Handle`/`Grab` with the signature one but not the fix,
+    /// so an ordinary picture's handles were exactly this bug, unfixed.
+    object_hover_handle: Option<Handle>,
+    /// Whether Shift was held on the last frame of a turn: the angle is then
+    /// snapped to 15 degrees, in what is drawn and in what is applied.
+    rotate_snap: bool,
+    /// A drag moving every member of [`Self::group`] by the same amount —
+    /// same shape as [`Self::grab`], kept separate because a group drag has
+    /// no handle and no single anchor rect to measure against.
+    group_grab: Option<Grab>,
+    text_selection: Option<std::ops::Range<usize>>,
+    /// Where a text drag began. `None` means a drag is selecting marks instead.
+    text_drag: Option<AppPoint>,
+    drag_from: Option<AppPoint>,
+    /// A drag in progress on the markup layer's own selection — see
+    /// [`Self::finish_markup_grab`]. Separate from [`Self::grab`] and
+    /// [`Self::signature_grab`]: a drawn shape is neither page content nor
+    /// an annotation, and moving one commits through `tools::move_selection`
+    /// rather than either of those two paths.
+    markup_grab: Option<Grab>,
+    last_snap: Option<tools::Snapped>,
+    /// Where the last right-click landed, kept for the menu built after it.
+    right_clicked_at: Option<(usize, AppPoint)>,
+    /// What the right-click menu's Join/Match-font/Split actions found,
+    /// computed once at the moment of the click.
+    ///
+    /// **Not recomputed by the menu itself.** Each of these reads every run
+    /// on the page — see `compute_right_click_text_actions`. The context
+    /// menu closure runs on every repaint of an open popup —
+    /// egui keeps redrawing it while it sits there — so computing this
+    /// inline the way `link_here` does its own cheap, already-cached lookup
+    /// meant a few-hundred-run real document redid a full-page text
+    /// extraction several times over on every single frame the menu stayed
+    /// open. Reported from use as the app freezing on right-click. Filled
+    /// in alongside `right_clicked_at` and simply read from here below,
+    /// the same "compute once at the click, read many times after" shape
+    /// `selected_image` already used for the image-lock menu.
+    right_click_text_actions: Option<RightClickTextActions>,
+    /// The opacity slider's value while it is being dragged, before it is
+    /// applied on release.
+    opacity_draft: Option<f32>,
+    /// The image a click landed on, and the page it is on.
+    ///
+    /// Held so a right-click can offer to lock it: the menu opens on a later
+    /// frame than the click that selected it, so what was under the pointer has
+    /// to survive in between.
+    selected_image: Option<(usize, pdf_core::document::PageImage)>,
+    /// Which entry in that list is picked, **by position in the list**.
+    ///
+    /// Not by object number: what a group draws is listed under the group's
+    /// own number, so several entries share one and a pick keyed by it would
+    /// select all of them at once.
+    picked_layer: Option<usize>,
+    /// A placed-but-unapplied picture signature, picked with no tool
+    /// armed — a click on the signature itself, not the object tool, which
+    /// only ever sees page *content* and a signature is deliberately not
+    /// that until it is applied. Move and resize share `Handle`/`Grab` with
+    /// the object tool's own selection; nothing else does.
+    signature_selected: Option<SignatureSelected>,
+    /// A drag in progress on [`Self::signature_selected`] — same shape and
+    /// same meaning as [`Self::grab`], kept separate because the two
+    /// selections are independent and a signature is never page content.
+    signature_grab: Option<Grab>,
+    /// The handle under the pointer as of the last frame it was only
+    /// *hovering* — read by [`Self::interact_signatures`] when a drag
+    /// starts, instead of hit-testing the drag's own current position.
+    ///
+    /// **Why this is not the same thing.** `egui` only decides a press has
+    /// become a drag once the pointer has moved past its own threshold, and
+    /// `drag_started()` reports the position *by then* — already a few
+    /// pixels off from wherever the button actually went down. Against an
+    /// eight-pixel handle that is enough to miss it entirely: a resize
+    /// aimed precisely at a corner was silently read as a body drag
+    /// instead, because by the time the drag was recognised the reported
+    /// point had already slid past the handle and onto the rect it sits
+    /// on. This is what was under the pointer just before that slide.
+    signature_hover_handle: Option<Handle>,
+    /// The same mechanism as [`Self::signature_selected`], for a plain
+    /// placed picture rather than one carrying a signature's name — see
+    /// [`PlacedImageSelected`].
+    placed_image_selected: Option<PlacedImageSelected>,
+    /// A drag in progress on [`Self::placed_image_selected`] — see
+    /// [`Self::signature_grab`].
+    placed_image_grab: Option<Grab>,
+    /// See [`Self::signature_hover_handle`].
+    placed_image_hover_handle: Option<Handle>,
+}
+
 struct DocTab {
     doc: Option<Doc>,
     markup: Markup,
@@ -630,6 +732,8 @@ struct DocTab {
     /// The modal and panel state: search, spelling, bookmarks, link and
     /// article-box prompts and the extract dialog — see [`PanelsState`].
     panels: PanelsState,
+    /// The page selection and in-flight gestures — see [`SelectionState`].
+    selection: SelectionState,
     /// Every page this document's own outline points at — read once and
     /// kept current rather than re-walked every frame, so the small icon
     /// `draw_pages` paints in a bookmarked page's corner costs a `HashSet`
@@ -679,16 +783,7 @@ struct DocTab {
     scroll_to_pt: Option<f32>,
     canvas_pt: egui::Vec2,
 
-    /// The image a click landed on, and the page it is on.
-    ///
-    /// Held so a right-click can offer to lock it: the menu opens on a later
-    /// frame than the click that selected it, so what was under the pointer has
-    /// to survive in between.
-    selected_image: Option<(usize, pdf_core::document::PageImage)>,
 
-    text_selection: Option<std::ops::Range<usize>>,
-    /// Where a text drag began. `None` means a drag is selecting marks instead.
-    text_drag: Option<AppPoint>,
 
     /// Every match, as (page, character range).
     /// Where the current match is, waiting for the next frame to scroll to it.
@@ -701,23 +796,6 @@ struct DocTab {
     /// The markup revision at the last successful save. Anything above it is
     /// work that closing would throw away.
     saved_revision: u64,
-    /// Where the last right-click landed, kept for the menu built after it.
-    right_clicked_at: Option<(usize, AppPoint)>,
-    /// What the right-click menu's Join/Match-font/Split actions found,
-    /// computed once at the moment of the click.
-    ///
-    /// **Not recomputed by the menu itself.** Each of these reads every run
-    /// on the page — see `compute_right_click_text_actions`. The context
-    /// menu closure runs on every repaint of an open popup —
-    /// egui keeps redrawing it while it sits there — so computing this
-    /// inline the way `link_here` does its own cheap, already-cached lookup
-    /// meant a few-hundred-run real document redid a full-page text
-    /// extraction several times over on every single frame the menu stayed
-    /// open. Reported from use as the app freezing on right-click. Filled
-    /// in alongside `right_clicked_at` and simply read from here below,
-    /// the same "compute once at the click, read many times after" shape
-    /// `selected_image` already used for the image-lock menu.
-    right_click_text_actions: Option<RightClickTextActions>,
     /// The object tool, when it is in hand: `true` picks pictures before
     /// words under the pointer, `false` the other way round.
     ///
@@ -731,19 +809,6 @@ struct DocTab {
     /// A drag in progress on the selection — where it started, what part of
     /// the selection was grabbed, and how far it has come.
     grab: Option<Grab>,
-    /// The handle under the pointer as of the last frame it was only
-    /// *hovering* — read by [`Self::interact_objects`] when a drag starts,
-    /// instead of hit-testing the drag's own current position. Same reason
-    /// as [`Self::signature_hover_handle`]: `egui` only decides a press has
-    /// become a drag once the pointer has moved a few pixels, and by then an
-    /// eight-pixel resize handle is already behind it — a fresh hit-test at
-    /// that point reads a corner-aimed resize as a body drag instead. This
-    /// tool shared `Handle`/`Grab` with the signature one but not the fix,
-    /// so an ordinary picture's handles were exactly this bug, unfixed.
-    object_hover_handle: Option<Handle>,
-    /// Whether Shift was held on the last frame of a turn: the angle is then
-    /// snapped to 15 degrees, in what is drawn and in what is applied.
-    rotate_snap: bool,
     /// More than one thing, picked up together by dragging a rectangle over
     /// empty page area — see [`Self::interact_objects`]. Moves and deletes
     /// as a group; resizing stays a [`Self::selected`]-only, one-thing-at-a-
@@ -757,52 +822,6 @@ struct DocTab {
     /// which page objects fall inside it is worked out once, when the drag
     /// ends, not recomputed every frame while it is still being dragged.
     marquee: Option<(AppPoint, AppPoint)>,
-    /// A drag moving every member of [`Self::group`] by the same amount —
-    /// same shape as [`Self::grab`], kept separate because a group drag has
-    /// no handle and no single anchor rect to measure against.
-    group_grab: Option<Grab>,
-    /// A placed-but-unapplied picture signature, picked with no tool
-    /// armed — a click on the signature itself, not the object tool, which
-    /// only ever sees page *content* and a signature is deliberately not
-    /// that until it is applied. Move and resize share `Handle`/`Grab` with
-    /// the object tool's own selection; nothing else does.
-    signature_selected: Option<SignatureSelected>,
-    /// A drag in progress on [`Self::signature_selected`] — same shape and
-    /// same meaning as [`Self::grab`], kept separate because the two
-    /// selections are independent and a signature is never page content.
-    signature_grab: Option<Grab>,
-    /// The handle under the pointer as of the last frame it was only
-    /// *hovering* — read by [`Self::interact_signatures`] when a drag
-    /// starts, instead of hit-testing the drag's own current position.
-    ///
-    /// **Why this is not the same thing.** `egui` only decides a press has
-    /// become a drag once the pointer has moved past its own threshold, and
-    /// `drag_started()` reports the position *by then* — already a few
-    /// pixels off from wherever the button actually went down. Against an
-    /// eight-pixel handle that is enough to miss it entirely: a resize
-    /// aimed precisely at a corner was silently read as a body drag
-    /// instead, because by the time the drag was recognised the reported
-    /// point had already slid past the handle and onto the rect it sits
-    /// on. This is what was under the pointer just before that slide.
-    signature_hover_handle: Option<Handle>,
-    /// The same mechanism as [`Self::signature_selected`], for a plain
-    /// placed picture rather than one carrying a signature's name — see
-    /// [`PlacedImageSelected`].
-    placed_image_selected: Option<PlacedImageSelected>,
-    /// A drag in progress on [`Self::placed_image_selected`] — see
-    /// [`Self::signature_grab`].
-    placed_image_grab: Option<Grab>,
-    /// See [`Self::signature_hover_handle`].
-    placed_image_hover_handle: Option<Handle>,
-    /// The opacity slider's value while it is being dragged, before it is
-    /// applied on release.
-    opacity_draft: Option<f32>,
-    /// Which entry in that list is picked, **by position in the list**.
-    ///
-    /// Not by object number: what a group draws is listed under the group's
-    /// own number, so several entries share one and a pick keyed by it would
-    /// select all of them at once.
-    picked_layer: Option<usize>,
     /// Which ribbon tab this document was left on — kept per document so
     /// switching tabs restores exactly how you left it, not just its page.
     ribbon: Tab,
@@ -888,14 +907,6 @@ struct DocTab {
     /// only affects which ribbon button *reads* as pressed, until the first
     /// real ribbon click settles it one way or the other.
     hand_shown_before_any_tool_is_picked: bool,
-    drag_from: Option<AppPoint>,
-    /// A drag in progress on the markup layer's own selection — see
-    /// [`Self::finish_markup_grab`]. Separate from [`Self::grab`] and
-    /// [`Self::signature_grab`]: a drawn shape is neither page content nor
-    /// an annotation, and moving one commits through `tools::move_selection`
-    /// rather than either of those two paths.
-    markup_grab: Option<Grab>,
-    last_snap: Option<tools::Snapped>,
     /// Which of the two separate undo stacks — the current page's markup
     /// layer, or the document's own command history — most recently changed,
     /// tracked by polling both of their own monotonic edit counters once a
@@ -951,29 +962,14 @@ impl DocTab {
             pan_by: None,
             scroll_to_pt: None,
             canvas_pt: egui::vec2(800.0, 600.0),
-            selected_image: None,
-            text_selection: None,
-            text_drag: None,
+            selection: SelectionState { object_hover_handle: None, rotate_snap: false, group_grab: None, text_selection: None, text_drag: None, drag_from: None, markup_grab: None, last_snap: None, right_clicked_at: None, right_click_text_actions: None, opacity_draft: None, selected_image: None, picked_layer: None, signature_selected: None, signature_grab: None, signature_hover_handle: None, placed_image_selected: None, placed_image_grab: None, placed_image_hover_handle: None, },
             reveal: None,
             saved_revision: 0,
-            picked_layer: None,
-            right_clicked_at: None,
-            right_click_text_actions: None,
             object_tool: None,
             selected: None,
             grab: None,
-            object_hover_handle: None,
-            rotate_snap: false,
             group: Vec::new(),
             marquee: None,
-            group_grab: None,
-            signature_selected: None,
-            signature_grab: None,
-            signature_hover_handle: None,
-            placed_image_selected: None,
-            placed_image_grab: None,
-            placed_image_hover_handle: None,
-            opacity_draft: None,
             ribbon: Tab::Home,
             closing: None,
             asking_to_secure: None,
@@ -988,9 +984,6 @@ impl DocTab {
             password_plus: false,
             pointer: Default::default(),
             hand_shown_before_any_tool_is_picked: true,
-            drag_from: None,
-            markup_grab: None,
-            last_snap: None,
             prefer_layer_undo: false,
             last_layer_edits: 0,
             last_doc_generation: 0,
@@ -3777,7 +3770,7 @@ impl PagifyApp {
         let mut opacity_to: Option<(usize, f32)> = None;
         if self.show_layers && !backstage && self.tab_mut().doc.is_some() {
             let page = self.tab_mut().page;
-            let picked = self.tab_mut().picked_layer;
+            let picked = self.tab_mut().selection.picked_layer;
             let entries: Vec<pdf_core::document::DrawnObject> = self.layers_on(page).to_vec();
             let mut pick: Option<usize> = None;
             let chosen_entry = picked.and_then(|at| entries.get(at));
@@ -3837,7 +3830,7 @@ impl PagifyApp {
                     // every frame of the drag, which would rewrite the page
                     // sixty times a second.
                     if let Some(entry) = chosen_entry.filter(|e| e.movable) {
-                        let mut alpha = self.tab_mut().opacity_draft.unwrap_or(entry.opacity);
+                        let mut alpha = self.tab_mut().selection.opacity_draft.unwrap_or(entry.opacity);
                         ui.add_space(6.0);
                         let slider = ui.add(
                             egui::Slider::new(&mut alpha, 0.0..=1.0)
@@ -3846,13 +3839,13 @@ impl PagifyApp {
                                 .custom_parser(|t| t.trim_end_matches('%').parse::<f64>().ok().map(|p| p / 100.0)),
                         );
                         if slider.changed() {
-                            self.tab_mut().opacity_draft = Some(alpha);
+                            self.tab_mut().selection.opacity_draft = Some(alpha);
                         }
                         if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
                             if (alpha - entry.opacity).abs() > 0.005 {
                                 opacity_to = Some((entry.object, alpha));
                             }
-                            self.tab_mut().opacity_draft = None;
+                            self.tab_mut().selection.opacity_draft = None;
                         }
                     }
                     ui.add_space(6.0);
@@ -3911,7 +3904,7 @@ impl PagifyApp {
                 self.show_layers = false;
             }
             if let Some(at) = pick {
-                self.tab_mut().picked_layer = Some(at);
+                self.tab_mut().selection.picked_layer = Some(at);
             }
         }
         if let Some((object, where_to)) = restack_to {
@@ -3923,14 +3916,14 @@ impl PagifyApp {
         }
         if let Some((object, alpha)) = opacity_to {
             let page = self.tab_mut().page;
-            let kept = self.tab_mut().picked_layer;
+            let kept = self.tab_mut().selection.picked_layer;
             match self.set_opacity_of(page, object, alpha) {
                 Ok(said) => self.say_info(said),
                 Err(e) => self.say_error(e),
             }
             // The page was rewritten, but nothing moved: the same row is the
             // same thing.
-            self.tab_mut().picked_layer = kept;
+            self.tab_mut().selection.picked_layer = kept;
         }
 
         // Claims its space before the central panel takes the rest — same
@@ -4662,7 +4655,7 @@ impl PagifyApp {
                         if let Some(doc) = &mut self.tab_mut().doc {
                             doc.rendered_is_stale();
                         }
-                        self.tab_mut().text_selection = None;
+                        self.tab_mut().selection.text_selection = None;
                         self.tab_mut().panels.find_hits.clear();
                     }
                     Err(e) => self.say_error(format!("page {}: {e}", page + 1)),
@@ -5630,11 +5623,11 @@ impl PagifyApp {
         self.tab_mut().grab = None;
         self.tab_mut().group = Vec::new();
         self.tab_mut().marquee = None;
-        self.tab_mut().group_grab = None;
-        self.tab_mut().signature_selected = None;
-        self.tab_mut().signature_grab = None;
-        self.tab_mut().placed_image_selected = None;
-        self.tab_mut().placed_image_grab = None;
+        self.tab_mut().selection.group_grab = None;
+        self.tab_mut().selection.signature_selected = None;
+        self.tab_mut().selection.signature_grab = None;
+        self.tab_mut().selection.placed_image_selected = None;
+        self.tab_mut().selection.placed_image_grab = None;
         let _ = page;
         self.say_info(if pictures_first {
             "edit object: click a picture or shape to select it, or words where there is nothing \
@@ -5688,7 +5681,7 @@ impl PagifyApp {
                 };
                 self.tab_mut().selected = Some(Selected { page, object, rect, what });
                 if let Some(index) = self.layer_index_for(page, object, rect) {
-                    self.tab_mut().picked_layer = Some(index);
+                    self.tab_mut().selection.picked_layer = Some(index);
                 }
                 self.say_info(format!("{what} selected."));
                 true
@@ -5696,7 +5689,7 @@ impl PagifyApp {
             Some((object, rect, what)) => {
                 self.tab_mut().selected = Some(Selected { page, object, rect, what });
                 if let Some(index) = self.layer_index_for(page, object, rect) {
-                    self.tab_mut().picked_layer = Some(index);
+                    self.tab_mut().selection.picked_layer = Some(index);
                 }
                 self.say_info(format!("{what} selected."));
                 true
@@ -5902,14 +5895,14 @@ impl PagifyApp {
                 }
             }
         }
-        if let Some(grab) = self.tab().group_grab.clone() {
+        if let Some(grab) = self.tab().selection.group_grab.clone() {
             if grab.handle.is_none() {
                 if let Some(bounds) = self.group_bounds(page) {
                     let members: Vec<usize> =
                         self.tab().group.iter().filter(|m| m.page == page).map(|m| m.object).collect();
                     let moving = Self::shifted(bounds, grab.by);
                     let (nudge, _) = self.align_for(page, moving, &members, scale, snap);
-                    if let Some(g) = self.tab_mut().group_grab.as_mut() {
+                    if let Some(g) = self.tab_mut().selection.group_grab.as_mut() {
                         g.by = (g.by.0 + nudge.0, g.by.1 + nudge.1);
                     }
                 }
@@ -5988,7 +5981,7 @@ impl PagifyApp {
             // **Turned about its own middle.** Clockwise as seen, which is what the
             // drag swept; the same turn the other way is the undo.
             Some(Handle::Rotate) => {
-                let degrees = Self::object_turn(&sel.rect, &grab, self.tab().rotate_snap);
+                let degrees = Self::object_turn(&sel.rect, &grab, self.tab().selection.rotate_snap);
                 if degrees.abs() < 0.5 {
                     return;
                 }
@@ -6172,7 +6165,7 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
         Ok(())
     }
@@ -6252,7 +6245,7 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
         // Said the way the label says it: counter-clockwise is positive.
         Ok(format!("turned {:.0}\u{b0} on page {} — `undo` turns it back.", -degrees, page + 1))
@@ -6274,7 +6267,7 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
         Ok(format!(
             "resized to {:.0}% across and {:.0}% down on page {}.",
@@ -6346,7 +6339,7 @@ impl PagifyApp {
     /// than [`Self::selected`]. Also checks the rotate handle, which
     /// `Handle::ALL` does not include (see [`Handle::Rotate`]).
     fn signature_handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
-        let sel = self.tab().signature_selected.as_ref()?;
+        let sel = self.tab().selection.signature_selected.as_ref()?;
         let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
         if (view.to_screen(at) - rotate_screen).length() <= ROTATE_HANDLE_PX + 2.0 {
             return Some(Handle::Rotate);
@@ -6360,7 +6353,7 @@ impl PagifyApp {
 
     /// The same as [`Self::signature_handle_at`], for [`Self::placed_image_selected`].
     fn placed_image_handle_at(&self, at: AppPoint, view: PageView) -> Option<Handle> {
-        let sel = self.tab().placed_image_selected.as_ref()?;
+        let sel = self.tab().selection.placed_image_selected.as_ref()?;
         let rotate_screen = Self::rotate_handle_screen_pos(&sel.rect, view);
         if (view.to_screen(at) - rotate_screen).length() <= ROTATE_HANDLE_PX + 2.0 {
             return Some(Handle::Rotate);
@@ -6425,12 +6418,12 @@ impl PagifyApp {
                     if let Some(doc) = &mut self.tab_mut().doc {
                         doc.rendered_is_stale();
                     }
-                    self.tab_mut().signature_selected =
+                    self.tab_mut().selection.signature_selected =
                         Some(SignatureSelected { rotation: wanted, ..sel });
                 }
                 Err(e) => {
                     self.say_error(e.to_string());
-                    self.tab_mut().signature_selected = Some(sel);
+                    self.tab_mut().selection.signature_selected = Some(sel);
                 }
             }
             return;
@@ -6469,7 +6462,7 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().signature_selected = Some(SignatureSelected { rect: wanted, ..sel });
+                self.tab_mut().selection.signature_selected = Some(SignatureSelected { rect: wanted, ..sel });
             }
             Err(e) => {
                 self.say_error(e.to_string());
@@ -6477,7 +6470,7 @@ impl PagifyApp {
                 // itself did not move if the call failed partway, and a
                 // selection rect that disagreed with it would make the next
                 // drag start from the wrong place.
-                self.tab_mut().signature_selected = Some(sel);
+                self.tab_mut().selection.signature_selected = Some(sel);
             }
         }
     }
@@ -6500,12 +6493,12 @@ impl PagifyApp {
                     if let Some(doc) = &mut self.tab_mut().doc {
                         doc.rendered_is_stale();
                     }
-                    self.tab_mut().placed_image_selected =
+                    self.tab_mut().selection.placed_image_selected =
                         Some(PlacedImageSelected { rotation: wanted, ..sel });
                 }
                 Err(e) => {
                     self.say_error(e.to_string());
-                    self.tab_mut().placed_image_selected = Some(sel);
+                    self.tab_mut().selection.placed_image_selected = Some(sel);
                 }
             }
             return;
@@ -6544,11 +6537,11 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().placed_image_selected = Some(PlacedImageSelected { rect: wanted, ..sel });
+                self.tab_mut().selection.placed_image_selected = Some(PlacedImageSelected { rect: wanted, ..sel });
             }
             Err(e) => {
                 self.say_error(e.to_string());
-                self.tab_mut().placed_image_selected = Some(sel);
+                self.tab_mut().selection.placed_image_selected = Some(sel);
             }
         }
     }
@@ -6707,7 +6700,7 @@ impl PagifyApp {
         // corner for a handle, same maths `Self::finish_group_grab` commits
         // with on release.
         let going = |r: &pdf_core::document::Rect| -> pdf_core::document::Rect {
-            let Some(grab) = &self.tab().group_grab else { return *r };
+            let Some(grab) = &self.tab().selection.group_grab else { return *r };
             let (dx, dy) = grab.by;
             match grab.handle {
                 None => pdf_core::document::Rect {
@@ -6731,7 +6724,7 @@ impl PagifyApp {
 
         for member in self.tab().group.iter().filter(|m| m.page == page) {
             let outline = to_screen(&going(&member.rect));
-            if self.tab().group_grab.is_some() {
+            if self.tab().selection.group_grab.is_some() {
                 painter.rect_filled(outline, egui::CornerRadius::ZERO, theme::violet().gamma_multiply(0.10));
             }
             painter.rect_stroke(
@@ -6744,7 +6737,7 @@ impl PagifyApp {
 
         // The handles, at a fixed size on screen — hidden while a drag is
         // live, same as a single object's own (see `draw_object_selection`).
-        if self.tab_mut().group_grab.is_some() {
+        if self.tab_mut().selection.group_grab.is_some() {
             return;
         }
         painter.rect_stroke(
@@ -6774,7 +6767,7 @@ impl PagifyApp {
     /// design (see [`SignatureSelected`]), and a shared draw call would be
     /// the one place that quietly assumed otherwise.
     fn draw_signature_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
-        let Some(sel) = self.tab_mut().signature_selected.clone().filter(|s| s.page == page) else { return };
+        let Some(sel) = self.tab_mut().selection.signature_selected.clone().filter(|s| s.page == page) else { return };
         let to_screen = |r: &pdf_core::document::Rect| {
             egui::Rect::from_min_max(
                 view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
@@ -6791,7 +6784,7 @@ impl PagifyApp {
             egui::StrokeKind::Outside,
         );
 
-        if let Some(grab) = &self.tab_mut().signature_grab {
+        if let Some(grab) = &self.tab_mut().selection.signature_grab {
             // Turning does not move `sel.rect` at all — see `SignatureSelected`
             // and `Annotation::Image`'s own doc for why rotation is a
             // separate transform, not a change to the rect move and resize
@@ -6874,7 +6867,7 @@ impl PagifyApp {
     /// The same as [`Self::draw_signature_selection`], for
     /// [`Self::placed_image_selected`] and [`Self::placed_image_grab`].
     fn draw_placed_image_selection(&mut self, ui: &mut egui::Ui, page: usize, view: PageView) {
-        let Some(sel) = self.tab_mut().placed_image_selected.clone().filter(|s| s.page == page) else { return };
+        let Some(sel) = self.tab_mut().selection.placed_image_selected.clone().filter(|s| s.page == page) else { return };
         let to_screen = |r: &pdf_core::document::Rect| {
             egui::Rect::from_min_max(
                 view.to_screen(AppPoint::new(r.left as f64, r.top as f64)),
@@ -6891,7 +6884,7 @@ impl PagifyApp {
             egui::StrokeKind::Outside,
         );
 
-        if let Some(grab) = &self.tab_mut().placed_image_grab {
+        if let Some(grab) = &self.tab_mut().selection.placed_image_grab {
             if grab.handle == Some(Handle::Rotate) {
                 let degrees = Self::angle_from_drag(&sel.rect, sel.rotation, grab.from, grab.by);
                 let centre = to_screen(&sel.rect).center();
@@ -6972,7 +6965,7 @@ impl PagifyApp {
         let Some(bounds) = self.markup_selection_bounds(page) else { return };
         let painter = ui.painter();
 
-        if let Some(grab) = &self.tab_mut().markup_grab {
+        if let Some(grab) = &self.tab_mut().selection.markup_grab {
             // A move in progress needs no handle in the way of watching the
             // shape itself go; a rotate in progress shows the angle instead
             // of the resting ring.
@@ -7054,7 +7047,7 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
         Ok(format!(
             "moved {what} by {:.0} across and {:.0} down on page {}.",
@@ -7268,7 +7261,7 @@ impl PagifyApp {
         }
         self.tab_mut().reveal = spot.map(|rect| Reveal { page, rect });
         // The match is also the selection, so ⌘C copies what was found.
-        self.tab_mut().text_selection = Some(range);
+        self.tab_mut().selection.text_selection = Some(range);
         let current_page = self.tab().page;
         self.tab_mut().organize.selection_page = current_page;
         let total = self.tab().panels.find_hits.len();
@@ -7336,7 +7329,7 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
 
         if replaced == 0 {
@@ -7454,7 +7447,7 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
 
         self.search(needle);
@@ -7684,7 +7677,7 @@ impl PagifyApp {
         }
         let page = self.tab_mut().page;
         let title = self.tab_mut()
-            .text_selection
+            .selection.text_selection
             .clone()
             .filter(|_| self.tab_mut().organize.selection_page == page)
             .and_then(|range| self.characters(page).map(|c| c.text_of(range)))
@@ -7745,7 +7738,7 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        if self.tab_mut().text_selection.is_some() {
+        if self.tab_mut().selection.text_selection.is_some() {
             self.open_link_prompt_from_selection();
         } else {
             let page = self.tab_mut().page;
@@ -7756,14 +7749,14 @@ impl PagifyApp {
     /// Turn the current text selection into a pending link, waiting for the
     /// address to send it to.
     fn open_link_prompt_from_selection(&mut self) {
-        let Some(range) = self.tab_mut().text_selection.clone() else { return };
+        let Some(range) = self.tab_mut().selection.text_selection.clone() else { return };
         let page = self.tab_mut().organize.selection_page;
         let rects = self.selection_rects(page, range);
         if rects.is_empty() {
             self.say_error("that selection has nothing to link.");
             return;
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.pending_link = Some(PendingLink { page, rects, url: String::new() });
     }
 
@@ -7884,7 +7877,7 @@ impl PagifyApp {
             .filter(|object| self.group_containing(page, *object).is_some());
 
         let selection = (page == self.tab_mut().organize.selection_page)
-            .then(|| self.tab_mut().text_selection.clone())
+            .then(|| self.tab_mut().selection.text_selection.clone())
             .flatten()
             .filter(|range| !range.is_empty());
         let Some(range) = selection else {
@@ -8122,7 +8115,7 @@ impl PagifyApp {
         // The page the selection was made on, not whichever one happens to be
         // in view now.
         let page = self.tab_mut().organize.selection_page;
-        let Some(range) = self.tab_mut().text_selection.clone() else {
+        let Some(range) = self.tab_mut().selection.text_selection.clone() else {
             self.say_info("nothing selected.");
             return;
         };
@@ -8146,7 +8139,7 @@ impl PagifyApp {
     /// take, so the caller knows whether to fall back to the text path.
     fn copy_object_selection(&mut self) -> bool {
         let page = self.tab_mut().page;
-        if let Some(sel) = self.tab_mut().placed_image_selected.clone().filter(|s| s.page == page) {
+        if let Some(sel) = self.tab_mut().selection.placed_image_selected.clone().filter(|s| s.page == page) {
             let mark = self.tab_mut()
                 .doc
                 .as_ref()
@@ -9544,15 +9537,15 @@ impl PagifyApp {
             self.tab_mut().grab = None;
             self.tab_mut().group = Vec::new();
             self.tab_mut().marquee = None;
-            self.tab_mut().group_grab = None;
+            self.tab_mut().selection.group_grab = None;
             self.say_info("object tool put down.");
         }
-        if self.tab_mut().signature_selected.take().is_some() {
-            self.tab_mut().signature_grab = None;
+        if self.tab_mut().selection.signature_selected.take().is_some() {
+            self.tab_mut().selection.signature_grab = None;
             self.say_info("signature deselected.");
         }
-        if self.tab_mut().placed_image_selected.take().is_some() {
-            self.tab_mut().placed_image_grab = None;
+        if self.tab_mut().selection.placed_image_selected.take().is_some() {
+            self.tab_mut().selection.placed_image_grab = None;
             self.say_info("picture deselected.");
         }
         if let Some(reading) = &self.tab_mut().reading {
@@ -9615,7 +9608,7 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().text_selection = None;
+                self.tab_mut().selection.text_selection = None;
                 self.tab_mut().panels.find_hits.clear();
                 Ok(format!(
                     "locked {} character{} on page {} — `unlock` and the passcode bring them back.",
@@ -9731,7 +9724,7 @@ impl PagifyApp {
                 if let Some(doc) = &mut self.tab_mut().doc {
                     doc.rendered_is_stale();
                 }
-                self.tab_mut().text_selection = None;
+                self.tab_mut().selection.text_selection = None;
                 self.tab_mut().panels.find_hits.clear();
                 // Says how many were *newly* locked, which can be fewer than
                 // were asked for: a page already locked keeps the way back it
@@ -9778,7 +9771,7 @@ impl PagifyApp {
         // What the picked layer looks like **now, before the page is
         // rewritten** — found again afterwards by what it looked like, not
         // by the index it happened to be at, which the restack itself moves.
-        let follow = self.tab_mut().picked_layer.and_then(|at| self.layers_on(page).get(at).cloned());
+        let follow = self.tab_mut().selection.picked_layer.and_then(|at| self.layers_on(page).get(at).cloned());
         let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
         doc.session.restack(page, object, where_to).map_err(|e| format!("layers: {e}"))?;
 
@@ -9788,7 +9781,7 @@ impl PagifyApp {
         // The page has been rewritten, so the fresh list is searched for the
         // same thing by what it looked like — a one-step move is usually the
         // first of several, so the same thing is found again and stays picked.
-        self.tab_mut().picked_layer = follow.as_ref().and_then(|was| {
+        self.tab_mut().selection.picked_layer = follow.as_ref().and_then(|was| {
             let close = |a: f32, b: f32| (a - b).abs() < 0.5;
             self.layers_on(page).iter().position(|d| {
                 d.kind == was.kind
@@ -9799,7 +9792,7 @@ impl PagifyApp {
                     && close(d.rect.bottom, was.rect.bottom)
             })
         });
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
 
         // **Say when nothing will look different.** The order changed, and
@@ -9901,7 +9894,7 @@ impl PagifyApp {
     /// Show the layer rail with one entry picked, by its place in the list.
     fn pick_layer(&mut self, page: usize, at: usize) {
         self.show_layers = true;
-        self.tab_mut().picked_layer = Some(at);
+        self.tab_mut().selection.picked_layer = Some(at);
         let told = self
             .layers_on(page)
             .get(at)
@@ -9913,7 +9906,7 @@ impl PagifyApp {
     /// Move whatever the layer rail has picked, or say why it cannot.
     fn restack_picked(&mut self, where_to: pdf_core::document::Stacking) {
         let page = self.tab_mut().page;
-        let Some(at) = self.tab_mut().picked_layer else {
+        let Some(at) = self.tab_mut().selection.picked_layer else {
             self.say_info("pick something in the layer rail first — `layers` opens it.");
             return;
         };
@@ -9957,7 +9950,7 @@ impl PagifyApp {
     /// its own cannot be trusted to come back in the typeface it left in.
     fn lock_selection(&mut self) {
         let page = self.tab_mut().organize.selection_page;
-        let Some(range) = self.tab_mut().text_selection.clone() else {
+        let Some(range) = self.tab_mut().selection.text_selection.clone() else {
             self.say_error("nothing selected.");
             return;
         };
@@ -10067,9 +10060,9 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
-        self.tab_mut().selected_image = None;
+        self.tab_mut().selection.selected_image = None;
     }
 
     /// Bring back everything the passcode has sealed.
@@ -10095,7 +10088,7 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
         Ok(format!(
             "unlocked {restored} page{}.",
@@ -10160,7 +10153,7 @@ impl PagifyApp {
                     doc.rendered_is_stale();
                 }
                 // The words are gone, so anything holding on to them is stale.
-                self.tab_mut().text_selection = None;
+                self.tab_mut().selection.text_selection = None;
                 self.tab_mut().panels.find_hits.clear();
                 Ok(format!(
                     "redacted an area of page {} — saving will rewrite the whole file.",
@@ -10382,7 +10375,7 @@ impl PagifyApp {
                 // edit changes exactly the same words, and a search or a
                 // selection built from the pre-undo text would otherwise
                 // keep answering as if the edit were still there.
-                self.tab_mut().text_selection = None;
+                self.tab_mut().selection.text_selection = None;
                 self.tab_mut().panels.find_hits.clear();
                 // Undoing or redoing an `AddBookmark` is the one document
                 // change with nothing else here to notice it by — no page
@@ -11494,7 +11487,7 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        if self.tab_mut().text_selection.is_some() {
+        if self.tab_mut().selection.text_selection.is_some() {
             match self.join_selected_text() {
                 Ok(message) => self.say_info(message),
                 Err(e) => self.say_error(e),
@@ -11508,7 +11501,7 @@ impl PagifyApp {
     }
 
     fn join_selected_text(&mut self) -> Result<String, String> {
-        let Some(range) = self.tab_mut().text_selection.clone() else {
+        let Some(range) = self.tab_mut().selection.text_selection.clone() else {
             return Err("select text across at least two lines or blocks first.".into());
         };
         let page = self.tab_mut().organize.selection_page;
@@ -11540,7 +11533,7 @@ impl PagifyApp {
             !touches
         });
 
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         if !self.declare_group(page, objects.clone()) {
             return Err("those words could not be read to be joined — nothing was changed.".into());
         }
@@ -11595,7 +11588,7 @@ impl PagifyApp {
             }
             return;
         }
-        if self.tab_mut().text_selection.is_some() {
+        if self.tab_mut().selection.text_selection.is_some() {
             match self.match_properties_sample_from_current_selection() {
                 Ok(message) => self.say_info(message),
                 Err(e) => self.say_error(e),
@@ -11610,7 +11603,7 @@ impl PagifyApp {
     /// it to match every selection made from here on — see
     /// [`Tool::MatchProperties`].
     fn match_properties_sample_from_current_selection(&mut self) -> Result<String, String> {
-        let Some(range) = self.tab_mut().text_selection.clone() else {
+        let Some(range) = self.tab_mut().selection.text_selection.clone() else {
             return Err("select the sample text first.".into());
         };
         let page = self.tab_mut().organize.selection_page;
@@ -11620,7 +11613,7 @@ impl PagifyApp {
         let Some(first) = self.run_at_selection_start(page, range.start) else {
             return Err("could not tell which run the selection starts in.".into());
         };
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         let sample = self.build_match_properties_sample(page, &first);
         // Set directly rather than through `arm_tool`: reachable either
         // already armed (the usual "waiting for a sample" case) or not
@@ -11729,7 +11722,7 @@ impl PagifyApp {
         let Some(sample) = sample else {
             return Err("select the sample text first.".into());
         };
-        let Some(range) = self.tab_mut().text_selection.clone() else {
+        let Some(range) = self.tab_mut().selection.text_selection.clone() else {
             return Err("select the text to change.".into());
         };
         let page = self.tab_mut().organize.selection_page;
@@ -11868,7 +11861,7 @@ impl PagifyApp {
         if let Some(doc) = &mut self.tab_mut().doc {
             doc.rendered_is_stale();
         }
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
 
         let count = targets.len();
         let plural = if count == 1 { "" } else { "s" };
@@ -12804,8 +12797,8 @@ impl PagifyApp {
         if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
             layer.clear_selection();
         }
-        self.tab_mut().signature_selected = None;
-        self.tab_mut().placed_image_selected = None;
+        self.tab_mut().selection.signature_selected = None;
+        self.tab_mut().selection.placed_image_selected = None;
 
         // The usual default, unless the box itself is smaller than that in
         // either direction — then the size follows the box down instead of
@@ -13261,7 +13254,7 @@ impl PagifyApp {
         // selection belonging to a page that has moved — and the symptom
         // appears well away from the cause.
         self.refresh_after_page_change();
-        self.tab_mut().text_selection = None;
+        self.tab_mut().selection.text_selection = None;
         self.tab_mut().panels.find_hits.clear();
         self.say_info(said);
     }
@@ -13561,28 +13554,28 @@ impl PagifyApp {
     /// from a test without a real frame to drive `keys.delete` through.
     fn delete_selection(&mut self) {
         let page = self.tab_mut().page;
-        if let Some(sel) = self.tab_mut().signature_selected.clone().filter(|s| s.page == page) {
+        if let Some(sel) = self.tab_mut().selection.signature_selected.clone().filter(|s| s.page == page) {
             match self.remove_annotation_at(sel.page, sel.index) {
                 Ok(()) => {
                     if let Some(doc) = &mut self.tab_mut().doc {
                         doc.rendered_is_stale();
                     }
-                    self.tab_mut().signature_selected = None;
-                    self.tab_mut().signature_grab = None;
+                    self.tab_mut().selection.signature_selected = None;
+                    self.tab_mut().selection.signature_grab = None;
                     self.say_info("signature removed — `undo` puts it back.");
                 }
                 Err(e) => self.say_error(e),
             }
             return;
         }
-        if let Some(sel) = self.tab_mut().placed_image_selected.clone().filter(|s| s.page == page) {
+        if let Some(sel) = self.tab_mut().selection.placed_image_selected.clone().filter(|s| s.page == page) {
             match self.remove_annotation_at(sel.page, sel.index) {
                 Ok(()) => {
                     if let Some(doc) = &mut self.tab_mut().doc {
                         doc.rendered_is_stale();
                     }
-                    self.tab_mut().placed_image_selected = None;
-                    self.tab_mut().placed_image_grab = None;
+                    self.tab_mut().selection.placed_image_selected = None;
+                    self.tab_mut().selection.placed_image_grab = None;
                     self.say_info("picture removed — `undo` puts it back.");
                 }
                 Err(e) => self.say_error(e),
@@ -13639,7 +13632,7 @@ impl PagifyApp {
     fn mark_selection(&mut self, kind: pagify_shell::verbs::Markup) {
         use pagify_shell::verbs::Markup;
 
-        let Some(range) = self.tab_mut().text_selection.clone() else {
+        let Some(range) = self.tab_mut().selection.text_selection.clone() else {
             // Nothing selected: pick the tool up rather than refuse. It stays
             // in hand until Escape or another tool, so a run of passages can be
             // marked without going back to the ribbon between each.
@@ -15474,7 +15467,7 @@ fn wrap_typed_last_line(
         if !self.show_layers {
             return;
         }
-        let Some(at) = self.tab_mut().picked_layer else { return };
+        let Some(at) = self.tab_mut().selection.picked_layer else { return };
         let Some(entry) = self.layers_on(page).get(at).cloned() else { return };
 
         let outline = egui::Rect::from_min_max(
@@ -15500,7 +15493,7 @@ fn wrap_typed_last_line(
         // Only on the page it was made on, now that a selection outlives the
         // page being scrolled past.
         let selection =
-            (page == self.tab_mut().organize.selection_page).then(|| self.tab_mut().text_selection.clone()).flatten();
+            (page == self.tab_mut().organize.selection_page).then(|| self.tab_mut().selection.text_selection.clone()).flatten();
         let hits: Vec<std::ops::Range<usize>> = self.tab_mut()
             .panels.find_hits
             .iter()

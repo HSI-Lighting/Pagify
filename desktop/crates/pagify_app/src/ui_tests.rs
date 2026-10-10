@@ -1352,7 +1352,7 @@ fn dragging_a_signature_handle_through_the_real_pointer_path_resizes_it() {
     });
     click(&mut h, middle);
     assert!(
-        h.state().tab().signature_selected.is_some(),
+        h.state().tab().selection.signature_selected.is_some(),
         "clicking the signature through a real pointer event did not select it"
     );
 
@@ -1409,7 +1409,7 @@ fn dragging_the_rotate_handle_through_the_real_pointer_path_turns_it() {
     });
     click(&mut h, middle);
     assert!(
-        h.state().tab().signature_selected.is_some(),
+        h.state().tab().selection.signature_selected.is_some(),
         "clicking the signature did not select it"
     );
 
@@ -2373,7 +2373,7 @@ fn selection_works_after_scrolling_into_a_long_document() {
 
     let app = h.state();
     assert!(
-        app.tab().text_selection.is_some(),
+        app.tab().selection.text_selection.is_some(),
         "nothing selected on page {} of the catalogue.\npointer: {:?}  tool armed: {:?}",
         landed + 1,
         app.tab().pointer,
@@ -2415,7 +2415,7 @@ fn selection_works_on_the_test_report() {
 
     let app = h.state();
     assert!(
-        app.tab().text_selection.is_some(),
+        app.tab().selection.text_selection.is_some(),
         "nothing selected on page {} of the report",
         app.tab().page + 1
     );
@@ -2450,7 +2450,7 @@ fn selected_text_can_be_copied_with_the_keyboard() {
     let mut h = harness("text-lines.pdf");
     let start = a_character_on_screen(&mut h);
     drag(&mut h, start, start + egui::vec2(160.0, 0.0));
-    assert!(h.state().tab().text_selection.is_some(), "nothing was selected to copy");
+    assert!(h.state().tab().selection.text_selection.is_some(), "nothing was selected to copy");
 
     // `Event::Copy` directly, not a raw `Key::C` press: that is what a
     // real ⌘C actually produces (egui-winit intercepts it and never also
@@ -2471,7 +2471,7 @@ fn selected_text_can_be_copied_with_the_keyboard() {
     assert!(
         said.contains("characters copied"),
         "\u{2318}C copied nothing.\nselection: {:?}\n{said}",
-        h.state().tab().text_selection
+        h.state().tab().selection.text_selection
     );
 }
 
@@ -2754,7 +2754,7 @@ fn what_is_copied_is_what_was_selected() {
     let expected = {
         let app = h.state_mut();
         let page = app.tab_mut().page;
-        let range = app.tab_mut().text_selection.clone().expect("no selection");
+        let range = app.tab_mut().selection.text_selection.clone().expect("no selection");
         app.characters(page).expect("characters").text_of(range)
     };
 
@@ -2854,14 +2854,14 @@ fn a_selection_survives_scrolling() {
 
     let start = a_character_on_screen(&mut h);
     drag(&mut h, start, start + egui::vec2(150.0, 0.0));
-    let selected = h.state().tab().text_selection.clone();
+    let selected = h.state().tab().selection.text_selection.clone();
     assert!(selected.is_some(), "nothing was selected to begin with");
     let on_page = h.state().tab().organize.selection_page;
 
     // A nudge, not a jump to another page.
     wheel(&mut h, 60.0);
 
-    assert_eq!(h.state().tab().text_selection, selected, "the wheel threw the selection away");
+    assert_eq!(h.state().tab().selection.text_selection, selected, "the wheel threw the selection away");
     assert_eq!(h.state().tab().organize.selection_page, on_page, "the selection changed page");
 
     h.state_mut().submit("copy");
@@ -3842,10 +3842,10 @@ fn clicking_is_not_pulled_to_nearby_geometry() {
     drag(&mut h, start, start + egui::vec2(150.0, 0.0));
 
     assert!(
-        h.state().tab().text_selection.is_some(),
+        h.state().tab().selection.text_selection.is_some(),
         "the drag was snapped off the text and selected nothing"
     );
-    assert!(h.state().tab().last_snap.is_none(), "a snap was applied with no tool in hand");
+    assert!(h.state().tab().selection.last_snap.is_none(), "a snap was applied with no tool in hand");
 }
 
 /// And it must still snap when a tool *is* placing points — that is what it
@@ -3886,7 +3886,7 @@ fn a_drawing_tool_still_snaps_to_what_is_there() {
     h.run_steps(2);
 
     assert!(
-        h.state().tab().last_snap.is_some(),
+        h.state().tab().selection.last_snap.is_some(),
         "the line tool did not snap to the end of the line beside it"
     );
 }
@@ -4239,7 +4239,7 @@ fn a_tool_pressed_with_text_already_selected_marks_it_at_once() {
     let mut h = harness("text-lines.pdf");
     let start = a_character_on_screen(&mut h);
     drag(&mut h, start, start + egui::vec2(150.0, 0.0));
-    assert!(h.state().tab().text_selection.is_some());
+    assert!(h.state().tab().selection.text_selection.is_some());
 
     h.state_mut().submit("highlight");
     h.run_steps(1);
@@ -4437,7 +4437,7 @@ fn dragging_over_text_selects_it() {
 
     let app = h.state();
     assert!(
-        app.tab().text_selection.is_some(),
+        app.tab().selection.text_selection.is_some(),
         "a drag across text selected nothing.\npointer mode: {:?}\nfrom {start:?} to {end:?}\n{}",
         app.tab().pointer,
         app.cmd.history().iter().map(|e| e.text.as_str()).collect::<Vec<_>>().join("\n")
@@ -4457,7 +4457,7 @@ fn hand_mode_stops_selection_and_select_gives_it_back() {
     h.run_steps(2);
     drag(&mut h, start, end);
     assert!(
-        h.state().tab().text_selection.is_none(),
+        h.state().tab().selection.text_selection.is_none(),
         "Hand mode selected text, so a drag both scrolls and selects"
     );
 
@@ -4465,7 +4465,7 @@ fn hand_mode_stops_selection_and_select_gives_it_back() {
     h.run_steps(2);
     drag(&mut h, start, end);
     assert!(
-        h.state().tab().text_selection.is_some(),
+        h.state().tab().selection.text_selection.is_some(),
         "Select did not give selection back, which would make Hand a one-way trip"
     );
 }
@@ -4486,7 +4486,7 @@ fn an_armed_tool_takes_the_click_and_escape_gives_it_back() {
 
     drag(&mut h, start, end);
     assert!(
-        h.state().tab().text_selection.is_none(),
+        h.state().tab().selection.text_selection.is_none(),
         "an armed tool let the drag select as well, so a click would do two things"
     );
 
@@ -4496,7 +4496,7 @@ fn an_armed_tool_takes_the_click_and_escape_gives_it_back() {
 
     drag(&mut h, start, end);
     assert!(
-        h.state().tab().text_selection.is_some(),
+        h.state().tab().selection.text_selection.is_some(),
         "selection did not come back after escape"
     );
 }
@@ -4573,7 +4573,7 @@ fn a_placed_picture_is_selected_and_moved_by_the_object_tool() {
 
     click(&mut h, centre);
     assert!(
-        h.state_mut().tab_mut().placed_image_selected.is_some(),
+        h.state_mut().tab_mut().selection.placed_image_selected.is_some(),
         "clicking the picture with the object tool in hand did not select it"
     );
 

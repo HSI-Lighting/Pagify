@@ -499,7 +499,7 @@ fn every_click_writes_exactly_one_content_free_pick_line_to_the_session_log() {
         runs.iter().max_by(|x, y| x.rect.top.total_cmp(&y.rect.top)).unwrap().clone(),
     );
     let total = app.characters(0).expect("characters").len();
-    app.tab_mut().text_selection = Some(0..total);
+    app.tab_mut().selection.text_selection = Some(0..total);
     app.tab_mut().organize.selection_page = 0;
     app.join_selected_text().expect("join");
     app.tab_mut().edit.editing_run = None;

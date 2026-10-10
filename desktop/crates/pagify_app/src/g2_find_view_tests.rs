@@ -562,7 +562,7 @@ fn replace_goes_on_to_the_match_after_the_one_it_replaced() {
     );
     assert_eq!(at, 2, "the next match is the one that was fourth");
     // And it is shown: the selection is on it, ready to be replaced in turn.
-    assert_eq!(app.tab().text_selection, Some(now));
+    assert_eq!(app.tab().selection.text_selection, Some(now));
 }
 
 /// A replacement that still contains the word searched for — "the" to
@@ -637,7 +637,7 @@ fn replace_shows_the_match_before_replacing_it() {
     assert!(said.contains("replace"), "it did not say what to do next: {said}");
     assert_eq!(run_texts(&app, 0), before, "the first press replaced a match nobody had seen");
     assert_eq!(app.tab().panels.find_hits.len(), 1);
-    assert!(app.tab().text_selection.is_some(), "the match was not shown");
+    assert!(app.tab().selection.text_selection.is_some(), "the match was not shown");
 
     let said = app.replace_current("fox", "wolf").expect("replace failed");
     assert!(said.contains("none left"), "{said}");
