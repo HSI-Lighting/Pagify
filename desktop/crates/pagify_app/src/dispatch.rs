@@ -165,7 +165,8 @@ impl crate::PagifyApp {
             | Effect::ReportWordCount(_)
             | Effect::RunAccessCheck
             | Effect::WriteAccessReport { .. }
-            | Effect::RunAutoBookmarks => self.apply_files(effect),
+            | Effect::RunAutoBookmarks
+            | Effect::RunPreflight => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -636,6 +637,7 @@ impl crate::PagifyApp {
                 None => self.access_report_dialog(),
             },
             Effect::RunAutoBookmarks => self.auto_bookmarks(),
+            Effect::RunPreflight => self.run_preflight(),
             other => unreachable!("apply_files was handed {other:?}"),
         }
     }

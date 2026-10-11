@@ -5113,3 +5113,23 @@ fn autobookmarks_names_a_bookmark_per_text_page() {
     assert_eq!(stored.len(), session.page_count().expect("count"), "one per text page: {stored:?}");
     assert!(stored.iter().all(|(title, _)| !title.trim().is_empty()), "{stored:?}");
 }
+
+/// **The Conversion tab's Preflight, through the real dispatch.** A page of
+/// pure vector colour can hold no finding at all — no fonts, no images — so
+/// the clean path is the deterministic one to assert.
+#[test]
+fn preflight_reports_a_vector_only_document_clean() {
+    let mut h = harness("quadrants.pdf");
+    h.state_mut().submit("preflight");
+    h.run_steps(1);
+
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("no problems found by the checks this build makes")),
+        "preflight did not report clean: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("not visible to this engine")),
+        "the scope sentence is missing: {said:?}"
+    );
+}

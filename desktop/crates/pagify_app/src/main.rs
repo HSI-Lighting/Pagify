@@ -14022,6 +14022,38 @@ impl PagifyApp {
         }
     }
 
+    /// Run the document checks this build can make — the Conversion tab's
+    /// Preflight. What the checks cover, and what they deliberately do not,
+    /// is `pagify_shell::preflight`'s own note.
+    fn run_preflight(&mut self) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        match pagify_shell::preflight::findings(&session) {
+            Ok(findings) => {
+                let problems = findings.iter().filter(|f| f.problem).count();
+                for finding in findings.iter().filter(|f| f.problem) {
+                    self.say_error(&finding.line);
+                }
+                if problems == 0 {
+                    self.say_info(
+                        "no problems found by the checks this build makes — fonts embedded, \
+                         image resolution. PDF/A conformance, colour spaces, transparency \
+                         and metadata are not visible to this engine and were not checked.",
+                    );
+                } else {
+                    self.say_info(format!(
+                        "{problems} problem(s); the lines above say which. Everything else \
+                         a preflight profile checks is not visible to this engine.",
+                    ));
+                }
+            }
+            Err(e) => self.say_error(format!("preflight: {e}")),
+        }
+    }
+
     /// The annotation under a point, if any.
     fn foreign_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
         let (x, y) = (at.x as f32, at.y as f32);

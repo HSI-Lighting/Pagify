@@ -586,6 +586,9 @@ pub enum Verb {
     /// Make a bookmark per page, named from the page's own largest text run
     /// — the Navigation tab's Auto Create Bookmarks.
     AutoBookmarks,
+    /// Run the document checks this build can make — fonts embedded, image
+    /// resolution — the Conversion tab's Preflight.
+    Preflight,
     Quit { force: bool },
     /// Recognised, deliberately not implemented yet, and carrying the phase
     /// that will implement it.
@@ -862,7 +865,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("pagetemplates", "the forms phase", "the Page Templates tool"),
     ("pencil", "the annotation phase", "the Pencil tool"),
     ("portfolio", "the conversion phase", "the PDF Portfolio tool"),
-    ("preflight", "the conversion phase", "the Preflight tool"),
     ("readaloud", "the viewing phase", "the Read tool"),
     ("readingoptions", "the accessibility phase", "the Reading Options tool"),
     ("readingorder", "the accessibility phase", "the Reading Order tool"),
@@ -1011,7 +1013,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
-        "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks",
+        "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1719,6 +1721,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
         "autobookmarks" => Ok(Verb::AutoBookmarks),
+        "preflight" => Ok(Verb::Preflight),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2070,6 +2073,20 @@ mod navigation_phase_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "autobookmarks"),
             "`autobookmarks` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    #[test]
+    fn preflight_parses_and_is_not_planned() {
+        assert_eq!(parse("preflight"), Some(Ok(Verb::Preflight)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "preflight"),
+            "`preflight` is still in the planned table"
         );
     }
 }

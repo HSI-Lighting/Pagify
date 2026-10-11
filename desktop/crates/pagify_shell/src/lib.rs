@@ -31,6 +31,7 @@ pub mod organize;
 pub mod page_space;
 pub mod paragraph_lines;
 pub mod predefined;
+pub mod preflight;
 pub mod pdfium;
 pub mod reader;
 pub mod recent;

@@ -82,6 +82,8 @@ pub enum Effect {
     /// Make a bookmark per page from the pages' own largest text runs, as
     /// one batch.
     RunAutoBookmarks,
+    /// Run the document checks this build can make.
+    RunPreflight,
     /// Make a new document out of nothing, one sheet of this size and ruling.
     BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
     /// Merge PDFs into one new document; a folder to read them from, or
@@ -308,6 +310,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::AccessCheck
         | Verb::AccessReport { .. }
         | Verb::AutoBookmarks
+        | Verb::Preflight
         | Verb::BlankDoc { .. }
         | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
@@ -428,6 +431,7 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::AccessCheck => vec![Effect::RunAccessCheck],
         Verb::AccessReport { dest } => vec![Effect::WriteAccessReport { dest: dest.clone() }],
         Verb::AutoBookmarks => vec![Effect::RunAutoBookmarks],
+        Verb::Preflight => vec![Effect::RunPreflight],
         // A new document is allowed with nothing open — that is the point of
         // it.
         Verb::BlankDoc { width_pt, height_pt, ruling } => vec![Effect::BlankDocument {
@@ -715,6 +719,7 @@ mod tests {
                 vec![Effect::WriteAccessReport { dest: None }],
             ),
             (Verb::AutoBookmarks, vec![Effect::RunAutoBookmarks]),
+            (Verb::Preflight, vec![Effect::RunPreflight]),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");
