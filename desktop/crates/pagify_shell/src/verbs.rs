@@ -395,6 +395,10 @@ pub enum Verb {
     /// rulings `lined`/`grid`/`dots` (plain paper when nothing is said), in
     /// either order.
     BlankDoc { width_pt: f32, height_pt: f32, ruling: Ruling },
+    /// Merge PDFs into one new document — `combine` or `combine <folder>`,
+    /// which takes every PDF in the folder in name order. Bare, the app
+    /// opens a file picker.
+    Combine { folder: Option<PathBuf> },
 
     // Review — phase 10.
     /// Find text across the document.
@@ -806,7 +810,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("clipboard", "the capture phase", "the Clipboard tool"),
     ("cloudstorage", "the sharing phase", "the Cloud Storage tool"),
     ("combfield", "the forms phase", "the Comb Field tool"),
-    ("combine", "the conversion phase", "the Combine Files tool"),
     ("compare", "the viewing phase", "the Compare tool"),
     ("createform", "the forms phase", "the Form tool"),
     ("crossref", "the editing phase", "the Cross Reference tool"),
@@ -993,6 +996,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         // tests/command_box.rs is what caught every one of them.
         "extract", "import", "deletepage", "delpage", "insertpage", "movepage",
         "replacepage", "interleave", "toimage", "tohtml", "split", "wordcount", "blankdoc",
+        "combine",
         "highlight", "hl", "note", "calibrate", "cal", "pagescale", "measure",
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
@@ -1597,6 +1601,10 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
             }
             Ok(Verb::BlankDoc { width_pt, height_pt, ruling })
         }
+        // A folder to take the PDFs from; bare is a request for the picker.
+        "combine" => Ok(Verb::Combine {
+            folder: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
         _ => return None,
     })
 }
@@ -1963,6 +1971,24 @@ mod blank_document_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "blankdoc"),
             "`blankdoc` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod combine_tests {
+    use super::*;
+
+    #[test]
+    fn combine_parses_bare_and_with_a_folder() {
+        assert_eq!(parse("combine"), Some(Ok(Verb::Combine { folder: None })));
+        assert_eq!(
+            parse("combine /tmp/in"),
+            Some(Ok(Verb::Combine { folder: Some("/tmp/in".into()) }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "combine"),
+            "`combine` is still in the planned table"
         );
     }
 }

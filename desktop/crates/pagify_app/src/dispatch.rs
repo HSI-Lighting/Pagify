@@ -103,6 +103,7 @@ impl crate::PagifyApp {
             | Effect::ReportTextLayer
             | Effect::Snapshot
             | Effect::BlankDocument { .. }
+            | Effect::CombineFiles { .. }
             | Effect::Say(_)
             | Effect::SayError(_)
             | Effect::CheckUpdate => self.apply_document(effect),
@@ -237,6 +238,10 @@ impl crate::PagifyApp {
             Effect::BlankDocument { width_pt, height_pt, ruling } => {
                 self.create_blank_document(width_pt, height_pt, ruling)
             }
+            Effect::CombineFiles { folder } => match folder {
+                Some(folder) => self.combine_folder(&folder),
+                None => self.combine_dialog(),
+            },
             Effect::Say(text) => self.say_info(text),
             Effect::SayError(text) => self.say_error(text),
             Effect::CheckUpdate => self.spawn_update_check(),

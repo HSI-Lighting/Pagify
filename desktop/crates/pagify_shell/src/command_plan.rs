@@ -72,6 +72,9 @@ pub enum Effect {
     Snapshot,
     /// Make a new document out of nothing, one sheet of this size and ruling.
     BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
+    /// Merge PDFs into one new document; a folder to read them from, or
+    /// `None` to ask with a picker.
+    CombineFiles { folder: Option<std::path::PathBuf> },
     /// Say a line in the info colour.
     Say(String),
     /// Start an update check; the caller has already said it is checking.
@@ -288,7 +291,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Version
         | Verb::CheckUpdate
         | Verb::Snapshot
-        | Verb::BlankDoc { .. } => plan_document(verb, env),
+        | Verb::BlankDoc { .. }
+        | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
         | Verb::RepairLocks
         | Verb::Opacity(_)
@@ -408,6 +412,9 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
             height_pt: *height_pt,
             ruling: *ruling,
         }],
+        // Combining makes its own new document, so it needs nothing open
+        // either.
+        Verb::Combine { folder } => vec![Effect::CombineFiles { folder: folder.clone() }],
         Verb::Pdfium => vec![Effect::Say(crate::pdfium::describe())],
         Verb::Version => vec![Effect::Say(format!("Pagify {}", crate::VERSION))],
         // The message comes first so it is on the bar while the check runs.
@@ -672,6 +679,10 @@ mod tests {
             (
                 Verb::BlankDoc { width_pt: 612.0, height_pt: 792.0, ruling: pdf_core::document::Ruling::None },
                 vec![Effect::BlankDocument { width_pt: 612.0, height_pt: 792.0, ruling: pdf_core::document::Ruling::None }],
+            ),
+            (
+                Verb::Combine { folder: Some(std::path::PathBuf::from("in")) },
+                vec![Effect::CombineFiles { folder: Some(std::path::PathBuf::from("in")) }],
             ),
         ];
         for (verb, want) in cases {

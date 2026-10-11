@@ -13685,23 +13685,40 @@ impl PagifyApp {
     }
 
     /// Start a new document out of nothing — the Convert tab's Blank.
-    ///
-    /// The bytes have to live at some path before they are a document at all
-    /// (`blank_document`'s own note), so the sheet opens from a file in the
-    /// system temp folder, and says so: `saveas` puts it where it should
-    /// live.
     fn create_blank_document(
         &mut self,
         width_pt: f32,
         height_pt: f32,
         ruling: pdf_core::document::Ruling,
     ) {
+        if let Some(path) = self.open_blank_sheet(width_pt, height_pt, ruling) {
+            self.say_info(format!(
+                "untitled blank page — `saveas <name.pdf>` keeps it (it lives in {} until \
+                 then).",
+                path.display()
+            ));
+        }
+    }
+
+    /// Write one blank sheet to a file in the system temp folder and open it
+    /// — the part `blankdoc` and Combine share. `Some(path)` is where it
+    /// lives, and only when the tab actually opened.
+    ///
+    /// The bytes have to live at some path before they are a document at all
+    /// (`blank_document`'s own note), so the ordinary open path is the only
+    /// one a new document takes.
+    fn open_blank_sheet(
+        &mut self,
+        width_pt: f32,
+        height_pt: f32,
+        ruling: pdf_core::document::Ruling,
+    ) -> Option<std::path::PathBuf> {
         let size = pdf_core::document::PageSize { width_pt, height_pt };
         let bytes = match pdf_core::document::blank_document(1, size, None, ruling) {
             Ok(bytes) => bytes,
             Err(e) => {
                 self.say_error(format!("blankdoc: {e}"));
-                return;
+                return None;
             }
         };
         let stamp = std::time::SystemTime::now()
@@ -13718,15 +13735,104 @@ impl PagifyApp {
                     .doc
                     .as_ref()
                     .is_some_and(|d| d.session.path() == path.as_path());
-                if opened_the_blank {
-                    self.say_info(format!(
-                        "untitled blank page — `saveas <name.pdf>` keeps it (it lives in {} \
-                         until then).",
-                        path.display()
-                    ));
-                }
+                opened_the_blank.then_some(path)
             }
-            Err(e) => self.say_error(format!("blankdoc: {e}")),
+            Err(e) => {
+                self.say_error(format!("blankdoc: {e}"));
+                None
+            }
+        }
+    }
+
+    /// Merge PDFs into one new document — the Convert tab's Combine Files.
+    ///
+    /// A letter sheet is made and opened first (there is no document to
+    /// combine *into* otherwise); every source's pages are appended after it
+    /// through the ordinary import, and it is deleted once they are in. A
+    /// failure on one file is said and the rest still combine — half a merge
+    /// somebody can see beats none.
+    fn combine_files(&mut self, sources: &[std::path::PathBuf]) {
+        if sources.is_empty() {
+            self.say_info("nothing chosen.");
+            return;
+        }
+        if self.open_blank_sheet(612.0, 792.0, pdf_core::document::Ruling::None).is_none() {
+            return;
+        }
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            return;
+        };
+        let mut imported = 0usize;
+        let mut combined = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        for source in sources {
+            let pages = match Session::open(source).and_then(|s| s.page_count()) {
+                Ok(0) => {
+                    failures.push(format!("{}: no pages", source.display()));
+                    continue;
+                }
+                Ok(count) => (0..count).collect::<Vec<_>>(),
+                Err(e) => {
+                    failures.push(format!("{}: {e}", source.display()));
+                    continue;
+                }
+            };
+            let at = session.page_count().unwrap_or(0);
+            match session.import_from(source, &pages, at) {
+                Ok(_) => {
+                    imported += pages.len();
+                    combined += 1;
+                }
+                Err(e) => failures.push(format!("{}: {e}", source.display())),
+            }
+        }
+        if imported > 0 {
+            // The sheet the merge started from is not part of the merge.
+            let _ = session.execute(pdf_core::command::Command::DeletePage { index: 0 });
+            self.refresh_after_page_change();
+            self.say_info(format!(
+                "combined {combined} file(s), {imported} page(s) — `saveas <name.pdf>` keeps \
+                 it."
+            ));
+        }
+        if !failures.is_empty() {
+            self.say_error(format!("combine: {}", failures.join("; ")));
+        } else if imported == 0 {
+            self.say_error("combine: nothing imported.");
+        }
+    }
+
+    /// `combine <folder>`: every PDF in the folder, in name order.
+    fn combine_folder(&mut self, folder: &std::path::Path) {
+        let entries = match std::fs::read_dir(folder) {
+            Ok(entries) => entries,
+            Err(e) => {
+                self.say_error(format!("combine: {e}"));
+                return;
+            }
+        };
+        let mut sources: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf")))
+            .collect();
+        sources.sort();
+        if sources.is_empty() {
+            self.say_error(format!("combine: no PDFs in {}.", folder.display()));
+            return;
+        }
+        self.combine_files(&sources);
+    }
+
+    /// The Convert tab's Combine Files button, bare: choose the PDFs, then
+    /// merge them in the order chosen.
+    fn combine_dialog(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Choose PDFs to combine")
+            .add_filter("PDF", &["pdf"]);
+        match dialog.pick_files() {
+            Some(paths) => self.combine_files(&paths),
+            None => self.say_info("nothing chosen."),
         }
     }
 

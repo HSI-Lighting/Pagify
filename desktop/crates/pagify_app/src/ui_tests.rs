@@ -4974,3 +4974,41 @@ fn blankdoc_opens_a_new_sheet_and_saveas_keeps_it() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **The Convert tab's Combine, through the real dispatch.** Two fixture
+/// copies in a folder merge into one untitled document: the blank sheet the
+/// merge starts from is gone, and the widths prove which page came from
+/// which file.
+#[test]
+fn combine_merges_a_folders_pdfs_into_one_document() {
+    let dir = std::env::temp_dir().join(format!("pagify-combine-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+    std::fs::copy(fixture("two-column.pdf"), dir.join("a.pdf")).expect("copy a");
+    std::fs::copy(fixture("quadrants.pdf"), dir.join("b.pdf")).expect("copy b");
+
+    let two = Session::open(dir.join("a.pdf")).expect("open a");
+    let two_pages = two.page_count().expect("count a");
+    let two_first = two.page_size(0).expect("size a").width_pt.round() as u32;
+
+    let mut h = harness("pages-ladder.pdf");
+    let before = h.state().tabs.len();
+    h.state_mut().submit(&format!("combine {}", dir.display()));
+    h.run_steps(2);
+
+    assert_eq!(h.state().tabs.len(), before + 1, "combine did not open a new document");
+    let doc = h.state().tab().doc.as_ref().expect("the merged document");
+    assert_eq!(doc.page_count, two_pages + 1, "the merged page count");
+    let session = doc.session.clone();
+    assert_eq!(
+        session.page_size(0).expect("size").width_pt.round() as u32,
+        two_first,
+        "the first merged page is not the first page of the first file"
+    );
+    assert_eq!(
+        session.page_size(doc.page_count - 1).expect("size").width_pt.round() as u32,
+        400,
+        "the last merged page is not quadrants' 400pt sheet"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
