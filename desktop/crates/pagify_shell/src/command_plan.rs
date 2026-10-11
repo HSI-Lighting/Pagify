@@ -191,6 +191,11 @@ pub enum Effect {
     /// Write the document's text as one HTML file; `None` asks for the file
     /// first.
     ExportHtml { dest: Option<std::path::PathBuf> },
+    /// Write the document as several files, this many pages each; `None`
+    /// asks for the folder first.
+    SplitPages { every: usize, dest: Option<std::path::PathBuf> },
+    /// Report words and characters over these pages — empty means all.
+    ReportWordCount(String),
     /// Reflow the page's text.
     RunReflow,
     /// Search for `needle`.
@@ -332,6 +337,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Interleave { .. }
         | Verb::ToImage { .. }
         | Verb::ToHtml { .. }
+        | Verb::Split { .. }
+        | Verb::WordCount { .. }
         | Verb::Reflow
         | Verb::Find(_)
         | Verb::FindStep { .. }
@@ -547,6 +554,10 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         }
         Verb::ToImage { dest } => vec![Effect::ExportImages { dest: dest.clone() }],
         Verb::ToHtml { dest } => vec![Effect::ExportHtml { dest: dest.clone() }],
+        Verb::Split { every, dest } => {
+            vec![Effect::SplitPages { every: *every, dest: dest.clone() }]
+        }
+        Verb::WordCount { pages } => vec![Effect::ReportWordCount(pages.clone())],
         // Text and find.
         Verb::Reflow => vec![Effect::RunReflow],
         Verb::Find(needle) => vec![Effect::RunFind(needle.clone())],
@@ -846,6 +857,11 @@ mod tests {
                 Verb::ToHtml { dest: Some("book.html".into()) },
                 vec![Effect::ExportHtml { dest: Some("book.html".into()) }],
             ),
+            (
+                Verb::Split { every: 2, dest: None },
+                vec![Effect::SplitPages { every: 2, dest: None }],
+            ),
+            (Verb::WordCount { pages: String::new() }, vec![Effect::ReportWordCount(String::new())]),
             (Verb::Reflow, vec![Effect::RunReflow]),
             (Verb::Find("n".into()), vec![Effect::RunFind("n".into())]),
             (Verb::FindStep { forward: true }, vec![Effect::RunFindStep { forward: true }]),

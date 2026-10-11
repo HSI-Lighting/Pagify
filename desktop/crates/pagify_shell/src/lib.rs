@@ -38,6 +38,7 @@ pub mod signature_extract;
 pub mod signatures;
 pub mod spelling;
 pub mod state;
+pub mod stats;
 pub mod tools;
 pub mod models;
 pub mod outlined_fonts;

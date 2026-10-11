@@ -156,7 +156,9 @@ impl crate::PagifyApp {
             | Effect::ReplacePage { .. }
             | Effect::InterleavePages { .. }
             | Effect::ExportImages { .. }
-            | Effect::ExportHtml { .. } => self.apply_files(effect),
+            | Effect::ExportHtml { .. }
+            | Effect::SplitPages { .. }
+            | Effect::ReportWordCount(_) => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -607,6 +609,11 @@ impl crate::PagifyApp {
                 Some(path) => self.export_html(&path),
                 None => self.export_html_dialog(),
             },
+            Effect::SplitPages { every, dest } => match dest {
+                Some(folder) => self.split_pages(every, &folder),
+                None => self.split_dialog(),
+            },
+            Effect::ReportWordCount(pages) => self.report_word_count(&pages),
             other => unreachable!("apply_files was handed {other:?}"),
         }
     }

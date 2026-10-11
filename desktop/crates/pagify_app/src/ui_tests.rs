@@ -4896,3 +4896,51 @@ fn to_image_writes_pngs_and_to_html_writes_the_text() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **The Organize tab's Split and the View tab's Word Count, through the
+/// real dispatch.** Split writes one file per chunk of pages into a folder —
+/// verified by reopening the first file and reading its page widths, which
+/// the ladder fixture makes decisive.
+#[test]
+fn split_writes_chunk_files_and_wordcount_counts_the_pages() {
+    let mut h = harness("pages-ladder.pdf");
+    let dir = std::env::temp_dir().join(format!("pagify-split-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    h.state_mut().submit(&format!("split 2 {}", dir.display()));
+    h.run_steps(1);
+
+    let mut names: Vec<String> = std::fs::read_dir(&dir)
+        .expect("listed")
+        .map(|entry| entry.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "pages-ladder-pages-001-002.pdf",
+            "pages-ladder-pages-003-004.pdf",
+            "pages-ladder-pages-005-005.pdf",
+        ],
+        "split 2 of a five-page document should write three files"
+    );
+
+    let first =
+        Session::open(dir.join("pages-ladder-pages-001-002.pdf")).expect("reopen the first chunk");
+    let widths: Vec<u32> = (0..first.page_count().expect("count"))
+        .map(|i| first.page_size(i).expect("size").width_pt.round() as u32)
+        .collect();
+    assert_eq!(widths, vec![200, 250], "the first chunk is not the first two pages");
+
+    std::fs::remove_dir_all(&dir).ok();
+
+    // Word Count on a document whose words are known to exist.
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("wordcount");
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("word(s),") && !l.starts_with("0 word")),
+        "wordcount did not count the page: {said:?}"
+    );
+}

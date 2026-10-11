@@ -13626,6 +13626,93 @@ impl PagifyApp {
         }
     }
 
+    /// Write the document out as several files, `every` pages each — the
+    /// Organize tab's Split.
+    ///
+    /// The pages go out through the same extract the page-copy path uses, so
+    /// the document itself is untouched: a split is a set of ordinary files
+    /// beside it, not a change to it.
+    fn split_pages(&mut self, every: usize, folder: &std::path::Path) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        let count = doc.page_count;
+        if !folder.is_dir() {
+            self.say_error(format!("split: {} is not a folder.", folder.display()));
+            return;
+        }
+        let every = every.max(1);
+        let stem = self.document_stem();
+        let mut written = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        for pages in (0..count).collect::<Vec<_>>().chunks(every) {
+            let first = pages[0] + 1;
+            let last = pages[pages.len() - 1] + 1;
+            let name = if every == 1 {
+                format!("{stem}-page-{first:03}.pdf")
+            } else {
+                format!("{stem}-pages-{first:03}-{last:03}.pdf")
+            };
+            match session.extract_to(pages, &folder.join(&name)) {
+                Ok(_) => written += 1,
+                Err(e) => failures.push(format!("pages {first}-{last}: {e}")),
+            }
+        }
+        if failures.is_empty() {
+            self.say_info(format!(
+                "wrote {written} file(s) of up to {every} page(s) to {}.",
+                folder.display()
+            ));
+        } else {
+            self.say_error(format!("{written} file(s) written; {}", failures.join("; ")));
+        }
+    }
+
+    /// The Organize tab's Split button, bare: choose the folder, then write
+    /// one file per page.
+    fn split_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new().set_title("Choose a folder for the split files");
+        match dialog.pick_folder() {
+            Some(folder) => self.split_pages(1, &folder),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// Count words and characters over `spec`'s pages, or the whole document
+    /// — the View tab's Word Count.
+    fn report_word_count(&mut self, spec: &str) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        let count = doc.page_count;
+        let pages = if spec.trim().is_empty() {
+            (0..count).collect::<Vec<_>>()
+        } else {
+            match pagify_shell::organize::parse_range(spec, count) {
+                Ok(pages) => pages,
+                Err(why) => {
+                    self.say_error(why);
+                    return;
+                }
+            }
+        };
+        match pagify_shell::stats::words_and_characters(&session, &pages) {
+            Ok((words, characters)) => self.say_info(format!(
+                "{words} word(s), {characters} character(s) on {} page(s).",
+                pages.len()
+            )),
+            Err(e) => self.say_error(format!("wordcount: {e}")),
+        }
+    }
+
     /// The annotation under a point, if any.
     fn foreign_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
         let (x, y) = (at.x as f32, at.y as f32);

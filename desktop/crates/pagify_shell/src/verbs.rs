@@ -381,6 +381,13 @@ pub enum Verb {
     /// Write the document's text as one HTML file — `tohtml <file.html>`.
     /// Bare, the app asks for the file.
     ToHtml { dest: Option<PathBuf> },
+    /// Write the document out as several files, `every` pages each —
+    /// `split [<every>] <folder>`. Bare, the app asks for the folder and
+    /// writes one page per file.
+    Split { every: usize, dest: Option<PathBuf> },
+    /// Count words and characters over the pages named, or the whole
+    /// document — `wordcount [pages]`.
+    WordCount { pages: String },
 
     // Review — phase 10.
     /// Find text across the document.
@@ -850,7 +857,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("sendreview", "the sharing phase", "the Send for Review tool"),
     ("sharelink", "the sharing phase", "the Share Link tool"),
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
-    ("split", "the page phase", "the Split tool"),
     ("stamp", "the annotation phase", "the Stamp tool"),
     ("tagspanel", "the accessibility phase", "the Tags Panel tool"),
     ("textbox", "the annotation phase", "the Textbox tool"),
@@ -865,7 +871,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("viewcontinuousfacing", "the viewing phase", "the Continuous Facing tool"),
     ("viewsetting", "the viewing phase", "the View Setting tool"),
     ("viewsplit", "the viewing phase", "the Split tool"),
-    ("wordcount", "the viewing phase", "the Word Count tool"),
 ];
 
 /// Parse a line as a Pagify verb.
@@ -980,7 +985,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         // and distance from anyone who also uses SIMLUX. The guard test in
         // tests/command_box.rs is what caught every one of them.
         "extract", "import", "deletepage", "delpage", "insertpage", "movepage",
-        "replacepage", "interleave", "toimage", "tohtml",
+        "replacepage", "interleave", "toimage", "tohtml", "split", "wordcount",
         "highlight", "hl", "note", "calibrate", "cal", "pagescale", "measure",
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
@@ -1516,6 +1521,28 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
         "tohtml" => Ok(Verb::ToHtml {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
+        // Split takes an optional count first; everything after it is the
+        // folder, quoted if it has spaces.
+        "split" => {
+            let mut words = tail.splitn(2, char::is_whitespace);
+            let first = words.next().unwrap_or("");
+            let rest = words.next().unwrap_or("").trim();
+            if !first.is_empty() && first.chars().all(|c| c.is_ascii_digit()) {
+                match first.parse::<usize>() {
+                    Ok(0) => return Some(Err("split: pages per file must be at least 1".into())),
+                    Ok(every) => Ok(Verb::Split {
+                        every,
+                        dest: (!rest.is_empty()).then(|| resolve_path(rest)),
+                    }),
+                    // Not a count after all — a very long digit string is a
+                    // path the same way any other word is.
+                    Err(_) => Ok(Verb::Split { every: 1, dest: Some(resolve_path(tail)) }),
+                }
+            } else {
+                Ok(Verb::Split { every: 1, dest: (!tail.is_empty()).then(|| resolve_path(tail)) })
+            }
+        }
+        "wordcount" => Ok(Verb::WordCount { pages: tail.to_string() }),
         _ => return None,
     })
 }
@@ -1805,5 +1832,46 @@ mod conversion_phase_tests {
                 "`{word}` is still in the planned table"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod split_and_wordcount_tests {
+    use super::*;
+
+    /// Split's two shapes — a folder alone, or a count and a folder — and
+    /// the one refusal: a chunk of no pages.
+    #[test]
+    fn split_parses_its_two_shapes() {
+        assert_eq!(parse("split"), Some(Ok(Verb::Split { every: 1, dest: None })));
+        assert_eq!(
+            parse("split /tmp/out"),
+            Some(Ok(Verb::Split { every: 1, dest: Some("/tmp/out".into()) }))
+        );
+        assert_eq!(
+            parse("split 3 /tmp/out"),
+            Some(Ok(Verb::Split { every: 3, dest: Some("/tmp/out".into()) }))
+        );
+        assert_eq!(
+            parse("split 0 /tmp/out"),
+            Some(Err("split: pages per file must be at least 1".into()))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "split"),
+            "`split` is still in the planned table"
+        );
+    }
+
+    #[test]
+    fn word_count_parses_and_is_not_planned() {
+        assert_eq!(parse("wordcount"), Some(Ok(Verb::WordCount { pages: String::new() })));
+        assert_eq!(
+            parse("wordcount 2-4"),
+            Some(Ok(Verb::WordCount { pages: "2-4".into() }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "wordcount"),
+            "`wordcount` is still in the planned table"
+        );
     }
 }
