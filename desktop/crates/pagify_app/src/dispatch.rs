@@ -162,10 +162,11 @@ impl crate::PagifyApp {
             | Effect::BeginWebLink
             | Effect::BeginJoinText
             | Effect::BeginMatchProperties
-            | Effect::RunMarkText(_)
+            |             Effect::RunMarkText(_)
             | Effect::RunListMarks
             | Effect::RunRemoveMark(_)
-            | Effect::RunNote(_) => self.apply_text(effect),
+            | Effect::RunNote(_)
+            | Effect::ReportShortcuts => self.apply_text(effect),
             Effect::UndoRedo { .. }
             | Effect::SetPointer(_)
             | Effect::CopyText
@@ -612,7 +613,27 @@ impl crate::PagifyApp {
             Effect::RunListMarks => self.list_marks(),
             Effect::RunRemoveMark(n) => self.remove_mark(n),
             Effect::RunNote(text) => self.add_note(text),
+            Effect::ReportShortcuts => self.report_shortcuts(),
             other => unreachable!("apply_text was handed {other:?}"),
+        }
+    }
+
+    /// What `shortcuts` says — the window's keys, kept beside the handlers
+    /// rather than in the shell because the shell has no window: these are
+    /// `Keys` in `main.rs`, read by `handle_input`, and this list should be
+    /// edited in the same commit as any change there.
+    fn report_shortcuts(&mut self) {
+        for line in [
+            "⌘O open    ⌘S save    ⌘P print    ⌘W close the tab",
+            "⌘Z undo    ⇧⌘Z redo    ⌘C copy    ⌘V paste",
+            "⌘F find — puts `find ` in the box    ⌘Enter next hit",
+            "⌘Tab / ⇧⌘Tab    next / previous tab",
+            "← →    previous / next page        + -    zoom in / out",
+            "Delete    remove the selection (pages first, then objects and text)",
+            "Enter    finish a tool waiting for points (area, polyline)",
+            "Escape    cancel what is armed        ↑ ↓    command history",
+        ] {
+            self.say_info(line);
         }
     }
 

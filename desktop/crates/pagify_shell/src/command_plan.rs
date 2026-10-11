@@ -121,6 +121,9 @@ pub enum Effect {
     RunManageSignatures(crate::verbs::Signatures),
     /// Report where the session log is, if it could be written.
     ReportSessionLog,
+    /// Say the window's key bindings. The bindings live in the app (`Keys` in
+    /// `main.rs`), which is the only place they are real.
+    ReportShortcuts,
     /// Open the signature pad with this name; `then_place` carries on to
     /// placing once it is drawn.
     OpenSignaturePad { name: String, then_place: bool },
@@ -343,6 +346,10 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::ExtractText(_)
         | Verb::OutlinedFont(_)
         | Verb::ClearHistory => plan_navigation(verb, env),
+        Verb::About
+        | Verb::Shortcuts
+        | Verb::QuickStart
+        | Verb::ReportIssue => plan_documentation(verb, env),
         Verb::Help(_) | Verb::Planned { .. } => None,
     }
 }
@@ -526,6 +533,25 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::ListMarks => vec![Effect::RunListMarks],
         Verb::RemoveMark(n) => vec![Effect::RunRemoveMark(*n)],
         Verb::Note(text) => vec![Effect::RunNote(text.clone())],
+        _ => return None,
+    })
+}
+
+/// The documentation verbs — the Help tab's buttons: `about`, `shortcuts`,
+/// `quickstart` and `reportissue` (the fifth, `checkupdate`, was already
+/// built and needs no planning beyond the mirror).
+fn plan_documentation(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
+    Some(match verb {
+        Verb::About => crate::verbs::about_text().into_iter().map(Effect::Say).collect(),
+        Verb::QuickStart => crate::verbs::quickstart_text().into_iter().map(Effect::Say).collect(),
+        Verb::Shortcuts => vec![Effect::ReportShortcuts],
+        // The two things a report needs: where it goes, and the log of what
+        // happened — `ReportSessionLog` says where that is (or why there is
+        // none this run).
+        Verb::ReportIssue => vec![
+            Effect::Say(format!("found a problem? Report it at {}", crate::verbs::ISSUES_URL)),
+            Effect::ReportSessionLog,
+        ],
         _ => return None,
     })
 }
@@ -820,6 +846,33 @@ mod tests {
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");
         }
+    }
+
+    #[test]
+    fn the_documentation_domain_plans_its_verbs() {
+        let env = CommandEnv::default();
+        match plan(&Verb::About, &env) {
+            Some(effects) => assert!(
+                matches!(effects.as_slice(), [Effect::Say(_), Effect::Say(_)]),
+                "about planned {effects:?}"
+            ),
+            other => panic!("about planned {other:?}"),
+        }
+        assert_eq!(plan(&Verb::Shortcuts, &env), Some(vec![Effect::ReportShortcuts]));
+        assert_eq!(
+            plan(&Verb::QuickStart, &env).map(|effects| effects.len()),
+            Some(crate::verbs::quickstart_text().len())
+        );
+        assert_eq!(
+            plan(&Verb::ReportIssue, &env),
+            Some(vec![
+                Effect::Say(format!(
+                    "found a problem? Report it at {}",
+                    crate::verbs::ISSUES_URL
+                )),
+                Effect::ReportSessionLog,
+            ])
+        );
     }
 
     #[test]

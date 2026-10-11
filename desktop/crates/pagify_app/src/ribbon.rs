@@ -393,7 +393,7 @@ impl Tab {
                 ("\u{EA19}", "User Manual", Command::Verb("help")),
                 ("\u{EB9B}", "Quick Start", Command::Verb("quickstart")),
                 ("\u{EAE7}", "Keyboard Shortcuts", Command::Verb("shortcuts")),
-                ("\u{E923}", "Check for Updates", Command::Verb("checkupdates")),
+                ("\u{E923}", "Check for Updates", Command::Verb("checkupdate")),
                 ("\u{E868}", "Report an Issue", Command::Verb("reportissue")),
                 ("\u{E88E}", "About Pagify", Command::Verb("about")),
     ];

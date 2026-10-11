@@ -4782,3 +4782,35 @@ fn a_whole_paragraph_moves_undoes_and_moves_again_on_the_real_datasheet() {
         assert!((was.1 - now.1).abs() < 0.5 && (was.2 - now.2).abs() < 0.5, "run {} drifted", was.0);
     }
 }
+
+/// **The Help tab's documentation buttons are real.** They used to type words
+/// that answered "planned for the documentation phase"; now each answers with
+/// its own lines — the version, the keys, how to open a file, and where a bug
+/// report goes.
+#[test]
+fn the_documentation_buttons_answer_with_their_lines() {
+    let mut h = harness("two-column.pdf");
+    for word in ["about", "shortcuts", "quickstart", "reportissue"] {
+        h.state_mut().submit(word);
+    }
+    h.run_steps(1);
+
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains(&format!("Pagify {}", pagify_shell::VERSION))),
+        "about did not name the build: {said:?}"
+    );
+    assert!(said.iter().any(|l| l.contains("⌘O")), "shortcuts did not list the keys: {said:?}");
+    assert!(
+        said.iter().any(|l| l.contains("drag a PDF")),
+        "quickstart did not say how to open one: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("HSI-Lighting/Pagify/issues")),
+        "reportissue did not name the tracker: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|l| l.contains("is planned for")),
+        "a documentation button still reports its phase: {said:?}"
+    );
+}

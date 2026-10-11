@@ -525,6 +525,16 @@ pub enum Verb {
     /// Look again for a newer build without waiting for the next launch —
     /// mainly for confirming a publish landed, without relaunching.
     CheckUpdate,
+    /// Say what this program is, in a line or two — the About button's word.
+    About,
+    /// The window's key bindings, listed in the box. The bindings themselves
+    /// live in the app (`Keys` in `main.rs`); this only asks for them.
+    Shortcuts,
+    /// The first few things to try, for someone who just opened it.
+    QuickStart,
+    /// Say where a bug report goes, and where this run's session log is —
+    /// the two things a report needs.
+    ReportIssue,
     /// Say what kind of text this page has, and what that means.
     TextLayer,
     Quit { force: bool },
@@ -746,7 +756,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     // Kept in step with `Tab::buttons` by `every_ribbon_button_runs_a_command`,
     // because two hand-maintained lists of a hundred and fifty names each will
     // not stay in step on their own.
-    ("about", "the documentation phase", "the About Pagify tool"),
     ("accesscheck", "the accessibility phase", "the Full Check tool"),
     ("accessreport", "the accessibility phase", "the Accessibility Report tool"),
     ("add3d", "the editing phase", "the Add 3D tool"),
@@ -765,7 +774,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("calculator", "the annotation phase", "the Accounting Calculator tool"),
     ("callout", "the annotation phase", "the Callout tool"),
     ("changecolor", "the viewing phase", "the Change Color tool"),
-    ("checkupdates", "the documentation phase", "the Check for Updates tool"),
     ("clipboard", "the capture phase", "the Clipboard tool"),
     ("cloudstorage", "the sharing phase", "the Cloud Storage tool"),
     ("combfield", "the forms phase", "the Comb Field tool"),
@@ -813,14 +821,12 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("pencil", "the annotation phase", "the Pencil tool"),
     ("portfolio", "the conversion phase", "the PDF Portfolio tool"),
     ("preflight", "the conversion phase", "the Preflight tool"),
-    ("quickstart", "the documentation phase", "the Quick Start tool"),
     ("readaloud", "the viewing phase", "the Read tool"),
     ("readingoptions", "the accessibility phase", "the Reading Options tool"),
     ("readingorder", "the accessibility phase", "the Reading Order tool"),
     ("rearrange", "the page phase", "the Rearrange tool"),
     ("replacepage", "the page phase", "the Replace tool"),
     ("replacetext", "the annotation phase", "the Replace Text tool"),
-    ("reportissue", "the documentation phase", "the Report an Issue tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("resetform", "the forms phase", "the Reset Form tool"),
     ("reverseview", "the viewing phase", "the Reverse View tool"),
@@ -829,7 +835,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
     ("sendreview", "the sharing phase", "the Send for Review tool"),
     ("sharelink", "the sharing phase", "the Share Link tool"),
-    ("shortcuts", "the documentation phase", "the Keyboard Shortcuts tool"),
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
     ("snapshot", "the capture phase", "the Snapshot tool"),
     ("split", "the page phase", "the Split tool"),
@@ -955,6 +960,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
     let mut tokens = vec![
         "open", "close", "save", "saveas", "page", "p", "next", "zoom", "z", "fit",
         "rotate", "undo", "redo", "pdfium", "version", "checkupdate", "quit", "exit", "help",
+        "about", "shortcuts", "quickstart", "reportissue",
         "close!", "quit!", "exit!",
         // Several page operations are spelt out rather than taking the short
         // word: `delete`, `insert`, `scale`, `mp` and `dist` are all live
@@ -996,6 +1002,17 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
         if let Some((v, phase, what)) = PLANNED.iter().find(|(v, _, _)| *v == topic) {
             return vec![format!("{v} — {what}. Planned for {phase}.")];
         }
+        match topic.as_str() {
+            "about" => return about_text(),
+            "quickstart" => return quickstart_text(),
+            "reportissue" => {
+                return vec![format!("reportissue — a bug report goes to {ISSUES_URL}.")]
+            }
+            "shortcuts" => {
+                return vec!["shortcuts — the window's key bindings, said as lines in the box.".into()]
+            }
+            _ => {}
+        }
         return vec![format!("no help for '{topic}'.")];
     }
 
@@ -1014,12 +1031,44 @@ pub fn help_text(topic: Option<&str>) -> Vec<String> {
         "           may be doing nothing".into(),
         "picking    pick <x,y>   — supplies a click to a waiting tool, so fillet and".into(),
         "           trim can be scripted and recorded as well as clicked".into(),
-        "planned    redact sign comment".into(),
+        "help       about   shortcuts   quickstart   reportissue".into(),
+        "planned    comment — and the ribbon's unbuilt buttons, whose words name their phase".into(),
         "drawing    every SIMLUX command — line, polyline, trim, fillet, offset, … — with the same aliases".into(),
         "           `help <verb>` explains any word that means something different here.".into(),
         "".into(),
         "Page operations are spelt out — `deletepage`, `insertpage`, `pagescale` — because".into(),
         "`delete`, `insert` and `scale` are drawing commands and keep their SIMLUX meanings.".into(),
+    ]
+}
+
+/// Where a bug report goes. Kept here so `about`, `reportissue` and the help
+/// topic all say the same thing.
+pub const ISSUES_URL: &str = "https://github.com/HSI-Lighting/Pagify/issues";
+
+/// What `about` says — shared with `help about`, so the two cannot drift.
+pub fn about_text() -> Vec<String> {
+    vec![
+        format!(
+            "Pagify {} — a PDF editor whose whole interface is a command box: every ribbon \
+             button runs a word you can type.",
+            crate::VERSION
+        ),
+        "`help` lists every word, `shortcuts` the keys, and `reportissue` where a bug report goes."
+            .into(),
+    ]
+}
+
+/// What `quickstart` says — shared with `help quickstart`.
+pub fn quickstart_text() -> Vec<String> {
+    vec![
+        "open — drag a PDF onto the window, or type `open` (⌘O).".into(),
+        "type a word in the box and press Enter — `help` lists them all; the ribbon's buttons \
+         type their own."
+            .into(),
+        "`page 3`, `next` and `prev` move; `+` and `-` zoom; ← → step pages.".into(),
+        "drag over text to select it, `find <words>` searches, ⌘C copies the selection.".into(),
+        "`reflow` rebuilds this page's reading order when selection or extraction reads wrong."
+            .into(),
     ]
 }
 
@@ -1517,6 +1566,10 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "pdfium" => Ok(Verb::Pdfium),
         "version" => Ok(Verb::Version),
         "checkupdate" => Ok(Verb::CheckUpdate),
+        "about" => Ok(Verb::About),
+        "shortcuts" => Ok(Verb::Shortcuts),
+        "quickstart" => Ok(Verb::QuickStart),
+        "reportissue" => Ok(Verb::ReportIssue),
         "textlayer" | "whytext" => Ok(Verb::TextLayer),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
@@ -1592,5 +1645,48 @@ mod parse_domain_tests {
                 "`{word}` is claimed by `{domain}` but `parse` returns None for it"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod documentation_tests {
+    use super::*;
+
+    /// **The documentation phase's words are built, not planned.** The
+    /// ribbon's five Help-tab buttons used to answer "planned for the
+    /// documentation phase"; each now runs a real verb. Removing a word from
+    /// `PLANNED` without teaching `parse` it is exactly the failure this
+    /// catches.
+    #[test]
+    fn the_documentation_words_parse_to_their_verbs() {
+        assert_eq!(parse("about"), Some(Ok(Verb::About)));
+        assert_eq!(parse("shortcuts"), Some(Ok(Verb::Shortcuts)));
+        assert_eq!(parse("quickstart"), Some(Ok(Verb::QuickStart)));
+        assert_eq!(parse("reportissue"), Some(Ok(Verb::ReportIssue)));
+        assert_eq!(parse("checkupdate"), Some(Ok(Verb::CheckUpdate)));
+    }
+
+    #[test]
+    fn the_documentation_words_are_no_longer_planned() {
+        for word in ["about", "shortcuts", "quickstart", "reportissue", "checkupdates"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
+        // The old button's spelling was the placeholder's, never a command.
+        assert!(parse("checkupdates").is_none(), "`checkupdates` should not parse");
+    }
+
+    /// What the words say, and that `help <word>` says the same thing.
+    #[test]
+    fn the_documentation_answers_are_shared_with_help() {
+        let about = about_text().join("\n");
+        assert!(about.contains(crate::VERSION), "about does not name the build: {about}");
+        assert_eq!(help_text(Some("about")).join("\n"), about);
+        assert_eq!(help_text(Some("quickstart")).join("\n"), quickstart_text().join("\n"));
+
+        let issue = help_text(Some("reportissue")).join("\n");
+        assert!(issue.contains(ISSUES_URL), "reportissue does not name the tracker: {issue}");
     }
 }
