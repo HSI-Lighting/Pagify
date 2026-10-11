@@ -164,7 +164,8 @@ impl crate::PagifyApp {
             | Effect::SplitPages { .. }
             | Effect::ReportWordCount(_)
             | Effect::RunAccessCheck
-            | Effect::WriteAccessReport { .. } => self.apply_files(effect),
+            | Effect::WriteAccessReport { .. }
+            | Effect::RunAutoBookmarks => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -634,6 +635,7 @@ impl crate::PagifyApp {
                 Some(path) => self.write_access_report(&path),
                 None => self.access_report_dialog(),
             },
+            Effect::RunAutoBookmarks => self.auto_bookmarks(),
             other => unreachable!("apply_files was handed {other:?}"),
         }
     }

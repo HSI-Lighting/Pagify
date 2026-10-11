@@ -79,6 +79,9 @@ pub enum Effect {
     /// Write those findings as one HTML file; `None` asks for the file
     /// first.
     WriteAccessReport { dest: Option<std::path::PathBuf> },
+    /// Make a bookmark per page from the pages' own largest text runs, as
+    /// one batch.
+    RunAutoBookmarks,
     /// Make a new document out of nothing, one sheet of this size and ruling.
     BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
     /// Merge PDFs into one new document; a folder to read them from, or
@@ -304,6 +307,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Ruler
         | Verb::AccessCheck
         | Verb::AccessReport { .. }
+        | Verb::AutoBookmarks
         | Verb::BlankDoc { .. }
         | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
@@ -423,6 +427,7 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         // Nothing open is nothing to check; the app's own report says so.
         Verb::AccessCheck => vec![Effect::RunAccessCheck],
         Verb::AccessReport { dest } => vec![Effect::WriteAccessReport { dest: dest.clone() }],
+        Verb::AutoBookmarks => vec![Effect::RunAutoBookmarks],
         // A new document is allowed with nothing open — that is the point of
         // it.
         Verb::BlankDoc { width_pt, height_pt, ruling } => vec![Effect::BlankDocument {
@@ -709,6 +714,7 @@ mod tests {
                 Verb::AccessReport { dest: None },
                 vec![Effect::WriteAccessReport { dest: None }],
             ),
+            (Verb::AutoBookmarks, vec![Effect::RunAutoBookmarks]),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");

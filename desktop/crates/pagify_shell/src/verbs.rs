@@ -583,6 +583,9 @@ pub enum Verb {
     /// Write those findings as one HTML file — `accessreport [file.html]`.
     /// Bare, the app asks for the file.
     AccessReport { dest: Option<PathBuf> },
+    /// Make a bookmark per page, named from the page's own largest text run
+    /// — the Navigation tab's Auto Create Bookmarks.
+    AutoBookmarks,
     Quit { force: bool },
     /// Recognised, deliberately not implemented yet, and carrying the phase
     /// that will implement it.
@@ -810,7 +813,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("assistant", "the viewing phase", "the Assistant tool"),
     ("attach", "the editing phase", "the File Attachment tool"),
     ("attachcomment", "the annotation phase", "the File tool"),
-    ("autobookmarks", "the navigation phase", "the Auto Create Bookmarks tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
     ("calculator", "the annotation phase", "the Accounting Calculator tool"),
@@ -1009,7 +1011,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
-        "autoscroll", "ruler", "accesscheck", "accessreport",
+        "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1716,6 +1718,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "accessreport" => Ok(Verb::AccessReport {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
+        "autobookmarks" => Ok(Verb::AutoBookmarks),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2054,5 +2057,19 @@ mod accessibility_phase_tests {
                 "`{word}` is still in the planned table"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod navigation_phase_tests {
+    use super::*;
+
+    #[test]
+    fn autobookmarks_parses_and_is_not_planned() {
+        assert_eq!(parse("autobookmarks"), Some(Ok(Verb::AutoBookmarks)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "autobookmarks"),
+            "`autobookmarks` is still in the planned table"
+        );
     }
 }

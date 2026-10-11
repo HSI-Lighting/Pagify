@@ -17,6 +17,7 @@ pub mod passphrase;
 pub mod automate;
 pub mod block_input;
 pub mod blocks;
+pub mod bookmarks;
 pub mod command;
 pub mod command_plan;
 pub mod commit;

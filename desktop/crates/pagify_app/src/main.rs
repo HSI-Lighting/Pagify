@@ -13975,6 +13975,53 @@ impl PagifyApp {
         }
     }
 
+    /// Auto Create Bookmarks — the Navigation tab's button: one bookmark per
+    /// page, named from the page's own largest text run.
+    ///
+    /// All the entries go in as one [`pdf_core::command::Command::Batch`], so
+    /// the whole pass is one undo away — a hundred bookmarks made by one
+    /// button press should not take a hundred undos to take back, or nobody
+    /// will press it on a document that needs it.
+    fn auto_bookmarks(&mut self) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        let count = doc.page_count;
+        let titles = match pagify_shell::bookmarks::heading_titles(&session) {
+            Ok(titles) => titles,
+            Err(e) => {
+                self.say_error(format!("autobookmarks: {e}"));
+                return;
+            }
+        };
+        if titles.is_empty() {
+            self.say_error("autobookmarks: no page has any text to name a bookmark after.");
+            return;
+        }
+        let commands: Vec<pdf_core::command::Command> = titles
+            .iter()
+            .map(|(page, title)| pdf_core::command::Command::AddBookmark {
+                title: title.clone(),
+                page_index: *page,
+            })
+            .collect();
+        match session.execute(pdf_core::command::Command::Batch { commands }) {
+            Ok(_) => {
+                self.say_info(format!(
+                    "made {} bookmark(s) from the pages' own headings; {} page(s) had no \
+                     text to name one from.",
+                    titles.len(),
+                    count - titles.len()
+                ));
+                let entries = self.sync_bookmarks();
+                self.tab_mut().panels.bookmark_panel = Some(BookmarkPanel { entries });
+            }
+            Err(e) => self.say_error(format!("autobookmarks: {e}")),
+        }
+    }
+
     /// The annotation under a point, if any.
     fn foreign_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
         let (x, y) = (at.x as f32, at.y as f32);

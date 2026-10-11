@@ -5092,3 +5092,24 @@ fn accesscheck_reports_the_text_layer_and_accessreport_writes_it() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **The Navigation tab's Auto Create Bookmarks, through the real dispatch.**
+/// One batch makes a bookmark per text page, and the document's own outline
+/// reads them back.
+#[test]
+fn autobookmarks_names_a_bookmark_per_text_page() {
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("autobookmarks");
+    h.run_steps(1);
+
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("bookmark(s) from the pages' own headings")),
+        "autobookmarks did not report: {said:?}"
+    );
+
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let stored = session.bookmarks().expect("read the outline back");
+    assert_eq!(stored.len(), session.page_count().expect("count"), "one per text page: {stored:?}");
+    assert!(stored.iter().all(|(title, _)| !title.trim().is_empty()), "{stored:?}");
+}
