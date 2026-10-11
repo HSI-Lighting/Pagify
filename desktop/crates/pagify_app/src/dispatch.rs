@@ -84,8 +84,112 @@ impl crate::PagifyApp {
     }
 
     /// Apply one planned [`Effect`] — the doing half of the shell's planning
-    /// (`command_plan::plan`). The bodies are the ones `act_document` ran.
+    /// (`command_plan::plan`).
+    ///
+    /// The router is exhaustive: every [`Effect`] the shell can plan goes to
+    /// the per-domain function whose body came from the same old handler, so
+    /// an arm cannot be forgotten silently. One function per domain is what
+    /// DESIGN_REVIEW.md §3.4 asks for ("split into dispatch/document.rs,
+    /// dispatch/edit.rs, etc. if it grows"); the bodies stay verbatim.
     fn apply_effect(&mut self, effect: Effect) {
+        match effect {
+            Effect::OpenPath(_)
+            | Effect::OpenFileDialog
+            | Effect::CloseDocument { .. }
+            | Effect::Quit { .. }
+            | Effect::GoTo(_)
+            | Effect::Zoom(_)
+            | Effect::RotatePage(_)
+            | Effect::ReportTextLayer
+            | Effect::Say(_)
+            | Effect::SayError(_)
+            | Effect::CheckUpdate => self.apply_document(effect),
+            Effect::ToggleLayers
+            | Effect::RepairLocks
+            | Effect::SetOpacity(_)
+            | Effect::Restack(_)
+            | Effect::ArmLockArea
+            | Effect::LockPages(_)
+            | Effect::Unlock
+            | Effect::ArmCalibrate { .. }
+            | Effect::ReportScale
+            | Effect::ArmMeasure(_)
+            | Effect::Record(_)
+            | Effect::StopRecording
+            | Effect::Replay(_) => self.apply_objects_and_measurement(effect),
+            Effect::TakePick(_)
+            | Effect::Sensitivity(_)
+            | Effect::FillSign(_)
+            | Effect::PredefinedText(_)
+            | Effect::TakeUpObjectTool { .. }
+            | Effect::ArmSignLine { .. }
+            | Effect::ArmSignRectangle { .. }
+            | Effect::ReportDocumentStatus => self.apply_tools(effect),
+            Effect::ReportSessionLog
+            | Effect::RunApplySignatures
+            | Effect::RunManageSignatures(_)
+            | Effect::OpenSignaturePad { .. }
+            | Effect::UploadSignaturePath(_)
+            | Effect::UploadSignatureDialog
+            | Effect::ArmSignature { .. }
+            | Effect::RunValidate
+            | Effect::RunCertify(_) => self.apply_signing(effect),
+            Effect::ArmWhiteout
+            | Effect::ArmDrawArrow
+            | Effect::ToggleFill
+            | Effect::ArmRedact
+            | Effect::LockWords
+            | Effect::RunSecure(_)
+            | Effect::RunSmartRedact { .. }
+            | Effect::RunHiddenData { .. }
+            | Effect::RunUnsecure => self.apply_security(effect),
+            Effect::FinishPick
+            | Effect::SaveFile
+            | Effect::SaveFileAs(_)
+            | Effect::SaveAsDialog
+            | Effect::RunExtract { .. }
+            | Effect::RunImport { .. }
+            | Effect::RunDeletePages(_)
+            | Effect::RunInsertPage
+            | Effect::RunMovePages { .. } => self.apply_files(effect),
+            Effect::RunReflow
+            | Effect::RunFind(_)
+            | Effect::RunFindStep { .. }
+            | Effect::OpenFindReplace
+            | Effect::OpenSpellCheck
+            | Effect::AddBookmark
+            | Effect::ArmArticleBox
+            | Effect::BeginWebLink
+            | Effect::BeginJoinText
+            | Effect::BeginMatchProperties
+            | Effect::RunMarkText(_)
+            | Effect::RunListMarks
+            | Effect::RunRemoveMark(_)
+            | Effect::RunNote(_) => self.apply_text(effect),
+            Effect::UndoRedo { .. }
+            | Effect::SetPointer(_)
+            | Effect::CopyText
+            | Effect::Paste
+            | Effect::EditText
+            | Effect::AddText(_)
+            | Effect::AddImage(_)
+            | Effect::SetLayout(_)
+            | Effect::RunReversePages
+            | Effect::ToggleOrganizeGrid
+            | Effect::ToggleAppearance
+            | Effect::RunDuplicatePages(_)
+            | Effect::RunCropPages { .. }
+            | Effect::RunResizePages { .. }
+            | Effect::RunSwapPages { .. }
+            | Effect::RunRotatePages { .. }
+            | Effect::RunExtractText(_)
+            | Effect::RunOutlinedFont(_)
+            | Effect::ClearRecent => self.apply_navigation(effect),
+        }
+    }
+
+    /// The document and view effects — the bodies `act_document` ran.
+    fn apply_document(&mut self, effect: Effect) {
         match effect {
             Effect::OpenPath(path) => self.open(&path.to_string_lossy()),
             Effect::OpenFileDialog => self.open_dialog(),
@@ -121,7 +225,16 @@ impl crate::PagifyApp {
             Effect::RotatePage(degrees) => self.rotate_view(degrees),
             Effect::ReportTextLayer => self.report_text_layer(true),
             Effect::Say(text) => self.say_info(text),
+            Effect::SayError(text) => self.say_error(text),
             Effect::CheckUpdate => self.spawn_update_check(),
+            other => unreachable!("apply_document was handed {other:?}"),
+        }
+    }
+
+    /// The object and measurement effects — the bodies `act_objects` and
+    /// `act_measurement` ran.
+    fn apply_objects_and_measurement(&mut self, effect: Effect) {
+        match effect {
             Effect::ToggleLayers => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
@@ -232,7 +345,15 @@ impl crate::PagifyApp {
             }
             Effect::StopRecording => self.stop_recording(),
             Effect::Replay(path) => self.replay(&path),
-            Effect::SayError(text) => self.say_error(text),
+            other => unreachable!("apply_objects_and_measurement was handed {other:?}"),
+        }
+    }
+
+    /// The tool effects: picks, form marks and the text tools — the bodies
+    /// `act_tools` ran (its walks live beside this as `act_sensitivity` and
+    /// `act_fill_sign`).
+    fn apply_tools(&mut self, effect: Effect) {
+        match effect {
             Effect::TakePick(at) => self.take_pick(at),
             Effect::Sensitivity(what) => self.act_sensitivity(what),
             Effect::FillSign(what) => self.act_fill_sign(what),
@@ -256,6 +377,15 @@ impl crate::PagifyApp {
                     self.say_info(line);
                 }
             }
+            other => unreachable!("apply_tools was handed {other:?}"),
+        }
+    }
+
+    /// The signing effects — the bodies `act_signing` ran (the page walk and
+    /// the management actions live beside this as `act_apply_signatures` and
+    /// `act_manage_signatures`).
+    fn apply_signing(&mut self, effect: Effect) {
+        match effect {
             Effect::ReportSessionLog => match self.recording_state.session_log.path() {
                 Some(path) => self.say_info(format!(
                     "recording every command and outcome to {} — send it along with a bug report.",
@@ -275,6 +405,14 @@ impl crate::PagifyApp {
             Effect::ArmSignature { page } => self.arm_tool(Tool::Signature, page),
             Effect::RunValidate => self.act_validate(),
             Effect::RunCertify(path) => self.act_certify(path),
+            other => unreachable!("apply_signing was handed {other:?}"),
+        }
+    }
+
+    /// The security effects — the bodies `act_security` ran (its walks live
+    /// beside this as `act_validate`, `act_certify` and `act_smart_redact`).
+    fn apply_security(&mut self, effect: Effect) {
+        match effect {
             Effect::ArmWhiteout => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");
@@ -412,6 +550,13 @@ impl crate::PagifyApp {
                     Err(e) => self.say_error(e.to_string()),
                 }
             }
+            other => unreachable!("apply_security was handed {other:?}"),
+        }
+    }
+
+    /// The file effects — the bodies `act_files` ran.
+    fn apply_files(&mut self, effect: Effect) {
+        match effect {
             Effect::FinishPick => {
                 let closeable = self.tab_mut()
                     .tool
@@ -439,6 +584,13 @@ impl crate::PagifyApp {
             Effect::RunDeletePages(pages) => self.delete_pages(&pages),
             Effect::RunInsertPage => self.insert_page(),
             Effect::RunMovePages { pages, before } => self.move_pages(&pages, before),
+            other => unreachable!("apply_files was handed {other:?}"),
+        }
+    }
+
+    /// The text-and-find effects — the bodies `act_text_and_find` ran.
+    fn apply_text(&mut self, effect: Effect) {
+        match effect {
             Effect::RunReflow => self.reflow(),
             Effect::RunFind(needle) => self.find(&needle),
             Effect::RunFindStep { forward } => self.find_step(forward),
@@ -460,6 +612,13 @@ impl crate::PagifyApp {
             Effect::RunListMarks => self.list_marks(),
             Effect::RunRemoveMark(n) => self.remove_mark(n),
             Effect::RunNote(text) => self.add_note(text),
+            other => unreachable!("apply_text was handed {other:?}"),
+        }
+    }
+
+    /// The navigation and editing effects — the bodies `act_navigation` ran.
+    fn apply_navigation(&mut self, effect: Effect) {
+        match effect {
             Effect::UndoRedo { undo } => self.undo_redo(undo),
             Effect::SetPointer(mode) => {
                 // Switching tools abandons whatever was half-picked. Leaving a
@@ -480,11 +639,26 @@ impl crate::PagifyApp {
                     pagify_shell::verbs::PointerMode::Pan => "hand — drag to move the page.",
                 });
             }
+            // **Reported from use**: typing `copy` (or the "Copy" ribbon
+            // button, which types it) after selecting a page in the
+            // thumbnail rail copied nothing — only ⌘C's own keyboard
+            // dispatch knew to try a page selection first. §7 says the box
+            // can do anything the interface can, so this needs the same
+            // precedence ⌘C already has: page selection, then a drawn
+            // object, then falling through to the deferred text-copy flag
+            // (unlike the other two, that one needs `ctx` to put text on the
+            // OS clipboard, which `act` has no access to — see `copy_wanted`
+            // at its own declaration).
             Effect::CopyText => {
                 if !self.copy_organize_selection() && !self.copy_object_selection() {
                     self.tab_mut().view_state.copy_wanted = true;
                 }
             }
+            // Same precedence ⌘V's own keyboard dispatch already has: a
+            // copied page first, a copied object otherwise. Both already
+            // take no `ctx`, unlike the text-copy side, so there is no
+            // deferred-flag equivalent needed here the way `CopyText` needs
+            // one for `copy_selection`.
             Effect::Paste => {
                 if self.current_page_clipboard().is_some() {
                     self.paste_organize_selection();
@@ -528,6 +702,7 @@ impl crate::PagifyApp {
                     Err(e) => self.say_error(format!("could not remove the list: {e}")),
                 }
             }
+            other => unreachable!("apply_navigation was handed {other:?}"),
         }
     }
 
