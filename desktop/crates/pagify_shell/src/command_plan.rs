@@ -1,10 +1,11 @@
-//! What a command *does*, as data — the first slice of the design review's
-//! Phase 4b (DESIGN_REVIEW.md §3.4).
+//! What a command *does*, as data — the design review's Phase 4b
+//! (DESIGN_REVIEW.md §3.4), complete.
 //!
-//! [`plan`] turns the document, view and app verbs into [`Effect`]s that the
-//! app applies. Verbs the plan does not know return `None`, and the app's own
-//! handlers still run them; the migration ports one domain at a time, and
-//! this is the first — the eleven verbs of `dispatch::act_document`.
+//! [`plan`] turns every document, view and app verb into [`Effect`]s that
+//! the app applies; its router is exhaustive, so a new verb must choose a
+//! domain before the crate compiles. `Help` and `Planned` are the only verbs
+//! with no plan — the app's `run()` answers them before dispatch reaches
+//! `act`.
 //!
 //! Planning is deliberately pure: no engine, no window, no `egui`. That is
 //! what makes the decision side testable in this crate, while the app keeps
@@ -239,10 +240,115 @@ pub enum Effect {
     ClearRecent,
 }
 
-/// The plan for a verb, or `None` when this slice does not know it yet — the
-/// app then runs its own handler, so an unported verb behaves exactly as
-/// before.
+/// The plan for a verb — what it does, as data.
+///
+/// The router below names every [`Verb`] on purpose: it is exhaustive, so a
+/// new verb cannot be added without being put in a domain (the compiler
+/// refuses the match, where the old wildcard let it through to a runtime
+/// panic). `Help` and `Planned` are the only verbs with no plan; the app's
+/// `run()` answers them before dispatch. Each domain's arms live in their
+/// own function so no single function outgrows the review's size invariant.
 pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
+    match verb {
+        Verb::Open(_)
+        | Verb::OpenDialog
+        | Verb::Close { .. }
+        | Verb::Quit { .. }
+        | Verb::Page(_)
+        | Verb::Zoom(_)
+        | Verb::RotatePage(_)
+        | Verb::TextLayer
+        | Verb::Pdfium
+        | Verb::Version
+        | Verb::CheckUpdate => plan_document(verb, env),
+        Verb::Layers
+        | Verb::RepairLocks
+        | Verb::Opacity(_)
+        | Verb::BringToFront
+        | Verb::SendToBack
+        | Verb::LockArea
+        | Verb::LockPages(_)
+        | Verb::Unlock
+        | Verb::Calibrate { .. }
+        | Verb::Scale
+        | Verb::Measure(_)
+        | Verb::Record(_)
+        | Verb::StopRecording
+        | Verb::Replay(_) => plan_objects_and_measurement(verb, env),
+        Verb::Pick(_)
+        | Verb::Sensitivity(_)
+        | Verb::FillSign(_)
+        | Verb::PredefinedText(_)
+        | Verb::EditObject
+        | Verb::MoveThing
+        | Verb::SignLine
+        | Verb::SignRectangle
+        | Verb::DocumentStatus => plan_tools(verb, env),
+        Verb::SessionLog
+        | Verb::ApplySignatures
+        | Verb::ManageSignatures(_)
+        | Verb::Signature(_) => plan_signing(verb, env),
+        Verb::Validate
+        | Verb::Certify(_)
+        | Verb::Whiteout
+        | Verb::DrawArrow
+        | Verb::ToggleFill
+        | Verb::Redact
+        | Verb::Lock
+        | Verb::Secure(_)
+        | Verb::SmartRedact { .. }
+        | Verb::HiddenData { .. }
+        | Verb::Unsecure => plan_security(verb, env),
+        Verb::Finish
+        | Verb::Save
+        | Verb::SaveAs(_)
+        | Verb::SaveAsDialog
+        | Verb::Extract { .. }
+        | Verb::Import { .. }
+        | Verb::DeletePages(_)
+        | Verb::InsertPage
+        | Verb::MovePages { .. }
+        | Verb::Reflow
+        | Verb::Find(_)
+        | Verb::FindStep { .. }
+        | Verb::Replace
+        | Verb::Spelling
+        | Verb::Bookmark
+        | Verb::ArticleBox
+        | Verb::Weblinks
+        | Verb::JoinText
+        | Verb::MatchProperties
+        | Verb::Copy
+        | Verb::MarkText(_)
+        | Verb::ListMarks
+        | Verb::RemoveMark(_)
+        | Verb::Note(_) => plan_files_and_text(verb, env),
+        Verb::Undo
+        | Verb::Redo
+        | Verb::Pointer(_)
+        | Verb::CopyText
+        | Verb::Paste
+        | Verb::EditText
+        | Verb::AddText(_)
+        | Verb::AddImage(_)
+        | Verb::SetLayout(_)
+        | Verb::ReversePages
+        | Verb::Thumbnails
+        | Verb::ToggleAppearance
+        | Verb::DuplicatePages(_)
+        | Verb::CropPages { .. }
+        | Verb::ResizePages { .. }
+        | Verb::SwapPages { .. }
+        | Verb::RotatePages { .. }
+        | Verb::ExtractText(_)
+        | Verb::OutlinedFont(_)
+        | Verb::ClearHistory => plan_navigation(verb, env),
+        Verb::Help(_) | Verb::Planned { .. } => None,
+    }
+}
+
+/// The document and view verbs.
+fn plan_document(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
     Some(match verb {
         // Opening lands in its own tab, so it never puts this one's unsaved
         // work at risk — see the app's `open_with`.
@@ -258,8 +364,15 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Version => vec![Effect::Say(format!("Pagify {}", crate::VERSION))],
         // The message comes first so it is on the bar while the check runs.
         Verb::CheckUpdate => vec![Effect::Say("checking for a newer build…".into()), Effect::CheckUpdate],
-        // Objects and measurement: mirrors of the verbs, so the app applies
-        // the same bodies it always ran.
+        _ => return None,
+    })
+}
+
+/// The objects and measurement verbs.
+fn plan_objects_and_measurement(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
+    Some(match verb {
+        // Mirrors of the verbs, so the app applies the same bodies it always
+        // ran.
         Verb::Layers => vec![Effect::ToggleLayers],
         Verb::RepairLocks => vec![Effect::RepairLocks],
         Verb::Opacity(percent) => vec![Effect::SetOpacity(*percent)],
@@ -276,12 +389,25 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Record(name) => vec![Effect::Record(name.clone())],
         Verb::StopRecording => vec![Effect::StopRecording],
         Verb::Replay(path) => vec![Effect::Replay(path.clone())],
-        // Tools: the guards and the one coordinate flip live here now, where
-        // they can be tested without a window.
+        _ => return None,
+    })
+}
+
+/// The tool verbs: the guards and the one coordinate flip live here, where
+/// they can be tested without a window.
+fn plan_tools(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
+    Some(match verb {
         Verb::Pick(at) => {
             if !env.tool_armed {
                 vec![Effect::SayError("nothing is waiting for a click.".into())]
             } else {
+                // A typed pick is in the *same* coordinates as a typed draw
+                // command — `l 30,250 170,250` and `pick 100,250` must refer
+                // to the same place, or every scripted pick misses. That is
+                // the kernel's page space, y up from the bottom-left, which
+                // is also the PDF's own convention. Pointer picks arrive in
+                // app space instead, so this is the one place that converts,
+                // through the module that owns the flip.
                 let space = PageSpace::new(env.page_height);
                 vec![Effect::TakePick(space.from_kernel(Vec2::new(at.x, at.y)))]
             }
@@ -299,8 +425,14 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::SignLine => vec![Effect::ArmSignLine { page: env.page }],
         Verb::SignRectangle => vec![Effect::ArmSignRectangle { page: env.page }],
         Verb::DocumentStatus => vec![Effect::ReportDocumentStatus],
-        // Signing: the pad names and the draw-then-place decisions are
-        // computed here from the library count.
+        _ => return None,
+    })
+}
+
+/// The signing verbs: the pad names and the draw-then-place decisions are
+/// computed here from the library count.
+fn plan_signing(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
+    Some(match verb {
         Verb::SessionLog => vec![Effect::ReportSessionLog],
         Verb::ApplySignatures => vec![Effect::RunApplySignatures],
         Verb::ManageSignatures(what) => vec![Effect::RunManageSignatures(what.clone())],
@@ -334,8 +466,14 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
             vec![Effect::SayError("nothing open.".into())]
         }
         Verb::Signature(SignatureAction::Place) => vec![Effect::ArmSignature { page: env.page }],
-        // Security: mirrors, with the password-state decisions still in the
-        // app's bodies (they read live session state).
+        _ => return None,
+    })
+}
+
+/// The security verbs: mirrors, with the password-state decisions still in
+/// the app's bodies (they read live session state).
+fn plan_security(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
+    Some(match verb {
         Verb::Validate => vec![Effect::RunValidate],
         Verb::Certify(path) => vec![Effect::RunCertify(path.clone())],
         Verb::Whiteout => vec![Effect::ArmWhiteout],
@@ -347,6 +485,13 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::SmartRedact { redact } => vec![Effect::RunSmartRedact { redact: *redact }],
         Verb::HiddenData { clean } => vec![Effect::RunHiddenData { clean: *clean }],
         Verb::Unsecure => vec![Effect::RunUnsecure],
+        _ => return None,
+    })
+}
+
+/// The file, text and find verbs.
+fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
+    Some(match verb {
         // Files: save/finish and the page-range operations.
         Verb::Finish => vec![Effect::FinishPick],
         Verb::Save => vec![Effect::SaveFile],
@@ -381,7 +526,13 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::ListMarks => vec![Effect::RunListMarks],
         Verb::RemoveMark(n) => vec![Effect::RunRemoveMark(*n)],
         Verb::Note(text) => vec![Effect::RunNote(text.clone())],
-        // Navigation and editing — the last domain.
+        _ => return None,
+    })
+}
+
+/// The navigation and editing verbs — the last domain ported.
+fn plan_navigation(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
+    Some(match verb {
         Verb::Undo => vec![Effect::UndoRedo { undo: true }],
         Verb::Redo => vec![Effect::UndoRedo { undo: false }],
         Verb::Pointer(mode) => vec![Effect::SetPointer(*mode)],
