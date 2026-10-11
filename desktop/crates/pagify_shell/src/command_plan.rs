@@ -199,6 +199,44 @@ pub enum Effect {
     RunRemoveMark(usize),
     /// Add a note.
     RunNote(String),
+    /// Step the undo/redo history; `undo` picks the direction.
+    UndoRedo { undo: bool },
+    /// Set the pointer tool (select or hand).
+    SetPointer(crate::verbs::PointerMode),
+    /// Copy with the frame's own precedence (page, object, then text).
+    CopyText,
+    /// Paste with the frame's own precedence (page, then object).
+    Paste,
+    /// Open the run editor on the words under the pointer.
+    EditText,
+    /// Add the given words, or open the type-first flow when empty.
+    AddText(String),
+    /// Add a picture from this path, or ask for one.
+    AddImage(Option<std::path::PathBuf>),
+    /// Set the reader's layout.
+    SetLayout(crate::reader::Layout),
+    /// Reverse the page order.
+    RunReversePages,
+    /// Toggle the Organize grid.
+    ToggleOrganizeGrid,
+    /// Toggle light/dark appearance.
+    ToggleAppearance,
+    /// Duplicate the named pages.
+    RunDuplicatePages(String),
+    /// Crop the named pages by a margin.
+    RunCropPages { pages: String, margin: f32 },
+    /// Resize the named pages.
+    RunResizePages { pages: String, width_pt: f32, height_pt: f32 },
+    /// Swap two pages.
+    RunSwapPages { a: usize, b: usize },
+    /// Rotate the named pages by quarters.
+    RunRotatePages { pages: String, quarters: i32 },
+    /// Extract the named pages' text.
+    RunExtractText(String),
+    /// Add, remove or clear the outlined-font set.
+    RunOutlinedFont(crate::verbs::OutlinedFontAction),
+    /// Clear the recent-documents list.
+    ClearRecent,
 }
 
 /// The plan for a verb, or `None` when this slice does not know it yet — the
@@ -343,6 +381,35 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::ListMarks => vec![Effect::RunListMarks],
         Verb::RemoveMark(n) => vec![Effect::RunRemoveMark(*n)],
         Verb::Note(text) => vec![Effect::RunNote(text.clone())],
+        // Navigation and editing — the last domain.
+        Verb::Undo => vec![Effect::UndoRedo { undo: true }],
+        Verb::Redo => vec![Effect::UndoRedo { undo: false }],
+        Verb::Pointer(mode) => vec![Effect::SetPointer(*mode)],
+        Verb::CopyText => vec![Effect::CopyText],
+        Verb::Paste => vec![Effect::Paste],
+        Verb::EditText => vec![Effect::EditText],
+        Verb::AddText(text) => vec![Effect::AddText(text.clone())],
+        Verb::AddImage(path) => vec![Effect::AddImage(path.clone())],
+        Verb::SetLayout(layout) => vec![Effect::SetLayout(layout.clone())],
+        Verb::ReversePages => vec![Effect::RunReversePages],
+        Verb::Thumbnails => vec![Effect::ToggleOrganizeGrid],
+        Verb::ToggleAppearance => vec![Effect::ToggleAppearance],
+        Verb::DuplicatePages(spec) => vec![Effect::RunDuplicatePages(spec.clone())],
+        Verb::CropPages { pages, margin } => {
+            vec![Effect::RunCropPages { pages: pages.clone(), margin: *margin }]
+        }
+        Verb::ResizePages { pages, width_pt, height_pt } => vec![Effect::RunResizePages {
+            pages: pages.clone(),
+            width_pt: *width_pt,
+            height_pt: *height_pt,
+        }],
+        Verb::SwapPages { a, b } => vec![Effect::RunSwapPages { a: *a, b: *b }],
+        Verb::RotatePages { pages, quarters } => {
+            vec![Effect::RunRotatePages { pages: pages.clone(), quarters: *quarters }]
+        }
+        Verb::ExtractText(spec) => vec![Effect::RunExtractText(spec.clone())],
+        Verb::OutlinedFont(action) => vec![Effect::RunOutlinedFont(action.clone())],
+        Verb::ClearHistory => vec![Effect::ClearRecent],
         _ => return None,
     })
 }
@@ -565,17 +632,48 @@ mod tests {
             assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");
         }
     }
+    #[test]
+    fn the_navigation_domain_mirrors_its_verbs() {
+        use crate::verbs::PointerMode;
+        let env = CommandEnv::default();
+        let cases: Vec<(Verb, Vec<Effect>)> = vec![
+            (Verb::Undo, vec![Effect::UndoRedo { undo: true }]),
+            (Verb::Redo, vec![Effect::UndoRedo { undo: false }]),
+            (Verb::Pointer(PointerMode::Pan), vec![Effect::SetPointer(PointerMode::Pan)]),
+            (Verb::CopyText, vec![Effect::CopyText]),
+            (Verb::Paste, vec![Effect::Paste]),
+            (Verb::EditText, vec![Effect::EditText]),
+            (Verb::AddText("hi".into()), vec![Effect::AddText("hi".into())]),
+            (Verb::AddImage(None), vec![Effect::AddImage(None)]),
+            (Verb::ReversePages, vec![Effect::RunReversePages]),
+            (Verb::Thumbnails, vec![Effect::ToggleOrganizeGrid]),
+            (Verb::ToggleAppearance, vec![Effect::ToggleAppearance]),
+            (Verb::DuplicatePages("1".into()), vec![Effect::RunDuplicatePages("1".into())]),
+            (
+                Verb::CropPages { pages: "1".into(), margin: 4.0 },
+                vec![Effect::RunCropPages { pages: "1".into(), margin: 4.0 }],
+            ),
+            (
+                Verb::ResizePages { pages: "1".into(), width_pt: 612.0, height_pt: 792.0 },
+                vec![Effect::RunResizePages { pages: "1".into(), width_pt: 612.0, height_pt: 792.0 }],
+            ),
+            (Verb::SwapPages { a: 0, b: 1 }, vec![Effect::RunSwapPages { a: 0, b: 1 }]),
+            (
+                Verb::RotatePages { pages: "1".into(), quarters: 1 },
+                vec![Effect::RunRotatePages { pages: "1".into(), quarters: 1 }],
+            ),
+            (Verb::ExtractText("all".into()), vec![Effect::RunExtractText("all".into())]),
+            (Verb::ClearHistory, vec![Effect::ClearRecent]),
+        ];
+        for (verb, want) in cases {
+            assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");
+        }
+    }
 
     #[test]
-    fn unported_verbs_have_no_plan_yet() {        // One verb from each domain still handled app-side; the list shrinks
-        // as the migration ports them.
-        for verb in [
-            Verb::Pointer(crate::verbs::PointerMode::Select),
-            Verb::Paste,
-            Verb::EditText,
-            Verb::Undo,
-        ] {
-            assert!(plan(&verb, &CommandEnv::default()).is_none(), "{verb:?} should still fall through");
-        }
+    fn only_help_and_planned_have_no_plan() {
+        // These two never reach `act`: `run()` answers them itself.
+        assert!(plan(&Verb::Help(None), &CommandEnv::default()).is_none());
+        assert!(plan(&Verb::Planned { verb: "x".into(), phase: "later".into() }, &CommandEnv::default()).is_none());
     }
 }

@@ -51,38 +51,14 @@ impl crate::PagifyApp {
     }
 
     pub(crate) fn act(&mut self, verb: Verb) {
-        // Phase 4b: the document/view/app verbs are planned in the shell
-        // (DESIGN_REVIEW.md §3.4); everything else still routes below.
-        if let Some(effects) = pagify_shell::command_plan::plan(&verb, &self.command_env()) {
-            for effect in effects {
-                self.apply_effect(effect);
-            }
-            return;
-        }
-        match verb {
-            Verb::Undo
-            | Verb::Redo
-            | Verb::Pointer(..)
-            | Verb::CopyText
-            | Verb::Paste
-            | Verb::EditText
-            | Verb::AddText(..)
-            | Verb::AddImage(..)
-            | Verb::SetLayout(..)
-            | Verb::ReversePages
-            | Verb::Thumbnails
-            | Verb::ToggleAppearance
-            | Verb::DuplicatePages(..)
-            | Verb::CropPages { .. }
-            | Verb::ResizePages { .. }
-            | Verb::SwapPages { .. }
-            | Verb::RotatePages { .. }
-            | Verb::ExtractText(..)
-            | Verb::OutlinedFont(..)
-            | Verb::ClearHistory
-            => self.act_navigation(verb),
-            // Ported domains never reach here: `plan` above claimed them.
-            other => unreachable!("an unplanned verb fell through the router: {other:?}"),
+        // Phase 4b is complete: every verb that reaches `act` is planned in
+        // the shell (DESIGN_REVIEW.md §3.4) — `run` answers `Help` and
+        // `Planned` before this point. A verb with no plan is a bug, not a
+        // fall-through, and says so.
+        let effects = pagify_shell::command_plan::plan(&verb, &self.command_env())
+            .unwrap_or_else(|| unreachable!("unplanned verb reached act: {verb:?}"));
+        for effect in effects {
+            self.apply_effect(effect);
         }
     }
 
@@ -484,6 +460,74 @@ impl crate::PagifyApp {
             Effect::RunListMarks => self.list_marks(),
             Effect::RunRemoveMark(n) => self.remove_mark(n),
             Effect::RunNote(text) => self.add_note(text),
+            Effect::UndoRedo { undo } => self.undo_redo(undo),
+            Effect::SetPointer(mode) => {
+                // Switching tools abandons whatever was half-picked. Leaving a
+                // pending operation armed under a new tool is how a click meant
+                // for one thing lands in another.
+                if let Some(armed) = self.tab_mut().tool.take() {
+                    if armed.kind.cancel_drops_checkpoint() {
+                        let page = self.tab().view_state.page;
+                        if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
+                            layer.forget_last_step();
+                        }
+                    }
+                }
+                self.tab_mut().pointer = mode;
+                self.say_info(match mode {
+                    pagify_shell::verbs::PointerMode::Select =>
+                        "select — drag over text to select it, or over paper to select marks.",
+                    pagify_shell::verbs::PointerMode::Pan => "hand — drag to move the page.",
+                });
+            }
+            Effect::CopyText => {
+                if !self.copy_organize_selection() && !self.copy_object_selection() {
+                    self.tab_mut().view_state.copy_wanted = true;
+                }
+            }
+            Effect::Paste => {
+                if self.current_page_clipboard().is_some() {
+                    self.paste_organize_selection();
+                } else {
+                    self.paste_object_selection();
+                }
+            }
+            Effect::EditText => self.edit_text(),
+            Effect::AddText(text) => self.add_text(text),
+            Effect::AddImage(path) => match path {
+                Some(path) => self.add_image(&path),
+                None => self.add_image_dialog(),
+            },
+            Effect::SetLayout(layout) => self.set_layout(layout),
+            Effect::RunReversePages => self.reverse_pages(),
+            Effect::ToggleOrganizeGrid => self.toggle_organize_grid(),
+            Effect::ToggleAppearance => self.toggle_appearance(),
+            Effect::RunDuplicatePages(spec) => self.duplicate_pages(&spec),
+            Effect::RunCropPages { pages, margin } => self.crop_pages(&pages, margin),
+            Effect::RunResizePages { pages, width_pt, height_pt } => {
+                self.resize_pages(&pages, width_pt, height_pt)
+            }
+            Effect::RunSwapPages { a, b } => self.swap_pages(a, b),
+            Effect::RunRotatePages { pages, quarters } => self.rotate_pages(&pages, quarters),
+            Effect::RunExtractText(spec) => self.extract_text(&spec),
+            Effect::RunOutlinedFont(action) => self.outlined_font_action(action),
+            Effect::ClearRecent => {
+                // The list is a record of what somebody has been reading;
+                // clearing it removes the file, and says what else is kept
+                // beside it so they can decide about those too.
+                let where_kept = pagify_shell::state::state_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| "nowhere on this system".into());
+                match self.library_state.recent.forget_all() {
+                    Ok(()) => self.say_info(format!(
+                        "the recent-documents list is gone. Pagify keeps its own files in \
+                         {where_kept}: predefined.json (saved texts), signatures.json (drawn \
+                         signatures), outlined_fonts.json (glyph shapes learned from documents), \
+                         and scripts/ (recordings) — delete any of them there."
+                    )),
+                    Err(e) => self.say_error(format!("could not remove the list: {e}")),
+                }
+            }
         }
     }
 
@@ -899,99 +943,6 @@ impl crate::PagifyApp {
 
 
 
-    /// One domain of [`Self::act`]: 19 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_navigation(&mut self, verb: Verb) {
-        match verb {
-            Verb::Undo | Verb::Redo => self.undo_redo(matches!(verb, Verb::Undo)),
-
-            Verb::Pointer(mode) => {
-                // Switching tools abandons whatever was half-picked. Leaving a
-                // pending operation armed under a new tool is how a click meant
-                // for one thing lands in another.
-                if let Some(armed) = self.tab_mut().tool.take() {
-                    if armed.kind.cancel_drops_checkpoint() {
-                        let page = self.tab().view_state.page;
-                        if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
-                            layer.forget_last_step();
-                        }
-                    }
-                }
-                self.tab_mut().pointer = mode;
-                self.say_info(match mode {
-                    pagify_shell::verbs::PointerMode::Select =>
-                        "select — drag over text to select it, or over paper to select marks.",
-                    pagify_shell::verbs::PointerMode::Pan => "hand — drag to move the page.",
-                });
-            }
-
-            // **Reported from use**: typing `copy` (or the "Copy" ribbon
-            // button, which types it) after selecting a page in the
-            // thumbnail rail copied nothing — only ⌘C's own keyboard
-            // dispatch knew to try a page selection first. §7 says the box
-            // can do anything the interface can, so this needs the same
-            // precedence ⌘C already has: page selection, then a drawn
-            // object, then falling through to the deferred text-copy flag
-            // (unlike the other two, that one needs `ctx` to put text on the
-            // OS clipboard, which `act` has no access to — see `copy_wanted`
-            // at its own declaration).
-            Verb::CopyText => {
-                if !self.copy_organize_selection() && !self.copy_object_selection() {
-                    self.tab_mut().view_state.copy_wanted = true;
-                }
-            }
-            // Same precedence ⌘V's own keyboard dispatch already has: a
-            // copied page first, a copied object otherwise. Both already
-            // take no `ctx`, unlike the text-copy side, so there is no
-            // deferred-flag equivalent needed here the way `CopyText` needs
-            // one for `copy_selection`.
-            Verb::Paste => {
-                if self.current_page_clipboard().is_some() {
-                    self.paste_organize_selection();
-                } else {
-                    self.paste_object_selection();
-                }
-            }
-            Verb::EditText => self.edit_text(),
-            Verb::AddText(text) => self.add_text(text),
-            Verb::AddImage(path) => match path {
-                Some(path) => self.add_image(&path),
-                None => self.add_image_dialog(),
-            },
-            Verb::SetLayout(layout) => self.set_layout(layout),
-            Verb::ReversePages => self.reverse_pages(),
-            Verb::Thumbnails => self.toggle_organize_grid(),
-            Verb::ToggleAppearance => self.toggle_appearance(),
-            Verb::DuplicatePages(spec) => self.duplicate_pages(&spec),
-            Verb::CropPages { pages, margin } => self.crop_pages(&pages, margin),
-            Verb::ResizePages { pages, width_pt, height_pt } => {
-                self.resize_pages(&pages, width_pt, height_pt)
-            }
-            Verb::SwapPages { a, b } => self.swap_pages(a, b),
-            Verb::RotatePages { pages, quarters } => self.rotate_pages(&pages, quarters),
-            Verb::ExtractText(spec) => self.extract_text(&spec),
-            Verb::OutlinedFont(action) => self.outlined_font_action(action),
-            Verb::ClearHistory => {
-                // The list is a record of what somebody has been reading;
-                // clearing it removes the file, and says what else is kept
-                // beside it so they can decide about those too.
-                let where_kept = pagify_shell::state::state_dir()
-                    .map(|d| d.display().to_string())
-                    .unwrap_or_else(|| "nowhere on this system".into());
-                match self.library_state.recent.forget_all() {
-                    Ok(()) => self.say_info(format!(
-                        "the recent-documents list is gone. Pagify keeps its own files in \
-                         {where_kept}: predefined.json (saved texts), signatures.json (drawn \
-                         signatures), outlined_fonts.json (glyph shapes learned from documents), \
-                         and scripts/ (recordings) — delete any of them there."
-                    )),
-                    Err(e) => self.say_error(format!("could not remove the list: {e}")),
-                }
-            }
-
-            _ => unreachable!("act_navigation was handed a verb from another domain"),
-        }
-    }
 
 
 
