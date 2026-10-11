@@ -122,17 +122,17 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   `command_plan::plan(&Verb) -> Option<Vec<Effect>>` is the decision half
   (pure, with tests); `dispatch::act` tries it first and otherwise falls
   through to the old handlers, and `dispatch::apply_effect` is the doing
-  half. Four domains are ported: document/view/app (11 verbs),
-  objects/stacking (8), measurement/recording (7) and tools (9), with
-  mutation coverage equal to before. `plan(verb, env)` now takes a small
-  `CommandEnv` (has_doc / page / page_height / tool_armed) and makes the
-  real decisions: the document guards and the kernel-to-app `Pick` flip
-  are computed in the shell and unit-tested (four plan tests). Porting the
-  rest is the same recipe — add `Effect` variants (scroll-to-rect,
-  refresh, ask-unsaved, dialogs, selection ops), extend `plan`, move each
-  handler body into `apply_effect`, delete the handler, one domain per
-  commit. Remaining domains: signing, security, navigation/edit, files,
-  text-and-find (plus `run()`'s dispatch prologue).
+  half. Six domains are ported — document/view/app (11 verbs),
+  objects/stacking (8), measurement/recording (7), tools (9), signing (6)
+  and security (11): 52 verbs in all, with mutation coverage equal to
+  before. `plan(verb, env)` takes a small `CommandEnv` (has_doc / page /
+  page_height / tool_armed / signature_count) and makes the real
+  decisions: document guards, the kernel-to-app `Pick` flip and the
+  signature pad names/place-then-draw logic are computed in the shell and
+  unit-tested (six plan tests). Remaining domains, same recipe — extend
+  `plan`, move the handler body into `apply_effect`, delete the handler,
+  one commit each: navigation/edit (19 verbs), files (9), text-and-find
+  (15), plus `run()`'s dispatch prologue.
 5. **File splits — DONE for both monoliths.** `session.rs` (1,817) is
   `session/mod.rs` (475) plus fourteen `impl Session` families;
   `blocks.rs` (2,292) is `blocks/mod.rs` (900) plus `furniture`/`rows`/
