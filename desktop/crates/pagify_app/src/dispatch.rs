@@ -81,32 +81,6 @@ impl crate::PagifyApp {
             | Verb::OutlinedFont(..)
             | Verb::ClearHistory
             => self.act_navigation(verb),
-            Verb::Finish
-            | Verb::Save
-            | Verb::SaveAs(..)
-            | Verb::SaveAsDialog
-            | Verb::Extract { .. }
-            | Verb::Import { .. }
-            | Verb::DeletePages(..)
-            | Verb::InsertPage
-            | Verb::MovePages { .. }
-            => self.act_files(verb),
-            Verb::Reflow
-            | Verb::Find(..)
-            | Verb::FindStep { .. }
-            | Verb::Replace
-            | Verb::Spelling
-            | Verb::Bookmark
-            | Verb::ArticleBox
-            | Verb::Weblinks
-            | Verb::JoinText
-            | Verb::MatchProperties
-            | Verb::Copy
-            | Verb::MarkText(..)
-            | Verb::ListMarks
-            | Verb::RemoveMark(..)
-            | Verb::Note(..)
-            => self.act_text_and_find(verb),
             // Ported domains never reach here: `plan` above claimed them.
             other => unreachable!("an unplanned verb fell through the router: {other:?}"),
         }
@@ -462,6 +436,54 @@ impl crate::PagifyApp {
                     Err(e) => self.say_error(e.to_string()),
                 }
             }
+            Effect::FinishPick => {
+                let closeable = self.tab_mut()
+                    .tool
+                    .as_ref()
+                    .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
+                if closeable {
+                    self.resolve_tool();
+                // No multi-point kind is left with fewer than Enter needs —
+                // anything armed at this point is still waiting for more points.
+                } else if self.tab_mut().tool.is_some() {
+                    self.say_error("not enough points yet.");
+                } else {
+                    self.say_error("nothing to finish.");
+                }
+            }
+            Effect::SaveFile => {
+                self.save(None);
+            }
+            Effect::SaveFileAs(path) => {
+                self.save(Some(path));
+            }
+            Effect::SaveAsDialog => self.save_as_dialog(),
+            Effect::RunExtract { pages, dest } => self.extract(&pages, &dest),
+            Effect::RunImport { source, pages } => self.import(&source, &pages),
+            Effect::RunDeletePages(pages) => self.delete_pages(&pages),
+            Effect::RunInsertPage => self.insert_page(),
+            Effect::RunMovePages { pages, before } => self.move_pages(&pages, before),
+            Effect::RunReflow => self.reflow(),
+            Effect::RunFind(needle) => self.find(&needle),
+            Effect::RunFindStep { forward } => self.find_step(forward),
+            Effect::OpenFindReplace => self.tab_mut().panels.find_replace = Some(FindReplace::default()),
+            Effect::OpenSpellCheck => self.open_spell_check(),
+            Effect::AddBookmark => self.add_bookmark_here(),
+            Effect::ArmArticleBox => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::ArticleBox, page);
+                }
+            }
+            Effect::BeginWebLink => self.begin_web_link(),
+            Effect::BeginJoinText => self.begin_join_text(),
+            Effect::BeginMatchProperties => self.begin_match_properties(),
+            Effect::RunMarkText(kind) => self.mark_selection(kind),
+            Effect::RunListMarks => self.list_marks(),
+            Effect::RunRemoveMark(n) => self.remove_mark(n),
+            Effect::RunNote(text) => self.add_note(text),
         }
     }
 
@@ -971,73 +993,6 @@ impl crate::PagifyApp {
         }
     }
 
-    /// One domain of [`Self::act`]: 9 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_files(&mut self, verb: Verb) {
-        match verb {
-            // The typed form of pressing Enter over the page.
-            Verb::Finish => {
-                let closeable = self.tab_mut()
-                    .tool
-                    .as_ref()
-                    .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
-                if closeable {
-                    self.resolve_tool();
-                // No multi-point kind is left with fewer than Enter needs —
-                // anything armed at this point is still waiting for more points.
-                } else if self.tab_mut().tool.is_some() {
-                    self.say_error("not enough points yet.");
-                } else {
-                    self.say_error("nothing to finish.");
-                }
-            }
-            Verb::Save => {
-                self.save(None);
-            }
-            Verb::SaveAs(path) => {
-                self.save(Some(path));
-            }
-            Verb::SaveAsDialog => self.save_as_dialog(),
 
-            Verb::Extract { pages, dest } => self.extract(&pages, &dest),
-            Verb::Import { source, pages } => self.import(&source, &pages),
-            Verb::DeletePages(pages) => self.delete_pages(&pages),
-            Verb::InsertPage => self.insert_page(),
-            Verb::MovePages { pages, before } => self.move_pages(&pages, before),
-
-            _ => unreachable!("act_files was handed a verb from another domain"),
-        }
-    }
-
-    /// One domain of [`Self::act`]: 15 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_text_and_find(&mut self, verb: Verb) {
-        match verb {
-            Verb::Reflow => self.reflow(),
-            Verb::Find(needle) => self.find(&needle),
-            Verb::FindStep { forward } => self.find_step(forward),
-            Verb::Replace => self.tab_mut().panels.find_replace = Some(FindReplace::default()),
-            Verb::Spelling => self.open_spell_check(),
-            Verb::Bookmark => self.add_bookmark_here(),
-            Verb::ArticleBox => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else {
-                    let page = self.tab_mut().view_state.page;
-                    self.arm_tool(Tool::ArticleBox, page);
-                }
-            }
-            Verb::Weblinks => self.begin_web_link(),
-            Verb::JoinText => self.begin_join_text(),
-            Verb::MatchProperties => self.begin_match_properties(),
-            Verb::Copy => {}
-            Verb::MarkText(kind) => self.mark_selection(kind),
-            Verb::ListMarks => self.list_marks(),
-            Verb::RemoveMark(n) => self.remove_mark(n),
-            Verb::Note(text) => self.add_note(text),
-
-            _ => unreachable!("act_text_and_find was handed a verb from another domain"),
-        }
-    }
 
 }

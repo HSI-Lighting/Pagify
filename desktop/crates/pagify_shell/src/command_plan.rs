@@ -153,6 +153,52 @@ pub enum Effect {
     RunHiddenData { clean: bool },
     /// Take the document's password off.
     RunUnsecure,
+    /// Finish the armed pick if it can be finished, else say why not.
+    FinishPick,
+    /// Save the document (over itself when possible).
+    SaveFile,
+    /// Save the document to this path.
+    SaveFileAs(std::path::PathBuf),
+    /// Ask the platform where to save.
+    SaveAsDialog,
+    /// Extract pages to a file.
+    RunExtract { pages: String, dest: std::path::PathBuf },
+    /// Import pages from a file.
+    RunImport { source: std::path::PathBuf, pages: String },
+    /// Delete pages.
+    RunDeletePages(String),
+    /// Insert a blank page.
+    RunInsertPage,
+    /// Move pages before a page.
+    RunMovePages { pages: String, before: usize },
+    /// Reflow the page's text.
+    RunReflow,
+    /// Search for `needle`.
+    RunFind(String),
+    /// Step to the next or previous hit.
+    RunFindStep { forward: bool },
+    /// Open the Search & Replace panel.
+    OpenFindReplace,
+    /// Open the Check Spelling panel.
+    OpenSpellCheck,
+    /// Bookmark the page in view.
+    AddBookmark,
+    /// Arm the article-box tool.
+    ArmArticleBox,
+    /// Begin making a web link out of the selection.
+    BeginWebLink,
+    /// Begin joining runs into one paragraph.
+    BeginJoinText,
+    /// Begin sampling properties to match.
+    BeginMatchProperties,
+    /// Mark the selection.
+    RunMarkText(crate::verbs::Markup),
+    /// List the page's marks.
+    RunListMarks,
+    /// Remove the nth mark.
+    RunRemoveMark(usize),
+    /// Add a note.
+    RunNote(String),
 }
 
 /// The plan for a verb, or `None` when this slice does not know it yet — the
@@ -263,6 +309,40 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::SmartRedact { redact } => vec![Effect::RunSmartRedact { redact: *redact }],
         Verb::HiddenData { clean } => vec![Effect::RunHiddenData { clean: *clean }],
         Verb::Unsecure => vec![Effect::RunUnsecure],
+        // Files: save/finish and the page-range operations.
+        Verb::Finish => vec![Effect::FinishPick],
+        Verb::Save => vec![Effect::SaveFile],
+        Verb::SaveAs(path) => vec![Effect::SaveFileAs(path.clone())],
+        Verb::SaveAsDialog => vec![Effect::SaveAsDialog],
+        Verb::Extract { pages, dest } => {
+            vec![Effect::RunExtract { pages: pages.clone(), dest: dest.clone() }]
+        }
+        Verb::Import { source, pages } => {
+            vec![Effect::RunImport { source: source.clone(), pages: pages.clone() }]
+        }
+        Verb::DeletePages(pages) => vec![Effect::RunDeletePages(pages.clone())],
+        Verb::InsertPage => vec![Effect::RunInsertPage],
+        Verb::MovePages { pages, before } => {
+            vec![Effect::RunMovePages { pages: pages.clone(), before: *before }]
+        }
+        // Text and find.
+        Verb::Reflow => vec![Effect::RunReflow],
+        Verb::Find(needle) => vec![Effect::RunFind(needle.clone())],
+        Verb::FindStep { forward } => vec![Effect::RunFindStep { forward: *forward }],
+        Verb::Replace => vec![Effect::OpenFindReplace],
+        Verb::Spelling => vec![Effect::OpenSpellCheck],
+        Verb::Bookmark => vec![Effect::AddBookmark],
+        Verb::ArticleBox => vec![Effect::ArmArticleBox],
+        Verb::Weblinks => vec![Effect::BeginWebLink],
+        Verb::JoinText => vec![Effect::BeginJoinText],
+        Verb::MatchProperties => vec![Effect::BeginMatchProperties],
+        // Copy is handled by the frame's own keyboard path, not by the
+        // command executor; the verb plans to nothing.
+        Verb::Copy => vec![],
+        Verb::MarkText(kind) => vec![Effect::RunMarkText(*kind)],
+        Verb::ListMarks => vec![Effect::RunListMarks],
+        Verb::RemoveMark(n) => vec![Effect::RunRemoveMark(*n)],
+        Verb::Note(text) => vec![Effect::RunNote(text.clone())],
         _ => return None,
     })
 }
@@ -443,12 +523,56 @@ mod tests {
     }
 
     #[test]
+    fn the_files_and_text_domains_mirror_their_verbs() {
+        use crate::verbs::Markup;
+        let env = CommandEnv::default();
+        let cases: Vec<(Verb, Vec<Effect>)> = vec![
+            (Verb::Finish, vec![Effect::FinishPick]),
+            (Verb::Save, vec![Effect::SaveFile]),
+            (Verb::SaveAs("a.pdf".into()), vec![Effect::SaveFileAs("a.pdf".into())]),
+            (Verb::SaveAsDialog, vec![Effect::SaveAsDialog]),
+            (
+                Verb::Extract { pages: "1-2".into(), dest: "o.pdf".into() },
+                vec![Effect::RunExtract { pages: "1-2".into(), dest: "o.pdf".into() }],
+            ),
+            (
+                Verb::Import { source: "i.pdf".into(), pages: "1".into() },
+                vec![Effect::RunImport { source: "i.pdf".into(), pages: "1".into() }],
+            ),
+            (Verb::DeletePages("1".into()), vec![Effect::RunDeletePages("1".into())]),
+            (Verb::InsertPage, vec![Effect::RunInsertPage]),
+            (
+                Verb::MovePages { pages: "2".into(), before: 0 },
+                vec![Effect::RunMovePages { pages: "2".into(), before: 0 }],
+            ),
+            (Verb::Reflow, vec![Effect::RunReflow]),
+            (Verb::Find("n".into()), vec![Effect::RunFind("n".into())]),
+            (Verb::FindStep { forward: true }, vec![Effect::RunFindStep { forward: true }]),
+            (Verb::Replace, vec![Effect::OpenFindReplace]),
+            (Verb::Spelling, vec![Effect::OpenSpellCheck]),
+            (Verb::Bookmark, vec![Effect::AddBookmark]),
+            (Verb::ArticleBox, vec![Effect::ArmArticleBox]),
+            (Verb::Weblinks, vec![Effect::BeginWebLink]),
+            (Verb::JoinText, vec![Effect::BeginJoinText]),
+            (Verb::MatchProperties, vec![Effect::BeginMatchProperties]),
+            (Verb::Copy, vec![]),
+            (Verb::MarkText(Markup::Highlight), vec![Effect::RunMarkText(Markup::Highlight)]),
+            (Verb::ListMarks, vec![Effect::RunListMarks]),
+            (Verb::RemoveMark(2), vec![Effect::RunRemoveMark(2)]),
+            (Verb::Note("t".into()), vec![Effect::RunNote("t".into())]),
+        ];
+        for (verb, want) in cases {
+            assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");
+        }
+    }
+
+    #[test]
     fn unported_verbs_have_no_plan_yet() {        // One verb from each domain still handled app-side; the list shrinks
         // as the migration ports them.
         for verb in [
             Verb::Pointer(crate::verbs::PointerMode::Select),
-            Verb::SaveAs(std::path::PathBuf::from("a.pdf")),
-            Verb::Find(String::new()),
+            Verb::Paste,
+            Verb::EditText,
             Verb::Undo,
         ] {
             assert!(plan(&verb, &CommandEnv::default()).is_none(), "{verb:?} should still fall through");
