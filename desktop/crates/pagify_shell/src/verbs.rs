@@ -592,6 +592,10 @@ pub enum Verb {
     /// Write every embedded picture out as a PNG — `exportimages <folder>`.
     /// Bare, the app asks for the folder.
     ExportAllImages { dest: Option<PathBuf> },
+    /// Make a new document out of picture files — `fromfiles` or
+    /// `fromfiles <folder>`, which takes every picture in the folder in name
+    /// order. Bare, the app opens a picker.
+    FromFiles { folder: Option<PathBuf> },
     Quit { force: bool },
     /// Recognised, deliberately not implemented yet, and carrying the phase
     /// that will implement it.
@@ -852,7 +856,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("formrecognise", "the forms phase", "the Run Form Field Recognition tool"),
     ("formtosheet", "the forms phase", "the Form to sheet tool"),
     ("fromclipboard", "the conversion phase", "the From Clipboard tool"),
-    ("fromfiles", "the conversion phase", "the From Files tool"),
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
     ("fromtemplate", "the conversion phase", "the From Template tool"),
     ("imageannotation", "the annotation phase", "the Image Annotation tool"),
@@ -1016,7 +1019,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
-        "exportimages",
+        "exportimages", "fromfiles",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1728,6 +1731,9 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "exportimages" => Ok(Verb::ExportAllImages {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
+        "fromfiles" => Ok(Verb::FromFiles {
+            folder: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2111,6 +2117,24 @@ mod export_images_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "exportimages"),
             "`exportimages` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod from_files_tests {
+    use super::*;
+
+    #[test]
+    fn fromfiles_parses_and_is_not_planned() {
+        assert_eq!(parse("fromfiles"), Some(Ok(Verb::FromFiles { folder: None })));
+        assert_eq!(
+            parse("fromfiles /tmp/pics"),
+            Some(Ok(Verb::FromFiles { folder: Some("/tmp/pics".into()) }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "fromfiles"),
+            "`fromfiles` is still in the planned table"
         );
     }
 }

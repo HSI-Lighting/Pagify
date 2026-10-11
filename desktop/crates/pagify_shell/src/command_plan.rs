@@ -92,6 +92,9 @@ pub enum Effect {
     /// Merge PDFs into one new document; a folder to read them from, or
     /// `None` to ask with a picker.
     CombineFiles { folder: Option<std::path::PathBuf> },
+    /// Make a new document out of picture files; a folder to read them from,
+    /// or `None` to ask with a picker.
+    BuildPdfFromPictures { folder: Option<std::path::PathBuf> },
     /// Say a line in the info colour.
     Say(String),
     /// Start an update check; the caller has already said it is checking.
@@ -315,6 +318,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::AutoBookmarks
         | Verb::Preflight
         | Verb::ExportAllImages { .. }
+        | Verb::FromFiles { .. }
         | Verb::BlankDoc { .. }
         | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
@@ -447,6 +451,10 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         // Combining makes its own new document, so it needs nothing open
         // either.
         Verb::Combine { folder } => vec![Effect::CombineFiles { folder: folder.clone() }],
+        // From Files makes its own new document too.
+        Verb::FromFiles { folder } => {
+            vec![Effect::BuildPdfFromPictures { folder: folder.clone() }]
+        }
         Verb::Pdfium => vec![Effect::Say(crate::pdfium::describe())],
         Verb::Version => vec![Effect::Say(format!("Pagify {}", crate::VERSION))],
         // The message comes first so it is on the bar while the check runs.
@@ -715,6 +723,10 @@ mod tests {
             (
                 Verb::Combine { folder: Some(std::path::PathBuf::from("in")) },
                 vec![Effect::CombineFiles { folder: Some(std::path::PathBuf::from("in")) }],
+            ),
+            (
+                Verb::FromFiles { folder: None },
+                vec![Effect::BuildPdfFromPictures { folder: None }],
             ),
             (Verb::AutoScroll, vec![Effect::ToggleAutoScroll]),
             (Verb::Ruler, vec![Effect::ToggleRuler]),

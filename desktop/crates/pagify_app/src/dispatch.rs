@@ -106,6 +106,7 @@ impl crate::PagifyApp {
             | Effect::ToggleRuler
             | Effect::BlankDocument { .. }
             | Effect::CombineFiles { .. }
+            | Effect::BuildPdfFromPictures { .. }
             | Effect::Say(_)
             | Effect::SayError(_)
             | Effect::CheckUpdate => self.apply_document(effect),
@@ -250,6 +251,10 @@ impl crate::PagifyApp {
             Effect::CombineFiles { folder } => match folder {
                 Some(folder) => self.combine_folder(&folder),
                 None => self.combine_dialog(),
+            },
+            Effect::BuildPdfFromPictures { folder } => match folder {
+                Some(folder) => self.from_files_folder(&folder),
+                None => self.from_files_dialog(),
             },
             Effect::Say(text) => self.say_info(text),
             Effect::SayError(text) => self.say_error(text),

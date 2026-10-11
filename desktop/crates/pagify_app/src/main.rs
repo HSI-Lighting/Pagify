@@ -13152,56 +13152,13 @@ impl PagifyApp {
             self.say_error("nothing open.");
             return;
         }
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                self.say_error(format!("could not read {}: {e}", path.display()));
-                return;
+        match decode_picture(path) {
+            Ok((rgba, width, height)) => {
+                let page = self.tab_mut().view_state.page;
+                self.arm_tool(Tool::PlaceImage { rgba, width, height }, page);
             }
-        };
-        let not_a_picture = |e: image::ImageError| {
-            format!("{} is not a picture this reads (PNG or JPEG): {e}", path.display())
-        };
-        let reader = match image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format() {
-            Ok(reader) => reader,
-            Err(e) => {
-                self.say_error(not_a_picture(e.into()));
-                return;
-            }
-        };
-        let mut decoder = match reader.into_decoder() {
-            Ok(decoder) => decoder,
-            Err(e) => {
-                self.say_error(not_a_picture(e));
-                return;
-            }
-        };
-        // Checked from the header, before a single pixel is decoded — see the
-        // matching comment on `upload_signature`.
-        let (declared_width, declared_height) = image::ImageDecoder::dimensions(&decoder);
-        if pdf_core::render::bitmap::validate_dimensions(declared_width, declared_height).is_err()
-        {
-            self.say_error(format!(
-                "{} is {declared_width}x{declared_height} — too large a picture to read.",
-                path.display()
-            ));
-            return;
+            Err(why) => self.say_error(why),
         }
-        let orientation = image::ImageDecoder::orientation(&mut decoder)
-            .unwrap_or(image::metadata::Orientation::NoTransforms);
-        let mut decoded = match image::DynamicImage::from_decoder(decoder) {
-            Ok(decoded) => decoded,
-            Err(e) => {
-                self.say_error(not_a_picture(e));
-                return;
-            }
-        };
-        decoded.apply_orientation(orientation);
-        let photo = decoded.to_rgba8();
-        let (width, height) = photo.dimensions();
-
-        let page = self.tab_mut().view_state.page;
-        self.arm_tool(Tool::PlaceImage { rgba: photo.into_raw(), width, height }, page);
     }
 
     /// Default width a placed picture gets on the page, in points — about two
@@ -14134,6 +14091,137 @@ impl PagifyApp {
         }
     }
 
+    /// Make a new document out of picture files — the Convert tab's From
+    /// Files.
+    ///
+    /// One page per picture: letter, turned landscape when the picture is
+    /// wider than it is tall, with the picture centred inside a 36pt margin
+    /// — the margins total 72pt — and scaled to fit without distortion.
+    /// Everything the construction needs goes in as one `Command::Batch`,
+    /// so one undo takes the whole new document back to a single blank
+    /// sheet.
+    fn make_pdf_from_pictures(&mut self, sources: &[std::path::PathBuf]) {
+        if sources.is_empty() {
+            self.say_info("nothing chosen.");
+            return;
+        }
+        let mut pictures = Vec::new();
+        let mut failures: Vec<String> = Vec::new();
+        for source in sources {
+            match decode_picture(source) {
+                Ok((rgba, width, height)) => pictures.push((rgba, width, height)),
+                Err(why) => failures.push(why),
+            }
+        }
+        if pictures.is_empty() {
+            self.say_error(format!("fromfiles: nothing usable. {}", failures.join("; ")));
+            return;
+        }
+        let count = pictures.len();
+        if self.open_blank_sheet(612.0, 792.0, pdf_core::document::Ruling::None).is_none() {
+            return;
+        }
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            return;
+        };
+        let mut commands: Vec<pdf_core::command::Command> = Vec::new();
+        for (index, (rgba, width, height)) in pictures.iter().enumerate() {
+            let (page_w, page_h) = if width > height {
+                (792.0f32, 612.0f32)
+            } else {
+                (612.0f32, 792.0f32)
+            };
+            if index == 0 {
+                commands.push(pdf_core::command::Command::SetPageSize {
+                    index: 0,
+                    width_pt: page_w,
+                    height_pt: page_h,
+                });
+            } else {
+                commands.push(pdf_core::command::Command::InsertBlankPage {
+                    at: index,
+                    width_pt: page_w,
+                    height_pt: page_h,
+                    fill: None,
+                    ruling: 0,
+                });
+            }
+            let scale =
+                ((page_w - 72.0) / *width as f32).min((page_h - 72.0) / *height as f32);
+            let draw_w = *width as f32 * scale;
+            let draw_h = *height as f32 * scale;
+            commands.push(pdf_core::command::Command::AddAnnotation {
+                page_index: index,
+                annotation: pdf_core::document::Annotation::Image {
+                    rect: pdf_core::document::Rect {
+                        left: (page_w - draw_w) / 2.0,
+                        top: (page_h - draw_h) / 2.0,
+                        right: (page_w + draw_w) / 2.0,
+                        bottom: (page_h + draw_h) / 2.0,
+                    },
+                    rgba: rgba.clone(),
+                    width: *width,
+                    height: *height,
+                },
+            });
+        }
+        match session.execute(pdf_core::command::Command::Batch { commands }) {
+            Ok(_) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.refresh_after_page_change();
+                self.say_info(format!(
+                    "made a {count}-page PDF from {count} picture(s) — `saveas <name.pdf>` \
+                     keeps it."
+                ));
+            }
+            Err(e) => self.say_error(format!("fromfiles: {e}")),
+        }
+        if !failures.is_empty() {
+            self.say_error(format!("fromfiles: {}", failures.join("; ")));
+        }
+    }
+
+    /// `fromfiles <folder>`: every picture in the folder, in name order.
+    fn from_files_folder(&mut self, folder: &std::path::Path) {
+        let entries = match std::fs::read_dir(folder) {
+            Ok(entries) => entries,
+            Err(e) => {
+                self.say_error(format!("fromfiles: {e}"));
+                return;
+            }
+        };
+        let mut sources: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_ascii_lowercase())
+                    .is_some_and(|e| e == "png" || e == "jpg" || e == "jpeg")
+            })
+            .collect();
+        sources.sort();
+        if sources.is_empty() {
+            self.say_error(format!("fromfiles: no pictures in {}.", folder.display()));
+            return;
+        }
+        self.make_pdf_from_pictures(&sources);
+    }
+
+    /// The Convert tab's From Files button, bare: choose the pictures, then
+    /// make the document in the order chosen.
+    fn from_files_dialog(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Choose pictures to make a PDF from")
+            .add_filter("Pictures", &["png", "jpg", "jpeg"]);
+        match dialog.pick_files() {
+            Some(paths) => self.make_pdf_from_pictures(&paths),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
     /// The annotation under a point, if any.
     fn foreign_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
         let (x, y) = (at.x as f32, at.y as f32);
@@ -14999,6 +15087,37 @@ impl PagifyApp {
             && tile_crop.bottom >= visible_crop.bottom - 0.01
     }
 
+}
+
+/// Decode a picture file to RGBA, honouring the orientation it declares —
+/// the one reading `addimage`, `upload_signature` and `fromfiles` share;
+/// `Err` is a line for the command bar.
+fn decode_picture(path: &std::path::Path) -> Result<(Vec<u8>, u32, u32), String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let not_a_picture = |e: image::ImageError| {
+        format!("{} is not a picture this reads (PNG or JPEG): {e}", path.display())
+    };
+    let reader = image::ImageReader::new(std::io::Cursor::new(&bytes))
+        .with_guessed_format()
+        .map_err(|e| not_a_picture(e.into()))?;
+    let mut decoder = reader.into_decoder().map_err(not_a_picture)?;
+    // Checked from the header, before a single pixel is decoded — see the
+    // matching comment on `upload_signature`.
+    let (declared_width, declared_height) = image::ImageDecoder::dimensions(&decoder);
+    if pdf_core::render::bitmap::validate_dimensions(declared_width, declared_height).is_err() {
+        return Err(format!(
+            "{} is {declared_width}x{declared_height} — too large a picture to read.",
+            path.display()
+        ));
+    }
+    let orientation = image::ImageDecoder::orientation(&mut decoder)
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut decoded = image::DynamicImage::from_decoder(decoder).map_err(not_a_picture)?;
+    decoded.apply_orientation(orientation);
+    let photo = decoded.to_rgba8();
+    let (width, height) = photo.dimensions();
+    Ok((photo.into_raw(), width, height))
 }
 
 /// A page's pixels as an egui image.

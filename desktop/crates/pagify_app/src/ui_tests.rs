@@ -5163,3 +5163,46 @@ fn exportimages_writes_every_embedded_picture() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **The Convert tab's From Files, through the real dispatch.** Two pictures
+/// in a folder become a two-page document — name order, a page each, letter
+/// turned landscape for the wide one, with the picture drawn on it.
+#[test]
+fn fromfiles_makes_a_page_per_picture() {
+    let dir = std::env::temp_dir().join(format!("pagify-fromfiles-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+    image::RgbaImage::from_pixel(4, 6, image::Rgba([30, 30, 200, 255]))
+        .save(dir.join("a-tall.png"))
+        .expect("save a");
+    image::RgbaImage::from_pixel(6, 4, image::Rgba([200, 30, 30, 255]))
+        .save(dir.join("b-wide.png"))
+        .expect("save b");
+
+    let mut h = harness("quadrants.pdf");
+    let before = h.state().tabs.len();
+    h.state_mut().submit(&format!("fromfiles {}", dir.display()));
+    h.run_steps(2);
+
+    assert_eq!(h.state().tabs.len(), before + 1, "fromfiles did not open a new document");
+    let doc = h.state().tab().doc.as_ref().expect("the new document");
+    assert_eq!(doc.page_count, 2, "one page per picture");
+    let session = doc.session.clone();
+    let tall = session.page_size(0).expect("size 0");
+    assert!(
+        (tall.width_pt - 612.0).abs() < 1.0 && (tall.height_pt - 792.0).abs() < 1.0,
+        "the tall picture's page is not letter portrait: {tall:?}"
+    );
+    let wide = session.page_size(1).expect("size 1");
+    assert!(
+        (wide.width_pt - 792.0).abs() < 1.0 && (wide.height_pt - 612.0).abs() < 1.0,
+        "the wide picture's page is not letter landscape: {wide:?}"
+    );
+    let marks = session.annotations(0).expect("marks on page 1");
+    assert!(
+        marks.iter().any(|m| matches!(m.annotation, pdf_core::document::Annotation::Image { .. })),
+        "no picture was drawn on the first page: {} marks",
+        marks.len()
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
