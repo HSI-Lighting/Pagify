@@ -74,6 +74,11 @@ pub enum Effect {
     ToggleAutoScroll,
     /// Turn the page ruler on or off.
     ToggleRuler,
+    /// Run the accessibility checks this build can make.
+    RunAccessCheck,
+    /// Write those findings as one HTML file; `None` asks for the file
+    /// first.
+    WriteAccessReport { dest: Option<std::path::PathBuf> },
     /// Make a new document out of nothing, one sheet of this size and ruling.
     BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
     /// Merge PDFs into one new document; a folder to read them from, or
@@ -297,6 +302,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Snapshot
         | Verb::AutoScroll
         | Verb::Ruler
+        | Verb::AccessCheck
+        | Verb::AccessReport { .. }
         | Verb::BlankDoc { .. }
         | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
@@ -413,6 +420,9 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Snapshot => vec![Effect::Snapshot],
         Verb::AutoScroll => vec![Effect::ToggleAutoScroll],
         Verb::Ruler => vec![Effect::ToggleRuler],
+        // Nothing open is nothing to check; the app's own report says so.
+        Verb::AccessCheck => vec![Effect::RunAccessCheck],
+        Verb::AccessReport { dest } => vec![Effect::WriteAccessReport { dest: dest.clone() }],
         // A new document is allowed with nothing open — that is the point of
         // it.
         Verb::BlankDoc { width_pt, height_pt, ruling } => vec![Effect::BlankDocument {
@@ -694,6 +704,11 @@ mod tests {
             ),
             (Verb::AutoScroll, vec![Effect::ToggleAutoScroll]),
             (Verb::Ruler, vec![Effect::ToggleRuler]),
+            (Verb::AccessCheck, vec![Effect::RunAccessCheck]),
+            (
+                Verb::AccessReport { dest: None },
+                vec![Effect::WriteAccessReport { dest: None }],
+            ),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");

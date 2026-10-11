@@ -577,6 +577,12 @@ pub enum Verb {
     /// A ruler along the page in view's top and left edges, in page points —
     /// the View tab's Toggle Ruler.
     Ruler,
+    /// Run the accessibility checks this build can make — the Accessibility
+    /// tab's Full Check.
+    AccessCheck,
+    /// Write those findings as one HTML file — `accessreport [file.html]`.
+    /// Bare, the app asks for the file.
+    AccessReport { dest: Option<PathBuf> },
     Quit { force: bool },
     /// Recognised, deliberately not implemented yet, and carrying the phase
     /// that will implement it.
@@ -796,8 +802,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     // Kept in step with `Tab::buttons` by `every_ribbon_button_runs_a_command`,
     // because two hand-maintained lists of a hundred and fifty names each will
     // not stay in step on their own.
-    ("accesscheck", "the accessibility phase", "the Full Check tool"),
-    ("accessreport", "the accessibility phase", "the Accessibility Report tool"),
     ("add3d", "the editing phase", "the Add 3D tool"),
     ("addlink", "the editing phase", "the Link tool"),
     ("addshape", "the editing phase", "the Add Shapes tool"),
@@ -1005,7 +1009,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
-        "autoscroll", "ruler",
+        "autoscroll", "ruler", "accesscheck", "accessreport",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1708,6 +1712,10 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "snapshot" => Ok(Verb::Snapshot),
         "autoscroll" => Ok(Verb::AutoScroll),
         "ruler" => Ok(Verb::Ruler),
+        "accesscheck" => Ok(Verb::AccessCheck),
+        "accessreport" => Ok(Verb::AccessReport {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2025,5 +2033,26 @@ mod ruler_tests {
             PLANNED.iter().all(|(v, _, _)| *v != "ruler"),
             "`ruler` is still in the planned table"
         );
+    }
+}
+
+#[cfg(test)]
+mod accessibility_phase_tests {
+    use super::*;
+
+    #[test]
+    fn the_accessibility_words_parse_and_are_not_planned() {
+        assert_eq!(parse("accesscheck"), Some(Ok(Verb::AccessCheck)));
+        assert_eq!(parse("accessreport"), Some(Ok(Verb::AccessReport { dest: None })));
+        assert_eq!(
+            parse("accessreport r.html"),
+            Some(Ok(Verb::AccessReport { dest: Some("r.html".into()) }))
+        );
+        for word in ["accesscheck", "accessreport"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
     }
 }

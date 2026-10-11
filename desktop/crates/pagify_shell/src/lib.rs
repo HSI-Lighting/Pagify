@@ -11,6 +11,7 @@
 //! to 50,081 lines in one file. **If logic can be tested without a window, it
 //! must live here.**
 
+pub mod accessibility;
 pub mod appearance;
 pub mod passphrase;
 pub mod automate;

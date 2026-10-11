@@ -162,7 +162,9 @@ impl crate::PagifyApp {
             | Effect::ExportImages { .. }
             | Effect::ExportHtml { .. }
             | Effect::SplitPages { .. }
-            | Effect::ReportWordCount(_) => self.apply_files(effect),
+            | Effect::ReportWordCount(_)
+            | Effect::RunAccessCheck
+            | Effect::WriteAccessReport { .. } => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -627,6 +629,11 @@ impl crate::PagifyApp {
                 None => self.split_dialog(),
             },
             Effect::ReportWordCount(pages) => self.report_word_count(&pages),
+            Effect::RunAccessCheck => self.run_access_check(),
+            Effect::WriteAccessReport { dest } => match dest {
+                Some(path) => self.write_access_report(&path),
+                None => self.access_report_dialog(),
+            },
             other => unreachable!("apply_files was handed {other:?}"),
         }
     }

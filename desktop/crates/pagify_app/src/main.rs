@@ -13907,6 +13907,74 @@ impl PagifyApp {
         }
     }
 
+    /// Run the accessibility checks this build can make — the Accessibility
+    /// tab's Full Check. What the checks cover, and what they deliberately
+    /// do not, is `pagify_shell::accessibility`'s own note.
+    fn run_access_check(&mut self) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        match pagify_shell::accessibility::findings(&session) {
+            Ok(findings) => {
+                let problems = findings.iter().filter(|f| f.problem).count();
+                for finding in findings.iter().filter(|f| f.problem) {
+                    self.say_error(&finding.line);
+                }
+                if problems == 0 {
+                    self.say_info(
+                        "no problems found by the checks this build makes — the text layer \
+                         of every page. Alt text, tags, reading order and language are not \
+                         visible to this engine and were not checked.",
+                    );
+                } else {
+                    self.say_info(format!(
+                        "{problems} problem(s); the lines above say which and what fixes \
+                         them. The rest of the audit is not visible to this engine.",
+                    ));
+                }
+            }
+            Err(e) => self.say_error(format!("accesscheck: {e}")),
+        }
+    }
+
+    /// Write the accessibility findings as one HTML file — the Accessibility
+    /// tab's Accessibility Report. The file is built in the shell, where it
+    /// can be tested against fixtures with no window.
+    fn write_access_report(&mut self, dest: &std::path::Path) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        let stem = self.document_stem();
+        match pagify_shell::accessibility::report_html(&session, &stem) {
+            Ok(html) => match std::fs::write(dest, html) {
+                Ok(()) => self.say_info(format!("wrote {}.", dest.display())),
+                Err(e) => self.say_error(format!("accessreport: {e}")),
+            },
+            Err(e) => self.say_error(format!("accessreport: {e}")),
+        }
+    }
+
+    /// The Accessibility tab's Accessibility Report button, bare: choose the
+    /// file, then write the findings into it.
+    fn access_report_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new()
+            .set_title("Write the accessibility report")
+            .set_file_name(format!("{}-accessibility.html", self.document_stem()))
+            .add_filter("HTML", &["html"]);
+        match dialog.save_file() {
+            Some(path) => self.write_access_report(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
     /// The annotation under a point, if any.
     fn foreign_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
         let (x, y) = (at.x as f32, at.y as f32);

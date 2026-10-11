@@ -5065,3 +5065,30 @@ fn ruler_toggles_and_says_so() {
     let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
     assert!(said.iter().any(|l| l.contains("ruler: off")), "no off-message: {said:?}");
 }
+
+/// **The Accessibility tab's pair, through the real dispatch.** A scan is a
+/// real finding — the check says so and names `extracttext` — and the report
+/// writes the same finding, with its scope sentence, into a real file.
+#[test]
+fn accesscheck_reports_the_text_layer_and_accessreport_writes_it() {
+    let dir = std::env::temp_dir().join(format!("pagify-access-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    let mut h = harness("scan-300dpi.pdf");
+    h.state_mut().submit("accesscheck");
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("scan with no text")),
+        "the scan was not reported: {said:?}"
+    );
+
+    let report = dir.join("report.html");
+    h.state_mut().submit(&format!("accessreport {}", report.display()));
+    h.run_steps(1);
+    let html = std::fs::read_to_string(&report).expect("the report file");
+    assert!(html.contains("accessibility check"), "no title: {html}");
+    assert!(html.contains("scan with no text"), "the finding is not in the report: {html}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

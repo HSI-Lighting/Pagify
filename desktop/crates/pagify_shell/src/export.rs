@@ -43,8 +43,9 @@ pub fn document_html(session: &Session, title: &str) -> pdf_core::Result<String>
 }
 
 /// Four characters stand between text and markup; everything else passes
-/// through as it is.
-fn escape(text: &str) -> String {
+/// through as it is. Shared with the accessibility report, which writes
+/// markup too.
+pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
