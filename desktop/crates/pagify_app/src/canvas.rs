@@ -14,6 +14,11 @@ use pagify_shell::command::Kind;
 use pagify_shell::markup::HIT_TOLERANCE_PT;
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::reader::{prefetch_targets, STRIP_PAD_PX};
+
+/// One frame's worth of `autoscroll`, in content points — about 360pt a
+/// second at 60Hz, a comfortable reading pace. Not a speed setting: the
+/// toggle is either on or off, and this is what on means.
+const AUTOSCROLL_PT_PER_FRAME: f32 = 6.0;
 use pagify_shell::tools;
 use pagify_shell::verbs::{PageTarget, Verb};
 
@@ -1271,6 +1276,23 @@ impl crate::PagifyApp {
             let to = (self.tab_mut().view_state.scroll_offset + by).clamp(egui::Vec2::ZERO, room);
             forced = Some(to);
             area = area.scroll_offset(to);
+        } else if self.tab().view_state.autoscroll {
+            // Autoscroll: one frame's worth of downward movement, through
+            // the same clamp a drag's pan takes. When there is nothing left
+            // to show it stops itself rather than repainting a still frame
+            // for ever.
+            let content = egui::vec2(strip_width * zoom + 24.0, strip_height * zoom + 24.0);
+            let room = (content - viewport.size()).max(egui::Vec2::ZERO);
+            let from = self.tab().view_state.scroll_offset;
+            let to = (from + egui::vec2(0.0, AUTOSCROLL_PT_PER_FRAME))
+                .clamp(egui::Vec2::ZERO, room);
+            if to == from {
+                self.tab_mut().view_state.autoscroll = false;
+                self.say_info("autoscroll: reached the end.");
+            } else {
+                forced = Some(to);
+                area = area.scroll_offset(to);
+            }
         } else if let Some(Reveal { page, rect }) = self.tab_mut().view_state.reveal.take() {
             // A word to show, not a page: scrolled just far enough, on both
             // axes, and never by a change of zoom. `go_to` asked for the page's

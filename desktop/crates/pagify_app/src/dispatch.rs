@@ -102,6 +102,7 @@ impl crate::PagifyApp {
             | Effect::RotatePage(_)
             | Effect::ReportTextLayer
             | Effect::Snapshot
+            | Effect::ToggleAutoScroll
             | Effect::BlankDocument { .. }
             | Effect::CombineFiles { .. }
             | Effect::Say(_)
@@ -235,6 +236,7 @@ impl crate::PagifyApp {
             Effect::RotatePage(degrees) => self.rotate_view(degrees),
             Effect::ReportTextLayer => self.report_text_layer(true),
             Effect::Snapshot => self.snapshot_page(),
+            Effect::ToggleAutoScroll => self.toggle_autoscroll(),
             Effect::BlankDocument { width_pt, height_pt, ruling } => {
                 self.create_blank_document(width_pt, height_pt, ruling)
             }

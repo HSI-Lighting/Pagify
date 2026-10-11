@@ -571,6 +571,9 @@ pub enum Verb {
     /// Put the page in view on the system clipboard as an image — the
     /// Capture tab's Snapshot.
     Snapshot,
+    /// Scroll the view by itself, one frame at a time — the View tab's
+    /// AutoScroll. `autoscroll` again, or Escape, stops it.
+    AutoScroll,
     Quit { force: bool },
     /// Recognised, deliberately not implemented yet, and carrying the phase
     /// that will implement it.
@@ -801,7 +804,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("attach", "the editing phase", "the File Attachment tool"),
     ("attachcomment", "the annotation phase", "the File tool"),
     ("autobookmarks", "the navigation phase", "the Auto Create Bookmarks tool"),
-    ("autoscroll", "the viewing phase", "the AutoScroll tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
     ("calculator", "the annotation phase", "the Accounting Calculator tool"),
@@ -1001,6 +1003,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
+        "autoscroll",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1701,6 +1704,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "reportissue" => Ok(Verb::ReportIssue),
         "textlayer" | "whytext" => Ok(Verb::TextLayer),
         "snapshot" => Ok(Verb::Snapshot),
+        "autoscroll" => Ok(Verb::AutoScroll),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -1989,6 +1993,20 @@ mod combine_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "combine"),
             "`combine` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod viewing_phase_tests {
+    use super::*;
+
+    #[test]
+    fn autoscroll_parses_and_is_not_planned() {
+        assert_eq!(parse("autoscroll"), Some(Ok(Verb::AutoScroll)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "autoscroll"),
+            "`autoscroll` is still in the planned table"
         );
     }
 }

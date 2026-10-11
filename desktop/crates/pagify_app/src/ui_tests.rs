@@ -5012,3 +5012,38 @@ fn combine_merges_a_folders_pdfs_into_one_document() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **The View tab's AutoScroll, through the real dispatch.** The toggle moves
+/// the view by itself frame after frame — asserted on the scroll offset, not
+/// the message — and stops when toggled off.
+#[test]
+fn autoscroll_moves_the_view_until_it_is_stopped() {
+    let mut h = harness("mixed-sizes.pdf");
+    // Fit would put the whole page in the window with nothing to scroll;
+    // 200% gives the view room to move through.
+    h.state_mut().submit("zoom 200");
+    h.run_steps(1);
+    let before = h.state().tab().view_state.scroll_offset.y;
+
+    h.state_mut().submit("autoscroll");
+    h.run_steps(3);
+    let during = h.state().tab().view_state.scroll_offset.y;
+    assert!(
+        during > before,
+        "autoscroll did not move the view: offset stayed at {before} (now {during})"
+    );
+
+    h.state_mut().submit("autoscroll");
+    h.run_steps(1);
+    assert!(!h.state().tab().view_state.autoscroll, "the second toggle did not stop it");
+
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("autoscroll: on")),
+        "no on-message: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("autoscroll: off")),
+        "no off-message: {said:?}"
+    );
+}

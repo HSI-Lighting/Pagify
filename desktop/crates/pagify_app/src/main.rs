@@ -782,6 +782,11 @@ struct ViewState {
     /// the system clipboard as an image at the end of the frame, where the
     /// context that performs the write is available.
     snapshot_wanted: bool,
+    /// The view is scrolling itself, one frame at a time — the View tab's
+    /// AutoScroll. Applied in the canvas's own scroll pass (see
+    /// `take_forced_scroll`), and the frame loop keeps repainting while it
+    /// is on; `autoscroll` again, or Escape, stops it.
+    autoscroll: bool,
 }
 
 /// Passcode and redaction asks on this tab — what the app is
@@ -978,7 +983,7 @@ impl DocTab {
             markup: Markup::default(),
             calibration: Calibration::default(),
             tool: None,
-            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, },
+            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
             panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
@@ -2964,6 +2969,16 @@ impl PagifyApp {
             print: i.modifiers.command && i.key_pressed(egui::Key::P),
         });
 
+        // Autoscroll is a moving picture: without this the window would sleep
+        // between events and the view would move only when something else
+        // woke it.
+        if self.tab().view_state.autoscroll {
+            ctx.request_repaint();
+        }
+        if keys.escape && self.tab().view_state.autoscroll {
+            self.tab_mut().view_state.autoscroll = false;
+            self.say_info("autoscroll: stopped.");
+        }
         if keys.escape && self.escape() == Escaped::ReturnedToPointer {
             ctx.memory_mut(|m| m.surrender_focus(command_id));
             let page = self.tab().view_state.page;
@@ -8347,6 +8362,18 @@ impl PagifyApp {
             }
             Err(e) => self.say_error(format!("snapshot: {e}")),
         }
+    }
+
+    /// Toggle AutoScroll — the View tab's button. The scrolling itself is the
+    /// canvas's (`take_forced_scroll`); this is only the switch.
+    fn toggle_autoscroll(&mut self) {
+        let on = !self.tab().view_state.autoscroll;
+        self.tab_mut().view_state.autoscroll = on;
+        self.say_info(if on {
+            "autoscroll: on — scrolling down; `autoscroll` again or Escape stops it."
+        } else {
+            "autoscroll: off."
+        });
     }
 
     /// ⌘C on what Edit Object has picked.
