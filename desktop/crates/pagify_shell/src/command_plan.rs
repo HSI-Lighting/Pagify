@@ -70,6 +70,8 @@ pub enum Effect {
     /// needs no window; the clipboard write does, so the app carries it out
     /// in the frame's own clipboard pass.
     Snapshot,
+    /// Make a new document out of nothing, one sheet of this size and ruling.
+    BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
     /// Say a line in the info colour.
     Say(String),
     /// Start an update check; the caller has already said it is checking.
@@ -285,7 +287,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Pdfium
         | Verb::Version
         | Verb::CheckUpdate
-        | Verb::Snapshot => plan_document(verb, env),
+        | Verb::Snapshot
+        | Verb::BlankDoc { .. } => plan_document(verb, env),
         Verb::Layers
         | Verb::RepairLocks
         | Verb::Opacity(_)
@@ -398,6 +401,13 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         // The one capture verb: a page in view is what there is to copy.
         Verb::Snapshot if !env.has_doc => vec![Effect::SayError("nothing open.".into())],
         Verb::Snapshot => vec![Effect::Snapshot],
+        // A new document is allowed with nothing open — that is the point of
+        // it.
+        Verb::BlankDoc { width_pt, height_pt, ruling } => vec![Effect::BlankDocument {
+            width_pt: *width_pt,
+            height_pt: *height_pt,
+            ruling: *ruling,
+        }],
         Verb::Pdfium => vec![Effect::Say(crate::pdfium::describe())],
         Verb::Version => vec![Effect::Say(format!("Pagify {}", crate::VERSION))],
         // The message comes first so it is on the bar while the check runs.
@@ -658,6 +668,10 @@ mod tests {
             (
                 Verb::CheckUpdate,
                 vec![Effect::Say("checking for a newer build…".into()), Effect::CheckUpdate],
+            ),
+            (
+                Verb::BlankDoc { width_pt: 612.0, height_pt: 792.0, ruling: pdf_core::document::Ruling::None },
+                vec![Effect::BlankDocument { width_pt: 612.0, height_pt: 792.0, ruling: pdf_core::document::Ruling::None }],
             ),
         ];
         for (verb, want) in cases {

@@ -29,6 +29,8 @@
 
 use std::path::PathBuf;
 
+use pdf_core::document::Ruling;
+
 /// What a reader may do with a secured document.
 ///
 /// **A request, not a guarantee** — and the difference matters enough to say
@@ -388,6 +390,11 @@ pub enum Verb {
     /// Count words and characters over the pages named, or the whole
     /// document — `wordcount [pages]`.
     WordCount { pages: String },
+    /// Start a new document out of nothing — `blankdoc [size] [ruling]`,
+    /// sizes `a4`/`a3`/`letter`/`legal` (letter when nothing is said) and
+    /// rulings `lined`/`grid`/`dots` (plain paper when nothing is said), in
+    /// either order.
+    BlankDoc { width_pt: f32, height_pt: f32, ruling: Ruling },
 
     // Review — phase 10.
     /// Find text across the document.
@@ -792,7 +799,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("autobookmarks", "the navigation phase", "the Auto Create Bookmarks tool"),
     ("autoscroll", "the viewing phase", "the AutoScroll tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
-    ("blankdoc", "the conversion phase", "the Blank tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
     ("calculator", "the annotation phase", "the Accounting Calculator tool"),
     ("callout", "the annotation phase", "the Callout tool"),
@@ -903,6 +909,7 @@ pub fn parse(line: &str) -> Option<Result<Verb, String>> {
         .or_else(|| parse_security_options(head.as_str(), rest, tail))
         .or_else(|| parse_document_edits(head.as_str(), rest, tail))
         .or_else(|| parse_file_and_view(head.as_str(), rest, tail))
+        .or_else(|| parse_conversion(head.as_str(), rest, tail))
         .or_else(|| parse_marks_and_misc(head.as_str(), rest, tail))
 }
 /// Resolve a path as a person typed it.
@@ -985,7 +992,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         // and distance from anyone who also uses SIMLUX. The guard test in
         // tests/command_box.rs is what caught every one of them.
         "extract", "import", "deletepage", "delpage", "insertpage", "movepage",
-        "replacepage", "interleave", "toimage", "tohtml", "split", "wordcount",
+        "replacepage", "interleave", "toimage", "tohtml", "split", "wordcount", "blankdoc",
         "highlight", "hl", "note", "calibrate", "cal", "pagescale", "measure",
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
@@ -1513,14 +1520,6 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
             }),
             None => Ok(Verb::Interleave { source: None, pages: "all".into() }),
         },
-        // Conversion: no arguments means "ask me where", the same shape
-        // `open`/`saveas` already have.
-        "toimage" => Ok(Verb::ToImage {
-            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
-        }),
-        "tohtml" => Ok(Verb::ToHtml {
-            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
-        }),
         // Split takes an optional count first; everything after it is the
         // folder, quoted if it has spaces.
         "split" => {
@@ -1543,6 +1542,61 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
             }
         }
         "wordcount" => Ok(Verb::WordCount { pages: tail.to_string() }),
+        _ => return None,
+    })
+}
+
+/// One domain of [`parse`]: the conversion phase's words — blank paper and
+/// the two exports.
+fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
+    Some(match head {
+        // No arguments means "ask me where", the same shape `open`/`saveas`
+        // already have.
+        "toimage" => Ok(Verb::ToImage {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
+        "tohtml" => Ok(Verb::ToHtml {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
+        // Blank paper: an optional size and an optional ruling, in either
+        // order and both optional, because `blankdoc lined` and `blankdoc a4`
+        // are both things a person says.
+        "blankdoc" => {
+            let mut width_pt = 612.0f32;
+            let mut height_pt = 792.0f32;
+            let mut ruling = Ruling::None;
+            for word in tail.split_whitespace() {
+                match word.to_ascii_lowercase().as_str() {
+                    "a4" => {
+                        width_pt = 595.0;
+                        height_pt = 842.0;
+                    }
+                    "a3" => {
+                        width_pt = 842.0;
+                        height_pt = 1191.0;
+                    }
+                    "letter" => {
+                        width_pt = 612.0;
+                        height_pt = 792.0;
+                    }
+                    "legal" => {
+                        width_pt = 612.0;
+                        height_pt = 1008.0;
+                    }
+                    "lined" => ruling = Ruling::Lined,
+                    "grid" | "squared" => ruling = Ruling::Grid,
+                    "dots" | "dotted" => ruling = Ruling::Dots,
+                    "plain" => ruling = Ruling::None,
+                    other => {
+                        return Some(Err(format!(
+                            "blankdoc: don't know {other:?} — try a size (a4, a3, letter, \
+                             legal) or a ruling (lined, grid, dots)"
+                        )))
+                    }
+                }
+            }
+            Ok(Verb::BlankDoc { width_pt, height_pt, ruling })
+        }
         _ => return None,
     })
 }
@@ -1682,7 +1736,7 @@ mod parse_domain_tests {
     ///
     /// When `parse` was one `match`, a word registered twice was a hard
     /// compile error — the second arm was unreachable and the compiler said
-    /// so. Split into seven parsers that is no longer true: the second
+    /// so. Split into eight parsers that is no longer true: the second
     /// registration simply never runs, silently. This reads the source and
     /// re-establishes the guarantee by hand, and also checks that every word
     /// a parser claims is one `parse` actually reaches (a typo in a literal
@@ -1872,6 +1926,43 @@ mod split_and_wordcount_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "wordcount"),
             "`wordcount` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod blank_document_tests {
+    use super::*;
+
+    /// Blank paper reads an optional size and an optional ruling, in either
+    /// order; anything else is refused with the words that do work.
+    #[test]
+    fn blankdoc_reads_sizes_and_rulings_in_any_order() {
+        let letter = Verb::BlankDoc { width_pt: 612.0, height_pt: 792.0, ruling: Ruling::None };
+        assert_eq!(parse("blankdoc"), Some(Ok(letter.clone())));
+        assert_eq!(
+            parse("blankdoc a4"),
+            Some(Ok(Verb::BlankDoc { width_pt: 595.0, height_pt: 842.0, ruling: Ruling::None }))
+        );
+        assert_eq!(
+            parse("blankdoc grid a3"),
+            Some(Ok(Verb::BlankDoc {
+                width_pt: 842.0,
+                height_pt: 1191.0,
+                ruling: Ruling::Grid
+            }))
+        );
+        assert_eq!(
+            parse("blankdoc legal plain"),
+            Some(Ok(Verb::BlankDoc { width_pt: 612.0, height_pt: 1008.0, ruling: Ruling::None }))
+        );
+        match parse("blankdoc parchment") {
+            Some(Err(why)) => assert!(why.contains("parchment"), "unhelpful refusal: {why}"),
+            other => panic!("blankdoc parchment parsed as {other:?}"),
+        }
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "blankdoc"),
+            "`blankdoc` is still in the planned table"
         );
     }
 }

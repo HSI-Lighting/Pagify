@@ -13684,6 +13684,52 @@ impl PagifyApp {
         }
     }
 
+    /// Start a new document out of nothing — the Convert tab's Blank.
+    ///
+    /// The bytes have to live at some path before they are a document at all
+    /// (`blank_document`'s own note), so the sheet opens from a file in the
+    /// system temp folder, and says so: `saveas` puts it where it should
+    /// live.
+    fn create_blank_document(
+        &mut self,
+        width_pt: f32,
+        height_pt: f32,
+        ruling: pdf_core::document::Ruling,
+    ) {
+        let size = pdf_core::document::PageSize { width_pt, height_pt };
+        let bytes = match pdf_core::document::blank_document(1, size, None, ruling) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                self.say_error(format!("blankdoc: {e}"));
+                return;
+            }
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = std::env::temp_dir()
+            .join(format!("pagify-untitled-{}-{stamp}.pdf", std::process::id()));
+        match std::fs::write(&path, bytes) {
+            Ok(()) => {
+                self.open(&path.to_string_lossy());
+                let opened_the_blank = self
+                    .tab()
+                    .doc
+                    .as_ref()
+                    .is_some_and(|d| d.session.path() == path.as_path());
+                if opened_the_blank {
+                    self.say_info(format!(
+                        "untitled blank page — `saveas <name.pdf>` keeps it (it lives in {} \
+                         until then).",
+                        path.display()
+                    ));
+                }
+            }
+            Err(e) => self.say_error(format!("blankdoc: {e}")),
+        }
+    }
+
     /// Count words and characters over `spec`'s pages, or the whole document
     /// — the View tab's Word Count.
     fn report_word_count(&mut self, spec: &str) {

@@ -102,6 +102,7 @@ impl crate::PagifyApp {
             | Effect::RotatePage(_)
             | Effect::ReportTextLayer
             | Effect::Snapshot
+            | Effect::BlankDocument { .. }
             | Effect::Say(_)
             | Effect::SayError(_)
             | Effect::CheckUpdate => self.apply_document(effect),
@@ -233,6 +234,9 @@ impl crate::PagifyApp {
             Effect::RotatePage(degrees) => self.rotate_view(degrees),
             Effect::ReportTextLayer => self.report_text_layer(true),
             Effect::Snapshot => self.snapshot_page(),
+            Effect::BlankDocument { width_pt, height_pt, ruling } => {
+                self.create_blank_document(width_pt, height_pt, ruling)
+            }
             Effect::Say(text) => self.say_info(text),
             Effect::SayError(text) => self.say_error(text),
             Effect::CheckUpdate => self.spawn_update_check(),

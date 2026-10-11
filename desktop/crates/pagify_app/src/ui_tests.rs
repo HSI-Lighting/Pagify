@@ -4944,3 +4944,33 @@ fn split_writes_chunk_files_and_wordcount_counts_the_pages() {
         "wordcount did not count the page: {said:?}"
     );
 }
+
+/// **The Convert tab's Blank, through the real dispatch.** A new tab opens
+/// over whatever was there, one sheet of the size asked for; `saveas` then
+/// settles it somewhere real, and reopening proves the sheet.
+#[test]
+fn blankdoc_opens_a_new_sheet_and_saveas_keeps_it() {
+    let dir = std::env::temp_dir().join(format!("pagify-blank-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    let mut h = harness("quadrants.pdf");
+    let before = h.state().tabs.len();
+    h.state_mut().submit("blankdoc a4 lined");
+    h.run_steps(2);
+
+    assert_eq!(h.state().tabs.len(), before + 1, "blankdoc did not open a new tab");
+    assert_eq!(h.state().tab().doc.as_ref().expect("doc").page_count, 1);
+
+    let out = dir.join("untitled.pdf");
+    h.state_mut().submit(&format!("saveas {}", out.display()));
+    h.run_steps(1);
+
+    let saved = Session::open(&out).expect("reopen the saved blank");
+    let size = saved.page_size(0).expect("size");
+    assert!(
+        (size.width_pt - 595.0).abs() < 1.0 && (size.height_pt - 842.0).abs() < 1.0,
+        "the saved sheet is not A4: {size:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
