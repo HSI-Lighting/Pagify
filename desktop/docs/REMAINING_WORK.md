@@ -40,7 +40,7 @@ cargo test -p pdf_core --release --manifest-path ..\rust\pdf_core\Cargo.toml --n
     two `spell_check_tests` timing tests flake under parallel load on Linux;
     they pass in isolation.
 - clippy check (compiles clean; **not** `-D warnings` clean — do not add a
-  blanket gate yet; ~195 warnings, 47 of them `too_many_lines`):
+  blanket gate yet; no function is over the 150-line threshold, 2026-10-11):
 
 ```powershell
 cargo clippy --workspace --all-targets --message-format short -- `
@@ -84,11 +84,11 @@ Regenerate the list any time with the clippy command above and:
 grep -E 'this function has too many lines' clippy.txt | sort -t'(' -k2 -rn
 ```
 
-Current inventory (clippy, 2026-10-10): **nothing over 150 lines**. The
-largest are `draw_passcode_dialog` 145, the sweep test 142, then 139
-(`draw_ribbon_actions`, `draw_pages`), 138 (`pick_wiring` helper) and
-136 (`blocks_review_fuzz`, `segment`). 44 functions remain over 100 —
-split opportunistically, not as a program.
+Current inventory (clippy, re-measured 2026-10-11 after the executor split —
+see §2.2.4): **nothing over 150 lines**. The largest are `draw_signature_list`
+145, the sweep test 142, then 139 (`draw_pages`, `draw_layers_window`), 138
+(the pick-wiring word test) and 136 (`segment`, `blocks_review_fuzz`). 44
+functions remain over 100 — split opportunistically, not as a program.
 
 Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105/103/102,
 `main.rs` 139/135/123/118/108/105/102/102/102, `panels.rs` 136/123/102/102,
@@ -126,8 +126,14 @@ Below 150 but still large if you want to keep going: `canvas.rs` 129/125/110/105
   moved across verbatim. `act` is a pure plan-applier; only `Help` and
   `Planned` bypass it (`run()` answers them first). Eight plan tests in the
   shell cover all nine domains; behaviour is unchanged (app suite at the
-  known baseline throughout). The `run()` prologue keeps its `Kernel`/
-  `Pagify` split as designed.
+   known baseline throughout). The `run()` prologue keeps its `Kernel`/
+   `Pagify` split as designed. On 2026-10-11 (`farzad-review-fixes`) the
+   executor was split to keep the size invariant: `plan` is an exhaustive
+   router over `plan_document` … `plan_navigation` and `apply_effect` over
+   `apply_document` … `apply_navigation` — 95 verbs and 92 effects, each
+   routed exactly once, and the old wildcard arm is gone, so a new verb is a
+   compile error rather than a runtime panic. Behaviour unchanged (shell
+   642/0; app at the known 12 plus the documented lock flake).
 5. **File splits — DONE for both monoliths.** `session.rs` (1,817) is
   `session/mod.rs` (475) plus fourteen `impl Session` families;
   `blocks.rs` (2,292) is `blocks/mod.rs` (900) plus `furniture`/`rows`/
