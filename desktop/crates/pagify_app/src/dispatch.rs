@@ -103,6 +103,7 @@ impl crate::PagifyApp {
             | Effect::ReportTextLayer
             | Effect::Snapshot
             | Effect::ToggleAutoScroll
+            | Effect::ToggleRuler
             | Effect::BlankDocument { .. }
             | Effect::CombineFiles { .. }
             | Effect::Say(_)
@@ -237,6 +238,7 @@ impl crate::PagifyApp {
             Effect::ReportTextLayer => self.report_text_layer(true),
             Effect::Snapshot => self.snapshot_page(),
             Effect::ToggleAutoScroll => self.toggle_autoscroll(),
+            Effect::ToggleRuler => self.toggle_ruler(),
             Effect::BlankDocument { width_pt, height_pt, ruling } => {
                 self.create_blank_document(width_pt, height_pt, ruling)
             }

@@ -5047,3 +5047,21 @@ fn autoscroll_moves_the_view_until_it_is_stopped() {
         "no off-message: {said:?}"
     );
 }
+
+/// The View tab's Toggle Ruler: the switch and its messages. The marks
+/// themselves are `ruler_marks`' own test.
+#[test]
+fn ruler_toggles_and_says_so() {
+    let mut h = harness("quadrants.pdf");
+    h.state_mut().submit("ruler");
+    h.run_steps(1);
+    assert!(h.state().tab().view_state.ruler, "the first toggle did not turn it on");
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(said.iter().any(|l| l.contains("ruler: on")), "no on-message: {said:?}");
+
+    h.state_mut().submit("ruler");
+    h.run_steps(1);
+    assert!(!h.state().tab().view_state.ruler, "the second toggle did not turn it off");
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(said.iter().any(|l| l.contains("ruler: off")), "no off-message: {said:?}");
+}

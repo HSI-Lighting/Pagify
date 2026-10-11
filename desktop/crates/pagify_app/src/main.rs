@@ -787,6 +787,9 @@ struct ViewState {
     /// `take_forced_scroll`), and the frame loop keeps repainting while it
     /// is on; `autoscroll` again, or Escape, stops it.
     autoscroll: bool,
+    /// A ruler along the page in view's top and left edges — the View tab's
+    /// Toggle Ruler. Page points, so the marks stay true at any zoom.
+    ruler: bool,
 }
 
 /// Passcode and redaction asks on this tab — what the app is
@@ -983,7 +986,7 @@ impl DocTab {
             markup: Markup::default(),
             calibration: Calibration::default(),
             tool: None,
-            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, },
+            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
             panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
@@ -8373,6 +8376,18 @@ impl PagifyApp {
             "autoscroll: on — scrolling down; `autoscroll` again or Escape stops it."
         } else {
             "autoscroll: off."
+        });
+    }
+
+    /// Toggle the page ruler — the View tab's button. Drawn by the canvas
+    /// (`draw_ruler`); this is only the switch.
+    fn toggle_ruler(&mut self) {
+        let on = !self.tab().view_state.ruler;
+        self.tab_mut().view_state.ruler = on;
+        self.say_info(if on {
+            "ruler: on — page points along the top and left edges of the page in view."
+        } else {
+            "ruler: off."
         });
     }
 

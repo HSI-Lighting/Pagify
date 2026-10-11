@@ -574,6 +574,9 @@ pub enum Verb {
     /// Scroll the view by itself, one frame at a time — the View tab's
     /// AutoScroll. `autoscroll` again, or Escape, stops it.
     AutoScroll,
+    /// A ruler along the page in view's top and left edges, in page points —
+    /// the View tab's Toggle Ruler.
+    Ruler,
     Quit { force: bool },
     /// Recognised, deliberately not implemented yet, and carrying the phase
     /// that will implement it.
@@ -862,7 +865,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("resetform", "the forms phase", "the Reset Form tool"),
     ("reverseview", "the viewing phase", "the Reverse View tool"),
-    ("ruler", "the viewing phase", "the Toggle Ruler tool"),
     ("searchhighlight", "the annotation phase", "the Search & Highlight tool"),
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
     ("sendreview", "the sharing phase", "the Send for Review tool"),
@@ -1003,7 +1005,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
-        "autoscroll",
+        "autoscroll", "ruler",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1705,6 +1707,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "textlayer" | "whytext" => Ok(Verb::TextLayer),
         "snapshot" => Ok(Verb::Snapshot),
         "autoscroll" => Ok(Verb::AutoScroll),
+        "ruler" => Ok(Verb::Ruler),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2007,6 +2010,20 @@ mod viewing_phase_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "autoscroll"),
             "`autoscroll` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ruler_tests {
+    use super::*;
+
+    #[test]
+    fn ruler_parses_and_is_not_planned() {
+        assert_eq!(parse("ruler"), Some(Ok(Verb::Ruler)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "ruler"),
+            "`ruler` is still in the planned table"
         );
     }
 }

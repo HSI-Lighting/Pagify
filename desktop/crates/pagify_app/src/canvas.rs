@@ -19,6 +19,21 @@ use pagify_shell::reader::{prefetch_targets, STRIP_PAD_PX};
 /// second at 60Hz, a comfortable reading pace. Not a speed setting: the
 /// toggle is either on or off, and this is what on means.
 const AUTOSCROLL_PT_PER_FRAME: f32 = 6.0;
+
+/// Ruler tick positions for an extent, in page points: a tick every 10pt, a
+/// major one every 50pt (which is the one that carries its label).
+///
+/// In points, not pixels, on purpose: the marks mean the same distance on the
+/// page at any zoom, and only their screen spacing changes.
+fn ruler_marks(extent_pt: f32) -> Vec<(f32, bool)> {
+    let mut marks = Vec::new();
+    let mut pt = 0.0f32;
+    while pt <= extent_pt {
+        marks.push((pt, (pt as i32) % 50 == 0));
+        pt += 10.0;
+    }
+    marks
+}
 use pagify_shell::tools;
 use pagify_shell::verbs::{PageTarget, Verb};
 
@@ -1107,6 +1122,16 @@ impl crate::PagifyApp {
                             }
                         }
                         let owns = self.tab_mut().tool.as_ref().map_or(true, |p| p.page == page);
+                        if page == self.tab().view_state.page && self.tab().view_state.ruler {
+                            // The ruler belongs to the page in view, and sits
+                            // outside the sheet: two rulers per visible page
+                            // would be a ladder.
+                            if let Some((w_pt, h_pt)) =
+                                self.tab().doc.as_ref().and_then(|d| d.strip.size_of(page))
+                            {
+                                Self::draw_ruler(ui, rect, view, (w_pt, h_pt));
+                            }
+                        }
                         if owns {
                             self.interact(ui, rect, view, page, command_id);
                         }
@@ -1432,6 +1457,65 @@ impl crate::PagifyApp {
     /// Drawn from the point that has been placed to wherever a click would land
     /// *now*, snapping included, so the preview is the thing that would happen
     /// rather than an impression of it.
+    /// A ruler along the page's top and left edges, in page points — see
+    /// [`ruler_marks`]. Drawn only for the page in view; the strips sit
+    /// outside the sheet so they never cover content.
+    fn draw_ruler(ui: &mut egui::Ui, rect: egui::Rect, view: PageView, size_pt: (f32, f32)) {
+        const RULER_PX: f32 = 16.0;
+        let painter = ui.painter();
+        let stroke = egui::Stroke::new(1.0, theme::line());
+        let ink = theme::ink_dim();
+        let font = egui::FontId::proportional(9.0);
+
+        let top = egui::Rect::from_min_max(
+            egui::pos2(rect.left(), rect.top() - RULER_PX),
+            egui::pos2(rect.right(), rect.top()),
+        );
+        painter.rect_filled(top, egui::CornerRadius::ZERO, theme::raised());
+        painter.line_segment([top.left_bottom(), top.right_bottom()], stroke);
+        for (pt, major) in ruler_marks(size_pt.0) {
+            let x = rect.left() + pt * view.scale;
+            let len = if major { 9.0 } else { 4.0 };
+            painter.line_segment(
+                [egui::pos2(x, rect.top() - len), egui::pos2(x, rect.top())],
+                stroke,
+            );
+            if major {
+                painter.text(
+                    egui::pos2(x + 2.0, rect.top() - RULER_PX + 1.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{pt}"),
+                    font.clone(),
+                    ink,
+                );
+            }
+        }
+
+        let left = egui::Rect::from_min_max(
+            egui::pos2(rect.left() - RULER_PX, rect.top()),
+            egui::pos2(rect.left(), rect.bottom()),
+        );
+        painter.rect_filled(left, egui::CornerRadius::ZERO, theme::raised());
+        painter.line_segment([left.right_top(), left.right_bottom()], stroke);
+        for (pt, major) in ruler_marks(size_pt.1) {
+            let y = rect.top() + pt * view.scale;
+            let len = if major { 9.0 } else { 4.0 };
+            painter.line_segment(
+                [egui::pos2(rect.left() - len, y), egui::pos2(rect.left(), y)],
+                stroke,
+            );
+            if major {
+                painter.text(
+                    egui::pos2(rect.left() - RULER_PX + 1.0, y + 2.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{pt}"),
+                    font.clone(),
+                    ink,
+                );
+            }
+        }
+    }
+
     pub(crate) fn draw_pending_preview(
         &mut self,
         ui: &mut egui::Ui,
@@ -2341,4 +2425,24 @@ impl crate::PagifyApp {
 
 
 
+}
+
+#[cfg(test)]
+mod ruler_tests {
+    use super::ruler_marks;
+
+    /// A tick every 10pt, a labelled one every 50 — and the last tick never
+    /// runs past the sheet.
+    #[test]
+    fn ruler_marks_step_by_ten_and_label_every_fiftieth() {
+        let marks = ruler_marks(200.0);
+        assert_eq!(marks.len(), 21);
+        assert!(marks.iter().all(|(pt, _)| pt % 10.0 == 0.0));
+        let labelled: Vec<f32> =
+            marks.iter().filter(|(_, major)| *major).map(|(pt, _)| *pt).collect();
+        assert_eq!(labelled, vec![0.0, 50.0, 100.0, 150.0, 200.0]);
+
+        let marks = ruler_marks(72.0);
+        assert_eq!(marks.last().map(|(pt, _)| *pt), Some(70.0));
+    }
 }
