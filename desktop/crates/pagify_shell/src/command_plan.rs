@@ -13,7 +13,7 @@
 //! `pagify_app::dispatch`).
 
 use crate::page_space::{AppPoint, PageSpace};
-use crate::verbs::{AppPointArg, MeasureKind, PageTarget, SignatureAction, Verb, ZoomTarget};
+use crate::verbs::{MeasureKind, PageTarget, SignatureAction, Verb, ZoomTarget};
 use cad_kernel::Vec2;
 use pdf_core::document::Stacking;
 
@@ -568,6 +568,7 @@ fn plan_navigation(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::verbs::AppPointArg;
     use std::path::PathBuf;
 
     #[test]

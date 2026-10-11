@@ -10,7 +10,7 @@ use crate::{
 };
 use pagify_shell::command_plan::{CommandEnv, Effect};
 use pagify_shell::command::{Dispatch, Kind};
-use pagify_shell::verbs::{self, SignatureAction, Verb};
+use pagify_shell::verbs::{self, Verb};
 
 impl crate::PagifyApp {
     pub(crate) fn say_info(&mut self, text: impl Into<String>) {
