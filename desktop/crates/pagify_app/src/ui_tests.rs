@@ -5220,3 +5220,18 @@ fn viewsetting_opens_and_closes_the_settings_panel() {
     h.run_steps(1);
     assert!(!h.state().tab().panels.view_settings, "the panel did not close");
 }
+
+/// The Comment tab's Accounting Calculator: the panel opens, draws its keys
+/// for a few frames, and closes on a second press. The arithmetic itself is
+/// `pagify_shell::calculator`'s own tests.
+#[test]
+fn calculator_opens_and_closes() {
+    let mut h = harness("quadrants.pdf");
+    h.state_mut().submit("calculator");
+    h.run_steps(2);
+    assert!(h.state().tab().panels.calculator.is_some(), "the calculator did not open");
+
+    h.state_mut().submit("calculator");
+    h.run_steps(1);
+    assert!(h.state().tab().panels.calculator.is_none(), "the calculator did not close");
+}

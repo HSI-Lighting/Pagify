@@ -594,6 +594,9 @@ pub enum Verb {
     ExportAllImages { dest: Option<PathBuf> },
     /// Open or close the View Settings panel — the View tab's View Setting.
     ViewSetting,
+    /// Open or close the Accounting Calculator — the Comment tab's little
+    /// adding machine.
+    Calculator,
     /// Make a new document out of picture files — `fromfiles` or
     /// `fromfiles <folder>`, which takes every picture in the folder in name
     /// order. Bare, the app opens a picker.
@@ -827,7 +830,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("attachcomment", "the annotation phase", "the File tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
-    ("calculator", "the annotation phase", "the Accounting Calculator tool"),
     ("callout", "the annotation phase", "the Callout tool"),
     ("changecolor", "the viewing phase", "the Change Color tool"),
     ("clipboard", "the capture phase", "the Clipboard tool"),
@@ -1020,7 +1022,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
-        "exportimages", "fromfiles", "viewsetting",
+        "exportimages", "fromfiles", "viewsetting", "calculator",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1736,6 +1738,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
             folder: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
         "viewsetting" => Ok(Verb::ViewSetting),
+        "calculator" => Ok(Verb::Calculator),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2151,6 +2154,20 @@ mod view_setting_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "viewsetting"),
             "`viewsetting` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod calculator_tests {
+    use super::*;
+
+    #[test]
+    fn calculator_parses_and_is_not_planned() {
+        assert_eq!(parse("calculator"), Some(Ok(Verb::Calculator)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "calculator"),
+            "`calculator` is still in the planned table"
         );
     }
 }

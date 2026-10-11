@@ -108,6 +108,7 @@ impl crate::PagifyApp {
             | Effect::CombineFiles { .. }
             | Effect::BuildPdfFromPictures { .. }
             | Effect::ToggleViewSettings
+            | Effect::ToggleCalculator
             | Effect::Say(_)
             | Effect::SayError(_)
             | Effect::CheckUpdate => self.apply_document(effect),
@@ -258,6 +259,7 @@ impl crate::PagifyApp {
                 None => self.from_files_dialog(),
             },
             Effect::ToggleViewSettings => self.toggle_view_settings(),
+            Effect::ToggleCalculator => self.toggle_calculator(),
             Effect::Say(text) => self.say_info(text),
             Effect::SayError(text) => self.say_error(text),
             Effect::CheckUpdate => self.spawn_update_check(),

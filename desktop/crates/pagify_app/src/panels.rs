@@ -572,6 +572,92 @@ impl crate::PagifyApp {
         }
     }
 
+    /// The Accounting Calculator — the Comment tab's little adding machine.
+    ///
+    /// The arithmetic is `pagify_shell::calculator`'s; this draws its keys and
+    /// presses them. Immediate execution, with the tape kept so the
+    /// arithmetic can be read back — see that module's own note.
+    pub(crate) fn draw_calculator(&mut self, ctx: &egui::Context) {
+        let Some(mut calc) = self.tab_mut().panels.calculator.take() else { return };
+        let mut open = true;
+        let mut close = false;
+
+        egui::Window::new("Accounting Calculator")
+            .id(egui::Id::new("calculator-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(220.0, 160.0))
+            .show(ctx, |ui| {
+                use pagify_shell::calculator::Key;
+                ui.set_width(230.0);
+                ui.label(egui::RichText::new(calc.display()).monospace().size(20.0));
+                ui.separator();
+                let rows: [&[(Key, &str)]; 5] = [
+                    &[
+                        (Key::ClearAll, "AC"),
+                        (Key::ClearEntry, "C"),
+                        (Key::Divide, "÷"),
+                        (Key::Multiply, "×"),
+                    ],
+                    &[
+                        (Key::Digit(7), "7"),
+                        (Key::Digit(8), "8"),
+                        (Key::Digit(9), "9"),
+                        (Key::Subtract, "−"),
+                    ],
+                    &[
+                        (Key::Digit(4), "4"),
+                        (Key::Digit(5), "5"),
+                        (Key::Digit(6), "6"),
+                        (Key::Add, "+"),
+                    ],
+                    &[
+                        (Key::Digit(1), "1"),
+                        (Key::Digit(2), "2"),
+                        (Key::Digit(3), "3"),
+                        (Key::Equals, "="),
+                    ],
+                    &[(Key::Digit(0), "0"), (Key::Dot, ".")],
+                ];
+                for row in rows {
+                    ui.horizontal(|ui| {
+                        for (key, label) in row {
+                            if ui
+                                .add_sized(egui::vec2(52.0, 30.0), egui::Button::new(*label))
+                                .clicked()
+                            {
+                                calc.press(*key);
+                            }
+                        }
+                    });
+                }
+                ui.separator();
+                ui.label("Tape");
+                egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                    if calc.tape().is_empty() {
+                        ui.label(egui::RichText::new("nothing yet").weak());
+                    }
+                    for line in calc.tape() {
+                        ui.label(egui::RichText::new(line).monospace());
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(format!("Total {}", calc.total())).monospace().strong(),
+                );
+                ui.add_space(4.0);
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Closed: the taken state is dropped with it.
+            return;
+        }
+        self.tab_mut().panels.calculator = Some(calc);
+    }
+
     pub(crate) fn draw_bookmark_panel(&mut self, ctx: &egui::Context) {
         let Some(panel) = self.tab_mut().panels.bookmark_panel.take() else { return };
         let mut open = true;

@@ -540,6 +540,8 @@ struct PanelsState {
     spelling: Option<SpellCheck>,
     /// Whether the View Settings panel is open on this tab.
     view_settings: bool,
+    /// The Accounting Calculator, while its panel is open on this tab.
+    calculator: Option<pagify_shell::calculator::Calculator>,
 }
 
 /// The rail/Organize selection and drag: which page the rail follows, which
@@ -991,7 +993,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, },
+            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -2886,6 +2888,7 @@ impl PagifyApp {
         self.draw_snippet_list(&ctx);
         self.draw_find_replace(&ctx);
         self.draw_view_settings(&ctx);
+        self.draw_calculator(&ctx);
         self.draw_spell_check(&ctx);
         self.draw_bookmark_panel(&ctx);
         self.draw_link_prompt(&ctx);
@@ -8400,6 +8403,17 @@ impl PagifyApp {
     fn toggle_view_settings(&mut self) {
         let open = !self.tab().panels.view_settings;
         self.tab_mut().panels.view_settings = open;
+    }
+
+    /// Open or close the Accounting Calculator — the Comment tab's button.
+    /// The arithmetic lives in `pagify_shell::calculator`; this is only the
+    /// switch.
+    fn toggle_calculator(&mut self) {
+        let mut panels = &mut self.tab_mut().panels;
+        panels.calculator = match panels.calculator.take() {
+            Some(_) => None,
+            None => Some(pagify_shell::calculator::Calculator::default()),
+        };
     }
 
     /// ⌘C on what Edit Object has picked.
