@@ -60,23 +60,6 @@ impl crate::PagifyApp {
             return;
         }
         match verb {
-            Verb::SessionLog
-            | Verb::ApplySignatures
-            | Verb::ManageSignatures(..)
-            | Verb::Signature(..)
-            => self.act_signing(verb),
-            Verb::Validate
-            | Verb::Certify(..)
-            | Verb::Whiteout
-            | Verb::DrawArrow
-            | Verb::ToggleFill
-            | Verb::Redact
-            | Verb::Lock
-            | Verb::Secure(..)
-            | Verb::SmartRedact { .. }
-            | Verb::HiddenData { .. }
-            | Verb::Unsecure
-            => self.act_security(verb),
             Verb::Undo
             | Verb::Redo
             | Verb::Pointer(..)
@@ -146,6 +129,7 @@ impl crate::PagifyApp {
                 .map(|(_, h)| h as f64)
                 .unwrap_or(792.0),
             tool_armed: tab.tool.is_some(),
+            signature_count: self.library_state.signatures.entries().len(),
         }
     }
 
@@ -322,6 +306,162 @@ impl crate::PagifyApp {
                     self.say_info(line);
                 }
             }
+            Effect::ReportSessionLog => match self.recording_state.session_log.path() {
+                Some(path) => self.say_info(format!(
+                    "recording every command and outcome to {} — send it along with a bug report.",
+                    path.display()
+                )),
+                None => self.say_info(
+                    "no session log this run — the config directory could not be written to.",
+                ),
+            },
+            Effect::RunApplySignatures => self.act_apply_signatures(),
+            Effect::RunManageSignatures(what) => self.act_manage_signatures(what),
+            Effect::OpenSignaturePad { name, then_place } => {
+                self.library_state.pad = Some(SignaturePad { name, then_place, ..SignaturePad::default() });
+            }
+            Effect::UploadSignaturePath(path) => self.upload_signature(&path),
+            Effect::UploadSignatureDialog => self.upload_signature_dialog(),
+            Effect::ArmSignature { page } => self.arm_tool(Tool::Signature, page),
+            Effect::RunValidate => self.act_validate(),
+            Effect::RunCertify(path) => self.act_certify(path),
+            Effect::ArmWhiteout => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Whiteout, page);
+                }
+            }
+            Effect::ArmDrawArrow => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Draw(DrawKind::Arrow), page);
+                }
+            }
+            Effect::ToggleFill => {
+                self.prefs_state.draw_fill = !self.prefs_state.draw_fill;
+                self.say_info(if self.prefs_state.draw_fill {
+                    "fill: on — the next rectangle or circle is drawn filled."
+                } else {
+                    "fill: off — the next rectangle or circle is drawn hollow."
+                });
+            }
+            Effect::ArmRedact => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Redact, page);
+                }
+            }
+            Effect::LockWords => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                // **Selecting the words is the obvious way to say which words.**
+                // Asking for two opposite corners of a rectangle is a drawing
+                // gesture, and this is not a drawing operation — reported from
+                // use as not being what anyone reaches for. A selection already
+                // on the page is taken as the answer; otherwise it says to make
+                // one, and the rectangle stays available for the cases a
+                // selection cannot express, like an area of a scan.
+                if self.tab_mut().selection.text_selection.is_some() {
+                    self.lock_selection();
+                    return;
+                }
+                self.say_info(
+                    "lock: select the words to hide, then `lock` again — or drag a rectangle with `lockarea`.",
+                );
+            }
+            Effect::RunSecure(options) => {
+                let Some(doc) = &self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                // **Refused before a password is typed, not after.**
+                //
+                // Two passwords cannot both be written — the content would be
+                // encrypted twice and open for nobody — and the engine has
+                // always refused that. But it refused at *save*, by which time
+                // somebody had chosen a password, met the rule and typed it
+                // twice for nothing.
+                // A document that already has one is *changed*, not refused:
+                // the current password first, then the new one.
+                if doc.session.already_has_password() {
+                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::SecureCurrent(options));
+                    self.say_info("this document has a password — type it to change it.");
+                    return;
+                }
+                if doc.session.is_secured() {
+                    self.say_info(
+                        "this document already has a password waiting — `unsecure` takes it off.",
+                    );
+                    return;
+                }
+                let allowed = options.describe();
+                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Secure(options));
+                self.say_info(format!(
+                    "type a password for this document, or Escape to give up. \
+                     Anyone opening the file will be asked for it — {allowed}."
+                ));
+            }
+            Effect::RunSmartRedact { redact } => self.act_smart_redact(redact),
+            Effect::RunHiddenData { clean } => {
+                let Some(doc) = &self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                if clean {
+                    // **What is printed is what a second survey of the cleaned
+                    // bytes found**, not what the first survey listed. The line
+                    // used to print the findings as removals — and for the
+                    // attachment and the script, which the clean left alone,
+                    // that was a claim with nothing behind it. Found by audit.
+                    match doc.session.remove_hidden_data() {
+                        Ok(done) => {
+                            if let Some(doc) = &mut self.tab_mut().doc {
+                                doc.rendered_is_stale();
+                            }
+                            self.tab_mut().selection.text_selection = None;
+                            self.tab_mut().panels.find_hits.clear();
+                            let said = done.describe();
+                            if done.is_clean() {
+                                self.say_info(if done.removed().is_empty() {
+                                    format!("{said}.")
+                                } else {
+                                    format!("{said}. Save to write it out.")
+                                });
+                            } else {
+                                self.say_error(format!("{said}. Save to write out what was removed."));
+                            }
+                        }
+                        Err(e) => self.say_error(e.to_string()),
+                    }
+                } else {
+                    match doc.session.hidden_data() {
+                        Ok(found) => self.say_info(if found.is_empty() {
+                            found.describe()
+                        } else {
+                            format!("{} — `hiddendata clean` takes it out.", found.describe())
+                        }),
+                        Err(e) => self.say_error(e.to_string()),
+                    }
+                }
+            }
+            Effect::RunUnsecure => {
+                let Some(doc) = &mut self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                match doc.session.unsecure_document() {
+                    Ok(()) => self.say_info("the password is off; save to write it out."),
+                    Err(e) => self.say_error(e.to_string()),
+                }
+            }
         }
     }
 
@@ -412,72 +552,6 @@ impl crate::PagifyApp {
     }
 
 
-    /// One domain of [`Self::act`]: 6 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_signing(&mut self, verb: Verb) {
-        match verb {
-            Verb::SessionLog => match self.recording_state.session_log.path() {
-                Some(path) => self.say_info(format!(
-                    "recording every command and outcome to {} — send it along with a bug report.",
-                    path.display()
-                )),
-                None => self.say_info(
-                    "no session log this run — the config directory could not be written to.",
-                ),
-            },
-            Verb::ApplySignatures => self.act_apply_signatures(),
-            Verb::ManageSignatures(what) => self.act_manage_signatures(what),
-            Verb::Signature(SignatureAction::Draw) => {
-                let first = self.library_state.signatures.current().is_none();
-                self.library_state.pad = Some(SignaturePad {
-                    name: if first {
-                        "Signature".to_string()
-                    } else {
-                        format!("Signature {}", self.library_state.signatures.entries().len() + 1)
-                    },
-                    // An explicit `signature draw` is a request to draw, not
-                    // to sign — unlike bare `signature` with nothing made yet,
-                    // this does not carry on to placing it.
-                    then_place: false,
-                    ..SignaturePad::default()
-                });
-                self.say_info("draw a signature in the window.");
-            }
-            Verb::Signature(SignatureAction::Upload(path)) => {
-                match path {
-                    Some(path) => self.upload_signature(&path),
-                    None => self.upload_signature_dialog(),
-                }
-            }
-            Verb::Signature(SignatureAction::Place) => {
-                // Nothing drawn or uploaded yet needs a signature made before
-                // it can be placed. Placing does not.
-                if self.library_state.signatures.current().is_none() {
-                    self.library_state.pad = Some(SignaturePad {
-                        name: "Signature".to_string(),
-                        // Somebody who typed bare `signature` wanted to sign,
-                        // not to draw; carrying on to the click is the rest
-                        // of that.
-                        then_place: true,
-                        ..SignaturePad::default()
-                    });
-                    self.say_info(
-                        "draw your signature in the window — it is kept on this \
-                         computer, and nowhere else. `signature upload` adds one \
-                         from a picture instead.",
-                    );
-                    return;
-                }
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.arm_tool(Tool::Signature, page);
-            }
-            _ => unreachable!("act_signing was handed a verb from another domain"),
-        }
-    }
 
     /// Everything `applysignatures` does: run the confirmation pass over every
     /// page, place the saved signatures and say what happened. Moved out of
@@ -619,152 +693,6 @@ impl crate::PagifyApp {
     }
 
 
-    /// One domain of [`Self::act`]: 11 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_security(&mut self, verb: Verb) {
-        match verb {
-            Verb::Validate => self.act_validate(),
-            Verb::Certify(path) => self.act_certify(path),
-            Verb::Whiteout => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else {
-                    let page = self.tab_mut().view_state.page;
-                    self.arm_tool(Tool::Whiteout, page);
-                }
-            }
-            Verb::DrawArrow => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else {
-                    let page = self.tab_mut().view_state.page;
-                    self.arm_tool(Tool::Draw(DrawKind::Arrow), page);
-                }
-            }
-            Verb::ToggleFill => {
-                self.prefs_state.draw_fill = !self.prefs_state.draw_fill;
-                self.say_info(if self.prefs_state.draw_fill {
-                    "fill: on — the next rectangle or circle is drawn filled."
-                } else {
-                    "fill: off — the next rectangle or circle is drawn hollow."
-                });
-            }
-            Verb::Redact => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else {
-                    let page = self.tab_mut().view_state.page;
-                    self.arm_tool(Tool::Redact, page);
-                }
-            }
-            Verb::Lock => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                // **Selecting the words is the obvious way to say which words.**
-                // Asking for two opposite corners of a rectangle is a drawing
-                // gesture, and this is not a drawing operation — reported from
-                // use as not being what anyone reaches for. A selection already
-                // on the page is taken as the answer; otherwise it says to make
-                // one, and the rectangle stays available for the cases a
-                // selection cannot express, like an area of a scan.
-                if self.tab_mut().selection.text_selection.is_some() {
-                    self.lock_selection();
-                    return;
-                }
-                self.say_info(
-                    "lock: select the words to hide, then `lock` again — or drag a rectangle with `lockarea`.",
-                );
-            }
-            Verb::Secure(options) => {
-                let Some(doc) = &self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                // **Refused before a password is typed, not after.**
-                //
-                // Two passwords cannot both be written — the content would be
-                // encrypted twice and open for nobody — and the engine has
-                // always refused that. But it refused at *save*, by which time
-                // somebody had chosen a password, met the rule and typed it
-                // twice for nothing.
-                // A document that already has one is *changed*, not refused:
-                // the current password first, then the new one.
-                if doc.session.already_has_password() {
-                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::SecureCurrent(options));
-                    self.say_info("this document has a password — type it to change it.");
-                    return;
-                }
-                if doc.session.is_secured() {
-                    self.say_info(
-                        "this document already has a password waiting — `unsecure` takes it off.",
-                    );
-                    return;
-                }
-                let allowed = options.describe();
-                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Secure(options));
-                self.say_info(format!(
-                    "type a password for this document, or Escape to give up. \
-                     Anyone opening the file will be asked for it — {allowed}."
-                ));
-            }
-            Verb::SmartRedact { redact } => self.act_smart_redact(redact),
-            Verb::HiddenData { clean } => {
-                let Some(doc) = &self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                if clean {
-                    // **What is printed is what a second survey of the cleaned
-                    // bytes found**, not what the first survey listed. The line
-                    // used to print the findings as removals — and for the
-                    // attachment and the script, which the clean left alone,
-                    // that was a claim with nothing behind it. Found by audit.
-                    match doc.session.remove_hidden_data() {
-                        Ok(done) => {
-                            if let Some(doc) = &mut self.tab_mut().doc {
-                                doc.rendered_is_stale();
-                            }
-                            self.tab_mut().selection.text_selection = None;
-                            self.tab_mut().panels.find_hits.clear();
-                            let said = done.describe();
-                            if done.is_clean() {
-                                self.say_info(if done.removed().is_empty() {
-                                    format!("{said}.")
-                                } else {
-                                    format!("{said}. Save to write it out.")
-                                });
-                            } else {
-                                self.say_error(format!("{said}. Save to write out what was removed."));
-                            }
-                        }
-                        Err(e) => self.say_error(e.to_string()),
-                    }
-                } else {
-                    match doc.session.hidden_data() {
-                        Ok(found) => self.say_info(if found.is_empty() {
-                            found.describe()
-                        } else {
-                            format!("{} — `hiddendata clean` takes it out.", found.describe())
-                        }),
-                        Err(e) => self.say_error(e.to_string()),
-                    }
-                }
-            }
-            Verb::Unsecure => {
-                let Some(doc) = &mut self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                match doc.session.unsecure_document() {
-                    Ok(()) => self.say_info("the password is off; save to write it out."),
-                    Err(e) => self.say_error(e.to_string()),
-                }
-            }
-            _ => unreachable!("act_security was handed a verb from another domain"),
-        }
-    }
 
 
     /// What `validate` does: run the validation pass and report what it found.

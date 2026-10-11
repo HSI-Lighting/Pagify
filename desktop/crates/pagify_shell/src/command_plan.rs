@@ -12,7 +12,7 @@
 //! `pagify_app::dispatch`).
 
 use crate::page_space::{AppPoint, PageSpace};
-use crate::verbs::{AppPointArg, MeasureKind, PageTarget, Verb, ZoomTarget};
+use crate::verbs::{AppPointArg, MeasureKind, PageTarget, SignatureAction, Verb, ZoomTarget};
 use cad_kernel::Vec2;
 use pdf_core::document::Stacking;
 
@@ -32,11 +32,14 @@ pub struct CommandEnv {
     pub page_height: f64,
     /// A tool is armed and waiting for a click.
     pub tool_armed: bool,
+    /// How many signatures the library holds (drives the names a new pad
+    /// gets, and whether placing needs one drawn first).
+    pub signature_count: usize,
 }
 
 impl Default for CommandEnv {
     fn default() -> Self {
-        Self { has_doc: false, page: 0, page_height: 792.0, tool_armed: false }
+        Self { has_doc: false, page: 0, page_height: 792.0, tool_armed: false, signature_count: 0 }
     }
 }
 
@@ -111,6 +114,45 @@ pub enum Effect {
     ArmSignRectangle { page: usize },
     /// Say the document-status lines.
     ReportDocumentStatus,
+    /// Run the saved-signature confirmation pass over every page.
+    RunApplySignatures,
+    /// Run the signature-management actions.
+    RunManageSignatures(crate::verbs::Signatures),
+    /// Report where the session log is, if it could be written.
+    ReportSessionLog,
+    /// Open the signature pad with this name; `then_place` carries on to
+    /// placing once it is drawn.
+    OpenSignaturePad { name: String, then_place: bool },
+    /// Add a signature from this picture file.
+    UploadSignaturePath(std::path::PathBuf),
+    /// Ask the platform for a picture to add as a signature.
+    UploadSignatureDialog,
+    /// Arm placing the library's current signature.
+    ArmSignature { page: usize },
+    /// Run the signature-validation report.
+    RunValidate,
+    /// Run `certify`: write the certification at this path, or report when
+    /// `None`.
+    RunCertify(Option<std::path::PathBuf>),
+    /// Arm the whiteout tool.
+    ArmWhiteout,
+    /// Arm the arrow drawing tool.
+    ArmDrawArrow,
+    /// Toggle whether new rectangles and circles are drawn filled.
+    ToggleFill,
+    /// Arm the redaction tool.
+    ArmRedact,
+    /// Lock the text selection, or say to make one first.
+    LockWords,
+    /// Run `secure` with these options — the document's password state
+    /// decides the prompt.
+    RunSecure(crate::verbs::SecureOptions),
+    /// Run the Smart Redact pass.
+    RunSmartRedact { redact: bool },
+    /// Survey or clean the document's hidden data.
+    RunHiddenData { clean: bool },
+    /// Take the document's password off.
+    RunUnsecure,
 }
 
 /// The plan for a verb, or `None` when this slice does not know it yet — the
@@ -173,6 +215,54 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::SignLine => vec![Effect::ArmSignLine { page: env.page }],
         Verb::SignRectangle => vec![Effect::ArmSignRectangle { page: env.page }],
         Verb::DocumentStatus => vec![Effect::ReportDocumentStatus],
+        // Signing: the pad names and the draw-then-place decisions are
+        // computed here from the library count.
+        Verb::SessionLog => vec![Effect::ReportSessionLog],
+        Verb::ApplySignatures => vec![Effect::RunApplySignatures],
+        Verb::ManageSignatures(what) => vec![Effect::RunManageSignatures(what.clone())],
+        Verb::Signature(SignatureAction::Draw) => {
+            let name = if env.signature_count == 0 {
+                "Signature".to_string()
+            } else {
+                format!("Signature {}", env.signature_count + 1)
+            };
+            vec![
+                Effect::OpenSignaturePad { name, then_place: false },
+                Effect::Say("draw a signature in the window.".into()),
+            ]
+        }
+        Verb::Signature(SignatureAction::Upload(Some(path))) => {
+            vec![Effect::UploadSignaturePath(path.clone())]
+        }
+        Verb::Signature(SignatureAction::Upload(None)) => vec![Effect::UploadSignatureDialog],
+        // Nothing made yet needs one drawn before it can be placed; placing
+        // does not.
+        Verb::Signature(SignatureAction::Place) if env.signature_count == 0 => vec![
+            Effect::OpenSignaturePad { name: "Signature".to_string(), then_place: true },
+            Effect::Say(
+                "draw your signature in the window — it is kept on this \
+                 computer, and nowhere else. `signature upload` adds one \
+                 from a picture instead."
+                    .into(),
+            ),
+        ],
+        Verb::Signature(SignatureAction::Place) if !env.has_doc => {
+            vec![Effect::SayError("nothing open.".into())]
+        }
+        Verb::Signature(SignatureAction::Place) => vec![Effect::ArmSignature { page: env.page }],
+        // Security: mirrors, with the password-state decisions still in the
+        // app's bodies (they read live session state).
+        Verb::Validate => vec![Effect::RunValidate],
+        Verb::Certify(path) => vec![Effect::RunCertify(path.clone())],
+        Verb::Whiteout => vec![Effect::ArmWhiteout],
+        Verb::DrawArrow => vec![Effect::ArmDrawArrow],
+        Verb::ToggleFill => vec![Effect::ToggleFill],
+        Verb::Redact => vec![Effect::ArmRedact],
+        Verb::Lock => vec![Effect::LockWords],
+        Verb::Secure(options) => vec![Effect::RunSecure(*options)],
+        Verb::SmartRedact { redact } => vec![Effect::RunSmartRedact { redact: *redact }],
+        Verb::HiddenData { clean } => vec![Effect::RunHiddenData { clean: *clean }],
+        Verb::Unsecure => vec![Effect::RunUnsecure],
         _ => return None,
     })
 }
@@ -241,7 +331,8 @@ mod tests {
     #[test]
     fn the_tools_domain_guards_and_flips_in_the_plan() {
         let no_doc = CommandEnv::default();
-        let with_doc = CommandEnv { has_doc: true, page: 2, page_height: 800.0, tool_armed: true };
+        let with_doc =
+            CommandEnv { has_doc: true, page: 2, page_height: 800.0, tool_armed: true, signature_count: 3 };
         for verb in [Verb::EditObject, Verb::MoveThing, Verb::SignLine, Verb::SignRectangle] {
             assert_eq!(
                 plan(&verb, &no_doc),
@@ -274,6 +365,81 @@ mod tests {
             Some(vec![Effect::ArmSignRectangle { page: 2 }])
         );
         assert_eq!(plan(&Verb::DocumentStatus, &with_doc), Some(vec![Effect::ReportDocumentStatus]));
+    }
+
+
+    #[test]
+    fn the_signing_domain_plans_names_and_places() {
+        use crate::verbs::SignatureAction;
+        let no_sig = CommandEnv::default();
+        let with_sig = CommandEnv {
+            has_doc: true,
+            page: 2,
+            page_height: 800.0,
+            tool_armed: false,
+            signature_count: 3,
+        };
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Draw), &no_sig),
+            Some(vec![
+                Effect::OpenSignaturePad { name: "Signature".into(), then_place: false },
+                Effect::Say("draw a signature in the window.".into()),
+            ])
+        );
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Draw), &with_sig),
+            Some(vec![
+                Effect::OpenSignaturePad { name: "Signature 4".into(), then_place: false },
+                Effect::Say("draw a signature in the window.".into()),
+            ])
+        );
+        match plan(&Verb::Signature(SignatureAction::Place), &no_sig) {
+            Some(v) => {
+                assert!(matches!(v.as_slice(), [Effect::OpenSignaturePad { then_place: true, .. }, Effect::Say(_)]))
+            }
+            other => panic!("expected a pad hand-off, got {other:?}"),
+        }
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Place), &with_sig),
+            Some(vec![Effect::ArmSignature { page: 2 }])
+        );
+        let sig_no_doc = CommandEnv { signature_count: 3, ..CommandEnv::default() };
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Place), &sig_no_doc),
+            Some(vec![Effect::SayError("nothing open.".into())])
+        );
+        assert_eq!(
+            plan(
+                &Verb::Signature(SignatureAction::Upload(Some(std::path::PathBuf::from("s.png")))),
+                &no_sig
+            ),
+            Some(vec![Effect::UploadSignaturePath(std::path::PathBuf::from("s.png"))])
+        );
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Upload(None)), &no_sig),
+            Some(vec![Effect::UploadSignatureDialog])
+        );
+        assert_eq!(plan(&Verb::SessionLog, &no_sig), Some(vec![Effect::ReportSessionLog]));
+    }
+
+    #[test]
+    fn the_security_domain_mirrors_its_verbs() {
+        let env = CommandEnv::default();
+        let cases: Vec<(Verb, Vec<Effect>)> = vec![
+            (Verb::Validate, vec![Effect::RunValidate]),
+            (Verb::Certify(None), vec![Effect::RunCertify(None)]),
+            (Verb::Whiteout, vec![Effect::ArmWhiteout]),
+            (Verb::DrawArrow, vec![Effect::ArmDrawArrow]),
+            (Verb::ToggleFill, vec![Effect::ToggleFill]),
+            (Verb::Redact, vec![Effect::ArmRedact]),
+            (Verb::Lock, vec![Effect::LockWords]),
+            (Verb::SmartRedact { redact: true }, vec![Effect::RunSmartRedact { redact: true }]),
+            (Verb::HiddenData { clean: false }, vec![Effect::RunHiddenData { clean: false }]),
+            (Verb::Unsecure, vec![Effect::RunUnsecure]),
+        ];
+        for (verb, want) in cases {
+            assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");
+        }
     }
 
     #[test]
