@@ -589,6 +589,9 @@ pub enum Verb {
     /// Run the document checks this build can make — fonts embedded, image
     /// resolution — the Conversion tab's Preflight.
     Preflight,
+    /// Write every embedded picture out as a PNG — `exportimages <folder>`.
+    /// Bare, the app asks for the folder.
+    ExportAllImages { dest: Option<PathBuf> },
     Quit { force: bool },
     /// Recognised, deliberately not implemented yet, and carrying the phase
     /// that will implement it.
@@ -832,7 +835,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("editxfa", "the forms phase", "the Edit Static XFA Form tool"),
     ("email", "the sharing phase", "the Email tool"),
     ("emailattach", "the sharing phase", "the Attach to Email tool"),
-    ("exportimages", "the conversion phase", "the Export All Images tool"),
     ("fieldbarcode", "the forms phase", "the Barcode tool"),
     ("fieldbutton", "the forms phase", "the Push Button tool"),
     ("fieldcheckbox", "the forms phase", "the Check Box tool"),
@@ -1014,6 +1016,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
+        "exportimages",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1722,6 +1725,9 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         }),
         "autobookmarks" => Ok(Verb::AutoBookmarks),
         "preflight" => Ok(Verb::Preflight),
+        "exportimages" => Ok(Verb::ExportAllImages {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2087,6 +2093,24 @@ mod preflight_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "preflight"),
             "`preflight` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod export_images_tests {
+    use super::*;
+
+    #[test]
+    fn exportimages_parses_and_is_not_planned() {
+        assert_eq!(parse("exportimages"), Some(Ok(Verb::ExportAllImages { dest: None })));
+        assert_eq!(
+            parse("exportimages /tmp/out"),
+            Some(Ok(Verb::ExportAllImages { dest: Some("/tmp/out".into()) }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "exportimages"),
+            "`exportimages` is still in the planned table"
         );
     }
 }

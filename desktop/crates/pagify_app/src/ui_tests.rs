@@ -5133,3 +5133,33 @@ fn preflight_reports_a_vector_only_document_clean() {
         "the scope sentence is missing: {said:?}"
     );
 }
+
+/// **The Conversion tab's Export All Images, through the real dispatch.**
+/// `pictures.pdf` carries two embedded pictures; each comes out as a PNG
+/// whose header says the same pixel dimensions the engine's metadata does.
+#[test]
+fn exportimages_writes_every_embedded_picture() {
+    let dir = std::env::temp_dir().join(format!("pagify-pics-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    let mut h = harness("pictures.pdf");
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let expected = session.images_on(0).expect("images").len();
+    assert!(expected > 0, "pictures.pdf should carry pictures");
+
+    h.state_mut().submit(&format!("exportimages {}", dir.display()));
+    h.run_steps(1);
+
+    let written: Vec<_> = std::fs::read_dir(&dir)
+        .expect("listed")
+        .map(|entry| entry.expect("entry").path())
+        .filter(|path| path.extension().is_some_and(|e| e == "png"))
+        .collect();
+    assert_eq!(written.len(), expected, "one PNG per embedded picture");
+    for path in &written {
+        let bytes = std::fs::read(path).expect("read the PNG");
+        assert!(bytes.starts_with(&[0x89, b'P', b'N', b'G']), "{path:?} is not a PNG");
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}

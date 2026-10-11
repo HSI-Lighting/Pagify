@@ -23,11 +23,20 @@ use pdfium_render::prelude::{
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
-    Annotation, Color, Document, DocumentMut, Glyph, IndexedAnnotation, InternalLink, Page, PageCharacters,
+    Annotation, Color, DecodedImage, Document, DocumentMut, Glyph, IndexedAnnotation, InternalLink, Page, PageCharacters,
     PageClassification, PageSize, PageTextKind, RecognisedWord, TEXT_LAYER_ID,
     Point, Rect, RegionRequest, RemovedPage, RenderRequest, Rotation, Ruling, TextSegment,
     Redaction, RedactionReport, Uncleared,
 };
+
+// The `FPDF_COLORSPACE_*` values from PDFium's C API (`fpdfview.h`). Its
+// Rust bindings keep those constants private, so they are named here exactly
+// as the header names them — the numbers are the C API's, not ours.
+const FPDF_COLORSPACE_DEVICEGRAY: c_int = 1;
+const FPDF_COLORSPACE_DEVICERGB: c_int = 2;
+const FPDF_COLORSPACE_DEVICECMYK: c_int = 3;
+const FPDF_COLORSPACE_CALGRAY: c_int = 4;
+const FPDF_COLORSPACE_CALRGB: c_int = 5;
 use crate::crypto::vault::{self, Vault};
 use crate::crypto::{KdfParams, Secret};
 use crate::error::{classify_pdfium_load_error, PdfError, Result};
@@ -1036,6 +1045,120 @@ impl Document for PdfiumDocument {
             });
         }
         Ok(found)
+    }
+
+    /// Decode one image on a page to 8-bit RGBA, top-left origin — what
+    /// `exportimages` writes out as PNG.
+    ///
+    /// `object_index` is the address [`Self::images_on`] reports as
+    /// [`crate::document::PageImage::object`]: PDFium's own index for the
+    /// object. Grey, RGB and CMYK at 8 bits are expanded; anything else
+    /// answers `None` rather than guessing at a layout.
+    fn image_data(
+        &self,
+        page_index: usize,
+        object_index: usize,
+    ) -> Result<Option<DecodedImage>> {
+        self.validate_page_index(page_index)?;
+        let page_number = i32::try_from(page_index)
+            .map_err(|_| PdfError::InvalidArgument(format!("page index {page_index} is out of range")))?;
+        let raw = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+
+        let handle = unsafe { bindings.FPDFPage_GetObject(raw.handle, object_index as i32) };
+        if handle.is_null()
+            || unsafe { bindings.FPDFPageObj_GetType(handle) }
+                != pdfium_render::prelude::FPDF_PAGEOBJ_IMAGE as i32
+        {
+            return Ok(None);
+        }
+
+        let mut meta = pdfium_render::prelude::FPDF_IMAGEOBJ_METADATA {
+            width: 0,
+            height: 0,
+            horizontal_dpi: 0.0,
+            vertical_dpi: 0.0,
+            bits_per_pixel: 0,
+            colorspace: 0,
+            marked_content_id: 0,
+        };
+        unsafe { bindings.FPDFImageObj_GetImageMetadata(handle, raw.handle, &mut meta) };
+        let channels = match meta.colorspace {
+            FPDF_COLORSPACE_DEVICEGRAY | FPDF_COLORSPACE_CALGRAY => 1u32,
+            FPDF_COLORSPACE_DEVICERGB | FPDF_COLORSPACE_CALRGB => 3,
+            FPDF_COLORSPACE_DEVICECMYK => 4,
+            _ => return Ok(None),
+        };
+        // `bits_per_pixel` is per pixel, not per component — 24 for an 8-bit
+        // RGB image — so the check is against the whole pixel. Anything but
+        // 8 bits a component would need a layout this expansion does not
+        // know, and is answered `None` rather than guessed at.
+        if meta.bits_per_pixel != channels * 8 || meta.width == 0 || meta.height == 0 {
+            return Ok(None);
+        }
+
+        // Asked for the length first, as every sized PDFium read is.
+        let needed = unsafe {
+            bindings.FPDFImageObj_GetImageDataDecoded(handle, std::ptr::null_mut(), 0)
+        } as usize;
+        if needed == 0 {
+            return Ok(None);
+        }
+        let mut buffer = vec![0u8; needed];
+        let got = unsafe {
+            bindings.FPDFImageObj_GetImageDataDecoded(
+                handle,
+                buffer.as_mut_ptr() as *mut c_void,
+                buffer.len() as c_ulong,
+            )
+        } as usize;
+        if got == 0 {
+            return Ok(None);
+        }
+        buffer.truncate(got.min(needed));
+
+        let (width, height) = (meta.width as usize, meta.height as usize);
+        let pixels = width * height;
+        let rgba = match meta.colorspace {
+            FPDF_COLORSPACE_DEVICEGRAY | FPDF_COLORSPACE_CALGRAY => {
+                if buffer.len() < pixels {
+                    return Ok(None);
+                }
+                let mut out = Vec::with_capacity(pixels * 4);
+                for &grey in &buffer[..pixels] {
+                    out.extend_from_slice(&[grey, grey, grey, 255]);
+                }
+                out
+            }
+            FPDF_COLORSPACE_DEVICERGB | FPDF_COLORSPACE_CALRGB => {
+                if buffer.len() < pixels * 3 {
+                    return Ok(None);
+                }
+                let mut out = Vec::with_capacity(pixels * 4);
+                for px in buffer[..pixels * 3].chunks_exact(3) {
+                    out.extend_from_slice(&[px[0], px[1], px[2], 255]);
+                }
+                out
+            }
+            FPDF_COLORSPACE_DEVICECMYK => {
+                if buffer.len() < pixels * 4 {
+                    return Ok(None);
+                }
+                let mut out = Vec::with_capacity(pixels * 4);
+                for px in buffer[..pixels * 4].chunks_exact(4) {
+                    let (c, m, y, k) = (px[0] as u32, px[1] as u32, px[2] as u32, px[3] as u32);
+                    out.extend_from_slice(&[
+                        ((255 - c) * (255 - k) / 255) as u8,
+                        ((255 - m) * (255 - k) / 255) as u8,
+                        ((255 - y) * (255 - k) / 255) as u8,
+                        255,
+                    ]);
+                }
+                out
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(DecodedImage { width: meta.width, height: meta.height, rgba }))
     }
 
     fn run_font_data(&self, page_index: usize, object: usize) -> Result<Option<Vec<u8>>> {

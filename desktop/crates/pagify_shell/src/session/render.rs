@@ -57,6 +57,27 @@ impl Session {
         pdf_core::render::export::encode(&bitmap, pdf_core::render::ImageFormat::Png)
     }
 
+    /// One embedded image's pixels re-encoded as a PNG — the Conversion
+    /// tab's `exportimages`. `object` is the address
+    /// [`Session::images_on`] reports for it.
+    pub fn export_image_png(&self, page: usize, object: usize) -> Result<Vec<u8>> {
+        let decoded = registry::with_session(self.handle, |s| s.document.image_data(page, object))?
+            .ok_or_else(|| {
+                pdf_core::PdfError::Unsupported(
+                    "reading this image's pixels — its colour space or depth is one this \
+                     build does not expand",
+                )
+            })?;
+        let bitmap = pdf_core::render::Bitmap {
+            width: decoded.width,
+            height: decoded.height,
+            stride: decoded.width as usize * pdf_core::render::BYTES_PER_PIXEL,
+            order: pdf_core::render::PixelOrder::Rgba,
+            data: decoded.rgba,
+        };
+        pdf_core::render::export::encode(&bitmap, pdf_core::render::ImageFormat::Png)
+    }
+
     /// Rasterise a page at `scale`, turned a quarter at a time.
     ///
     /// This is a *view* rotation: it changes what is drawn, not what is stored.

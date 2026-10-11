@@ -667,6 +667,13 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// The pixels of one of the page's images, decoded to 8-bit RGBA with a
+    /// top-left origin — `None` when this document cannot hand them over (an
+    /// image in a colour space or depth this build does not expand).
+    fn image_data(&self, _page_index: usize, _object_index: usize) -> Result<Option<DecodedImage>> {
+        Ok(None)
+    }
+
     /// The bytes of the font one text run is drawn in, if it can be had.
     ///
     /// **What Obfuscate needs and [`crate::crypto::tweak::coverage`] cannot
@@ -2444,6 +2451,19 @@ pub struct PageImage {
     /// The stream filters, outermost first — `DCTDecode` for a JPEG,
     /// `FlateDecode` for a PNG-ish one. Empty when the pixels are stored raw.
     pub filters: Vec<String>,
+}
+
+/// One of a page's images, decoded to 8-bit RGBA with a top-left origin —
+/// what `exportimages` writes out as PNG.
+///
+/// Decoded rather than raw: a PDF image's bytes may be a JPEG, a
+/// zlib-compressed bitmap or something rarer, and only PDFium knows which.
+/// Asking it for the pixels is the one route that works for all of them.
+pub struct DecodedImage {
+    pub width: u32,
+    pub height: u32,
+    /// `width * height * 4` bytes, RGBA.
+    pub rgba: Vec<u8>,
 }
 
 /// What kind of thing is drawn on a page.

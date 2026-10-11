@@ -14054,6 +14054,86 @@ impl PagifyApp {
         }
     }
 
+    /// Write every embedded picture out to `folder` as a PNG — the
+    /// Conversion tab's Export All Images.
+    ///
+    /// The pixels come decoded from the engine (`Session::export_image_png`),
+    /// so a picture stored as a JPEG, a zlib bitmap or a CMYK scan exports
+    /// the same way; one it cannot expand is said and skipped.
+    fn export_pictures(&mut self, folder: &std::path::Path) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        let count = doc.page_count;
+        if !folder.is_dir() {
+            self.say_error(format!("exportimages: {} is not a folder.", folder.display()));
+            return;
+        }
+        let stem = self.document_stem();
+        let mut written = 0usize;
+        let mut from_pages = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        for page in 0..count {
+            let images = match session.images_on(page) {
+                Ok(images) => images,
+                Err(e) => {
+                    failures.push(format!("page {}: {e}", page + 1));
+                    continue;
+                }
+            };
+            let mut any_from_this_page = false;
+            for (n, image) in images.iter().enumerate() {
+                match session.export_image_png(page, image.object) {
+                    Ok(bytes) => {
+                        let name = format!("{stem}-page-{:03}-image-{:02}.png", page + 1, n + 1);
+                        match std::fs::write(folder.join(&name), bytes) {
+                            Ok(()) => {
+                                written += 1;
+                                any_from_this_page = true;
+                            }
+                            Err(e) => failures.push(format!("{name}: {e}")),
+                        }
+                    }
+                    Err(e) => failures.push(format!("page {} image {}: {e}", page + 1, n + 1)),
+                }
+            }
+            if any_from_this_page {
+                from_pages += 1;
+            }
+        }
+        if written == 0 && failures.is_empty() {
+            self.say_error("exportimages: this document has no embedded images.");
+            return;
+        }
+        if failures.is_empty() {
+            self.say_info(format!(
+                "wrote {written} image(s) from {from_pages} page(s) to {}.",
+                folder.display()
+            ));
+        } else {
+            self.say_error(format!(
+                "{written} image(s) written; {}",
+                failures.join("; ")
+            ));
+        }
+    }
+
+    /// The Conversion tab's Export All Images button, bare: choose the
+    /// folder, then write every embedded picture into it.
+    fn export_pictures_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new().set_title("Choose a folder for the images");
+        match dialog.pick_folder() {
+            Some(folder) => self.export_pictures(&folder),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
     /// The annotation under a point, if any.
     fn foreign_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
         let (x, y) = (at.x as f32, at.y as f32);

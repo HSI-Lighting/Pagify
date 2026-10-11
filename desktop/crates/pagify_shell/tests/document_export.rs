@@ -59,3 +59,23 @@ fn a_page_with_no_text_says_so_rather_than_going_missing() {
         "an empty page vanished from the export: {html}"
     );
 }
+
+#[test]
+fn an_embedded_picture_exports_as_a_png_of_its_own_pixels() {
+    let session = Session::open(fixture("pictures.pdf")).expect("open");
+    let images = session.images_on(0).expect("images");
+    let first = images.first().expect("pictures.pdf carries pictures");
+
+    let png = session.export_image_png(0, first.object).expect("png");
+
+    assert!(png.starts_with(&[0x89, b'P', b'N', b'G']), "not a PNG");
+    // PNG's IHDR: width and height are the first two 4-byte fields after the
+    // 8-byte signature and the 8-byte chunk header.
+    let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+    let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+    assert_eq!(
+        (width, height),
+        (first.pixel_width, first.pixel_height),
+        "the PNG's dimensions must be the image's own pixels, not its size on the page"
+    );
+}

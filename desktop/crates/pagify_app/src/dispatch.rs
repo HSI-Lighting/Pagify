@@ -166,7 +166,8 @@ impl crate::PagifyApp {
             | Effect::RunAccessCheck
             | Effect::WriteAccessReport { .. }
             | Effect::RunAutoBookmarks
-            | Effect::RunPreflight => self.apply_files(effect),
+            | Effect::RunPreflight
+            | Effect::ExportPictures { .. } => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -638,6 +639,10 @@ impl crate::PagifyApp {
             },
             Effect::RunAutoBookmarks => self.auto_bookmarks(),
             Effect::RunPreflight => self.run_preflight(),
+            Effect::ExportPictures { dest } => match dest {
+                Some(folder) => self.export_pictures(&folder),
+                None => self.export_pictures_dialog(),
+            },
             other => unreachable!("apply_files was handed {other:?}"),
         }
     }
