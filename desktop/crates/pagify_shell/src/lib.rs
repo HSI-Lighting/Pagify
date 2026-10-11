@@ -21,6 +21,7 @@ pub mod command_plan;
 pub mod commit;
 pub mod diagnose;
 pub mod editor;
+pub mod export;
 pub mod guides;
 pub mod markup;
 pub mod measure;

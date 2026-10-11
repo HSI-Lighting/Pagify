@@ -66,6 +66,10 @@ pub enum Effect {
     RotatePage(i32),
     /// Report whether the page has a text layer the editor can use.
     ReportTextLayer,
+    /// Copy the page in view to the system clipboard as an image. The render
+    /// needs no window; the clipboard write does, so the app carries it out
+    /// in the frame's own clipboard pass.
+    Snapshot,
     /// Say a line in the info colour.
     Say(String),
     /// Start an update check; the caller has already said it is checking.
@@ -181,6 +185,12 @@ pub enum Effect {
     /// Alternate a file's pages into this document after the page in view;
     /// `None` asks for the file first.
     InterleavePages { source: Option<std::path::PathBuf>, pages: String },
+    /// Write every page as a PNG into this folder; `None` asks for the
+    /// folder first.
+    ExportImages { dest: Option<std::path::PathBuf> },
+    /// Write the document's text as one HTML file; `None` asks for the file
+    /// first.
+    ExportHtml { dest: Option<std::path::PathBuf> },
     /// Reflow the page's text.
     RunReflow,
     /// Search for `needle`.
@@ -269,7 +279,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::TextLayer
         | Verb::Pdfium
         | Verb::Version
-        | Verb::CheckUpdate => plan_document(verb, env),
+        | Verb::CheckUpdate
+        | Verb::Snapshot => plan_document(verb, env),
         Verb::Layers
         | Verb::RepairLocks
         | Verb::Opacity(_)
@@ -319,6 +330,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::MovePages { .. }
         | Verb::ReplacePage { .. }
         | Verb::Interleave { .. }
+        | Verb::ToImage { .. }
+        | Verb::ToHtml { .. }
         | Verb::Reflow
         | Verb::Find(_)
         | Verb::FindStep { .. }
@@ -363,7 +376,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
 }
 
 /// The document and view verbs.
-fn plan_document(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
+fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
     Some(match verb {
         // Opening lands in its own tab, so it never puts this one's unsaved
         // work at risk — see the app's `open_with`.
@@ -375,6 +388,9 @@ fn plan_document(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Zoom(target) => vec![Effect::Zoom(target.clone())],
         Verb::RotatePage(degrees) => vec![Effect::RotatePage(*degrees)],
         Verb::TextLayer => vec![Effect::ReportTextLayer],
+        // The one capture verb: a page in view is what there is to copy.
+        Verb::Snapshot if !env.has_doc => vec![Effect::SayError("nothing open.".into())],
+        Verb::Snapshot => vec![Effect::Snapshot],
         Verb::Pdfium => vec![Effect::Say(crate::pdfium::describe())],
         Verb::Version => vec![Effect::Say(format!("Pagify {}", crate::VERSION))],
         // The message comes first so it is on the bar while the check runs.
@@ -529,6 +545,8 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Interleave { source, pages } => {
             vec![Effect::InterleavePages { source: source.clone(), pages: pages.clone() }]
         }
+        Verb::ToImage { dest } => vec![Effect::ExportImages { dest: dest.clone() }],
+        Verb::ToHtml { dest } => vec![Effect::ExportHtml { dest: dest.clone() }],
         // Text and find.
         Verb::Reflow => vec![Effect::RunReflow],
         Verb::Find(needle) => vec![Effect::RunFind(needle.clone())],
@@ -634,6 +652,14 @@ mod tests {
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");
         }
+        // The one document verb with a guard: there is nothing to capture
+        // until a document is open.
+        assert_eq!(
+            plan(&Verb::Snapshot, &CommandEnv::default()),
+            Some(vec![Effect::SayError("nothing open.".into())])
+        );
+        let with_doc = CommandEnv { has_doc: true, ..CommandEnv::default() };
+        assert_eq!(plan(&Verb::Snapshot, &with_doc), Some(vec![Effect::Snapshot]));
     }
 
     #[test]
@@ -811,6 +837,14 @@ mod tests {
             (
                 Verb::Interleave { source: None, pages: "all".into() },
                 vec![Effect::InterleavePages { source: None, pages: "all".into() }],
+            ),
+            (
+                Verb::ToImage { dest: None },
+                vec![Effect::ExportImages { dest: None }],
+            ),
+            (
+                Verb::ToHtml { dest: Some("book.html".into()) },
+                vec![Effect::ExportHtml { dest: Some("book.html".into()) }],
             ),
             (Verb::Reflow, vec![Effect::RunReflow]),
             (Verb::Find("n".into()), vec![Effect::RunFind("n".into())]),

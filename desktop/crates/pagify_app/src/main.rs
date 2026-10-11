@@ -778,6 +778,10 @@ struct ViewState {
     /// typed `copy`, a ribbon button, a menu item. Carried out at the end of
     /// the frame, where the context is available.
     copy_wanted: bool,
+    /// The same idea for `snapshot`: the page in view is rendered and put on
+    /// the system clipboard as an image at the end of the frame, where the
+    /// context that performs the write is available.
+    snapshot_wanted: bool,
 }
 
 /// Passcode and redaction asks on this tab — what the app is
@@ -974,7 +978,7 @@ impl DocTab {
             markup: Markup::default(),
             calibration: Calibration::default(),
             tool: None,
-            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, },
+            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
             panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
@@ -3003,6 +3007,12 @@ impl PagifyApp {
         // `egui::Context` a real write needs.
         if std::mem::take(&mut self.clipboard_state.clipboard_mirror_wanted) {
             ctx.copy_text(COPIED_IN_PAGIFY.to_string());
+        }
+        // Snapshot: the render itself needs no window, but the clipboard
+        // write does — the same one-place-has-the-context rule as the mirror
+        // above.
+        if std::mem::take(&mut self.tab_mut().view_state.snapshot_wanted) {
+            self.copy_snapshot(&ctx);
         }
         if keys.find_next && !self.tab_mut().panels.find_hits.is_empty() {
             self.find_step(true);
@@ -8305,6 +8315,40 @@ impl PagifyApp {
         self.say_info(said);
     }
 
+    /// What `snapshot` does when the click reaches `act`: nothing yet, only
+    /// the ask — the render and the clipboard write happen at the end of the
+    /// frame, where there is a context (see `snapshot_wanted`).
+    fn snapshot_page(&mut self) {
+        self.tab_mut().view_state.snapshot_wanted = true;
+    }
+
+    /// Render the page in view and put it on the system clipboard as an
+    /// image — the Capture tab's Snapshot.
+    ///
+    /// At the zoom on screen, within a sane band: a snapshot is for pasting
+    /// into something else, and the page as it is being read is what was
+    /// asked for. The 4× ceiling keeps a 1600% pinch from asking PDFium for
+    /// a gigapixel a 5,000pt drawing would need.
+    fn copy_snapshot(&mut self, ctx: &egui::Context) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let page = self.tab().view_state.page;
+        let scale = (self.resolved_zoom() * Self::DISPLAY_DPI_SCALE).clamp(1.0, 4.0);
+        match session.render_page(page, scale) {
+            Ok(raster) => {
+                let (width, height) = (raster.width, raster.height);
+                ctx.copy_image(page_to_image(&raster));
+                self.say_info(format!(
+                    "page {} copied as an image ({width}×{height}) — paste it into another program.",
+                    page + 1
+                ));
+            }
+            Err(e) => self.say_error(format!("snapshot: {e}")),
+        }
+    }
+
     /// ⌘C on what Edit Object has picked.
     ///
     /// **Words are copied as words** — their text, size, colour and font — and
@@ -13477,6 +13521,107 @@ impl PagifyApp {
             .add_filter("PDF", &["pdf"]);
         match dialog.pick_file() {
             Some(path) => self.interleave_pages(&path, "all"),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// The document's own name, for naming what an export writes beside it.
+    fn document_stem(&self) -> String {
+        self.tab()
+            .doc
+            .as_ref()
+            .and_then(|d| d.session.path().file_stem().map(|s| s.to_string_lossy().into_owned()))
+            .unwrap_or_else(|| "document".into())
+    }
+
+    /// Write every page to `folder` as a PNG, at 2× (about 144 dpi) — the
+    /// Conversion tab's To Image. One file per page, the document's own name
+    /// first, so a whole run of exports sorts together.
+    fn export_images(&mut self, folder: &std::path::Path) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        let count = doc.page_count;
+        if !folder.is_dir() {
+            self.say_error(format!("toimage: {} is not a folder.", folder.display()));
+            return;
+        }
+        let stem = self.document_stem();
+        let mut written = 0usize;
+        let mut failures: Vec<String> = Vec::new();
+        for page in 0..count {
+            match session.export_page_png(page, 2.0) {
+                Ok(bytes) => {
+                    let name = format!("{stem}-page-{:03}.png", page + 1);
+                    match std::fs::write(folder.join(&name), bytes) {
+                        Ok(()) => written += 1,
+                        Err(e) => failures.push(format!("page {}: {e}", page + 1)),
+                    }
+                }
+                Err(e) => failures.push(format!("page {}: {e}", page + 1)),
+            }
+        }
+        if failures.is_empty() {
+            self.say_info(format!(
+                "wrote {written} PNG page(s) at 2× to {}.",
+                folder.display()
+            ));
+        } else {
+            self.say_error(format!(
+                "{written} of {count} page(s) written; {}",
+                failures.join("; ")
+            ));
+        }
+    }
+
+    /// Write the document's text as one HTML file — the Conversion tab's To
+    /// HTML. The file itself is built in the shell (`pagify_shell::export`),
+    /// where it can be tested against fixtures with no window.
+    fn export_html(&mut self, dest: &std::path::Path) {
+        let Some(doc) = self.tab().doc.as_ref() else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let session = doc.session.clone();
+        let stem = self.document_stem();
+        match pagify_shell::export::document_html(&session, &stem) {
+            Ok(html) => match std::fs::write(dest, html) {
+                Ok(()) => self.say_info(format!("wrote {}.", dest.display())),
+                Err(e) => self.say_error(format!("tohtml: {e}")),
+            },
+            Err(e) => self.say_error(format!("tohtml: {e}")),
+        }
+    }
+
+    /// The Conversion tab's To Image, bare: choose the folder, then write
+    /// every page into it.
+    fn export_images_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new().set_title("Choose a folder for the page images");
+        match dialog.pick_folder() {
+            Some(folder) => self.export_images(&folder),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// The Conversion tab's To HTML, bare: choose the file, then write the
+    /// document's text into it.
+    fn export_html_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new()
+            .set_title("Write the document's text as HTML")
+            .set_file_name(format!("{}.html", self.document_stem()))
+            .add_filter("HTML", &["html"]);
+        match dialog.save_file() {
+            Some(path) => self.export_html(&path),
             None => self.say_info("nothing chosen."),
         }
     }

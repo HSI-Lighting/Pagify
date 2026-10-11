@@ -4847,3 +4847,52 @@ fn replace_and_interleave_run_from_the_box() {
         "interleave did not alternate the source in after page 1"
     );
 }
+
+/// **The Capture tab's Snapshot.** The page in view is rendered and put on
+/// the clipboard in the frame's own pass (the write needs the context), so
+/// what is asserted here is the answered line — which is also where a
+/// render failure would surface as `snapshot: …`.
+#[test]
+fn snapshot_renders_the_page_and_says_so() {
+    let mut h = harness("quadrants.pdf");
+    h.state_mut().submit("snapshot");
+    h.run_steps(2);
+
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("copied as an image")),
+        "snapshot said nothing about a copy: {said:?}"
+    );
+    assert!(
+        !said.iter().any(|l| l.contains("snapshot:")),
+        "snapshot failed: {said:?}"
+    );
+}
+
+/// **The Conversion tab's pair, through the real dispatch.** `toimage` writes
+/// one PNG per page into a folder; `tohtml` writes the document's text as one
+/// file. Both go through real files in a scratch folder, since writing them
+/// is the feature.
+#[test]
+fn to_image_writes_pngs_and_to_html_writes_the_text() {
+    let mut h = harness("quadrants.pdf");
+    let dir = std::env::temp_dir().join(format!("pagify-export-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    h.state_mut().submit(&format!("toimage {}", dir.display()));
+    h.run_steps(1);
+    let png = std::fs::read(dir.join("quadrants-page-001.png")).expect("a PNG per page");
+    assert!(
+        png.starts_with(&[0x89, b'P', b'N', b'G']),
+        "the written file is not a PNG"
+    );
+
+    let book = dir.join("book.html");
+    h.state_mut().submit(&format!("tohtml {}", book.display()));
+    h.run_steps(1);
+    let html = std::fs::read_to_string(&book).expect("the HTML file");
+    assert!(html.contains("<title>quadrants</title>"), "no title: {html}");
+    assert!(html.contains("<h2>Page 1</h2>"), "no page heading: {html}");
+
+    std::fs::remove_dir_all(&dir).ok();
+}

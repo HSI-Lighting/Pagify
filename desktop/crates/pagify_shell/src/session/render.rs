@@ -41,6 +41,22 @@ impl Session {
         self.render_page_rotated(index, scale, Rotation::None)
     }
 
+    /// Rasterise a page and encode it as a PNG — the engine's own encoder,
+    /// behind the Conversion tab's `toimage`. Kept here so the app writes
+    /// files and never touches pixel formats: a render is RGBA with a
+    /// top-left origin, which is also what a PNG is.
+    pub fn export_page_png(&self, index: usize, scale: f32) -> Result<Vec<u8>> {
+        let raster = self.render_page(index, scale)?;
+        let bitmap = pdf_core::render::Bitmap {
+            width: raster.width,
+            height: raster.height,
+            stride: raster.width as usize * pdf_core::render::BYTES_PER_PIXEL,
+            order: pdf_core::render::PixelOrder::Rgba,
+            data: raster.pixels,
+        };
+        pdf_core::render::export::encode(&bitmap, pdf_core::render::ImageFormat::Png)
+    }
+
     /// Rasterise a page at `scale`, turned a quarter at a time.
     ///
     /// This is a *view* rotation: it changes what is drawn, not what is stored.

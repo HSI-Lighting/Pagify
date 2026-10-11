@@ -101,6 +101,7 @@ impl crate::PagifyApp {
             | Effect::Zoom(_)
             | Effect::RotatePage(_)
             | Effect::ReportTextLayer
+            | Effect::Snapshot
             | Effect::Say(_)
             | Effect::SayError(_)
             | Effect::CheckUpdate => self.apply_document(effect),
@@ -153,7 +154,9 @@ impl crate::PagifyApp {
             | Effect::RunInsertPage
             | Effect::RunMovePages { .. }
             | Effect::ReplacePage { .. }
-            | Effect::InterleavePages { .. } => self.apply_files(effect),
+            | Effect::InterleavePages { .. }
+            | Effect::ExportImages { .. }
+            | Effect::ExportHtml { .. } => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -227,6 +230,7 @@ impl crate::PagifyApp {
             Effect::Zoom(target) => self.set_zoom(target),
             Effect::RotatePage(degrees) => self.rotate_view(degrees),
             Effect::ReportTextLayer => self.report_text_layer(true),
+            Effect::Snapshot => self.snapshot_page(),
             Effect::Say(text) => self.say_info(text),
             Effect::SayError(text) => self.say_error(text),
             Effect::CheckUpdate => self.spawn_update_check(),
@@ -594,6 +598,14 @@ impl crate::PagifyApp {
             Effect::InterleavePages { source, pages } => match source {
                 Some(path) => self.interleave_pages(&path, &pages),
                 None => self.interleave_dialog(),
+            },
+            Effect::ExportImages { dest } => match dest {
+                Some(folder) => self.export_images(&folder),
+                None => self.export_images_dialog(),
+            },
+            Effect::ExportHtml { dest } => match dest {
+                Some(path) => self.export_html(&path),
+                None => self.export_html_dialog(),
             },
             other => unreachable!("apply_files was handed {other:?}"),
         }

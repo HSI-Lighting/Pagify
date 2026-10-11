@@ -375,6 +375,12 @@ pub enum Verb {
     /// Alternate another file's pages into this one, starting after the page
     /// in view. Bare, the app asks for the file.
     Interleave { source: Option<PathBuf>, pages: String },
+    /// Write every page as a PNG into a folder — `toimage <folder>`. Bare,
+    /// the app asks for the folder.
+    ToImage { dest: Option<PathBuf> },
+    /// Write the document's text as one HTML file — `tohtml <file.html>`.
+    /// Bare, the app asks for the file.
+    ToHtml { dest: Option<PathBuf> },
 
     // Review — phase 10.
     /// Find text across the document.
@@ -544,6 +550,9 @@ pub enum Verb {
     ReportIssue,
     /// Say what kind of text this page has, and what that means.
     TextLayer,
+    /// Put the page in view on the system clipboard as an image — the
+    /// Capture tab's Snapshot.
+    Snapshot,
     Quit { force: bool },
     /// Recognised, deliberately not implemented yet, and carrying the phase
     /// that will implement it.
@@ -841,14 +850,11 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("sendreview", "the sharing phase", "the Send for Review tool"),
     ("sharelink", "the sharing phase", "the Share Link tool"),
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
-    ("snapshot", "the capture phase", "the Snapshot tool"),
     ("split", "the page phase", "the Split tool"),
     ("stamp", "the annotation phase", "the Stamp tool"),
     ("tagspanel", "the accessibility phase", "the Tags Panel tool"),
     ("textbox", "the annotation phase", "the Textbox tool"),
     ("tickmark", "the annotation phase", "the TickMark tool"),
-    ("tohtml", "the conversion phase", "the To HTML tool"),
-    ("toimage", "the conversion phase", "the To Image tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
     ("toolsettings", "the forms phase", "the Tool Settings tool"),
     ("tooltip", "the forms phase", "the Add Tooltip tool"),
@@ -974,11 +980,11 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         // and distance from anyone who also uses SIMLUX. The guard test in
         // tests/command_box.rs is what caught every one of them.
         "extract", "import", "deletepage", "delpage", "insertpage", "movepage",
-        "replacepage", "interleave",
+        "replacepage", "interleave", "toimage", "tohtml",
         "highlight", "hl", "note", "calibrate", "cal", "pagescale", "measure",
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
-        "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext",
+        "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1502,6 +1508,14 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
             }),
             None => Ok(Verb::Interleave { source: None, pages: "all".into() }),
         },
+        // Conversion: no arguments means "ask me where", the same shape
+        // `open`/`saveas` already have.
+        "toimage" => Ok(Verb::ToImage {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
+        "tohtml" => Ok(Verb::ToHtml {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
         _ => return None,
     })
 }
@@ -1597,6 +1611,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "quickstart" => Ok(Verb::QuickStart),
         "reportissue" => Ok(Verb::ReportIssue),
         "textlayer" | "whytext" => Ok(Verb::TextLayer),
+        "snapshot" => Ok(Verb::Snapshot),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -1747,5 +1762,48 @@ mod documentation_tests {
 
         let issue = help_text(Some("reportissue")).join("\n");
         assert!(issue.contains(ISSUES_URL), "reportissue does not name the tracker: {issue}");
+    }
+}
+
+#[cfg(test)]
+mod capture_phase_tests {
+    use super::*;
+
+    /// The capture phase's one word: `snapshot` is real now, not a
+    /// placeholder.
+    #[test]
+    fn the_capture_word_parses_and_is_not_planned() {
+        assert_eq!(parse("snapshot"), Some(Ok(Verb::Snapshot)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "snapshot"),
+            "`snapshot` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod conversion_phase_tests {
+    use super::*;
+
+    /// The conversion phase's first two words: `toimage` and `tohtml` parse
+    /// (bare, asking for a destination), and neither is a placeholder.
+    #[test]
+    fn the_conversion_words_parse_and_are_not_planned() {
+        assert_eq!(parse("toimage"), Some(Ok(Verb::ToImage { dest: None })));
+        assert_eq!(
+            parse("toimage /tmp/out"),
+            Some(Ok(Verb::ToImage { dest: Some("/tmp/out".into()) }))
+        );
+        assert_eq!(parse("tohtml"), Some(Ok(Verb::ToHtml { dest: None })));
+        assert_eq!(
+            parse("tohtml book.html"),
+            Some(Ok(Verb::ToHtml { dest: Some("book.html".into()) }))
+        );
+        for word in ["toimage", "tohtml"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
     }
 }
