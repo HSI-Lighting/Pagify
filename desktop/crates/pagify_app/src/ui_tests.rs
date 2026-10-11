@@ -4814,3 +4814,36 @@ fn the_documentation_buttons_answer_with_their_lines() {
         "a documentation button still reports its phase: {said:?}"
     );
 }
+
+/// **The Organize tab's page-phase pair, through the real dispatch.**
+/// `replacepage` swaps a page in place; `interleave` alternates the source in
+/// after the page in view. Both are read back from the page sizes, which are
+/// all distinct in `pages-ladder`/`mixed-sizes` on purpose.
+#[test]
+fn replace_and_interleave_run_from_the_box() {
+    let mut h = harness("pages-ladder.pdf");
+    let source = fixture("mixed-sizes.pdf");
+
+    // On page 2, so the replaced page is the 250pt one.
+    h.state_mut().submit("page 2");
+    h.run_steps(1);
+    h.state_mut().submit(&format!("replacepage {source} 1"));
+    h.run_steps(1);
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let widths: Vec<u32> = (0..session.page_count().expect("count"))
+        .map(|i| session.page_size(i).expect("size").width_pt.round() as u32)
+        .collect();
+    assert_eq!(widths, vec![200, 595, 300, 350, 400], "replacepage did not put 595 where 250 was");
+
+    h.state_mut().submit(&format!("interleave {source}"));
+    h.run_steps(1);
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let widths: Vec<u32> = (0..session.page_count().expect("count"))
+        .map(|i| session.page_size(i).expect("size").width_pt.round() as u32)
+        .collect();
+    assert_eq!(
+        widths,
+        vec![200, 595, 595, 300, 420, 350, 612, 400, 842],
+        "interleave did not alternate the source in after page 1"
+    );
+}

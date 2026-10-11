@@ -13378,6 +13378,109 @@ impl PagifyApp {
         }
     }
 
+    /// Replace the page in view with pages `spec` of `source` — the Organize
+    /// tab's Replace. The source's own page count decides the range, so it is
+    /// opened first, exactly as `import_at` does.
+    fn replace_pages(&mut self, source: &std::path::Path, spec: &str) {
+        let at = self.tab().view_state.page;
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let pages = match Session::open(source).and_then(|s| s.page_count()) {
+            Ok(count) => match pagify_shell::organize::parse_range(spec, count) {
+                Ok(pages) => pages,
+                Err(e) => {
+                    self.say_error(e);
+                    return;
+                }
+            },
+            Err(e) => {
+                self.say_error(format!("replacepage: {e}"));
+                return;
+            }
+        };
+        match session.replace_page_from(source, &pages, at) {
+            Ok(total) => {
+                self.say_info(format!(
+                    "page {} replaced with {} page(s) from {}; {total} in all.",
+                    at + 1,
+                    pages.len(),
+                    source.display()
+                ));
+                self.refresh_after_page_change();
+            }
+            Err(e) => self.say_error(format!("replacepage: {e}")),
+        }
+    }
+
+    /// Alternate pages `spec` of `source` into this document, starting after
+    /// the page in view — the Organize tab's Interleaving.
+    fn interleave_pages(&mut self, source: &std::path::Path, spec: &str) {
+        let after = self.tab().view_state.page;
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let pages = match Session::open(source).and_then(|s| s.page_count()) {
+            Ok(count) => match pagify_shell::organize::parse_range(spec, count) {
+                Ok(pages) => pages,
+                Err(e) => {
+                    self.say_error(e);
+                    return;
+                }
+            },
+            Err(e) => {
+                self.say_error(format!("interleave: {e}"));
+                return;
+            }
+        };
+        let inserted = pages.len();
+        match session.interleave_from(source, &pages, after) {
+            Ok(total) => {
+                self.say_info(format!(
+                    "interleaved {inserted} page(s) from {} after page {}; {total} in all.",
+                    source.display(),
+                    after + 1
+                ));
+                self.refresh_after_page_change();
+            }
+            Err(e) => self.say_error(format!("interleave: {e}")),
+        }
+    }
+
+    /// The Organize tab's Replace button, bare: choose the file, then put its
+    /// first page where the page in view is.
+    fn replace_page_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new()
+            .set_title("Replace this page with a page from another PDF")
+            .add_filter("PDF", &["pdf"]);
+        match dialog.pick_file() {
+            Some(path) => self.replace_pages(&path, "1"),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// The Organize tab's Interleaving button, bare: choose the file, then
+    /// alternate all of its pages in after the page in view.
+    fn interleave_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new()
+            .set_title("Interleave pages from another PDF")
+            .add_filter("PDF", &["pdf"]);
+        match dialog.pick_file() {
+            Some(path) => self.interleave_pages(&path, "all"),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
     /// The annotation under a point, if any.
     fn foreign_at(&mut self, page: usize, at: AppPoint) -> Option<usize> {
         let (x, y) = (at.x as f32, at.y as f32);

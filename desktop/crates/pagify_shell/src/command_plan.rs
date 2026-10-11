@@ -175,6 +175,12 @@ pub enum Effect {
     RunInsertPage,
     /// Move pages before a page.
     RunMovePages { pages: String, before: usize },
+    /// Replace the page in view with pages from a file; `None` asks for the
+    /// file first.
+    ReplacePage { source: Option<std::path::PathBuf>, pages: String },
+    /// Alternate a file's pages into this document after the page in view;
+    /// `None` asks for the file first.
+    InterleavePages { source: Option<std::path::PathBuf>, pages: String },
     /// Reflow the page's text.
     RunReflow,
     /// Search for `needle`.
@@ -311,6 +317,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::DeletePages(_)
         | Verb::InsertPage
         | Verb::MovePages { .. }
+        | Verb::ReplacePage { .. }
+        | Verb::Interleave { .. }
         | Verb::Reflow
         | Verb::Find(_)
         | Verb::FindStep { .. }
@@ -514,6 +522,12 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::InsertPage => vec![Effect::RunInsertPage],
         Verb::MovePages { pages, before } => {
             vec![Effect::RunMovePages { pages: pages.clone(), before: *before }]
+        }
+        Verb::ReplacePage { source, pages } => {
+            vec![Effect::ReplacePage { source: source.clone(), pages: pages.clone() }]
+        }
+        Verb::Interleave { source, pages } => {
+            vec![Effect::InterleavePages { source: source.clone(), pages: pages.clone() }]
         }
         // Text and find.
         Verb::Reflow => vec![Effect::RunReflow],
@@ -789,6 +803,14 @@ mod tests {
             (
                 Verb::MovePages { pages: "2".into(), before: 0 },
                 vec![Effect::RunMovePages { pages: "2".into(), before: 0 }],
+            ),
+            (
+                Verb::ReplacePage { source: Some("o.pdf".into()), pages: "1".into() },
+                vec![Effect::ReplacePage { source: Some("o.pdf".into()), pages: "1".into() }],
+            ),
+            (
+                Verb::Interleave { source: None, pages: "all".into() },
+                vec![Effect::InterleavePages { source: None, pages: "all".into() }],
             ),
             (Verb::Reflow, vec![Effect::RunReflow]),
             (Verb::Find("n".into()), vec![Effect::RunFind("n".into())]),

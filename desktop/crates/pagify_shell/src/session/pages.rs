@@ -50,6 +50,12 @@ impl Session {
     /// Bring pages in from another file.
     pub fn import_from(&self, source: &Path, pages: &[usize], at: usize) -> Result<usize> {
         let source = Session::open(source)?;
+        self.import_from_session(&source, pages, at)
+    }
+
+    /// [`Self::import_from`], with the source already open — for the walks
+    /// below, which would otherwise reopen the same file once per page.
+    fn import_from_session(&self, source: &Session, pages: &[usize], at: usize) -> Result<usize> {
         let command = registry::with_session(source.handle, |src| {
             let mut slice = src
                 .document
@@ -65,5 +71,38 @@ impl Session {
         })?;
 
         self.execute(command).map(|state| state.page_count)
+    }
+
+    /// Replace the page at `at` with pages from another file.
+    ///
+    /// Two commands — the import, then the deletion of the page it displaced
+    /// — so each half undoes exactly like the same edits made by hand: the
+    /// shape `deletepage 1-3` already has, and the reason `import_at`'s own
+    /// note about self-contained commands applies here too.
+    pub fn replace_page_from(&self, source: &Path, pages: &[usize], at: usize) -> Result<usize> {
+        if pages.is_empty() {
+            return Err(pdf_core::PdfError::InvalidArgument(
+                "no pages to put in its place".into(),
+            ));
+        }
+        let source = Session::open(source)?;
+        self.import_from_session(&source, pages, at)?;
+        self.execute(pdf_core::command::Command::DeletePage { index: at + pages.len() })
+            .map(|state| state.page_count)
+    }
+
+    /// Alternate pages from another file into this one: the first lands just
+    /// after page `after`, the next just after the document page that
+    /// follows, and so on; once the document runs out the rest are appended.
+    ///
+    /// One command per page, so each insertion can be taken back on its own
+    /// — the same shape as `deletepage 1-3`.
+    pub fn interleave_from(&self, source: &Path, pages: &[usize], after: usize) -> Result<usize> {
+        let source = Session::open(source)?;
+        for (i, page) in pages.iter().enumerate() {
+            let at = (after + 1 + 2 * i).min(self.page_count()?);
+            self.import_from_session(&source, std::slice::from_ref(page), at)?;
+        }
+        self.page_count()
     }
 }

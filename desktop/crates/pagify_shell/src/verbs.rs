@@ -368,6 +368,13 @@ pub enum Verb {
     InsertPage,
     /// Drag, as a command: move these pages in front of that one (one-based).
     MovePages { pages: String, before: usize },
+    /// Replace the page in view with pages from another file —
+    /// `replacepage <file> [pages]`. Bare, the app asks for the file and uses
+    /// its first page.
+    ReplacePage { source: Option<PathBuf>, pages: String },
+    /// Alternate another file's pages into this one, starting after the page
+    /// in view. Bare, the app asks for the file.
+    Interleave { source: Option<PathBuf>, pages: String },
 
     // Review — phase 10.
     /// Find text across the document.
@@ -809,7 +816,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("fromtemplate", "the conversion phase", "the From Template tool"),
     ("imageannotation", "the annotation phase", "the Image Annotation tool"),
     ("inserttext", "the annotation phase", "the Insert Text tool"),
-    ("interleave", "the page phase", "the Interleaving tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
     ("keeptool", "the annotation phase", "the Keep Tool Selected tool"),
     ("managecomments", "the annotation phase", "the Manage Comments tool"),
@@ -825,7 +831,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("readingoptions", "the accessibility phase", "the Reading Options tool"),
     ("readingorder", "the accessibility phase", "the Reading Order tool"),
     ("rearrange", "the page phase", "the Rearrange tool"),
-    ("replacepage", "the page phase", "the Replace tool"),
     ("replacetext", "the annotation phase", "the Replace Text tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("resetform", "the forms phase", "the Reset Form tool"),
@@ -969,6 +974,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         // and distance from anyone who also uses SIMLUX. The guard test in
         // tests/command_box.rs is what caught every one of them.
         "extract", "import", "deletepage", "delpage", "insertpage", "movepage",
+        "replacepage", "interleave",
         "highlight", "hl", "note", "calibrate", "cal", "pagescale", "measure",
         "find", "findnext", "fn", "findprev", "fp", "replace", "spelling", "bookmark",
         "articlebox", "weblinks", "jointext", "reflow",
@@ -1476,6 +1482,26 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
             },
             _ => Err("usage: movepage <pages> <before>   e.g. movepage 5 2".into()),
         },
+        // Replace takes a path *and* an optional page range, like `import` —
+        // the path is the tail minus a trailing range token. Bare, it is a
+        // request for the file picker, and the source's first page is what
+        // stands in for the one in view.
+        "replacepage" => match split_path_and_extra(tail) {
+            Some((path, extra)) => Ok(Verb::ReplacePage {
+                source: Some(resolve_path(&path)),
+                pages: if extra.is_empty() { "1".into() } else { extra },
+            }),
+            None => Ok(Verb::ReplacePage { source: None, pages: "1".into() }),
+        },
+        // Interleave reads the same way; with nothing said, every page of the
+        // source takes its turn.
+        "interleave" => match split_path_and_extra(tail) {
+            Some((path, extra)) => Ok(Verb::Interleave {
+                source: Some(resolve_path(&path)),
+                pages: if extra.is_empty() { "all".into() } else { extra },
+            }),
+            None => Ok(Verb::Interleave { source: None, pages: "all".into() }),
+        },
         _ => return None,
     })
 }
@@ -1643,6 +1669,39 @@ mod parse_domain_tests {
             assert!(
                 parse(word).is_some(),
                 "`{word}` is claimed by `{domain}` but `parse` returns None for it"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod page_phase_tests {
+    use super::*;
+
+    /// The page phase's two words, as the box reads them: a path and an
+    /// optional range, bare forms asking for the file picker.
+    #[test]
+    fn the_page_phase_words_parse() {
+        assert_eq!(
+            parse("replacepage"),
+            Some(Ok(Verb::ReplacePage { source: None, pages: "1".into() }))
+        );
+        assert_eq!(
+            parse("replacepage other.pdf 2-3"),
+            Some(Ok(Verb::ReplacePage { source: Some("other.pdf".into()), pages: "2-3".into() }))
+        );
+        assert_eq!(parse("interleave"), Some(Ok(Verb::Interleave { source: None, pages: "all".into() })));
+        assert_eq!(
+            parse("interleave /tmp/other.pdf"),
+            Some(Ok(Verb::Interleave {
+                source: Some("/tmp/other.pdf".into()),
+                pages: "all".into()
+            }))
+        );
+        for word in ["replacepage", "interleave"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
             );
         }
     }

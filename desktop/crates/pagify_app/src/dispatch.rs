@@ -151,7 +151,9 @@ impl crate::PagifyApp {
             | Effect::RunImport { .. }
             | Effect::RunDeletePages(_)
             | Effect::RunInsertPage
-            | Effect::RunMovePages { .. } => self.apply_files(effect),
+            | Effect::RunMovePages { .. }
+            | Effect::ReplacePage { .. }
+            | Effect::InterleavePages { .. } => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -585,6 +587,14 @@ impl crate::PagifyApp {
             Effect::RunDeletePages(pages) => self.delete_pages(&pages),
             Effect::RunInsertPage => self.insert_page(),
             Effect::RunMovePages { pages, before } => self.move_pages(&pages, before),
+            Effect::ReplacePage { source, pages } => match source {
+                Some(path) => self.replace_pages(&path, &pages),
+                None => self.replace_page_dialog(),
+            },
+            Effect::InterleavePages { source, pages } => match source {
+                Some(path) => self.interleave_pages(&path, &pages),
+                None => self.interleave_dialog(),
+            },
             other => unreachable!("apply_files was handed {other:?}"),
         }
     }
