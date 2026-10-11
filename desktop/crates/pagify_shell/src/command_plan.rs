@@ -87,6 +87,8 @@ pub enum Effect {
     /// Write every embedded picture out as a PNG; `None` asks for the folder
     /// first.
     ExportPictures { dest: Option<std::path::PathBuf> },
+    /// Open or close the View Settings panel.
+    ToggleViewSettings,
     /// Make a new document out of nothing, one sheet of this size and ruling.
     BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
     /// Merge PDFs into one new document; a folder to read them from, or
@@ -319,6 +321,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Preflight
         | Verb::ExportAllImages { .. }
         | Verb::FromFiles { .. }
+        | Verb::ViewSetting
         | Verb::BlankDoc { .. }
         | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
@@ -441,6 +444,7 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::AutoBookmarks => vec![Effect::RunAutoBookmarks],
         Verb::Preflight => vec![Effect::RunPreflight],
         Verb::ExportAllImages { dest } => vec![Effect::ExportPictures { dest: dest.clone() }],
+        Verb::ViewSetting => vec![Effect::ToggleViewSettings],
         // A new document is allowed with nothing open — that is the point of
         // it.
         Verb::BlankDoc { width_pt, height_pt, ruling } => vec![Effect::BlankDocument {
@@ -741,6 +745,7 @@ mod tests {
                 Verb::ExportAllImages { dest: Some("out".into()) },
                 vec![Effect::ExportPictures { dest: Some("out".into()) }],
             ),
+            (Verb::ViewSetting, vec![Effect::ToggleViewSettings]),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");

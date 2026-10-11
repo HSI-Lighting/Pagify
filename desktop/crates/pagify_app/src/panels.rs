@@ -455,6 +455,123 @@ impl crate::PagifyApp {
 
 
     /// The Bookmarks panel — every bookmark, click to jump.
+    /// The View Settings panel — the View tab's View Setting.
+    ///
+    /// **A face on the verbs, not a second implementation of them.** Every
+    /// control submits the same command the ribbon button and the box use, so
+    /// the panel cannot drift from either: what it shows is read back from
+    /// the same `view_state` the commands write.
+    pub(crate) fn draw_view_settings(&mut self, ctx: &egui::Context) {
+        if !self.tab().panels.view_settings {
+            return;
+        }
+        let mut open = true;
+        let mut close = false;
+        let mut submit: Option<&'static str> = None;
+
+        let has_doc = self.tab().doc.is_some();
+        let layout = self.tab().doc.as_ref().map(|d| d.strip.layout());
+        let page = self.tab().view_state.page;
+        let mut ruler_box = self.tab().view_state.ruler;
+        let mut autoscroll_box = self.tab().view_state.autoscroll;
+        let zoom_pct = has_doc.then(|| (self.resolved_zoom() * 100.0).round());
+
+        egui::Window::new("View Setting")
+            .id(egui::Id::new("view-settings-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(140.0, 120.0))
+            .show(ctx, |ui| {
+                ui.set_width(270.0);
+                if !has_doc {
+                    ui.label("Nothing open — these settings act on a document's view.");
+                    if ui.button("Close").clicked() {
+                        close = true;
+                    }
+                    return;
+                }
+
+                ui.label(format!("Page {} — {:.0}%", page + 1, zoom_pct.unwrap_or(0.0)));
+                ui.add_space(6.0);
+                ui.label("Page display");
+                if ui
+                    .selectable_label(
+                        matches!(layout, Some(pagify_shell::reader::Layout::Single)),
+                        "One page per row",
+                    )
+                    .clicked()
+                {
+                    submit = Some("viewsingle");
+                }
+                if ui
+                    .selectable_label(
+                        matches!(layout, Some(pagify_shell::reader::Layout::Facing)),
+                        "Two pages side by side",
+                    )
+                    .clicked()
+                {
+                    submit = Some("viewfacing");
+                }
+                if ui
+                    .selectable_label(
+                        matches!(layout, Some(pagify_shell::reader::Layout::FacingWithCover)),
+                        "Two pages, cover alone",
+                    )
+                    .clicked()
+                {
+                    submit = Some("viewcover");
+                }
+                ui.add_space(8.0);
+                ui.label("Turn");
+                ui.horizontal(|ui| {
+                    if ui.button("Left").clicked() {
+                        submit = Some("rotate 270");
+                    }
+                    if ui.button("Right").clicked() {
+                        submit = Some("rotate 90");
+                    }
+                });
+                ui.add_space(8.0);
+                ui.label("Zoom");
+                ui.horizontal(|ui| {
+                    if ui.button("Fit page").clicked() {
+                        submit = Some("zoom fit");
+                    }
+                    if ui.button("Fit width").clicked() {
+                        submit = Some("zoom width");
+                    }
+                    if ui.button("100%").clicked() {
+                        submit = Some("zoom 100");
+                    }
+                    if ui.button("−").clicked() {
+                        submit = Some("zoom out");
+                    }
+                    if ui.button("+").clicked() {
+                        submit = Some("zoom in");
+                    }
+                });
+                ui.add_space(8.0);
+                if ui.checkbox(&mut ruler_box, "Ruler, in page points").clicked() {
+                    submit = Some("ruler");
+                }
+                if ui.checkbox(&mut autoscroll_box, "AutoScroll").clicked() {
+                    submit = Some("autoscroll");
+                }
+                ui.add_space(6.0);
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.tab_mut().panels.view_settings = false;
+        }
+        if let Some(line) = submit {
+            self.submit(line);
+        }
+    }
+
     pub(crate) fn draw_bookmark_panel(&mut self, ctx: &egui::Context) {
         let Some(panel) = self.tab_mut().panels.bookmark_panel.take() else { return };
         let mut open = true;

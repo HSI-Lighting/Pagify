@@ -592,6 +592,8 @@ pub enum Verb {
     /// Write every embedded picture out as a PNG — `exportimages <folder>`.
     /// Bare, the app asks for the folder.
     ExportAllImages { dest: Option<PathBuf> },
+    /// Open or close the View Settings panel — the View tab's View Setting.
+    ViewSetting,
     /// Make a new document out of picture files — `fromfiles` or
     /// `fromfiles <folder>`, which takes every picture in the folder in name
     /// order. Bare, the app opens a picker.
@@ -895,7 +897,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("transitions", "the viewing phase", "the Page Transitions tool"),
     ("viewcontinuous", "the viewing phase", "the Continuous tool"),
     ("viewcontinuousfacing", "the viewing phase", "the Continuous Facing tool"),
-    ("viewsetting", "the viewing phase", "the View Setting tool"),
     ("viewsplit", "the viewing phase", "the Split tool"),
 ];
 
@@ -1019,7 +1020,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
-        "exportimages", "fromfiles",
+        "exportimages", "fromfiles", "viewsetting",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1734,6 +1735,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "fromfiles" => Ok(Verb::FromFiles {
             folder: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
+        "viewsetting" => Ok(Verb::ViewSetting),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2135,6 +2137,20 @@ mod from_files_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "fromfiles"),
             "`fromfiles` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod view_setting_tests {
+    use super::*;
+
+    #[test]
+    fn viewsetting_parses_and_is_not_planned() {
+        assert_eq!(parse("viewsetting"), Some(Ok(Verb::ViewSetting)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "viewsetting"),
+            "`viewsetting` is still in the planned table"
         );
     }
 }

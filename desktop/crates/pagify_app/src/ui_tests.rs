@@ -5206,3 +5206,17 @@ fn fromfiles_makes_a_page_per_picture() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The View tab's View Setting: the panel opens, survives a few frames of
+/// drawing, and closes on a second press.
+#[test]
+fn viewsetting_opens_and_closes_the_settings_panel() {
+    let mut h = harness("quadrants.pdf");
+    h.state_mut().submit("viewsetting");
+    h.run_steps(2);
+    assert!(h.state().tab().panels.view_settings, "the panel did not open");
+
+    h.state_mut().submit("viewsetting");
+    h.run_steps(1);
+    assert!(!h.state().tab().panels.view_settings, "the panel did not close");
+}
