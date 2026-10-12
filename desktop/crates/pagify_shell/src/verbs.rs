@@ -889,7 +889,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("combfield", "the forms phase", "the Comb Field tool"),
     ("createform", "the forms phase", "the Form tool"),
     ("crossref", "the editing phase", "the Cross Reference tool"),
-    ("customstamp", "the annotation phase", "the Custom Stamp tool"),
     ("drawing", "the annotation phase", "the Drawing tool"),
     ("editxfa", "the forms phase", "the Edit Static XFA Form tool"),
     ("email", "the sharing phase", "the Email tool"),
@@ -913,7 +912,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("fromclipboard", "the conversion phase", "the From Clipboard tool"),
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
     ("fromtemplate", "the conversion phase", "the From Template tool"),
-    ("imageannotation", "the annotation phase", "the Image Annotation tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
     ("keeptool", "the annotation phase", "the Keep Tool Selected tool"),
     ("markredact", "the protection phase", "the Mark for Redaction tool"),
@@ -1070,7 +1068,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
-        "tickmark", "inserttext", "replacetext", "addlink",
+        "tickmark", "inserttext", "replacetext", "addlink", "customstamp", "imageannotation",
         "unsecure", "redact",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));
@@ -1397,6 +1395,19 @@ fn parse_document_edits(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         // is rewritten rather than covered over.
         "replacetext" => Ok(Verb::EditText),
         "addimage" => {
+            let tail = tail.trim();
+            if tail.is_empty() {
+                Ok(Verb::AddImage(None))
+            } else {
+                Ok(Verb::AddImage(Some(resolve_path(tail))))
+            }
+        }
+        // A custom stamp, and a comment that carries a picture, are both a
+        // picture placed where it is clicked — which is what `addimage`
+        // does. This app keeps no reusable stamp library, so the picture is
+        // placed and then adjusted in place; the words exist so the
+        // Comment tab's buttons run the operation they name.
+        "customstamp" | "imageannotation" => {
             let tail = tail.trim();
             if tail.is_empty() {
                 Ok(Verb::AddImage(None))
@@ -2395,6 +2406,29 @@ mod alias_tests {
         assert_eq!(parse("replacetext"), Some(Ok(Verb::EditText)));
         assert_eq!(parse("addlink"), Some(Ok(Verb::Weblinks)));
         for word in ["tickmark", "inserttext", "replacetext", "addlink"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod picture_alias_tests {
+    use super::*;
+
+    /// Custom Stamp and Image Annotation run the picture placement the app
+    /// has: a path, or bare asking for the picker, on `Verb::AddImage`.
+    #[test]
+    fn the_picture_words_run_the_picture_placement() {
+        for word in ["customstamp", "imageannotation"] {
+            assert_eq!(parse(word), Some(Ok(Verb::AddImage(None))), "{word} bare");
+            assert_eq!(
+                parse(&format!("{word} logo.png")),
+                Some(Ok(Verb::AddImage(Some("logo.png".into())))),
+                "{word} with a path"
+            );
             assert!(
                 PLANNED.iter().all(|(v, _, _)| *v != word),
                 "`{word}` is still in the planned table"

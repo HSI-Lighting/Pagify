@@ -5453,3 +5453,34 @@ fn the_alias_buttons_reach_the_same_tools_as_their_words() {
         "addlink did not arm the link tool"
     );
 }
+
+/// The Custom Stamp and Image Annotation buttons, through the real dispatch:
+/// each takes a picture file and arms the placement tool with its pixels —
+/// the same tool `addimage` arms.
+#[test]
+fn the_picture_words_arm_the_placement_tool() {
+    use crate::tool::Tool;
+
+    let dir = std::env::temp_dir().join(format!("pagify-stamp-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+    let logo = dir.join("logo.png");
+    image::RgbaImage::from_pixel(3, 2, image::Rgba([10, 200, 10, 255]))
+        .save(&logo)
+        .expect("save the logo");
+
+    let mut h = harness("two-column.pdf");
+    for word in ["customstamp", "imageannotation"] {
+        h.state_mut().submit(&format!("{word} {}", logo.display()));
+        h.run_steps(1);
+        match h.state().tab().tool.as_ref().map(|t| &t.kind) {
+            Some(Tool::PlaceImage { width, height, .. }) => {
+                assert_eq!((*width, *height), (3, 2), "{word} armed the wrong pixels");
+            }
+            other => panic!("{word} did not arm the placement tool: {other:?}"),
+        }
+        // Put the tool down between rounds so the next submit arms afresh.
+        h.state_mut().tab_mut().tool = None;
+    }
+
+    std::fs::remove_dir_all(&dir).ok();
+}
