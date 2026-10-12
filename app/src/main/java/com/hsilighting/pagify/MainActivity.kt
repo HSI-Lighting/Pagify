@@ -88,14 +88,8 @@ class MainActivity : ComponentActivity() {
                 val pendingFiling by viewModel.pendingFiling.collectAsStateWithLifecycle()
                 val pendingReview by viewModel.pendingReview.collectAsStateWithLifecycle()
 
-                LaunchedEffect(incoming) {
-                    incoming?.let { uri ->
-                        viewModel.open(uri)
-                        // Cleared so a configuration change does not reopen it and
-                        // discard the page the user had scrolled to.
-                        incomingDocument.value = null
-                    }
-                }
+                // The actual routing is below `showModel`/`showDrawing`, which this
+                // needs and which are declared further down this same function.
 
                 // **The 3D viewer's way in, on this branch only.**
                 //
@@ -174,6 +168,41 @@ class MainActivity : ComponentActivity() {
                                 sizeBytes = sizeOf(uri),
                             )
                         }
+                    }
+                }
+
+                /**
+                 * A file handed to Pagify from outside — another app's share
+                 * sheet, or Android's "Open with" chooser.
+                 *
+                 * **Routed by kind, the same way the in-app picker already is.**
+                 * This used to go straight to `viewModel.open(uri)` — the PDF
+                 * reader's own open call — whatever the file actually was,
+                 * because nothing outside the app could reach a DWG, DXF or
+                 * STEP file before the manifest offered Pagify for them. Now
+                 * that it does, a drawing or a model arriving this way needs
+                 * the same `copyForReading` + remember-on-success treatment the
+                 * picker gives it, not a PDF reader trying to parse a STEP file
+                 * and failing on the first byte.
+                 */
+                LaunchedEffect(incoming) {
+                    incoming?.let { uri ->
+                        keepReadAccessTo(uri)
+                        val name = nameOf(uri)
+                        when (kindOfFile(name)) {
+                            RecentKind.Model ->
+                                if (showModel(uri)) {
+                                    viewModel.rememberModel(uri.toString(), name, sizeOf(uri))
+                                }
+                            RecentKind.Drawing ->
+                                if (showDrawing(uri)) {
+                                    viewModel.rememberDrawing(uri.toString(), name, sizeOf(uri))
+                                }
+                            RecentKind.Document -> viewModel.open(uri)
+                        }
+                        // Cleared so a configuration change does not reopen it and
+                        // discard the page or view the user had scrolled to.
+                        incomingDocument.value = null
                     }
                 }
 
