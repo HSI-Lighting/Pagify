@@ -142,6 +142,19 @@ pub enum SignatureAction {
     Upload(Option<PathBuf>),
 }
 
+/// What `addshape` and `drawing` answer with — the shape words this build
+/// actually has. Kept here so the answer and the help text cannot drift.
+pub const SHAPE_WORDS: &str = "shapes draw with their own words: `line`, `rectangle`, `circle`, \
+                                `arrow`, `pline` and `spline` — and freehand ink is `pencil`.";
+
+/// What `keeptool` answers with: the state of the "keep tool selected"
+/// question in this build, which is that the keeping is already the default.
+pub const KEEP_TOOL_WORDS: &str = "every comment tool stays in hand already — a run of ticks, \
+                                   notes or strokes runs until Escape. The only tools that put \
+                                   themselves down on purpose are the signature, a placed \
+                                   picture, typed text and calibration, each because what \
+                                   follows wants the pointer back.";
+
 /// The colour behind the page — the View tab's Change Color.
 ///
 /// Only the choice, no colours: the shell has no window, and the palette is
@@ -444,6 +457,12 @@ pub enum Verb {
     /// Open a copy of a file as untitled, so the original is untouched —
     /// `fromtemplate <file.pdf>`. Bare, the app asks for the file.
     FromTemplate { source: Option<PathBuf> },
+    /// Name the shape words this build actually has — what the Edit tab's
+    /// Add Shapes and the Comment tab's Drawing buttons answer with.
+    ShapeWords,
+    /// Answer the keep-tool-selected question as this build stands: the
+    /// keeping is already the default.
+    KeepTool,
     /// Start a new document out of nothing — `blankdoc [size] [ruling]`,
     /// sizes `a4`/`a3`/`letter`/`legal` (letter when nothing is said) and
     /// rulings `lined`/`grid`/`dots` (plain paper when nothing is said), in
@@ -889,7 +908,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     // because two hand-maintained lists of a hundred and fifty names each will
     // not stay in step on their own.
     ("add3d", "the editing phase", "the Add 3D tool"),
-    ("addshape", "the editing phase", "the Add Shapes tool"),
     ("alttext", "the accessibility phase", "the Set Alternate Text tool"),
     ("assistant", "the viewing phase", "the Assistant tool"),
     ("attach", "the editing phase", "the File Attachment tool"),
@@ -902,7 +920,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("combfield", "the forms phase", "the Comb Field tool"),
     ("createform", "the forms phase", "the Form tool"),
     ("crossref", "the editing phase", "the Cross Reference tool"),
-    ("drawing", "the annotation phase", "the Drawing tool"),
     ("editxfa", "the forms phase", "the Edit Static XFA Form tool"),
     ("email", "the sharing phase", "the Email tool"),
     ("emailattach", "the sharing phase", "the Attach to Email tool"),
@@ -924,7 +941,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("formtosheet", "the forms phase", "the Form to sheet tool"),
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
-    ("keeptool", "the annotation phase", "the Keep Tool Selected tool"),
     ("markredact", "the protection phase", "the Mark for Redaction tool"),
     ("media", "the editing phase", "the Audio & Video tool"),
     ("onlineform", "the signing phase", "the Create Online Form tool"),
@@ -1072,7 +1088,8 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
-        "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate",
+        "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
+        "drawing", "keeptool",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1700,6 +1717,13 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
         "fromtemplate" => Ok(Verb::FromTemplate {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
+        // Add Shapes (Edit tab) and Drawing (Comment tab) are both answered
+        // with the shape words this build has: some kinds are the engine's
+        // own drawing words and some are Pagify's, and which is which is not
+        // something a button should make anyone learn — the answer names
+        // them all, and the freehand route besides.
+        "addshape" | "drawing" => Ok(Verb::ShapeWords),
+        "keeptool" => Ok(Verb::KeepTool),
         _ => return None,
     })
 }
@@ -2593,5 +2617,27 @@ mod from_template_tests {
             PLANNED.iter().all(|(v, _, _)| *v != "fromtemplate"),
             "`fromtemplate` is still in the planned table"
         );
+    }
+}
+
+#[cfg(test)]
+mod shape_and_keep_tool_tests {
+    use super::*;
+
+    #[test]
+    fn the_shape_buttons_and_keeptool_parse_and_are_not_planned() {
+        assert_eq!(parse("addshape"), Some(Ok(Verb::ShapeWords)));
+        assert_eq!(parse("drawing"), Some(Ok(Verb::ShapeWords)));
+        assert_eq!(parse("keeptool"), Some(Ok(Verb::KeepTool)));
+        for word in ["addshape", "drawing", "keeptool"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
+        // The answers must name routes that exist.
+        for word in ["line", "rectangle", "circle", "arrow", "pline", "spline", "pencil"] {
+            assert!(SHAPE_WORDS.contains(word), "the shape answer omits `{word}`");
+        }
     }
 }

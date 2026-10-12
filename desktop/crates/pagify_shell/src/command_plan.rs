@@ -419,6 +419,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::PageMarks { .. }
         | Verb::FromClipboard
         | Verb::FromTemplate { .. }
+        | Verb::ShapeWords
+        | Verb::KeepTool
         | Verb::Reflow
         | Verb::Find(_)
         | Verb::FindStep { .. }
@@ -678,6 +680,8 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::FromTemplate { source } => {
             vec![Effect::OpenTemplateCopy { source: source.clone() }]
         }
+        Verb::ShapeWords => vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())],
+        Verb::KeepTool => vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())],
         // Text and find.
         Verb::Reflow => vec![Effect::RunReflow],
         Verb::Find(needle) => vec![Effect::RunFind(needle.clone())],
@@ -1039,6 +1043,8 @@ mod tests {
                 Verb::FromTemplate { source: None },
                 vec![Effect::OpenTemplateCopy { source: None }],
             ),
+            (Verb::ShapeWords, vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())]),
+            (Verb::KeepTool, vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())]),
             (Verb::Reflow, vec![Effect::RunReflow]),
             (Verb::Find("n".into()), vec![Effect::RunFind("n".into())]),
             (Verb::FindStep { forward: true }, vec![Effect::RunFindStep { forward: true }]),

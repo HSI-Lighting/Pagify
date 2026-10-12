@@ -5665,3 +5665,32 @@ fn fromtemplate_opens_a_copy_the_original_never_sees() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The shape buttons and Keep Tool Selected answer with what this build
+/// actually has: the shape words for the first two, and the truth about
+/// tool-keeping for the third.
+#[test]
+fn the_shape_and_keeptool_buttons_answer_with_their_routes() {
+    let mut h = harness("two-column.pdf");
+
+    h.state_mut().submit("addshape");
+    h.run_steps(1);
+    h.state_mut().submit("drawing");
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().filter(|l| l.contains("freehand ink is `pencil`")).count() >= 2,
+        "both shape buttons should answer with the routes: {said:?}"
+    );
+    for word in ["`line`", "`rectangle`", "`circle`", "`arrow`", "`pline`", "`spline`"] {
+        assert!(said.iter().any(|l| l.contains(word)), "`{word}` missing from the answer");
+    }
+
+    h.state_mut().submit("keeptool");
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("stays in hand already") && l.contains("Escape")),
+        "keeptool did not say the truth about keeping: {said:?}"
+    );
+}
