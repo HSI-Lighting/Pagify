@@ -5576,3 +5576,22 @@ fn pencil_draws_a_stroke_and_keeps_the_tool() {
     assert!(drawn, "the three collected points did not become one stroke");
     assert!(h.state().tab().tool.is_some(), "the pencil let go after one stroke");
 }
+
+/// The Organize tab's Rearrange button opens the grid pages are dragged
+/// around in — the same surface `thumbnails` opens — and closes again.
+#[test]
+fn rearrange_opens_the_organize_grid() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().submit("rearrange");
+    h.run_steps(1);
+    assert!(h.state().ui_state.organize_open, "the grid did not open");
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("drag to reorder")),
+        "the message does not name the gesture: {said:?}"
+    );
+
+    h.state_mut().submit("rearrange");
+    h.run_steps(1);
+    assert!(!h.state().ui_state.organize_open, "the grid did not close");
+}

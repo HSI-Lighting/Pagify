@@ -931,7 +931,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("readaloud", "the viewing phase", "the Read tool"),
     ("readingoptions", "the accessibility phase", "the Reading Options tool"),
     ("readingorder", "the accessibility phase", "the Reading Order tool"),
-    ("rearrange", "the page phase", "the Rearrange tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("resetform", "the forms phase", "the Reset Form tool"),
     ("reverseview", "the viewing phase", "the Reverse View tool"),
@@ -1072,7 +1071,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
-        "pagemarks", "fromclipboard", "pencil",
+        "pagemarks", "fromclipboard", "pencil", "rearrange",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1389,6 +1388,10 @@ fn parse_document_edits(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "paste" => Ok(Verb::Paste),
         "reversepages" => Ok(Verb::ReversePages),
         "thumbnails" => Ok(Verb::Thumbnails),
+        // Rearrange, in Acrobat's Organize tab, is the page grid you drag
+        // pages around in — which is this app's Organize grid, so the word
+        // opens it.
+        "rearrange" => Ok(Verb::Thumbnails),
         "appearance" => Ok(Verb::ToggleAppearance),
         // An inset rather than a rectangle. Trimming the same amount off every
         // edge is what "crop the margins" means, and a rectangle typed into a
@@ -2530,6 +2533,20 @@ mod pencil_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "pencil"),
             "`pencil` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod rearrange_tests {
+    use super::*;
+
+    #[test]
+    fn rearrange_parses_to_the_organize_grid_and_is_not_planned() {
+        assert_eq!(parse("rearrange"), Some(Ok(Verb::Thumbnails)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "rearrange"),
+            "`rearrange` is still in the planned table"
         );
     }
 }
