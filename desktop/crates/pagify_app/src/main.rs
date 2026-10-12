@@ -14240,6 +14240,94 @@ impl PagifyApp {
         }
     }
 
+    /// Write every form field's name, kind and value as JSON — the Form
+    /// tab's Export.
+    ///
+    /// The file is `Session::form_data_json`'s, unmodified, so what
+    /// `formimport` reads is exactly what this wrote.
+    fn export_form_data(&mut self, dest: &std::path::Path) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let count = session.form_fields().map(|f| f.len()).unwrap_or(0);
+        match session.form_data_json() {
+            Ok(json) => match std::fs::write(dest, json) {
+                Ok(()) => self.say_info(format!(
+                    "wrote {count} field value(s) to {}.",
+                    dest.display()
+                )),
+                Err(e) => self.say_error(format!("formexport: {e}")),
+            },
+            Err(e) => self.say_error(format!("formexport: {e}")),
+        }
+    }
+
+    /// The Form tab's Export button, bare: choose the file, then write.
+    fn form_export_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new()
+            .set_title("Write the form data")
+            .set_file_name(format!("{}-form.json", self.document_stem()))
+            .add_filter("Form data", &["json"]);
+        match dialog.save_file() {
+            Some(path) => self.export_form_data(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// Read form JSON and apply what this build can set — the Form tab's
+    /// Import. Text and checkbox entries apply; radio and choice entries
+    /// are counted and said, not guessed at.
+    fn import_form_data(&mut self, source: &std::path::Path) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let json = match std::fs::read_to_string(source) {
+            Ok(json) => json,
+            Err(e) => {
+                self.say_error(format!("formimport: could not read {}: {e}", source.display()));
+                return;
+            }
+        };
+        match session.apply_form_data_json(&json) {
+            Ok((applied, not_applied)) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                if not_applied == 0 {
+                    self.say_info(format!("applied {applied} field value(s)."));
+                } else {
+                    self.say_info(format!(
+                        "{applied} field value(s) applied; {not_applied} not — this build \
+                         can set text and checkbox fields. Radios and choices are read \
+                         but not settable; see the form notes."
+                    ));
+                }
+            }
+            Err(e) => self.say_error(format!("formimport: {e}")),
+        }
+    }
+
+    /// The Form tab's Import button, bare: choose the file, then apply.
+    fn form_import_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new()
+            .set_title("Read form data")
+            .add_filter("Form data", &["json"]);
+        match dialog.pick_file() {
+            Some(path) => self.import_form_data(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
     /// The `fromclipboard` wait: ask the platform once, then take the text
     /// when it arrives. Called from `handle_input`, the one place with both
     /// the context and the paste events; split out of it so that function

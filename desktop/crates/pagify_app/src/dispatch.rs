@@ -180,7 +180,9 @@ impl crate::PagifyApp {
             | Effect::RunPreflight
             | Effect::ExportPictures { .. }
             | Effect::RequestClipboardText
-            | Effect::OpenTemplateCopy { .. } => self.apply_files(effect),
+            | Effect::OpenTemplateCopy { .. }
+            | Effect::ExportFormData { .. }
+            | Effect::ImportFormData { .. } => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -679,6 +681,14 @@ impl crate::PagifyApp {
             Effect::OpenTemplateCopy { source } => match source {
                 Some(path) => self.open_template(&path),
                 None => self.from_template_dialog(),
+            },
+            Effect::ExportFormData { dest } => match dest {
+                Some(path) => self.export_form_data(&path),
+                None => self.form_export_dialog(),
+            },
+            Effect::ImportFormData { dest } => match dest {
+                Some(path) => self.import_form_data(&path),
+                None => self.form_import_dialog(),
             },
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {

@@ -5694,3 +5694,45 @@ fn the_shape_and_keeptool_buttons_answer_with_their_routes() {
         "keeptool did not say the truth about keeping: {said:?}"
     );
 }
+
+/// **The Form tab's Export and Import, through the real dispatch.** Export
+/// writes the fixture's fields to JSON; import reads an edited copy back —
+/// the text and checkbox land, the radio edit is counted and said rather
+/// than silently attempted.
+#[test]
+fn formexport_and_formimport_round_trip_through_a_file() {
+    let dir = std::env::temp_dir().join(format!("pagify-formdata-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    let mut h = harness("form-fields.pdf");
+    let data = dir.join("data.json");
+    h.state_mut().submit(&format!("formexport {}", data.display()));
+    h.run_steps(1);
+    let json = std::fs::read_to_string(&data).expect("the export file");
+    assert!(json.contains("Ada Lovelace"), "{json}");
+
+    // Change the text, uncheck the box, and attempt the radio.
+    let edited = json
+        .replace("Ada Lovelace", "Grace Hopper")
+        .replace("\"value\":\"Yes\"", "\"value\":null")
+        .replace("\"value\":\"slow\"", "\"value\":\"fast\"");
+    let edited_path = dir.join("edited.json");
+    std::fs::write(&edited_path, edited).expect("write the edit");
+
+    h.state_mut().submit(&format!("formimport {}", edited_path.display()));
+    h.run_steps(1);
+
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let fields = session.form_fields().expect("reread");
+    assert_eq!(fields[0].value.as_deref(), Some("Grace Hopper"), "the text did not apply");
+    assert_eq!(fields[2].value, None, "the checkbox did not clear");
+    assert_eq!(fields[3].value.as_deref(), Some("slow"), "the refused radio change touched the file");
+
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("not settable")),
+        "the not-applied radio must be said, not silent: {said:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

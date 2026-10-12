@@ -457,6 +457,12 @@ pub enum Verb {
     /// Open a copy of a file as untitled, so the original is untouched —
     /// `fromtemplate <file.pdf>`. Bare, the app asks for the file.
     FromTemplate { source: Option<PathBuf> },
+    /// Write every form field's name, kind and value as JSON —
+    /// `formexport [file.json]`. Bare, the app asks for the file.
+    FormExport { dest: Option<PathBuf> },
+    /// Read that JSON back and apply what this build can set —
+    /// `formimport [file.json]`. Bare, the app asks for the file.
+    FormImport { dest: Option<PathBuf> },
     /// Name the shape words this build actually has — what the Edit tab's
     /// Add Shapes and the Comment tab's Drawing buttons answer with.
     ShapeWords,
@@ -935,8 +941,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("fieldtext", "the forms phase", "the Text Field tool"),
     ("flatten", "the page phase", "the Flatten tool"),
     ("formdesigner", "the forms phase", "the Designer Assistant tool"),
-    ("formexport", "the forms phase", "the Export tool"),
-    ("formimport", "the forms phase", "the Import tool"),
     ("formrecognise", "the forms phase", "the Run Form Field Recognition tool"),
     ("formtosheet", "the forms phase", "the Form to sheet tool"),
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
@@ -1089,7 +1093,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
-        "drawing", "keeptool",
+        "drawing", "keeptool", "formexport", "formimport",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1714,9 +1718,6 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
             Ok(Verb::PageMarks { top, text })
         }
         "fromclipboard" => Ok(Verb::FromClipboard),
-        "fromtemplate" => Ok(Verb::FromTemplate {
-            source: (!tail.is_empty()).then(|| resolve_path(tail)),
-        }),
         // Add Shapes (Edit tab) and Drawing (Comment tab) are both answered
         // with the shape words this build has: some kinds are the engine's
         // own drawing words and some are Pagify's, and which is which is not
@@ -1728,10 +1729,21 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
     })
 }
 
-/// One domain of [`parse`]: the conversion phase's words — blank paper and
-/// the two exports.
+/// One domain of [`parse`]: the conversion phase's words — blank paper, a
+/// copy of a template, and the form data going in and out.
 fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Verb, String>> {
     Some(match head {
+        // Words that make a document: blank paper, a copy of a template,
+        // pasted words, and the form data going in and out.
+        "fromtemplate" => Ok(Verb::FromTemplate {
+            source: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
+        "formexport" => Ok(Verb::FormExport {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
+        "formimport" => Ok(Verb::FormImport {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
         // No arguments means "ask me where", the same shape `open`/`saveas`
         // already have.
         "toimage" => Ok(Verb::ToImage {
@@ -2638,6 +2650,27 @@ mod shape_and_keep_tool_tests {
         // The answers must name routes that exist.
         for word in ["line", "rectangle", "circle", "arrow", "pline", "spline", "pencil"] {
             assert!(SHAPE_WORDS.contains(word), "the shape answer omits `{word}`");
+        }
+    }
+}
+
+#[cfg(test)]
+mod form_data_tests {
+    use super::*;
+
+    #[test]
+    fn formexport_and_formimport_parse_and_are_not_planned() {
+        assert_eq!(parse("formexport"), Some(Ok(Verb::FormExport { dest: None })));
+        assert_eq!(
+            parse("formexport data.json"),
+            Some(Ok(Verb::FormExport { dest: Some("data.json".into()) }))
+        );
+        assert_eq!(parse("formimport"), Some(Ok(Verb::FormImport { dest: None })));
+        for word in ["formexport", "formimport"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
         }
     }
 }

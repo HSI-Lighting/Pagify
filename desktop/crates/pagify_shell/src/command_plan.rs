@@ -255,6 +255,12 @@ pub enum Effect {
     RequestClipboardText,
     /// Open a copy of a file as untitled; `None` asks for the file first.
     OpenTemplateCopy { source: Option<std::path::PathBuf> },
+    /// Write every form field's name, kind and value as JSON; `None` asks
+    /// for the file first.
+    ExportFormData { dest: Option<std::path::PathBuf> },
+    /// Read form JSON back and apply what this build can set; `None` asks
+    /// for the file first.
+    ImportFormData { dest: Option<std::path::PathBuf> },
     /// Reflow the page's text.
     RunReflow,
     /// Search for `needle`.
@@ -419,6 +425,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::PageMarks { .. }
         | Verb::FromClipboard
         | Verb::FromTemplate { .. }
+        | Verb::FormExport { .. }
+        | Verb::FormImport { .. }
         | Verb::ShapeWords
         | Verb::KeepTool
         | Verb::Reflow
@@ -680,6 +688,8 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::FromTemplate { source } => {
             vec![Effect::OpenTemplateCopy { source: source.clone() }]
         }
+        Verb::FormExport { dest } => vec![Effect::ExportFormData { dest: dest.clone() }],
+        Verb::FormImport { dest } => vec![Effect::ImportFormData { dest: dest.clone() }],
         Verb::ShapeWords => vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())],
         Verb::KeepTool => vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())],
         // Text and find.
@@ -1043,6 +1053,8 @@ mod tests {
                 Verb::FromTemplate { source: None },
                 vec![Effect::OpenTemplateCopy { source: None }],
             ),
+            (Verb::FormExport { dest: None }, vec![Effect::ExportFormData { dest: None }]),
+            (Verb::FormImport { dest: None }, vec![Effect::ImportFormData { dest: None }]),
             (Verb::ShapeWords, vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())]),
             (Verb::KeepTool, vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())]),
             (Verb::Reflow, vec![Effect::RunReflow]),
