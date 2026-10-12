@@ -11,8 +11,37 @@
 //! ownership of *doing* things (`Effect` application lives in
 //! `pagify_app::dispatch`).
 
-use crate::verbs::{MeasureKind, PageTarget, Verb, ZoomTarget};
+use crate::page_space::{AppPoint, PageSpace};
+use crate::verbs::{AppPointArg, MeasureKind, PageTarget, SignatureAction, Verb, ZoomTarget};
+use cad_kernel::Vec2;
 use pdf_core::document::Stacking;
+
+/// What the plan may need to know about the app at the moment the verb runs.
+///
+/// Kept small on purpose: every field here is a decision the plan makes
+/// instead of the old handlers (document guards, the current page, the page
+/// height the kernel-to-app flip needs, whether a pick has somewhere to go).
+#[derive(Debug, Clone, Copy)]
+pub struct CommandEnv {
+    /// A document is open in the active tab.
+    pub has_doc: bool,
+    /// The active tab's current page.
+    pub page: usize,
+    /// That page's height in points, for the kernel/app flip; 792 when
+    /// unknown, the same fallback the app used.
+    pub page_height: f64,
+    /// A tool is armed and waiting for a click.
+    pub tool_armed: bool,
+    /// How many signatures the library holds (drives the names a new pad
+    /// gets, and whether placing needs one drawn first).
+    pub signature_count: usize,
+}
+
+impl Default for CommandEnv {
+    fn default() -> Self {
+        Self { has_doc: false, page: 0, page_height: 792.0, tool_armed: false, signature_count: 0 }
+    }
+}
 
 /// A user-visible consequence of running a command. The app applies these in
 /// order; nothing here knows how.
@@ -67,12 +96,153 @@ pub enum Effect {
     StopRecording,
     /// Replay a recorded script.
     Replay(std::path::PathBuf),
+    /// Say a line in the error colour.
+    SayError(String),
+    /// Deliver a typed pick, already flipped from kernel space to app space.
+    TakePick(AppPoint),
+    /// Run the `sensitivity` command's reporting/marking/taking-off.
+    Sensitivity(Option<String>),
+    /// Run the `fillsign` family of form marks.
+    FillSign(Option<String>),
+    /// Open the predefined-text list, or use the given words.
+    PredefinedText(Option<String>),
+    /// Take up the object tool: editing when `edit`, moving otherwise.
+    TakeUpObjectTool { edit: bool, page: usize },
+    /// Arm the drawn-line form mark.
+    ArmSignLine { page: usize },
+    /// Arm the drawn-rectangle form mark.
+    ArmSignRectangle { page: usize },
+    /// Say the document-status lines.
+    ReportDocumentStatus,
+    /// Run the saved-signature confirmation pass over every page.
+    RunApplySignatures,
+    /// Run the signature-management actions.
+    RunManageSignatures(crate::verbs::Signatures),
+    /// Report where the session log is, if it could be written.
+    ReportSessionLog,
+    /// Open the signature pad with this name; `then_place` carries on to
+    /// placing once it is drawn.
+    OpenSignaturePad { name: String, then_place: bool },
+    /// Add a signature from this picture file.
+    UploadSignaturePath(std::path::PathBuf),
+    /// Ask the platform for a picture to add as a signature.
+    UploadSignatureDialog,
+    /// Arm placing the library's current signature.
+    ArmSignature { page: usize },
+    /// Run the signature-validation report.
+    RunValidate,
+    /// Run `certify`: write the certification at this path, or report when
+    /// `None`.
+    RunCertify(Option<std::path::PathBuf>),
+    /// Arm the whiteout tool.
+    ArmWhiteout,
+    /// Arm the arrow drawing tool.
+    ArmDrawArrow,
+    /// Toggle whether new rectangles and circles are drawn filled.
+    ToggleFill,
+    /// Arm the redaction tool.
+    ArmRedact,
+    /// Lock the text selection, or say to make one first.
+    LockWords,
+    /// Run `secure` with these options — the document's password state
+    /// decides the prompt.
+    RunSecure(crate::verbs::SecureOptions),
+    /// Run the Smart Redact pass.
+    RunSmartRedact { redact: bool },
+    /// Survey or clean the document's hidden data.
+    RunHiddenData { clean: bool },
+    /// Take the document's password off.
+    RunUnsecure,
+    /// Finish the armed pick if it can be finished, else say why not.
+    FinishPick,
+    /// Save the document (over itself when possible).
+    SaveFile,
+    /// Save the document to this path.
+    SaveFileAs(std::path::PathBuf),
+    /// Ask the platform where to save.
+    SaveAsDialog,
+    /// Extract pages to a file.
+    RunExtract { pages: String, dest: std::path::PathBuf },
+    /// Import pages from a file.
+    RunImport { source: std::path::PathBuf, pages: String },
+    /// Delete pages.
+    RunDeletePages(String),
+    /// Insert a blank page.
+    RunInsertPage,
+    /// Move pages before a page.
+    RunMovePages { pages: String, before: usize },
+    /// Reflow the page's text.
+    RunReflow,
+    /// Search for `needle`.
+    RunFind(String),
+    /// Step to the next or previous hit.
+    RunFindStep { forward: bool },
+    /// Open the Search & Replace panel.
+    OpenFindReplace,
+    /// Open the Check Spelling panel.
+    OpenSpellCheck,
+    /// Bookmark the page in view.
+    AddBookmark,
+    /// Arm the article-box tool.
+    ArmArticleBox,
+    /// Begin making a web link out of the selection.
+    BeginWebLink,
+    /// Begin joining runs into one paragraph.
+    BeginJoinText,
+    /// Begin sampling properties to match.
+    BeginMatchProperties,
+    /// Mark the selection.
+    RunMarkText(crate::verbs::Markup),
+    /// List the page's marks.
+    RunListMarks,
+    /// Remove the nth mark.
+    RunRemoveMark(usize),
+    /// Add a note.
+    RunNote(String),
+    /// Step the undo/redo history; `undo` picks the direction.
+    UndoRedo { undo: bool },
+    /// Set the pointer tool (select or hand).
+    SetPointer(crate::verbs::PointerMode),
+    /// Copy with the frame's own precedence (page, object, then text).
+    CopyText,
+    /// Paste with the frame's own precedence (page, then object).
+    Paste,
+    /// Open the run editor on the words under the pointer.
+    EditText,
+    /// Add the given words, or open the type-first flow when empty.
+    AddText(String),
+    /// Add a picture from this path, or ask for one.
+    AddImage(Option<std::path::PathBuf>),
+    /// Set the reader's layout.
+    SetLayout(crate::reader::Layout),
+    /// Reverse the page order.
+    RunReversePages,
+    /// Toggle the Organize grid.
+    ToggleOrganizeGrid,
+    /// Toggle light/dark appearance.
+    ToggleAppearance,
+    /// Duplicate the named pages.
+    RunDuplicatePages(String),
+    /// Crop the named pages by a margin.
+    RunCropPages { pages: String, margin: f32 },
+    /// Resize the named pages.
+    RunResizePages { pages: String, width_pt: f32, height_pt: f32 },
+    /// Swap two pages.
+    RunSwapPages { a: usize, b: usize },
+    /// Rotate the named pages by quarters.
+    RunRotatePages { pages: String, quarters: i32 },
+    /// Extract the named pages' text.
+    RunExtractText(String),
+    /// Add, remove or clear the outlined-font set.
+    RunOutlinedFont(crate::verbs::OutlinedFontAction),
+    /// Clear the recent-documents list.
+    ClearRecent,
 }
 
 /// The plan for a verb, or `None` when this slice does not know it yet — the
 /// app then runs its own handler, so an unported verb behaves exactly as
 /// before.
-pub fn plan(verb: &Verb) -> Option<Vec<Effect>> {
+pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
     Some(match verb {
         // Opening lands in its own tab, so it never puts this one's unsaved
         // work at risk — see the app's `open_with`.
@@ -106,6 +276,140 @@ pub fn plan(verb: &Verb) -> Option<Vec<Effect>> {
         Verb::Record(name) => vec![Effect::Record(name.clone())],
         Verb::StopRecording => vec![Effect::StopRecording],
         Verb::Replay(path) => vec![Effect::Replay(path.clone())],
+        // Tools: the guards and the one coordinate flip live here now, where
+        // they can be tested without a window.
+        Verb::Pick(at) => {
+            if !env.tool_armed {
+                vec![Effect::SayError("nothing is waiting for a click.".into())]
+            } else {
+                let space = PageSpace::new(env.page_height);
+                vec![Effect::TakePick(space.from_kernel(Vec2::new(at.x, at.y)))]
+            }
+        }
+        Verb::Sensitivity(what) => vec![Effect::Sensitivity(what.clone())],
+        Verb::FillSign(what) => vec![Effect::FillSign(what.clone())],
+        Verb::PredefinedText(words) => vec![Effect::PredefinedText(words.clone())],
+        Verb::EditObject | Verb::MoveThing | Verb::SignLine | Verb::SignRectangle
+            if !env.has_doc =>
+        {
+            vec![Effect::SayError("nothing open.".into())]
+        }
+        Verb::EditObject => vec![Effect::TakeUpObjectTool { edit: true, page: env.page }],
+        Verb::MoveThing => vec![Effect::TakeUpObjectTool { edit: false, page: env.page }],
+        Verb::SignLine => vec![Effect::ArmSignLine { page: env.page }],
+        Verb::SignRectangle => vec![Effect::ArmSignRectangle { page: env.page }],
+        Verb::DocumentStatus => vec![Effect::ReportDocumentStatus],
+        // Signing: the pad names and the draw-then-place decisions are
+        // computed here from the library count.
+        Verb::SessionLog => vec![Effect::ReportSessionLog],
+        Verb::ApplySignatures => vec![Effect::RunApplySignatures],
+        Verb::ManageSignatures(what) => vec![Effect::RunManageSignatures(what.clone())],
+        Verb::Signature(SignatureAction::Draw) => {
+            let name = if env.signature_count == 0 {
+                "Signature".to_string()
+            } else {
+                format!("Signature {}", env.signature_count + 1)
+            };
+            vec![
+                Effect::OpenSignaturePad { name, then_place: false },
+                Effect::Say("draw a signature in the window.".into()),
+            ]
+        }
+        Verb::Signature(SignatureAction::Upload(Some(path))) => {
+            vec![Effect::UploadSignaturePath(path.clone())]
+        }
+        Verb::Signature(SignatureAction::Upload(None)) => vec![Effect::UploadSignatureDialog],
+        // Nothing made yet needs one drawn before it can be placed; placing
+        // does not.
+        Verb::Signature(SignatureAction::Place) if env.signature_count == 0 => vec![
+            Effect::OpenSignaturePad { name: "Signature".to_string(), then_place: true },
+            Effect::Say(
+                "draw your signature in the window — it is kept on this \
+                 computer, and nowhere else. `signature upload` adds one \
+                 from a picture instead."
+                    .into(),
+            ),
+        ],
+        Verb::Signature(SignatureAction::Place) if !env.has_doc => {
+            vec![Effect::SayError("nothing open.".into())]
+        }
+        Verb::Signature(SignatureAction::Place) => vec![Effect::ArmSignature { page: env.page }],
+        // Security: mirrors, with the password-state decisions still in the
+        // app's bodies (they read live session state).
+        Verb::Validate => vec![Effect::RunValidate],
+        Verb::Certify(path) => vec![Effect::RunCertify(path.clone())],
+        Verb::Whiteout => vec![Effect::ArmWhiteout],
+        Verb::DrawArrow => vec![Effect::ArmDrawArrow],
+        Verb::ToggleFill => vec![Effect::ToggleFill],
+        Verb::Redact => vec![Effect::ArmRedact],
+        Verb::Lock => vec![Effect::LockWords],
+        Verb::Secure(options) => vec![Effect::RunSecure(*options)],
+        Verb::SmartRedact { redact } => vec![Effect::RunSmartRedact { redact: *redact }],
+        Verb::HiddenData { clean } => vec![Effect::RunHiddenData { clean: *clean }],
+        Verb::Unsecure => vec![Effect::RunUnsecure],
+        // Files: save/finish and the page-range operations.
+        Verb::Finish => vec![Effect::FinishPick],
+        Verb::Save => vec![Effect::SaveFile],
+        Verb::SaveAs(path) => vec![Effect::SaveFileAs(path.clone())],
+        Verb::SaveAsDialog => vec![Effect::SaveAsDialog],
+        Verb::Extract { pages, dest } => {
+            vec![Effect::RunExtract { pages: pages.clone(), dest: dest.clone() }]
+        }
+        Verb::Import { source, pages } => {
+            vec![Effect::RunImport { source: source.clone(), pages: pages.clone() }]
+        }
+        Verb::DeletePages(pages) => vec![Effect::RunDeletePages(pages.clone())],
+        Verb::InsertPage => vec![Effect::RunInsertPage],
+        Verb::MovePages { pages, before } => {
+            vec![Effect::RunMovePages { pages: pages.clone(), before: *before }]
+        }
+        // Text and find.
+        Verb::Reflow => vec![Effect::RunReflow],
+        Verb::Find(needle) => vec![Effect::RunFind(needle.clone())],
+        Verb::FindStep { forward } => vec![Effect::RunFindStep { forward: *forward }],
+        Verb::Replace => vec![Effect::OpenFindReplace],
+        Verb::Spelling => vec![Effect::OpenSpellCheck],
+        Verb::Bookmark => vec![Effect::AddBookmark],
+        Verb::ArticleBox => vec![Effect::ArmArticleBox],
+        Verb::Weblinks => vec![Effect::BeginWebLink],
+        Verb::JoinText => vec![Effect::BeginJoinText],
+        Verb::MatchProperties => vec![Effect::BeginMatchProperties],
+        // Copy is handled by the frame's own keyboard path, not by the
+        // command executor; the verb plans to nothing.
+        Verb::Copy => vec![],
+        Verb::MarkText(kind) => vec![Effect::RunMarkText(*kind)],
+        Verb::ListMarks => vec![Effect::RunListMarks],
+        Verb::RemoveMark(n) => vec![Effect::RunRemoveMark(*n)],
+        Verb::Note(text) => vec![Effect::RunNote(text.clone())],
+        // Navigation and editing — the last domain.
+        Verb::Undo => vec![Effect::UndoRedo { undo: true }],
+        Verb::Redo => vec![Effect::UndoRedo { undo: false }],
+        Verb::Pointer(mode) => vec![Effect::SetPointer(*mode)],
+        Verb::CopyText => vec![Effect::CopyText],
+        Verb::Paste => vec![Effect::Paste],
+        Verb::EditText => vec![Effect::EditText],
+        Verb::AddText(text) => vec![Effect::AddText(text.clone())],
+        Verb::AddImage(path) => vec![Effect::AddImage(path.clone())],
+        Verb::SetLayout(layout) => vec![Effect::SetLayout(layout.clone())],
+        Verb::ReversePages => vec![Effect::RunReversePages],
+        Verb::Thumbnails => vec![Effect::ToggleOrganizeGrid],
+        Verb::ToggleAppearance => vec![Effect::ToggleAppearance],
+        Verb::DuplicatePages(spec) => vec![Effect::RunDuplicatePages(spec.clone())],
+        Verb::CropPages { pages, margin } => {
+            vec![Effect::RunCropPages { pages: pages.clone(), margin: *margin }]
+        }
+        Verb::ResizePages { pages, width_pt, height_pt } => vec![Effect::RunResizePages {
+            pages: pages.clone(),
+            width_pt: *width_pt,
+            height_pt: *height_pt,
+        }],
+        Verb::SwapPages { a, b } => vec![Effect::RunSwapPages { a: *a, b: *b }],
+        Verb::RotatePages { pages, quarters } => {
+            vec![Effect::RunRotatePages { pages: pages.clone(), quarters: *quarters }]
+        }
+        Verb::ExtractText(spec) => vec![Effect::RunExtractText(spec.clone())],
+        Verb::OutlinedFont(action) => vec![Effect::RunOutlinedFont(action.clone())],
+        Verb::ClearHistory => vec![Effect::ClearRecent],
         _ => return None,
     })
 }
@@ -136,7 +440,7 @@ mod tests {
             ),
         ];
         for (verb, want) in cases {
-            assert_eq!(plan(&verb), Some(want), "planning {verb:?}");
+            assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");
         }
     }
 
@@ -166,20 +470,210 @@ mod tests {
             ),
         ];
         for (verb, want) in cases {
-            assert_eq!(plan(&verb), Some(want), "planning {verb:?}");
+            assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");
+        }
+    }
+
+
+    #[test]
+    fn the_tools_domain_guards_and_flips_in_the_plan() {
+        let no_doc = CommandEnv::default();
+        let with_doc =
+            CommandEnv { has_doc: true, page: 2, page_height: 800.0, tool_armed: true, signature_count: 3 };
+        for verb in [Verb::EditObject, Verb::MoveThing, Verb::SignLine, Verb::SignRectangle] {
+            assert_eq!(
+                plan(&verb, &no_doc),
+                Some(vec![Effect::SayError("nothing open.".into())]),
+                "{verb:?} without a document"
+            );
+        }
+        let pick = AppPointArg { x: 100.0, y: 200.0 };
+        assert_eq!(
+            plan(&Verb::Pick(pick), &CommandEnv { tool_armed: false, ..with_doc }),
+            Some(vec![Effect::SayError("nothing is waiting for a click.".into())])
+        );
+        let want = PageSpace::new(800.0).from_kernel(Vec2::new(100.0, 200.0));
+        assert_eq!(
+            plan(&Verb::Pick(pick), &with_doc),
+            Some(vec![Effect::TakePick(want)]),
+            "the kernel-to-app flip matches the module the app used"
+        );
+        assert_eq!(
+            plan(&Verb::EditObject, &with_doc),
+            Some(vec![Effect::TakeUpObjectTool { edit: true, page: 2 }])
+        );
+        assert_eq!(
+            plan(&Verb::MoveThing, &with_doc),
+            Some(vec![Effect::TakeUpObjectTool { edit: false, page: 2 }])
+        );
+        assert_eq!(plan(&Verb::SignLine, &with_doc), Some(vec![Effect::ArmSignLine { page: 2 }]));
+        assert_eq!(
+            plan(&Verb::SignRectangle, &with_doc),
+            Some(vec![Effect::ArmSignRectangle { page: 2 }])
+        );
+        assert_eq!(plan(&Verb::DocumentStatus, &with_doc), Some(vec![Effect::ReportDocumentStatus]));
+    }
+
+
+    #[test]
+    fn the_signing_domain_plans_names_and_places() {
+        use crate::verbs::SignatureAction;
+        let no_sig = CommandEnv::default();
+        let with_sig = CommandEnv {
+            has_doc: true,
+            page: 2,
+            page_height: 800.0,
+            tool_armed: false,
+            signature_count: 3,
+        };
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Draw), &no_sig),
+            Some(vec![
+                Effect::OpenSignaturePad { name: "Signature".into(), then_place: false },
+                Effect::Say("draw a signature in the window.".into()),
+            ])
+        );
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Draw), &with_sig),
+            Some(vec![
+                Effect::OpenSignaturePad { name: "Signature 4".into(), then_place: false },
+                Effect::Say("draw a signature in the window.".into()),
+            ])
+        );
+        match plan(&Verb::Signature(SignatureAction::Place), &no_sig) {
+            Some(v) => {
+                assert!(matches!(v.as_slice(), [Effect::OpenSignaturePad { then_place: true, .. }, Effect::Say(_)]))
+            }
+            other => panic!("expected a pad hand-off, got {other:?}"),
+        }
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Place), &with_sig),
+            Some(vec![Effect::ArmSignature { page: 2 }])
+        );
+        let sig_no_doc = CommandEnv { signature_count: 3, ..CommandEnv::default() };
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Place), &sig_no_doc),
+            Some(vec![Effect::SayError("nothing open.".into())])
+        );
+        assert_eq!(
+            plan(
+                &Verb::Signature(SignatureAction::Upload(Some(std::path::PathBuf::from("s.png")))),
+                &no_sig
+            ),
+            Some(vec![Effect::UploadSignaturePath(std::path::PathBuf::from("s.png"))])
+        );
+        assert_eq!(
+            plan(&Verb::Signature(SignatureAction::Upload(None)), &no_sig),
+            Some(vec![Effect::UploadSignatureDialog])
+        );
+        assert_eq!(plan(&Verb::SessionLog, &no_sig), Some(vec![Effect::ReportSessionLog]));
+    }
+
+    #[test]
+    fn the_security_domain_mirrors_its_verbs() {
+        let env = CommandEnv::default();
+        let cases: Vec<(Verb, Vec<Effect>)> = vec![
+            (Verb::Validate, vec![Effect::RunValidate]),
+            (Verb::Certify(None), vec![Effect::RunCertify(None)]),
+            (Verb::Whiteout, vec![Effect::ArmWhiteout]),
+            (Verb::DrawArrow, vec![Effect::ArmDrawArrow]),
+            (Verb::ToggleFill, vec![Effect::ToggleFill]),
+            (Verb::Redact, vec![Effect::ArmRedact]),
+            (Verb::Lock, vec![Effect::LockWords]),
+            (Verb::SmartRedact { redact: true }, vec![Effect::RunSmartRedact { redact: true }]),
+            (Verb::HiddenData { clean: false }, vec![Effect::RunHiddenData { clean: false }]),
+            (Verb::Unsecure, vec![Effect::RunUnsecure]),
+        ];
+        for (verb, want) in cases {
+            assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");
         }
     }
 
     #[test]
-    fn unported_verbs_have_no_plan_yet() {        // One verb from each domain still handled app-side; the list shrinks
-        // as the migration ports them.
-        for verb in [
-            Verb::Pointer(crate::verbs::PointerMode::Select),
-            Verb::SaveAs(std::path::PathBuf::from("a.pdf")),
-            Verb::Find(String::new()),
-            Verb::Undo,
-        ] {
-            assert!(plan(&verb).is_none(), "{verb:?} should still fall through");
+    fn the_files_and_text_domains_mirror_their_verbs() {
+        use crate::verbs::Markup;
+        let env = CommandEnv::default();
+        let cases: Vec<(Verb, Vec<Effect>)> = vec![
+            (Verb::Finish, vec![Effect::FinishPick]),
+            (Verb::Save, vec![Effect::SaveFile]),
+            (Verb::SaveAs("a.pdf".into()), vec![Effect::SaveFileAs("a.pdf".into())]),
+            (Verb::SaveAsDialog, vec![Effect::SaveAsDialog]),
+            (
+                Verb::Extract { pages: "1-2".into(), dest: "o.pdf".into() },
+                vec![Effect::RunExtract { pages: "1-2".into(), dest: "o.pdf".into() }],
+            ),
+            (
+                Verb::Import { source: "i.pdf".into(), pages: "1".into() },
+                vec![Effect::RunImport { source: "i.pdf".into(), pages: "1".into() }],
+            ),
+            (Verb::DeletePages("1".into()), vec![Effect::RunDeletePages("1".into())]),
+            (Verb::InsertPage, vec![Effect::RunInsertPage]),
+            (
+                Verb::MovePages { pages: "2".into(), before: 0 },
+                vec![Effect::RunMovePages { pages: "2".into(), before: 0 }],
+            ),
+            (Verb::Reflow, vec![Effect::RunReflow]),
+            (Verb::Find("n".into()), vec![Effect::RunFind("n".into())]),
+            (Verb::FindStep { forward: true }, vec![Effect::RunFindStep { forward: true }]),
+            (Verb::Replace, vec![Effect::OpenFindReplace]),
+            (Verb::Spelling, vec![Effect::OpenSpellCheck]),
+            (Verb::Bookmark, vec![Effect::AddBookmark]),
+            (Verb::ArticleBox, vec![Effect::ArmArticleBox]),
+            (Verb::Weblinks, vec![Effect::BeginWebLink]),
+            (Verb::JoinText, vec![Effect::BeginJoinText]),
+            (Verb::MatchProperties, vec![Effect::BeginMatchProperties]),
+            (Verb::Copy, vec![]),
+            (Verb::MarkText(Markup::Highlight), vec![Effect::RunMarkText(Markup::Highlight)]),
+            (Verb::ListMarks, vec![Effect::RunListMarks]),
+            (Verb::RemoveMark(2), vec![Effect::RunRemoveMark(2)]),
+            (Verb::Note("t".into()), vec![Effect::RunNote("t".into())]),
+        ];
+        for (verb, want) in cases {
+            assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");
         }
+    }
+    #[test]
+    fn the_navigation_domain_mirrors_its_verbs() {
+        use crate::verbs::PointerMode;
+        let env = CommandEnv::default();
+        let cases: Vec<(Verb, Vec<Effect>)> = vec![
+            (Verb::Undo, vec![Effect::UndoRedo { undo: true }]),
+            (Verb::Redo, vec![Effect::UndoRedo { undo: false }]),
+            (Verb::Pointer(PointerMode::Pan), vec![Effect::SetPointer(PointerMode::Pan)]),
+            (Verb::CopyText, vec![Effect::CopyText]),
+            (Verb::Paste, vec![Effect::Paste]),
+            (Verb::EditText, vec![Effect::EditText]),
+            (Verb::AddText("hi".into()), vec![Effect::AddText("hi".into())]),
+            (Verb::AddImage(None), vec![Effect::AddImage(None)]),
+            (Verb::ReversePages, vec![Effect::RunReversePages]),
+            (Verb::Thumbnails, vec![Effect::ToggleOrganizeGrid]),
+            (Verb::ToggleAppearance, vec![Effect::ToggleAppearance]),
+            (Verb::DuplicatePages("1".into()), vec![Effect::RunDuplicatePages("1".into())]),
+            (
+                Verb::CropPages { pages: "1".into(), margin: 4.0 },
+                vec![Effect::RunCropPages { pages: "1".into(), margin: 4.0 }],
+            ),
+            (
+                Verb::ResizePages { pages: "1".into(), width_pt: 612.0, height_pt: 792.0 },
+                vec![Effect::RunResizePages { pages: "1".into(), width_pt: 612.0, height_pt: 792.0 }],
+            ),
+            (Verb::SwapPages { a: 0, b: 1 }, vec![Effect::RunSwapPages { a: 0, b: 1 }]),
+            (
+                Verb::RotatePages { pages: "1".into(), quarters: 1 },
+                vec![Effect::RunRotatePages { pages: "1".into(), quarters: 1 }],
+            ),
+            (Verb::ExtractText("all".into()), vec![Effect::RunExtractText("all".into())]),
+            (Verb::ClearHistory, vec![Effect::ClearRecent]),
+        ];
+        for (verb, want) in cases {
+            assert_eq!(plan(&verb, &env), Some(want), "planning {verb:?}");
+        }
+    }
+
+    #[test]
+    fn only_help_and_planned_have_no_plan() {
+        // These two never reach `act`: `run()` answers them itself.
+        assert!(plan(&Verb::Help(None), &CommandEnv::default()).is_none());
+        assert!(plan(&Verb::Planned { verb: "x".into(), phase: "later".into() }, &CommandEnv::default()).is_none());
     }
 }

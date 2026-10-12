@@ -8,7 +8,7 @@ use crate::{
     signature_is_a_warning, signature_line, Awaiting, Closing, DrawKind, FindReplace, SignatureList,
     SignaturePad, SnippetList, Tab, Tool,
 };
-use pagify_shell::command_plan::Effect;
+use pagify_shell::command_plan::{CommandEnv, Effect};
 use pagify_shell::command::{Dispatch, Kind};
 use pagify_shell::verbs::{self, SignatureAction, Verb};
 
@@ -51,91 +51,35 @@ impl crate::PagifyApp {
     }
 
     pub(crate) fn act(&mut self, verb: Verb) {
-        // Phase 4b: the document/view/app verbs are planned in the shell
-        // (DESIGN_REVIEW.md §3.4); everything else still routes below.
-        if let Some(effects) = pagify_shell::command_plan::plan(&verb) {
-            for effect in effects {
-                self.apply_effect(effect);
-            }
-            return;
+        // Phase 4b is complete: every verb that reaches `act` is planned in
+        // the shell (DESIGN_REVIEW.md §3.4) — `run` answers `Help` and
+        // `Planned` before this point. A verb with no plan is a bug, not a
+        // fall-through, and says so.
+        let effects = pagify_shell::command_plan::plan(&verb, &self.command_env())
+            .unwrap_or_else(|| unreachable!("unplanned verb reached act: {verb:?}"));
+        for effect in effects {
+            self.apply_effect(effect);
         }
-        match verb {
-            Verb::Pick(..)
-            | Verb::Sensitivity(..)
-            | Verb::FillSign(..)
-            | Verb::PredefinedText(..)
-            | Verb::EditObject
-            | Verb::MoveThing
-            | Verb::SignLine
-            | Verb::SignRectangle
-            | Verb::DocumentStatus
-            => self.act_tools(verb),
-            Verb::SessionLog
-            | Verb::ApplySignatures
-            | Verb::ManageSignatures(..)
-            | Verb::Signature(..)
-            => self.act_signing(verb),
-            Verb::Validate
-            | Verb::Certify(..)
-            | Verb::Whiteout
-            | Verb::DrawArrow
-            | Verb::ToggleFill
-            | Verb::Redact
-            | Verb::Lock
-            | Verb::Secure(..)
-            | Verb::SmartRedact { .. }
-            | Verb::HiddenData { .. }
-            | Verb::Unsecure
-            => self.act_security(verb),
-            Verb::Undo
-            | Verb::Redo
-            | Verb::Pointer(..)
-            | Verb::CopyText
-            | Verb::Paste
-            | Verb::EditText
-            | Verb::AddText(..)
-            | Verb::AddImage(..)
-            | Verb::SetLayout(..)
-            | Verb::ReversePages
-            | Verb::Thumbnails
-            | Verb::ToggleAppearance
-            | Verb::DuplicatePages(..)
-            | Verb::CropPages { .. }
-            | Verb::ResizePages { .. }
-            | Verb::SwapPages { .. }
-            | Verb::RotatePages { .. }
-            | Verb::ExtractText(..)
-            | Verb::OutlinedFont(..)
-            | Verb::ClearHistory
-            => self.act_navigation(verb),
-            Verb::Finish
-            | Verb::Save
-            | Verb::SaveAs(..)
-            | Verb::SaveAsDialog
-            | Verb::Extract { .. }
-            | Verb::Import { .. }
-            | Verb::DeletePages(..)
-            | Verb::InsertPage
-            | Verb::MovePages { .. }
-            => self.act_files(verb),
-            Verb::Reflow
-            | Verb::Find(..)
-            | Verb::FindStep { .. }
-            | Verb::Replace
-            | Verb::Spelling
-            | Verb::Bookmark
-            | Verb::ArticleBox
-            | Verb::Weblinks
-            | Verb::JoinText
-            | Verb::MatchProperties
-            | Verb::Copy
-            | Verb::MarkText(..)
-            | Verb::ListMarks
-            | Verb::RemoveMark(..)
-            | Verb::Note(..)
-            => self.act_text_and_find(verb),
-            // Ported domains never reach here: `plan` above claimed them.
-            other => unreachable!("an unplanned verb fell through the router: {other:?}"),
+    }
+
+
+    /// The small snapshot the shell's `plan` needs to decide a verb's
+    /// effects: guards, current page and its height, and whether a pick is
+    /// waiting.
+    fn command_env(&self) -> CommandEnv {
+        let tab = self.tab();
+        let page = tab.view_state.page;
+        CommandEnv {
+            has_doc: tab.doc.is_some(),
+            page,
+            page_height: tab
+                .doc
+                .as_ref()
+                .and_then(|d| d.strip.size_of(page))
+                .map(|(_, h)| h as f64)
+                .unwrap_or(792.0),
+            tool_armed: tab.tool.is_some(),
+            signature_count: self.library_state.signatures.entries().len(),
         }
     }
 
@@ -288,41 +232,11 @@ impl crate::PagifyApp {
             }
             Effect::StopRecording => self.stop_recording(),
             Effect::Replay(path) => self.replay(&path),
-        }
-    }
-
-
-    /// One domain of [`Self::act`]: 9 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_tools(&mut self, verb: Verb) {
-        match verb {
-            Verb::Pick(at) => {
-                if self.tab_mut().tool.is_none() {
-                    self.say_error("nothing is waiting for a click.");
-                    return;
-                }
-                // A typed pick is in the *same* coordinates as a typed draw
-                // command — `l 30,250 170,250` and `pick 100,250` must refer to
-                // the same place, or every scripted pick misses. That is the
-                // kernel's page space, y up from the bottom-left, which is also
-                // the PDF's own convention.
-                //
-                // Pointer picks arrive in app space instead, so this is the one
-                // place that converts, through the module that owns the flip.
-                let page = self.tab_mut().view_state.page;
-                let height = self.tab_mut()
-                    .doc
-                    .as_ref()
-                    .and_then(|d| d.strip.size_of(page))
-                    .map(|(_, h)| h as f64)
-                    .unwrap_or(792.0);
-                let space = pagify_shell::page_space::PageSpace::new(height);
-                let in_app = space.from_kernel(cad_kernel::Vec2::new(at.x, at.y));
-                self.take_pick(in_app);
-            }
-            Verb::Sensitivity(what) => self.act_sensitivity(what),
-            Verb::FillSign(what) => self.act_fill_sign(what),
-            Verb::PredefinedText(words) => match words {
+            Effect::SayError(text) => self.say_error(text),
+            Effect::TakePick(at) => self.take_pick(at),
+            Effect::Sensitivity(what) => self.act_sensitivity(what),
+            Effect::FillSign(what) => self.act_fill_sign(what),
+            Effect::PredefinedText(words) => match words {
                 Some(text) => self.use_snippet(&text),
                 None => {
                     self.library_state.snippets = Some(SnippetList::default());
@@ -334,46 +248,290 @@ impl crate::PagifyApp {
                     }
                 }
             },
-            Verb::EditObject => {
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.take_up_object_tool(true, page);
-            }
-            Verb::MoveThing => {
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.take_up_object_tool(false, page);
-            }
-            Verb::SignLine => {
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.arm_tool(Tool::SignLine, page);
-            }
-            Verb::SignRectangle => {
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.arm_tool(Tool::SignRectangle, page);
-            }
-            Verb::DocumentStatus => {
+            Effect::TakeUpObjectTool { edit, page } => self.take_up_object_tool(edit, page),
+            Effect::ArmSignLine { page } => self.arm_tool(Tool::SignLine, page),
+            Effect::ArmSignRectangle { page } => self.arm_tool(Tool::SignRectangle, page),
+            Effect::ReportDocumentStatus => {
                 for line in self.document_status() {
                     self.say_info(line);
                 }
             }
-            _ => unreachable!("act_tools was handed a verb from another domain"),
+            Effect::ReportSessionLog => match self.recording_state.session_log.path() {
+                Some(path) => self.say_info(format!(
+                    "recording every command and outcome to {} — send it along with a bug report.",
+                    path.display()
+                )),
+                None => self.say_info(
+                    "no session log this run — the config directory could not be written to.",
+                ),
+            },
+            Effect::RunApplySignatures => self.act_apply_signatures(),
+            Effect::RunManageSignatures(what) => self.act_manage_signatures(what),
+            Effect::OpenSignaturePad { name, then_place } => {
+                self.library_state.pad = Some(SignaturePad { name, then_place, ..SignaturePad::default() });
+            }
+            Effect::UploadSignaturePath(path) => self.upload_signature(&path),
+            Effect::UploadSignatureDialog => self.upload_signature_dialog(),
+            Effect::ArmSignature { page } => self.arm_tool(Tool::Signature, page),
+            Effect::RunValidate => self.act_validate(),
+            Effect::RunCertify(path) => self.act_certify(path),
+            Effect::ArmWhiteout => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Whiteout, page);
+                }
+            }
+            Effect::ArmDrawArrow => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Draw(DrawKind::Arrow), page);
+                }
+            }
+            Effect::ToggleFill => {
+                self.prefs_state.draw_fill = !self.prefs_state.draw_fill;
+                self.say_info(if self.prefs_state.draw_fill {
+                    "fill: on — the next rectangle or circle is drawn filled."
+                } else {
+                    "fill: off — the next rectangle or circle is drawn hollow."
+                });
+            }
+            Effect::ArmRedact => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::Redact, page);
+                }
+            }
+            Effect::LockWords => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                    return;
+                }
+                // **Selecting the words is the obvious way to say which words.**
+                // Asking for two opposite corners of a rectangle is a drawing
+                // gesture, and this is not a drawing operation — reported from
+                // use as not being what anyone reaches for. A selection already
+                // on the page is taken as the answer; otherwise it says to make
+                // one, and the rectangle stays available for the cases a
+                // selection cannot express, like an area of a scan.
+                if self.tab_mut().selection.text_selection.is_some() {
+                    self.lock_selection();
+                    return;
+                }
+                self.say_info(
+                    "lock: select the words to hide, then `lock` again — or drag a rectangle with `lockarea`.",
+                );
+            }
+            Effect::RunSecure(options) => {
+                let Some(doc) = &self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                // **Refused before a password is typed, not after.**
+                //
+                // Two passwords cannot both be written — the content would be
+                // encrypted twice and open for nobody — and the engine has
+                // always refused that. But it refused at *save*, by which time
+                // somebody had chosen a password, met the rule and typed it
+                // twice for nothing.
+                // A document that already has one is *changed*, not refused:
+                // the current password first, then the new one.
+                if doc.session.already_has_password() {
+                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::SecureCurrent(options));
+                    self.say_info("this document has a password — type it to change it.");
+                    return;
+                }
+                if doc.session.is_secured() {
+                    self.say_info(
+                        "this document already has a password waiting — `unsecure` takes it off.",
+                    );
+                    return;
+                }
+                let allowed = options.describe();
+                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Secure(options));
+                self.say_info(format!(
+                    "type a password for this document, or Escape to give up. \
+                     Anyone opening the file will be asked for it — {allowed}."
+                ));
+            }
+            Effect::RunSmartRedact { redact } => self.act_smart_redact(redact),
+            Effect::RunHiddenData { clean } => {
+                let Some(doc) = &self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                if clean {
+                    // **What is printed is what a second survey of the cleaned
+                    // bytes found**, not what the first survey listed. The line
+                    // used to print the findings as removals — and for the
+                    // attachment and the script, which the clean left alone,
+                    // that was a claim with nothing behind it. Found by audit.
+                    match doc.session.remove_hidden_data() {
+                        Ok(done) => {
+                            if let Some(doc) = &mut self.tab_mut().doc {
+                                doc.rendered_is_stale();
+                            }
+                            self.tab_mut().selection.text_selection = None;
+                            self.tab_mut().panels.find_hits.clear();
+                            let said = done.describe();
+                            if done.is_clean() {
+                                self.say_info(if done.removed().is_empty() {
+                                    format!("{said}.")
+                                } else {
+                                    format!("{said}. Save to write it out.")
+                                });
+                            } else {
+                                self.say_error(format!("{said}. Save to write out what was removed."));
+                            }
+                        }
+                        Err(e) => self.say_error(e.to_string()),
+                    }
+                } else {
+                    match doc.session.hidden_data() {
+                        Ok(found) => self.say_info(if found.is_empty() {
+                            found.describe()
+                        } else {
+                            format!("{} — `hiddendata clean` takes it out.", found.describe())
+                        }),
+                        Err(e) => self.say_error(e.to_string()),
+                    }
+                }
+            }
+            Effect::RunUnsecure => {
+                let Some(doc) = &mut self.tab_mut().doc else {
+                    self.say_error("nothing open.");
+                    return;
+                };
+                match doc.session.unsecure_document() {
+                    Ok(()) => self.say_info("the password is off; save to write it out."),
+                    Err(e) => self.say_error(e.to_string()),
+                }
+            }
+            Effect::FinishPick => {
+                let closeable = self.tab_mut()
+                    .tool
+                    .as_ref()
+                    .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
+                if closeable {
+                    self.resolve_tool();
+                // No multi-point kind is left with fewer than Enter needs —
+                // anything armed at this point is still waiting for more points.
+                } else if self.tab_mut().tool.is_some() {
+                    self.say_error("not enough points yet.");
+                } else {
+                    self.say_error("nothing to finish.");
+                }
+            }
+            Effect::SaveFile => {
+                self.save(None);
+            }
+            Effect::SaveFileAs(path) => {
+                self.save(Some(path));
+            }
+            Effect::SaveAsDialog => self.save_as_dialog(),
+            Effect::RunExtract { pages, dest } => self.extract(&pages, &dest),
+            Effect::RunImport { source, pages } => self.import(&source, &pages),
+            Effect::RunDeletePages(pages) => self.delete_pages(&pages),
+            Effect::RunInsertPage => self.insert_page(),
+            Effect::RunMovePages { pages, before } => self.move_pages(&pages, before),
+            Effect::RunReflow => self.reflow(),
+            Effect::RunFind(needle) => self.find(&needle),
+            Effect::RunFindStep { forward } => self.find_step(forward),
+            Effect::OpenFindReplace => self.tab_mut().panels.find_replace = Some(FindReplace::default()),
+            Effect::OpenSpellCheck => self.open_spell_check(),
+            Effect::AddBookmark => self.add_bookmark_here(),
+            Effect::ArmArticleBox => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::ArticleBox, page);
+                }
+            }
+            Effect::BeginWebLink => self.begin_web_link(),
+            Effect::BeginJoinText => self.begin_join_text(),
+            Effect::BeginMatchProperties => self.begin_match_properties(),
+            Effect::RunMarkText(kind) => self.mark_selection(kind),
+            Effect::RunListMarks => self.list_marks(),
+            Effect::RunRemoveMark(n) => self.remove_mark(n),
+            Effect::RunNote(text) => self.add_note(text),
+            Effect::UndoRedo { undo } => self.undo_redo(undo),
+            Effect::SetPointer(mode) => {
+                // Switching tools abandons whatever was half-picked. Leaving a
+                // pending operation armed under a new tool is how a click meant
+                // for one thing lands in another.
+                if let Some(armed) = self.tab_mut().tool.take() {
+                    if armed.kind.cancel_drops_checkpoint() {
+                        let page = self.tab().view_state.page;
+                        if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
+                            layer.forget_last_step();
+                        }
+                    }
+                }
+                self.tab_mut().pointer = mode;
+                self.say_info(match mode {
+                    pagify_shell::verbs::PointerMode::Select =>
+                        "select — drag over text to select it, or over paper to select marks.",
+                    pagify_shell::verbs::PointerMode::Pan => "hand — drag to move the page.",
+                });
+            }
+            Effect::CopyText => {
+                if !self.copy_organize_selection() && !self.copy_object_selection() {
+                    self.tab_mut().view_state.copy_wanted = true;
+                }
+            }
+            Effect::Paste => {
+                if self.current_page_clipboard().is_some() {
+                    self.paste_organize_selection();
+                } else {
+                    self.paste_object_selection();
+                }
+            }
+            Effect::EditText => self.edit_text(),
+            Effect::AddText(text) => self.add_text(text),
+            Effect::AddImage(path) => match path {
+                Some(path) => self.add_image(&path),
+                None => self.add_image_dialog(),
+            },
+            Effect::SetLayout(layout) => self.set_layout(layout),
+            Effect::RunReversePages => self.reverse_pages(),
+            Effect::ToggleOrganizeGrid => self.toggle_organize_grid(),
+            Effect::ToggleAppearance => self.toggle_appearance(),
+            Effect::RunDuplicatePages(spec) => self.duplicate_pages(&spec),
+            Effect::RunCropPages { pages, margin } => self.crop_pages(&pages, margin),
+            Effect::RunResizePages { pages, width_pt, height_pt } => {
+                self.resize_pages(&pages, width_pt, height_pt)
+            }
+            Effect::RunSwapPages { a, b } => self.swap_pages(a, b),
+            Effect::RunRotatePages { pages, quarters } => self.rotate_pages(&pages, quarters),
+            Effect::RunExtractText(spec) => self.extract_text(&spec),
+            Effect::RunOutlinedFont(action) => self.outlined_font_action(action),
+            Effect::ClearRecent => {
+                // The list is a record of what somebody has been reading;
+                // clearing it removes the file, and says what else is kept
+                // beside it so they can decide about those too.
+                let where_kept = pagify_shell::state::state_dir()
+                    .map(|d| d.display().to_string())
+                    .unwrap_or_else(|| "nowhere on this system".into());
+                match self.library_state.recent.forget_all() {
+                    Ok(()) => self.say_info(format!(
+                        "the recent-documents list is gone. Pagify keeps its own files in \
+                         {where_kept}: predefined.json (saved texts), signatures.json (drawn \
+                         signatures), outlined_fonts.json (glyph shapes learned from documents), \
+                         and scripts/ (recordings) — delete any of them there."
+                    )),
+                    Err(e) => self.say_error(format!("could not remove the list: {e}")),
+                }
+            }
         }
     }
+
+
 
     /// What `sensitivity` does. Moved out of `act_tools` whole.
     fn act_sensitivity(&mut self, what: Option<String>) {
@@ -460,72 +618,6 @@ impl crate::PagifyApp {
     }
 
 
-    /// One domain of [`Self::act`]: 6 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_signing(&mut self, verb: Verb) {
-        match verb {
-            Verb::SessionLog => match self.recording_state.session_log.path() {
-                Some(path) => self.say_info(format!(
-                    "recording every command and outcome to {} — send it along with a bug report.",
-                    path.display()
-                )),
-                None => self.say_info(
-                    "no session log this run — the config directory could not be written to.",
-                ),
-            },
-            Verb::ApplySignatures => self.act_apply_signatures(),
-            Verb::ManageSignatures(what) => self.act_manage_signatures(what),
-            Verb::Signature(SignatureAction::Draw) => {
-                let first = self.library_state.signatures.current().is_none();
-                self.library_state.pad = Some(SignaturePad {
-                    name: if first {
-                        "Signature".to_string()
-                    } else {
-                        format!("Signature {}", self.library_state.signatures.entries().len() + 1)
-                    },
-                    // An explicit `signature draw` is a request to draw, not
-                    // to sign — unlike bare `signature` with nothing made yet,
-                    // this does not carry on to placing it.
-                    then_place: false,
-                    ..SignaturePad::default()
-                });
-                self.say_info("draw a signature in the window.");
-            }
-            Verb::Signature(SignatureAction::Upload(path)) => {
-                match path {
-                    Some(path) => self.upload_signature(&path),
-                    None => self.upload_signature_dialog(),
-                }
-            }
-            Verb::Signature(SignatureAction::Place) => {
-                // Nothing drawn or uploaded yet needs a signature made before
-                // it can be placed. Placing does not.
-                if self.library_state.signatures.current().is_none() {
-                    self.library_state.pad = Some(SignaturePad {
-                        name: "Signature".to_string(),
-                        // Somebody who typed bare `signature` wanted to sign,
-                        // not to draw; carrying on to the click is the rest
-                        // of that.
-                        then_place: true,
-                        ..SignaturePad::default()
-                    });
-                    self.say_info(
-                        "draw your signature in the window — it is kept on this \
-                         computer, and nowhere else. `signature upload` adds one \
-                         from a picture instead.",
-                    );
-                    return;
-                }
-                let page = self.tab_mut().view_state.page;
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                self.arm_tool(Tool::Signature, page);
-            }
-            _ => unreachable!("act_signing was handed a verb from another domain"),
-        }
-    }
 
     /// Everything `applysignatures` does: run the confirmation pass over every
     /// page, place the saved signatures and say what happened. Moved out of
@@ -667,152 +759,6 @@ impl crate::PagifyApp {
     }
 
 
-    /// One domain of [`Self::act`]: 11 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_security(&mut self, verb: Verb) {
-        match verb {
-            Verb::Validate => self.act_validate(),
-            Verb::Certify(path) => self.act_certify(path),
-            Verb::Whiteout => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else {
-                    let page = self.tab_mut().view_state.page;
-                    self.arm_tool(Tool::Whiteout, page);
-                }
-            }
-            Verb::DrawArrow => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else {
-                    let page = self.tab_mut().view_state.page;
-                    self.arm_tool(Tool::Draw(DrawKind::Arrow), page);
-                }
-            }
-            Verb::ToggleFill => {
-                self.prefs_state.draw_fill = !self.prefs_state.draw_fill;
-                self.say_info(if self.prefs_state.draw_fill {
-                    "fill: on — the next rectangle or circle is drawn filled."
-                } else {
-                    "fill: off — the next rectangle or circle is drawn hollow."
-                });
-            }
-            Verb::Redact => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else {
-                    let page = self.tab_mut().view_state.page;
-                    self.arm_tool(Tool::Redact, page);
-                }
-            }
-            Verb::Lock => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                    return;
-                }
-                // **Selecting the words is the obvious way to say which words.**
-                // Asking for two opposite corners of a rectangle is a drawing
-                // gesture, and this is not a drawing operation — reported from
-                // use as not being what anyone reaches for. A selection already
-                // on the page is taken as the answer; otherwise it says to make
-                // one, and the rectangle stays available for the cases a
-                // selection cannot express, like an area of a scan.
-                if self.tab_mut().selection.text_selection.is_some() {
-                    self.lock_selection();
-                    return;
-                }
-                self.say_info(
-                    "lock: select the words to hide, then `lock` again — or drag a rectangle with `lockarea`.",
-                );
-            }
-            Verb::Secure(options) => {
-                let Some(doc) = &self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                // **Refused before a password is typed, not after.**
-                //
-                // Two passwords cannot both be written — the content would be
-                // encrypted twice and open for nobody — and the engine has
-                // always refused that. But it refused at *save*, by which time
-                // somebody had chosen a password, met the rule and typed it
-                // twice for nothing.
-                // A document that already has one is *changed*, not refused:
-                // the current password first, then the new one.
-                if doc.session.already_has_password() {
-                    self.tab_mut().secure_state.awaiting_password = Some(Awaiting::SecureCurrent(options));
-                    self.say_info("this document has a password — type it to change it.");
-                    return;
-                }
-                if doc.session.is_secured() {
-                    self.say_info(
-                        "this document already has a password waiting — `unsecure` takes it off.",
-                    );
-                    return;
-                }
-                let allowed = options.describe();
-                self.tab_mut().secure_state.awaiting_password = Some(Awaiting::Secure(options));
-                self.say_info(format!(
-                    "type a password for this document, or Escape to give up. \
-                     Anyone opening the file will be asked for it — {allowed}."
-                ));
-            }
-            Verb::SmartRedact { redact } => self.act_smart_redact(redact),
-            Verb::HiddenData { clean } => {
-                let Some(doc) = &self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                if clean {
-                    // **What is printed is what a second survey of the cleaned
-                    // bytes found**, not what the first survey listed. The line
-                    // used to print the findings as removals — and for the
-                    // attachment and the script, which the clean left alone,
-                    // that was a claim with nothing behind it. Found by audit.
-                    match doc.session.remove_hidden_data() {
-                        Ok(done) => {
-                            if let Some(doc) = &mut self.tab_mut().doc {
-                                doc.rendered_is_stale();
-                            }
-                            self.tab_mut().selection.text_selection = None;
-                            self.tab_mut().panels.find_hits.clear();
-                            let said = done.describe();
-                            if done.is_clean() {
-                                self.say_info(if done.removed().is_empty() {
-                                    format!("{said}.")
-                                } else {
-                                    format!("{said}. Save to write it out.")
-                                });
-                            } else {
-                                self.say_error(format!("{said}. Save to write out what was removed."));
-                            }
-                        }
-                        Err(e) => self.say_error(e.to_string()),
-                    }
-                } else {
-                    match doc.session.hidden_data() {
-                        Ok(found) => self.say_info(if found.is_empty() {
-                            found.describe()
-                        } else {
-                            format!("{} — `hiddendata clean` takes it out.", found.describe())
-                        }),
-                        Err(e) => self.say_error(e.to_string()),
-                    }
-                }
-            }
-            Verb::Unsecure => {
-                let Some(doc) = &mut self.tab_mut().doc else {
-                    self.say_error("nothing open.");
-                    return;
-                };
-                match doc.session.unsecure_document() {
-                    Ok(()) => self.say_info("the password is off; save to write it out."),
-                    Err(e) => self.say_error(e.to_string()),
-                }
-            }
-            _ => unreachable!("act_security was handed a verb from another domain"),
-        }
-    }
 
 
     /// What `validate` does: run the validation pass and report what it found.
@@ -997,167 +943,7 @@ impl crate::PagifyApp {
 
 
 
-    /// One domain of [`Self::act`]: 19 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_navigation(&mut self, verb: Verb) {
-        match verb {
-            Verb::Undo | Verb::Redo => self.undo_redo(matches!(verb, Verb::Undo)),
 
-            Verb::Pointer(mode) => {
-                // Switching tools abandons whatever was half-picked. Leaving a
-                // pending operation armed under a new tool is how a click meant
-                // for one thing lands in another.
-                if let Some(armed) = self.tab_mut().tool.take() {
-                    if armed.kind.cancel_drops_checkpoint() {
-                        let page = self.tab().view_state.page;
-                        if let Some(layer) = self.tab_mut().markup.existing_mut(page) {
-                            layer.forget_last_step();
-                        }
-                    }
-                }
-                self.tab_mut().pointer = mode;
-                self.say_info(match mode {
-                    pagify_shell::verbs::PointerMode::Select =>
-                        "select — drag over text to select it, or over paper to select marks.",
-                    pagify_shell::verbs::PointerMode::Pan => "hand — drag to move the page.",
-                });
-            }
 
-            // **Reported from use**: typing `copy` (or the "Copy" ribbon
-            // button, which types it) after selecting a page in the
-            // thumbnail rail copied nothing — only ⌘C's own keyboard
-            // dispatch knew to try a page selection first. §7 says the box
-            // can do anything the interface can, so this needs the same
-            // precedence ⌘C already has: page selection, then a drawn
-            // object, then falling through to the deferred text-copy flag
-            // (unlike the other two, that one needs `ctx` to put text on the
-            // OS clipboard, which `act` has no access to — see `copy_wanted`
-            // at its own declaration).
-            Verb::CopyText => {
-                if !self.copy_organize_selection() && !self.copy_object_selection() {
-                    self.tab_mut().view_state.copy_wanted = true;
-                }
-            }
-            // Same precedence ⌘V's own keyboard dispatch already has: a
-            // copied page first, a copied object otherwise. Both already
-            // take no `ctx`, unlike the text-copy side, so there is no
-            // deferred-flag equivalent needed here the way `CopyText` needs
-            // one for `copy_selection`.
-            Verb::Paste => {
-                if self.current_page_clipboard().is_some() {
-                    self.paste_organize_selection();
-                } else {
-                    self.paste_object_selection();
-                }
-            }
-            Verb::EditText => self.edit_text(),
-            Verb::AddText(text) => self.add_text(text),
-            Verb::AddImage(path) => match path {
-                Some(path) => self.add_image(&path),
-                None => self.add_image_dialog(),
-            },
-            Verb::SetLayout(layout) => self.set_layout(layout),
-            Verb::ReversePages => self.reverse_pages(),
-            Verb::Thumbnails => self.toggle_organize_grid(),
-            Verb::ToggleAppearance => self.toggle_appearance(),
-            Verb::DuplicatePages(spec) => self.duplicate_pages(&spec),
-            Verb::CropPages { pages, margin } => self.crop_pages(&pages, margin),
-            Verb::ResizePages { pages, width_pt, height_pt } => {
-                self.resize_pages(&pages, width_pt, height_pt)
-            }
-            Verb::SwapPages { a, b } => self.swap_pages(a, b),
-            Verb::RotatePages { pages, quarters } => self.rotate_pages(&pages, quarters),
-            Verb::ExtractText(spec) => self.extract_text(&spec),
-            Verb::OutlinedFont(action) => self.outlined_font_action(action),
-            Verb::ClearHistory => {
-                // The list is a record of what somebody has been reading;
-                // clearing it removes the file, and says what else is kept
-                // beside it so they can decide about those too.
-                let where_kept = pagify_shell::state::state_dir()
-                    .map(|d| d.display().to_string())
-                    .unwrap_or_else(|| "nowhere on this system".into());
-                match self.library_state.recent.forget_all() {
-                    Ok(()) => self.say_info(format!(
-                        "the recent-documents list is gone. Pagify keeps its own files in \
-                         {where_kept}: predefined.json (saved texts), signatures.json (drawn \
-                         signatures), outlined_fonts.json (glyph shapes learned from documents), \
-                         and scripts/ (recordings) — delete any of them there."
-                    )),
-                    Err(e) => self.say_error(format!("could not remove the list: {e}")),
-                }
-            }
-
-            _ => unreachable!("act_navigation was handed a verb from another domain"),
-        }
-    }
-
-    /// One domain of [`Self::act`]: 9 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_files(&mut self, verb: Verb) {
-        match verb {
-            // The typed form of pressing Enter over the page.
-            Verb::Finish => {
-                let closeable = self.tab_mut()
-                    .tool
-                    .as_ref()
-                    .is_some_and(|p| p.kind.ends_on_enter() && p.points.len() >= 2);
-                if closeable {
-                    self.resolve_tool();
-                // No multi-point kind is left with fewer than Enter needs —
-                // anything armed at this point is still waiting for more points.
-                } else if self.tab_mut().tool.is_some() {
-                    self.say_error("not enough points yet.");
-                } else {
-                    self.say_error("nothing to finish.");
-                }
-            }
-            Verb::Save => {
-                self.save(None);
-            }
-            Verb::SaveAs(path) => {
-                self.save(Some(path));
-            }
-            Verb::SaveAsDialog => self.save_as_dialog(),
-
-            Verb::Extract { pages, dest } => self.extract(&pages, &dest),
-            Verb::Import { source, pages } => self.import(&source, &pages),
-            Verb::DeletePages(pages) => self.delete_pages(&pages),
-            Verb::InsertPage => self.insert_page(),
-            Verb::MovePages { pages, before } => self.move_pages(&pages, before),
-
-            _ => unreachable!("act_files was handed a verb from another domain"),
-        }
-    }
-
-    /// One domain of [`Self::act`]: 15 verbs, moved out
-    /// whole so the router above stays a table of contents.
-    fn act_text_and_find(&mut self, verb: Verb) {
-        match verb {
-            Verb::Reflow => self.reflow(),
-            Verb::Find(needle) => self.find(&needle),
-            Verb::FindStep { forward } => self.find_step(forward),
-            Verb::Replace => self.tab_mut().panels.find_replace = Some(FindReplace::default()),
-            Verb::Spelling => self.open_spell_check(),
-            Verb::Bookmark => self.add_bookmark_here(),
-            Verb::ArticleBox => {
-                if self.tab_mut().doc.is_none() {
-                    self.say_error("nothing open.");
-                } else {
-                    let page = self.tab_mut().view_state.page;
-                    self.arm_tool(Tool::ArticleBox, page);
-                }
-            }
-            Verb::Weblinks => self.begin_web_link(),
-            Verb::JoinText => self.begin_join_text(),
-            Verb::MatchProperties => self.begin_match_properties(),
-            Verb::Copy => {}
-            Verb::MarkText(kind) => self.mark_selection(kind),
-            Verb::ListMarks => self.list_marks(),
-            Verb::RemoveMark(n) => self.remove_mark(n),
-            Verb::Note(text) => self.add_note(text),
-
-            _ => unreachable!("act_text_and_find was handed a verb from another domain"),
-        }
-    }
 
 }
