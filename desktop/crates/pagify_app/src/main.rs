@@ -7202,6 +7202,35 @@ impl PagifyApp {
         Ok(format!("area highlighted on page {}.", page + 1))
     }
 
+    /// One pencil stroke, as an `Ink` annotation — the Comment tab's Pencil.
+    /// The points arrive from the canvas as the drag gathered them; a
+    /// single-point pick never reaches here (it resolves as a dot).
+    fn pencil_stroke(&mut self, page: usize, points: &[AppPoint]) -> Result<String, String> {
+        if points.len() < 2 {
+            return Err("pencil: drag to draw a stroke.".into());
+        }
+        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
+        let stroke: Vec<pdf_core::document::Point> = points
+            .iter()
+            .map(|p| pdf_core::document::Point { x: p.x as f32, y: p.y as f32 })
+            .collect();
+        doc.session
+            .execute(pdf_core::command::Command::AddAnnotation {
+                page_index: page,
+                annotation: pdf_core::document::Annotation::Ink {
+                    strokes: vec![stroke],
+                    color: pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 },
+                    width: 1.5,
+                },
+            })
+            .map_err(|e| e.to_string())?;
+
+        if let Some(doc) = &mut self.tab_mut().doc {
+            doc.rendered_is_stale();
+        }
+        Ok(format!("pencil: stroke drawn on page {}.", page + 1))
+    }
+
     /// Whether a password has been chosen and not yet written.
     ///
     /// **Unsaved work of a different shape.** A password is set on the document

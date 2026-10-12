@@ -358,6 +358,9 @@ pub enum Verb {
     /// tab's Area Highlight. Unlike the selection marks, it is drawn over
     /// anything, words or not.
     AreaHighlight,
+    /// Freehand ink — the Comment tab's Pencil. Drag to draw a stroke; a
+    /// click dots.
+    Pencil,
     /// Whether the Rectangle and Circle drawing tools fill the shape solid or
     /// leave it hollow — chosen before drawing, not after.
     ///
@@ -924,7 +927,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("media", "the editing phase", "the Audio & Video tool"),
     ("onlineform", "the signing phase", "the Create Online Form tool"),
     ("pagetemplates", "the forms phase", "the Page Templates tool"),
-    ("pencil", "the annotation phase", "the Pencil tool"),
     ("portfolio", "the conversion phase", "the PDF Portfolio tool"),
     ("readaloud", "the viewing phase", "the Read tool"),
     ("readingoptions", "the accessibility phase", "the Reading Options tool"),
@@ -1070,7 +1072,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
-        "pagemarks", "fromclipboard",
+        "pagemarks", "fromclipboard", "pencil",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1207,6 +1209,7 @@ fn parse_locking_and_redaction(head: &str, rest: &[&str], tail: &str) -> Option<
         "secure" => SecureOptions::parse(tail).map(Verb::Secure),
         "whiteout" => Ok(Verb::Whiteout),
         "areahighlight" => Ok(Verb::AreaHighlight),
+        "pencil" => Ok(Verb::Pencil),
         _ => return None,
     })
 }
@@ -2513,6 +2516,20 @@ mod from_clipboard_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "fromclipboard"),
             "`fromclipboard` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod pencil_tests {
+    use super::*;
+
+    #[test]
+    fn pencil_parses_and_is_not_planned() {
+        assert_eq!(parse("pencil"), Some(Ok(Verb::Pencil)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "pencil"),
+            "`pencil` is still in the planned table"
         );
     }
 }

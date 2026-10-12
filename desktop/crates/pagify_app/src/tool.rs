@@ -74,6 +74,10 @@ pub(crate) enum Tool {
     /// tab's Area Highlight. Unlike `Markup`, which resolves from a text
     /// selection, this is drawn over anything, words or not.
     AreaHighlight,
+    /// Freehand ink — the Comment tab's Pencil. The one tool that draws from
+    /// movement: points join the stroke while the button is held, and
+    /// letting go resolves it; a plain click dots.
+    Pencil,
     /// Two corners of a box to draw while filling a form in.
     SignRectangle,
     /// The two ends of a line to rule while filling a form in.
@@ -124,6 +128,7 @@ impl Tool {
             | Tool::Fill(_)
             | Tool::Write(_)
             | Tool::EraseMark
+            | Tool::Pencil
             | Tool::PickText => 1,
             Tool::PlaceText
             | Tool::Calibrate { .. }
@@ -195,6 +200,7 @@ impl Tool {
                 0 => "area highlight: first corner".into(),
                 _ => "area highlight: opposite corner".into(),
             },
+            Tool::Pencil => "pencil: drag to draw — a click dots".into(),
             // Says which of the two rectangles/lines this is, because the
             // other one is a drawing that can be picked up again and this
             // one is not.
@@ -318,6 +324,7 @@ impl Tool {
             Tool::Redact => Some(ToolId::Redact),
             Tool::Whiteout => Some(ToolId::Whiteout),
             Tool::AreaHighlight => Some(ToolId::AreaHighlight),
+            Tool::Pencil => Some(ToolId::Pencil),
             Tool::SignRectangle => Some(ToolId::SignRectangle),
             Tool::SignLine => Some(ToolId::SignLine),
             Tool::Write(_) => Some(ToolId::AddText),
@@ -388,6 +395,7 @@ impl Tool {
                 | Tool::Redact
                 | Tool::Whiteout
                 | Tool::AreaHighlight
+                | Tool::Pencil
         )
     }
 }
@@ -523,6 +531,15 @@ impl Tool {
             Tool::AreaHighlight => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => app.area_highlight(page, *a, *b),
                 _ => Err("area highlight: two corners are needed.".into()),
+            },
+            Tool::Pencil => match points.first().copied() {
+                // One point is a dot; the drag path hands over the whole
+                // stroke at once.
+                Some(at) if points.len() < 2 => {
+                    app.stamp_mark(page, pdf_core::document::FillMark::Dot, at)
+                }
+                Some(_) => app.pencil_stroke(page, &points),
+                None => Err("pencil: nowhere was clicked.".into()),
             },
             Tool::SignRectangle => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => app.stamp_box(page, *a, *b),
@@ -743,6 +760,7 @@ impl Tool {
             | Tool::Fill(_)
             | Tool::Write(_)
             | Tool::EraseMark
+            | Tool::Pencil
             | Tool::Modify(_)
             | Tool::PickText => {}
             // A box, violet.
@@ -936,6 +954,7 @@ pub(crate) enum ToolId {
     Redact,
     Whiteout,
     AreaHighlight,
+    Pencil,
     SignRectangle,
     SignLine,
     Line,

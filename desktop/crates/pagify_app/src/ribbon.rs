@@ -229,7 +229,7 @@ impl Tab {
                 ("\u{E3BC}", "Textbox", Command::Verb("textbox")),
                 ("\u{E0CB}", "Callout", Command::Verb("callout")),
                 ("\u{EBBB}", "Drawing", Command::Verb("drawing")),
-                ("\u{F097}", "Pencil", Command::Verb("pencil")),
+                ("\u{F097}", "Pencil", Command::Tool(ToolId::Pencil, "pencil")),
                 ("\u{E6D0}", "Eraser", Command::Tool(ToolId::EraseMark, "erase")),
                 ("\u{E162}", "Area Highlight", Command::Tool(ToolId::AreaHighlight, "areahighlight")),
                 ("\u{F02F}", "Search & Highlight", Command::Verb("searchhighlight")),

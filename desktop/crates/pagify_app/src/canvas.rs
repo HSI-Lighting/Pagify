@@ -1977,6 +1977,41 @@ impl crate::PagifyApp {
         // tool does would swallow that drag as a wandered-click pick instead.
         if self.tab_mut().tool.as_ref().is_some_and(|t| !t.kind.wants_selection()) {
             self.tab_mut().selection.text_drag = None;
+            // The pencil is the one tool that draws from movement: while the
+            // button is held, every frame's point joins the stroke, and
+            // letting go resolves it. A click never reaches the drag
+            // branches and goes through `take_pick` below, which resolves
+            // its single point as a dot.
+            if self.tab().tool.as_ref().is_some_and(|t| matches!(t.kind, Tool::Pencil)) {
+                if response.dragged() {
+                    if let Some(armed) = self.tab_mut().tool.as_mut() {
+                        // Frame-rate sampling, with a near-point filter so a
+                        // still hand does not pile up hundreds of the same
+                        // point on one spot.
+                        let far_enough = armed.points.last().map_or(true, |last| {
+                            (last.x - at.x).abs() + (last.y - at.y).abs() > 0.75
+                        });
+                        if far_enough {
+                            armed.points.push(at);
+                        }
+                    }
+                }
+                if response.drag_stopped() {
+                    self.tab_mut().selection.drag_from = None;
+                    if self.tab().tool.as_ref().is_some_and(|t| t.points.len() >= 2) {
+                        self.resolve_tool();
+                    } else if let Some(armed) = self.tab_mut().tool.as_mut() {
+                        // A press that never moved is not a stroke.
+                        armed.points.clear();
+                    }
+                    return true;
+                }
+                if response.clicked() && !answered_above {
+                    self.take_pick(at);
+                    return true;
+                }
+                return true;
+            }
             // Not the click the click-away block above has already answered —
             // see `answered_above`.
             if response.drag_started() && !answered_above {

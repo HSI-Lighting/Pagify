@@ -5538,3 +5538,41 @@ fn fromclipboard_turns_the_pasted_words_into_a_document() {
     let text = h.state_mut().characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(text.contains("First line"), "the words did not land: {text:?}");
 }
+
+/// **The Comment tab's Pencil, through the tool machine.** The tool arms and
+/// lights its ribbon button; a drag's collected points resolve into one Ink
+/// annotation, and a single point resolves as a dot — and the tool stays in
+/// hand (a run of strokes should not mean a trip to the ribbon).
+#[test]
+fn pencil_draws_a_stroke_and_keeps_the_tool() {
+    use crate::tool::{ArmedTool, ToolId};
+
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("pencil");
+    h.run_steps(1);
+    let armed = h.state().tab().tool.as_ref().expect("the pencil was not armed");
+    assert_eq!(armed.kind.id(), Some(ToolId::Pencil), "the wrong button would light");
+
+    h.state_mut().tab_mut().tool = Some(ArmedTool {
+        kind: crate::tool::Tool::Pencil,
+        page: 0,
+        objects: Vec::new(),
+        points: vec![
+            AppPoint { x: 40.0, y: 40.0 },
+            AppPoint { x: 60.0, y: 55.0 },
+            AppPoint { x: 80.0, y: 45.0 },
+        ],
+    });
+    h.state_mut().resolve_tool();
+    h.run_steps(1);
+
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let drawn = session.annotations(0).expect("marks").iter().any(|m| {
+        matches!(
+            &m.annotation,
+            pdf_core::document::Annotation::Ink { strokes, .. } if strokes.first().is_some_and(|s| s.len() == 3)
+        )
+    });
+    assert!(drawn, "the three collected points did not become one stroke");
+    assert!(h.state().tab().tool.is_some(), "the pencil let go after one stroke");
+}
