@@ -74,32 +74,21 @@
 
                  A `content://` URI from a real document provider (Drive,
                  Gmail's attachment viewer) usually DOES resolve a type, so
-                 that half is covered by the literal `mimeType` entries below.
-                 A `file://` URI from a plain file manager usually does not —
-                 Android's own `MimeTypeMap` has never heard of a .dwg or a
-                 .step file, so `intent.type` arrives null and a filter that
-                 only looks at mimeType never sees the file at all. That half
-                 is covered by matching on the file's own name instead, via
-                 `pathPattern`, with `mimeType="*/*"` standing in for "I do
-                 not care what the provider resolved, if anything."
-
-                 `pathPattern`'s matching here is a strict, literal glob with
-                 no character classes and no alternation (`android:pathSuffix`
-                 would be the clean version of this, but it needs API 31 and
-                 this app's minSdk is 24) — so each extension gets two
-                 entries, lower and upper case, rather than one pattern
-                 covering both. Real files come in both. -->
+                 that half is covered by the literal `mimeType` entries
+                 below. A `file://` URI from a plain file manager usually
+                 does not — Android's own `MimeTypeMap` has never heard of
+                 a .dwg or a .step file, so `intent.getType()` comes back
+                 null, not a wildcard. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
 
-                <!-- A provider that resolved a real type. These are not an
-                     IANA-registered set — DWG and DXF predate MIME entirely —
-                     so this is every spelling actually seen in the wild
-                     (freedesktop's shared-mime-info, which a number of Android
-                     file managers build their type tables from, and a few
-                     vendor variants beside it). -->
+                <!-- Not an IANA-registered set — DWG and DXF predate MIME
+                     entirely — so this is every spelling actually seen in
+                     the wild (freedesktop's shared-mime-info, which a
+                     number of Android file managers build their type
+                     tables from, and a few vendor variants beside it). -->
                 <data android:mimeType="image/vnd.dwg" />
                 <data android:mimeType="application/acad" />
                 <data android:mimeType="application/x-acad" />
@@ -111,12 +100,38 @@
                 <data android:mimeType="application/step" />
                 <data android:mimeType="application/x-step" />
                 <data android:mimeType="model/step-xml+zip" />
+                <!-- And the generic fallback most providers actually hand
+                     back for a type they do not recognise, rather than
+                     leaving it unset. -->
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
 
-                <!-- A provider that didn't, matched on the file's own name
-                     instead. -->
+            <!-- The other half: a `file://` URI (or a `content://` one from
+                 a provider that set no type at all) whose `intent.getType()`
+                 is null. This is NOT the same thing as `mimeType="*/*"` —
+                 measured on-device, not assumed: `*/*` is still a type
+                 constraint, and a filter that declares one, wildcard or not,
+                 is defined to never match a null type. Only a `<data>` entry
+                 with no `mimeType` attribute at all is defined to match a
+                 typeless intent, which is why this is its own filter rather
+                 than folded into the one above — mixing "some entries
+                 constrain type, some don't" inside one filter is exactly the
+                 kind of ambiguity Android's own docs warn plays out
+                 unpredictably once multiple `<data>` tags are merged.
+
+                 Matched on the file's own name instead, via `pathPattern` —
+                 a strict, literal glob with no character classes and no
+                 alternation on this app's `minSdk 24` (`android:pathSuffix`
+                 would be the clean version of this, but needs API 31) — so
+                 each extension gets two entries, lower and upper case,
+                 rather than one pattern covering both. Real files come in
+                 both. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="content" />
                 <data android:scheme="file" />
-                <data android:mimeType="*/*" />
                 <data android:host="*" />
                 <data android:pathPattern=".*\\.dwg" />
                 <data android:pathPattern=".*\\.DWG" />
