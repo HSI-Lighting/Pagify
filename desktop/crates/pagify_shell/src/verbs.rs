@@ -940,7 +940,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
     ("stamp", "the annotation phase", "the Stamp tool"),
     ("tagspanel", "the accessibility phase", "the Tags Panel tool"),
-    ("textbox", "the annotation phase", "the Textbox tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
     ("toolsettings", "the forms phase", "the Tool Settings tool"),
     ("tooltip", "the forms phase", "the Add Tooltip tool"),
@@ -1076,6 +1075,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "tickmark", "inserttext", "replacetext", "addlink", "customstamp", "imageannotation",
+        "textbox",
         "unsecure", "redact",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));
@@ -1406,6 +1406,13 @@ fn parse_document_edits(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         // replacement is typed into the editor `edittext` opens, so the run
         // is rewritten rather than covered over.
         "replacetext" => Ok(Verb::EditText),
+        // The Comment tab's Textbox is the drag-a-box-and-type flow bare
+        // `addtext` arms — the words are typed in the box rather than
+        // covered over, and land as this app's written text. No frame is
+        // drawn around them: the annotation frames this build declares are
+        // not filled yet, and a box drawn by guessing at the line's width
+        // would misplace itself.
+        "textbox" => Ok(Verb::AddText(tail.to_string())),
         "addimage" => {
             let tail = tail.trim();
             if tail.is_empty() {
@@ -2547,6 +2554,21 @@ mod rearrange_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "rearrange"),
             "`rearrange` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod textbox_tests {
+    use super::*;
+
+    #[test]
+    fn textbox_runs_the_drag_a_box_and_type_flow() {
+        assert_eq!(parse("textbox"), Some(Ok(Verb::AddText(String::new()))));
+        assert_eq!(parse("textbox Hello"), Some(Ok(Verb::AddText("Hello".into()))));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "textbox"),
+            "`textbox` is still in the planned table"
         );
     }
 }

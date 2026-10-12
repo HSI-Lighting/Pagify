@@ -5595,3 +5595,30 @@ fn rearrange_opens_the_organize_grid() {
     h.run_steps(1);
     assert!(!h.state().ui_state.organize_open, "the grid did not close");
 }
+
+/// The Comment tab's Textbox: bare, it lands the reader in the
+/// drag-a-box-and-type flow (the tool `addtext` arms); with words, in the
+/// type-then-place one.
+#[test]
+fn textbox_reaches_the_box_flow() {
+    use crate::tool::Tool;
+
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("textbox");
+    h.run_steps(1);
+    assert!(
+        matches!(h.state().tab().tool.as_ref().map(|t| &t.kind), Some(Tool::PlaceText)),
+        "textbox did not arm the box flow"
+    );
+
+    h.state_mut().tab_mut().tool = None;
+    h.state_mut().submit("textbox Hello");
+    h.run_steps(1);
+    assert!(
+        matches!(
+            h.state().tab().tool.as_ref().map(|t| &t.kind),
+            Some(Tool::Write(words)) if words == "Hello"
+        ),
+        "textbox with words did not take them"
+    );
+}
