@@ -1,89 +1,287 @@
-//! Native Windows printing: the standard Print dialog, and the GDI calls
-//! that send a page's own rendered bitmap through it to the printer the
-//! user chose.
+//! Native Windows printing: listing printers, the driver's own settings
+//! dialog, the paper a printer reports, and the GDI calls that send a page's
+//! own rendered bitmap to the printer.
 //!
 //! Windows-only — see `pagify_app/Cargo.toml`'s own
-//! `cfg(target_os = "windows")` dependency block. `main.rs`'s
-//! `print_current_document` is the one caller, gated the same way; no other
+//! `cfg(target_os = "windows")` dependency block. The print window
+//! (`print_window.rs`) is the one caller, gated the same way; no other
 //! platform has a printing feature yet.
+//!
+//! **Why not the OS Print dialog any more.** On Windows 11 22H2+ the OS swaps
+//! `PrintDlgExW` for its modern dialog, whose preview pane an app only fills by
+//! supplying a WinRT print source — which an egui window cannot. So the print
+//! window is Pagify's own, and this module is what it needs from the OS:
+//! `DocumentPropertiesW` still shows the *driver's* dialog (duplex, tray,
+//! staple, paper size) on request.
 //!
 //! **A raster image, not a document of vector commands.** Everything this
 //! app already knows how to do is render a page to an RGBA bitmap
 //! (`Session::render_page_rotated`) — so printing reuses exactly that,
-//! requested at the *printer's own reported DPI* rather than screen
-//! resolution. A printer DC commonly reports 300–1200 DPI against the
-//! ~96–150 DPI a screen preview uses; blitting a screen-resolution bitmap
-//! stretched up to fill a full page would look visibly soft, so each page
-//! is re-rendered specifically for the print job instead of reusing
-//! whatever the screen already had cached.
+//! requested at the size the page will land on the sheet
+//! (`pagify_shell::print_layout::place`, the same answer the preview draws
+//! from) rather than screen resolution. A printer DC commonly reports 300–1200
+//! DPI against the ~96–150 DPI a screen preview uses; blitting a
+//! screen-resolution bitmap stretched up to fill a full page would look
+//! visibly soft, so each page is re-rendered specifically for the print job.
 
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{GlobalFree, HWND};
+use std::path::Path;
+
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     CreateDCW, DeleteDC, GetDeviceCaps, SetBrushOrgEx, SetStretchBltMode, StretchDIBits, BITMAPINFO,
-    BITMAPINFOHEADER, BI_RGB, DEVMODEW, DIB_RGB_COLORS, HALFTONE, HORZRES, LOGPIXELSX, LOGPIXELSY,
-    SRCCOPY, VERTRES,
+    BITMAPINFOHEADER, BI_RGB, DEVMODEW, DEVMODE_FIELD_FLAGS, DIB_RGB_COLORS, DMCOLLATE_FALSE,
+    DMCOLLATE_TRUE, DMORIENT_LANDSCAPE, DMORIENT_PORTRAIT, DM_COLLATE, DM_COPIES, DM_ORIENTATION, HALFTONE, HDC,
+    HORZRES, LOGPIXELSX, LOGPIXELSY, PHYSICALHEIGHT, PHYSICALOFFSETX, PHYSICALOFFSETY, PHYSICALWIDTH, SRCCOPY,
+    VERTRES,
+};
+use windows::Win32::Graphics::Printing::{
+    ClosePrinter, DocumentPropertiesW, EnumPrintersW, GetDefaultPrinterW, OpenPrinterW, PRINTER_ENUM_CONNECTIONS,
+    PRINTER_ENUM_LOCAL, PRINTER_HANDLE, PRINTER_INFO_4W,
 };
 // The actual GDI print-job calls — see this crate dependency's own doc
 // comment in Cargo.toml for why these, despite taking a GDI `HDC`, live
 // under `Storage::Xps` in this version of the `windows` crate rather than
 // `Graphics::Gdi`.
 use windows::Win32::Storage::Xps::{AbortDoc, EndDoc, EndPage, StartDocW, StartPage, DOCINFOW};
-use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
-use windows::Win32::UI::Controls::Dialogs::{
-    PrintDlgExW, DEVNAMES, PD_ALLPAGES, PD_CURRENTPAGE, PD_PAGENUMS, PD_RESULT_PRINT,
-    PD_USEDEVMODECOPIESANDCOLLATE, PRINTDLGEXW, PRINTPAGERANGE, START_PAGE_GENERAL,
-};
 
+use pagify_shell::print_layout::{self, Options, Paper};
 use pagify_shell::Session;
 
-/// Which zero-based page indices to print, resolved from the dialog's own
-/// result flags and (for a range) the page-range list it filled in.
-///
-/// Pure — no dialog, no handles — so this, the one piece of actual *logic*
-/// in this module, is the one piece that can be unit tested directly rather
-/// than only by hand against a real printer.
-fn resolve_print_pages(
-    flags: u32,
-    current_page: usize,
-    ranges: &[(u32, u32)],
-    page_count: usize,
-) -> Vec<usize> {
-    if page_count == 0 {
-        return Vec::new();
-    }
-    if flags & PD_CURRENTPAGE.0 != 0 {
-        return vec![current_page.min(page_count - 1)];
-    }
-    if flags & PD_PAGENUMS.0 != 0 && !ranges.is_empty() {
-        let mut pages: Vec<usize> = Vec::new();
-        for &(from, to) in ranges {
-            // The dialog's own page numbers are one-based, clamped to what
-            // this document actually has — `nMinPage`/`nMaxPage` already
-            // constrain what a person can type in, but a defensive clamp
-            // here costs nothing and a wrong one would print the wrong page.
-            let from = from.saturating_sub(1) as usize;
-            let to = to.saturating_sub(1) as usize;
-            if from >= page_count {
-                continue;
-            }
-            for p in from..=to.min(page_count - 1) {
-                if !pages.contains(&p) {
-                    pages.push(p);
-                }
-            }
-        }
-        pages.sort_unstable();
-        return pages;
-    }
-    // `PD_ALLPAGES`, or nothing recognisable set — default to everything
-    // rather than printing nothing, the same way a cancelled-but-not-really
-    // dialog state should never silently produce an empty job.
-    let _ = PD_ALLPAGES;
-    (0..page_count).collect()
+// `DocumentPropertiesW` `fMode` bits and results (wingdi.h / winuser.h).
+const DM_OUT_BUFFER: u32 = 2;
+const DM_IN_PROMPT: u32 = 4;
+const DM_IN_BUFFER: u32 = 8;
+const IDOK: i32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrinterInfo {
+    pub name: String,
+    pub is_default: bool,
 }
 
-/// The scale to render a page at for the printer: the printer's own `scale`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Orientation {
+    Portrait,
+    Landscape,
+}
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// An open printer handle, closed on every way out — `DocumentPropertiesW`
+/// needs one and a leaked handle keeps the spooler's printer object pinned.
+struct OpenPrinter(PRINTER_HANDLE);
+
+impl OpenPrinter {
+    fn new(name: &str) -> Result<Self, String> {
+        let w = wide(name);
+        let mut handle = PRINTER_HANDLE::default();
+        unsafe { OpenPrinterW(PCWSTR(w.as_ptr()), &mut handle, None) }
+            .map_err(|e| format!("couldn't open the printer \"{name}\": {e}"))?;
+        Ok(OpenPrinter(handle))
+    }
+}
+
+impl Drop for OpenPrinter {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ClosePrinter(self.0);
+        }
+    }
+}
+
+/// Every printer this person can print to, the default flagged.
+///
+/// Level 4 (name and attributes only) on purpose: it is answered from the
+/// spooler's own list and never wakes a network device, which a deeper level
+/// does — a copier that is off would otherwise stall the window opening.
+pub fn list_printers() -> Result<Vec<PrinterInfo>, String> {
+    let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+    let mut needed = 0u32;
+    let mut returned = 0u32;
+    // The first call only asks how big the answer is; it "fails" with
+    // ERROR_INSUFFICIENT_BUFFER by design.
+    let _ = unsafe { EnumPrintersW(flags, PCWSTR::null(), 4, None, &mut needed, &mut returned) };
+    if needed == 0 {
+        return Ok(Vec::new());
+    }
+    // A `u64` store: `PRINTER_INFO_4W` holds pointers, so it must be 8-aligned,
+    // which a `Vec<u8>` does not promise.
+    let mut store = vec![0u64; (needed as usize).div_ceil(8)];
+    let bytes = unsafe { std::slice::from_raw_parts_mut(store.as_mut_ptr() as *mut u8, needed as usize) };
+    unsafe { EnumPrintersW(flags, PCWSTR::null(), 4, Some(bytes), &mut needed, &mut returned) }
+        .map_err(|e| format!("couldn't list the printers: {e}"))?;
+
+    let default = default_printer_name();
+    let infos = unsafe { std::slice::from_raw_parts(store.as_ptr() as *const PRINTER_INFO_4W, returned as usize) };
+    let mut out: Vec<PrinterInfo> = infos
+        .iter()
+        .filter_map(|info| unsafe { info.pPrinterName.to_string().ok() })
+        .map(|name| PrinterInfo { is_default: Some(&name) == default.as_ref(), name })
+        .collect();
+    out.sort_by(|a, b| b.is_default.cmp(&a.is_default).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    out.dedup_by(|a, b| a.name == b.name);
+    Ok(out)
+}
+
+fn default_printer_name() -> Option<String> {
+    let mut len = 0u32;
+    let _ = unsafe { GetDefaultPrinterW(None, &mut len) };
+    if len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; len as usize];
+    if !unsafe { GetDefaultPrinterW(Some(PWSTR(buf.as_mut_ptr())), &mut len) }.as_bool() {
+        return None;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..end]))
+}
+
+/// One printer and the settings chosen for it: the whole `DEVMODEW`, including
+/// the driver's own private bytes after it (`dmDriverExtra`), which hold the
+/// duplex / tray / staple choices and must travel with it untouched.
+#[derive(Clone)]
+pub struct PrinterSetup {
+    pub name: String,
+    // `u64`s so the `DEVMODEW` inside is aligned however the allocator feels.
+    buf: Vec<u64>,
+}
+
+impl PrinterSetup {
+    /// The driver's own defaults for this printer.
+    pub fn new(name: &str) -> Result<Self, String> {
+        let printer = OpenPrinter::new(name)?;
+        let device = wide(name);
+        let size = unsafe { DocumentPropertiesW(None, printer.0, PCWSTR(device.as_ptr()), None, None, 0) };
+        if size <= 0 {
+            return Err(format!("the printer \"{name}\" would not say what its settings are."));
+        }
+        let mut setup = PrinterSetup { name: name.to_string(), buf: vec![0u64; (size as usize).div_ceil(8)] };
+        let got = unsafe {
+            DocumentPropertiesW(None, printer.0, PCWSTR(device.as_ptr()), Some(setup.devmode_mut()), None, DM_OUT_BUFFER)
+        };
+        if got != IDOK {
+            return Err(format!("the printer \"{name}\" would not give its default settings."));
+        }
+        Ok(setup)
+    }
+
+    fn devmode(&self) -> *const DEVMODEW {
+        self.buf.as_ptr() as *const DEVMODEW
+    }
+    fn devmode_mut(&mut self) -> *mut DEVMODEW {
+        self.buf.as_mut_ptr() as *mut DEVMODEW
+    }
+
+    pub fn orientation(&self) -> Orientation {
+        let o = unsafe { (*self.devmode()).Anonymous1.Anonymous1.dmOrientation };
+        if o as u32 == DMORIENT_LANDSCAPE {
+            Orientation::Landscape
+        } else {
+            Orientation::Portrait
+        }
+    }
+
+    pub fn copies(&self) -> u32 {
+        unsafe { (*self.devmode()).Anonymous1.Anonymous1.dmCopies }.max(1) as u32
+    }
+
+    /// Set orientation, copies and collation, and let the driver validate and
+    /// merge them (`DM_IN_BUFFER | DM_OUT_BUFFER`). A field is only honoured
+    /// when its `dmFields` bit is set, which is why each is set here — a
+    /// driver that ignores one does so silently, so read the result back.
+    pub fn apply(&mut self, orientation: Orientation, copies: u32, collate: bool) -> Result<(), String> {
+        unsafe {
+            let dm = &mut *self.devmode_mut();
+            dm.dmFields = DEVMODE_FIELD_FLAGS(dm.dmFields.0 | DM_ORIENTATION.0 | DM_COPIES.0 | DM_COLLATE.0);
+            dm.Anonymous1.Anonymous1.dmOrientation = match orientation {
+                Orientation::Portrait => DMORIENT_PORTRAIT,
+                Orientation::Landscape => DMORIENT_LANDSCAPE,
+            } as i16;
+            dm.Anonymous1.Anonymous1.dmCopies = copies.clamp(1, 9999) as i16;
+            dm.dmCollate = if collate { DMCOLLATE_TRUE } else { DMCOLLATE_FALSE };
+        }
+        self.merge(None)?;
+        Ok(())
+    }
+
+    /// The driver's own settings dialog (duplex, tray, staple, paper size).
+    /// `Ok(true)` if the person pressed OK, `Ok(false)` if they cancelled.
+    pub fn show_properties(&mut self, owner: HWND) -> Result<bool, String> {
+        self.merge(Some(owner))
+    }
+
+    /// Run the settings through `DocumentPropertiesW`, input and output in
+    /// separate buffers (the same one for both is not something its contract
+    /// promises). With an owner, the driver's dialog is shown.
+    fn merge(&mut self, owner: Option<HWND>) -> Result<bool, String> {
+        let printer = OpenPrinter::new(&self.name)?;
+        let device = wide(&self.name);
+        let input = self.buf.clone();
+        let mode = DM_IN_BUFFER | DM_OUT_BUFFER | if owner.is_some() { DM_IN_PROMPT } else { 0 };
+        let got = unsafe {
+            DocumentPropertiesW(
+                owner,
+                printer.0,
+                PCWSTR(device.as_ptr()),
+                Some(self.devmode_mut()),
+                Some(input.as_ptr() as *const DEVMODEW),
+                mode,
+            )
+        };
+        if got < 0 {
+            // A failed merge may have left the output half-written: put it back.
+            self.buf = input;
+            return Err(format!("the printer \"{}\" refused those settings.", self.name));
+        }
+        if got != IDOK && owner.is_none() {
+            return Err(format!("the printer \"{}\" refused those settings.", self.name));
+        }
+        Ok(got == IDOK)
+    }
+}
+
+/// A printer DC for these settings. Drawing nothing to it is free — it is how
+/// the sheet's size is learned without printing.
+unsafe fn open_dc(setup: &PrinterSetup) -> Result<HDC, String> {
+    let device = wide(&setup.name);
+    // The driver name is ignored for printers (the documented advice), so null.
+    let hdc = CreateDCW(PCWSTR::null(), PCWSTR(device.as_ptr()), PCWSTR::null(), Some(setup.devmode()));
+    if hdc.is_invalid() {
+        return Err(format!("couldn't open the printer \"{}\".", setup.name));
+    }
+    Ok(hdc)
+}
+
+unsafe fn paper_of_dc(hdc: HDC) -> Paper {
+    let caps = |index| GetDeviceCaps(Some(hdc), index).max(0) as u32;
+    Paper {
+        physical: (caps(PHYSICALWIDTH), caps(PHYSICALHEIGHT)),
+        offset: (caps(PHYSICALOFFSETX), caps(PHYSICALOFFSETY)),
+        printable: (caps(HORZRES), caps(VERTRES)),
+        dpi: (GetDeviceCaps(Some(hdc), LOGPIXELSX).max(1) as f32, GetDeviceCaps(Some(hdc), LOGPIXELSY).max(1) as f32),
+    }
+}
+
+/// The sheet these settings print on. Asked again only when the printer,
+/// orientation or driver settings change — a network printer can be slow to
+/// answer.
+pub fn paper(setup: &PrinterSetup) -> Result<Paper, String> {
+    unsafe {
+        let hdc = open_dc(setup)?;
+        let paper = paper_of_dc(hdc);
+        let _ = DeleteDC(hdc);
+        if paper.printable.0 == 0 || paper.printable.1 == 0 {
+            return Err(format!("the printer \"{}\" reports no printable area.", setup.name));
+        }
+        Ok(paper)
+    }
+}
+
+/// The scale to render a page at for the printer: the wanted `scale`
 /// (pixels per point), or less when that would ask the engine for more than
 /// its safety ceiling (`MAX_DIMENSION_PX` / `MAX_PIXELS`) allows.
 ///
@@ -117,146 +315,45 @@ fn rgba_to_bgra(rgba: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Read a NUL-terminated UTF-16 string out of a `DEVNAMES`/`DEVMODEW`-style
-/// block at a given `u16` character offset from its own start.
-///
-/// **Reported from use**: `CreateDCW` failed outright ("couldn't open the
-/// chosen printer") on every real attempt. The copied slice stopped at
-/// `len` — the last *real* character, one short of the NUL terminator at
-/// index `len` — so the `Vec` handed to `PCWSTR` was never actually
-/// NUL-terminated itself. `PCWSTR` reads until it finds one regardless, so
-/// it kept reading straight past this `Vec`'s own allocation into whatever
-/// memory happened to follow it, handing `CreateDCW` a driver/device/port
-/// name corrupted by trailing garbage that could never match a real
-/// printer.
-unsafe fn wide_str_at(base: *const u16, offset_chars: usize) -> Vec<u16> {
-    let start = base.add(offset_chars);
-    let mut len = 0usize;
-    while *start.add(len) != 0 {
-        len += 1;
-    }
-    // `len + 1`: the NUL terminator itself, included rather than trimmed.
-    std::slice::from_raw_parts(start, len + 1).to_vec()
-}
-
-/// Show the native Print dialog, and — if the user actually prints rather
-/// than cancelling or only changing settings — send the chosen page range
-/// to the chosen printer.
-pub fn print_document(
-    owner: HWND,
-    session: &Session,
-    page_count: usize,
-    current_page: usize,
-    title: &str,
-) -> Result<(), String> {
-    if page_count == 0 {
-        return Err("nothing to print.".into());
-    }
-
-    const MAX_RANGES: u32 = 16;
-    let mut page_ranges = vec![PRINTPAGERANGE { nFromPage: 0, nToPage: 0 }; MAX_RANGES as usize];
-
-    let mut pdex = PRINTDLGEXW {
-        lStructSize: std::mem::size_of::<PRINTDLGEXW>() as u32,
-        hwndOwner: owner,
-        nMinPage: 1,
-        nMaxPage: page_count as u32,
-        nMaxPageRanges: MAX_RANGES,
-        lpPageRanges: page_ranges.as_mut_ptr(),
-        nCopies: 1,
-        Flags: PD_ALLPAGES | PD_USEDEVMODECOPIESANDCOLLATE,
-        nStartPage: START_PAGE_GENERAL,
-        ..Default::default()
-    };
-
-    unsafe { PrintDlgExW(&mut pdex) }.map_err(|e| format!("couldn't open the print dialog: {e}"))?;
-
-    if pdex.dwResultAction != PD_RESULT_PRINT {
-        // Cancelled, or only "Apply" was pressed (settings changed, no
-        // print requested) — neither is an error.
-        return Ok(());
-    }
-
-    let flags = pdex.Flags.0;
-    let ranges: Vec<(u32, u32)> =
-        page_ranges.iter().take(pdex.nPageRanges as usize).map(|r| (r.nFromPage, r.nToPage)).collect();
-    let pages = resolve_print_pages(flags, current_page, &ranges, page_count);
-    if pages.is_empty() {
-        return Err("no pages matched what was asked for.".into());
-    }
-
-    let result = unsafe { print_pages(&pdex, session, title, &pages) };
-
-    unsafe {
-        if !pdex.hDevMode.is_invalid() {
-            let _ = GlobalFree(Some(pdex.hDevMode));
-        }
-        if !pdex.hDevNames.is_invalid() {
-            let _ = GlobalFree(Some(pdex.hDevNames));
-        }
-    }
-
-    result
-}
-
-/// The part that actually touches the printer: a device context built from
-/// the dialog's own chosen printer/settings, one `StartDoc`/`EndDoc` job,
-/// one `StartPage`/`StretchDIBits`/`EndPage` per page.
-unsafe fn print_pages(
-    pdex: &PRINTDLGEXW,
+/// Send `pages` (zero-based) to the printer in one job, each placed by
+/// [`print_layout::place`]. `output` names a file for a print-to-file driver
+/// ("Microsoft Print to PDF") so it does not ask — what the end-to-end test
+/// uses; a real job passes `None`.
+pub fn print(
+    setup: &PrinterSetup,
     session: &Session,
     title: &str,
     pages: &[usize],
+    options: &Options,
+    output: Option<&Path>,
 ) -> Result<(), String> {
-    let devmode_lock = GlobalLock(pdex.hDevMode) as *const DEVMODEW;
-    if devmode_lock.is_null() {
-        return Err("couldn't read the chosen printer's settings.".into());
+    if pages.is_empty() {
+        return Err("no pages matched what was asked for.".into());
     }
-    let devnames_lock = GlobalLock(pdex.hDevNames) as *const u16;
-    if devnames_lock.is_null() {
-        GlobalUnlock(pdex.hDevMode).ok();
-        return Err("couldn't read the chosen printer's name.".into());
+    unsafe {
+        let hdc = open_dc(setup)?;
+        let outcome = print_to_dc(hdc, session, title, pages, options, output);
+        let _ = DeleteDC(hdc);
+        outcome
     }
-    let devnames = devnames_lock as *const DEVNAMES;
-
-    let driver = wide_str_at(devnames_lock, (*devnames).wDriverOffset as usize);
-    let device = wide_str_at(devnames_lock, (*devnames).wDeviceOffset as usize);
-    let port = wide_str_at(devnames_lock, (*devnames).wOutputOffset as usize);
-
-    let hdc = CreateDCW(
-        PCWSTR(driver.as_ptr()),
-        PCWSTR(device.as_ptr()),
-        PCWSTR(port.as_ptr()),
-        Some(devmode_lock),
-    );
-    GlobalUnlock(pdex.hDevMode).ok();
-    GlobalUnlock(pdex.hDevNames).ok();
-
-    if hdc.is_invalid() {
-        return Err("couldn't open the chosen printer.".into());
-    }
-
-    let outcome = print_to_dc(hdc, session, title, pages);
-    let _ = DeleteDC(hdc);
-    outcome
 }
 
-unsafe fn print_to_dc(hdc: windows::Win32::Graphics::Gdi::HDC, session: &Session, title: &str, pages: &[usize]) -> Result<(), String> {
-    let dpi_x = GetDeviceCaps(Some(hdc), LOGPIXELSX).max(1) as f32;
-    let dpi_y = GetDeviceCaps(Some(hdc), LOGPIXELSY).max(1) as f32;
-    // `HORZRES`/`VERTRES` are already the *printable* area in device
-    // pixels, and (0, 0) on a printer DC is already that area's own
-    // top-left — not the full physical paper's, which is what
-    // `PHYSICALWIDTH`/`PHYSICALOFFSETX` and friends describe instead.
-    // Fitting within these two needs neither.
-    let printable_w = GetDeviceCaps(Some(hdc), HORZRES).max(1);
-    let printable_h = GetDeviceCaps(Some(hdc), VERTRES).max(1);
+unsafe fn print_to_dc(
+    hdc: HDC,
+    session: &Session,
+    title: &str,
+    pages: &[usize],
+    options: &Options,
+    output: Option<&Path>,
+) -> Result<(), String> {
+    let paper = paper_of_dc(hdc);
 
-    let mut doc_name: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+    let doc_name = wide(title);
+    let output_name = output.map(|p| wide(&p.to_string_lossy()));
     let docinfo = DOCINFOW {
         cbSize: std::mem::size_of::<DOCINFOW>() as i32,
-        lpszDocName: PCWSTR(doc_name.as_mut_ptr()),
-        lpszOutput: PCWSTR::null(),
+        lpszDocName: PCWSTR(doc_name.as_ptr()),
+        lpszOutput: output_name.as_ref().map_or(PCWSTR::null(), |w| PCWSTR(w.as_ptr())),
         lpszDatatype: PCWSTR::null(),
         fwType: 0,
     };
@@ -265,27 +362,28 @@ unsafe fn print_to_dc(hdc: windows::Win32::Graphics::Gdi::HDC, session: &Session
     }
 
     for &page in pages {
-        let scale = dpi_x.max(dpi_y) / 72.0;
-        // The printer's own full native DPI, regardless of page size — fine
-        // for a normal sheet, but an oversized one (an A1/A0 architectural
-        // drawing) at 300+ DPI can ask for more pixels than the engine's own
-        // safety ceiling allows (`MAX_DIMENSION_PX`/`MAX_PIXELS`, guarding
-        // against an OOM-sized buffer). That request was made once, at this
-        // one scale, with no fallback — so the whole page silently failed to
-        // print instead of printing a little softer. **Reported from use**
-        // on a real 20-page architectural submission. Clamped here the same
-        // way the on-screen path already clamps before ever asking pdf_core
-        // to rasterise, rather than finding out from a render error.
-        let scale = match session.page_size(page) {
-            Ok(size) => render_scale(scale, size.width_pt, size.height_pt),
-            Err(_) => scale,
-        };
-        let raster = session
-            .render_page_rotated(page, scale, pdf_core::document::Rotation::None)
-            .map_err(|e| {
-                let _ = AbortDoc(hdc);
-                format!("couldn't render page {} for printing: {e}", page + 1)
-            })?;
+        let size = session.page_size(page).map_err(|e| {
+            let _ = AbortDoc(hdc);
+            format!("couldn't read page {}: {e}", page + 1)
+        })?;
+        let placement = print_layout::place(&paper, (size.width_pt, size.height_pt), options);
+        if placement.dest.w <= 0 || placement.dest.h <= 0 {
+            let _ = AbortDoc(hdc);
+            return Err(format!("page {} has no size to print.", page + 1));
+        }
+
+        // Render at the size the page lands at, so the blit below is close to
+        // 1:1 — clamped to what the engine allows (an A0 drawing at 300+ dpi
+        // asks for more pixels than its safety ceiling, and prints a little
+        // softer rather than not at all; **reported from use** on a real
+        // 20-page architectural submission).
+        let turned = matches!(placement.rotation, pdf_core::document::Rotation::Clockwise90);
+        let (page_w, page_h) = if turned { (size.height_pt, size.width_pt) } else { (size.width_pt, size.height_pt) };
+        let scale = render_scale(placement.dest.w as f32 / page_w, page_w, page_h);
+        let raster = session.render_page_rotated(page, scale, placement.rotation).map_err(|e| {
+            let _ = AbortDoc(hdc);
+            format!("couldn't render page {} for printing: {e}", page + 1)
+        })?;
 
         let bgra = rgba_to_bgra(&raster.pixels);
         let bitmap_info = BITMAPINFO {
@@ -307,29 +405,19 @@ unsafe fn print_to_dc(hdc: windows::Win32::Graphics::Gdi::HDC, session: &Session
             let _ = AbortDoc(hdc);
             return Err(format!("the printer refused to start page {}.", page + 1));
         }
-        // HALFTONE gives a better-quality downscale than the GDI default
-        // when the printer-DPI render still needs to be fit to the
-        // printable area — but it requires this exact companion call right
-        // after, or output shows visible tiling artefacts (a documented,
-        // easy-to-miss Windows requirement).
+        // HALFTONE gives a better-quality downscale than the GDI default —
+        // but it requires this exact companion call right after, or output
+        // shows visible tiling artefacts (a documented, easy-to-miss Windows
+        // requirement).
         SetStretchBltMode(hdc, HALFTONE);
         let _ = SetBrushOrgEx(hdc, 0, 0, None);
 
-        // Fit the printer-DPI render to the printable area, preserving
-        // aspect ratio — the two should already match closely (the page
-        // was rendered at this printer's own DPI specifically) but a
-        // rounding difference between the page's own point size and the
-        // printer's reported resolution is still possible.
-        let scale_to_fit = (printable_w as f32 / raster.width as f32).min(printable_h as f32 / raster.height as f32);
-        let dest_w = (raster.width as f32 * scale_to_fit) as i32;
-        let dest_h = (raster.height as f32 * scale_to_fit) as i32;
-
         let blitted = StretchDIBits(
             hdc,
-            0,
-            0,
-            dest_w,
-            dest_h,
+            placement.dest.x,
+            placement.dest.y,
+            placement.dest.w,
+            placement.dest.h,
             0,
             0,
             raster.width as i32,
@@ -359,74 +447,6 @@ unsafe fn print_to_dc(hdc: windows::Win32::Graphics::Gdi::HDC, session: &Session
 mod tests {
     use super::*;
 
-    /// **Reported from use**: every real print attempt failed at `CreateDCW`
-    /// ("couldn't open the chosen printer"). Traced to this function handing
-    /// back a slice that stopped one character short of the NUL terminator
-    /// it had just found — `PCWSTR` reads until it sees one regardless, so
-    /// it kept reading past the end of the returned `Vec`'s own allocation
-    /// into whatever memory happened to follow, corrupting the driver and
-    /// device name `CreateDCW` was given.
-    #[test]
-    fn wide_str_at_includes_its_own_nul_terminator() {
-        // "AB" followed by its NUL, followed by a sentinel value that must
-        // never be reached — if it is, the function read short and this
-        // assertion still accidentally passes, so the real proof is the
-        // *length*, not just the content.
-        let buf: [u16; 4] = [b'A' as u16, b'B' as u16, 0, 0xFFFF];
-        let found = unsafe { wide_str_at(buf.as_ptr(), 0) };
-        assert_eq!(found, vec![b'A' as u16, b'B' as u16, 0], "must include the NUL, not stop one short of it");
-        assert_eq!(*found.last().unwrap(), 0, "the last element must be the terminator itself");
-    }
-
-    #[test]
-    fn wide_str_at_reads_from_the_given_offset() {
-        let buf: [u16; 5] = [0xDEAD, b'X' as u16, b'Y' as u16, 0, 0xFFFF];
-        let found = unsafe { wide_str_at(buf.as_ptr(), 1) };
-        assert_eq!(found, vec![b'X' as u16, b'Y' as u16, 0]);
-    }
-
-    #[test]
-    fn all_pages_flag_prints_everything() {
-        assert_eq!(resolve_print_pages(PD_ALLPAGES.0, 0, &[], 5), vec![0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn current_page_flag_prints_just_that_one() {
-        assert_eq!(resolve_print_pages(PD_CURRENTPAGE.0, 2, &[], 5), vec![2]);
-    }
-
-    #[test]
-    fn current_page_flag_clamps_to_the_last_real_page() {
-        assert_eq!(resolve_print_pages(PD_CURRENTPAGE.0, 99, &[], 5), vec![4]);
-    }
-
-    #[test]
-    fn a_single_range_is_one_based_in_zero_based_out() {
-        assert_eq!(resolve_print_pages(PD_PAGENUMS.0, 0, &[(2, 4)], 10), vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn several_ranges_are_merged_and_deduplicated() {
-        assert_eq!(resolve_print_pages(PD_PAGENUMS.0, 0, &[(1, 3), (2, 5)], 10), vec![0, 1, 2, 3, 4]);
-    }
-
-    #[test]
-    fn a_range_past_the_end_is_clamped_rather_than_producing_nothing() {
-        assert_eq!(resolve_print_pages(PD_PAGENUMS.0, 0, &[(3, 999)], 5), vec![2, 3, 4]);
-    }
-
-    #[test]
-    fn pagenums_flag_with_no_ranges_falls_back_to_everything() {
-        // Defensive: a dialog result that claims a page-number selection
-        // but supplies no actual range should not silently print nothing.
-        assert_eq!(resolve_print_pages(PD_PAGENUMS.0, 0, &[], 3), vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn zero_pages_prints_nothing() {
-        assert_eq!(resolve_print_pages(PD_ALLPAGES.0, 0, &[], 0), Vec::<usize>::new());
-    }
-
     /// A sheet that is allowed is asked for at a size the engine accepts,
     /// whatever the printer's resolution: the rendered pixel counts (rounded
     /// up, as the engine does) stay inside both of its limits.
@@ -452,5 +472,40 @@ mod tests {
     fn rgba_to_bgra_swaps_colour_channels_and_keeps_alpha() {
         let rgba = [10u8, 20, 30, 40, 50, 60, 70, 80];
         assert_eq!(rgba_to_bgra(&rgba), vec![30, 20, 10, 40, 70, 60, 50, 80]);
+    }
+
+    /// The default printer is listed first and flagged — the window opens on it.
+    #[test]
+    fn the_default_printer_is_listed_first_and_flagged() {
+        let printers = list_printers().expect("the spooler answers");
+        if printers.is_empty() {
+            return; // a machine with no printers has nothing to check
+        }
+        assert_eq!(printers.iter().filter(|p| p.is_default).count(), 1, "{printers:?}");
+        assert!(printers[0].is_default, "{printers:?}");
+        let mut names: Vec<_> = printers.iter().map(|p| &p.name).collect();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "a printer listed twice");
+    }
+
+    /// Orientation and copies must actually *take*: a wrong `dmFields` bit
+    /// makes a driver ignore a setting without a word, so read it back.
+    #[test]
+    fn orientation_and_copies_survive_the_drivers_own_merge() {
+        let Some(printer) = list_printers().ok().and_then(|p| p.into_iter().find(|p| p.name == "Microsoft Print to PDF")) else {
+            return; // the PDF printer is a Windows component, but skip rather than fail without it
+        };
+        let mut setup = PrinterSetup::new(&printer.name).expect("default settings");
+        setup.apply(Orientation::Landscape, 1, false).expect("merge landscape");
+        assert_eq!(setup.orientation(), Orientation::Landscape);
+        let landscape = paper(&setup).expect("paper");
+        setup.apply(Orientation::Portrait, 1, false).expect("merge portrait");
+        assert_eq!(setup.orientation(), Orientation::Portrait);
+        let portrait = paper(&setup).expect("paper");
+        // The sheet itself turned, not just a flag.
+        assert!(landscape.printable.0 > landscape.printable.1, "{landscape:?}");
+        assert!(portrait.printable.0 < portrait.printable.1, "{portrait:?}");
+        assert!(portrait.printable.0 <= portrait.physical.0 && portrait.printable.1 <= portrait.physical.1);
     }
 }

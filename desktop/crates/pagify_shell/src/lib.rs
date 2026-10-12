@@ -28,6 +28,7 @@ pub mod organize;
 pub mod page_space;
 pub mod paragraph_lines;
 pub mod predefined;
+pub mod print_layout;
 pub mod pdfium;
 pub mod reader;
 pub mod recent;

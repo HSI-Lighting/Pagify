@@ -33,6 +33,8 @@ mod tool_state_gap_tests;
 #[cfg(test)]
 mod tool_transition_tests;
 #[cfg(target_os = "windows")]
+mod print_window;
+#[cfg(target_os = "windows")]
 mod print_windows;
 mod ribbon;
 mod view;
@@ -528,6 +530,9 @@ struct PanelsState {
     pending_link: Option<PendingLink>,
     /// The Extract dialog, while it is open on this tab.
     extract_ask: Option<ExtractAsk>,
+    /// The Print window, while it is open on this tab.
+    #[cfg(target_os = "windows")]
+    print_ask: Option<print_window::PrintAsk>,
     /// A drawn Article Box rectangle, waiting for its title.
     pending_article_box: Option<PendingArticleBox>,
     /// The Bookmarks panel, while it is open.
@@ -977,7 +982,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
+            panels: PanelsState { pending_link: None, extract_ask: None, #[cfg(target_os = "windows")] print_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -2875,6 +2880,8 @@ impl PagifyApp {
         self.draw_bookmark_panel(&ctx);
         self.draw_link_prompt(&ctx);
         self.draw_extract_dialog(&ctx);
+        #[cfg(target_os = "windows")]
+        self.draw_print_window(&ctx);
         self.draw_article_box_prompt(&ctx);
 
         // The close button is how people actually quit, and it bypasses every
@@ -3019,7 +3026,13 @@ impl PagifyApp {
             self.act(Verb::Save);
         }
         if keys.print {
-            self.print_current_document(frame);
+            #[cfg(target_os = "windows")]
+            self.open_print_window(frame);
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = &frame;
+                self.say_info("printing isn't available on this platform yet.");
+            }
         }
         if keys.undo {
             self.undo_redo(true);
@@ -9112,58 +9125,6 @@ impl PagifyApp {
         match dialog.pick_file() {
             Some(path) => self.open(&path.to_string_lossy()),
             None => self.say_info("nothing chosen."),
-        }
-    }
-
-    /// Ctrl+P — the native Print dialog on Windows. Not yet available on
-    /// the other two platforms this builds for; see `print_windows`'s own
-    /// doc for why printing specifically needs real OS integration rather
-    /// than just more rendering code, which is the one thing this app
-    /// already does the same way everywhere.
-    fn print_current_document(&mut self, frame: &mut eframe::Frame) {
-        let Some(doc) = &self.tab_mut().doc else {
-            self.say_error("nothing open.");
-            return;
-        };
-        let page_count = doc.page_count;
-        let title = doc
-            .session
-            .path()
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Pagify document".to_string());
-        #[cfg(target_os = "windows")]
-        let session = doc.session.clone();
-        // `doc`'s own borrow ends here — nothing below reads from it again.
-
-        #[cfg(target_os = "windows")]
-        {
-            use raw_window_handle::HasWindowHandle as _;
-            let current_page = self.tab_mut().view_state.page;
-            let hwnd = match frame.window_handle().map(|h| h.as_raw()) {
-                Ok(raw_window_handle::RawWindowHandle::Win32(win32)) => {
-                    windows::Win32::Foundation::HWND(win32.hwnd.get() as *mut std::ffi::c_void)
-                }
-                Ok(_) => {
-                    self.say_error("this window has no HWND to print from.");
-                    return;
-                }
-                Err(e) => {
-                    self.say_error(format!("couldn't find this window to print from: {e}"));
-                    return;
-                }
-            };
-            // `frame` is the first window's. With several windows the one to
-            // print from is the one the person is using — see `hub`.
-            let hwnd = hub::active_window().unwrap_or(hwnd);
-            if let Err(e) = print_windows::print_document(hwnd, &session, page_count, current_page, &title) {
-                self.say_error(e);
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = (frame, page_count, title);
-            self.say_info("printing isn't available on this platform yet.");
         }
     }
 

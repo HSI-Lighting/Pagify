@@ -34,6 +34,9 @@ windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_Controls_Dialogs",
     "Win32_Graphics_Gdi",
+    # `EnumPrintersW` / `OpenPrinterW` / `DocumentPropertiesW` — the printer
+    # list and the driver's own settings dialog for the print window.
+    "Win32_Graphics_Printing",
     # `StartDocW`/`StartPage`/`EndPage`/`EndDoc`/`AbortDoc`/`DOCINFOW` — the
     # actual GDI print-job functions `wingdi.h` documents — live under this
     # crate's own `Storage::Xps` path, not `Graphics::Gdi`, despite what
