@@ -674,6 +674,13 @@ pub trait Document: Send + Sync {
         Ok(None)
     }
 
+    /// Every form widget in the document, page by page, in page order — the
+    /// same widget appearing on two pages is two entries, as a reader walks
+    /// them.
+    fn form_fields(&self) -> Result<Vec<FormFieldInfo>> {
+        Ok(Vec::new())
+    }
+
     /// The bytes of the font one text run is drawn in, if it can be had.
     ///
     /// **What Obfuscate needs and [`crate::crypto::tweak::coverage`] cannot
@@ -2464,6 +2471,35 @@ pub struct DecodedImage {
     pub height: u32,
     /// `width * height * 4` bytes, RGBA.
     pub rgba: Vec<u8>,
+}
+
+/// What kind of interactive form field a widget is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormFieldKind {
+    Text,
+    Checkbox,
+    /// One of a group: several widgets share a name, and the checked one
+    /// carries the group's value.
+    Radio,
+    Combo,
+    List,
+    Button,
+    Signature,
+    Unknown,
+}
+
+/// One form widget, as the reader walks it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormFieldInfo {
+    /// The field's name — what a form's own tooling addresses it by. Radio
+    /// widgets of one group all carry the group's name.
+    pub name: String,
+    pub kind: FormFieldKind,
+    /// What the file holds for it. For text and choice fields, the value;
+    /// for checkbox and radio widgets, the checked state's own name
+    /// (`Yes`, `slow`) when checked and `None` when not; `None` for buttons
+    /// and signatures, which hold no value of their own.
+    pub value: Option<String>,
 }
 
 /// What kind of thing is drawn on a page.

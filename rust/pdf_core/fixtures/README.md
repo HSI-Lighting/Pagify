@@ -435,3 +435,19 @@ openssl pkcs12 -export -inkey leaf.key -in leaf.crt -passout pass:pagify \
 The private keys are not committed; the roots cannot issue anything more.
 That is the point of a fixture root — and the reason HSI's real root will be
 minted by the issuing tool on an offline machine, not by these commands.
+
+## form-fields.pdf
+
+One 612 × 792 pt page carrying an AcroForm with five fields in page order:
+two text fields (`name` holding "Ada Lovelace", `email` empty), a checked
+checkbox (`agree`), a radio group (`speed`, one of its two widgets checked)
+and a combo box (`colour` holding "Green").
+
+**The check and radio widgets carry minimal appearance streams on purpose:**
+PDFium reads a widget's state through its `/AP /N` dictionary, and a widget
+without one reads every state as `Off` no matter what `/V` says — found by
+building this fixture without them first. Nothing else is drawn: the fields
+have no visible text or boxes, because this fixture is about what they
+*hold*, which is what the engine's form reader walks.
+
+Rebuild it with `tools/make_form_fields_fixture.py fixtures/form-fields.pdf`.

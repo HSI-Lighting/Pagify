@@ -46,6 +46,7 @@ mod markup;
 mod runs;
 mod pages;
 mod annotate;
+mod forms;
 mod save;
 
 use std::path::{Path, PathBuf};

@@ -8,7 +8,8 @@ use std::os::raw::{c_char, c_int, c_uint, c_ulong};
 use std::sync::OnceLock;
 
 use pdfium_render::prelude::{
-    PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfPage, PdfPagePaperSize,
+    PdfBitmap, PdfBitmapFormat, PdfColor, PdfDocument, PdfFormFieldCommon, PdfFormFieldType,
+    PdfPage, PdfPagePaperSize,
     PdfPageObjectCommon, PdfPageObjectType, PdfPageObjectsCommon, PdfPageRenderRotation, PdfPoints,
     PdfRenderConfig, Pdfium, PdfiumError, PdfiumLibraryBindingsAccessor,
     FPDFANNOT_COLORTYPE, FPDF_ANNOTATION, FPDF_ANNOTATION_SUBTYPE, FPDF_DOCUMENT, FPDF_FILEWRITE,
@@ -23,7 +24,7 @@ use pdfium_render::prelude::{
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
-    Annotation, Color, DecodedImage, Document, DocumentMut, Glyph, IndexedAnnotation, InternalLink, Page, PageCharacters,
+    Annotation, Color, DecodedImage, Document, DocumentMut, FormFieldInfo, FormFieldKind, Glyph, IndexedAnnotation, InternalLink, Page, PageCharacters,
     PageClassification, PageSize, PageTextKind, RecognisedWord, TEXT_LAYER_ID,
     Point, Rect, RegionRequest, RemovedPage, RenderRequest, Rotation, Ruling, TextSegment,
     Redaction, RedactionReport, Uncleared,
@@ -1159,6 +1160,75 @@ impl Document for PdfiumDocument {
             _ => return Ok(None),
         };
         Ok(Some(DecodedImage { width: meta.width, height: meta.height, rgba }))
+    }
+
+    /// Every form widget in the document, page by page — through
+    /// pdfium-render's own form plumbing (`PdfDocument::form`), which is
+    /// what gives the widget annotations a form-fill handle to be read
+    /// with; the raw `FPDFAnnot_GetFormField*` calls need one, and this
+    /// engine has no reason to grow its own.
+    fn form_fields(&self) -> Result<Vec<FormFieldInfo>> {
+        if self.document.form().is_none() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for index in 0..self.document.pages().len() {
+            let page = self
+                .document
+                .pages()
+                .get(index)
+                .map_err(|e| PdfError::InvalidArgument(format!("{e}")))?;
+            for annotation in page.annotations().iter() {
+                let Some(field) = annotation.as_form_field() else {
+                    continue;
+                };
+                let (kind, name, value) = match field.field_type() {
+                    PdfFormFieldType::Text => {
+                        let field = field.as_text_field().expect("type says text");
+                        (FormFieldKind::Text, field.name(), field.value())
+                    }
+                    PdfFormFieldType::Checkbox => {
+                        let field = field.as_checkbox_field().expect("type says checkbox");
+                        let checked = field.is_checked().unwrap_or(false);
+                        let value = checked
+                            .then(|| field.group_value().unwrap_or_else(|| "on".into()));
+                        (FormFieldKind::Checkbox, field.name(), value)
+                    }
+                    PdfFormFieldType::RadioButton => {
+                        let field =
+                            field.as_radio_button_field().expect("type says radio button");
+                        let checked = field.is_checked().unwrap_or(false);
+                        let value = checked
+                            .then(|| field.group_value().unwrap_or_else(|| "on".into()));
+                        (FormFieldKind::Radio, field.name(), value)
+                    }
+                    PdfFormFieldType::ComboBox => {
+                        let field = field.as_combo_box_field().expect("type says combo box");
+                        (FormFieldKind::Combo, field.name(), field.value())
+                    }
+                    PdfFormFieldType::ListBox => {
+                        let field = field.as_list_box_field().expect("type says list box");
+                        (FormFieldKind::List, field.name(), field.value())
+                    }
+                    PdfFormFieldType::PushButton => {
+                        let field =
+                            field.as_push_button_field().expect("type says push button");
+                        (FormFieldKind::Button, field.name(), None)
+                    }
+                    PdfFormFieldType::Signature => {
+                        let field = field.as_signature_field().expect("type says signature");
+                        (FormFieldKind::Signature, field.name(), None)
+                    }
+                    PdfFormFieldType::Unknown => (FormFieldKind::Unknown, None, None),
+                };
+                out.push(FormFieldInfo {
+                    name: name.unwrap_or_default(),
+                    kind,
+                    value,
+                });
+            }
+        }
+        Ok(out)
     }
 
     fn run_font_data(&self, page_index: usize, object: usize) -> Result<Option<Vec<u8>>> {
