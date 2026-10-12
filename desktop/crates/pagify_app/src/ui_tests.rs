@@ -5235,3 +5235,19 @@ fn calculator_opens_and_closes() {
     h.run_steps(1);
     assert!(h.state().tab().panels.calculator.is_none(), "the calculator did not close");
 }
+
+/// The Comment tab's Manage Comments: the panel opens with the document's
+/// annotations listed — none, here — draws them, and closes again. The
+/// listing and removal themselves are the shell integration test's.
+#[test]
+fn managecomments_opens_and_closes_the_comments_panel() {
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("managecomments");
+    h.run_steps(2);
+    let panel = h.state().tab().panels.comments.as_ref().expect("the panel did not open");
+    assert!(panel.rows.is_empty(), "the fixture starts with no comments");
+
+    h.state_mut().submit("managecomments");
+    h.run_steps(1);
+    assert!(h.state().tab().panels.comments.is_none(), "the panel did not close");
+}

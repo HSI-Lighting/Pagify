@@ -658,6 +658,67 @@ impl crate::PagifyApp {
         self.tab_mut().panels.calculator = Some(calc);
     }
 
+    /// The Comments panel — the Comment tab's Manage Comments. Lists every
+    /// annotation in the document; `Go` jumps to its page, `✕` takes it off.
+    ///
+    /// The rows are `pagify_shell::comments`'s, read once on opening and
+    /// re-read after every removal (every index after the removed one
+    /// changes); nothing here walks the pages per frame.
+    pub(crate) fn draw_comments(&mut self, ctx: &egui::Context) {
+        let Some(panel) = self.tab_mut().panels.comments.take() else { return };
+        let mut open = true;
+        let mut close = false;
+        let mut go_to: Option<usize> = None;
+        let mut remove: Option<(usize, usize)> = None;
+
+        egui::Window::new("Comments")
+            .id(egui::Id::new("comments-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(180.0, 140.0))
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                if panel.rows.is_empty() {
+                    ui.label("no comments in this document.");
+                }
+                egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                    for row in &panel.rows {
+                        ui.horizontal(|ui| {
+                            if ui.button("Go").clicked() {
+                                go_to = Some(row.page);
+                            }
+                            let text = if row.detail.is_empty() {
+                                format!("page {} — {}", row.page + 1, row.kind)
+                            } else {
+                                format!("page {} — {}: {}", row.page + 1, row.kind, row.detail)
+                            };
+                            ui.label(text);
+                            if ui.button("✕").on_hover_text("remove this one").clicked() {
+                                remove = Some((row.page, row.index));
+                            }
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Closed: the taken rows are dropped with it.
+        } else {
+            self.tab_mut().panels.comments = Some(panel);
+        }
+        if let Some(page) = go_to {
+            self.submit(&format!("page {}", page + 1));
+        }
+        if let Some((page, index)) = remove {
+            self.remove_annotation(page, index);
+        }
+    }
+
     pub(crate) fn draw_bookmark_panel(&mut self, ctx: &egui::Context) {
         let Some(panel) = self.tab_mut().panels.bookmark_panel.take() else { return };
         let mut open = true;

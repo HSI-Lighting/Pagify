@@ -91,6 +91,8 @@ pub enum Effect {
     ToggleViewSettings,
     /// Open or close the Accounting Calculator.
     ToggleCalculator,
+    /// Open or close the Comments panel.
+    ToggleCommentsPanel,
     /// Make a new document out of nothing, one sheet of this size and ruling.
     BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
     /// Merge PDFs into one new document; a folder to read them from, or
@@ -325,6 +327,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::FromFiles { .. }
         | Verb::ViewSetting
         | Verb::Calculator
+        | Verb::ManageComments
         | Verb::BlankDoc { .. }
         | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
@@ -449,6 +452,7 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::ExportAllImages { dest } => vec![Effect::ExportPictures { dest: dest.clone() }],
         Verb::ViewSetting => vec![Effect::ToggleViewSettings],
         Verb::Calculator => vec![Effect::ToggleCalculator],
+        Verb::ManageComments => vec![Effect::ToggleCommentsPanel],
         // A new document is allowed with nothing open — that is the point of
         // it.
         Verb::BlankDoc { width_pt, height_pt, ruling } => vec![Effect::BlankDocument {
@@ -751,6 +755,7 @@ mod tests {
             ),
             (Verb::ViewSetting, vec![Effect::ToggleViewSettings]),
             (Verb::Calculator, vec![Effect::ToggleCalculator]),
+            (Verb::ManageComments, vec![Effect::ToggleCommentsPanel]),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");

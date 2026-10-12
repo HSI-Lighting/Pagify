@@ -597,6 +597,9 @@ pub enum Verb {
     /// Open or close the Accounting Calculator — the Comment tab's little
     /// adding machine.
     Calculator,
+    /// Open or close the Comments panel — the Comment tab's Manage Comments:
+    /// every annotation in the document, jump to it or take it off.
+    ManageComments,
     /// Make a new document out of picture files — `fromfiles` or
     /// `fromfiles <folder>`, which takes every picture in the folder in name
     /// order. Bare, the app opens a picker.
@@ -866,7 +869,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("inserttext", "the annotation phase", "the Insert Text tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
     ("keeptool", "the annotation phase", "the Keep Tool Selected tool"),
-    ("managecomments", "the annotation phase", "the Manage Comments tool"),
     ("markredact", "the protection phase", "the Mark for Redaction tool"),
     ("media", "the editing phase", "the Audio & Video tool"),
     ("onlineform", "the signing phase", "the Create Online Form tool"),
@@ -1022,7 +1024,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "articlebox", "weblinks", "jointext", "reflow",
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
-        "exportimages", "fromfiles", "viewsetting", "calculator",
+        "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1739,6 +1741,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         }),
         "viewsetting" => Ok(Verb::ViewSetting),
         "calculator" => Ok(Verb::Calculator),
+        "managecomments" => Ok(Verb::ManageComments),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2168,6 +2171,20 @@ mod calculator_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "calculator"),
             "`calculator` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod manage_comments_tests {
+    use super::*;
+
+    #[test]
+    fn managecomments_parses_and_is_not_planned() {
+        assert_eq!(parse("managecomments"), Some(Ok(Verb::ManageComments)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "managecomments"),
+            "`managecomments` is still in the planned table"
         );
     }
 }

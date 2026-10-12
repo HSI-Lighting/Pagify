@@ -109,6 +109,7 @@ impl crate::PagifyApp {
             | Effect::BuildPdfFromPictures { .. }
             | Effect::ToggleViewSettings
             | Effect::ToggleCalculator
+            | Effect::ToggleCommentsPanel
             | Effect::Say(_)
             | Effect::SayError(_)
             | Effect::CheckUpdate => self.apply_document(effect),
@@ -260,6 +261,7 @@ impl crate::PagifyApp {
             },
             Effect::ToggleViewSettings => self.toggle_view_settings(),
             Effect::ToggleCalculator => self.toggle_calculator(),
+            Effect::ToggleCommentsPanel => self.toggle_comments_panel(),
             Effect::Say(text) => self.say_info(text),
             Effect::SayError(text) => self.say_error(text),
             Effect::CheckUpdate => self.spawn_update_check(),

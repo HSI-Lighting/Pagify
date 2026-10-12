@@ -542,6 +542,14 @@ struct PanelsState {
     view_settings: bool,
     /// The Accounting Calculator, while its panel is open on this tab.
     calculator: Option<pagify_shell::calculator::Calculator>,
+    /// The Comments panel's rows, while it is open on this tab. Read once on
+    /// opening and re-read after every removal — never rebuilt per frame.
+    comments: Option<CommentsPanel>,
+}
+
+/// The Comments panel's rows, as `pagify_shell::comments` lists them.
+struct CommentsPanel {
+    rows: Vec<pagify_shell::comments::Comment>,
 }
 
 /// The rail/Organize selection and drag: which page the rail follows, which
@@ -993,7 +1001,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, },
+            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -2889,6 +2897,7 @@ impl PagifyApp {
         self.draw_find_replace(&ctx);
         self.draw_view_settings(&ctx);
         self.draw_calculator(&ctx);
+        self.draw_comments(&ctx);
         self.draw_spell_check(&ctx);
         self.draw_bookmark_panel(&ctx);
         self.draw_link_prompt(&ctx);
@@ -8414,6 +8423,50 @@ impl PagifyApp {
             Some(_) => None,
             None => Some(pagify_shell::calculator::Calculator::default()),
         };
+    }
+
+    /// Open or close the Comments panel — the Comment tab's Manage Comments.
+    /// The list is read once on opening and re-read after every removal; a
+    /// big document must not re-walk every page sixty times a second.
+    fn toggle_comments_panel(&mut self) {
+        if self.tab().panels.comments.is_some() {
+            self.tab_mut().panels.comments = None;
+            return;
+        }
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        match pagify_shell::comments::comments(&session) {
+            Ok(rows) => self.tab_mut().panels.comments = Some(CommentsPanel { rows }),
+            Err(e) => self.say_error(format!("managecomments: {e}")),
+        }
+    }
+
+    /// Take one annotation off, by the engine's own page and index — the
+    /// Comments panel's ✕. Re-lists the panel afterwards, because every
+    /// index after the removed one has changed.
+    fn remove_annotation(&mut self, page: usize, index: usize) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        match session.execute(pdf_core::command::Command::RemoveAnnotation {
+            page_index: page,
+            index,
+        }) {
+            Ok(_) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                if let Ok(rows) = pagify_shell::comments::comments(&session) {
+                    if let Some(panel) = self.tab_mut().panels.comments.as_mut() {
+                        panel.rows = rows;
+                    }
+                }
+            }
+            Err(e) => self.say_error(format!("remove: {e}")),
+        }
     }
 
     /// ⌘C on what Edit Object has picked.
