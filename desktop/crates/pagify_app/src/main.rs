@@ -14195,6 +14195,51 @@ impl PagifyApp {
         self.clipboard_state.clipboard_pdf_requested = false;
     }
 
+    /// Open a copy of a file as untitled — the Convert tab's From Template.
+    ///
+    /// The copy is the whole of it: the file is copied to the temp folder
+    /// and opened through the ordinary open path, so everything that edits
+    /// from there (save included) lands on the copy, and the template itself
+    /// cannot be touched by accident.
+    fn open_template(&mut self, source: &std::path::Path) {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let path = std::env::temp_dir()
+            .join(format!("pagify-template-{}-{stamp}.pdf", std::process::id()));
+        match std::fs::copy(source, &path) {
+            Ok(_) => {
+                self.open(&path.to_string_lossy());
+                let opened = self
+                    .tab()
+                    .doc
+                    .as_ref()
+                    .is_some_and(|d| d.session.path() == path.as_path());
+                if opened {
+                    self.say_info(format!(
+                        "opened a copy of {} as untitled — `saveas <name.pdf>` keeps it, \
+                         and the original is untouched.",
+                        short(&source.to_string_lossy())
+                    ));
+                }
+            }
+            Err(e) => self.say_error(format!("fromtemplate: could not read {}: {e}", source.display())),
+        }
+    }
+
+    /// The Convert tab's From Template button, bare: choose the file, then
+    /// open a copy of it.
+    fn from_template_dialog(&mut self) {
+        let dialog = rfd::FileDialog::new()
+            .set_title("Choose a PDF to start from")
+            .add_filter("PDF", &["pdf"]);
+        match dialog.pick_file() {
+            Some(path) => self.open_template(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
     /// The `fromclipboard` wait: ask the platform once, then take the text
     /// when it arrives. Called from `handle_input`, the one place with both
     /// the context and the paste events; split out of it so that function

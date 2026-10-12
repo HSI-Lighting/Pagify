@@ -441,6 +441,9 @@ pub enum Verb {
     /// Make a document out of the clipboard's text — the Convert tab's From
     /// Clipboard. The platform hands the text back as a paste event.
     FromClipboard,
+    /// Open a copy of a file as untitled, so the original is untouched —
+    /// `fromtemplate <file.pdf>`. Bare, the app asks for the file.
+    FromTemplate { source: Option<PathBuf> },
     /// Start a new document out of nothing — `blankdoc [size] [ruling]`,
     /// sizes `a4`/`a3`/`letter`/`legal` (letter when nothing is said) and
     /// rulings `lined`/`grid`/`dots` (plain paper when nothing is said), in
@@ -920,7 +923,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("formrecognise", "the forms phase", "the Run Form Field Recognition tool"),
     ("formtosheet", "the forms phase", "the Form to sheet tool"),
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
-    ("fromtemplate", "the conversion phase", "the From Template tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
     ("keeptool", "the annotation phase", "the Keep Tool Selected tool"),
     ("markredact", "the protection phase", "the Mark for Redaction tool"),
@@ -1070,7 +1072,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
-        "pagemarks", "fromclipboard", "pencil", "rearrange",
+        "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1695,6 +1697,9 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
             Ok(Verb::PageMarks { top, text })
         }
         "fromclipboard" => Ok(Verb::FromClipboard),
+        "fromtemplate" => Ok(Verb::FromTemplate {
+            source: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
         _ => return None,
     })
 }
@@ -2569,6 +2574,24 @@ mod textbox_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "textbox"),
             "`textbox` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod from_template_tests {
+    use super::*;
+
+    #[test]
+    fn fromtemplate_parses_and_is_not_planned() {
+        assert_eq!(parse("fromtemplate"), Some(Ok(Verb::FromTemplate { source: None })));
+        assert_eq!(
+            parse("fromtemplate book.pdf"),
+            Some(Ok(Verb::FromTemplate { source: Some("book.pdf".into()) }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "fromtemplate"),
+            "`fromtemplate` is still in the planned table"
         );
     }
 }

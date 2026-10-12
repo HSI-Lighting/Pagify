@@ -5622,3 +5622,46 @@ fn textbox_reaches_the_box_flow() {
         "textbox with words did not take them"
     );
 }
+
+/// **The Convert tab's From Template, through the real dispatch.** The
+/// template is opened as a *copy*: a new tab over its pages, the message
+/// saying the original is untouched, and `saveas` writing the copy — after
+/// which the template's own bytes are still exactly what they were.
+#[test]
+fn fromtemplate_opens_a_copy_the_original_never_sees() {
+    let dir = std::env::temp_dir().join(format!("pagify-template-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+    let template = dir.join("template.pdf");
+    std::fs::copy(fixture("two-column.pdf"), &template).expect("copy the template");
+    let before = std::fs::read(&template).expect("read template");
+
+    let mut h = harness("pages-ladder.pdf");
+    let tabs_before = h.state().tabs.len();
+    h.state_mut().submit(&format!("fromtemplate {}", template.display()));
+    h.run_steps(2);
+
+    assert_eq!(h.state().tabs.len(), tabs_before + 1, "no copy was opened");
+    let doc = h.state().tab().doc.as_ref().expect("the copy");
+    let two_pages = doc.page_count;
+    assert!(two_pages > 0, "the copy has no pages");
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("the original is untouched")),
+        "the message does not say what was copied: {said:?}"
+    );
+
+    // Edit the copy and save it: the template's bytes must not move.
+    h.state_mut().submit("rotate 90");
+    h.run_steps(1);
+    let out = dir.join("edited.pdf");
+    h.state_mut().submit(&format!("saveas {}", out.display()));
+    h.run_steps(1);
+    assert!(out.exists(), "the copy did not save");
+    assert_eq!(
+        std::fs::read(&template).expect("read template"),
+        before,
+        "saving the copy touched the template"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

@@ -253,6 +253,8 @@ pub enum Effect {
     WritePageMarks { top: bool, text: String },
     /// Ask the platform for the clipboard's text, for a new document.
     RequestClipboardText,
+    /// Open a copy of a file as untitled; `None` asks for the file first.
+    OpenTemplateCopy { source: Option<std::path::PathBuf> },
     /// Reflow the page's text.
     RunReflow,
     /// Search for `needle`.
@@ -416,6 +418,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::WordCount { .. }
         | Verb::PageMarks { .. }
         | Verb::FromClipboard
+        | Verb::FromTemplate { .. }
         | Verb::Reflow
         | Verb::Find(_)
         | Verb::FindStep { .. }
@@ -672,6 +675,9 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
             vec![Effect::WritePageMarks { top: *top, text: text.clone() }]
         }
         Verb::FromClipboard => vec![Effect::RequestClipboardText],
+        Verb::FromTemplate { source } => {
+            vec![Effect::OpenTemplateCopy { source: source.clone() }]
+        }
         // Text and find.
         Verb::Reflow => vec![Effect::RunReflow],
         Verb::Find(needle) => vec![Effect::RunFind(needle.clone())],
@@ -1029,6 +1035,10 @@ mod tests {
                 vec![Effect::WritePageMarks { top: true, text: "Page {n}".into() }],
             ),
             (Verb::FromClipboard, vec![Effect::RequestClipboardText]),
+            (
+                Verb::FromTemplate { source: None },
+                vec![Effect::OpenTemplateCopy { source: None }],
+            ),
             (Verb::Reflow, vec![Effect::RunReflow]),
             (Verb::Find("n".into()), vec![Effect::RunFind("n".into())]),
             (Verb::FindStep { forward: true }, vec![Effect::RunFindStep { forward: true }]),
