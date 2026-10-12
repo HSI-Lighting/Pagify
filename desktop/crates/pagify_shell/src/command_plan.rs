@@ -95,6 +95,9 @@ pub enum Effect {
     ToggleCommentsPanel,
     /// Highlight every occurrence of these words, as one batch.
     RunSearchHighlight(String),
+    /// Compare this document against another file's pages; `None` asks for
+    /// the file first.
+    RunCompare { source: Option<std::path::PathBuf> },
     /// Make a new document out of nothing, one sheet of this size and ruling.
     BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
     /// Merge PDFs into one new document; a folder to read them from, or
@@ -331,6 +334,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Calculator
         | Verb::ManageComments
         | Verb::SearchHighlight { .. }
+        | Verb::Compare { .. }
         | Verb::BlankDoc { .. }
         | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
@@ -457,6 +461,7 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Calculator => vec![Effect::ToggleCalculator],
         Verb::ManageComments => vec![Effect::ToggleCommentsPanel],
         Verb::SearchHighlight { words } => vec![Effect::RunSearchHighlight(words.clone())],
+        Verb::Compare { source } => vec![Effect::RunCompare { source: source.clone() }],
         // A new document is allowed with nothing open — that is the point of
         // it.
         Verb::BlankDoc { width_pt, height_pt, ruling } => vec![Effect::BlankDocument {
@@ -763,6 +768,10 @@ mod tests {
             (
                 Verb::SearchHighlight { words: "invoice".into() },
                 vec![Effect::RunSearchHighlight("invoice".into())],
+            ),
+            (
+                Verb::Compare { source: Some("other.pdf".into()) },
+                vec![Effect::RunCompare { source: Some("other.pdf".into()) }],
             ),
         ];
         for (verb, want) in cases {

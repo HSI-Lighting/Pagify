@@ -5286,3 +5286,33 @@ fn searchhighlight_marks_every_hit_as_one_undo() {
         "one undo left {made} of the highlights behind — the sweep is not one batch"
     );
 }
+
+/// **The View tab's Compare, through the real dispatch.** Against the
+/// fixture that is the same words in a different order, the report keeps
+/// that distinction — and against the document itself, nothing differs.
+#[test]
+fn compare_reports_the_order_difference_and_self_identity() {
+    let shredded = fixture("shredded.pdf");
+    let mut h = harness("two-column.pdf");
+
+    h.state_mut().submit(&format!("compare {shredded}"));
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("differ")),
+        "compare did not report a summary: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("the same words, in a different order")),
+        "the order difference was smoothed over: {said:?}"
+    );
+
+    let itself = fixture("two-column.pdf");
+    h.state_mut().submit(&format!("compare {itself}"));
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("0 differ")),
+        "a document did not compare identical with itself: {said:?}"
+    );
+}

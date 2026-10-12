@@ -22,6 +22,7 @@ pub mod calculator;
 pub mod command;
 pub mod command_plan;
 pub mod comments;
+pub mod compare;
 pub mod commit;
 pub mod diagnose;
 pub mod editor;

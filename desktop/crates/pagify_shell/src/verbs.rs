@@ -603,6 +603,10 @@ pub enum Verb {
     /// Highlight every occurrence of the words — the Comment tab's Search &
     /// Highlight. `searchhighlight <words>`.
     SearchHighlight { words: String },
+    /// Compare this document against another, page by page, in words — the
+    /// View tab's Compare. `compare <file.pdf>`; bare, the app asks for the
+    /// file.
+    Compare { source: Option<PathBuf> },
     /// Make a new document out of picture files — `fromfiles` or
     /// `fromfiles <folder>`, which takes every picture in the folder in name
     /// order. Bare, the app opens a picker.
@@ -841,7 +845,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("clipboard", "the capture phase", "the Clipboard tool"),
     ("cloudstorage", "the sharing phase", "the Cloud Storage tool"),
     ("combfield", "the forms phase", "the Comb Field tool"),
-    ("compare", "the viewing phase", "the Compare tool"),
     ("createform", "the forms phase", "the Form tool"),
     ("crossref", "the editing phase", "the Cross Reference tool"),
     ("customstamp", "the annotation phase", "the Custom Stamp tool"),
@@ -1027,7 +1030,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
-        "searchhighlight",
+        "searchhighlight", "compare",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1746,6 +1749,9 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "calculator" => Ok(Verb::Calculator),
         "managecomments" => Ok(Verb::ManageComments),
         "searchhighlight" => Ok(Verb::SearchHighlight { words: tail.trim().to_string() }),
+        "compare" => Ok(Verb::Compare {
+            source: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2210,6 +2216,24 @@ mod search_highlight_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "searchhighlight"),
             "`searchhighlight` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod compare_tests {
+    use super::*;
+
+    #[test]
+    fn compare_parses_and_is_not_planned() {
+        assert_eq!(parse("compare"), Some(Ok(Verb::Compare { source: None })));
+        assert_eq!(
+            parse("compare other.pdf"),
+            Some(Ok(Verb::Compare { source: Some("other.pdf".into()) }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "compare"),
+            "`compare` is still in the planned table"
         );
     }
 }

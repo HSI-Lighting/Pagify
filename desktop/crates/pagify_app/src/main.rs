@@ -8542,6 +8542,70 @@ impl PagifyApp {
         }
     }
 
+    /// Compare this document against another, page by page, in words — the
+    /// View tab's Compare. What the words mean, and why order counts, is
+    /// `pagify_shell::compare`'s own note; this says the lines.
+    fn compare_with(&mut self, source: &std::path::Path) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let ours = session.page_count().unwrap_or(0);
+        let other = match Session::open(source) {
+            Ok(other) => other,
+            Err(e) => {
+                self.say_error(format!("compare: {e}"));
+                return;
+            }
+        };
+        let theirs = other.page_count().unwrap_or(0);
+        let pages = ours.min(theirs);
+        let comparisons = match pagify_shell::compare::compare(&session, &other, pages) {
+            Ok(comparisons) => comparisons,
+            Err(e) => {
+                self.say_error(format!("compare: {e}"));
+                return;
+            }
+        };
+        use pagify_shell::compare::Verdict;
+        let differing: Vec<&pagify_shell::compare::PageComparison> = comparisons
+            .iter()
+            .filter(|c| !matches!(c.verdict, Verdict::Identical))
+            .collect();
+        let page_note = if ours == theirs {
+            String::new()
+        } else {
+            format!(" (this one has {ours} page(s), the file {theirs})")
+        };
+        self.say_info(format!(
+            "{} page(s) compared against {}; {} differ{page_note}.",
+            pages,
+            source.display(),
+            differing.len()
+        ));
+        for comparison in differing.iter().take(12) {
+            self.say_info(pagify_shell::compare::describe(comparison));
+        }
+        if differing.len() > 12 {
+            self.say_info(format!("…and {} more differing page(s).", differing.len() - 12));
+        }
+    }
+
+    /// The View tab's Compare button, bare: choose the file, then compare.
+    fn compare_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new()
+            .set_title("Compare this document against another PDF")
+            .add_filter("PDF", &["pdf"]);
+        match dialog.pick_file() {
+            Some(path) => self.compare_with(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
     /// ⌘C on what Edit Object has picked.
     ///
     /// **Words are copied as words** — their text, size, colour and font — and

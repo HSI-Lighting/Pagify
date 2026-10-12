@@ -111,6 +111,7 @@ impl crate::PagifyApp {
             | Effect::ToggleCalculator
             | Effect::ToggleCommentsPanel
             | Effect::RunSearchHighlight(_)
+            | Effect::RunCompare { .. }
             | Effect::Say(_)
             | Effect::SayError(_)
             | Effect::CheckUpdate => self.apply_document(effect),
@@ -264,6 +265,10 @@ impl crate::PagifyApp {
             Effect::ToggleCalculator => self.toggle_calculator(),
             Effect::ToggleCommentsPanel => self.toggle_comments_panel(),
             Effect::RunSearchHighlight(words) => self.search_highlight(&words),
+            Effect::RunCompare { source } => match source {
+                Some(path) => self.compare_with(&path),
+                None => self.compare_dialog(),
+            },
             Effect::Say(text) => self.say_info(text),
             Effect::SayError(text) => self.say_error(text),
             Effect::CheckUpdate => self.spawn_update_check(),
