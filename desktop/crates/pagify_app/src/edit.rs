@@ -181,7 +181,11 @@ impl crate::PagifyApp {
         }
 
         trace.path = PickPath::Single;
-        let readable_text = fix_extracted_text(&run.text);
+        // **The words as the page draws them**, not as PDFium's text layer folds them: a
+        // run of spaces reads back as one there, so a line somebody padded showed
+        // unpadded in the box, and an apply from it took the padding off the page.
+        let exact = if heavy.is_some() { Default::default() } else { self.exact_run_texts(page, &[run.object]) };
+        let readable_text = fix_extracted_text(exact.get(&run.object).map_or(run.text.as_str(), String::as_str));
         let picked_char_count = readable_text.chars().count();
         // A mark on a line of drawn lettering that has no words of its own — the
         // hyphen glyph the page ends such a line with — is nothing to retype.
@@ -248,6 +252,7 @@ impl crate::PagifyApp {
             drawn: run.color.a == 0,
             focused: false,
             box_resize: RunBox::default(),
+            justify: false,
         });
         // The face these words are already in, for the field to be set in. Asked
         // for here and used a frame or two later — see `want_document_face`.
@@ -493,6 +498,10 @@ impl crate::PagifyApp {
         // open" this was reported as.
         let text_by_object: std::collections::HashMap<usize, &pdf_core::document::TextRun> =
             runs.iter().map(|r| (r.object, r)).collect();
+        // The words as the page draws them — see `exact_run_texts`. What PDFium's own
+        // text says stays for an object that could not be read that way.
+        let objects: Vec<usize> = lines.iter().flat_map(|line| line.objects.iter().copied()).collect();
+        let exact = self.exact_run_texts(page, &objects);
 
         // A line's text is its objects' own, left to right, **on one line**: a
         // newline inside a text object would otherwise split the paragraph's
@@ -508,7 +517,13 @@ impl crate::PagifyApp {
                 }
                 line.objects
                     .iter()
-                    .map(|o| text_by_object.get(o).map(|r| r.text.as_str()).unwrap_or(""))
+                    .map(|o| {
+                        exact
+                            .get(o)
+                            .map(String::as_str)
+                            .or_else(|| text_by_object.get(o).map(|r| r.text.as_str()))
+                            .unwrap_or("")
+                    })
                     .collect::<String>()
                     .replace(['\r', '\n'], " ")
             })
@@ -601,6 +616,9 @@ impl crate::PagifyApp {
             face: None,
         };
 
+        let geometry: Vec<(Vec<usize>, pdf_core::document::Rect)> =
+            lines.iter().map(|line| (line.objects.clone(), line.rect)).collect();
+        let justify = self.paragraph_is_justified(page, &geometry, size);
         let edit = EditingRun {
             page,
             object: seed_object,
@@ -622,8 +640,85 @@ impl crate::PagifyApp {
             drawn: false,
             focused: false,
             box_resize: RunBox::default(),
+            justify,
         };
         Ok((edit, look_object))
+    }
+
+    /// The words of `objects` as the page draws them, for the ones that can be read
+    /// that way — see `Document::run_exact_texts`.
+    ///
+    /// PDFium's own text folds a run of space glyphs into one space, so a line that
+    /// was padded read back unpadded: the box showed it so, and an apply taken from
+    /// the box took the padding off the page. Empty on any failure, and the editor
+    /// then has PDFium's text as it always did. Timed into the session log: it costs
+    /// a serialisation of the document.
+    pub(crate) fn exact_run_texts(&mut self, page: usize, objects: &[usize]) -> std::collections::HashMap<usize, String> {
+        let t = std::time::Instant::now();
+        let found = self
+            .tab()
+            .doc
+            .as_ref()
+            .and_then(|doc| doc.session.run_exact_texts(page, objects).ok())
+            .unwrap_or_default();
+        self.recording_state.session_log.record(
+            "perf",
+            &format!(
+                "page {} exact text of {} runs: {} read in {:.0} ms",
+                page + 1,
+                objects.len(),
+                found.len(),
+                t.elapsed().as_secs_f64() * 1000.0
+            ),
+        );
+        found
+    }
+
+    /// Whether the page draws this paragraph **justified** — the one answer the
+    /// preview (which spreads each non-last line to the box) and the apply (which
+    /// asks the engine to keep a retyped line as wide as it was) both go by, so
+    /// that the box cannot show a stretch the page does not have or the apply write
+    /// one the box did not show.
+    ///
+    /// The lines start at one margin and end at one margin
+    /// ([`paragraph_should_justify`], [`ends_at_one_margin`]) — and what they
+    /// *show* ends there too. A line whose box runs on well past its last mark of
+    /// ink is not justified, it is **padded**: spaces typed to line a value up, or
+    /// written by a producer. Spreading its words to the box would invent a look the
+    /// page never had, and was the whole of "the preview does not match the page"
+    /// for a two-line block of label and value. A line may end on a space of its own
+    /// (a fraction of an em past its ink); a pad is many.
+    ///
+    /// `em` is the size the box is set in. Where the page's characters cannot be
+    /// read there is no ink to look at, and the geometry alone decides, as it did.
+    pub(crate) fn paragraph_is_justified(
+        &mut self,
+        page: usize,
+        lines: &[(Vec<usize>, pdf_core::document::Rect)],
+        em: f32,
+    ) -> bool {
+        use pagify_shell::paragraph_lines::{ends_at_one_margin, paragraph_should_justify};
+        if !(paragraph_should_justify(lines) && ends_at_one_margin(lines)) {
+            return false;
+        }
+        let Some(characters) = self.characters(page) else { return true };
+        let slack = 0.8 * em.max(1.0);
+        let area = |rect: &pdf_core::document::Rect| (rect.left, rect.top, rect.right, rect.bottom);
+        // **Where each line starts to show, not where its box starts.** A value set in
+        // from its label by spaces has the label's box edge and shows far to its right:
+        // that is a label over a value, not a paragraph, whatever the boxes say.
+        let written = || lines.iter().filter(|(objects, _)| !objects.is_empty());
+        let lefts: Vec<f32> = written().filter_map(|(_, rect)| characters.ink_left_in(area(rect))).collect();
+        let (first, last) = (
+            lefts.iter().copied().fold(f32::INFINITY, f32::min),
+            lefts.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        );
+        if lefts.len() > 1 && last - first > 2.0 {
+            return false;
+        }
+        lines[..lines.len() - 1].iter().filter(|(objects, _)| !objects.is_empty()).all(|(_, rect)| {
+            characters.ink_right_in(area(rect)).map_or(true, |ink| rect.left.max(rect.right) - ink <= slack)
+        })
     }
 
     /// The next line submitted replaces the run that was picked.
@@ -729,7 +824,15 @@ impl crate::PagifyApp {
         // replaces the run in place; anything after it is new content,
         // written just below in the run's own size, colour and font — not
         // sent to `SetTextRun`, which is one run's own text, not several.
-        let mut typed_lines = typed.split('\n');
+        //
+        // **Leading spaces are part of the line**, now that the box shows the page's own
+        // spaces: a run that starts with a pad of them (a value set against a column)
+        // keeps it when it is retyped. Only trailing space and leading blank lines go.
+        let source = match edit.buffer.trim_end().trim_start_matches(['\r', '\n']) {
+            kept if kept.split('\n').next().is_some_and(|line| !line.trim().is_empty()) => kept,
+            _ => typed.as_str(),
+        };
+        let mut typed_lines = source.split('\n');
         let first_line = typed_lines.next().unwrap_or("").to_string();
         let extra_lines: Vec<&str> = typed_lines.collect();
 

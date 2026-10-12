@@ -80,6 +80,16 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.run_font_data(page, object))
     }
 
+    /// The words of some runs as the page draws them — the spaces PDFium's text
+    /// layer folds into one put back. See `Document::run_exact_texts`.
+    pub fn run_exact_texts(
+        &self,
+        page: usize,
+        objects: &[usize],
+    ) -> Result<std::collections::HashMap<usize, String>> {
+        registry::with_session(self.handle, |s| s.document.run_exact_texts(page, objects))
+    }
+
     /// The name of a run's own font — its `/BaseFont` — for showing which
     /// font a run is written in, whether or not that font is embedded.
     pub fn run_font_name(&self, page: usize, object: usize) -> Result<Option<String>> {

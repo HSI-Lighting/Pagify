@@ -492,6 +492,43 @@ impl Characters {
         self.text.is_empty()
     }
 
+    /// The left edge of the first mark of ink inside `area`: where a line *starts* to
+    /// show, whatever its text object's own box begins with. A value set in from its
+    /// label by a run of spaces begins at the same box edge as the label and shows far
+    /// to its right.
+    pub fn ink_left_in(&self, area: (f32, f32, f32, f32)) -> Option<f32> {
+        let (left, top, right, bottom) = area;
+        let (top, bottom) = (top.min(bottom), top.max(bottom));
+        let (left, right) = (left.min(right), left.max(right));
+        self.text
+            .iter()
+            .zip(&self.boxes)
+            .filter(|(c, b)| {
+                let (x, y) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
+                !c.is_whitespace() && !c.is_control() && x >= left && x <= right && y >= top && y <= bottom
+            })
+            .map(|(_, b)| b.left.min(b.right))
+            .reduce(f32::min)
+    }
+
+    /// The right edge of the last mark of ink inside `area`: the furthest right of
+    /// any character that is not a space and whose box is centred in it. What a line
+    /// *shows* ends there, whatever its text object's own box goes on to cover.
+    pub fn ink_right_in(&self, area: (f32, f32, f32, f32)) -> Option<f32> {
+        let (left, top, right, bottom) = area;
+        let (top, bottom) = (top.min(bottom), top.max(bottom));
+        let (left, right) = (left.min(right), left.max(right));
+        self.text
+            .iter()
+            .zip(&self.boxes)
+            .filter(|(c, b)| {
+                let (x, y) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
+                !c.is_whitespace() && !c.is_control() && x >= left && x <= right && y >= top && y <= bottom
+            })
+            .map(|(_, b)| b.left.max(b.right))
+            .reduce(f32::max)
+    }
+
     /// The character whose box contains this point, if any.
     pub fn hit(&self, x: f32, y: f32) -> Option<usize> {
         self.boxes.iter().position(|b| b.contains(x, y))

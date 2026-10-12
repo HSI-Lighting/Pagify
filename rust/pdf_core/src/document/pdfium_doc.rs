@@ -1084,6 +1084,10 @@ impl Document for PdfiumDocument {
         Ok(embedded)
     }
 
+    fn run_exact_texts(&self, page_index: usize, objects: &[usize]) -> Result<HashMap<usize, String>> {
+        self.exact_run_texts(page_index, objects)
+    }
+
     fn run_font_name(&self, page_index: usize, object: usize) -> Result<Option<String>> {
         let Some((raw, handle)) = self.text_object_at(page_index, object)? else {
             return Ok(None);
@@ -9110,6 +9114,66 @@ fn font_to_unicode(
         self.move_run_in_stream(page_index, object, by)
     }
 
+    /// The words of some runs as the page **draws** them, one entry for each that
+    /// could be read this way.
+    ///
+    /// **PDFium's text layer folds a run of space glyphs into one space** — a
+    /// run's own words and the page's character list alike. A line somebody
+    /// padded with twenty spaces reads back with one, the editor then shows one,
+    /// and an edit applied from that text takes the other nineteen off the page.
+    /// The content stream has all twenty. This walks each run's operator through
+    /// its font's own character map, the way [`Self::set_run_in_stream`] does to
+    /// find which codes are the run's, and puts back the spaces PDFium left out.
+    /// Everything else in the text is PDFium's own, so the result is a drop-in for
+    /// [`crate::document::TextRun::text`] — trailing space and all.
+    ///
+    /// A run that cannot be placed in the stream, or whose font has no map to
+    /// read, is **left out rather than guessed at**; the caller keeps PDFium's.
+    /// Costs a serialisation of the document and a parse of the page, once for
+    /// however many runs are asked for.
+    pub fn exact_run_texts(&self, page_index: usize, objects: &[usize]) -> Result<HashMap<usize, String>> {
+        use crate::pdf::content;
+        let mut out = HashMap::new();
+        if objects.is_empty() {
+            return Ok(out);
+        }
+        let height = self.page_size(page_index)?.height_pt;
+        let base = self.edit_base()?;
+        let bytes = &base.bytes;
+        let file = crate::pdf::File::parse(bytes)?;
+        let page = self.page_object(&file, page_index)?;
+        let (stream, _) = self.page_content(&file, &page)?;
+        let fonts = self.page_fonts(&file, &page);
+        let operations = content::parse(&stream)?;
+        let placed = content::placed(&operations);
+
+        let wanted: HashSet<usize> = objects.iter().copied().collect();
+        let runs = self.text_runs_some(page_index, &wanted)?;
+        let text_objects = self.text_objects_in_order(page_index).unwrap_or_default();
+        let codes_in = |p: &content::Placed| codes_drawn(&file, fonts.as_ref(), &operations, p);
+        let mut run_list = None;
+        for run in runs {
+            let order = text_objects.binary_search(&run.object).ok().map(|which| (which, text_objects.len()));
+            let Ok(found) =
+                self.operator_of(page_index, &run, height, &placed, order, &codes_in, &mut run_list)
+            else {
+                continue;
+            };
+            let (Some(name), Some(fonts)) = (found.font.as_ref(), fonts.as_ref()) else { continue };
+            let Some(width) = code_width(&file, fonts, name) else { continue };
+            let unicode = match Self::font_to_unicode(&file, bytes, fonts, name) {
+                Some(map) => map,
+                None if width == 1 => assumed_ascii(),
+                None => continue,
+            };
+            let codes = codes_of(&operations[found.origin.operation], width);
+            let spellings: Vec<Option<String>> = codes.iter().map(|code| unicode.get(code).cloned()).collect();
+            let Some(owner) = align_codes(&spellings, &run.text) else { continue };
+            out.insert(run.object, spaced_text(&run.text, &owner, &spellings));
+        }
+        Ok(out)
+    }
+
     /// The content-stream edit, exposed so a probe can ask *why* it refused.
     ///
     /// The ordinary path swallows the reason and falls back to PDFium; knowing
@@ -9369,10 +9433,18 @@ fn font_to_unicode(
             .filter(|s| *s > 0.0)
             .map(|wanted| if vertical_scale.abs() > 1e-6 { wanted / vertical_scale } else { wanted })
             .unwrap_or(found.size);
-        let mut replacement = content::replacing_codes(
+        // **The look of the old stretch comes with the words** — see
+        // `content::tracking`. Not into another font, whose codes and spacing are
+        // its own.
+        let tracking = if swap.is_none() {
+            content::tracking(operation, first..last + 1, width, &space_codes(&spellings))
+        } else {
+            None
+        };
+        let mut replacement = content::replacing_pieces(
             operation,
             first..last + 1,
-            &encoded,
+            &content::tracked(&encoded, width, tracking, &wanted),
             &drawing,
             size,
             width,
@@ -9673,8 +9745,19 @@ fn font_to_unicode(
                 .filter(|s| *s > 0.0)
                 .map(|wanted| if vertical_scale.abs() > 1e-6 { wanted / vertical_scale } else { wanted })
                 .unwrap_or(found.size);
-            let mut replacement =
-                content::replacing_codes(operation, first..last + 1, &encoded, &drawing, size, width);
+            let tracking = if swap.is_none() {
+                content::tracking(operation, first..last + 1, width, &space_codes(&spellings))
+            } else {
+                None
+            };
+            let mut replacement = content::replacing_pieces(
+                operation,
+                first..last + 1,
+                &content::tracked(&encoded, width, tracking, &wanted),
+                &drawing,
+                size,
+                width,
+            );
             // The page's own font and size back after it — see `set_run_in_stream`.
             let mut after: Vec<u8> = Vec::new();
             if swap.is_some() || size != found.size {
@@ -9727,6 +9810,7 @@ fn font_to_unicode(
                     after,
                     before: moved,
                     points_per_unit,
+                    tracking,
                 });
             }
 
@@ -11060,6 +11144,36 @@ fn codes_of(operation: &crate::pdf::content::Operation, width: usize) -> Vec<u32
     out
 }
 
+/// `text` with the spaces its codes drew and PDFium's text layer folded away put
+/// back: a code passed over on the way from one character's code to the next that
+/// spells a space was one of a run of them, and goes in front of the character
+/// the run ended at. `owner` and `spellings` are [`align_codes`]'s and the codes'
+/// own. What follows the last character's code is the operator's trailing padding,
+/// which is not the run's words.
+fn spaced_text(text: &str, owner: &[usize], spellings: &[Option<String>]) -> String {
+    let space = |code: usize| {
+        spellings
+            .get(code)
+            .and_then(|s| s.as_deref())
+            .filter(|s| !s.is_empty() && s.chars().all(char::is_whitespace))
+    };
+    let mut out = String::with_capacity(text.len());
+    // The first code not yet accounted for.
+    let mut next = 0usize;
+    for (character, &code) in text.chars().zip(owner) {
+        if code != usize::MAX && code >= next {
+            for skipped in next..code {
+                if let Some(space) = space(skipped) {
+                    out.push_str(space);
+                }
+            }
+            next = code + 1;
+        }
+        out.push(character);
+    }
+    out
+}
+
 /// Which code produced each character of a run.
 ///
 /// # Why counting is not enough
@@ -11221,6 +11335,9 @@ struct Stretch {
     /// size, the magnification of the text matrix and the page's transform, and
     /// the horizontal scaling, over a thousand.
     points_per_unit: f32,
+    /// The spacing the old words were tracked with, carried by the plain
+    /// version this is measured against, so it is carried by the spread one too.
+    tracking: Option<crate::pdf::content::Tracking>,
 }
 
 impl Stretch {
@@ -11290,9 +11407,18 @@ impl Stretch {
         let mut run: Vec<u8> = Vec::new();
         for (j, bytes) in self.encoded.chunks(per_char).enumerate() {
             run.extend_from_slice(bytes);
+            let mut number = match self.tracking {
+                Some(t) if j + 1 < chars.len() => {
+                    if chars[j].is_whitespace() { t.space } else { t.glyph }
+                }
+                _ => 0.0,
+            };
             if kern != 0.0 && gaps.binary_search(&j).is_ok() {
+                number += kern;
+            }
+            if number != 0.0 {
                 pieces.push(Piece::Codes(std::mem::take(&mut run)));
-                pieces.push(Piece::Kern(kern));
+                pieces.push(Piece::Kern(number));
             }
         }
         if !run.is_empty() {
@@ -11362,6 +11488,14 @@ fn spelling_codes(
         reverse.entry(spelling.clone()).or_insert(*code);
     }
     reverse
+}
+
+/// Which of an operator's codes are spaces, from what each spells.
+fn space_codes(spellings: &[Option<String>]) -> Vec<bool> {
+    spellings
+        .iter()
+        .map(|s| s.as_deref().is_some_and(|t| !t.is_empty() && t.chars().all(char::is_whitespace)))
+        .collect()
 }
 
 /// The codes that spell some words in a font, or `None` if it cannot.

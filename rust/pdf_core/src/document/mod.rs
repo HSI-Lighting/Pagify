@@ -701,6 +701,18 @@ pub trait Document: Send + Sync {
         Ok(false)
     }
 
+    /// The words of some runs **as the page draws them**, for those that can be
+    /// read that way. See `PdfiumDocument::exact_run_texts`: PDFium's text layer
+    /// folds a run of space glyphs into one space, and this puts them back.
+    /// Empty where a document has no way to say.
+    fn run_exact_texts(
+        &self,
+        _page_index: usize,
+        _objects: &[usize],
+    ) -> Result<std::collections::HashMap<usize, String>> {
+        Ok(std::collections::HashMap::new())
+    }
+
     /// The name this run's own font goes by — its `/BaseFont`, as the reader
     /// already knows it, whether or not the font is embedded.
     ///

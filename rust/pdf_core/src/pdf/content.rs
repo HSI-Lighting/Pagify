@@ -783,6 +783,105 @@ pub fn replacing_codes(
     replacing_pieces(operation, range, &[Piece::Codes(replacement.to_vec())], font, size, width)
 }
 
+/// The spacing a producer put between the glyphs of a line: a `TJ` number after
+/// each glyph, and the one after each space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Tracking {
+    pub glyph: f32,
+    pub space: f32,
+}
+
+/// The [`Tracking`] a stretch of codes was drawn with, or `None` where it was not
+/// spaced out by numbers of its own.
+///
+/// Two things look like this. A justified or letter-spaced line carries one number
+/// after (nearly) every glyph, next to a `Tc` that offsets it:
+/// `[<0021>-124<0084>-124 ...] TJ` under `-0.164 Tc`. A producer that opens the gaps
+/// between words puts its number after each space instead:
+/// `[(V )-113(C)(onstant )-113 ...]`. Either way the numbers sit *inside* the
+/// stretch, and retyping it drops every number inside it while `Tc` stays in
+/// force: each glyph came out about a point tighter than it was drawn, a space
+/// added almost nothing, and the words ran together. Writing the new codes with
+/// the same numbers puts the line back.
+///
+/// What most of the gaps after glyphs carry, and what most of those after spaces
+/// carry. A gap with no number carries nothing, and the pair-kerns that sit on top
+/// of the tracking are the few that disagree. `spaces[i]` is whether code `i` of
+/// the operator is a space. `None` when under three gaps carry a number at all (a
+/// word with a pair-kern is not tracked), or neither figure moves anything.
+pub fn tracking(
+    operation: &Operation,
+    range: std::ops::Range<usize>,
+    width: usize,
+    spaces: &[bool],
+) -> Option<Tracking> {
+    // The number straight after each code, if there is one.
+    let mut after: Vec<Option<f32>> = Vec::new();
+    for piece in pieces(operation) {
+        match piece {
+            Piece::Codes(bytes) => after.extend(bytes.chunks(width.max(1)).map(|_| None)),
+            Piece::Kern(number) => {
+                if let Some(last) = after.last_mut() {
+                    *last = Some(last.unwrap_or(0.0) + number);
+                }
+            }
+        }
+    }
+    // The gaps *inside* the stretch: after every code but its last.
+    let inside = after.get(range.start..range.end.saturating_sub(1))?;
+    if inside.iter().flatten().count() < 3 {
+        return None;
+    }
+    let (mut after_glyphs, mut after_spaces) = (Vec::new(), Vec::new());
+    for (at, number) in inside.iter().enumerate() {
+        let class = if spaces.get(range.start + at).copied().unwrap_or(false) {
+            &mut after_spaces
+        } else {
+            &mut after_glyphs
+        };
+        class.push(number.unwrap_or(0.0));
+    }
+    // What most of a class carries: its median, if half the class is within a unit.
+    fn typical(mut numbers: Vec<f32>) -> Option<f32> {
+        numbers.sort_by(|a, b| a.total_cmp(b));
+        let median = *numbers.get(numbers.len() / 2)?;
+        (numbers.iter().filter(|n| (**n - median).abs() <= 1.0).count() * 2 >= numbers.len())
+            .then_some(median)
+    }
+    // Scattered gaps after glyphs carry nothing; scattered gaps after spaces (a
+    // line justified by hand) are given what the glyphs carry.
+    let glyph = typical(after_glyphs);
+    let space = typical(after_spaces).or(glyph).unwrap_or(0.0);
+    let glyph = glyph.unwrap_or(0.0);
+    let kept = |n: f32| if n.abs() > 0.5 { n } else { 0.0 };
+    let found = Tracking { glyph: kept(glyph), space: kept(space) };
+    (found.glyph != 0.0 || found.space != 0.0).then_some(found)
+}
+
+/// `codes` as pieces, the [`Tracking`] after every glyph but the last (the number
+/// after the stretch's last glyph is the original's, which the rebuild keeps).
+/// `text` is what `codes` spell, a character to a code; where it is not, or there
+/// is no tracking, one run of codes as given.
+pub fn tracked(codes: &[u8], width: usize, tracking: Option<Tracking>, text: &str) -> Vec<Piece> {
+    let glyphs: Vec<&[u8]> = codes.chunks(width.max(1)).collect();
+    let chars: Vec<char> = text.chars().collect();
+    let Some(tracking) = tracking.filter(|_| chars.len() == glyphs.len()) else {
+        return vec![Piece::Codes(codes.to_vec())];
+    };
+    let mut out: Vec<Piece> = Vec::new();
+    for (at, glyph) in glyphs.iter().enumerate() {
+        match out.last_mut() {
+            Some(Piece::Codes(bytes)) => bytes.extend_from_slice(glyph),
+            _ => out.push(Piece::Codes(glyph.to_vec())),
+        }
+        let number = if chars[at].is_whitespace() { tracking.space } else { tracking.glyph };
+        if at + 1 < glyphs.len() && number != 0.0 {
+            out.push(Piece::Kern(number));
+        }
+    }
+    out
+}
+
 /// [`replacing_codes`] with the replacement given as pieces — codes and the
 /// spacing numbers between them — rather than as one run of codes: what writes a
 /// line whose words are spaced apart to fill a width.
@@ -2028,6 +2127,76 @@ mod tests {
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("-35"), "the kerning was dropped: {text}");
         assert!(text.contains("<42>") && text.contains("<4344>"), "{text}");
+    }
+
+    /// **Tracking is a number after the glyphs, or after the spaces; kerning is a
+    /// few pairs.** A justified line carries `-124` after each code, a line with
+    /// its word gaps opened carries its number after each space, a kerned one a few
+    /// scattered numbers, and only the first two are carried onto retyped words.
+    #[test]
+    fn tracking_is_told_from_kerning() {
+        let none = [false; 32];
+        let mut space_at_3 = [false; 6];
+        space_at_3[3] = true;
+        let uniform = ops(b"[<0021>-109<0084>-124<0020>-124<0003>-124<0030>-124.9<01CF>] TJ");
+        assert_eq!(
+            tracking(&uniform[0], 0..6, 2, &space_at_3),
+            Some(Tracking { glyph: -124.0, space: -124.0 })
+        );
+
+        // Tracking with pair-kerns on top: the few that disagree do not decide.
+        let pairs = ops(b"[(D)-67(r)-58(i)-67(v)-52(e)-67(r)-67( )-67(E)-67(f)-76(f)] TJ");
+        let mut space_at_6 = [false; 9];
+        space_at_6[6] = true;
+        assert_eq!(
+            tracking(&pairs[0], 0..9, 1, &space_at_6),
+            Some(Tracking { glyph: -67.0, space: -67.0 })
+        );
+
+        // Word gaps opened, the letters left alone.
+        let gaps = ops(b"[(V )-113(C)24.1(onstant )-113(V)55(ol)7(ta)-1(ge)] TJ");
+        let mut spaces = [false; 18];
+        spaces[1] = true;
+        spaces[10] = true;
+        assert_eq!(
+            tracking(&gaps[0], 0..18, 1, &spaces),
+            Some(Tracking { glyph: 0.0, space: -113.0 })
+        );
+
+        let kerned = ops(b"[(AV) 80 (ATE) -30 (R) 12 (OLD)] TJ");
+        assert_eq!(tracking(&kerned[0], 0..9, 1, &none), None, "pair kerns are not tracking");
+
+        let short = ops(b"[(A) -124 (B) -124 (C)] TJ");
+        assert_eq!(tracking(&short[0], 0..3, 1, &none), None, "two numbers prove nothing");
+
+        let trivial = ops(b"[(A) -0.2 (B) -0.2 (C) -0.2 (D) -0.2 (E)] TJ");
+        assert_eq!(tracking(&trivial[0], 0..5, 1, &none), None, "a number that moves nothing is not carried");
+    }
+
+    /// Retyping a tracked stretch writes the tracking after each new glyph,
+    /// including a typed space, and not after the last (the original's own number
+    /// there survives the rebuild).
+    #[test]
+    fn retyped_codes_carry_the_tracking() {
+        let found = ops(b"[(A) -124 (B) -124 (C) -124 (D) -124 (E)] TJ");
+        let tracking = tracking(&found[0], 0..5, 1, &[false; 5]);
+        assert_eq!(tracking, Some(Tracking { glyph: -124.0, space: -124.0 }));
+        let pieces = tracked(b"X Y", 1, tracking, "X Y");
+        let out = replacing_pieces(&found[0], 0..5, &pieces, b"F1", 1.0, 1);
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "/F1 1 Tf [<58> -124 <20> -124 <59>] TJ",
+            "the new glyphs lost the old spacing"
+        );
+        // And not at all where there was none to carry, or the text and codes disagree.
+        assert_eq!(tracked(b"X Y", 1, None, "X Y"), vec![Piece::Codes(b"X Y".to_vec())]);
+        assert_eq!(tracked(b"X Y", 1, tracking, "XY"), vec![Piece::Codes(b"X Y".to_vec())]);
+        // A number after the spaces only leaves the letters run together.
+        let gaps = Some(Tracking { glyph: 0.0, space: -113.0 });
+        assert_eq!(
+            tracked(b"AB CD", 1, gaps, "AB CD"),
+            vec![Piece::Codes(b"AB ".to_vec()), Piece::Kern(-113.0), Piece::Codes(b"CD".to_vec())]
+        );
     }
 
     /// A degenerate scale must not produce an infinite displacement.

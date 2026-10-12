@@ -1903,6 +1903,13 @@ struct EditingRun {
     focused: bool,
     /// How the reader has dragged the box open round this run — see [`RunBox`].
     box_resize: RunBox,
+    /// **Whether the page draws this block justified** — one answer for the two
+    /// things that stretch a line, so that they cannot disagree: the preview, which
+    /// spreads each non-last line's words to the box, and the apply, which asks the
+    /// engine to keep a retyped one as wide as it was. Decided once, when the block
+    /// is picked ([`PagifyApp::paragraph_is_justified`]). Always `false` for a run
+    /// and for drawn words.
+    justify: bool,
 }
 
 /// Runs a person declared one paragraph by hand — see [`DocTab::joined_groups`].
@@ -2442,6 +2449,42 @@ enum Closing {
 
 
 
+
+/// The pixel budget of one whole-page picture — what [`PagifyApp::whole_page_scale_ceiling`]
+/// holds a page to, and what an exact picture ([`exact_page_px`]) is held to too.
+const WHOLE_PAGE_BUDGET_PIXELS: f32 = 24.0 * 1024.0 * 1024.0;
+
+/// Which of a page's three kinds of render a job is — the slot it holds while it is in
+/// flight. **Three, not two**: an exact picture ([`EXACT_STEP_BASE`]) asked for while
+/// a quantised one was being made shared its slot, and each superseded the other.
+const SLOT_WHOLE: u8 = 0;
+const SLOT_DETAIL: u8 = 1;
+const SLOT_EXACT: u8 = 2;
+
+fn slot_kind(crop: &Option<pdf_core::document::Rect>, step: u32) -> u8 {
+    match (crop, step >= EXACT_STEP_BASE) {
+        (Some(_), _) => SLOT_DETAIL,
+        (None, true) => SLOT_EXACT,
+        (None, false) => SLOT_WHOLE,
+    }
+}
+
+/// Pictures at or above this step are **exact** ones: the step is this plus the
+/// picture's width in pixels, and they are held in `DocCaches::exact`, not
+/// `textures`. A job names its picture by step alone, and this is what tells the
+/// answer which map it belongs in.
+const EXACT_STEP_BASE: u32 = 1 << 20;
+
+/// The size in pixels a page frame of `w` x `h` points is shown at, at `zoom` on a
+/// screen of `pixels_per_point` — what an exact picture is made at, so that one
+/// texel is one pixel. `None` when that is more than a whole-page picture can be
+/// (the GPU's side, [`WHOLE_PAGE_BUDGET_PIXELS`]): a page that big is the detail
+/// overlay's business, as it always was.
+fn exact_page_px(w: f32, h: f32, zoom: f32, pixels_per_point: f32, max_side: f32) -> Option<(u32, u32)> {
+    let (px_w, px_h) = ((w * zoom * pixels_per_point).round(), (h * zoom * pixels_per_point).round());
+    (px_w >= 1.0 && px_h >= 1.0 && px_w.max(px_h) <= max_side && px_w * px_h <= WHOLE_PAGE_BUDGET_PIXELS)
+        .then_some((px_w as u32, px_h as u32))
+}
 
 /// The scale a page is actually rasterised at, for a given zoom.
 ///
@@ -12167,6 +12210,7 @@ impl PagifyApp {
             drawn: true,
             focused: false,
             box_resize: RunBox::default(),
+            justify: false,
         });
         Some(
             "these words are drawn, not written — type converted to outlines. \
@@ -12617,7 +12661,7 @@ impl PagifyApp {
         // A retyped line of a justified paragraph is asked to keep the width it
         // had — the editor's own test for drawing it justified, and that its
         // lines end at one margin (left-aligned text starts at one margin too).
-        let justified = stretch && paragraph_should_justify(&edit.lines) && ends_at_one_margin(&edit.lines);
+        let justified = stretch && edit.justify;
         let commands =
             commands_for(edit.page, recolour, line_edits(&plan.fates, &edit.lines, &edit.twins, &style, justified));
 
@@ -13826,7 +13870,7 @@ impl PagifyApp {
         // however it was scheduled. What the budget no longer covers is shown
         // sharp by the detail laid over the part being looked at, which is
         // millions of pixels and not tens of millions at any zoom.
-        const BUDGET_PIXELS: f32 = 24.0 * 1024.0 * 1024.0;
+        const BUDGET_PIXELS: f32 = WHOLE_PAGE_BUDGET_PIXELS;
         let max_side = (ctx.input(|i| i.max_texture_side) as f32)
             .min(pdf_core::render::bitmap::MAX_DIMENSION_PX as f32);
 
@@ -13855,6 +13899,69 @@ impl PagifyApp {
     /// pushes the point where that overlay kicks in a little further out.
     fn texture_for(&mut self, ctx: &egui::Context, page: usize, scale: f32) -> Option<egui::TextureHandle> {
         self.texture_or_request(ctx, page, scale, true)
+    }
+
+    /// The texture a page is drawn from, and whether it is **exact**: made at the very
+    /// size the page is shown, so that one texel is one screen pixel.
+    ///
+    /// **Reported from use: the page was blurry zoomed out, beside another reader.**
+    /// Every picture was made at a quantised scale — a quarter-step band, rounded up
+    /// ([`raster_scale`], `quantise_zoom`) — so that a pinch does not re-render sixty
+    /// times a second, and the GPU then stretched it to the page's true size with a
+    /// linear filter: a resample at some ratio between 0.9 and 2 and never 1, with the
+    /// page's edge on a fraction of a pixel besides. That is right while the zoom is
+    /// moving and wrong the moment it stops, so once it has settled the worker is
+    /// asked for a picture at exactly the size on screen, and until it lands the page
+    /// is drawn from what it already has, as it was. Not at all without a worker (a
+    /// render on the UI thread at every zoom step is the stutter the quantising is
+    /// for), and not for a page past a whole-page picture's size.
+    fn page_texture(
+        &mut self,
+        ctx: &egui::Context,
+        page: usize,
+        zoom: f32,
+        frame: (f32, f32),
+        device_scale: f32,
+    ) -> Option<(egui::TextureHandle, bool)> {
+        if self.render_state.async_render && !self.zoom_is_moving(ctx) {
+            let max_side = (ctx.input(|i| i.max_texture_side) as f32).min(pdf_core::render::bitmap::MAX_DIMENSION_PX as f32);
+            if let Some((px_w, _)) = exact_page_px(frame.0, frame.1, zoom, ctx.pixels_per_point(), max_side) {
+                if let Some(texture) = self.exact_texture(ctx, page, frame.0, px_w) {
+                    return Some((texture, true));
+                }
+                // On its way. Not a second picture asked for meanwhile: the one the page
+                // already has, stretched for the moment.
+                let rotation = self.tab().view_state.rotation as u8;
+                let step = pdf_core::render::cache::quantise_zoom(device_scale);
+                if let Some((held, _)) = self.tab().doc.as_ref().and_then(|d| stand_in_for(d, page, step, rotation)) {
+                    return Some((held, false));
+                }
+            }
+        }
+        self.texture_for(ctx, page, device_scale).map(|texture| (texture, false))
+    }
+
+    /// The page's picture made `px_w` pixels across, if it is held; asked for from the
+    /// worker if it is not.
+    fn exact_texture(&mut self, ctx: &egui::Context, page: usize, frame_w: f32, px_w: u32) -> Option<egui::TextureHandle> {
+        let rotation = self.tab().view_state.rotation;
+        let step = EXACT_STEP_BASE + px_w;
+        let doc = self.tab_mut().doc.as_mut()?;
+        if let Some(held) = doc.caches.exact.get(&(page, step, rotation as u8)) {
+            return Some(held.clone());
+        }
+        let (doc_id, epoch, session) = (doc.id, doc.render_epoch, doc.session.clone());
+        self.ask_for_render(ctx, RenderJob {
+            doc: doc_id,
+            epoch,
+            page,
+            step,
+            rotation,
+            scale: px_w as f32 / frame_w.max(1.0),
+            crop: None,
+            session,
+        });
+        None
     }
 
     /// Ask for a page's texture without waiting for it — the prefetch of the
@@ -13889,7 +13996,7 @@ impl PagifyApp {
         while let Ok(done) = worker.done.try_recv() {
             // The slot belongs to the *newest* ask; an older answer arriving
             // must not release it.
-            let slot = (done.doc, done.page, done.crop.is_some());
+            let slot = (done.doc, done.page, slot_kind(&done.crop, done.step));
             if worker.in_flight.get(&slot) == Some(&(done.step, done.rotation as u8, done.crop)) {
                 worker.in_flight.remove(&slot);
             }
@@ -13915,6 +14022,16 @@ impl PagifyApp {
             let [width, height] = image.size;
             let rotation = done.rotation as u8;
             match done.crop {
+                None if done.step >= EXACT_STEP_BASE => {
+                    let handle = ctx.load_texture(
+                        format!("exact{}", done.page),
+                        image,
+                        egui::TextureOptions::LINEAR,
+                    );
+                    // One picture a page and turn: a new size replaces the old.
+                    doc.caches.exact.retain(|(p, _, r), _| !(*p == done.page && *r == rotation));
+                    doc.caches.exact.insert((done.page, done.step, rotation), handle);
+                }
                 None => {
                     let handle = ctx.load_texture(
                         format!("page{}", done.page),
@@ -14091,7 +14208,7 @@ impl PagifyApp {
         if self.render_state.renders.is_none() {
             self.render_state.renders = RenderWorker::start(ctx);
         }
-        let ask = (job.doc, job.page, job.crop.is_some());
+        let ask = (job.doc, job.page, slot_kind(&job.crop, job.step));
         let want = (job.step, job.rotation as u8, job.crop);
         let refused = (job.doc, job.epoch, job.page, job.step, job.rotation as u8);
         let Some(worker) = self.render_state.renders.as_mut() else {
@@ -14280,7 +14397,7 @@ struct RenderWorker {
     /// `(step, rotation, crop)` — that has not come back. Only the newest
     /// matters, and the worker drops the older ones, so one slot per page and
     /// kind is the whole of what is outstanding.
-    in_flight: HashMap<(u64, usize, bool), (u32, u8, Option<pdf_core::document::Rect>)>,
+    in_flight: HashMap<(u64, usize, u8), (u32, u8, Option<pdf_core::document::Rect>)>,
     /// Renders that came back refused, as `(document, epoch, page, step,
     /// rotation)` — not asked for again, or a page that cannot be drawn would be
     /// asked for on every frame for as long as it was on screen. A change to the
@@ -14721,7 +14838,7 @@ impl PagifyApp {
         // column just because the lines above it were. See
         // `paragraph_should_justify`'s own doc for why "more than one line"
         // alone is not enough.
-        let justify = paragraph_should_justify(&edit.lines);
+        let justify = edit.justify;
         let format = egui::TextFormat { font_id: font_id.clone(), color: ink, ..Default::default() };
         // **What the document's own face has no ink for is drawn in the
         // program's own face instead** — same size, same colour. The family
@@ -15978,3 +16095,6 @@ mod paragraph_apply_tests;
 
 #[cfg(test)]
 mod pick_wiring_tests;
+
+#[cfg(test)]
+mod exact_text_tests;

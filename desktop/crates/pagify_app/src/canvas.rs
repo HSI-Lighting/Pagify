@@ -1005,7 +1005,7 @@ impl crate::PagifyApp {
                     // asked-for size and simply gets softer, which is the right
                     // trade. `texture_for` applies that cap.
                     let device_scale = raster_scale(zoom * ctx.pixels_per_point());
-                    if let Some(texture) = self.texture_for(ctx, page, device_scale) {
+                    if let Some((texture, exact)) = self.page_texture(ctx, page, zoom, (w, h), device_scale) {
                         // **The page's true size at this zoom, not the
                         // texture's.** The raster is quantised so that a pinch
                         // does not re-render sixty times a second; drawing it at
@@ -1020,9 +1020,22 @@ impl crate::PagifyApp {
                         // it, the picture and the hit-testing disagreed.
                         let size = egui::vec2(w * zoom, h * zoom);
                         let rect = egui::Rect::from_min_size(origin, size);
+                        // **An exact picture goes on the pixel grid, one texel to a pixel**:
+                        // its corner on a whole pixel and its own size, not the page's
+                        // fractional one — a half-pixel offset is a resample of its own.
+                        // (Clicks still go by `rect`, the true size; they differ by under
+                        // a pixel.)
+                        let drawn = if exact {
+                            let ppp = ctx.pixels_per_point();
+                            let at = egui::pos2((origin.x * ppp).round() / ppp, (origin.y * ppp).round() / ppp);
+                            let [tw, th] = texture.size();
+                            egui::Rect::from_min_size(at, egui::vec2(tw as f32 / ppp, th as f32 / ppp))
+                        } else {
+                            rect
+                        };
                         ui.painter().image(
                             texture.id(),
-                            rect,
+                            drawn,
                             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                             egui::Color32::WHITE,
                         );

@@ -4782,3 +4782,54 @@ fn a_whole_paragraph_moves_undoes_and_moves_again_on_the_real_datasheet() {
         assert!((was.1 - now.1).abs() < 0.5 && (was.2 - now.2).abs() < 0.5, "run {} drifted", was.0);
     }
 }
+
+// -- the page is sharp once the zoom has stopped ------------------------------
+
+/// **A page shown at some size is made at that size.** The pure rule: pixels are
+/// the frame times the zoom times the screen's density, rounded, and a page too big
+/// for a whole-page picture gets none.
+#[test]
+fn an_exact_picture_is_the_size_on_screen_in_pixels() {
+    assert_eq!(exact_page_px(612.0, 792.0, 1.0, 1.0, 16384.0), Some((612, 792)));
+    assert_eq!(exact_page_px(595.0, 842.0, 0.7, 1.5, 16384.0), Some((625, 884)));
+    // Past the GPU's side, or the budget: the detail overlay's business.
+    assert_eq!(exact_page_px(612.0, 792.0, 40.0, 1.0, 16384.0), None);
+    assert_eq!(exact_page_px(612.0, 792.0, 1.0, 1.0, 500.0), None);
+    assert_eq!(exact_page_px(0.4, 0.4, 1.0, 1.0, 16384.0), None, "less than a pixel");
+}
+
+/// **Once the zoom has settled the page is drawn from a picture made at exactly its
+/// size**, one texel to a pixel — not from the quantised one the GPU stretches. The
+/// reported blur: a page zoomed out looked soft beside another reader because its
+/// picture was made at a quarter-step band above the size shown and resampled.
+#[test]
+fn a_settled_page_is_drawn_from_a_picture_made_at_exactly_its_size() {
+    let mut h = async_harness(&fixture("two-column.pdf"));
+    let ctx = h.ctx.clone();
+    // A zoom that no quarter-step band lands on. The page already has an exact picture
+    // from before it, at the size it was; the one wanted is the one for this.
+    h.state_mut().tab_mut().view_state.zoom = ZoomMode::Factor(0.83);
+    let shown = |h: &Harness<'static, PagifyApp>| {
+        let state = h.state();
+        let doc = state.tab().doc.as_ref().expect("doc");
+        let (w, h_pt) = doc.strip.frame_of(0).expect("frame");
+        let zoom = state.tab().view_state.last_view.expect("the page was drawn").scale;
+        let want = exact_page_px(w, h_pt, zoom, ctx.pixels_per_point(), 16384.0).expect("it fits");
+        let held: Vec<[usize; 2]> = doc.caches.exact.values().map(|t| t.size()).collect();
+        (want, held)
+    };
+    let mut seen = (h.state().render_state.render_stats.applied, Vec::new());
+    let mut landed = false;
+    for _ in 0..600 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.run_steps(1);
+        let (want, held) = shown(&h);
+        seen = (h.state().render_state.render_stats.applied, held.clone());
+        if held.iter().any(|[tw, th]| (*tw as i64 - want.0 as i64).abs() <= 1 && (*th as i64 - want.1 as i64).abs() <= 1) {
+            landed = true;
+            break;
+        }
+    }
+    let (want, _) = shown(&h);
+    assert!(landed, "the page is shown {want:?} pixels and the pictures held are {:?}", seen.1);
+}

@@ -31,6 +31,11 @@ pub(crate) struct DocCaches {
     /// to `SCALES_KEPT_PER_PAGE` scales.
     pub(super) textures: std::collections::HashMap<(usize, u32, u8), egui::TextureHandle>,
     pub(super) thumbs: std::collections::HashMap<usize, egui::TextureHandle>,
+    /// A page made **at exactly the size it is shown**, one per (page, width in pixels,
+    /// turn), for when the zoom has settled — see [`crate::PagifyApp::page_texture`].
+    /// Kept apart from `textures`: those are the quantised pictures a moving zoom
+    /// stretches, and nothing there may mistake one of these for one of them.
+    pub(super) exact: std::collections::HashMap<(usize, u32, u8), egui::TextureHandle>,
     /// A sharper crop of whatever's on screen, layered over the capped
     /// whole-page texture when that cap would otherwise leave a zoomed-in
     /// detail blurry. One at a time: only the page actually being looked at
@@ -75,6 +80,7 @@ impl DocCaches {
     /// default.
     pub(super) fn invalidate(&mut self) {
         self.textures.clear();
+        self.exact.clear();
         self.thumbs.clear();
         self.detail = None;
         self.locked.get_mut().clear();
@@ -99,6 +105,7 @@ impl DocCaches {
     /// be made to render itself again.
     pub(super) fn evict_outside(&mut self, keep_from: usize, keep_to: usize) {
         self.textures.retain(|(page, _, _), _| *page >= keep_from && *page < keep_to);
+        self.exact.retain(|(page, _, _), _| *page >= keep_from && *page < keep_to);
         if self.detail.as_ref().is_some_and(|d| d.page < keep_from || d.page >= keep_to) {
             self.detail = None;
         }

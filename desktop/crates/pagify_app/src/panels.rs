@@ -1427,7 +1427,7 @@ impl crate::PagifyApp {
                 let pending_covers = self
                     .render_state.renders
                     .as_ref()
-                    .and_then(|w| w.in_flight.get(&(doc_id, page, true)))
+                    .and_then(|w| w.in_flight.get(&(doc_id, page, crate::SLOT_DETAIL)))
                     .is_some_and(|(step, _, pending)| {
                         pending.is_some_and(|c| Self::detail_tile_covers(page, *step, c, page, zoom_step, visible_crop))
                     });
