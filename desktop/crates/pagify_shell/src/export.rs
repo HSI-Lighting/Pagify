@@ -42,6 +42,21 @@ pub fn document_html(session: &Session, title: &str) -> pdf_core::Result<String>
     Ok(out)
 }
 
+/// Hard-wrap `line` at `width` characters, on character boundaries.
+///
+/// `fromclipboard`'s own wrap, and the reason it is a character count rather
+/// than a measurement: this build writes lines it cannot ask the width of
+/// (see the `pagemarks` parse arm), so a wrap point can only be a count. It
+/// is a formatting choice, not a typographic claim — anything that needs
+/// better goes through the editor.
+pub fn wrap_by_chars(line: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![line.to_string()];
+    }
+    let chars: Vec<char> = line.chars().collect();
+    chars.chunks(width).map(|chunk| chunk.iter().collect()).collect()
+}
+
 /// Four characters stand between text and markup; everything else passes
 /// through as it is. Shared with the accessibility report, which writes
 /// markup too.

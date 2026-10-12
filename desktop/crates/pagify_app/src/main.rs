@@ -1116,6 +1116,11 @@ struct ClipboardState {
     /// Where copied pages are left so any Pagify window can paste them — see
     /// [`Self::copy_organize_selection`].
     clipboard_dir: std::path::PathBuf,
+    /// `fromclipboard` is waiting for the platform to hand back the
+    /// clipboard's text, and whether `RequestPaste` has been sent for it
+    /// yet — see [`Self::request_clipboard_text`].
+    clipboard_pdf_wanted: bool,
+    clipboard_pdf_requested: bool,
     /// **Reported from use**: ⌘V did nothing. egui-winit only emits
     /// `Event::Paste` when the *system* clipboard already holds non-empty
     /// text — unrelated to whether Pagify's own [`Self::page_clipboard`]/
@@ -3149,6 +3154,11 @@ impl PagifyApp {
             }
         }
 
+        // From clipboard: see `take_requested_clipboard_text` — checked
+        // before the ⌘V gate below because there is no key press and often
+        // no document open; the pasted words are about to become one.
+        self.take_requested_clipboard_text(&ctx);
+
         // Paste shares ⌘C's own clipboard-keys gate, not the strict
         // document-keys one above: it is one half of the same shortcut the
         // command box legitimately re-focuses itself after (see
@@ -4165,7 +4175,7 @@ impl PagifyApp {
                 ))
             } else {
                 Self::shared_clipboard_dir()
-            }, clipboard_mirror_wanted: false, },
+            }, clipboard_mirror_wanted: false, clipboard_pdf_wanted: false, clipboard_pdf_requested: false, },
             faces_state: FacesState { outlined_fonts: if quiet {
                 pagify_shell::outlined_fonts::OutlinedFonts::default()
             } else {
@@ -14143,6 +14153,117 @@ impl PagifyApp {
                 ));
             }
             Err(e) => self.say_error(format!("pagemarks: {e}")),
+        }
+    }
+
+    /// Ask the platform for the clipboard's text — the Convert tab's From
+    /// Clipboard. There is no way to read the clipboard on demand in this
+    /// framework (only to be handed a paste event), so this sets the want,
+    /// the frame sends `RequestPaste` once, and whatever comes back arrives
+    /// as the same `Event::Paste` ⌘V reads.
+    fn request_clipboard_text(&mut self) {
+        self.clipboard_state.clipboard_pdf_wanted = true;
+        self.clipboard_state.clipboard_pdf_requested = false;
+    }
+
+    /// The `fromclipboard` wait: ask the platform once, then take the text
+    /// when it arrives. Called from `handle_input`, the one place with both
+    /// the context and the paste events; split out of it so that function
+    /// stays inside the review's size invariant.
+    fn take_requested_clipboard_text(&mut self, ctx: &egui::Context) {
+        if !self.clipboard_state.clipboard_pdf_wanted {
+            return;
+        }
+        if !self.clipboard_state.clipboard_pdf_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+            self.clipboard_state.clipboard_pdf_requested = true;
+        }
+        let pasted = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Paste(text) => Some(text.clone()),
+                _ => None,
+            })
+        });
+        if let Some(text) = pasted {
+            self.clipboard_state.clipboard_pdf_wanted = false;
+            self.clipboard_state.clipboard_pdf_requested = false;
+            self.make_pdf_from_text(&text);
+        }
+    }
+
+    /// Turn pasted words into a new document: letter pages, the lines
+    /// written down from the top-left, rolling onto a new page when one
+    /// fills — a first draft to `saveas`.
+    ///
+    /// **Lines are hard-wrapped by character count** — ninety-two fit an
+    /// eleven-point line on letter, near enough — because this build writes
+    /// lines it cannot measure (see the `pagemarks` parse arm); wrapping is
+    /// a formatting choice here, not a typographic claim, and the editor is
+    /// where anything that needs better goes.
+    fn make_pdf_from_text(&mut self, text: &str) {
+        let text = text.trim();
+        if text.is_empty() {
+            self.say_error("fromclipboard: the clipboard holds no words.");
+            return;
+        }
+        if self.open_blank_sheet(612.0, 792.0, pdf_core::document::Ruling::None).is_none() {
+            return;
+        }
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            return;
+        };
+        const MARGIN_PT: f32 = 54.0;
+        const SIZE_PT: f32 = 11.0;
+        const LINE_PT: f32 = 16.0;
+        const WRAP_CHARS: usize = 92;
+        let color = pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 };
+        let mut commands = Vec::new();
+        let mut page = 0usize;
+        let mut y = MARGIN_PT;
+        for source_line in text.lines() {
+            for chunk in pagify_shell::export::wrap_by_chars(source_line, WRAP_CHARS) {
+                if y > 792.0 - MARGIN_PT {
+                    page += 1;
+                    y = MARGIN_PT;
+                    commands.push(pdf_core::command::Command::InsertBlankPage {
+                        at: page,
+                        width_pt: 612.0,
+                        height_pt: 792.0,
+                        fill: None,
+                        ruling: 0,
+                    });
+                }
+                match self.styled_line_command(
+                    page,
+                    (MARGIN_PT, y),
+                    &chunk,
+                    SIZE_PT,
+                    color,
+                    None,
+                    1.0,
+                ) {
+                    Ok(command) => commands.push(command),
+                    Err(e) => {
+                        self.say_error(format!("fromclipboard: {e}"));
+                        return;
+                    }
+                }
+                y += LINE_PT;
+            }
+        }
+        let pages = page + 1;
+        match session.execute(pdf_core::command::Command::Batch { commands }) {
+            Ok(_) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.refresh_after_page_change();
+                self.say_info(format!(
+                    "made a {pages}-page PDF from the clipboard text — `saveas <name.pdf>` \
+                     keeps it."
+                ));
+            }
+            Err(e) => self.say_error(format!("fromclipboard: {e}")),
         }
     }
 

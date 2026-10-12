@@ -249,6 +249,8 @@ pub enum Effect {
     /// Write the same words on every page, with `{n}` standing for the page
     /// number; the first corner is the anchor.
     WritePageMarks { top: bool, text: String },
+    /// Ask the platform for the clipboard's text, for a new document.
+    RequestClipboardText,
     /// Reflow the page's text.
     RunReflow,
     /// Search for `needle`.
@@ -410,6 +412,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Split { .. }
         | Verb::WordCount { .. }
         | Verb::PageMarks { .. }
+        | Verb::FromClipboard
         | Verb::Reflow
         | Verb::Find(_)
         | Verb::FindStep { .. }
@@ -664,6 +667,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::PageMarks { top, text } => {
             vec![Effect::WritePageMarks { top: *top, text: text.clone() }]
         }
+        Verb::FromClipboard => vec![Effect::RequestClipboardText],
         // Text and find.
         Verb::Reflow => vec![Effect::RunReflow],
         Verb::Find(needle) => vec![Effect::RunFind(needle.clone())],
@@ -1019,6 +1023,7 @@ mod tests {
                 Verb::PageMarks { top: true, text: "Page {n}".into() },
                 vec![Effect::WritePageMarks { top: true, text: "Page {n}".into() }],
             ),
+            (Verb::FromClipboard, vec![Effect::RequestClipboardText]),
             (Verb::Reflow, vec![Effect::RunReflow]),
             (Verb::Find("n".into()), vec![Effect::RunFind("n".into())]),
             (Verb::FindStep { forward: true }, vec![Effect::RunFindStep { forward: true }]),

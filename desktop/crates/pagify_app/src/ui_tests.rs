@@ -5513,3 +5513,28 @@ fn pagemarks_numbers_every_page_as_one_undo() {
         "one undo did not take the whole run of marks back: {text:?}"
     );
 }
+
+/// **The Convert tab's From Clipboard, through the real dispatch.** The
+/// button asks the platform for the clipboard; the text comes back as the
+/// same paste event ⌘V reads, and becomes a document — here sixty lines,
+/// which must roll onto a second page.
+#[test]
+fn fromclipboard_turns_the_pasted_words_into_a_document() {
+    let mut h = harness("pages-ladder.pdf");
+    let before = h.state().tabs.len();
+    h.state_mut().submit("fromclipboard");
+    h.run_steps(1);
+
+    let mut lines = String::from("First line\n");
+    for n in 0..59 {
+        lines.push_str(&format!("line {n}\n"));
+    }
+    h.event(egui::Event::Paste(lines));
+    h.run_steps(2);
+
+    assert_eq!(h.state().tabs.len(), before + 1, "fromclipboard did not open a document");
+    let doc = h.state().tab().doc.as_ref().expect("the new document");
+    assert!(doc.page_count >= 2, "sixty lines did not roll onto a second page");
+    let text = h.state_mut().characters(0).map(|c| c.text()).unwrap_or_default();
+    assert!(text.contains("First line"), "the words did not land: {text:?}");
+}

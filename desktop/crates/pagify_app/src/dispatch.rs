@@ -177,7 +177,8 @@ impl crate::PagifyApp {
             | Effect::WritePageMarks { .. }
             | Effect::RunAutoBookmarks
             | Effect::RunPreflight
-            | Effect::ExportPictures { .. } => self.apply_files(effect),
+            | Effect::ExportPictures { .. }
+            | Effect::RequestClipboardText => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -664,6 +665,7 @@ impl crate::PagifyApp {
             },
             Effect::ReportWordCount(pages) => self.report_word_count(&pages),
             Effect::WritePageMarks { top, text } => self.write_page_marks(top, &text),
+            Effect::RequestClipboardText => self.request_clipboard_text(),
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {
                 Some(path) => self.write_access_report(&path),

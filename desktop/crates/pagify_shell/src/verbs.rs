@@ -435,6 +435,9 @@ pub enum Verb {
     /// with `{n}` standing for the page number. Bottom-left unless `topleft`
     /// is said.
     PageMarks { top: bool, text: String },
+    /// Make a document out of the clipboard's text — the Convert tab's From
+    /// Clipboard. The platform hands the text back as a paste event.
+    FromClipboard,
     /// Start a new document out of nothing — `blankdoc [size] [ruling]`,
     /// sizes `a4`/`a3`/`letter`/`legal` (letter when nothing is said) and
     /// rulings `lined`/`grid`/`dots` (plain paper when nothing is said), in
@@ -913,7 +916,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("formimport", "the forms phase", "the Import tool"),
     ("formrecognise", "the forms phase", "the Run Form Field Recognition tool"),
     ("formtosheet", "the forms phase", "the Form to sheet tool"),
-    ("fromclipboard", "the conversion phase", "the From Clipboard tool"),
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
     ("fromtemplate", "the conversion phase", "the From Template tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
@@ -1068,7 +1070,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
-        "pagemarks",
+        "pagemarks", "fromclipboard",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1679,6 +1681,7 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
             }
             Ok(Verb::PageMarks { top, text })
         }
+        "fromclipboard" => Ok(Verb::FromClipboard),
         _ => return None,
     })
 }
@@ -2496,6 +2499,20 @@ mod page_marks_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "pagemarks"),
             "`pagemarks` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod from_clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn fromclipboard_parses_and_is_not_planned() {
+        assert_eq!(parse("fromclipboard"), Some(Ok(Verb::FromClipboard)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "fromclipboard"),
+            "`fromclipboard` is still in the planned table"
         );
     }
 }

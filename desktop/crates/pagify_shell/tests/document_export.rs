@@ -79,3 +79,15 @@ fn an_embedded_picture_exports_as_a_png_of_its_own_pixels() {
         "the PNG's dimensions must be the image's own pixels, not its size on the page"
     );
 }
+
+#[test]
+fn the_character_wrap_is_a_count_and_keeps_the_characters() {
+    use pagify_shell::export::wrap_by_chars;
+
+    let wrapped = wrap_by_chars("abcdefghij", 4);
+    assert_eq!(wrapped, ["abcd", "efgh", "ij"]);
+    assert_eq!(wrapped.concat(), "abcdefghij", "the wrap lost characters");
+
+    // A line short of the width is one piece, not zero.
+    assert_eq!(wrap_by_chars("abc", 4), ["abc"]);
+}
