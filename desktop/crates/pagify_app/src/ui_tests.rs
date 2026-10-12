@@ -5345,3 +5345,30 @@ fn changecolor_sets_and_cycles_the_background() {
         "the bare form did not step on"
     );
 }
+
+/// The View tab's Continuous pair: both are this app's own continuous
+/// layouts — `viewcontinuous` is single rows (the reading default) and
+/// `viewcontinuousfacing` is facing rows, each saying so through
+/// `set_layout`'s own message.
+#[test]
+fn the_continuous_buttons_switch_to_the_continuous_layouts() {
+    let mut h = harness("two-column.pdf");
+
+    h.state_mut().submit("viewcontinuous");
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(said.iter().any(|l| l.contains("one page at a time")), "{said:?}");
+    assert_eq!(
+        h.state().tab().doc.as_ref().expect("doc").strip.layout(),
+        pagify_shell::reader::Layout::Single
+    );
+
+    h.state_mut().submit("viewcontinuousfacing");
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(said.iter().any(|l| l.contains("two pages side by side")), "{said:?}");
+    assert_eq!(
+        h.state().tab().doc.as_ref().expect("doc").strip.layout(),
+        pagify_shell::reader::Layout::Facing
+    );
+}

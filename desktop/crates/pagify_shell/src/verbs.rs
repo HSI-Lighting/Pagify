@@ -944,8 +944,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("toother", "the conversion phase", "the To Other tool"),
     ("trackreviews", "the sharing phase", "the Track Reviews tool"),
     ("transitions", "the viewing phase", "the Page Transitions tool"),
-    ("viewcontinuous", "the viewing phase", "the Continuous tool"),
-    ("viewcontinuousfacing", "the viewing phase", "the Continuous Facing tool"),
     ("viewsplit", "the viewing phase", "the Split tool"),
 ];
 
@@ -1397,6 +1395,14 @@ fn parse_document_edits(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "viewsingle" => Ok(Verb::SetLayout(crate::reader::Layout::Single)),
         "viewfacing" => Ok(Verb::SetLayout(crate::reader::Layout::Facing)),
         "viewcover" => Ok(Verb::SetLayout(crate::reader::Layout::FacingWithCover)),
+        // Continuous, as Acrobat means it, is this app's *default shape*: the
+        // strip already scrolls through every row, so "continuous single" and
+        // "continuous facing" are the single and facing layouts themselves.
+        // Wired to those rather than left as placeholders, because the
+        // behaviour the words ask for is real; if a page-snapped mode is ever
+        // added, these two words are where its switch belongs.
+        "viewcontinuous" => Ok(Verb::SetLayout(crate::reader::Layout::Single)),
+        "viewcontinuousfacing" => Ok(Verb::SetLayout(crate::reader::Layout::Facing)),
         "resizepages" => {
             let pages = rest.first().copied().unwrap_or("all").to_string();
             match rest.get(1).and_then(|n| paper_size(n)) {
@@ -2318,5 +2324,31 @@ mod change_color_tests {
         assert_eq!(PaperTint::Sepia.next(), PaperTint::Dark);
         assert_eq!(PaperTint::Dark.next(), PaperTint::White);
         assert_eq!(PaperTint::default(), PaperTint::White);
+    }
+}
+
+#[cfg(test)]
+mod continuous_view_tests {
+    use super::*;
+
+    /// The continuous words map onto the layouts this app has always had:
+    /// every layout here scrolls through its rows, so "continuous single" is
+    /// `Single` and "continuous facing" is `Facing`.
+    #[test]
+    fn the_continuous_words_map_onto_the_continuous_layouts() {
+        assert_eq!(
+            parse("viewcontinuous"),
+            Some(Ok(Verb::SetLayout(crate::reader::Layout::Single)))
+        );
+        assert_eq!(
+            parse("viewcontinuousfacing"),
+            Some(Ok(Verb::SetLayout(crate::reader::Layout::Facing)))
+        );
+        for word in ["viewcontinuous", "viewcontinuousfacing"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
     }
 }
