@@ -471,10 +471,40 @@ class MainActivity : ComponentActivity() {
                         // different screens. Reading the kind rather than
                         // guessing from the file name: a supplier who names a
                         // part "drawing.stp" should still get the 3D viewer.
-                        when (recent.kind) {
+                        //
+                        // **A model or a drawing can fail here for a reason a
+                        // retry cannot fix.** The engine reads a local path,
+                        // so reopening re-copies from the original `content://`
+                        // URI, which needs the read grant taken when it was
+                        // first opened to still be valid — see `showDrawing`.
+                        // That grant only survives a restart if the app that
+                        // handed the file over asked Android to make it
+                        // persistable, and a plain "Open with"/share from
+                        // another app usually does not; only this app's own
+                        // file picker reliably does. `showModel`/`showDrawing`
+                        // already swallow that failure internally (a dead
+                        // grant throwing `SecurityException` mid-copy is not
+                        // this app's bug to surface as a crash), but
+                        // swallowing it this far up as well left somebody
+                        // tapping a drawing and watching nothing happen, with
+                        // no way to tell "this needs reopening from Telegram
+                        // again" from "I didn't actually tap it."
+                        val opened = when (recent.kind) {
                             RecentKind.Model -> showModel(recent.uri.toUri())
                             RecentKind.Drawing -> showDrawing(recent.uri.toUri())
-                            RecentKind.Document -> viewModel.open(recent.uri.toUri())
+                            RecentKind.Document -> {
+                                viewModel.open(recent.uri.toUri())
+                                true
+                            }
+                        }
+                        if (!opened) {
+                            Toast.makeText(
+                                this,
+                                "Pagify no longer has permission to open " +
+                                    "\"${recent.name}\". Open it again from " +
+                                    "where you found it.",
+                                Toast.LENGTH_LONG,
+                            ).show()
                         }
                     },
                     onForgetRecent = { viewModel.forgetDocument(it.uri) },
