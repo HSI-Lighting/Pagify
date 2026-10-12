@@ -681,6 +681,35 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Set the value of the first text field named `name`; `false` when the
+    /// document holds no such field.
+    fn set_form_text(&mut self, _name: &str, _value: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Check or uncheck the checkbox named `name`; `false` when the document
+    /// holds no such field.
+    fn set_form_checkbox(&mut self, _name: &str, _checked: bool) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Check the radio widget of the group named `name` whose own state is
+    /// `state`; `false` when no widget matches.
+    ///
+    /// **This build cannot set radio buttons, and says so by answering
+    /// `false` rather than writing something wrong.** Measured while
+    /// building the form filler: the C API's checked-setter
+    /// (`FPDFAnnot_SetFormFieldChecked`) is not in the bindings this crate
+    /// ships, a button's own on-state (its export value) reads empty
+    /// through them for every widget this repo can make — tried keys-inline
+    /// and parent-with-`/Kids`, with minimal and well-formed appearance
+    /// streams — and writing `/AS` and the value by hand drives PDFium's
+    /// per-control state machine into reporting the *other* control
+    /// checked. A version bump of the pdfium bindings is the real fix.
+    fn set_form_radio(&mut self, _name: &str, _state: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// The bytes of the font one text run is drawn in, if it can be had.
     ///
     /// **What Obfuscate needs and [`crate::crypto::tweak::coverage`] cannot

@@ -177,8 +177,16 @@ impl<'a> PdfForm<'a> {
     }
 
     /// Returns the internal `FPDF_FORMHANDLE` handle for this [PdfForm].
+    /// Returns the underlying `FPDF_FORMHANDLE` for this form.
+    ///
+    /// **Patched for Pagify (2026-10-12): made public.** The form-fill handle
+    /// is what every `FPDFAnnot_Get/SetFormField*` call needs, and Pagify's
+    /// engine fills fields through those calls directly — the crate's own
+    /// per-kind setters are written for interactive use and, for radio
+    /// buttons, write the widget's current appearance state back as the
+    /// group's value (only right when the button was already checked).
     #[inline]
-    pub(crate) fn handle(&self) -> FPDF_FORMHANDLE {
+    pub fn handle(&self) -> FPDF_FORMHANDLE {
         self.form_handle
     }
 

@@ -44,7 +44,11 @@ objs[12] = (b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (email) "
 objs[13] = (b"<< /Type /Annot /Subtype /Widget /FT /Btn /T (agree) /V /Yes /AS /Yes "
             b"/Rect [140 584 154 598] /F 4 /P 3 0 R "
             b"/AP << /N << /Yes 18 0 R /Off 17 0 R >> >> >>")
-# A radio group is two widgets sharing a name; the checked one carries the value.
+# A radio group: two widgets sharing a name; the checked one carries the
+# value. Keys inline rather than a parent field with /Kids — both shapes
+# were tried while building the form filler and both read back the same,
+# so the simpler one is kept. (Radios are *read* by the engine but not
+# settable: see `Document::set_form_radio`'s own note.)
 objs[14] = (b"<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 32768 /T (speed) "
             b"/V /slow /AS /slow /Rect [140 544 154 558] /F 4 /P 3 0 R "
             b"/AP << /N << /slow 18 0 R /Off 17 0 R >> >> >>")
@@ -55,9 +59,10 @@ objs[15] = (b"<< /Type /Annot /Subtype /Widget /FT /Btn /Ff 32768 /T (speed) "
 objs[16] = (b"<< /Type /Annot /Subtype /Widget /FT /Ch /Ff 131072 /T (colour) "
             b"/Opt [(Red) (Green) (Blue)] /V (Green) /Rect [140 504 260 528] /F 4 /P 3 0 R >>")
 
-objs[17] = b"<< /Type /XObject /Subtype /Form /BBox [0 0 14 14] /Length 0 >>\nstream\n\nendstream"
+objs[17] = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 14 14] /Resources << >> "
+            b"/Length 1 >>\nstream\n \nendstream")
 mark = b"0 0 0 RG 2 w 2 2 m 12 12 l S 2 12 m 12 2 l S\n"
-objs[18] = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 14 14] /Length %d >>\nstream\n"
+objs[18] = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 14 14] /Resources << >> /Length %d >>\nstream\n"
             % len(mark) + mark + b"endstream")
 
 out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")

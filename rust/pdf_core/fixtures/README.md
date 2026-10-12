@@ -451,3 +451,11 @@ have no visible text or boxes, because this fixture is about what they
 *hold*, which is what the engine's form reader walks.
 
 Rebuild it with `tools/make_form_fields_fixture.py fixtures/form-fields.pdf`.
+
+**Radios are read, not settable.** The engine's `set_form_radio` answers
+`false` rather than writing a wrong state: the C API's checked-setter is
+not in the bindings the crate ships, a button's on-state (its export value)
+reads empty through them for every widget shape this repo could make, and
+hand-writing `/AS` and the value drives PDFium's per-control state machine
+into reporting the *other* control checked. Measured, not assumed — the
+notes are in `pdfium_doc.rs` and `Document::set_form_radio`.

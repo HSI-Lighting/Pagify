@@ -30,6 +30,25 @@ use crate::document::{
     Redaction, RedactionReport, Uncleared,
 };
 
+// The `FPDF_FORMFIELD_*` values from PDFium's C API, which its Rust
+// bindings keep private. Named here as the header names them.
+const FPDF_FORMFIELD_CHECKBOX: i32 = 2;
+
+/// Read a PDFium wide string in the two passes every sized read uses —
+/// length first, then the buffer — as a Rust `String`.
+fn read_form_wide(
+    read: impl Fn(*mut u16, std::os::raw::c_ulong) -> std::os::raw::c_ulong,
+) -> Option<String> {
+    let length = read(std::ptr::null_mut(), 0);
+    if length == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; (length as usize).div_ceil(2)];
+    read(buffer.as_mut_ptr(), length);
+    let end = buffer.iter().position(|&u| u == 0).unwrap_or(buffer.len());
+    Some(String::from_utf16_lossy(&buffer[..end]))
+}
+
 // The `FPDF_COLORSPACE_*` values from PDFium's C API (`fpdfview.h`). Its
 // Rust bindings keep those constants private, so they are named here exactly
 // as the header names them — the numbers are the C API's, not ours.
@@ -1230,6 +1249,40 @@ impl Document for PdfiumDocument {
         }
         Ok(out)
     }
+
+    fn set_form_text(&mut self, name: &str, value: &str) -> Result<bool> {
+        let pdf_err = |e: pdfium_render::prelude::PdfiumError| {
+            PdfError::InvalidArgument(format!("{e}"))
+        };
+        let pages = self.document.pages();
+        for page_index in 0..pages.len() {
+            let page = pages.get(page_index).map_err(pdf_err)?;
+            let annotations = page.annotations();
+            for annotation_index in 0..annotations.len() {
+                let mut annotation = annotations.get(annotation_index).map_err(pdf_err)?;
+                let Some(field) = annotation.as_form_field_mut() else {
+                    continue;
+                };
+                if field.field_type() != PdfFormFieldType::Text {
+                    continue;
+                }
+                let Some(text) = field.as_text_field_mut() else {
+                    continue;
+                };
+                if text.name().as_deref() != Some(name) {
+                    continue;
+                }
+                text.set_value(value).map_err(pdf_err)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn set_form_checkbox(&mut self, name: &str, checked: bool) -> Result<bool> {
+        self.set_form_check_state(name, checked)
+    }
+
 
     fn run_font_data(&self, page_index: usize, object: usize) -> Result<Option<Vec<u8>>> {
         let (raw, handle) = match self.text_object_at(page_index, object)? {
@@ -3760,6 +3813,66 @@ impl<'a> Page for PdfiumPage<'a> {
 }
 
 impl PdfiumDocument {
+    /// Check or clear a checkbox: walk every widget, match by field type
+    /// and name, then write `/AS` and the field's value through
+    /// `FPDFAnnot_SetStringValue`.
+    ///
+    /// **Why not the crate's own setter:** it writes `/Yes` or `/Off` as
+    /// strings — with a leading slash, and only right for a box whose
+    /// on-state is literally named `Yes`. This writes the box's own export
+    /// value where there is one (`Yes` for boxes without, preserving that
+    /// default) and `Off` to clear.
+    fn set_form_check_state(&mut self, name: &str, checked: bool) -> Result<bool> {
+        let Some(form) = self.document.form() else {
+            return Ok(false);
+        };
+        let form_handle = form.handle();
+        let bindings = pdfium()?.bindings();
+
+        for page_index in 0..self.page_count {
+            let page_number =
+                i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                    index: page_index,
+                    count: self.page_count,
+                })?;
+            let page = RawPage::open(self.document.handle(), page_number)?;
+            let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+            for index in 0..count.max(0) {
+                let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, index) };
+                if annot.is_null() {
+                    continue;
+                }
+                let annot_type =
+                    unsafe { bindings.FPDFAnnot_GetFormFieldType(form_handle, annot) };
+                let annot_name = read_form_wide(|buf, len| unsafe {
+                    bindings.FPDFAnnot_GetFormFieldName(form_handle, annot, buf, len)
+                });
+                if annot_type != FPDF_FORMFIELD_CHECKBOX || annot_name.as_deref() != Some(name) {
+                    unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                    continue;
+                }
+
+                let value = if checked {
+                    read_form_wide(|buf, len| unsafe {
+                        bindings
+                            .FPDFAnnot_GetFormFieldExportValue(form_handle, annot, buf, len)
+                    })
+                    .unwrap_or_else(|| "Yes".into())
+                } else {
+                    "Off".to_string()
+                };
+
+                unsafe {
+                    bindings.FPDFAnnot_SetStringValue_str(annot, "AS", &value);
+                    bindings.FPDFAnnot_SetStringValue_str(annot, "V", &value);
+                }
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Every text object on the page, including ones with no visible ink —
     /// unlike [`Document::text_runs`], which drops those because there is
     /// nothing there to click.
