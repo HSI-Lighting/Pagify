@@ -150,6 +150,37 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="application/pdf" />
             </intent-filter>
+
+            <!-- And a CAD file shared the same way. A chat app's "Open with"
+                 on a received file is often this, not VIEW — measured, not
+                 assumed: asking a real device what actually fired showed a
+                 generic Share sheet (Gmail, Drive, Bluetooth, every
+                 messenger on the phone), not an Open-with one, and Pagify
+                 was absent from it because this filter did not exist yet.
+
+                 No typeless/pathPattern half here the way the VIEW filter
+                 needed one — unlike a file manager's VIEW intent, a SEND
+                 intent is conventionally built with `setType()` always
+                 called, since the receiving app has nothing else to go on
+                 for what it is being handed; the literal types below
+                 (including the generic fallback) are what real senders
+                 hand over. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/vnd.dwg" />
+                <data android:mimeType="application/acad" />
+                <data android:mimeType="application/x-acad" />
+                <data android:mimeType="application/x-dwg" />
+                <data android:mimeType="image/vnd.dxf" />
+                <data android:mimeType="application/dxf" />
+                <data android:mimeType="application/x-dxf" />
+                <data android:mimeType="model/step" />
+                <data android:mimeType="application/step" />
+                <data android:mimeType="application/x-step" />
+                <data android:mimeType="model/step-xml+zip" />
+                <data android:mimeType="application/octet-stream" />
+            </intent-filter>
         </activity>
 
         <!-- Hands out one capture at a time as a content:// URI. Not exported: a

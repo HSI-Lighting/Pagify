@@ -5,6 +5,7 @@ import androidx.core.content.FileProvider
 import android.Manifest.permission.WRITE_EXTERNAL_STORAGE
 import android.content.Context
 import android.content.Intent
+import android.os.Build
 import android.net.Uri
 import android.util.Log
 import android.os.Bundle
@@ -700,9 +701,35 @@ class MainActivity : ComponentActivity() {
         viewableUri(intent)?.let { incomingDocument.value = it }
     }
 
-    private fun viewableUri(intent: Intent?): Uri? = intent
-        ?.takeIf { it.action == Intent.ACTION_VIEW || it.action == Intent.ACTION_SEND }
-        ?.data
+    /**
+     * The file a VIEW or a SEND intent is actually offering, which are not
+     * the same field.
+     *
+     * **A SEND intent never carries its payload in `data`.** VIEW does — the
+     * URI being viewed is the Intent's own data. SEND puts the file in the
+     * `EXTRA_STREAM` extra instead, because a share intent's `data`/`type`
+     * pair is conventionally reserved for describing what's being shared
+     * (a `text/plain` share with a caption, say), not for carrying it. This
+     * code accepted SEND and read `.data` from it regardless, which is the
+     * reason "share a PDF to Pagify" from another app's share sheet has
+     * never actually opened anything — `.data` on a SEND intent is normally
+     * null, so the whole open silently did nothing. Surfaced while adding a
+     * SEND filter for CAD files, where it would have repeated identically.
+     */
+    private fun viewableUri(intent: Intent?): Uri? {
+        intent ?: return null
+        return when (intent.action) {
+            Intent.ACTION_VIEW -> intent.data
+            Intent.ACTION_SEND ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM)
+                }
+            else -> null
+        }
+    }
 
     companion object {
         const val PDF_MIME_TYPE = "application/pdf"
