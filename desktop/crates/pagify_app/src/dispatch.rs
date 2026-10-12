@@ -80,6 +80,7 @@ impl crate::PagifyApp {
                 .unwrap_or(792.0),
             tool_armed: tab.tool.is_some(),
             signature_count: self.library_state.signatures.entries().len(),
+            paper_tint: tab.view_state.paper_tint,
         }
     }
 
@@ -112,6 +113,7 @@ impl crate::PagifyApp {
             | Effect::ToggleCommentsPanel
             | Effect::RunSearchHighlight(_)
             | Effect::RunCompare { .. }
+            | Effect::SetPaperTint(_)
             | Effect::Say(_)
             | Effect::SayError(_)
             | Effect::CheckUpdate => self.apply_document(effect),
@@ -269,6 +271,7 @@ impl crate::PagifyApp {
                 Some(path) => self.compare_with(&path),
                 None => self.compare_dialog(),
             },
+            Effect::SetPaperTint(tint) => self.set_paper_tint(tint),
             Effect::Say(text) => self.say_info(text),
             Effect::SayError(text) => self.say_error(text),
             Effect::CheckUpdate => self.spawn_update_check(),

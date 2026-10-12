@@ -6,9 +6,9 @@
 use crate::overlay::{self, PageView};
 use crate::theme;
 use crate::{
-    icon_font, raster_scale, reveal_axis, short, view_height, Awaiting, Grab, Handle,
-    OrganizeDrag, PlacedImageSelected, Reveal, SignatureSelected, Tab, Tool, ToolEffect, ZoomMode,
-    GRID_GAP_PT, HANDLE_PX, ORGANIZE_GRID_PANEL, ROTATE_HANDLE_PX,
+    icon_font, paper_tint_color, raster_scale, reveal_axis, short, view_height, Awaiting, Grab,
+    Handle, OrganizeDrag, PlacedImageSelected, Reveal, SignatureSelected, Tab, Tool, ToolEffect,
+    ZoomMode, GRID_GAP_PT, HANDLE_PX, ORGANIZE_GRID_PANEL, ROTATE_HANDLE_PX,
 };
 use pagify_shell::command::Kind;
 use pagify_shell::markup::HIT_TOLERANCE_PT;
@@ -1004,6 +1004,12 @@ impl crate::PagifyApp {
                     }
                 }
 
+                // The colour behind the pages — `changecolor`. Left unpainted
+                // for the default, so the window is exactly what it was; the
+                // opaque pages draw over it.
+                if let Some(tint) = paper_tint_color(self.tab().view_state.paper_tint) {
+                    ui.painter().rect_filled(canvas, egui::CornerRadius::ZERO, tint);
+                }
                 let hover = ui.ctx().input(|i| i.pointer.hover_pos());
                 for page in visible.clone() {
                     let (top, (w, h)) = {

@@ -474,6 +474,7 @@ impl crate::PagifyApp {
         let page = self.tab().view_state.page;
         let mut ruler_box = self.tab().view_state.ruler;
         let mut autoscroll_box = self.tab().view_state.autoscroll;
+        let paper_tint = self.tab().view_state.paper_tint;
         let zoom_pct = has_doc.then(|| (self.resolved_zoom() * 100.0).round());
 
         egui::Window::new("View Setting")
@@ -558,6 +559,21 @@ impl crate::PagifyApp {
                 if ui.checkbox(&mut autoscroll_box, "AutoScroll").clicked() {
                     submit = Some("autoscroll");
                 }
+                ui.add_space(8.0);
+                ui.label("Background");
+                ui.horizontal(|ui| {
+                    use pagify_shell::verbs::PaperTint;
+                    for (tint, label, word) in [
+                        (PaperTint::White, "White", "changecolor white"),
+                        (PaperTint::Grey, "Grey", "changecolor grey"),
+                        (PaperTint::Sepia, "Sepia", "changecolor sepia"),
+                        (PaperTint::Dark, "Dark", "changecolor dark"),
+                    ] {
+                        if ui.selectable_label(paper_tint == tint, label).clicked() {
+                            submit = Some(word);
+                        }
+                    }
+                });
                 ui.add_space(6.0);
                 if ui.button("Close").clicked() {
                     close = true;

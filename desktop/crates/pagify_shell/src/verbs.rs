@@ -142,6 +142,43 @@ pub enum SignatureAction {
     Upload(Option<PathBuf>),
 }
 
+/// The colour behind the page — the View tab's Change Color.
+///
+/// Only the choice, no colours: the shell has no window, and the palette is
+/// the app's (`paper_tint_color`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PaperTint {
+    /// What the background has always been — the theme's own.
+    #[default]
+    White,
+    Grey,
+    Sepia,
+    Dark,
+}
+
+impl PaperTint {
+    /// The next one in the ring a bare `changecolor` steps through:
+    /// white → grey → sepia → dark → white.
+    pub fn next(self) -> PaperTint {
+        match self {
+            PaperTint::White => PaperTint::Grey,
+            PaperTint::Grey => PaperTint::Sepia,
+            PaperTint::Sepia => PaperTint::Dark,
+            PaperTint::Dark => PaperTint::White,
+        }
+    }
+
+    /// The word the command bar and the panel use for it.
+    pub fn word(self) -> &'static str {
+        match self {
+            PaperTint::White => "white",
+            PaperTint::Grey => "grey",
+            PaperTint::Sepia => "sepia",
+            PaperTint::Dark => "dark",
+        }
+    }
+}
+
 /// A Pagify verb: something that acts on the document rather than on geometry.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verb {
@@ -607,6 +644,10 @@ pub enum Verb {
     /// View tab's Compare. `compare <file.pdf>`; bare, the app asks for the
     /// file.
     Compare { source: Option<PathBuf> },
+    /// The colour behind the pages — the View tab's Change Color.
+    /// `changecolor [white|grey|sepia|dark]`; bare, it steps to the next
+    /// one.
+    ChangeColor(Option<PaperTint>),
     /// Make a new document out of picture files — `fromfiles` or
     /// `fromfiles <folder>`, which takes every picture in the folder in name
     /// order. Bare, the app opens a picker.
@@ -841,7 +882,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
     ("callout", "the annotation phase", "the Callout tool"),
-    ("changecolor", "the viewing phase", "the Change Color tool"),
     ("clipboard", "the capture phase", "the Clipboard tool"),
     ("cloudstorage", "the sharing phase", "the Cloud Storage tool"),
     ("combfield", "the forms phase", "the Comb Field tool"),
@@ -1030,7 +1070,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
-        "searchhighlight", "compare",
+        "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1752,6 +1792,14 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "compare" => Ok(Verb::Compare {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
+        "changecolor" => match tail.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(Verb::ChangeColor(None)),
+            "white" | "off" => Ok(Verb::ChangeColor(Some(PaperTint::White))),
+            "grey" | "gray" => Ok(Verb::ChangeColor(Some(PaperTint::Grey))),
+            "sepia" => Ok(Verb::ChangeColor(Some(PaperTint::Sepia))),
+            "dark" => Ok(Verb::ChangeColor(Some(PaperTint::Dark))),
+            other => Err(format!("changecolor: {other:?} — try white, grey, sepia or dark")),
+        },
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2235,5 +2283,40 @@ mod compare_tests {
             PLANNED.iter().all(|(v, _, _)| *v != "compare"),
             "`compare` is still in the planned table"
         );
+    }
+}
+
+#[cfg(test)]
+mod change_color_tests {
+    use super::*;
+
+    #[test]
+    fn changecolor_parses_every_word_and_refuses_the_rest() {
+        assert_eq!(parse("changecolor"), Some(Ok(Verb::ChangeColor(None))));
+        assert_eq!(
+            parse("changecolor sepia"),
+            Some(Ok(Verb::ChangeColor(Some(PaperTint::Sepia))))
+        );
+        assert_eq!(
+            parse("changecolor GRAY"),
+            Some(Ok(Verb::ChangeColor(Some(PaperTint::Grey))))
+        );
+        match parse("changecolor parchment") {
+            Some(Err(why)) => assert!(why.contains("parchment"), "unhelpful refusal: {why}"),
+            other => panic!("changecolor parchment parsed as {other:?}"),
+        }
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "changecolor"),
+            "`changecolor` is still in the planned table"
+        );
+    }
+
+    #[test]
+    fn the_bare_form_steps_round_the_ring_and_comes_back() {
+        assert_eq!(PaperTint::White.next(), PaperTint::Grey);
+        assert_eq!(PaperTint::Grey.next(), PaperTint::Sepia);
+        assert_eq!(PaperTint::Sepia.next(), PaperTint::Dark);
+        assert_eq!(PaperTint::Dark.next(), PaperTint::White);
+        assert_eq!(PaperTint::default(), PaperTint::White);
     }
 }

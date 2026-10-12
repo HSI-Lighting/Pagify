@@ -802,6 +802,9 @@ struct ViewState {
     /// A ruler along the page in view's top and left edges — the View tab's
     /// Toggle Ruler. Page points, so the marks stay true at any zoom.
     ruler: bool,
+    /// The colour behind the pages — the View tab's Change Color. Only the
+    /// choice; the palette is `paper_tint_color`.
+    paper_tint: pagify_shell::verbs::PaperTint,
 }
 
 /// Passcode and redaction asks on this tab — what the app is
@@ -998,7 +1001,7 @@ impl DocTab {
             markup: Markup::default(),
             calibration: Calibration::default(),
             tool: None,
-            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, },
+            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
             panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, },
@@ -8414,6 +8417,20 @@ impl PagifyApp {
         self.tab_mut().panels.view_settings = open;
     }
 
+    /// Set the colour behind the pages — the View tab's Change Color. The
+    /// pages themselves are untouched; this is the paper the strip is read
+    /// on.
+    fn set_paper_tint(&mut self, tint: pagify_shell::verbs::PaperTint) {
+        self.tab_mut().view_state.paper_tint = tint;
+        self.say_info(match tint {
+            pagify_shell::verbs::PaperTint::White => "background: white.".to_string(),
+            other => format!(
+                "background: {} — the colour behind the pages; the page itself is unchanged.",
+                other.word()
+            ),
+        });
+    }
+
     /// Open or close the Accounting Calculator — the Comment tab's button.
     /// The arithmetic lives in `pagify_shell::calculator`; this is only the
     /// switch.
@@ -15333,6 +15350,19 @@ fn decode_picture(path: &std::path::Path) -> Result<(Vec<u8>, u32, u32), String>
     let photo = decoded.to_rgba8();
     let (width, height) = photo.dimensions();
     Ok((photo.into_raw(), width, height))
+}
+
+/// The fill behind the pages for a [`pagify_shell::verbs::PaperTint`], or
+/// `None` for the default white — which is left unpainted so the window is
+/// exactly what it was before anyone touched the setting.
+fn paper_tint_color(tint: pagify_shell::verbs::PaperTint) -> Option<egui::Color32> {
+    use pagify_shell::verbs::PaperTint;
+    match tint {
+        PaperTint::White => None,
+        PaperTint::Grey => Some(egui::Color32::from_rgb(0x8A, 0x8A, 0x92)),
+        PaperTint::Sepia => Some(egui::Color32::from_rgb(0xC9, 0xB4, 0x8C)),
+        PaperTint::Dark => Some(egui::Color32::from_rgb(0x2A, 0x2A, 0x30)),
+    }
 }
 
 /// A page's pixels as an egui image.

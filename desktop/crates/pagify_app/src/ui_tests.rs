@@ -5316,3 +5316,32 @@ fn compare_reports_the_order_difference_and_self_identity() {
         "a document did not compare identical with itself: {said:?}"
     );
 }
+
+/// The View tab's Change Color: the named form sets the tint and says what
+/// it means (the page itself is unchanged); the bare form steps on round
+/// the ring.
+#[test]
+fn changecolor_sets_and_cycles_the_background() {
+    let mut h = harness("quadrants.pdf");
+
+    h.state_mut().submit("changecolor sepia");
+    h.run_steps(1);
+    assert_eq!(
+        h.state().tab().view_state.paper_tint,
+        pagify_shell::verbs::PaperTint::Sepia
+    );
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(said.iter().any(|l| l.contains("background: sepia")), "{said:?}");
+    assert!(
+        said.iter().any(|l| l.contains("the page itself is unchanged")),
+        "the message does not say what changed: {said:?}"
+    );
+
+    h.state_mut().submit("changecolor");
+    h.run_steps(1);
+    assert_eq!(
+        h.state().tab().view_state.paper_tint,
+        pagify_shell::verbs::PaperTint::Dark,
+        "the bare form did not step on"
+    );
+}

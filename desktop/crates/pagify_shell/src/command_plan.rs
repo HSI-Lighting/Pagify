@@ -36,11 +36,21 @@ pub struct CommandEnv {
     /// How many signatures the library holds (drives the names a new pad
     /// gets, and whether placing needs one drawn first).
     pub signature_count: usize,
+    /// The colour behind the pages, so a bare `changecolor` knows what to
+    /// step to.
+    pub paper_tint: crate::verbs::PaperTint,
 }
 
 impl Default for CommandEnv {
     fn default() -> Self {
-        Self { has_doc: false, page: 0, page_height: 792.0, tool_armed: false, signature_count: 0 }
+        Self {
+            has_doc: false,
+            page: 0,
+            page_height: 792.0,
+            tool_armed: false,
+            signature_count: 0,
+            paper_tint: crate::verbs::PaperTint::White,
+        }
     }
 }
 
@@ -98,6 +108,8 @@ pub enum Effect {
     /// Compare this document against another file's pages; `None` asks for
     /// the file first.
     RunCompare { source: Option<std::path::PathBuf> },
+    /// Set the colour behind the pages.
+    SetPaperTint(crate::verbs::PaperTint),
     /// Make a new document out of nothing, one sheet of this size and ruling.
     BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
     /// Merge PDFs into one new document; a folder to read them from, or
@@ -335,6 +347,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::ManageComments
         | Verb::SearchHighlight { .. }
         | Verb::Compare { .. }
+        | Verb::ChangeColor(_)
         | Verb::BlankDoc { .. }
         | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
@@ -462,6 +475,10 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::ManageComments => vec![Effect::ToggleCommentsPanel],
         Verb::SearchHighlight { words } => vec![Effect::RunSearchHighlight(words.clone())],
         Verb::Compare { source } => vec![Effect::RunCompare { source: source.clone() }],
+        // The one verb whose bare form depends on where it already is: it
+        // steps to the next tint in the ring.
+        Verb::ChangeColor(Some(tint)) => vec![Effect::SetPaperTint(*tint)],
+        Verb::ChangeColor(None) => vec![Effect::SetPaperTint(env.paper_tint.next())],
         // A new document is allowed with nothing open — that is the point of
         // it.
         Verb::BlankDoc { width_pt, height_pt, ruling } => vec![Effect::BlankDocument {
@@ -773,6 +790,15 @@ mod tests {
                 Verb::Compare { source: Some("other.pdf".into()) },
                 vec![Effect::RunCompare { source: Some("other.pdf".into()) }],
             ),
+            (
+                Verb::ChangeColor(Some(crate::verbs::PaperTint::Sepia)),
+                vec![Effect::SetPaperTint(crate::verbs::PaperTint::Sepia)],
+            ),
+            // Bare, it steps from wherever the environment says it is.
+            (
+                Verb::ChangeColor(None),
+                vec![Effect::SetPaperTint(crate::verbs::PaperTint::Grey)],
+            ),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");
@@ -822,7 +848,7 @@ mod tests {
     fn the_tools_domain_guards_and_flips_in_the_plan() {
         let no_doc = CommandEnv::default();
         let with_doc =
-            CommandEnv { has_doc: true, page: 2, page_height: 800.0, tool_armed: true, signature_count: 3 };
+            CommandEnv { has_doc: true, page: 2, page_height: 800.0, tool_armed: true, signature_count: 3, ..CommandEnv::default() };
         for verb in [Verb::EditObject, Verb::MoveThing, Verb::SignLine, Verb::SignRectangle] {
             assert_eq!(
                 plan(&verb, &no_doc),
@@ -868,6 +894,7 @@ mod tests {
             page_height: 800.0,
             tool_armed: false,
             signature_count: 3,
+            ..CommandEnv::default()
         };
         assert_eq!(
             plan(&Verb::Signature(SignatureAction::Draw), &no_sig),
