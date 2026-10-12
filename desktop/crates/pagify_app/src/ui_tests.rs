@@ -5409,3 +5409,47 @@ fn areahighlight_arms_resolves_and_keeps_the_tool() {
     let rearmed = h.state().tab().tool.as_ref().expect("re-armed");
     assert!(rearmed.points.is_empty(), "the re-armed tool kept the old corners");
 }
+
+/// The four alias buttons, through the real dispatch: each lands the reader
+/// in the same place its existing word does — the tick tool armed, the
+/// words waiting for a click, the retyping picker, the link tool.
+#[test]
+fn the_alias_buttons_reach_the_same_tools_as_their_words() {
+    use crate::tool::Tool;
+
+    let mut h = harness("two-column.pdf");
+
+    h.state_mut().submit("tickmark");
+    h.run_steps(1);
+    assert!(
+        matches!(
+            h.state().tab().tool.as_ref().map(|t| &t.kind),
+            Some(Tool::Fill(pdf_core::document::FillMark::Tick))
+        ),
+        "tickmark did not arm the tick tool"
+    );
+
+    h.state_mut().submit("inserttext Hello");
+    h.run_steps(1);
+    assert!(
+        matches!(
+            h.state().tab().tool.as_ref().map(|t| &t.kind),
+            Some(Tool::Write(words)) if words == "Hello"
+        ),
+        "inserttext did not take the words"
+    );
+
+    h.state_mut().submit("replacetext");
+    h.run_steps(1);
+    assert!(
+        matches!(h.state().tab().tool.as_ref().map(|t| &t.kind), Some(Tool::PickText)),
+        "replacetext did not arm the retyping picker"
+    );
+
+    h.state_mut().submit("addlink");
+    h.run_steps(1);
+    assert!(
+        matches!(h.state().tab().tool.as_ref().map(|t| &t.kind), Some(Tool::Link)),
+        "addlink did not arm the link tool"
+    );
+}

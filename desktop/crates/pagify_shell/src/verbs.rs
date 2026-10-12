@@ -876,7 +876,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     // because two hand-maintained lists of a hundred and fifty names each will
     // not stay in step on their own.
     ("add3d", "the editing phase", "the Add 3D tool"),
-    ("addlink", "the editing phase", "the Link tool"),
     ("addshape", "the editing phase", "the Add Shapes tool"),
     ("alttext", "the accessibility phase", "the Set Alternate Text tool"),
     ("assistant", "the viewing phase", "the Assistant tool"),
@@ -915,7 +914,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
     ("fromtemplate", "the conversion phase", "the From Template tool"),
     ("imageannotation", "the annotation phase", "the Image Annotation tool"),
-    ("inserttext", "the annotation phase", "the Insert Text tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
     ("keeptool", "the annotation phase", "the Keep Tool Selected tool"),
     ("markredact", "the protection phase", "the Mark for Redaction tool"),
@@ -929,7 +927,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("readingoptions", "the accessibility phase", "the Reading Options tool"),
     ("readingorder", "the accessibility phase", "the Reading Order tool"),
     ("rearrange", "the page phase", "the Rearrange tool"),
-    ("replacetext", "the annotation phase", "the Replace Text tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("resetform", "the forms phase", "the Reset Form tool"),
     ("reverseview", "the viewing phase", "the Reverse View tool"),
@@ -940,7 +937,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("stamp", "the annotation phase", "the Stamp tool"),
     ("tagspanel", "the accessibility phase", "the Tags Panel tool"),
     ("textbox", "the annotation phase", "the Textbox tool"),
-    ("tickmark", "the annotation phase", "the TickMark tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
     ("toolsettings", "the forms phase", "the Tool Settings tool"),
     ("tooltip", "the forms phase", "the Add Tooltip tool"),
@@ -1074,6 +1070,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
+        "tickmark", "inserttext", "replacetext", "addlink",
         "unsecure", "redact",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));
@@ -1236,6 +1233,9 @@ fn parse_fill_and_sign(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
         "signcheck" => Ok(Verb::FillSign(Some("tick".into()))),
         "signcross" => Ok(Verb::FillSign(Some("cross".into()))),
         "signdot" => Ok(Verb::FillSign(Some("dot".into()))),
+        // The Comment tab's TickMark is the same tick the form-fill words
+        // place: this app has one tick, and the button runs it.
+        "tickmark" => Ok(Verb::FillSign(Some("tick".into()))),
         "documentstatus" | "status" => Ok(Verb::DocumentStatus),
         "sessionlog" => Ok(Verb::SessionLog),
         "applysignatures" => Ok(Verb::ApplySignatures),
@@ -1388,6 +1388,14 @@ fn parse_document_edits(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         // box is four numbers nobody can picture.
         "edittext" => Ok(Verb::EditText),
         "addtext" | "typewriter" => Ok(Verb::AddText(tail.to_string())),
+        // Insert Text, in Acrobat's Comment tab, is text laid on the page at
+        // a click — which is what this app's addtext writes: an annotation
+        // in the app's own text encoding, not page content.
+        "inserttext" => Ok(Verb::AddText(tail.to_string())),
+        // Replace Text is the edit-the-run operation this app has: the
+        // replacement is typed into the editor `edittext` opens, so the run
+        // is rewritten rather than covered over.
+        "replacetext" => Ok(Verb::EditText),
         "addimage" => {
             let tail = tail.trim();
             if tail.is_empty() {
@@ -1717,6 +1725,9 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "bookmark" => Ok(Verb::Bookmark),
         "articlebox" => Ok(Verb::ArticleBox),
         "weblinks" => Ok(Verb::Weblinks),
+        // The Edit tab's Link tool: a selection and an address — the same
+        // workflow `weblinks` runs.
+        "addlink" => Ok(Verb::Weblinks),
         "jointext" => Ok(Verb::JoinText),
         "matchproperties" => Ok(Verb::MatchProperties),
         "reflow" => Ok(Verb::Reflow),
@@ -2368,5 +2379,26 @@ mod area_highlight_tests {
             PLANNED.iter().all(|(v, _, _)| *v != "areahighlight"),
             "`areahighlight` is still in the planned table"
         );
+    }
+}
+
+#[cfg(test)]
+mod alias_tests {
+    use super::*;
+
+    /// Four ribbon buttons whose behaviour this app already had under
+    /// another word: the Alias is the same verb, not a stub.
+    #[test]
+    fn the_alias_words_parse_to_the_behaviour_they_name() {
+        assert_eq!(parse("tickmark"), Some(Ok(Verb::FillSign(Some("tick".into())))));
+        assert_eq!(parse("inserttext Hello"), Some(Ok(Verb::AddText("Hello".into()))));
+        assert_eq!(parse("replacetext"), Some(Ok(Verb::EditText)));
+        assert_eq!(parse("addlink"), Some(Ok(Verb::Weblinks)));
+        for word in ["tickmark", "inserttext", "replacetext", "addlink"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
     }
 }
