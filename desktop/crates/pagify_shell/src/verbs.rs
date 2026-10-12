@@ -600,6 +600,9 @@ pub enum Verb {
     /// Open or close the Comments panel — the Comment tab's Manage Comments:
     /// every annotation in the document, jump to it or take it off.
     ManageComments,
+    /// Highlight every occurrence of the words — the Comment tab's Search &
+    /// Highlight. `searchhighlight <words>`.
+    SearchHighlight { words: String },
     /// Make a new document out of picture files — `fromfiles` or
     /// `fromfiles <folder>`, which takes every picture in the folder in name
     /// order. Bare, the app opens a picker.
@@ -884,7 +887,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("resetform", "the forms phase", "the Reset Form tool"),
     ("reverseview", "the viewing phase", "the Reverse View tool"),
-    ("searchhighlight", "the annotation phase", "the Search & Highlight tool"),
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
     ("sendreview", "the sharing phase", "the Send for Review tool"),
     ("sharelink", "the sharing phase", "the Share Link tool"),
@@ -1025,6 +1027,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
+        "searchhighlight",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
@@ -1742,6 +1745,7 @@ fn parse_marks_and_misc(head: &str, rest: &[&str], tail: &str) -> Option<Result<
         "viewsetting" => Ok(Verb::ViewSetting),
         "calculator" => Ok(Verb::Calculator),
         "managecomments" => Ok(Verb::ManageComments),
+        "searchhighlight" => Ok(Verb::SearchHighlight { words: tail.trim().to_string() }),
         "quit" | "exit" => Ok(Verb::Quit { force: false }),
         "quit!" | "exit!" => Ok(Verb::Quit { force: true }),
         "help" => Ok(Verb::Help(rest.first().map(|s| s.to_string()))),
@@ -2185,6 +2189,27 @@ mod manage_comments_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "managecomments"),
             "`managecomments` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod search_highlight_tests {
+    use super::*;
+
+    #[test]
+    fn searchhighlight_parses_and_is_not_planned() {
+        assert_eq!(
+            parse("searchhighlight invoice"),
+            Some(Ok(Verb::SearchHighlight { words: "invoice".into() }))
+        );
+        assert_eq!(
+            parse("searchhighlight"),
+            Some(Ok(Verb::SearchHighlight { words: String::new() }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "searchhighlight"),
+            "`searchhighlight` is still in the planned table"
         );
     }
 }

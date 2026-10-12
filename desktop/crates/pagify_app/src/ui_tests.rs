@@ -5251,3 +5251,38 @@ fn managecomments_opens_and_closes_the_comments_panel() {
     h.run_steps(1);
     assert!(h.state().tab().panels.comments.is_none(), "the panel did not close");
 }
+
+/// **The Comment tab's Search & Highlight, through the real dispatch.** Finds
+/// every occurrence with the same search `find` runs, highlights them all,
+/// and the whole sweep is one undo — the batch.
+#[test]
+fn searchhighlight_marks_every_hit_as_one_undo() {
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("searchhighlight luminaire");
+    h.run_steps(1);
+
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("highlighted") && l.contains("occurrence(s) of \"luminaire\"")),
+        "searchhighlight did not report: {said:?}"
+    );
+
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let marks = session.annotations(0).expect("marks");
+    assert!(!marks.is_empty(), "no highlights were made");
+    assert!(
+        marks
+            .iter()
+            .all(|m| matches!(m.annotation, pdf_core::document::Annotation::Highlight { .. })),
+        "something other than a highlight was made"
+    );
+    let made = marks.len();
+
+    h.state_mut().submit("undo");
+    h.run_steps(1);
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    assert!(
+        session.annotations(0).expect("marks").is_empty(),
+        "one undo left {made} of the highlights behind — the sweep is not one batch"
+    );
+}

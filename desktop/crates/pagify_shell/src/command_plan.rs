@@ -93,6 +93,8 @@ pub enum Effect {
     ToggleCalculator,
     /// Open or close the Comments panel.
     ToggleCommentsPanel,
+    /// Highlight every occurrence of these words, as one batch.
+    RunSearchHighlight(String),
     /// Make a new document out of nothing, one sheet of this size and ruling.
     BlankDocument { width_pt: f32, height_pt: f32, ruling: pdf_core::document::Ruling },
     /// Merge PDFs into one new document; a folder to read them from, or
@@ -328,6 +330,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::ViewSetting
         | Verb::Calculator
         | Verb::ManageComments
+        | Verb::SearchHighlight { .. }
         | Verb::BlankDoc { .. }
         | Verb::Combine { .. } => plan_document(verb, env),
         Verb::Layers
@@ -453,6 +456,7 @@ fn plan_document(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::ViewSetting => vec![Effect::ToggleViewSettings],
         Verb::Calculator => vec![Effect::ToggleCalculator],
         Verb::ManageComments => vec![Effect::ToggleCommentsPanel],
+        Verb::SearchHighlight { words } => vec![Effect::RunSearchHighlight(words.clone())],
         // A new document is allowed with nothing open — that is the point of
         // it.
         Verb::BlankDoc { width_pt, height_pt, ruling } => vec![Effect::BlankDocument {
@@ -756,6 +760,10 @@ mod tests {
             (Verb::ViewSetting, vec![Effect::ToggleViewSettings]),
             (Verb::Calculator, vec![Effect::ToggleCalculator]),
             (Verb::ManageComments, vec![Effect::ToggleCommentsPanel]),
+            (
+                Verb::SearchHighlight { words: "invoice".into() },
+                vec![Effect::RunSearchHighlight("invoice".into())],
+            ),
         ];
         for (verb, want) in cases {
             assert_eq!(plan(&verb, &CommandEnv::default()), Some(want), "planning {verb:?}");

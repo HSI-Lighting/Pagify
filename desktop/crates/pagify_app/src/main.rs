@@ -8469,6 +8469,79 @@ impl PagifyApp {
         }
     }
 
+    /// Highlight every occurrence of `words` — the Comment tab's Search &
+    /// Highlight.
+    ///
+    /// The search is `find`'s own, so the two cannot disagree about what a
+    /// match is; the highlights go in as one `Command::Batch`, so one undo
+    /// takes the whole sweep back.
+    fn search_highlight(&mut self, words: &str) {
+        let words = words.trim();
+        if words.is_empty() {
+            self.say_error(
+                "searchhighlight: the words to find, as in `searchhighlight invoice`.",
+            );
+            return;
+        }
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        // `find` runs the search, says the count and jumps to the first hit —
+        // all of which this button wants said, too.
+        self.find(words);
+        let hits = self.tab_mut().panels.find_hits.clone();
+        if hits.is_empty() {
+            return;
+        }
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            return;
+        };
+
+        // The same amber the highlighter marks a selection with — one marker,
+        // not two yellows.
+        let color = pdf_core::document::Color { r: 255, g: 224, b: 102, a: 128 };
+        let mut commands = Vec::new();
+        for (page, range) in hits {
+            let Some(rects) = self.characters(page).map(|c| c.line_rects(range)) else {
+                continue;
+            };
+            if rects.is_empty() {
+                continue;
+            }
+            let rects: Vec<pdf_core::document::Rect> = rects
+                .into_iter()
+                .map(|r| pdf_core::document::Rect {
+                    left: r.left,
+                    top: r.top,
+                    right: r.right,
+                    bottom: r.bottom,
+                })
+                .collect();
+            commands.push(pdf_core::command::Command::AddAnnotation {
+                page_index: page,
+                annotation: pdf_core::document::Annotation::Highlight { rects, color },
+            });
+        }
+        if commands.is_empty() {
+            self.say_error("searchhighlight: the matches have no text to draw over.");
+            return;
+        }
+        let made = commands.len();
+        match session.execute(pdf_core::command::Command::Batch { commands }) {
+            Ok(_) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.say_info(format!(
+                    "highlighted {made} occurrence(s) of \"{}\".",
+                    short(words)
+                ));
+            }
+            Err(e) => self.say_error(format!("searchhighlight: {e}")),
+        }
+    }
+
     /// ⌘C on what Edit Object has picked.
     ///
     /// **Words are copied as words** — their text, size, colour and font — and
