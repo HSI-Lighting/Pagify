@@ -5372,3 +5372,40 @@ fn the_continuous_buttons_switch_to_the_continuous_layouts() {
         pagify_shell::reader::Layout::Facing
     );
 }
+
+/// **The Comment tab's Area Highlight, through the tool machine.** The tool
+/// arms and lights its ribbon button, the two corners resolve through
+/// `resolve_tool` into one Highlight annotation in the marker amber, and —
+/// because every markup tool repeats — the tool is still in hand afterwards.
+#[test]
+fn areahighlight_arms_resolves_and_keeps_the_tool() {
+    use crate::tool::{ArmedTool, ToolId};
+
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("areahighlight");
+    h.run_steps(1);
+    let armed = h.state().tab().tool.as_ref().expect("the tool was not armed");
+    assert_eq!(armed.kind.id(), Some(ToolId::AreaHighlight), "the wrong button would light");
+
+    h.state_mut().tab_mut().tool = Some(ArmedTool {
+        kind: crate::tool::Tool::AreaHighlight,
+        page: 0,
+        objects: Vec::new(),
+        points: vec![AppPoint { x: 40.0, y: 40.0 }, AppPoint { x: 200.0, y: 120.0 }],
+    });
+    h.state_mut().resolve_tool();
+    h.run_steps(1);
+
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let marks = session.annotations(0).expect("marks");
+    assert!(
+        marks.iter().any(|m| matches!(m.annotation, pdf_core::document::Annotation::Highlight { .. })),
+        "no highlight was made"
+    );
+    assert!(
+        h.state().tab().tool.is_some(),
+        "the tool let go after one area — it should stay in hand"
+    );
+    let rearmed = h.state().tab().tool.as_ref().expect("re-armed");
+    assert!(rearmed.points.is_empty(), "the re-armed tool kept the old corners");
+}

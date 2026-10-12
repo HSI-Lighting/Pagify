@@ -148,6 +148,7 @@ impl crate::PagifyApp {
             | Effect::RunValidate
             | Effect::RunCertify(_) => self.apply_signing(effect),
             Effect::ArmWhiteout
+            | Effect::ArmAreaHighlight
             | Effect::ArmDrawArrow
             | Effect::ToggleFill
             | Effect::ArmRedact
@@ -467,6 +468,14 @@ impl crate::PagifyApp {
                 } else {
                     let page = self.tab_mut().view_state.page;
                     self.arm_tool(Tool::Whiteout, page);
+                }
+            }
+            Effect::ArmAreaHighlight => {
+                if self.tab_mut().doc.is_none() {
+                    self.say_error("nothing open.");
+                } else {
+                    let page = self.tab_mut().view_state.page;
+                    self.arm_tool(Tool::AreaHighlight, page);
                 }
             }
             Effect::ArmDrawArrow => {

@@ -70,6 +70,10 @@ pub(crate) enum Tool {
     /// reason the verbs are: the difference is the whole point, and a flag
     /// on one is how somebody ends up with the other.
     Whiteout,
+    /// Two corners of an area to wash with the highlighter — the Comment
+    /// tab's Area Highlight. Unlike `Markup`, which resolves from a text
+    /// selection, this is drawn over anything, words or not.
+    AreaHighlight,
     /// Two corners of a box to draw while filling a form in.
     SignRectangle,
     /// The two ends of a line to rule while filling a form in.
@@ -125,6 +129,7 @@ impl Tool {
             | Tool::Calibrate { .. }
             | Tool::Redact
             | Tool::Whiteout
+            | Tool::AreaHighlight
             | Tool::SignRectangle
             | Tool::SignLine
             | Tool::Lock
@@ -185,6 +190,10 @@ impl Tool {
             Tool::Whiteout => match points_done {
                 0 => "whiteout: first corner — this covers, it does not remove".into(),
                 _ => "whiteout: opposite corner".into(),
+            },
+            Tool::AreaHighlight => match points_done {
+                0 => "area highlight: first corner".into(),
+                _ => "area highlight: opposite corner".into(),
             },
             // Says which of the two rectangles/lines this is, because the
             // other one is a drawing that can be picked up again and this
@@ -308,6 +317,7 @@ impl Tool {
             Tool::Fill(_) => None,
             Tool::Redact => Some(ToolId::Redact),
             Tool::Whiteout => Some(ToolId::Whiteout),
+            Tool::AreaHighlight => Some(ToolId::AreaHighlight),
             Tool::SignRectangle => Some(ToolId::SignRectangle),
             Tool::SignLine => Some(ToolId::SignLine),
             Tool::Write(_) => Some(ToolId::AddText),
@@ -377,6 +387,7 @@ impl Tool {
                 | Tool::Fill(_)
                 | Tool::Redact
                 | Tool::Whiteout
+                | Tool::AreaHighlight
         )
     }
 }
@@ -508,6 +519,10 @@ impl Tool {
             Tool::Whiteout => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => app.whiteout(page, *a, *b),
                 _ => Err("whiteout: two corners are needed.".into()),
+            },
+            Tool::AreaHighlight => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => app.area_highlight(page, *a, *b),
+                _ => Err("area highlight: two corners are needed.".into()),
             },
             Tool::SignRectangle => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => app.stamp_box(page, *a, *b),
@@ -733,6 +748,7 @@ impl Tool {
             // A box, violet.
             Tool::PlaceText
             | Tool::Whiteout
+            | Tool::AreaHighlight
             | Tool::SignRectangle
             | Tool::Draw(DrawKind::Rectangle)
             | Tool::Lock
@@ -919,6 +935,7 @@ pub(crate) enum ToolId {
     Calibrate,
     Redact,
     Whiteout,
+    AreaHighlight,
     SignRectangle,
     SignLine,
     Line,

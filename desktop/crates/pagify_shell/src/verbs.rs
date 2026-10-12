@@ -354,6 +354,10 @@ pub enum Verb {
     /// `redact`, because a flag that turns "destroy" into "cover" is exactly
     /// the kind of thing that gets set by accident.
     Whiteout,
+    /// Two corners of an area to wash with the highlighter — the Comment
+    /// tab's Area Highlight. Unlike the selection marks, it is drawn over
+    /// anything, words or not.
+    AreaHighlight,
     /// Whether the Rectangle and Circle drawing tools fill the shape solid or
     /// leave it hollow — chosen before drawing, not after.
     ///
@@ -875,7 +879,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("addlink", "the editing phase", "the Link tool"),
     ("addshape", "the editing phase", "the Add Shapes tool"),
     ("alttext", "the accessibility phase", "the Set Alternate Text tool"),
-    ("areahighlight", "the annotation phase", "the Area Highlight tool"),
     ("assistant", "the viewing phase", "the Assistant tool"),
     ("attach", "the editing phase", "the File Attachment tool"),
     ("attachcomment", "the annotation phase", "the File tool"),
@@ -1070,7 +1073,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
-        "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
+        "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
         "unsecure", "redact",
     ];
     tokens.extend(PLANNED.iter().map(|(v, _, _)| *v));
@@ -1202,6 +1205,7 @@ fn parse_locking_and_redaction(head: &str, rest: &[&str], tail: &str) -> Option<
         },
         "secure" => SecureOptions::parse(tail).map(Verb::Secure),
         "whiteout" => Ok(Verb::Whiteout),
+        "areahighlight" => Ok(Verb::AreaHighlight),
         _ => return None,
     })
 }
@@ -2350,5 +2354,19 @@ mod continuous_view_tests {
                 "`{word}` is still in the planned table"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod area_highlight_tests {
+    use super::*;
+
+    #[test]
+    fn areahighlight_parses_and_is_not_planned() {
+        assert_eq!(parse("areahighlight"), Some(Ok(Verb::AreaHighlight)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "areahighlight"),
+            "`areahighlight` is still in the planned table"
+        );
     }
 }

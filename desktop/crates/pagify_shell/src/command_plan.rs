@@ -192,6 +192,8 @@ pub enum Effect {
     RunCertify(Option<std::path::PathBuf>),
     /// Arm the whiteout tool.
     ArmWhiteout,
+    /// Arm the area-highlight tool.
+    ArmAreaHighlight,
     /// Arm the arrow drawing tool.
     ArmDrawArrow,
     /// Toggle whether new rectangles and circles are drawn filled.
@@ -380,6 +382,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Validate
         | Verb::Certify(_)
         | Verb::Whiteout
+        | Verb::AreaHighlight
         | Verb::DrawArrow
         | Verb::ToggleFill
         | Verb::Redact
@@ -610,6 +613,7 @@ fn plan_security(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Validate => vec![Effect::RunValidate],
         Verb::Certify(path) => vec![Effect::RunCertify(path.clone())],
         Verb::Whiteout => vec![Effect::ArmWhiteout],
+        Verb::AreaHighlight => vec![Effect::ArmAreaHighlight],
         Verb::DrawArrow => vec![Effect::ArmDrawArrow],
         Verb::ToggleFill => vec![Effect::ToggleFill],
         Verb::Redact => vec![Effect::ArmRedact],
@@ -946,6 +950,7 @@ mod tests {
             (Verb::Validate, vec![Effect::RunValidate]),
             (Verb::Certify(None), vec![Effect::RunCertify(None)]),
             (Verb::Whiteout, vec![Effect::ArmWhiteout]),
+            (Verb::AreaHighlight, vec![Effect::ArmAreaHighlight]),
             (Verb::DrawArrow, vec![Effect::ArmDrawArrow]),
             (Verb::ToggleFill, vec![Effect::ToggleFill]),
             (Verb::Redact, vec![Effect::ArmRedact]),

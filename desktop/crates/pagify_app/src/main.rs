@@ -7165,6 +7165,33 @@ impl PagifyApp {
         ))
     }
 
+    /// Wash the rectangle `a`..`b` with the highlighter — the Comment tab's
+    /// Area Highlight.
+    ///
+    /// A `Highlight` annotation over one rect, in the same amber as a
+    /// selection highlighter, so `removemark` and the comments panel treat
+    /// it like any other mark.
+    fn area_highlight(&mut self, page: usize, a: AppPoint, b: AppPoint) -> Result<String, String> {
+        let Some(area) = area_between(a, b) else {
+            return Err("areahighlight: that area has no size.".into());
+        };
+        let Some(doc) = &self.tab_mut().doc else { return Err("nothing open.".into()) };
+        doc.session
+            .execute(pdf_core::command::Command::AddAnnotation {
+                page_index: page,
+                annotation: pdf_core::document::Annotation::Highlight {
+                    rects: vec![area],
+                    color: pdf_core::document::Color { r: 255, g: 224, b: 102, a: 128 },
+                },
+            })
+            .map_err(|e| e.to_string())?;
+
+        if let Some(doc) = &mut self.tab_mut().doc {
+            doc.rendered_is_stale();
+        }
+        Ok(format!("area highlighted on page {}.", page + 1))
+    }
+
     /// Whether a password has been chosen and not yet written.
     ///
     /// **Unsaved work of a different shape.** A password is set on the document
