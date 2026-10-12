@@ -108,6 +108,16 @@ fun forgetRecent(existing: List<RecentDocument>, uri: String): List<RecentDocume
     existing.filterNot { it.uri == uri }
 
 /**
+ * The name a model or drawing's permanent local copy is filed under, in both
+ * MainActivity (writing it) and the view model (deleting it on forget).
+ *
+ * Derived from the uri string alone, never from a provider query: a query is
+ * exactly what a stale grant can no longer make, so keying on one would break
+ * the lookup it exists to avoid.
+ */
+fun modelCacheKey(uri: String): String = uri.hashCode().toUInt().toString(16)
+
+/**
  * The documents whose names match what was typed.
  *
  * Case-insensitive and unanchored, so "nda" finds `2024-NDA-final.pdf`. A blank

@@ -70,6 +70,7 @@ import com.hsilighting.pagify.core.PdfDocument
 import com.hsilighting.pagify.core.PdfPasswordException
 import com.hsilighting.pagify.core.RecentDocument
 import com.hsilighting.pagify.core.RecentKind
+import com.hsilighting.pagify.core.modelCacheKey
 import com.hsilighting.pagify.core.ThemeChoice
 import com.hsilighting.pagify.data.AppSettingsStore
 import com.hsilighting.pagify.data.RecentDocumentsStore
@@ -502,7 +503,22 @@ class PdfReaderViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Drop a document from the library — moved, deleted, or no longer permitted. */
     fun forgetDocument(uri: String) {
-        viewModelScope.launch { recentDocuments.forget(uri) }
+        viewModelScope.launch {
+            // A model or drawing keeps a permanent local copy (see
+            // `copyForReading` in MainActivity) precisely so it does not
+            // depend on the original share's permission surviving. That
+            // copy is only reachable through this library entry, so once
+            // the entry is gone nothing else will ever clean it up.
+            recentDocuments.documents.value.find { it.uri == uri }?.let { recent ->
+                if (recent.kind != RecentKind.Document) {
+                    val key = modelCacheKey(recent.uri)
+                    File(getApplication<Application>().filesDir, "models")
+                        .listFiles { file -> file.name.startsWith("$key.") }
+                        ?.forEach { it.delete() }
+                }
+            }
+            recentDocuments.forget(uri)
+        }
     }
 
     /**

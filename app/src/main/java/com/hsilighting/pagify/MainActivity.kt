@@ -38,6 +38,7 @@ import com.hsilighting.pagify.core.CaptureExport
 import com.hsilighting.pagify.core.RecentDocument
 import com.hsilighting.pagify.core.RecentKind
 import com.hsilighting.pagify.core.kindOfFile
+import com.hsilighting.pagify.core.modelCacheKey
 import com.hsilighting.pagify.core.isDark
 import com.hsilighting.pagify.ui.components.PageAction
 import com.hsilighting.pagify.ui.PagifyApp
@@ -105,15 +106,19 @@ class MainActivity : ComponentActivity() {
                 /**
                  * Open a model, from the picker or from the library.
                  *
-                 * The copy is made each time rather than kept: it lives in the
-                 * cache, which the system empties whenever it likes, so a
-                 * remembered model has to be re-copied from its URI. That is
-                 * what the persistable grant taken below is for.
+                 * The copy is kept permanently (see `copyForReading`), so a
+                 * remembered model reopens from it directly rather than being
+                 * re-copied from its uri — which matters because that uri's
+                 * read grant is not guaranteed to still be good by then.
                  */
-                val showModel: (Uri) -> Boolean = { uri ->
+                // Takes the display name as a parameter rather than reading
+                // `copied.name`: the cache file underneath is keyed on the uri,
+                // not on this name (see `copyForReading`), so the two can differ
+                // and the title shown here must stay the human-readable one.
+                val showModel: (Uri, String) -> Boolean = { uri, displayName ->
                     val copied = copyForReading(uri)
                     if (copied != null) {
-                        modelState = ModelViewerState(copied.name, modelScope)
+                        modelState = ModelViewerState(displayName, modelScope)
                             .also { it.open(copied.absolutePath) }
                     }
                     copied != null
@@ -124,13 +129,14 @@ class MainActivity : ComponentActivity() {
                 ) { uri ->
                     if (uri != null) {
                         keepReadAccessTo(uri)
-                        if (showModel(uri)) {
+                        val name = nameOf(uri)
+                        if (showModel(uri, name)) {
                             // Remembered only once it has opened, the same rule
                             // the reader follows: a file that failed is not
                             // something to offer again as if it worked.
                             viewModel.rememberModel(
                                 uri = uri.toString(),
-                                name = nameOf(uri),
+                                name = name,
                                 sizeBytes = sizeOf(uri),
                             )
                         }
@@ -142,16 +148,16 @@ class MainActivity : ComponentActivity() {
                 /**
                  * Open a drawing, from the picker or from the library.
                  *
-                 * **The name has to survive the copy.** The engine chooses its
-                 * reader by extension, and the cache copy keeps the picked
-                 * file's name, so a `.dwg` stays a `.dwg` — a copy written
-                 * under a generic name would arrive as a DXF and fail on the
-                 * first byte.
+                 * **The extension has to survive the copy.** The engine chooses
+                 * its reader by extension, so `copyForReading` keeps the
+                 * original one on the cache file even though it renames
+                 * everything ahead of it — a copy written as `.bin` would
+                 * arrive as a DXF and fail on the first byte.
                  */
-                val showDrawing: (Uri) -> Boolean = { uri ->
+                val showDrawing: (Uri, String) -> Boolean = { uri, displayName ->
                     val copied = copyForReading(uri)
                     if (copied != null) {
-                        drawingState = DrawingViewerState(copied.name, modelScope)
+                        drawingState = DrawingViewerState(displayName, modelScope)
                             .also { it.open(copied.absolutePath) }
                     }
                     copied != null
@@ -162,10 +168,11 @@ class MainActivity : ComponentActivity() {
                 ) { uri ->
                     if (uri != null) {
                         keepReadAccessTo(uri)
-                        if (showDrawing(uri)) {
+                        val name = nameOf(uri)
+                        if (showDrawing(uri, name)) {
                             viewModel.rememberDrawing(
                                 uri = uri.toString(),
-                                name = nameOf(uri),
+                                name = name,
                                 sizeBytes = sizeOf(uri),
                             )
                         }
@@ -192,11 +199,11 @@ class MainActivity : ComponentActivity() {
                         val name = nameOf(uri)
                         when (kindOfFile(name)) {
                             RecentKind.Model ->
-                                if (showModel(uri)) {
+                                if (showModel(uri, name)) {
                                     viewModel.rememberModel(uri.toString(), name, sizeOf(uri))
                                 }
                             RecentKind.Drawing ->
-                                if (showDrawing(uri)) {
+                                if (showDrawing(uri, name)) {
                                     viewModel.rememberDrawing(uri.toString(), name, sizeOf(uri))
                                 }
                             RecentKind.Document -> viewModel.open(uri)
@@ -226,11 +233,11 @@ class MainActivity : ComponentActivity() {
                         val name = nameOf(uri)
                         when (kindOfFile(name)) {
                             RecentKind.Model ->
-                                if (showModel(uri)) {
+                                if (showModel(uri, name)) {
                                     viewModel.rememberModel(uri.toString(), name, sizeOf(uri))
                                 }
                             RecentKind.Drawing ->
-                                if (showDrawing(uri)) {
+                                if (showDrawing(uri, name)) {
                                     viewModel.rememberDrawing(uri.toString(), name, sizeOf(uri))
                                 }
                             // The reader remembers its own, once it has opened.
@@ -472,26 +479,25 @@ class MainActivity : ComponentActivity() {
                         // guessing from the file name: a supplier who names a
                         // part "drawing.stp" should still get the 3D viewer.
                         //
-                        // **A model or a drawing can fail here for a reason a
-                        // retry cannot fix.** The engine reads a local path,
-                        // so reopening re-copies from the original `content://`
-                        // URI, which needs the read grant taken when it was
-                        // first opened to still be valid — see `showDrawing`.
-                        // That grant only survives a restart if the app that
-                        // handed the file over asked Android to make it
-                        // persistable, and a plain "Open with"/share from
-                        // another app usually does not; only this app's own
-                        // file picker reliably does. `showModel`/`showDrawing`
-                        // already swallow that failure internally (a dead
-                        // grant throwing `SecurityException` mid-copy is not
-                        // this app's bug to surface as a crash), but
-                        // swallowing it this far up as well left somebody
-                        // tapping a drawing and watching nothing happen, with
-                        // no way to tell "this needs reopening from Telegram
-                        // again" from "I didn't actually tap it."
+                        // **A model or a drawing can still fail here, for a
+                        // file that was never opened successfully even once.**
+                        // `copyForReading` reopens from its permanent copy when
+                        // one already exists, which is the normal case and
+                        // needs no uri access at all — but the very first open
+                        // of a file shared from another app can itself fail
+                        // (that app's read grant can be gone by the time this
+                        // runs), and then there is no copy here to fall back
+                        // on. `showModel`/`showDrawing` already swallow that
+                        // failure internally (a dead grant throwing
+                        // `SecurityException` mid-copy is not this app's bug to
+                        // surface as a crash), but swallowing it this far up as
+                        // well left somebody tapping a drawing and watching
+                        // nothing happen, with no way to tell "this needs
+                        // reopening from Telegram again" from "I didn't
+                        // actually tap it."
                         val opened = when (recent.kind) {
-                            RecentKind.Model -> showModel(recent.uri.toUri())
-                            RecentKind.Drawing -> showDrawing(recent.uri.toUri())
+                            RecentKind.Model -> showModel(recent.uri.toUri(), recent.name)
+                            RecentKind.Drawing -> showDrawing(recent.uri.toUri(), recent.name)
                             RecentKind.Document -> {
                                 viewModel.open(recent.uri.toUri())
                                 true
@@ -964,11 +970,28 @@ private class OpenWritableDocument : ActivityResultContracts.OpenDocument() {
  * is being looked at, and it is the same reason the PDF path takes a file
  * descriptor rather than a name.
  */
+// `filesDir`, not `cacheDir`: a model or drawing opened from another app's
+// share often arrives with a permission grant that does not survive the
+// Activity that received it, so a later reopen cannot always re-read the
+// original uri. Keeping the copy in permanent storage means that reopen
+// never has to — it is served from here instead, so the grant's lifetime
+// no longer matters.
+//
+// The lookup below is keyed on the uri string itself, not on `nameOf(uri)`:
+// that calls back into the content provider, which is exactly the thing a
+// stale grant can no longer do, so keying on it would make the cache check
+// fail for the same reason the read would have. The uri string needs no
+// provider access at all and is the one thing guaranteed identical between
+// the first open and every later one, since it is what the library stores.
 private fun ComponentActivity.copyForReading(uri: android.net.Uri): File? = runCatching {
-    val name = nameOf(uri)
+    val into = File(filesDir, "models").apply { mkdirs() }
+    val key = modelCacheKey(uri.toString())
+    into.listFiles { file -> file.name.startsWith("$key.") }
+        ?.firstOrNull { it.length() > 0 }
+        ?.let { return it }
 
-    val into = File(cacheDir, "models").apply { mkdirs() }
-    val file = File(into, name)
+    val ext = nameOf(uri).substringAfterLast('.', "")
+    val file = File(into, if (ext.isBlank()) key else "$key.$ext")
     contentResolver.openInputStream(uri)?.use { source ->
         file.outputStream().use { sink -> source.copyTo(sink) }
     } ?: return null
