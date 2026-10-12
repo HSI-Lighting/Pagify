@@ -309,7 +309,7 @@ fn a_click_runs_fills_or_asks_for_a_file_by_what_the_bare_command_would_get() {
 /// that needs words is a decision somebody made, not a red error a tester
 /// finds — the rule above catches it either way.
 #[test]
-fn only_delete_extract_and_move_run_a_bare_command_the_parser_refuses() {
+fn only_the_cards_that_wait_for_arguments_leave_a_bare_command_the_parser_refuses() {
     let mut asked: Vec<&str> = Vec::new();
     for tab in Tab::ALL {
         for (_glyph, _label, command) in tab.leading().iter().chain(tab.buttons()) {
@@ -323,7 +323,7 @@ fn only_delete_extract_and_move_run_a_bare_command_the_parser_refuses() {
     }
     asked.sort();
     asked.dedup();
-    assert_eq!(asked, ["deletepage", "extract", "movepage"]);
+    assert_eq!(asked, ["deletepage", "extract", "movepage", "pagemarks"]);
 }
 
 /// **Reported from use (report 10): "Extract lacks a UI".** The card used to

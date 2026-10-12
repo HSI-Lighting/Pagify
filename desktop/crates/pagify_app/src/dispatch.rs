@@ -174,6 +174,7 @@ impl crate::PagifyApp {
             | Effect::ReportWordCount(_)
             | Effect::RunAccessCheck
             | Effect::WriteAccessReport { .. }
+            | Effect::WritePageMarks { .. }
             | Effect::RunAutoBookmarks
             | Effect::RunPreflight
             | Effect::ExportPictures { .. } => self.apply_files(effect),
@@ -662,6 +663,7 @@ impl crate::PagifyApp {
                 None => self.split_dialog(),
             },
             Effect::ReportWordCount(pages) => self.report_word_count(&pages),
+            Effect::WritePageMarks { top, text } => self.write_page_marks(top, &text),
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {
                 Some(path) => self.write_access_report(&path),

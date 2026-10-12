@@ -246,6 +246,9 @@ pub enum Effect {
     SplitPages { every: usize, dest: Option<std::path::PathBuf> },
     /// Report words and characters over these pages — empty means all.
     ReportWordCount(String),
+    /// Write the same words on every page, with `{n}` standing for the page
+    /// number; the first corner is the anchor.
+    WritePageMarks { top: bool, text: String },
     /// Reflow the page's text.
     RunReflow,
     /// Search for `needle`.
@@ -406,6 +409,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::ToHtml { .. }
         | Verb::Split { .. }
         | Verb::WordCount { .. }
+        | Verb::PageMarks { .. }
         | Verb::Reflow
         | Verb::Find(_)
         | Verb::FindStep { .. }
@@ -657,6 +661,9 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
             vec![Effect::SplitPages { every: *every, dest: dest.clone() }]
         }
         Verb::WordCount { pages } => vec![Effect::ReportWordCount(pages.clone())],
+        Verb::PageMarks { top, text } => {
+            vec![Effect::WritePageMarks { top: *top, text: text.clone() }]
+        }
         // Text and find.
         Verb::Reflow => vec![Effect::RunReflow],
         Verb::Find(needle) => vec![Effect::RunFind(needle.clone())],
@@ -1008,6 +1015,10 @@ mod tests {
                 vec![Effect::SplitPages { every: 2, dest: None }],
             ),
             (Verb::WordCount { pages: String::new() }, vec![Effect::ReportWordCount(String::new())]),
+            (
+                Verb::PageMarks { top: true, text: "Page {n}".into() },
+                vec![Effect::WritePageMarks { top: true, text: "Page {n}".into() }],
+            ),
             (Verb::Reflow, vec![Effect::RunReflow]),
             (Verb::Find("n".into()), vec![Effect::RunFind("n".into())]),
             (Verb::FindStep { forward: true }, vec![Effect::RunFindStep { forward: true }]),

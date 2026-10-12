@@ -14094,6 +14094,58 @@ impl PagifyApp {
         }
     }
 
+    /// Write the same words on every page — the Page phase's Page Marks.
+    ///
+    /// `{n}` is the page number. One `Command::Batch`, so one undo takes the
+    /// whole run of marks back. Only the left corners are offered; see the
+    /// parse arm's own note on why.
+    fn write_page_marks(&mut self, top: bool, text: &str) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let sizes = match session.page_sizes() {
+            Ok(sizes) => sizes,
+            Err(e) => {
+                self.say_error(format!("pagemarks: {e}"));
+                return;
+            }
+        };
+        const MARGIN_PT: f32 = 36.0;
+        const SIZE_PT: f32 = 10.0;
+        let color = pdf_core::document::Color { r: 20, g: 20, b: 20, a: 255 };
+        let mut commands = Vec::new();
+        for (page, size) in sizes.iter().enumerate() {
+            let said = text.replace("{n}", &(page + 1).to_string());
+            let y = if top { MARGIN_PT } else { size.height_pt - MARGIN_PT };
+            // `styled_line_command` lays the line out from its left edge —
+            // where the mark is anchored, and why only the left corners are
+            // offered.
+            match self.styled_line_command(page, (MARGIN_PT, y), &said, SIZE_PT, color, None, 1.0)
+            {
+                Ok(command) => commands.push(command),
+                Err(e) => {
+                    self.say_error(format!("pagemarks: {e}"));
+                    return;
+                }
+            }
+        }
+        match session.execute(pdf_core::command::Command::Batch { commands }) {
+            Ok(_) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.say_info(format!(
+                    "wrote \"{}\" on {} page(s) at the {}.",
+                    short(text),
+                    sizes.len(),
+                    if top { "top left" } else { "bottom left" }
+                ));
+            }
+            Err(e) => self.say_error(format!("pagemarks: {e}")),
+        }
+    }
+
     /// Count words and characters over `spec`'s pages, or the whole document
     /// — the View tab's Word Count.
     fn report_word_count(&mut self, spec: &str) {

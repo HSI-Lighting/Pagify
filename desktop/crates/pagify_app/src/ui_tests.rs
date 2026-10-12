@@ -5484,3 +5484,32 @@ fn the_picture_words_arm_the_placement_tool() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **The Page phase's Page Marks, through the real dispatch.** One command
+/// puts the numbered mark on every page — each carrying its own number — in
+/// a single batch, so a single undo takes all of them back.
+#[test]
+fn pagemarks_numbers_every_page_as_one_undo() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().submit("pagemarks Page {n}");
+    h.run_steps(1);
+
+    // The marks are written text, so they read back where any written text
+    // reads: the page's own characters — the same path `addtext`'s tests
+    // use.
+    for page in 0..5 {
+        let text = h.state_mut().characters(page).map(|c| c.text()).unwrap_or_default();
+        assert!(
+            text.contains(&format!("Page {}", page + 1)),
+            "page {page} did not get its own number: {text:?}"
+        );
+    }
+
+    h.state_mut().submit("undo");
+    h.run_steps(1);
+    let text = h.state_mut().characters(0).map(|c| c.text()).unwrap_or_default();
+    assert!(
+        !text.contains("Page 1"),
+        "one undo did not take the whole run of marks back: {text:?}"
+    );
+}

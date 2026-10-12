@@ -431,6 +431,10 @@ pub enum Verb {
     /// Count words and characters over the pages named, or the whole
     /// document — `wordcount [pages]`.
     WordCount { pages: String },
+    /// Write the same words on every page — `pagemarks [topleft] <words>`,
+    /// with `{n}` standing for the page number. Bottom-left unless `topleft`
+    /// is said.
+    PageMarks { top: bool, text: String },
     /// Start a new document out of nothing — `blankdoc [size] [ruling]`,
     /// sizes `a4`/`a3`/`letter`/`legal` (letter when nothing is said) and
     /// rulings `lined`/`grid`/`dots` (plain paper when nothing is said), in
@@ -917,7 +921,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("markredact", "the protection phase", "the Mark for Redaction tool"),
     ("media", "the editing phase", "the Audio & Video tool"),
     ("onlineform", "the signing phase", "the Create Online Form tool"),
-    ("pagemarks", "the page phase", "the Page Marks tool"),
     ("pagetemplates", "the forms phase", "the Page Templates tool"),
     ("pencil", "the annotation phase", "the Pencil tool"),
     ("portfolio", "the conversion phase", "the PDF Portfolio tool"),
@@ -1065,6 +1068,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "record", "stop", "endrecord", "replay", "pick", "textlayer", "whytext", "snapshot",
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
+        "pagemarks",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1645,6 +1649,36 @@ fn parse_file_and_view(head: &str, rest: &[&str], tail: &str) -> Option<Result<V
             }
         }
         "wordcount" => Ok(Verb::WordCount { pages: tail.to_string() }),
+        // Page marks: a corner, then the words. Only the left corners are
+        // offered, and that is a measurement decision rather than a taste
+        // one: the engine lays a written line out from its own left edge,
+        // and this build has no way to ask how wide the line will be, so a
+        // centred or right-aligned mark could only be placed by guessing.
+        "pagemarks" => {
+            let mut words = tail.trim().splitn(2, char::is_whitespace);
+            let first = words.next().unwrap_or("");
+            let rest = words.next().unwrap_or("").trim();
+            let (top, text) = match first.to_ascii_lowercase().as_str() {
+                "topleft" | "top" => (true, rest.to_string()),
+                "bottomleft" | "bottom" => (false, rest.to_string()),
+                "topright" | "bottomright" | "topcenter" | "bottomcenter" | "centre"
+                | "center" => {
+                    return Some(Err(
+                        "pagemarks: only `topleft` and `bottomleft` — the other corners need \
+                         the line measured, which this build does not do"
+                            .into(),
+                    ))
+                }
+                // No position word: everything said is the text.
+                _ => (false, tail.trim().to_string()),
+            };
+            if text.is_empty() {
+                return Some(Err(
+                    "pagemarks: the words to write, as in `pagemarks Page {n}`".into(),
+                ));
+            }
+            Ok(Verb::PageMarks { top, text })
+        }
         _ => return None,
     })
 }
@@ -2434,5 +2468,34 @@ mod picture_alias_tests {
                 "`{word}` is still in the planned table"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod page_marks_tests {
+    use super::*;
+
+    #[test]
+    fn pagemarks_parses_positions_and_refuses_the_unmeasurable_corners() {
+        assert_eq!(
+            parse("pagemarks Page {n}"),
+            Some(Ok(Verb::PageMarks { top: false, text: "Page {n}".into() }))
+        );
+        assert_eq!(
+            parse("pagemarks topleft Draft {n}"),
+            Some(Ok(Verb::PageMarks { top: true, text: "Draft {n}".into() }))
+        );
+        match parse("pagemarks topright x") {
+            Some(Err(why)) => assert!(why.contains("topleft"), "unhelpful refusal: {why}"),
+            other => panic!("topright parsed as {other:?}"),
+        }
+        match parse("pagemarks") {
+            Some(Err(why)) => assert!(why.contains("words to write"), "unhelpful refusal: {why}"),
+            other => panic!("bare pagemarks parsed as {other:?}"),
+        }
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "pagemarks"),
+            "`pagemarks` is still in the planned table"
+        );
     }
 }
