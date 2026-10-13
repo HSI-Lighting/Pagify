@@ -15,6 +15,10 @@ use pagify_shell::markup::HIT_TOLERANCE_PT;
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::reader::{prefetch_targets, STRIP_PAD_PX};
 
+/// The Contents panel's own left-panel id — its width is remembered under
+/// it, the same rule the thumbnail rail and the Organize grid live by.
+const CONTENTS_PANEL: &str = "contents_panel";
+
 /// How much of the page area the main view keeps when the split is on —
 /// the second pane gets the rest.
 const SPLIT_FRACTION: f32 = 0.6;
@@ -802,22 +806,29 @@ impl crate::PagifyApp {
         jump
     }
 
-    /// The Contents panel: the opened file's own table of contents, in the
-    /// rail's slot — one row per outline entry, the row for the page in
+    /// The Contents panel: the opened file's own table of contents, docked
+    /// on the left — one row per outline entry, the row for the page in
     /// view lit, clicking one going there. Read live, so `autobookmarks`'
     /// new entries appear the moment the rail redraws.
     ///
-    /// The rail's other occupants are the thumbnails and the Organize grid;
-    /// this takes the same slot, which the toggle arranges.
+    /// **Its own left panel**, like the Organize grid's: the first cut drew
+    /// into the rail's parent `ui` and spanned the window (reported from
+    /// use) — a left panel is what makes it a column.
     pub(crate) fn draw_contents_panel(
         &mut self,
         _ctx: &egui::Context,
         ui: &mut egui::Ui,
     ) -> Option<usize> {
         let mut jump_to = None;
-        egui::Frame::new()
-            .fill(theme::paper())
-            .inner_margin(egui::Margin::symmetric(8, 8))
+        egui::Panel::left(CONTENTS_PANEL)
+            .resizable(true)
+            .default_size(220.0)
+            .size_range(160.0..=420.0)
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::paper())
+                    .inner_margin(egui::Margin::symmetric(8, 8)),
+            )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("Contents").strong());
