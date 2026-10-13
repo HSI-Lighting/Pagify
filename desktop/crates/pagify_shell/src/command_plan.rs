@@ -202,6 +202,8 @@ pub enum Effect {
     ArmCallout { words: String },
     /// Start marking for redaction, or destroy what is marked.
     MarkRedact,
+    /// Read the system clipboard's picture, ready to place.
+    PasteClipboardImage,
     /// Arm the arrow drawing tool.
     ArmDrawArrow,
     /// Toggle whether new rectangles and circles are drawn filled.
@@ -420,7 +422,8 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::MoveThing
         | Verb::SignLine
         | Verb::SignRectangle
-        | Verb::DocumentStatus => plan_tools(verb, env),
+        | Verb::DocumentStatus
+        | Verb::Clipboard => plan_tools(verb, env),
         Verb::SessionLog
         | Verb::ApplySignatures
         | Verb::ManageSignatures(_)
@@ -631,6 +634,10 @@ fn plan_tools(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::SignLine => vec![Effect::ArmSignLine { page: env.page }],
         Verb::SignRectangle => vec![Effect::ArmSignRectangle { page: env.page }],
         Verb::DocumentStatus => vec![Effect::ReportDocumentStatus],
+        // Placing a picture needs a document; no clipboard read happens
+        // without one.
+        Verb::Clipboard if !env.has_doc => vec![Effect::SayError("nothing open.".into())],
+        Verb::Clipboard => vec![Effect::PasteClipboardImage],
         _ => return None,
     })
 }
@@ -1062,6 +1069,10 @@ mod tests {
                 vec![Effect::ArmCallout { words: "see 2".into() }],
             ),
             (Verb::MarkRedact, vec![Effect::MarkRedact]),
+            (
+                Verb::Clipboard,
+                vec![Effect::SayError("nothing open.".into())],
+            ),
             (Verb::DrawArrow, vec![Effect::ArmDrawArrow]),
             (Verb::ToggleFill, vec![Effect::ToggleFill]),
             (Verb::Redact, vec![Effect::ArmRedact]),

@@ -153,6 +153,7 @@ impl crate::PagifyApp {
             | Effect::ArmPencil
             | Effect::ArmStamp { .. }
             | Effect::ArmCallout { .. }
+            | Effect::PasteClipboardImage
             | Effect::ArmDrawArrow
             | Effect::ArmRedact => self.apply_tool_arms(effect),
             Effect::ToggleFill
@@ -528,6 +529,7 @@ impl crate::PagifyApp {
                     self.arm_tool(Tool::Callout(words), page);
                 }
             }
+            Effect::PasteClipboardImage => self.paste_clipboard_image(),
             Effect::ArmDrawArrow => {
                 if self.tab_mut().doc.is_none() {
                     self.say_error("nothing open.");

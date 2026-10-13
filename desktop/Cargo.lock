@@ -2700,6 +2700,7 @@ dependencies = [
 name = "pagify_app"
 version = "0.1.63"
 dependencies = [
+ "arboard",
  "cad_kernel",
  "eframe",
  "egui",

@@ -6068,3 +6068,24 @@ fn toother_writes_txt_rtf_and_xml() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The Capture tab's Clipboard tool, through the real dispatch. The harness
+/// has no desktop session, so the honest outcomes are a reached clipboard
+/// (nothing usable here) or the graceful "no system clipboard" line — the
+/// point asserted is that either way it says something and never panics.
+#[test]
+fn clipboard_reads_or_says_why_not() {
+    let mut h = harness("two-column.pdf");
+    h.state_mut().submit("clipboard");
+    h.run_steps(1);
+
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| {
+            l.contains("clipboard:")
+                || l.contains("click where it goes")
+                || l.contains("fromclipboard")
+        }),
+        "clipboard must answer either way: {said:?}"
+    );
+}

@@ -7220,6 +7220,58 @@ impl PagifyApp {
         Ok(format!("area highlighted on page {}.", page + 1))
     }
 
+    /// Paste the clipboard's picture onto the page — the Capture tab's
+    /// Clipboard tool — landing the reader in the same placement tool
+    /// `addimage` arms. Text on the clipboard is pointed at `fromclipboard`.
+    ///
+    /// **The OS clipboard needs a desktop session**, so the harness cannot
+    /// exercise the happy path; a clipboard that cannot be reached is said,
+    /// never panicked.
+    fn paste_clipboard_image(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let mut clipboard = match arboard::Clipboard::new() {
+            Ok(clipboard) => clipboard,
+            Err(e) => {
+                self.say_error(format!("clipboard: no system clipboard to read ({e})."));
+                return;
+            }
+        };
+        match clipboard.get_image() {
+            Ok(image) => {
+                let (width, height) = (image.width as u32, image.height as u32);
+                if width == 0 || height == 0 {
+                    self.say_error("clipboard: the picture on the clipboard is empty.");
+                    return;
+                }
+                if pdf_core::render::bitmap::validate_dimensions(width, height).is_err() {
+                    self.say_error(format!(
+                        "clipboard: that picture is {width}x{height} — too large to place."
+                    ));
+                    return;
+                }
+                let page = self.tab_mut().view_state.page;
+                self.arm_tool(
+                    Tool::PlaceImage { rgba: image.bytes.into_owned(), width, height },
+                    page,
+                );
+                self.say_info(format!(
+                    "clipboard picture ({width}×{height}) — click where it goes."
+                ));
+            }
+            Err(arboard::Error::ContentNotAvailable) => match clipboard.get_text() {
+                Ok(text) if !text.trim().is_empty() => self.say_info(
+                    "the clipboard holds text, not a picture — `fromclipboard` makes a \
+                     document from it.",
+                ),
+                _ => self.say_error("clipboard: nothing usable on the clipboard."),
+            },
+            Err(e) => self.say_error(format!("clipboard: {e}.")),
+        }
+    }
+
     /// Put words on the page in a red ring — the Comment tab's Stamp.
     ///
     /// The ring is an ink stroke and the words are written text, so both are

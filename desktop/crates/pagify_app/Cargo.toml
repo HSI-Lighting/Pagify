@@ -17,6 +17,7 @@ egui   = "0.36"
 egui_extras = { version = "0.36", default-features = false }
 # Native file dialogs. Without one there is literally no way to open a document
 # from the interface — which is exactly what happened.
+arboard = "3"
 rfd    = "0.15"
 # Decodes the embedded logo. PNG only — every other decoder is dead weight in
 # the binary and attack surface with nothing asking for it.

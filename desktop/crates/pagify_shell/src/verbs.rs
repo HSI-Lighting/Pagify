@@ -505,6 +505,9 @@ pub enum Verb {
     /// Write the document's text as a plain file — `toother <file.(txt|rtf|xml)>`.
     /// Bare, the app asks for the file.
     ToOther { dest: Option<PathBuf> },
+    /// Paste the clipboard's picture onto the page — the Capture tab's
+    /// Clipboard tool. Text on the clipboard is pointed at `fromclipboard`.
+    Clipboard,
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -974,7 +977,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("assistant", "the viewing phase", "the Assistant tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
-    ("clipboard", "the capture phase", "the Clipboard tool"),
     ("cloudstorage", "the sharing phase", "the Cloud Storage tool"),
     ("combfield", "the forms phase", "the Comb Field tool"),
     ("createform", "the forms phase", "the Form tool"),
@@ -1135,7 +1137,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview", "stamp", "callout", "markredact", "toother",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview", "stamp", "callout", "markredact", "toother", "clipboard",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1796,6 +1798,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "readingoptions" => Ok(Verb::ReadingOptions),
         "reverseview" => Ok(Verb::ReverseView),
         "markredact" => Ok(Verb::MarkRedact),
+        "clipboard" => Ok(Verb::Clipboard),
         "stamp" => {
             let words = tail.trim();
             if words.is_empty() {
@@ -2967,6 +2970,20 @@ mod to_other_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "toother"),
             "`toother` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod clipboard_tests {
+    use super::*;
+
+    #[test]
+    fn clipboard_parses_and_is_not_planned() {
+        assert_eq!(parse("clipboard"), Some(Ok(Verb::Clipboard)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "clipboard"),
+            "`clipboard` is still in the planned table"
         );
     }
 }
