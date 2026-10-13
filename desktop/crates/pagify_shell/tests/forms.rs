@@ -104,3 +104,57 @@ fn the_json_carries_every_field_and_applies_back() {
     assert_eq!(fields[2].value, None, "the checkbox did not clear from JSON");
     assert_eq!(fields[5].value.as_deref(), Some("Green"), "the combo must be untouched");
 }
+
+#[test]
+fn the_csv_carries_a_header_and_quotes_what_it_must() {
+    let session = Session::open(fixture("form-fields.pdf")).expect("open");
+
+    let csv = session.form_data_csv().expect("csv");
+    assert!(csv.starts_with("name,kind,value\n"), "{csv}");
+    assert!(csv.contains("name,text,Ada Lovelace"), "{csv}");
+
+    // A value with a comma and a quote must come back quoted, doubled.
+    assert!(session.set_form_text("name", "Hopper, Grace \"Amazing\"").expect("set"));
+    let csv = session.form_data_csv().expect("csv again");
+    assert!(
+        csv.contains("\"Hopper, Grace \"\"Amazing\"\"\""),
+        "the awkward value was not quoted per RFC 4180: {csv}"
+    );
+}
+
+#[test]
+fn tooltips_set_read_back_and_reach_the_file() {
+    let session = Session::open(fixture("form-fields.pdf")).expect("open");
+
+    assert!(session.set_form_tooltip("email", "Your address").expect("set tooltip"));
+    assert!(!session.set_form_tooltip("no-such-field", "x").expect("missing field"));
+
+    let tooltips = session.form_field_tooltips().expect("tooltips");
+    let email = tooltips.iter().find(|(name, _)| name == "email").expect("email row");
+    assert_eq!(email.1.as_deref(), Some("Your address"));
+
+    let path = std::env::temp_dir().join(format!("pagify-tooltip-test-{}.pdf", std::process::id()));
+    session.save_to(&path, false).expect("save");
+    let reopened = Session::open(&path).expect("reopen");
+    let tooltips = reopened.form_field_tooltips().expect("tooltips again");
+    let email = tooltips.iter().find(|(name, _)| name == "email").expect("email row");
+    assert_eq!(email.1.as_deref(), Some("Your address"), "the tooltip is not in the file");
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn clearing_empties_what_this_build_can_set_and_leaves_the_rest() {
+    let session = Session::open(fixture("form-fields.pdf")).expect("open");
+
+    let cleared = session.clear_form_fields().expect("clear");
+
+    // One text field with a value, one empty text field, one checked box:
+    // the two text fields and the box are clearable; the radios and the
+    // combo are not.
+    assert_eq!(cleared, 3, "two texts and a checkbox should clear");
+    let fields = session.form_fields().expect("reread");
+    assert_eq!(fields[0].value, None, "the text did not clear");
+    assert_eq!(fields[2].value, None, "the checkbox did not clear");
+    assert_eq!(fields[3].value.as_deref(), Some("slow"), "the radio must be untouched");
+    assert_eq!(fields[5].value.as_deref(), Some("Green"), "the combo must be untouched");
+}

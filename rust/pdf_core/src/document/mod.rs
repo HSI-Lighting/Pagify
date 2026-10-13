@@ -710,6 +710,29 @@ pub trait Document: Send + Sync {
         Ok(false)
     }
 
+    /// Set the tooltip (`/TU`) of the first field named `name`, whatever
+    /// its kind; `false` when the document holds no such field.
+    fn set_form_tooltip(&mut self, _name: &str, _text: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Every field's tooltip (`/TU`), as `(name, tooltip)` in page order —
+    /// read raw, because this build's field reader has no public route to
+    /// it.
+    fn form_field_tooltips(&self) -> Result<Vec<(String, Option<String>)>> {
+        Ok(Vec::new())
+    }
+
+    /// Clear every field this build can set: text fields go empty, checkboxes
+    /// go off. Returns how many were cleared.
+    ///
+    /// **A clear, not a reset.** A form's stored defaults (`/DV`) are not
+    /// readable through this build's bindings, so fields go empty rather
+    /// than back to the values the form's author set.
+    fn clear_form_fields(&mut self) -> Result<usize> {
+        Ok(0)
+    }
+
     /// The bytes of the font one text run is drawn in, if it can be had.
     ///
     /// **What Obfuscate needs and [`crate::crypto::tweak::coverage`] cannot

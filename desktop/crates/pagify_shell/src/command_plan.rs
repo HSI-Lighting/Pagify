@@ -261,6 +261,12 @@ pub enum Effect {
     /// Read form JSON back and apply what this build can set; `None` asks
     /// for the file first.
     ImportFormData { dest: Option<std::path::PathBuf> },
+    /// Write every field as CSV; `None` asks for the file first.
+    ExportFormSheet { dest: Option<std::path::PathBuf> },
+    /// Set a field's tooltip.
+    SetFormTooltip { field: String, text: String },
+    /// Clear every field this build can set.
+    ClearFormFields,
     /// Reflow the page's text.
     RunReflow,
     /// Search for `needle`.
@@ -427,6 +433,9 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::FromTemplate { .. }
         | Verb::FormExport { .. }
         | Verb::FormImport { .. }
+        | Verb::FormToSheet { .. }
+        | Verb::ToolTip { .. }
+        | Verb::ResetForm
         | Verb::ShapeWords
         | Verb::KeepTool
         | Verb::Reflow
@@ -690,6 +699,12 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         }
         Verb::FormExport { dest } => vec![Effect::ExportFormData { dest: dest.clone() }],
         Verb::FormImport { dest } => vec![Effect::ImportFormData { dest: dest.clone() }],
+        Verb::FormToSheet { dest } => vec![Effect::ExportFormSheet { dest: dest.clone() }],
+        Verb::ToolTip { field, text } => vec![Effect::SetFormTooltip {
+            field: field.clone(),
+            text: text.clone(),
+        }],
+        Verb::ResetForm => vec![Effect::ClearFormFields],
         Verb::ShapeWords => vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())],
         Verb::KeepTool => vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())],
         // Text and find.
@@ -1055,6 +1070,12 @@ mod tests {
             ),
             (Verb::FormExport { dest: None }, vec![Effect::ExportFormData { dest: None }]),
             (Verb::FormImport { dest: None }, vec![Effect::ImportFormData { dest: None }]),
+            (Verb::FormToSheet { dest: None }, vec![Effect::ExportFormSheet { dest: None }]),
+            (
+                Verb::ToolTip { field: "email".into(), text: "Your address".into() },
+                vec![Effect::SetFormTooltip { field: "email".into(), text: "Your address".into() }],
+            ),
+            (Verb::ResetForm, vec![Effect::ClearFormFields]),
             (Verb::ShapeWords, vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())]),
             (Verb::KeepTool, vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())]),
             (Verb::Reflow, vec![Effect::RunReflow]),

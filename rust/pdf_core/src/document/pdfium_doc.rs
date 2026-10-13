@@ -1283,6 +1283,19 @@ impl Document for PdfiumDocument {
         self.set_form_check_state(name, checked)
     }
 
+    // The three below live as inherent methods on `PdfiumDocument` (they are
+    // machinery the trait only fronts); these are their trait doors.
+    fn form_field_tooltips(&self) -> Result<Vec<(String, Option<String>)>> {
+        PdfiumDocument::form_field_tooltips(self)
+    }
+
+    fn set_form_tooltip(&mut self, name: &str, text: &str) -> Result<bool> {
+        PdfiumDocument::set_form_tooltip(self, name, text)
+    }
+
+    fn clear_form_fields(&mut self) -> Result<usize> {
+        PdfiumDocument::clear_form_fields(self)
+    }
 
     fn run_font_data(&self, page_index: usize, object: usize) -> Result<Option<Vec<u8>>> {
         let (raw, handle) = match self.text_object_at(page_index, object)? {
@@ -3871,6 +3884,109 @@ impl PdfiumDocument {
             }
         }
         Ok(false)
+    }
+
+    /// Every field's tooltip (`/TU`), as `(name, tooltip)` in page order,
+    /// read raw — the crate's field wrappers have no alternate-name
+    /// accessor, and the C API call wants handles.
+    fn form_field_tooltips(&self) -> Result<Vec<(String, Option<String>)>> {
+        let Some(form) = self.document.form() else {
+            return Ok(Vec::new());
+        };
+        let form_handle = form.handle();
+        let bindings = pdfium()?.bindings();
+        let mut out = Vec::new();
+        for page_index in 0..self.page_count {
+            let page_number =
+                i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                    index: page_index,
+                    count: self.page_count,
+                })?;
+            let page = RawPage::open(self.document.handle(), page_number)?;
+            let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+            for index in 0..count.max(0) {
+                let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, index) };
+                if annot.is_null() {
+                    continue;
+                }
+                // Only widgets carry form fields; the type call answers -1
+                // for anything that is not one.
+                let kind = unsafe { bindings.FPDFAnnot_GetFormFieldType(form_handle, annot) };
+                if kind < 0 {
+                    unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                    continue;
+                }
+                let name = read_form_wide(|buf, len| unsafe {
+                    bindings.FPDFAnnot_GetFormFieldName(form_handle, annot, buf, len)
+                });
+                let tooltip = read_form_wide(|buf, len| unsafe {
+                    bindings.FPDFAnnot_GetFormFieldAlternateName(
+                        form_handle,
+                        annot,
+                        buf,
+                        len,
+                    )
+                });
+                if let Some(name) = name {
+                    out.push((name, tooltip));
+                }
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            }
+        }
+        Ok(out)
+    }
+
+    /// Set a field's tooltip (`/TU`): find the first widget named `name`,
+    /// whatever its kind, and write the key.
+    fn set_form_tooltip(&mut self, name: &str, text: &str) -> Result<bool> {
+        let Some(form) = self.document.form() else {
+            return Ok(false);
+        };
+        let form_handle = form.handle();
+        let bindings = pdfium()?.bindings();
+        for page_index in 0..self.page_count {
+            let page_number =
+                i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                    index: page_index,
+                    count: self.page_count,
+                })?;
+            let page = RawPage::open(self.document.handle(), page_number)?;
+            let count = unsafe { bindings.FPDFPage_GetAnnotCount(page.handle) };
+            for index in 0..count.max(0) {
+                let annot = unsafe { bindings.FPDFPage_GetAnnot(page.handle, index) };
+                if annot.is_null() {
+                    continue;
+                }
+                let annot_name = read_form_wide(|buf, len| unsafe {
+                    bindings.FPDFAnnot_GetFormFieldName(form_handle, annot, buf, len)
+                });
+                if annot_name.as_deref() == Some(name) {
+                    unsafe { bindings.FPDFAnnot_SetStringValue_str(annot, "TU", text) };
+                    unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+                    return Ok(true);
+                }
+                unsafe { bindings.FPDFPage_CloseAnnot(annot) };
+            }
+        }
+        Ok(false)
+    }
+
+    fn clear_form_fields(&mut self) -> Result<usize> {
+        let fields = Document::form_fields(self)?;
+        let mut cleared = 0usize;
+        for field in fields {
+            let ok = match field.kind {
+                FormFieldKind::Text => self.set_form_text(&field.name, "")?,
+                FormFieldKind::Checkbox => self.set_form_checkbox(&field.name, false)?,
+                // Radios and choices are not settable in this build; a
+                // clear that claimed them would be lying.
+                _ => false,
+            };
+            if ok {
+                cleared += 1;
+            }
+        }
+        Ok(cleared)
     }
 
     /// Every text object on the page, including ones with no visible ink —

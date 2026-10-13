@@ -182,7 +182,10 @@ impl crate::PagifyApp {
             | Effect::RequestClipboardText
             | Effect::OpenTemplateCopy { .. }
             | Effect::ExportFormData { .. }
-            | Effect::ImportFormData { .. } => self.apply_files(effect),
+            | Effect::ImportFormData { .. }
+            | Effect::ExportFormSheet { .. }
+            | Effect::SetFormTooltip { .. }
+            | Effect::ClearFormFields => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -690,6 +693,12 @@ impl crate::PagifyApp {
                 Some(path) => self.import_form_data(&path),
                 None => self.form_import_dialog(),
             },
+            Effect::ExportFormSheet { dest } => match dest {
+                Some(path) => self.form_to_sheet(&path),
+                None => self.form_sheet_dialog(),
+            },
+            Effect::SetFormTooltip { field, text } => self.set_form_tooltip(&field, &text),
+            Effect::ClearFormFields => self.clear_form_fields(),
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {
                 Some(path) => self.write_access_report(&path),

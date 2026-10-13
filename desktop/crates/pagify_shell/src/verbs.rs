@@ -463,6 +463,15 @@ pub enum Verb {
     /// Read that JSON back and apply what this build can set —
     /// `formimport [file.json]`. Bare, the app asks for the file.
     FormImport { dest: Option<PathBuf> },
+    /// Write every field as CSV — `formtosheet [file.csv]`. Bare, the app
+    /// asks for the file.
+    FormToSheet { dest: Option<PathBuf> },
+    /// Set a field's tooltip — `tooltip <field> <words>`.
+    ToolTip { field: String, text: String },
+    /// Clear every field this build can set — the Form tab's Reset Form.
+    /// A clear, not a reset: the form's stored defaults are not readable in
+    /// this build, and the answer says so.
+    ResetForm,
     /// Name the shape words this build actually has — what the Edit tab's
     /// Add Shapes and the Comment tab's Drawing buttons answer with.
     ShapeWords,
@@ -942,7 +951,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("flatten", "the page phase", "the Flatten tool"),
     ("formdesigner", "the forms phase", "the Designer Assistant tool"),
     ("formrecognise", "the forms phase", "the Run Form Field Recognition tool"),
-    ("formtosheet", "the forms phase", "the Form to sheet tool"),
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
     ("markredact", "the protection phase", "the Mark for Redaction tool"),
@@ -954,7 +962,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("readingoptions", "the accessibility phase", "the Reading Options tool"),
     ("readingorder", "the accessibility phase", "the Reading Order tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
-    ("resetform", "the forms phase", "the Reset Form tool"),
     ("reverseview", "the viewing phase", "the Reverse View tool"),
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
     ("sendreview", "the sharing phase", "the Send for Review tool"),
@@ -964,7 +971,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("tagspanel", "the accessibility phase", "the Tags Panel tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
     ("toolsettings", "the forms phase", "the Tool Settings tool"),
-    ("tooltip", "the forms phase", "the Add Tooltip tool"),
     ("toother", "the conversion phase", "the To Other tool"),
     ("trackreviews", "the sharing phase", "the Track Reviews tool"),
     ("transitions", "the viewing phase", "the Page Transitions tool"),
@@ -1093,7 +1099,8 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "autoscroll", "ruler", "accesscheck", "accessreport", "autobookmarks", "preflight",
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
-        "drawing", "keeptool", "formexport", "formimport",
+        "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
+        "resetform",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1744,6 +1751,24 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "formimport" => Ok(Verb::FormImport {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
+        "formtosheet" => Ok(Verb::FormToSheet {
+            dest: (!tail.is_empty()).then(|| resolve_path(tail)),
+        }),
+        "resetform" => Ok(Verb::ResetForm),
+        // A field's name never has spaces in it, so the first word is the
+        // field and everything after it is the tooltip.
+        "tooltip" => {
+            let mut words = tail.trim().splitn(2, char::is_whitespace);
+            let field = words.next().unwrap_or("");
+            let text = words.next().unwrap_or("").trim();
+            if field.is_empty() || text.is_empty() {
+                return Some(Err(
+                    "tooltip: a field and its words, as in `tooltip email Your address`"
+                        .into(),
+                ));
+            }
+            Ok(Verb::ToolTip { field: field.to_string(), text: text.to_string() })
+        }
         // No arguments means "ask me where", the same shape `open`/`saveas`
         // already have.
         "toimage" => Ok(Verb::ToImage {
@@ -2667,6 +2692,31 @@ mod form_data_tests {
         );
         assert_eq!(parse("formimport"), Some(Ok(Verb::FormImport { dest: None })));
         for word in ["formexport", "formimport"] {
+            assert!(
+                PLANNED.iter().all(|(v, _, _)| *v != word),
+                "`{word}` is still in the planned table"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod form_tab_tests {
+    use super::*;
+
+    #[test]
+    fn the_form_tab_words_parse_and_are_not_planned() {
+        assert_eq!(parse("formtosheet"), Some(Ok(Verb::FormToSheet { dest: None })));
+        assert_eq!(parse("resetform"), Some(Ok(Verb::ResetForm)));
+        assert_eq!(
+            parse("tooltip email Your address"),
+            Some(Ok(Verb::ToolTip { field: "email".into(), text: "Your address".into() }))
+        );
+        match parse("tooltip email") {
+            Some(Err(why)) => assert!(why.contains("field and its words"), "{why}"),
+            other => panic!("bare tooltip parsed as {other:?}"),
+        }
+        for word in ["formtosheet", "tooltip", "resetform"] {
             assert!(
                 PLANNED.iter().all(|(v, _, _)| *v != word),
                 "`{word}` is still in the planned table"

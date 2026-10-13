@@ -14328,6 +14328,83 @@ impl PagifyApp {
         }
     }
 
+    /// Write every field as CSV — the Form tab's Form to Sheet.
+    fn form_to_sheet(&mut self, dest: &std::path::Path) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        match session.form_data_csv() {
+            Ok(csv) => {
+                let rows = csv.lines().count().saturating_sub(1);
+                match std::fs::write(dest, csv) {
+                    Ok(()) => {
+                        self.say_info(format!("wrote {rows} row(s) to {}.", dest.display()))
+                    }
+                    Err(e) => self.say_error(format!("formtosheet: {e}")),
+                }
+            }
+            Err(e) => self.say_error(format!("formtosheet: {e}")),
+        }
+    }
+
+    /// The Form tab's Form to Sheet button, bare: choose the file, then
+    /// write.
+    fn form_sheet_dialog(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let dialog = rfd::FileDialog::new()
+            .set_title("Write the form as a sheet")
+            .set_file_name(format!("{}-sheet.csv", self.document_stem()))
+            .add_filter("CSV", &["csv"]);
+        match dialog.save_file() {
+            Some(path) => self.form_to_sheet(&path),
+            None => self.say_info("nothing chosen."),
+        }
+    }
+
+    /// Set a field's tooltip — the Form tab's Add Tooltip.
+    fn set_form_tooltip(&mut self, field: &str, text: &str) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        match session.set_form_tooltip(field, text) {
+            Ok(true) => self.say_info(format!("tooltip set on `{field}`.")),
+            Ok(false) => {
+                self.say_error(format!("tooltip: no field named `{field}` in this document."))
+            }
+            Err(e) => self.say_error(format!("tooltip: {e}")),
+        }
+    }
+
+    /// Clear every field this build can set — the Form tab's Reset Form.
+    ///
+    /// **A clear, not a reset**, and the answer says so: the form's stored
+    /// defaults are not readable through this build's bindings, so fields
+    /// go empty rather than back to the values the form's author set.
+    fn clear_form_fields(&mut self) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        match session.clear_form_fields() {
+            Ok(0) => self.say_info("nothing to clear — no text or checkbox fields in this form."),
+            Ok(cleared) => {
+                if let Some(doc) = &mut self.tab_mut().doc {
+                    doc.rendered_is_stale();
+                }
+                self.say_info(format!(
+                    "cleared {cleared} field(s) — this build cannot read the form's stored \
+                     defaults, so they went empty rather than back to the author's values."
+                ));
+            }
+            Err(e) => self.say_error(format!("resetform: {e}")),
+        }
+    }
+
     /// The `fromclipboard` wait: ask the platform once, then take the text
     /// when it arrives. Called from `handle_input`, the one place with both
     /// the context and the paste events; split out of it so that function

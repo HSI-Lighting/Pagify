@@ -5736,3 +5736,47 @@ fn formexport_and_formimport_round_trip_through_a_file() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// **The Form tab's Form to Sheet, Add Tooltip and Reset Form, through the
+/// real dispatch.** The sheet is written with a header and the fixture's
+/// fields; a tooltip lands and reads back; Reset Form clears what this build
+/// can set, says it is a clear rather than a reset, and leaves the radios
+/// and choices alone.
+#[test]
+fn form_to_sheet_tooltip_and_reset_run_from_the_box() {
+    let dir = std::env::temp_dir().join(format!("pagify-formtab-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch folder");
+
+    let mut h = harness("form-fields.pdf");
+
+    let sheet = dir.join("sheet.csv");
+    h.state_mut().submit(&format!("formtosheet {}", sheet.display()));
+    h.run_steps(1);
+    let csv = std::fs::read_to_string(&sheet).expect("the sheet");
+    assert!(csv.starts_with("name,kind,value\n"), "{csv}");
+    assert!(csv.contains("name,text,Ada Lovelace"), "{csv}");
+
+    h.state_mut().submit("tooltip email Your address");
+    h.run_steps(1);
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let tooltips = session.form_field_tooltips().expect("tooltips");
+    assert!(
+        tooltips.iter().any(|(name, t)| name == "email" && t.as_deref() == Some("Your address")),
+        "the tooltip did not land: {tooltips:?}"
+    );
+
+    h.state_mut().submit("resetform");
+    h.run_steps(1);
+    let session = h.state().tab().doc.as_ref().expect("doc").session.clone();
+    let fields = session.form_fields().expect("reread");
+    assert_eq!(fields[0].value, None, "the text did not clear");
+    assert_eq!(fields[2].value, None, "the checkbox did not clear");
+    assert_eq!(fields[5].value.as_deref(), Some("Green"), "the combo must be untouched");
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("clear") && l.contains("stored defaults")),
+        "resetform must say it is a clear, not a reset: {said:?}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
