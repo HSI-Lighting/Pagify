@@ -780,6 +780,12 @@ pub trait Document: Send + Sync {
         Ok(text.chars().count() as f32 * 0.55 * size)
     }
 
+    /// The document's outline as a tree, children and all. Empty when the
+    /// file has none.
+    fn outline_entries(&self) -> Result<Vec<OutlineEntry>> {
+        Ok(Vec::new())
+    }
+
     /// A page's structure tree — its tags — as the Tags panel lists them.
     /// Empty for an untagged page. Read-only: PDFium reads structure, it
     /// does not write it.
@@ -2577,6 +2583,18 @@ pub struct DecodedImage {
     pub height: u32,
     /// `width * height * 4` bytes, RGBA.
     pub rgba: Vec<u8>,
+}
+
+/// One entry of the document's outline, children and all — what the
+/// Contents panel shows as a tree. [`Document::bookmarks`] deliberately
+/// flattens to the top level; this keeps the shape a file from anywhere
+/// else may have nested.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutlineEntry {
+    pub title: String,
+    /// The page it goes to; `None` for a heading that only groups others.
+    pub page: Option<usize>,
+    pub children: Vec<OutlineEntry>,
 }
 
 /// One node of a page's structure tree, as the Tags panel shows it.

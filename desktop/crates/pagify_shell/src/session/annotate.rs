@@ -73,6 +73,13 @@ impl Session {
     /// Every bookmark in the document's own outline, title and the page it
     /// goes to, top level only — see [`pdf_core::document::Document::
     /// bookmarks`]'s own doc for why nesting is not modelled.
+    /// The document's outline as a tree, children and all — what the
+    /// Contents panel shows. [`Session::bookmarks`] stays the flat top
+    /// level its callers asked for.
+    pub fn outline(&self) -> Result<Vec<pdf_core::document::OutlineEntry>> {
+        registry::with_session(self.handle, |s| s.document.outline_entries())
+    }
+
     pub fn bookmarks(&self) -> Result<Vec<(String, usize)>> {
         registry::with_session(self.handle, |s| s.document.bookmarks())
     }

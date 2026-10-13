@@ -24,7 +24,7 @@ use pdfium_render::prelude::{
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
-    Annotation, Color, DecodedImage, Document, DocumentMut, FormFieldInfo, FormFieldKind, Glyph, IndexedAnnotation, InternalLink, Page, PageCharacters, TagNode,
+    Annotation, Color, DecodedImage, Document, DocumentMut, FormFieldInfo, FormFieldKind, Glyph, IndexedAnnotation, InternalLink, OutlineEntry, Page, PageCharacters, TagNode,
     PageClassification, PageSize, PageTextKind, RecognisedWord, TEXT_LAYER_ID,
     Point, Rect, RegionRequest, RemovedPage, RenderRequest, Rotation, Ruling, TextSegment,
     Redaction, RedactionReport, Uncleared,
@@ -43,6 +43,33 @@ fn read_wide_void(
     read(buffer.as_mut_ptr() as *mut std::ffi::c_void, length);
     let end = buffer.iter().position(|&u| u == 0).unwrap_or(buffer.len());
     Some(String::from_utf16_lossy(&buffer[..end]))
+}
+
+/// One outline entry, children and all. **Depth-capped**: a hostile file
+/// can nest outline items for ever, and the cap turns that into a truncated
+/// tree rather than a stack overflow.
+const OUTLINE_DEPTH_CAP: usize = 64;
+
+fn read_outline_entry(
+    bookmark: &pdfium_render::prelude::PdfBookmark,
+    depth: usize,
+) -> OutlineEntry {
+    let title = bookmark.title().unwrap_or_default();
+    let page = bookmark
+        .destination()
+        .and_then(|destination| destination.page_index().ok())
+        .map(|index| index as usize);
+    let mut children = Vec::new();
+    if depth < OUTLINE_DEPTH_CAP {
+        if let Some(first) = bookmark.first_child() {
+            let mut sibling = Some(first);
+            while let Some(child) = sibling {
+                children.push(read_outline_entry(&child, depth + 1));
+                sibling = child.next_sibling();
+            }
+        }
+    }
+    OutlineEntry { title, page, children }
 }
 
 /// One structure-tree node, read recursively — the Tags panel's rows.
@@ -2064,6 +2091,19 @@ impl Document for PdfiumDocument {
                 Some(next) => current = next,
                 None => break,
             }
+        }
+        Ok(out)
+    }
+
+    fn outline_entries(&self) -> Result<Vec<OutlineEntry>> {
+        let Some(root) = self.document.bookmarks().root() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::new();
+        let mut sibling = Some(root);
+        while let Some(bookmark) = sibling {
+            out.push(read_outline_entry(&bookmark, 0));
+            sibling = bookmark.next_sibling();
         }
         Ok(out)
     }

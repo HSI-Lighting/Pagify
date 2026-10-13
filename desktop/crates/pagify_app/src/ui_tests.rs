@@ -6105,8 +6105,11 @@ fn contents_opens_the_files_table_of_contents_in_the_rail() {
         "the answer must say what it is: {said:?}"
     );
 
-    let entries = h.state().tab().doc.as_ref().expect("doc").session.bookmarks().expect("outline");
-    assert!(!entries.is_empty(), "the fixture must ship entries to list");
+    let tree = h.state().tab().doc.as_ref().expect("doc").session.outline().expect("outline");
+    assert!(
+        tree.iter().any(|entry| !entry.children.is_empty()),
+        "the panel's tree must have nesting to show: {tree:?}"
+    );
 
     h.state_mut().submit("contents");
     h.run_steps(2);

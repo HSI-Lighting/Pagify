@@ -53,11 +53,18 @@ objs[26] = (b"<< /Type /StructElem /S /Figure /P 21 0 R /K 3 "
 objs[23] = b"<< /Nums [0 [22 0 R 24 0 R 25 0 R 26 0 R]] >>"
 
 # The file's own table of contents, so the Contents panel has a real one
-# to list.
-objs[30] = b"<< /Type /Outlines /First 31 0 R /Last 32 0 R /Count 2 >>"
-objs[31] = (b"<< /Title (A Tagged Heading) /Parent 30 0 R /Next 32 0 R "
+# to list — nested two deep, the way files from other producers are, so the
+# tree view has a tree to show. The middle item has no destination of its
+# own: a heading that only groups, which must still be walked.
+objs[30] = b"<< /Type /Outlines /First 31 0 R /Last 33 0 R /Count 4 >>"
+objs[31] = (b"<< /Title (A Tagged Heading) /Parent 30 0 R /Next 33 0 R "
+            b"/First 32 0 R /Last 32 0 R /Count 2 "
             b"/Dest [3 0 R /XYZ null null null] >>")
-objs[32] = (b"<< /Title (The paragraph) /Parent 30 0 R "
+objs[32] = (b"<< /Title (The paragraph) /Parent 31 0 R "
+            b"/Dest [3 0 R /XYZ null null null] >>")
+objs[33] = (b"<< /Title (The figures) /Parent 30 0 R "
+            b"/First 34 0 R /Last 34 0 R /Count 1 >>")
+objs[34] = (b"<< /Title (Deeper still) /Parent 33 0 R "
             b"/Dest [3 0 R /XYZ null null null] >>")
 
 out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")

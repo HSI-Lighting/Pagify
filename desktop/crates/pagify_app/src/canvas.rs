@@ -850,8 +850,16 @@ impl crate::PagifyApp {
                 });
                 ui.add_space(6.0);
 
-                let entries = self.sync_bookmarks();
-                if entries.is_empty() {
+                // The flat read still feeds the lit-page set and the
+                // Bookmarks window; the panel itself shows the tree.
+                let _ = self.sync_bookmarks();
+                let tree = self
+                    .tab()
+                    .doc
+                    .as_ref()
+                    .and_then(|doc| doc.session.outline().ok())
+                    .unwrap_or_default();
+                if tree.is_empty() {
                     ui.label(
                         egui::RichText::new(
                             "no contents in this file — `autobookmarks` makes them from the \
@@ -863,15 +871,69 @@ impl crate::PagifyApp {
                 }
                 let current = self.tab().view_state.page;
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    for (title, page) in &entries {
-                        let row = format!("{title}   —   p.{}", page + 1);
-                        if ui.selectable_label(*page == current, row).clicked() {
-                            jump_to = Some(*page);
-                        }
+                    for (index, entry) in tree.iter().enumerate() {
+                        let path = format!("{index}");
+                        self.draw_outline_row(ui, entry, &path, current, &mut jump_to);
                     }
                 });
             });
         jump_to
+    }
+
+    /// One outline row: a disclosure arrow where there are children, then
+    /// the title — clicking a title goes to its page; a grouping heading
+    /// (no destination of its own) is dim and not clickable. Children are
+    /// drawn indented when the row is open; collapsed rows are remembered
+    /// in `ui_state.outline_closed` by the node's path.
+    fn draw_outline_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        entry: &pdf_core::document::OutlineEntry,
+        path: &str,
+        current: usize,
+        jump_to: &mut Option<usize>,
+    ) {
+        let has_children = !entry.children.is_empty();
+        let open = has_children && !self.ui_state.outline_closed.contains(path);
+        ui.horizontal(|ui| {
+            if has_children {
+                let arrow = if open { "▾" } else { "▸" };
+                if ui
+                    .add(
+                        egui::Label::new(arrow)
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
+                    )
+                    .clicked()
+                {
+                    if open {
+                        self.ui_state.outline_closed.insert(path.to_string());
+                    } else {
+                        self.ui_state.outline_closed.remove(path);
+                    }
+                }
+            } else {
+                ui.add_space(12.0);
+            }
+            match entry.page {
+                Some(page) => {
+                    if ui.selectable_label(page == current, &entry.title).clicked() {
+                        *jump_to = Some(page);
+                    }
+                }
+                None => {
+                    ui.label(egui::RichText::new(&entry.title).weak());
+                }
+            }
+        });
+        if open {
+            for (index, child) in entry.children.iter().enumerate() {
+                let child_path = format!("{path}.{index}");
+                ui.indent(("outline", child_path.as_str()), |ui| {
+                    self.draw_outline_row(ui, child, &child_path, current, jump_to);
+                });
+            }
+        }
     }
 
     /// The Organize grid: a wrapped, multi-column thumbnail view occupying

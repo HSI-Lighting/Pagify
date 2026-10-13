@@ -40,17 +40,45 @@ fn pages_with_no_text_get_no_bookmark() {
 }
 
 #[test]
-fn the_tagged_fixture_ships_its_own_contents() {
+fn the_flat_reader_stops_at_the_top_level_it_promises() {
     let session = Session::open(fixture("tagged.pdf")).expect("open");
 
     let entries = session.bookmarks().expect("outline");
 
+    // Top level only, and only what a click can go to: "The figures" is a
+    // grouping heading with no destination of its own, so the flat list
+    // skips it while the tree keeps it. Children never leak in.
     assert_eq!(
         entries,
-        vec![
-            ("A Tagged Heading".to_string(), 0),
-            ("The paragraph".to_string(), 0),
-        ],
-        "the file's own table of contents must read back entry for entry"
+        vec![("A Tagged Heading".to_string(), 0)],
+        "bookmarks() is the flat, jumpable top level it promises"
     );
+}
+
+#[test]
+fn the_outline_reads_the_whole_tree() {
+    use pdf_core::document::OutlineEntry;
+    let session = Session::open(fixture("tagged.pdf")).expect("open");
+
+    let tree = session.outline().expect("tree");
+
+    assert_eq!(tree.len(), 2, "two top-level entries: {tree:?}");
+    let heading = &tree[0];
+    assert_eq!(heading.title, "A Tagged Heading");
+    assert_eq!(heading.page, Some(0));
+    assert_eq!(
+        heading.children,
+        vec![OutlineEntry {
+            title: "The paragraph".into(),
+            page: Some(0),
+            children: Vec::new(),
+        }],
+        "the heading's child"
+    );
+
+    let figures = &tree[1];
+    assert_eq!(figures.page, None, "a grouping heading goes nowhere itself");
+    assert_eq!(figures.children.len(), 1);
+    assert_eq!(figures.children[0].title, "Deeper still");
+    assert_eq!(figures.children[0].page, Some(0));
 }

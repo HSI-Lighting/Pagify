@@ -53,16 +53,22 @@ endobj
 << /Type /StructElem /S /Figure /P 21 0 R /K 3 /Alt (a blue bar, described) >>
 endobj
 30 0 obj
-<< /Type /Outlines /First 31 0 R /Last 32 0 R /Count 2 >>
+<< /Type /Outlines /First 31 0 R /Last 33 0 R /Count 4 >>
 endobj
 31 0 obj
-<< /Title (A Tagged Heading) /Parent 30 0 R /Next 32 0 R /Dest [3 0 R /XYZ null null null] >>
+<< /Title (A Tagged Heading) /Parent 30 0 R /Next 33 0 R /First 32 0 R /Last 32 0 R /Count 2 /Dest [3 0 R /XYZ null null null] >>
 endobj
 32 0 obj
-<< /Title (The paragraph) /Parent 30 0 R /Dest [3 0 R /XYZ null null null] >>
+<< /Title (The paragraph) /Parent 31 0 R /Dest [3 0 R /XYZ null null null] >>
+endobj
+33 0 obj
+<< /Title (The figures) /Parent 30 0 R /First 34 0 R /Last 34 0 R /Count 1 >>
+endobj
+34 0 obj
+<< /Title (Deeper still) /Parent 33 0 R /Dest [3 0 R /XYZ null null null] >>
 endobj
 xref
-0 33
+0 35
 0000000000 65535 f 
 0000000015 00000 n 
 0000000147 00000 n 
@@ -95,9 +101,11 @@ xref
 0000000000 65535 f 
 0000001349 00000 n 
 0000001423 00000 n 
-0000001533 00000 n 
+0000001569 00000 n 
+0000001663 00000 n 
+0000001757 00000 n 
 trailer
-<< /Size 33 /Root 1 0 R >>
+<< /Size 35 /Root 1 0 R >>
 startxref
-1627
+1850
 %%EOF

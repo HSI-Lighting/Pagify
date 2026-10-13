@@ -1219,6 +1219,9 @@ struct UiState {
     /// The rail's own slot showing the file's table of contents instead of
     /// thumbnails — the `contents` command and the rail's ☰ button.
     show_contents: bool,
+    /// Outline entries the person has collapsed, keyed by the node's path
+    /// (`0.1`). New entries — `autobookmarks`' own — arrive open.
+    outline_closed: std::collections::HashSet<String>,
     /// Whether the Organize grid is showing in place of the plain thumbnail
     /// rail — workspace-wide, the same convention `show_thumbs` itself
     /// already uses, not per document: the two are mutually exclusive views
@@ -4339,7 +4342,7 @@ impl PagifyApp {
             }, recorder: Recorder::default(), replay_depth: 0, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
             render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
-            ui_state: UiState { show_thumbs: true, show_contents: false, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
+            ui_state: UiState { show_thumbs: true, show_contents: false, outline_closed: std::collections::HashSet::new(), organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             pending_dialog: None,
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

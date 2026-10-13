@@ -469,8 +469,10 @@ shape PDFium's `FPDF_StructTree_GetForPage` walks. It exists for the Tags
 panel, which lists a page's structure read-only; the tags are not visible
 in the page's own content beyond the words.
 
-It also ships its own **table of contents** (`/Outlines`: "A Tagged
-Heading" and "The paragraph"), so the Contents panel has a real one to
-list without anything having to write one first.
+It also ships its own **table of contents** — `/Outlines`, nested two deep
+("A Tagged Heading" with "The paragraph" under it, and a destination-less
+grouping heading "The figures" with "Deeper still" under that) — so the
+Contents panel's tree view has a real tree to show without anything
+having to write one first.
 
 Rebuild it with `tools/make_tagged_fixture.py fixtures/tagged.pdf`.
