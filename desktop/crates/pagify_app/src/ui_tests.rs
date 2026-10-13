@@ -5916,3 +5916,35 @@ fn readingoptions_points_at_the_real_routes() {
         "the answer does not name the routes: {said:?}"
     );
 }
+
+/// The View tab's Reverse View: in a facing layout the pair's first page
+/// lands on the right, the answer says what it did, and toggling back
+/// restores the order.
+#[test]
+fn reverseview_mirrors_the_facing_rows() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().submit("viewfacing");
+    h.run_steps(1);
+    let doc = h.state().tab().doc.as_ref().expect("doc");
+    assert!(doc.strip.left_of(0) < doc.strip.left_of(1), "facing order starts left to right");
+
+    h.state_mut().submit("reverseview");
+    h.run_steps(1);
+    let doc = h.state().tab().doc.as_ref().expect("doc");
+    assert!(
+        doc.strip.left_of(0) > doc.strip.left_of(1),
+        "the pair did not mirror: {:?} vs {:?}",
+        doc.strip.left_of(0),
+        doc.strip.left_of(1)
+    );
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("right-to-left")),
+        "the answer does not say what it did: {said:?}"
+    );
+
+    h.state_mut().submit("reverseview");
+    h.run_steps(1);
+    let doc = h.state().tab().doc.as_ref().expect("doc");
+    assert!(doc.strip.left_of(0) < doc.strip.left_of(1), "the order did not come back");
+}

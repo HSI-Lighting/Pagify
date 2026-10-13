@@ -8496,6 +8496,30 @@ impl PagifyApp {
         self.tab_mut().panels.view_settings = open;
     }
 
+    /// Toggle Reverse View — the View tab's button. The rows' own layout
+    /// does the work (`Strip::with_reversed`); this is the switch and the
+    /// answer.
+    fn toggle_reverse_view(&mut self) {
+        let Some(doc) = &mut self.tab_mut().doc else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let on = !doc.strip.reversed();
+        doc.strip = doc.strip.with_reversed(on);
+        let layout = doc.strip.layout();
+        self.say_info(match (on, layout) {
+            (true, pagify_shell::reader::Layout::Single) => {
+                "reverse view: on — one page per row has nothing to flip; it shows in \
+                 facing layouts (`viewfacing`)."
+            }
+            (true, _) => {
+                "reverse view: on — the first page of each pair lands on the right, the way \
+                 right-to-left books read."
+            }
+            (false, _) => "reverse view: off.",
+        });
+    }
+
     /// Toggle the split view — the View tab's Split. The pane itself is the
     /// canvas's (`draw_split_pane`); this is only the switch.
     fn toggle_split_view(&mut self) {

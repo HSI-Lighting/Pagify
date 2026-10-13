@@ -79,6 +79,10 @@ pub struct Strip {
     /// Whether the pages are laid out a quarter turn on, so each takes up its
     /// height across and its width down — see [`Strip::frame_of`].
     turned: bool,
+    /// **Reverse View**: each row's pages mirrored within the row, so a
+    /// facing pair puts the first page on the right — the way right-to-left
+    /// books read. A row of one has nothing to mirror.
+    reversed: bool,
     gap: f32,
     total: f32,
     width: f32,
@@ -99,15 +103,38 @@ impl Strip {
     /// own height and width are all those of what is drawn — not of what is
     /// stored.
     pub fn with_layout_turned(sizes: &[PageSize], gap: f32, layout: Layout, turned: bool) -> Self {
-        Self::build(sizes.iter().map(|s| (s.width_pt, s.height_pt)).collect(), gap, layout, turned)
+        Self::build(
+            sizes.iter().map(|s| (s.width_pt, s.height_pt)).collect(),
+            gap,
+            layout,
+            turned,
+            false,
+        )
     }
 
-    /// The same pages, laid out another way.
+    /// The same pages, laid out another way. Reverse View is kept as it is —
+    /// it is about how a row reads, not how the rows are laid out.
     pub fn retarget(&self, layout: Layout, turned: bool) -> Self {
-        Self::build(self.sizes.clone(), self.gap, layout, turned)
+        Self::build(self.sizes.clone(), self.gap, layout, turned, self.reversed)
     }
 
-    fn build(page_space: Vec<(f32, f32)>, gap: f32, layout: Layout, turned: bool) -> Self {
+    /// The same pages, read the other way round within their rows.
+    pub fn with_reversed(&self, reversed: bool) -> Self {
+        Self::build(self.sizes.clone(), self.gap, self.layout, self.turned, reversed)
+    }
+
+    /// Whether the rows read right to left.
+    pub fn reversed(&self) -> bool {
+        self.reversed
+    }
+
+    fn build(
+        page_space: Vec<(f32, f32)>,
+        gap: f32,
+        layout: Layout,
+        turned: bool,
+        reversed: bool,
+    ) -> Self {
         // **What each page occupies in the strip.** Reported from use, with
         // screenshots, as a regression: turning the view squeezed the turned
         // page into the portrait frame it had before the turn, because the
@@ -161,6 +188,29 @@ impl Strip {
             cursor += height + gap;
         }
 
+        // **Reverse View**: mirror each row's pages within the row. Done
+        // after the rows are placed, so the row keeps its own bounds and the
+        // strip keeps being centred the same way; a row of one is untouched.
+        if reversed {
+            for row in &rows {
+                if row.len() < 2 {
+                    continue;
+                }
+                let row_left = row.iter().map(|p| lefts[*p]).fold(f32::INFINITY, f32::min);
+                let row_right =
+                    row.iter().map(|p| lefts[*p] + sizes[*p].width_pt).fold(0.0, f32::max);
+                let mirrored: Vec<(usize, f32)> = row
+                    .iter()
+                    .map(|p| {
+                        (*p, row_left + (row_right - (lefts[*p] + sizes[*p].width_pt)))
+                    })
+                    .collect();
+                for (page, x) in mirrored {
+                    lefts[page] = x;
+                }
+            }
+        }
+
         // The trailing gap is not part of the document.
         let total = (cursor - gap).max(0.0);
 
@@ -169,6 +219,7 @@ impl Strip {
             lefts,
             sizes: page_space,
             turned,
+            reversed,
             gap,
             total,
             width,
@@ -963,6 +1014,19 @@ mod layout_tests {
     #[test]
     fn retargeting_keeps_the_pages_and_changes_how_they_are_laid_out() {
         let strip = Strip::with_layout(&sizes(4), 10.0, Layout::Single);
+        let reversed = Strip::with_layout(&sizes(2), 10.0, Layout::Facing).with_reversed(true);
+        assert!(
+            reversed.left_of(0) > reversed.left_of(1),
+            "reverse view must put the first page on the right: {:?} vs {:?}",
+            reversed.left_of(0),
+            reversed.left_of(1)
+        );
+        assert!(!reversed.with_reversed(false).reversed());
+        // The row keeps its bounds: the union of the two pages' spans is the
+        // same either way.
+        let plain = Strip::with_layout(&sizes(2), 10.0, Layout::Facing);
+        assert_eq!(reversed.width_pt(), plain.width_pt());
+
         let turned = strip.retarget(Layout::Facing, true);
         assert_eq!(turned.layout(), Layout::Facing);
         assert!(turned.turned());

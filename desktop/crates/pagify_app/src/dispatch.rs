@@ -192,7 +192,8 @@ impl crate::PagifyApp {
             | Effect::ToggleTagsPanel
             | Effect::ReportAltText(_)
             | Effect::ReportReadingOrder(_)
-            | Effect::ToggleSplitView => self.apply_files(effect),
+            | Effect::ToggleSplitView
+            | Effect::ToggleReverseView => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -719,6 +720,7 @@ impl crate::PagifyApp {
             Effect::ReportAltText(pages) => self.report_alt_text(&pages),
             Effect::ReportReadingOrder(pages) => self.report_reading_order(&pages),
             Effect::ToggleSplitView => self.toggle_split_view(),
+            Effect::ToggleReverseView => self.toggle_reverse_view(),
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {
                 Some(path) => self.write_access_report(&path),

@@ -490,6 +490,8 @@ pub enum Verb {
     /// Name where this build's reading options live — the Accessibility
     /// tab's Reading Options, answered with the routes that exist.
     ReadingOptions,
+    /// The View tab's Reverse View: read each facing row right to left.
+    ReverseView,
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -989,7 +991,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("portfolio", "the conversion phase", "the PDF Portfolio tool"),
     ("readaloud", "the viewing phase", "the Read tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
-    ("reverseview", "the viewing phase", "the Reverse View tool"),
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
     ("sendreview", "the sharing phase", "the Send for Review tool"),
     ("sharelink", "the sharing phase", "the Share Link tool"),
@@ -1125,7 +1126,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1781,6 +1782,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "readingorder" => Ok(Verb::ReadingOrder { pages: tail.trim().to_string() }),
         "viewsplit" => Ok(Verb::ViewSplit),
         "readingoptions" => Ok(Verb::ReadingOptions),
+        "reverseview" => Ok(Verb::ReverseView),
         "flatten" => Ok(Verb::Flatten),
         "attach" => Ok(Verb::Attach {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
@@ -2867,5 +2869,19 @@ mod reading_options_tests {
         for route in ["viewsetting", "changecolor", "Read Out Loud"] {
             assert!(READING_OPTIONS_WORDS.contains(route), "the answer omits `{route}`");
         }
+    }
+}
+
+#[cfg(test)]
+mod reverse_view_tests {
+    use super::*;
+
+    #[test]
+    fn reverseview_parses_and_is_not_planned() {
+        assert_eq!(parse("reverseview"), Some(Ok(Verb::ReverseView)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "reverseview"),
+            "`reverseview` is still in the planned table"
+        );
     }
 }

@@ -476,6 +476,7 @@ impl crate::PagifyApp {
         let mut autoscroll_box = self.tab().view_state.autoscroll;
         let paper_tint = self.tab().view_state.paper_tint;
         let mut split_box = self.tab().view_state.split;
+        let layout_reversed = self.tab().doc.as_ref().is_some_and(|d| d.strip.reversed());
         let zoom_pct = has_doc.then(|| (self.resolved_zoom() * 100.0).round());
 
         egui::Window::new("View Setting")
@@ -562,6 +563,10 @@ impl crate::PagifyApp {
                 }
                 if ui.checkbox(&mut split_box, "Split view").clicked() {
                     submit = Some("viewsplit");
+                }
+                let mut reverse_box = layout_reversed;
+                if ui.checkbox(&mut reverse_box, "Reverse view").clicked() {
+                    submit = Some("reverseview");
                 }
                 ui.add_space(8.0);
                 ui.label("Background");
