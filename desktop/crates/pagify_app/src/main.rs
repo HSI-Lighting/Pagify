@@ -927,6 +927,10 @@ struct ToolState {
 struct DocTab {
     doc: Option<Doc>,
     markup: Markup,
+    /// **Mark for Redaction's staging**: `None` = not marking; `Some` = the
+    /// areas marked so far, destroyed only when `markredact` is pressed
+    /// again. Nothing is destroyed while this exists.
+    redact_staging: Option<Vec<(usize, pdf_core::document::Rect)>>,
     calibration: Calibration,
     /// A `Tool` armed and part-way through collecting its objects/points —
     /// see [`ArmedTool`]'s own doc.
@@ -1011,6 +1015,7 @@ impl DocTab {
         DocTab {
             doc: None,
             markup: Markup::default(),
+            redact_staging: None,
             calibration: Calibration::default(),
             tool: None,
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, split: false, },
@@ -14671,6 +14676,79 @@ impl PagifyApp {
             }
             Err(e) => self.say_error(format!("tagspanel: {e}")),
         }
+    }
+
+    /// Mark for Redaction, the Protection tab's button: the first press
+    /// starts staging (drags mark areas, nothing destroyed); the next
+    /// destroys everything marked.
+    ///
+    /// **Two presses, said plainly.** The destructive tool is `redact`;
+    /// this is the careful route to the same end — mark what should go,
+    /// look at it, then destroy.
+    fn mark_redact(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        if let Some(staged) = self.tab().redact_staging.clone() {
+            if staged.is_empty() {
+                self.say_info(
+                    "marking for redaction — drag over each area; `markredact` again destroys \
+                     everything marked.",
+                );
+                return;
+            }
+            // Each area goes through `apply_redaction` — the same command
+            // the redact tool runs, so it undoes and it refuses to leave
+            // anything it cannot fully clear.
+            let mut destroyed = 0usize;
+            let mut failures: Vec<String> = Vec::new();
+            for (page, area) in &staged {
+                match self.apply_redaction(*page, *area, false) {
+                    Ok(_) => destroyed += 1,
+                    Err(e) => failures.push(format!("page {}: {e}", page + 1)),
+                }
+            }
+            self.tab_mut().redact_staging = None;
+            if let Some(doc) = &mut self.tab_mut().doc {
+                doc.rendered_is_stale();
+            }
+            self.tab_mut().markup.clear();
+            if failures.is_empty() {
+                self.say_info(format!(
+                    "destroyed {destroyed} marked area(s) — saving will rewrite the whole \
+                     file."
+                ));
+            } else {
+                self.say_error(format!(
+                    "{destroyed} area(s) destroyed; {}",
+                    failures.join("; ")
+                ));
+            }
+            return;
+        }
+        let page = self.tab_mut().view_state.page;
+        self.tab_mut().redact_staging = Some(Vec::new());
+        self.arm_tool(Tool::MarkRedact, page);
+        self.say_info(
+            "marking for redaction: drag over each area to destroy. Nothing is destroyed \
+             until `markredact` is pressed again; Escape leaves marking.",
+        );
+    }
+
+    /// One staged redaction area — `Tool::MarkRedact`'s resolve.
+    fn stage_redaction(&mut self, page: usize, a: AppPoint, b: AppPoint) -> Result<String, String> {
+        let Some(area) = area_between(a, b) else {
+            return Err("markredact: that area has no size.".into());
+        };
+        let Some(staged) = self.tab_mut().redact_staging.as_mut() else {
+            return Err("markredact: marking is not on.".into());
+        };
+        staged.push((page, area));
+        Ok(format!(
+            "marked for redaction ({} area(s) so far) — `markredact` destroys them.",
+            staged.len()
+        ))
     }
 
     /// Bake every page's annotations and form fields into its content — the

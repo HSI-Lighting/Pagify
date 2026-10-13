@@ -200,6 +200,8 @@ pub enum Effect {
     ArmStamp { words: String },
     /// Arm the callout with these words.
     ArmCallout { words: String },
+    /// Start marking for redaction, or destroy what is marked.
+    MarkRedact,
     /// Arm the arrow drawing tool.
     ArmDrawArrow,
     /// Toggle whether new rectangles and circles are drawn filled.
@@ -427,6 +429,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Pencil
         | Verb::Stamp { .. }
         | Verb::Callout { .. }
+        | Verb::MarkRedact
         | Verb::DrawArrow
         | Verb::ToggleFill
         | Verb::Redact
@@ -680,6 +683,7 @@ fn plan_security(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Pencil => vec![Effect::ArmPencil],
         Verb::Stamp { words } => vec![Effect::ArmStamp { words: words.clone() }],
         Verb::Callout { words } => vec![Effect::ArmCallout { words: words.clone() }],
+        Verb::MarkRedact => vec![Effect::MarkRedact],
         Verb::DrawArrow => vec![Effect::ArmDrawArrow],
         Verb::ToggleFill => vec![Effect::ToggleFill],
         Verb::Redact => vec![Effect::ArmRedact],
@@ -1052,6 +1056,7 @@ mod tests {
                 Verb::Callout { words: "see 2".into() },
                 vec![Effect::ArmCallout { words: "see 2".into() }],
             ),
+            (Verb::MarkRedact, vec![Effect::MarkRedact]),
             (Verb::DrawArrow, vec![Effect::ArmDrawArrow]),
             (Verb::ToggleFill, vec![Effect::ToggleFill]),
             (Verb::Redact, vec![Effect::ArmRedact]),

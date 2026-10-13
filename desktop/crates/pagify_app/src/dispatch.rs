@@ -116,7 +116,8 @@ impl crate::PagifyApp {
             | Effect::SetPaperTint(_)
             | Effect::Say(_)
             | Effect::SayError(_)
-            | Effect::CheckUpdate => self.apply_document(effect),
+            | Effect::CheckUpdate
+            | Effect::MarkRedact => self.apply_document(effect),
             Effect::ToggleLayers
             | Effect::RepairLocks
             | Effect::SetOpacity(_)
@@ -269,6 +270,7 @@ impl crate::PagifyApp {
             Effect::Zoom(target) => self.set_zoom(target),
             Effect::RotatePage(degrees) => self.rotate_view(degrees),
             Effect::ReportTextLayer => self.report_text_layer(true),
+            Effect::MarkRedact => self.mark_redact(),
             Effect::Snapshot => self.snapshot_page(),
             Effect::ToggleAutoScroll => self.toggle_autoscroll(),
             Effect::ToggleRuler => self.toggle_ruler(),

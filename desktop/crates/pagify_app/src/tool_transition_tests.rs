@@ -208,6 +208,7 @@ fn every_kind() -> Vec<Tool> {
         Tool::Pencil,
         Tool::Stamp(String::new()),
         Tool::Callout(String::new()),
+        Tool::MarkRedact,
         Tool::SignRectangle,
         Tool::SignLine,
         Tool::Write(String::new()),

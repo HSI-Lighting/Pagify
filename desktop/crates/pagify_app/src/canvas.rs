@@ -997,6 +997,37 @@ impl crate::PagifyApp {
         });
     }
 
+    /// **Staged redactions, drawn where they will land.** `markredact`'s
+    /// whole promise is that you can see what is about to go before it does;
+    /// split out of the page loop to keep that loop's function inside the
+    /// size invariant.
+    fn draw_staged_redactions(&self, ui: &mut egui::Ui, page: usize, view: PageView) {
+        let Some(staged) = self.tab().redact_staging.as_ref() else {
+            return;
+        };
+        for (staged_page, area) in staged {
+            if *staged_page != page {
+                continue;
+            }
+            let min =
+                view.to_screen(AppPoint { x: area.left as f64, y: area.top as f64 });
+            let max =
+                view.to_screen(AppPoint { x: area.right as f64, y: area.bottom as f64 });
+            let mark = egui::Rect::from_two_pos(min, max);
+            ui.painter().rect_filled(
+                mark,
+                egui::CornerRadius::ZERO,
+                egui::Color32::from_rgba_unmultiplied(200, 30, 30, 48),
+            );
+            ui.painter().rect_stroke(
+                mark,
+                egui::CornerRadius::ZERO,
+                egui::Stroke::new(1.5, egui::Color32::from_rgb(200, 30, 30)),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+
     pub(crate) fn draw_page_area(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, command_id: egui::Id) {
         let mut zoom = self.resolved_zoom();
         let (strip_height, strip_width, page_count) = {
@@ -1168,6 +1199,7 @@ impl crate::PagifyApp {
                                 theme::selected(),
                             );
                         }
+                        self.draw_staged_redactions(ui, page, view);
                         // **A bookmarked page said so nowhere on the page
                         // itself.** Reported from use: adding one gave no
                         // lasting sign that it had worked short of reopening

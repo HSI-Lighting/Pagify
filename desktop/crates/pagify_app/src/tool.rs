@@ -80,6 +80,10 @@ pub(crate) enum Tool {
     Pencil,
     /// Words waiting for a point to be stamped at, in a red ring.
     Stamp(String),
+    /// Two corners of an area to *mark* for redaction — the careful route
+    /// to `Redact`'s destruction: nothing goes until `markredact` is pressed
+    /// again.
+    MarkRedact,
     /// Words waiting for the point they describe, in a box with a leader.
     Callout(String),
     /// Two corners of a box to draw while filling a form in.
@@ -141,6 +145,7 @@ impl Tool {
             | Tool::Redact
             | Tool::Whiteout
             | Tool::AreaHighlight
+            | Tool::MarkRedact
             | Tool::SignRectangle
             | Tool::SignLine
             | Tool::Lock
@@ -211,6 +216,11 @@ impl Tool {
             Tool::Callout(words) => {
                 format!("callout: click the point the box describes \"{}\"", crate::short(words))
             }
+            Tool::MarkRedact => match points_done {
+                0 => "mark redaction: first corner — nothing is destroyed until `markredact` again"
+                    .into(),
+                _ => "mark redaction: opposite corner".into(),
+            },
             // Says which of the two rectangles/lines this is, because the
             // other one is a drawing that can be picked up again and this
             // one is not.
@@ -337,6 +347,9 @@ impl Tool {
             Tool::Pencil => Some(ToolId::Pencil),
             Tool::Stamp(_) => Some(ToolId::Stamp),
             Tool::Callout(_) => Some(ToolId::Callout),
+            // No ribbon button carries it (the Protection tab's button is
+            // the destructive `redact`); the word is command-first.
+            Tool::MarkRedact => None,
             Tool::SignRectangle => Some(ToolId::SignRectangle),
             Tool::SignLine => Some(ToolId::SignLine),
             Tool::Write(_) => Some(ToolId::AddText),
@@ -560,6 +573,10 @@ impl Tool {
             Tool::Callout(words) => match points.first().copied() {
                 Some(at) => app.place_callout_at(page, at, words.as_str()),
                 None => Err("callout: nowhere was clicked.".into()),
+            },
+            Tool::MarkRedact => match (points.first(), points.get(1)) {
+                (Some(a), Some(b)) => app.stage_redaction(page, *a, *b),
+                _ => Err("markredact: two corners are needed.".into()),
             },
             Tool::SignRectangle => match (points.first(), points.get(1)) {
                 (Some(a), Some(b)) => app.stamp_box(page, *a, *b),
@@ -789,6 +806,7 @@ impl Tool {
             Tool::PlaceText
             | Tool::Whiteout
             | Tool::AreaHighlight
+            | Tool::MarkRedact
             | Tool::SignRectangle
             | Tool::Draw(DrawKind::Rectangle)
             | Tool::Lock

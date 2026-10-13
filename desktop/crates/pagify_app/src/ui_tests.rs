@@ -6002,3 +6002,47 @@ fn stamp_and_callout_land_ink_and_words() {
     let text = h.state_mut().characters(0).map(|c| c.text()).unwrap_or_default();
     assert!(text.contains("see figure 2"), "the callout words did not land: {text:?}");
 }
+
+/// **Mark for Redaction, through the tool machine.** The first press starts
+/// marking and arms the tool (nothing destroyed); the resolved drag stages
+/// an area; the second press destroys it through the same command the
+/// redact tool uses, and the page's words shrink.
+#[test]
+fn markredact_marks_then_destroys_on_the_second_press() {
+    use crate::tool::ArmedTool;
+
+    let mut h = harness("two-column.pdf");
+    let before = h.state_mut().characters(0).map(|c| c.text().len()).unwrap_or(0);
+    assert!(before > 0, "the fixture has words");
+
+    h.state_mut().submit("markredact");
+    h.run_steps(1);
+    assert!(h.state().tab().redact_staging.is_some(), "marking did not start");
+    let armed = h.state().tab().tool.as_ref().expect("the tool was not armed");
+    assert!(armed.kind.id().is_none(), "marking has no ribbon button to light");
+
+    h.state_mut().tab_mut().tool = Some(ArmedTool {
+        kind: crate::tool::Tool::MarkRedact,
+        page: 0,
+        objects: Vec::new(),
+        points: vec![AppPoint { x: 20.0, y: 20.0 }, AppPoint { x: 560.0, y: 760.0 }],
+    });
+    h.state_mut().resolve_tool();
+    h.run_steps(1);
+    assert_eq!(
+        h.state().tab().redact_staging.as_ref().map(|s| s.len()),
+        Some(1),
+        "the drag did not stage an area"
+    );
+    let after_mark = h.state_mut().characters(0).map(|c| c.text().len()).unwrap_or(0);
+    assert_eq!(after_mark, before, "marking must not destroy anything");
+
+    h.state_mut().submit("markredact");
+    h.run_steps(1);
+    assert!(h.state().tab().redact_staging.is_none(), "staging did not clear");
+    let after_apply = h.state_mut().characters(0).map(|c| c.text().len()).unwrap_or(0);
+    assert!(
+        after_apply < before,
+        "the marked area was not destroyed: {before} -> {after_apply}"
+    );
+}

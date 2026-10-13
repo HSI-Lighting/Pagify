@@ -498,6 +498,10 @@ pub enum Verb {
     /// Words in a box with a leader to the point they describe —
     /// `callout <words>`.
     Callout { words: String },
+    /// Start marking areas for redaction, or destroy what is marked — the
+    /// Protection tab's Mark for Redaction. Two presses: nothing goes until
+    /// the second.
+    MarkRedact,
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -989,7 +993,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("formrecognise", "the forms phase", "the Run Form Field Recognition tool"),
     ("fromscanner", "the scanning phase", "the From Scanner tool"),
     ("javascript", "the forms phase", "the JavaScript tool"),
-    ("markredact", "the protection phase", "the Mark for Redaction tool"),
     ("media", "the editing phase", "the Audio & Video tool"),
     ("onlineform", "the signing phase", "the Create Online Form tool"),
     ("pagetemplates", "the forms phase", "the Page Templates tool"),
@@ -1130,7 +1133,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview", "stamp", "callout",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview", "stamp", "callout", "markredact",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1787,6 +1790,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "viewsplit" => Ok(Verb::ViewSplit),
         "readingoptions" => Ok(Verb::ReadingOptions),
         "reverseview" => Ok(Verb::ReverseView),
+        "markredact" => Ok(Verb::MarkRedact),
         "stamp" => {
             let words = tail.trim();
             if words.is_empty() {
@@ -2927,5 +2931,19 @@ mod stamp_callout_tests {
                 "`{word}` is still in the planned table"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod mark_redact_tests {
+    use super::*;
+
+    #[test]
+    fn markredact_parses_and_is_not_planned() {
+        assert_eq!(parse("markredact"), Some(Ok(Verb::MarkRedact)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "markredact"),
+            "`markredact` is still in the planned table"
+        );
     }
 }
