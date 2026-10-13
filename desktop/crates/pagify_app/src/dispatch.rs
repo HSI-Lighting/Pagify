@@ -189,7 +189,8 @@ impl crate::PagifyApp {
             | Effect::FlattenDocument
             | Effect::AttachFile { .. }
             | Effect::AttachComment { .. }
-            | Effect::ToggleTagsPanel => self.apply_files(effect),
+            | Effect::ToggleTagsPanel
+            | Effect::ReportAltText(_) => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -713,6 +714,7 @@ impl crate::PagifyApp {
                 None => self.attach_comment_dialog(),
             },
             Effect::ToggleTagsPanel => self.toggle_tags_panel(),
+            Effect::ReportAltText(pages) => self.report_alt_text(&pages),
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {
                 Some(path) => self.write_access_report(&path),

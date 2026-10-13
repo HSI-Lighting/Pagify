@@ -14415,6 +14415,56 @@ impl PagifyApp {
         }
     }
 
+    /// The alternate-text reading — the Accessibility tab's Set Alternate
+    /// Text, which in this build reads rather than edits.
+    fn report_alt_text(&mut self, spec: &str) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let count = self.tab().doc.as_ref().map(|d| d.page_count).unwrap_or(0);
+        let pages = if spec.trim().is_empty() {
+            (0..count).collect::<Vec<_>>()
+        } else {
+            match pagify_shell::organize::parse_range(spec, count) {
+                Ok(pages) => pages,
+                Err(why) => {
+                    self.say_error(why);
+                    return;
+                }
+            }
+        };
+        match session.alt_text_report(&pages) {
+            Ok((with_alt, missing)) => {
+                for (page, kind) in missing.iter().take(12) {
+                    self.say_error(format!(
+                        "page {}: a `{kind}` has no alternate text — a screen reader has \
+                         nothing to say for it.",
+                        page + 1
+                    ));
+                }
+                if missing.len() > 12 {
+                    self.say_error(format!("…and {} more.", missing.len() - 12));
+                }
+                if with_alt == 0 && missing.is_empty() {
+                    self.say_info(
+                        "no figures on the pages read — nothing carries alternate text and \
+                         nothing is missing it. Text elements are read directly; figures are \
+                         what needs the words.",
+                    );
+                } else {
+                    self.say_info(format!(
+                        "{with_alt} figure(s) carry alternate text; {} do not. Set \
+                         Alternate Text edits them in the full product; this build reads — \
+                         `tagspanel` lists the tree.",
+                        missing.len()
+                    ));
+                }
+            }
+            Err(e) => self.say_error(format!("alttext: {e}")),
+        }
+    }
+
     /// Open or close the Tags panel — the Accessibility tab's Tags Panel.
     ///
     /// The page in view's structure tree, flattened with indents; read once
@@ -15962,9 +16012,11 @@ fn decode_picture(path: &std::path::Path) -> Result<(Vec<u8>, u32, u32), String>
 /// one. The indent is the row's own depth.
 fn flatten_tags(nodes: &[pdf_core::document::TagNode], depth: usize, out: &mut Vec<(usize, String)>) {
     for node in nodes {
-        let row = match &node.title {
-            Some(title) if !title.trim().is_empty() => format!("{} — {}", node.kind, title),
-            _ => node.kind.clone(),
+        let note = node.title.as_deref().or(node.alt.as_deref()).unwrap_or("");
+        let row = if note.trim().is_empty() {
+            node.kind.clone()
+        } else {
+            format!("{} — {}", node.kind, note)
         };
         out.push((depth, row));
         flatten_tags(&node.children, depth + 1, out);

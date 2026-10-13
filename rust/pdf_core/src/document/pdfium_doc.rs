@@ -56,11 +56,9 @@ fn read_tag_node(
     .unwrap_or_else(|| "?".into());
     let title = read_wide_void(|buf, len| unsafe {
         bindings.FPDF_StructElement_GetTitle(element, buf, len)
-    })
-    .or_else(|| {
-        read_wide_void(|buf, len| unsafe {
-            bindings.FPDF_StructElement_GetAltText(element, buf, len)
-        })
+    });
+    let alt = read_wide_void(|buf, len| unsafe {
+        bindings.FPDF_StructElement_GetAltText(element, buf, len)
     });
     let mut children = Vec::new();
     let count = unsafe { bindings.FPDF_StructElement_CountChildren(element) };
@@ -70,7 +68,7 @@ fn read_tag_node(
             children.push(read_tag_node(bindings, child));
         }
     }
-    TagNode { kind, title, children }
+    TagNode { kind, title, alt, children }
 }
 
 // The `FPDF_FORMFIELD_*` values from PDFium's C API, which its Rust

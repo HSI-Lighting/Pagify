@@ -269,6 +269,8 @@ pub enum Effect {
     AttachComment { source: Option<std::path::PathBuf> },
     /// Open or close the Tags panel.
     ToggleTagsPanel,
+    /// Report the alternate-text reading over these pages — empty means all.
+    ReportAltText(String),
     /// Write every field as CSV; `None` asks for the file first.
     ExportFormSheet { dest: Option<std::path::PathBuf> },
     /// Set a field's tooltip.
@@ -448,6 +450,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Attach { .. }
         | Verb::AttachComment { .. }
         | Verb::TagSpanel
+        | Verb::AltText { .. }
         | Verb::ShapeWords
         | Verb::KeepTool
         | Verb::Reflow
@@ -721,6 +724,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Attach { source } => vec![Effect::AttachFile { source: source.clone() }],
         Verb::AttachComment { source } => vec![Effect::AttachComment { source: source.clone() }],
         Verb::TagSpanel => vec![Effect::ToggleTagsPanel],
+        Verb::AltText { pages } => vec![Effect::ReportAltText(pages.clone())],
         Verb::ShapeWords => vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())],
         Verb::KeepTool => vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())],
         // Text and find.
@@ -1099,6 +1103,10 @@ mod tests {
                 vec![Effect::AttachComment { source: None }],
             ),
             (Verb::TagSpanel, vec![Effect::ToggleTagsPanel]),
+            (
+                Verb::AltText { pages: String::new() },
+                vec![Effect::ReportAltText(String::new())],
+            ),
             (Verb::ShapeWords, vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())]),
             (Verb::KeepTool, vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())]),
             (Verb::Reflow, vec![Effect::RunReflow]),

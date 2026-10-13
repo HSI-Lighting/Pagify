@@ -26,6 +26,12 @@ EMC
 /P <</MCID 1>> BDC
 BT /F1 11 Tf 1 0 0 1 72 670 Tm (A tagged paragraph with some words.) Tj ET
 EMC
+/Figure <</MCID 2>> BDC
+0.2 0.3 0.8 rg 72 600 100 40 re f
+EMC
+/Figure <</MCID 3>> BDC
+0.8 0.3 0.2 rg 200 600 100 40 re f
+EMC
 Q
 """
 objs[5] = b"<< /Length %d >>\nstream\n" % len(content) + content + b"endstream"
@@ -34,11 +40,17 @@ objs[5] = b"<< /Length %d >>\nstream\n" % len(content) + content + b"endstream"
 # the page's own sequence (the page carries /StructParents 0).
 objs[20] = (b"<< /Type /StructTreeRoot /K [21 0 R] /ParentTree 23 0 R "
             b"/ParentTreeNextKey 1 >>")
-objs[21] = b"<< /Type /StructElem /S /Document /P 20 0 R /K [22 0 R 24 0 R] >>"
+objs[21] = (b"<< /Type /StructElem /S /Document /P 20 0 R "
+            b"/K [22 0 R 24 0 R 25 0 R 26 0 R] >>")
 objs[22] = b"<< /Type /StructElem /S /H1 /P 21 0 R /K 0 >>"
 objs[24] = (b"<< /Type /StructElem /S /P /P 21 0 R /K 1 "
             b"/Alt (the paragraph's alternate text) >>")
-objs[23] = b"<< /Nums [0 [22 0 R 24 0 R]] >>"
+# One figure with alternate text, one without — the pair the alt-text
+# reading is tested against.
+objs[25] = b"<< /Type /StructElem /S /Figure /P 21 0 R /K 2 >>"
+objs[26] = (b"<< /Type /StructElem /S /Figure /P 21 0 R /K 3 "
+            b"/Alt (a blue bar, described) >>")
+objs[23] = b"<< /Nums [0 [22 0 R 24 0 R 25 0 R 26 0 R]] >>"
 
 out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
 offsets = {}

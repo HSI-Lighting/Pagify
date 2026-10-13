@@ -469,6 +469,10 @@ pub enum Verb {
     /// Open the Tags panel — the Accessibility tab's Tags Panel. It lists
     /// the page's structure tree; read-only in this build.
     TagSpanel,
+    /// The alternate-text reading over pages named, or the whole document —
+    /// the Accessibility tab's Set Alternate Text, which in this build
+    /// reads rather than edits.
+    AltText { pages: String },
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -935,7 +939,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     // because two hand-maintained lists of a hundred and fifty names each will
     // not stay in step on their own.
     ("add3d", "the editing phase", "the Add 3D tool"),
-    ("alttext", "the accessibility phase", "the Set Alternate Text tool"),
     ("assistant", "the viewing phase", "the Assistant tool"),
     ("autotag", "the accessibility phase", "the Autotag Document tool"),
     ("calcorder", "the forms phase", "the Calculation Order tool"),
@@ -1108,7 +1111,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1760,6 +1763,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
         "tagspanel" => Ok(Verb::TagSpanel),
+        "alttext" => Ok(Verb::AltText { pages: tail.trim().to_string() }),
         "flatten" => Ok(Verb::Flatten),
         "attach" => Ok(Verb::Attach {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
@@ -2776,6 +2780,27 @@ mod tags_panel_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "tagspanel"),
             "`tagspanel` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod alt_text_tests {
+    use super::*;
+
+    #[test]
+    fn alttext_parses_and_is_not_planned() {
+        assert_eq!(
+            parse("alttext"),
+            Some(Ok(Verb::AltText { pages: String::new() }))
+        );
+        assert_eq!(
+            parse("alttext 1-3"),
+            Some(Ok(Verb::AltText { pages: "1-3".into() }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "alttext"),
+            "`alttext` is still in the planned table"
         );
     }
 }

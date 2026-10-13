@@ -2574,10 +2574,14 @@ pub struct DecodedImage {
 /// One node of a page's structure tree, as the Tags panel shows it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TagNode {
-    /// The tag's type — `Document`, `H1`, `P`.
+    /// The tag's type — `Document`, `H1`, `P`, `Figure`.
     pub kind: String,
-    /// The element's title, or its alternate text where it has no title.
+    /// The element's own title (`/Title`), where it has one.
     pub title: Option<String>,
+    /// The element's alternate text (`/Alt`) — what a screen reader says
+    /// for a figure. Kept apart from the title so the alt-text reading can
+    /// ask about it directly.
+    pub alt: Option<String>,
     pub children: Vec<TagNode>,
 }
 

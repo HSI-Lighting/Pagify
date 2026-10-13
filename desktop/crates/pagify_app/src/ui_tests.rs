@@ -5835,3 +5835,27 @@ fn tagspanel_lists_the_structure_tree_read_only() {
     h.run_steps(1);
     assert!(h.state().tab().panels.tags.is_none(), "the panel did not close");
 }
+
+/// The Accessibility tab's Set Alternate Text, reading in this build: the
+/// tagged fixture's described figure counts, its bare one is named, and the
+/// answer points at the Tags panel.
+#[test]
+fn alttext_reports_the_bare_figure() {
+    let mut h = harness("tagged.pdf");
+    h.state_mut().submit("alttext");
+    h.run_steps(1);
+
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("`Figure` has no alternate text")),
+        "the bare figure was not named: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("1 figure(s) carry alternate text; 1 do not")),
+        "the counts are missing: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("tagspanel")),
+        "the answer does not point at the tree: {said:?}"
+    );
+}
