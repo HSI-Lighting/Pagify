@@ -6110,6 +6110,18 @@ fn contents_opens_the_files_table_of_contents_in_the_rail() {
         tree.iter().any(|entry| !entry.children.is_empty()),
         "the panel's tree must have nesting to show: {tree:?}"
     );
+    // It starts all collapsed, with the page's chapter recorded but not
+    // opened — scrolling into a *different* chapter is what opens one.
+    assert!(
+        h.state().ui_state.outline_open.is_empty(),
+        "the tree must start collapsed: {:?}",
+        h.state().ui_state.outline_open
+    );
+    assert_eq!(
+        h.state().ui_state.outline_active.as_deref(),
+        Some("1.0"),
+        "the deepest entry on the page in view is the recorded chapter"
+    );
 
     h.state_mut().submit("contents");
     h.run_steps(2);

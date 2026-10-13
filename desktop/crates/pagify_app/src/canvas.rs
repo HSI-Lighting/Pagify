@@ -15,6 +15,51 @@ use pagify_shell::markup::HIT_TOLERANCE_PT;
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::reader::{prefetch_targets, STRIP_PAD_PX};
 
+/// The chapter the page belongs to: the outline entry with the highest
+/// page not past `page`, deepest winning a tie (a subsection that starts on
+/// its parent's page is the more precise match), with the chain of ancestor
+/// paths a call to `open` would make visible. `None` for an empty outline.
+pub(crate) fn active_outline_path(
+    tree: &[pdf_core::document::OutlineEntry],
+    page: usize,
+) -> Option<(String, Vec<String>)> {
+    fn walk(
+        nodes: &[pdf_core::document::OutlineEntry],
+        prefix: &str,
+        ancestors: &mut Vec<String>,
+        page: usize,
+        best: &mut Option<(String, Vec<String>, usize, usize)>,
+    ) {
+        for (index, node) in nodes.iter().enumerate() {
+            let path =
+                if prefix.is_empty() { format!("{index}") } else { format!("{prefix}.{index}") };
+            if let Some(node_page) = node.page {
+                if node_page <= page {
+                    // Higher page wins; the same page means the deeper —
+                    // or, at the same depth, the later — entry is the more
+                    // precise chapter.
+                    let better = best.as_ref().is_none_or(|(_, _, best_page, best_depth)| {
+                        node_page > *best_page
+                            || (node_page == *best_page && ancestors.len() + 1 >= *best_depth)
+                    });
+                    if better {
+                        *best =
+                            Some((path.clone(), ancestors.clone(), node_page, ancestors.len() + 1));
+                    }
+                }
+            }
+            ancestors.push(path.clone());
+            walk(&node.children, &path, ancestors, page, best);
+            ancestors.pop();
+        }
+    }
+
+    let mut best = None;
+    let mut ancestors = Vec::new();
+    walk(tree, "", &mut ancestors, page, &mut best);
+    best.map(|(path, ancestors, _, _)| (path, ancestors))
+}
+
 /// The Contents panel's own left-panel id — its width is remembered under
 /// it, the same rule the thumbnail rail and the Organize grid live by.
 const CONTENTS_PANEL: &str = "contents_panel";
@@ -870,46 +915,87 @@ impl crate::PagifyApp {
                     return;
                 }
                 let current = self.tab().view_state.page;
+
+                // **The chapter follows the pages.** When the page in view
+                // moves into a different chapter, that chapter's own chain
+                // is opened so its lit row can be seen; manual collapses
+                // inside an unchanged chapter stay collapsed.
+                let active = active_outline_path(&tree, current);
+                let active_path = active.as_ref().map(|(path, _)| path.clone());
+                if active_path != self.ui_state.outline_active {
+                    if let Some((_, chain)) = &active {
+                        for ancestor in chain {
+                            self.ui_state.outline_open.insert(ancestor.clone());
+                        }
+                    }
+                    self.ui_state.outline_active = active_path;
+                }
+                let active = self.ui_state.outline_active.clone();
+
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for (index, entry) in tree.iter().enumerate() {
                         let path = format!("{index}");
-                        self.draw_outline_row(ui, entry, &path, current, &mut jump_to);
+                        self.draw_outline_row(
+                            ui,
+                            entry,
+                            &path,
+                            current,
+                            active.as_deref(),
+                            &mut jump_to,
+                        );
                     }
                 });
             });
         jump_to
     }
 
-    /// One outline row: a disclosure arrow where there are children, then
-    /// the title — clicking a title goes to its page; a grouping heading
-    /// (no destination of its own) is dim and not clickable. Children are
-    /// drawn indented when the row is open; collapsed rows are remembered
-    /// in `ui_state.outline_closed` by the node's path.
+    /// One outline row: a painted disclosure triangle where there are
+    /// children (painted, not a glyph — the ▶/▼ characters rendered as
+    /// squares in the app's UI font, reported from use), then the title —
+    /// clicking a title goes to its page; a grouping heading (no
+    /// destination of its own) is dim and not clickable. Children are drawn
+    /// indented when the row is open (everything starts collapsed); the row
+    /// of the chapter the page in view belongs to is lit.
     fn draw_outline_row(
         &mut self,
         ui: &mut egui::Ui,
         entry: &pdf_core::document::OutlineEntry,
         path: &str,
         current: usize,
+        active: Option<&str>,
         jump_to: &mut Option<usize>,
     ) {
         let has_children = !entry.children.is_empty();
-        let open = has_children && !self.ui_state.outline_closed.contains(path);
+        let open = has_children && self.ui_state.outline_open.contains(path);
+        let is_active = active == Some(path);
         ui.horizontal(|ui| {
             if has_children {
-                let arrow = if open { "▾" } else { "▸" };
-                if ui
-                    .add(
-                        egui::Label::new(arrow)
-                            .selectable(false)
-                            .sense(egui::Sense::click()),
-                    )
-                    .clicked()
-                {
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::click());
+                let c = rect.center();
+                let points = if open {
+                    vec![
+                        egui::pos2(c.x - 4.0, c.y - 2.0),
+                        egui::pos2(c.x + 4.0, c.y - 2.0),
+                        egui::pos2(c.x, c.y + 3.0),
+                    ]
+                } else {
+                    vec![
+                        egui::pos2(c.x - 2.0, c.y - 4.0),
+                        egui::pos2(c.x + 3.0, c.y),
+                        egui::pos2(c.x - 2.0, c.y + 4.0),
+                    ]
+                };
+                ui.painter().add(egui::Shape::convex_polygon(
+                    points,
+                    theme::ink_dim(),
+                    egui::Stroke::NONE,
+                ));
+                if response.clicked() {
                     if open {
-                        self.ui_state.outline_closed.insert(path.to_string());
+                        self.ui_state.outline_open.remove(path);
                     } else {
-                        self.ui_state.outline_closed.remove(path);
+                        self.ui_state.outline_open.insert(path.to_string());
                     }
                 }
             } else {
@@ -917,7 +1003,10 @@ impl crate::PagifyApp {
             }
             match entry.page {
                 Some(page) => {
-                    if ui.selectable_label(page == current, &entry.title).clicked() {
+                    if ui
+                        .selectable_label(is_active || page == current, &entry.title)
+                        .clicked()
+                    {
                         *jump_to = Some(page);
                     }
                 }
@@ -930,7 +1019,7 @@ impl crate::PagifyApp {
             for (index, child) in entry.children.iter().enumerate() {
                 let child_path = format!("{path}.{index}");
                 ui.indent(("outline", child_path.as_str()), |ui| {
-                    self.draw_outline_row(ui, child, &child_path, current, jump_to);
+                    self.draw_outline_row(ui, child, &child_path, current, active, jump_to);
                 });
             }
         }
@@ -2754,5 +2843,46 @@ mod ruler_tests {
 
         let marks = ruler_marks(72.0);
         assert_eq!(marks.last().map(|(pt, _)| *pt), Some(70.0));
+    }
+}
+
+#[cfg(test)]
+mod outline_active_tests {
+    use super::active_outline_path;
+    use pdf_core::document::OutlineEntry;
+
+    fn entry(title: &str, page: Option<usize>, children: Vec<OutlineEntry>) -> OutlineEntry {
+        OutlineEntry { title: title.into(), page, children }
+    }
+
+    /// The chapter is the highest page not past the reader, deepest wins a
+    /// tie, and the ancestor chain is what a call to open needs.
+    #[test]
+    fn the_active_chapter_is_the_last_one_the_page_has_reached() {
+        let tree = vec![
+            entry(
+                "one",
+                Some(0),
+                vec![entry("one-a", Some(2), Vec::new()), entry("one-b", Some(5), Vec::new())],
+            ),
+            entry("two", Some(7), vec![entry("two-a", Some(7), Vec::new())]),
+        ];
+
+        assert_eq!(
+            active_outline_path(&tree, 3),
+            Some(("0.0".into(), vec!["0".into()])),
+            "page 3 is still in one-a"
+        );
+        assert_eq!(
+            active_outline_path(&tree, 7),
+            Some(("1.0".into(), vec!["1".into()])),
+            "the deeper entry wins the tie at page 7"
+        );
+        assert_eq!(
+            active_outline_path(&tree, 0),
+            Some(("0".into(), Vec::new())),
+            "a chapter itself can be the match"
+        );
+        assert_eq!(active_outline_path(&[], 0), None);
     }
 }

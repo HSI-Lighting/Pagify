@@ -1219,9 +1219,15 @@ struct UiState {
     /// The rail's own slot showing the file's table of contents instead of
     /// thumbnails — the `contents` command and the rail's ☰ button.
     show_contents: bool,
-    /// Outline entries the person has collapsed, keyed by the node's path
-    /// (`0.1`). New entries — `autobookmarks`' own — arrive open.
-    outline_closed: std::collections::HashSet<String>,
+    /// Outline entries the person has opened, keyed by the node's path
+    /// (`0.1`). **Everything starts collapsed**; scrolling to another
+    /// chapter opens that chapter's own chain (see `outline_active`).
+    outline_open: std::collections::HashSet<String>,
+    /// The path of the chapter the page in view belongs to, as last
+    /// computed — when it changes, that chapter's ancestors are opened so
+    /// the highlight can be seen, and manual collapses inside an unchanged
+    /// chapter stay collapsed.
+    outline_active: Option<String>,
     /// Whether the Organize grid is showing in place of the plain thumbnail
     /// rail — workspace-wide, the same convention `show_thumbs` itself
     /// already uses, not per document: the two are mutually exclusive views
@@ -4342,7 +4348,7 @@ impl PagifyApp {
             }, recorder: Recorder::default(), replay_depth: 0, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
             render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
-            ui_state: UiState { show_thumbs: true, show_contents: false, outline_closed: std::collections::HashSet::new(), organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
+            ui_state: UiState { show_thumbs: true, show_contents: false, outline_open: std::collections::HashSet::new(), outline_active: None, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             pending_dialog: None,
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -8187,6 +8193,18 @@ impl PagifyApp {
         if on {
             self.ui_state.organize_open = false;
             self.ui_state.show_thumbs = true;
+            // Record which chapter the page in view belongs to *without*
+            // opening it: the panel starts all collapsed, and scrolling
+            // into a different chapter is what opens one.
+            let page = self.tab().view_state.page;
+            let tree = self
+                .tab()
+                .doc
+                .as_ref()
+                .and_then(|doc| doc.session.outline().ok())
+                .unwrap_or_default();
+            self.ui_state.outline_active =
+                crate::canvas::active_outline_path(&tree, page).map(|(path, _)| path);
         }
         self.say_info(if on {
             "contents: this file's own table of contents, on the left — click an entry to go \
