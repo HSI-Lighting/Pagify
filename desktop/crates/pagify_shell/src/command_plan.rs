@@ -273,6 +273,8 @@ pub enum Effect {
     ReportAltText(String),
     /// Report each page's reading order — empty means all pages.
     ReportReadingOrder(String),
+    /// Open or close the split view's second pane.
+    ToggleSplitView,
     /// Write every field as CSV; `None` asks for the file first.
     ExportFormSheet { dest: Option<std::path::PathBuf> },
     /// Set a field's tooltip.
@@ -454,6 +456,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::TagSpanel
         | Verb::AltText { .. }
         | Verb::ReadingOrder { .. }
+        | Verb::ViewSplit
         | Verb::ShapeWords
         | Verb::KeepTool
         | Verb::Reflow
@@ -729,6 +732,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::TagSpanel => vec![Effect::ToggleTagsPanel],
         Verb::AltText { pages } => vec![Effect::ReportAltText(pages.clone())],
         Verb::ReadingOrder { pages } => vec![Effect::ReportReadingOrder(pages.clone())],
+        Verb::ViewSplit => vec![Effect::ToggleSplitView],
         Verb::ShapeWords => vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())],
         Verb::KeepTool => vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())],
         // Text and find.
@@ -1115,6 +1119,7 @@ mod tests {
                 Verb::ReadingOrder { pages: String::new() },
                 vec![Effect::ReportReadingOrder(String::new())],
             ),
+            (Verb::ViewSplit, vec![Effect::ToggleSplitView]),
             (Verb::ShapeWords, vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())]),
             (Verb::KeepTool, vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())]),
             (Verb::Reflow, vec![Effect::RunReflow]),

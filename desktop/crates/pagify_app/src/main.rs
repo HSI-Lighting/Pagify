@@ -814,6 +814,9 @@ struct ViewState {
     /// The colour behind the pages — the View tab's Change Color. Only the
     /// choice; the palette is `paper_tint_color`.
     paper_tint: pagify_shell::verbs::PaperTint,
+    /// The View tab's Split: a second, read-only pane over the same strip,
+    /// with its own scroll.
+    split: bool,
 }
 
 /// Passcode and redaction asks on this tab — what the app is
@@ -1010,7 +1013,7 @@ impl DocTab {
             markup: Markup::default(),
             calibration: Calibration::default(),
             tool: None,
-            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, },
+            view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, split: false, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
             panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, tags: None, },
@@ -8491,6 +8494,19 @@ impl PagifyApp {
     fn toggle_view_settings(&mut self) {
         let open = !self.tab().panels.view_settings;
         self.tab_mut().panels.view_settings = open;
+    }
+
+    /// Toggle the split view — the View tab's Split. The pane itself is the
+    /// canvas's (`draw_split_pane`); this is only the switch.
+    fn toggle_split_view(&mut self) {
+        let on = !self.tab().view_state.split;
+        self.tab_mut().view_state.split = on;
+        self.say_info(if on {
+            "split view: on — a second pane on the right, the same pages with their own \
+             scroll. It is for reading: picks and marks stay in the main view.              `viewsplit` again closes it."
+        } else {
+            "split view: off."
+        });
     }
 
     /// Set the colour behind the pages — the View tab's Change Color. The

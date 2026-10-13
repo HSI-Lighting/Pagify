@@ -15,6 +15,10 @@ use pagify_shell::markup::HIT_TOLERANCE_PT;
 use pagify_shell::page_space::AppPoint;
 use pagify_shell::reader::{prefetch_targets, STRIP_PAD_PX};
 
+/// How much of the page area the main view keeps when the split is on —
+/// the second pane gets the rest.
+const SPLIT_FRACTION: f32 = 0.6;
+
 /// One frame's worth of `autoscroll`, in content points — about 360pt a
 /// second at 60Hz, a comfortable reading pace. Not a speed setting: the
 /// toggle is either on or off, and this is what on means.
@@ -894,7 +898,106 @@ impl crate::PagifyApp {
         self.finish_thumbnail_drag(&cell_rects, pointer_pos, released);
     }
 
+    /// The page area, whole or split — the View tab's Split.
+    ///
+    /// The split is two views of one strip: the main view on the left, and a
+    /// second, read-only pane on the right with its own scroll. Read-only on
+    /// purpose — a second set of eyes on the document, not a second place to
+    /// edit it; picks, editors and overlays stay in the main view.
     pub(crate) fn draw_pages(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, command_id: egui::Id) {
+        if !self.tab().view_state.split {
+            self.draw_page_area(ui, ctx, command_id);
+            return;
+        }
+        let whole = ui.available_rect_before_wrap();
+        let gap = 6.0;
+        let split_x = whole.left() + whole.width() * SPLIT_FRACTION;
+        let left = egui::Rect::from_min_max(
+            whole.min,
+            egui::pos2((split_x - gap * 0.5).max(whole.left()), whole.max.y),
+        );
+        let right = egui::Rect::from_min_max(
+            egui::pos2((split_x + gap * 0.5).min(whole.right()), whole.min.y),
+            whole.max,
+        );
+        {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(left));
+            self.draw_page_area(&mut child, ctx, command_id);
+        }
+        {
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(right));
+            self.draw_split_pane(ctx, &mut child);
+        }
+    }
+
+    /// The split view's second pane: the same strip, its own scroll, pages
+    /// drawn read-only. Renders it can see are asked for the same way the
+    /// main view's are — `texture_for` requests a raster when one is missing
+    /// — so scrolling it fills in rather than showing placeholders for ever.
+    fn draw_split_pane(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let frame = egui::Frame::new()
+            .fill(theme::raised())
+            .stroke(egui::Stroke::new(1.0, theme::line()))
+            .inner_margin(egui::Margin::same(4));
+        frame.show(ui, |ui| {
+            let (count, strip_w, strip_h, doc_id) = {
+                let Some(doc) = self.tab().doc.as_ref() else { return };
+                (doc.page_count, doc.strip.width_pt(), doc.strip.height_pt(), doc.id)
+            };
+            let zoom = self.resolved_zoom() * Self::DISPLAY_DPI_SCALE;
+            let scroll_id = egui::Id::new(("split-pane", doc_id));
+            egui::ScrollArea::both()
+                .id_salt(scroll_id)
+                .auto_shrink([false; 2])
+                .show(ui, |ui| {
+                    ui.set_min_size(egui::vec2(strip_w * zoom + 24.0, strip_h * zoom + 24.0));
+                    let clip = ui.clip_rect();
+                    let device_scale = raster_scale(zoom * ctx.pixels_per_point());
+                    for page in 0..count {
+                        let geometry = self.tab().doc.as_ref().and_then(|doc| {
+                            let (w, h) = doc.strip.size_of(page)?;
+                            let left = doc.strip.left_of(page).unwrap_or((strip_w - w) / 2.0);
+                            let top = doc.strip.top_of(page).unwrap_or(0.0);
+                            Some((w, h, left, top))
+                        });
+                        let Some((w, h, left, top)) = geometry else { continue };
+                        let origin = egui::pos2(12.0 + left * zoom, 12.0 + top * zoom);
+                        let rect = egui::Rect::from_min_size(origin, egui::vec2(w * zoom, h * zoom));
+                        if !clip.intersects(rect) {
+                            continue;
+                        }
+                        match self.texture_for(ctx, page, device_scale) {
+                            Some(texture) => {
+                                ui.painter().image(
+                                    texture.id(),
+                                    rect,
+                                    egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, 1.0),
+                                    ),
+                                    egui::Color32::WHITE,
+                                );
+                            }
+                            None => {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    egui::CornerRadius::ZERO,
+                                    theme::paper(),
+                                );
+                                ui.painter().rect_stroke(
+                                    rect,
+                                    egui::CornerRadius::ZERO,
+                                    egui::Stroke::new(1.0, theme::line()),
+                                    egui::StrokeKind::Inside,
+                                );
+                            }
+                        }
+                    }
+                });
+        });
+    }
+
+    pub(crate) fn draw_page_area(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, command_id: egui::Id) {
         let mut zoom = self.resolved_zoom();
         let (strip_height, strip_width, page_count) = {
             let doc = self.tab_mut().doc.as_ref().expect("checked");

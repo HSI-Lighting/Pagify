@@ -5881,3 +5881,24 @@ fn readingorder_reads_tagged_and_untagged_pages() {
         "the answer must say editing is not built: {said:?}"
     );
 }
+
+/// The View tab's Split: the switch toggles the second pane, the answer
+/// says what it is for, and drawing frames with it on and off is safe.
+#[test]
+fn viewsplit_toggles_the_second_pane() {
+    let mut h = harness("pages-ladder.pdf");
+    h.state_mut().submit("viewsplit");
+    h.run_steps(3);
+    assert!(h.state().tab().view_state.split, "the split did not turn on");
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("for reading") && l.contains("main view")),
+        "the answer must say what the pane is for: {said:?}"
+    );
+
+    h.state_mut().submit("viewsplit");
+    h.run_steps(2);
+    assert!(!h.state().tab().view_state.split, "the split did not turn off");
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(said.iter().any(|l| l.contains("split view: off")), "{said:?}");
+}

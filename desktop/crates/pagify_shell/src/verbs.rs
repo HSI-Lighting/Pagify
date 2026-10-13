@@ -477,6 +477,9 @@ pub enum Verb {
     /// has none — the Accessibility tab's Reading Order, which in this
     /// build reads rather than edits.
     ReadingOrder { pages: String },
+    /// The View tab's Split: a second, read-only pane over the same strip,
+    /// with its own scroll.
+    ViewSplit,
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -988,7 +991,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("toother", "the conversion phase", "the To Other tool"),
     ("trackreviews", "the sharing phase", "the Track Reviews tool"),
     ("transitions", "the viewing phase", "the Page Transitions tool"),
-    ("viewsplit", "the viewing phase", "the Split tool"),
 ];
 
 /// Parse a line as a Pagify verb.
@@ -1114,7 +1116,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1768,6 +1770,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "tagspanel" => Ok(Verb::TagSpanel),
         "alttext" => Ok(Verb::AltText { pages: tail.trim().to_string() }),
         "readingorder" => Ok(Verb::ReadingOrder { pages: tail.trim().to_string() }),
+        "viewsplit" => Ok(Verb::ViewSplit),
         "flatten" => Ok(Verb::Flatten),
         "attach" => Ok(Verb::Attach {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
@@ -2822,6 +2825,20 @@ mod reading_order_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "readingorder"),
             "`readingorder` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod view_split_tests {
+    use super::*;
+
+    #[test]
+    fn viewsplit_parses_and_is_not_planned() {
+        assert_eq!(parse("viewsplit"), Some(Ok(Verb::ViewSplit)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "viewsplit"),
+            "`viewsplit` is still in the planned table"
         );
     }
 }

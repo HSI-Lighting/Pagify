@@ -191,7 +191,8 @@ impl crate::PagifyApp {
             | Effect::AttachComment { .. }
             | Effect::ToggleTagsPanel
             | Effect::ReportAltText(_)
-            | Effect::ReportReadingOrder(_) => self.apply_files(effect),
+            | Effect::ReportReadingOrder(_)
+            | Effect::ToggleSplitView => self.apply_files(effect),
             Effect::RunReflow
             | Effect::RunFind(_)
             | Effect::RunFindStep { .. }
@@ -717,6 +718,7 @@ impl crate::PagifyApp {
             Effect::ToggleTagsPanel => self.toggle_tags_panel(),
             Effect::ReportAltText(pages) => self.report_alt_text(&pages),
             Effect::ReportReadingOrder(pages) => self.report_reading_order(&pages),
+            Effect::ToggleSplitView => self.toggle_split_view(),
             Effect::RunAccessCheck => self.run_access_check(),
             Effect::WriteAccessReport { dest } => match dest {
                 Some(path) => self.write_access_report(&path),
