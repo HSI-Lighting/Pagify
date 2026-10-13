@@ -38,3 +38,19 @@ fn pages_with_no_text_get_no_bookmark() {
 
     assert!(titles.is_empty(), "a page of solid colours named a bookmark: {titles:?}");
 }
+
+#[test]
+fn the_tagged_fixture_ships_its_own_contents() {
+    let session = Session::open(fixture("tagged.pdf")).expect("open");
+
+    let entries = session.bookmarks().expect("outline");
+
+    assert_eq!(
+        entries,
+        vec![
+            ("A Tagged Heading".to_string(), 0),
+            ("The paragraph".to_string(), 0),
+        ],
+        "the file's own table of contents must read back entry for entry"
+    );
+}

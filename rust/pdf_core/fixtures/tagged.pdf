@@ -1,7 +1,7 @@
 %PDF-1.7
 %‚„œ”
 1 0 obj
-<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 20 0 R /MarkInfo << /Marked true >> /Lang (en-US) >>
+<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 20 0 R /Outlines 30 0 R /MarkInfo << /Marked true >> /Lang (en-US) >>
 endobj
 2 0 obj
 << /Type /Pages /Kids [3 0 R] /Count 1 >>
@@ -52,14 +52,23 @@ endobj
 26 0 obj
 << /Type /StructElem /S /Figure /P 21 0 R /K 3 /Alt (a blue bar, described) >>
 endobj
+30 0 obj
+<< /Type /Outlines /First 31 0 R /Last 32 0 R /Count 2 >>
+endobj
+31 0 obj
+<< /Title (A Tagged Heading) /Parent 30 0 R /Next 32 0 R /Dest [3 0 R /XYZ null null null] >>
+endobj
+32 0 obj
+<< /Title (The paragraph) /Parent 30 0 R /Dest [3 0 R /XYZ null null null] >>
+endobj
 xref
-0 27
+0 33
 0000000000 65535 f 
 0000000015 00000 n 
-0000000130 00000 n 
-0000000187 00000 n 
-0000000330 00000 n 
-0000000400 00000 n 
+0000000147 00000 n 
+0000000204 00000 n 
+0000000347 00000 n 
+0000000417 00000 n 
 0000000000 65535 f 
 0000000000 65535 f 
 0000000000 65535 f 
@@ -74,15 +83,21 @@ xref
 0000000000 65535 f 
 0000000000 65535 f 
 0000000000 65535 f 
-0000000756 00000 n 
-0000000852 00000 n 
-0000000948 00000 n 
-0000001010 00000 n 
-0000001072 00000 n 
-0000001171 00000 n 
-0000001237 00000 n 
+0000000773 00000 n 
+0000000869 00000 n 
+0000000965 00000 n 
+0000001027 00000 n 
+0000001089 00000 n 
+0000001188 00000 n 
+0000001254 00000 n 
+0000000000 65535 f 
+0000000000 65535 f 
+0000000000 65535 f 
+0000001349 00000 n 
+0000001423 00000 n 
+0000001533 00000 n 
 trailer
-<< /Size 27 /Root 1 0 R >>
+<< /Size 33 /Root 1 0 R >>
 startxref
-1332
+1627
 %%EOF

@@ -13,7 +13,7 @@ import sys
 objs = {}
 
 objs[1] = (b"<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 20 0 R "
-           b"/MarkInfo << /Marked true >> /Lang (en-US) >>")
+           b"/Outlines 30 0 R /MarkInfo << /Marked true >> /Lang (en-US) >>")
 objs[2] = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
 objs[3] = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R "
            b"/StructParents 0 /Resources << /Font << /F1 4 0 R >> >> >>")
@@ -51,6 +51,14 @@ objs[25] = b"<< /Type /StructElem /S /Figure /P 21 0 R /K 2 >>"
 objs[26] = (b"<< /Type /StructElem /S /Figure /P 21 0 R /K 3 "
             b"/Alt (a blue bar, described) >>")
 objs[23] = b"<< /Nums [0 [22 0 R 24 0 R 25 0 R 26 0 R]] >>"
+
+# The file's own table of contents, so the Contents panel has a real one
+# to list.
+objs[30] = b"<< /Type /Outlines /First 31 0 R /Last 32 0 R /Count 2 >>"
+objs[31] = (b"<< /Title (A Tagged Heading) /Parent 30 0 R /Next 32 0 R "
+            b"/Dest [3 0 R /XYZ null null null] >>")
+objs[32] = (b"<< /Title (The paragraph) /Parent 30 0 R "
+            b"/Dest [3 0 R /XYZ null null null] >>")
 
 out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
 offsets = {}

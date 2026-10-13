@@ -6089,3 +6089,26 @@ fn clipboard_reads_or_says_why_not() {
         "clipboard must answer either way: {said:?}"
     );
 }
+
+/// **The Contents panel, through the real dispatch.** The fixture ships its
+/// own outline; the command opens the panel in the rail's slot (drawing it
+/// for real), says what it is, and closes again.
+#[test]
+fn contents_opens_the_files_table_of_contents_in_the_rail() {
+    let mut h = harness("tagged.pdf");
+    h.state_mut().submit("contents");
+    h.run_steps(3);
+    assert!(h.state().ui_state.show_contents, "the panel did not open");
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("table of contents")),
+        "the answer must say what it is: {said:?}"
+    );
+
+    let entries = h.state().tab().doc.as_ref().expect("doc").session.bookmarks().expect("outline");
+    assert!(!entries.is_empty(), "the fixture must ship entries to list");
+
+    h.state_mut().submit("contents");
+    h.run_steps(2);
+    assert!(!h.state().ui_state.show_contents, "the panel did not close");
+}

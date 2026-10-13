@@ -195,6 +195,7 @@ impl crate::PagifyApp {
             | Effect::AttachFile { .. }
             | Effect::AttachComment { .. }
             | Effect::ToggleTagsPanel
+            | Effect::ToggleContentsPanel
             | Effect::ReportAltText(_)
             | Effect::ReportReadingOrder(_)
             | Effect::ToggleSplitView
@@ -754,6 +755,7 @@ impl crate::PagifyApp {
                 None => self.attach_comment_dialog(),
             },
             Effect::ToggleTagsPanel => self.toggle_tags_panel(),
+            Effect::ToggleContentsPanel => self.toggle_contents_panel(),
             Effect::ReportAltText(pages) => self.report_alt_text(&pages),
             Effect::ReportReadingOrder(pages) => self.report_reading_order(&pages),
             Effect::ToggleSplitView => self.toggle_split_view(),

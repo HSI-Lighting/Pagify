@@ -280,6 +280,8 @@ pub enum Effect {
     AttachComment { source: Option<std::path::PathBuf> },
     /// Open or close the Tags panel.
     ToggleTagsPanel,
+    /// Open or close the Contents panel.
+    ToggleContentsPanel,
     /// Report the alternate-text reading over these pages — empty means all.
     ReportAltText(String),
     /// Report each page's reading order — empty means all pages.
@@ -472,6 +474,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Attach { .. }
         | Verb::AttachComment { .. }
         | Verb::TagSpanel
+        | Verb::Contents
         | Verb::AltText { .. }
         | Verb::ReadingOrder { .. }
         | Verb::ViewSplit
@@ -758,6 +761,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Attach { source } => vec![Effect::AttachFile { source: source.clone() }],
         Verb::AttachComment { source } => vec![Effect::AttachComment { source: source.clone() }],
         Verb::TagSpanel => vec![Effect::ToggleTagsPanel],
+        Verb::Contents => vec![Effect::ToggleContentsPanel],
         Verb::AltText { pages } => vec![Effect::ReportAltText(pages.clone())],
         Verb::ReadingOrder { pages } => vec![Effect::ReportReadingOrder(pages.clone())],
         Verb::ViewSplit => vec![Effect::ToggleSplitView],
@@ -1158,6 +1162,7 @@ mod tests {
                 vec![Effect::AttachComment { source: None }],
             ),
             (Verb::TagSpanel, vec![Effect::ToggleTagsPanel]),
+            (Verb::Contents, vec![Effect::ToggleContentsPanel]),
             (
                 Verb::AltText { pages: String::new() },
                 vec![Effect::ReportAltText(String::new())],

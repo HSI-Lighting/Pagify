@@ -1216,6 +1216,9 @@ struct RenderState {
 /// command box, and how many errors have been said this session.
 struct UiState {
     show_thumbs: bool,
+    /// The rail's own slot showing the file's table of contents instead of
+    /// thumbnails — the `contents` command and the rail's ☰ button.
+    show_contents: bool,
     /// Whether the Organize grid is showing in place of the plain thumbnail
     /// rail — workspace-wide, the same convention `show_thumbs` itself
     /// already uses, not per document: the two are mutually exclusive views
@@ -3755,6 +3758,8 @@ impl PagifyApp {
         // furniture that does not do anything.
         if self.ui_state.organize_open && !backstage && self.tab_mut().doc.is_some() {
             self.draw_organize_grid(&ctx, ui);
+        } else if self.ui_state.show_contents && !backstage && self.tab_mut().doc.is_some() {
+            jump_to = self.draw_contents_panel(&ctx, ui);
         } else if self.ui_state.show_thumbs && !backstage && self.tab_mut().doc.is_some() {
             let modifiers = ctx.input(|i| i.modifiers);
             let pointer_pos = ctx.input(|i| i.pointer.hover_pos());
@@ -3797,6 +3802,22 @@ impl PagifyApp {
                         .clicked()
                     {
                         self.toggle_bookmark_panel();
+                    }
+                    // The file's own table of contents, in the rail's slot —
+                    // a plain Unicode glyph, the same choice the chevron
+                    // beside it makes.
+                    if ui
+                        .add(
+                            egui::Label::new(
+                                egui::RichText::new("☰").size(14.0).color(theme::ink_dim()),
+                            )
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text("Contents — the file's own table of contents")
+                        .clicked()
+                    {
+                        self.toggle_contents_panel();
                     }
                     // Pages from another PDF, put into this one. The file
                     // dialog opens after the panel is drawn, not inside it.
@@ -4183,7 +4204,7 @@ impl PagifyApp {
             }, recorder: Recorder::default(), replay_depth: 0, },
             prefs_state: PrefsState { ortho: false, defaults: tools::Defaults::default(), draw_fill: false, snaps: SnapSet::defaults(), grid_pt: 0.0, },
             render_state: RenderState { renders: None, async_render: !cfg!(test), render_stats: RenderStats::default(), },
-            ui_state: UiState { show_thumbs: true, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
+            ui_state: UiState { show_thumbs: true, show_contents: false, organize_open: false, show_layers: false, command_open: false, errors_said: 0, },
             clipboard_state: ClipboardState { object_clipboard: None, paste_count: 0, page_clipboard: None, paste_ghost: None, clipboard_dir: if cfg!(test) {
                 static APPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
                 std::env::temp_dir().join(format!(
@@ -8015,6 +8036,28 @@ impl PagifyApp {
             self.tab_mut().panels.bookmark_panel = Some(BookmarkPanel { entries: entries.clone() });
         }
         entries
+    }
+
+    /// Open or close the Contents panel — the file's own table of contents,
+    /// in the rail's slot (the pages view hides while it is up). The
+    /// `contents` command and the rail's ☰ button both land here.
+    fn toggle_contents_panel(&mut self) {
+        if self.tab().doc.is_none() {
+            self.say_error("nothing open.");
+            return;
+        }
+        let on = !self.ui_state.show_contents;
+        self.ui_state.show_contents = on;
+        if on {
+            self.ui_state.organize_open = false;
+            self.ui_state.show_thumbs = true;
+        }
+        self.say_info(if on {
+            "contents: this file's own table of contents, on the left — click an entry to go \
+             there."
+        } else {
+            "contents: closed."
+        });
     }
 
     /// Open or close the Bookmarks panel without adding one — the rail's

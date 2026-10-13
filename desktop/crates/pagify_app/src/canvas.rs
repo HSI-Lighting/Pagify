@@ -802,6 +802,67 @@ impl crate::PagifyApp {
         jump
     }
 
+    /// The Contents panel: the opened file's own table of contents, in the
+    /// rail's slot — one row per outline entry, the row for the page in
+    /// view lit, clicking one going there. Read live, so `autobookmarks`'
+    /// new entries appear the moment the rail redraws.
+    ///
+    /// The rail's other occupants are the thumbnails and the Organize grid;
+    /// this takes the same slot, which the toggle arranges.
+    pub(crate) fn draw_contents_panel(
+        &mut self,
+        _ctx: &egui::Context,
+        ui: &mut egui::Ui,
+    ) -> Option<usize> {
+        let mut jump_to = None;
+        egui::Frame::new()
+            .fill(theme::paper())
+            .inner_margin(egui::Margin::symmetric(8, 8))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("Contents").strong());
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .add(
+                                egui::Label::new(
+                                    egui::RichText::new("‹").size(16.0).color(theme::ink_dim()),
+                                )
+                                .selectable(false)
+                                .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Back to the page thumbnails")
+                            .clicked()
+                        {
+                            self.ui_state.show_contents = false;
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+
+                let entries = self.sync_bookmarks();
+                if entries.is_empty() {
+                    ui.label(
+                        egui::RichText::new(
+                            "no contents in this file — `autobookmarks` makes them from the \
+                             pages' own headings.",
+                        )
+                        .weak(),
+                    );
+                    return;
+                }
+                let current = self.tab().view_state.page;
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    for (title, page) in &entries {
+                        let row = format!("{title}   —   p.{}", page + 1);
+                        if ui.selectable_label(*page == current, row).clicked() {
+                            jump_to = Some(*page);
+                        }
+                    }
+                });
+            });
+        jump_to
+    }
+
     /// The Organize grid: a wrapped, multi-column thumbnail view occupying
     /// the same panel slot the plain scrolling rail does, while
     /// [`Self::organize_open`] is set — see [`Self::toggle_organize_grid`].

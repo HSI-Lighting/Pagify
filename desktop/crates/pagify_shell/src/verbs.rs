@@ -508,6 +508,9 @@ pub enum Verb {
     /// Paste the clipboard's picture onto the page — the Capture tab's
     /// Clipboard tool. Text on the clipboard is pointed at `fromclipboard`.
     Clipboard,
+    /// Open or close the Contents panel — the opened file's own table of
+    /// contents, in the rail's slot on the left.
+    Contents,
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -1137,7 +1140,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview", "stamp", "callout", "markredact", "toother", "clipboard",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder", "viewsplit", "readingoptions", "reverseview", "stamp", "callout", "markredact", "toother", "clipboard", "contents",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1799,6 +1802,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "reverseview" => Ok(Verb::ReverseView),
         "markredact" => Ok(Verb::MarkRedact),
         "clipboard" => Ok(Verb::Clipboard),
+        "contents" => Ok(Verb::Contents),
         "stamp" => {
             let words = tail.trim();
             if words.is_empty() {
@@ -2985,5 +2989,15 @@ mod clipboard_tests {
             PLANNED.iter().all(|(v, _, _)| *v != "clipboard"),
             "`clipboard` is still in the planned table"
         );
+    }
+}
+
+#[cfg(test)]
+mod contents_tests {
+    use super::*;
+
+    #[test]
+    fn contents_parses() {
+        assert_eq!(parse("contents"), Some(Ok(Verb::Contents)));
     }
 }
