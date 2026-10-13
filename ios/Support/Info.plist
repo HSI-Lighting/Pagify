@@ -33,6 +33,135 @@
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<!-- What Pagify offers to open from Files, "Open with", and the share
+	     sheet's app row. Without these, iOS never hands Pagify a file at all —
+	     .onOpenURL exists, but nothing was ever routed to it, PDF included.
+	     The handler picks the viewer by file extension (RecentKind.of), so a
+	     sender's type only has to get the file here, not to the right screen. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>PDF Document</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.adobe.pdf</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>CAD Drawing</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.autodesk.autocad.dwg</string>
+				<string>com.autodesk.autocad.dxf</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>STEP Model</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Default</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>org.iso.step</string>
+			</array>
+		</dict>
+	</array>
+	<!-- iOS has a system type for PDF only; DWG, DXF and STEP resolve to dyn.*
+	     placeholders, so Pagify declares them. Imported, not exported: Pagify
+	     reads these formats, it doesn't own them. DWG reuses AutoCAD's own
+	     exported identifier so the two apps agree on what a .dwg is; nobody
+	     declares DXF or STEP, so DXF follows Autodesk's naming and STEP takes
+	     the ISO standard's. MIME types mirror Android's intent filters, minus
+	     the generic application/octet-stream (iOS types by extension) and
+	     model/step-xml+zip (a different, zipped format the viewer doesn't read). -->
+	<key>UTImportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.autodesk.autocad.dwg</string>
+			<key>UTTypeDescription</key>
+			<string>AutoCAD Drawing</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>dwg</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>application/dwg</string>
+					<string>image/vnd.dwg</string>
+					<string>application/acad</string>
+					<string>application/x-acad</string>
+					<string>application/x-dwg</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.autodesk.autocad.dxf</string>
+			<key>UTTypeDescription</key>
+			<string>DXF Drawing</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>dxf</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>image/vnd.dxf</string>
+					<string>application/dxf</string>
+					<string>application/x-dxf</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>org.iso.step</string>
+			<key>UTTypeDescription</key>
+			<string>STEP 3D Model</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>step</string>
+					<string>stp</string>
+					<string>p21</string>
+				</array>
+				<key>public.mime-type</key>
+				<array>
+					<string>model/step</string>
+					<string>application/step</string>
+					<string>application/x-step</string>
+				</array>
+			</dict>
+		</dict>
+	</array>
 	<!-- For business-card capture (CameraCapture.swift). Photo-library import
 	     needs no entry here at all — PHPickerViewController runs out of
 	     process and never asks. -->
