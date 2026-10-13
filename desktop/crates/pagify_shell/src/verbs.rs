@@ -466,6 +466,9 @@ pub enum Verb {
     /// Attach a file to the page in view as an annotation — `attachcomment
     /// [file]`. Bare, the app asks for the file.
     AttachComment { source: Option<PathBuf> },
+    /// Open the Tags panel — the Accessibility tab's Tags Panel. It lists
+    /// the page's structure tree; read-only in this build.
+    TagSpanel,
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -974,7 +977,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("sharelink", "the sharing phase", "the Share Link tool"),
     ("signbranding", "the signing phase", "the Add E-Sign Branding tool"),
     ("stamp", "the annotation phase", "the Stamp tool"),
-    ("tagspanel", "the accessibility phase", "the Tags Panel tool"),
     ("tooffice", "the conversion phase", "the To MS Office tool"),
     ("toolsettings", "the forms phase", "the Tool Settings tool"),
     ("toother", "the conversion phase", "the To Other tool"),
@@ -1106,7 +1108,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1757,6 +1759,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         "formimport" => Ok(Verb::FormImport {
             dest: (!tail.is_empty()).then(|| resolve_path(tail)),
         }),
+        "tagspanel" => Ok(Verb::TagSpanel),
         "flatten" => Ok(Verb::Flatten),
         "attach" => Ok(Verb::Attach {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
@@ -2760,5 +2763,19 @@ mod attach_flatten_tests {
                 "`{word}` is still in the planned table"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tags_panel_tests {
+    use super::*;
+
+    #[test]
+    fn tagspanel_parses_and_is_not_planned() {
+        assert_eq!(parse("tagspanel"), Some(Ok(Verb::TagSpanel)));
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "tagspanel"),
+            "`tagspanel` is still in the planned table"
+        );
     }
 }

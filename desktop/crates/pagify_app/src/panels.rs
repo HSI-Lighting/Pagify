@@ -674,6 +674,46 @@ impl crate::PagifyApp {
         self.tab_mut().panels.calculator = Some(calc);
     }
 
+    /// The Tags panel — the Accessibility tab's Tags Panel. Lists the page
+    /// in view's structure tree, indented; read-only in this build, and the
+    /// panel says so.
+    pub(crate) fn draw_tags(&mut self, ctx: &egui::Context) {
+        let Some(panel) = self.tab_mut().panels.tags.take() else { return };
+        let mut open = true;
+        let mut close = false;
+
+        egui::Window::new("Tags")
+            .id(egui::Id::new("tags-window"))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .default_pos(egui::pos2(200.0, 150.0))
+            .show(ctx, |ui| {
+                ui.set_width(360.0);
+                ui.label(format!("page {} — read-only: this build lists tags, it does not edit them.", panel.page + 1));
+                ui.separator();
+                if panel.rows.is_empty() {
+                    ui.label("no tags on this page.");
+                }
+                egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
+                    for (depth, row) in &panel.rows {
+                        let indent = "    ".repeat(*depth);
+                        ui.label(egui::RichText::new(format!("{indent}{row}")).monospace());
+                    }
+                });
+                ui.add_space(4.0);
+                if ui.button("Close").clicked() {
+                    close = true;
+                }
+            });
+
+        if !open || close || ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Closed: the taken rows are dropped with it.
+        } else {
+            self.tab_mut().panels.tags = Some(panel);
+        }
+    }
+
     /// The Comments panel — the Comment tab's Manage Comments. Lists every
     /// annotation in the document; `Go` jumps to its page, `✕` takes it off.
     ///

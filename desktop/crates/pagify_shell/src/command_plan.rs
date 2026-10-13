@@ -267,6 +267,8 @@ pub enum Effect {
     AttachFile { source: Option<std::path::PathBuf> },
     /// Attach a file to the page in view; `None` asks for the file first.
     AttachComment { source: Option<std::path::PathBuf> },
+    /// Open or close the Tags panel.
+    ToggleTagsPanel,
     /// Write every field as CSV; `None` asks for the file first.
     ExportFormSheet { dest: Option<std::path::PathBuf> },
     /// Set a field's tooltip.
@@ -445,6 +447,7 @@ pub fn plan(verb: &Verb, env: &CommandEnv) -> Option<Vec<Effect>> {
         | Verb::Flatten
         | Verb::Attach { .. }
         | Verb::AttachComment { .. }
+        | Verb::TagSpanel
         | Verb::ShapeWords
         | Verb::KeepTool
         | Verb::Reflow
@@ -717,6 +720,7 @@ fn plan_files_and_text(verb: &Verb, _env: &CommandEnv) -> Option<Vec<Effect>> {
         Verb::Flatten => vec![Effect::FlattenDocument],
         Verb::Attach { source } => vec![Effect::AttachFile { source: source.clone() }],
         Verb::AttachComment { source } => vec![Effect::AttachComment { source: source.clone() }],
+        Verb::TagSpanel => vec![Effect::ToggleTagsPanel],
         Verb::ShapeWords => vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())],
         Verb::KeepTool => vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())],
         // Text and find.
@@ -1094,6 +1098,7 @@ mod tests {
                 Verb::AttachComment { source: None },
                 vec![Effect::AttachComment { source: None }],
             ),
+            (Verb::TagSpanel, vec![Effect::ToggleTagsPanel]),
             (Verb::ShapeWords, vec![Effect::Say(crate::verbs::SHAPE_WORDS.into())]),
             (Verb::KeepTool, vec![Effect::Say(crate::verbs::KEEP_TOOL_WORDS.into())]),
             (Verb::Reflow, vec![Effect::RunReflow]),

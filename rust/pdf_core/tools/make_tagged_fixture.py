@@ -1,0 +1,59 @@
+"""A one-page tagged PDF: a heading and a paragraph under a Document tag.
+
+Minimal but canonical: the page's content carries marked-content sequences
+(`/P <</MCID n>> BDC … EMC`), the page declares `/StructParents 0`, the
+structure tree hangs off the catalog (`/StructTreeRoot`), and a
+`/ParentTree` number tree maps the MCIDs back to their elements — which is
+what PDFium's `FPDF_StructTree_GetForPage` walks. Rebuild with:
+
+    python3 tools/make_tagged_fixture.py fixtures/tagged.pdf
+"""
+import sys
+
+objs = {}
+
+objs[1] = (b"<< /Type /Catalog /Pages 2 0 R /StructTreeRoot 20 0 R "
+           b"/MarkInfo << /Marked true >> /Lang (en-US) >>")
+objs[2] = b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"
+objs[3] = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R "
+           b"/StructParents 0 /Resources << /Font << /F1 4 0 R >> >> >>")
+objs[4] = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+
+content = b"""q
+/P <</MCID 0>> BDC
+BT /F1 18 Tf 1 0 0 1 72 700 Tm (A Tagged Heading) Tj ET
+EMC
+/P <</MCID 1>> BDC
+BT /F1 11 Tf 1 0 0 1 72 670 Tm (A tagged paragraph with some words.) Tj ET
+EMC
+Q
+"""
+objs[5] = b"<< /Length %d >>\nstream\n" % len(content) + content + b"endstream"
+
+# The structure tree: a Document holding an H1 and a P; /K as the MCID in
+# the page's own sequence (the page carries /StructParents 0).
+objs[20] = (b"<< /Type /StructTreeRoot /K [21 0 R] /ParentTree 23 0 R "
+            b"/ParentTreeNextKey 1 >>")
+objs[21] = b"<< /Type /StructElem /S /Document /P 20 0 R /K [22 0 R 24 0 R] >>"
+objs[22] = b"<< /Type /StructElem /S /H1 /P 21 0 R /K 0 >>"
+objs[24] = (b"<< /Type /StructElem /S /P /P 21 0 R /K 1 "
+            b"/Alt (the paragraph's alternate text) >>")
+objs[23] = b"<< /Nums [0 [22 0 R 24 0 R]] >>"
+
+out = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
+offsets = {}
+for num in sorted(objs):
+    offsets[num] = len(out)
+    out += b"%d 0 obj\n" % num + objs[num] + b"\nendobj\n"
+
+start = len(out)
+top = max(objs) + 1
+out += b"xref\n0 %d\n" % top
+out += b"0000000000 65535 f \n"
+for num in range(1, top):
+    if num in offsets:
+        out += b"%010d 00000 n \n" % offsets[num]
+    else:
+        out += b"0000000000 65535 f \n"
+out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (top, start)
+open(sys.argv[1], "wb").write(bytes(out))

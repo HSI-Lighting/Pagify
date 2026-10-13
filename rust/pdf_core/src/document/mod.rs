@@ -772,6 +772,13 @@ pub trait Document: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// A page's structure tree — its tags — as the Tags panel lists them.
+    /// Empty for an untagged page. Read-only: PDFium reads structure, it
+    /// does not write it.
+    fn structure_outline(&self, _page_index: usize) -> Result<Vec<TagNode>> {
+        Ok(Vec::new())
+    }
+
     /// The bytes of the font one text run is drawn in, if it can be had.
     ///
     /// **What Obfuscate needs and [`crate::crypto::tweak::coverage`] cannot
@@ -2562,6 +2569,16 @@ pub struct DecodedImage {
     pub height: u32,
     /// `width * height * 4` bytes, RGBA.
     pub rgba: Vec<u8>,
+}
+
+/// One node of a page's structure tree, as the Tags panel shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TagNode {
+    /// The tag's type — `Document`, `H1`, `P`.
+    pub kind: String,
+    /// The element's title, or its alternate text where it has no title.
+    pub title: Option<String>,
+    pub children: Vec<TagNode>,
 }
 
 /// What kind of interactive form field a widget is.

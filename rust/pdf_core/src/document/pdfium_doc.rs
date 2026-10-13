@@ -24,11 +24,54 @@ use pdfium_render::prelude::{
 
 use crate::document::metadata::DocumentMetadata;
 use crate::document::{
-    Annotation, Color, DecodedImage, Document, DocumentMut, FormFieldInfo, FormFieldKind, Glyph, IndexedAnnotation, InternalLink, Page, PageCharacters,
+    Annotation, Color, DecodedImage, Document, DocumentMut, FormFieldInfo, FormFieldKind, Glyph, IndexedAnnotation, InternalLink, Page, PageCharacters, TagNode,
     PageClassification, PageSize, PageTextKind, RecognisedWord, TEXT_LAYER_ID,
     Point, Rect, RegionRequest, RemovedPage, RenderRequest, Rotation, Ruling, TextSegment,
     Redaction, RedactionReport, Uncleared,
 };
+
+/// As [`read_form_wide`], for the C API calls that take their buffer as a
+/// `void` pointer (the structure-tree readers do).
+fn read_wide_void(
+    read: impl Fn(*mut std::ffi::c_void, std::os::raw::c_ulong) -> std::os::raw::c_ulong,
+) -> Option<String> {
+    let length = read(std::ptr::null_mut(), 0);
+    if length == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; (length as usize).div_ceil(2)];
+    read(buffer.as_mut_ptr() as *mut std::ffi::c_void, length);
+    let end = buffer.iter().position(|&u| u == 0).unwrap_or(buffer.len());
+    Some(String::from_utf16_lossy(&buffer[..end]))
+}
+
+/// One structure-tree node, read recursively — the Tags panel's rows.
+fn read_tag_node(
+    bindings: &dyn pdfium_render::prelude::PdfiumLibraryBindings,
+    element: pdfium_render::prelude::FPDF_STRUCTELEMENT,
+) -> TagNode {
+    let kind = read_wide_void(|buf, len| unsafe {
+        bindings.FPDF_StructElement_GetType(element, buf, len)
+    })
+    .unwrap_or_else(|| "?".into());
+    let title = read_wide_void(|buf, len| unsafe {
+        bindings.FPDF_StructElement_GetTitle(element, buf, len)
+    })
+    .or_else(|| {
+        read_wide_void(|buf, len| unsafe {
+            bindings.FPDF_StructElement_GetAltText(element, buf, len)
+        })
+    });
+    let mut children = Vec::new();
+    let count = unsafe { bindings.FPDF_StructElement_CountChildren(element) };
+    for index in 0..count.max(0) {
+        let child = unsafe { bindings.FPDF_StructElement_GetChildAtIndex(element, index) };
+        if !child.is_null() {
+            children.push(read_tag_node(bindings, child));
+        }
+    }
+    TagNode { kind, title, children }
+}
 
 // The `FPDF_FORMFIELD_*` values from PDFium's C API, which its Rust
 // bindings keep private. Named here as the header names them.
@@ -1444,6 +1487,31 @@ impl Document for PdfiumDocument {
             }
             unsafe { bindings.FPDFPage_CloseAnnot(annot) };
         }
+        Ok(out)
+    }
+
+    fn structure_outline(&self, page_index: usize) -> Result<Vec<TagNode>> {
+        self.validate_page_index(page_index)?;
+        let page_number =
+            i32::try_from(page_index).map_err(|_| PdfError::PageOutOfRange {
+                index: page_index,
+                count: self.page_count,
+            })?;
+        let page = RawPage::open(self.document.handle(), page_number)?;
+        let bindings = pdfium()?.bindings();
+        let tree = unsafe { bindings.FPDF_StructTree_GetForPage(page.handle) };
+        if tree.is_null() {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        let count = unsafe { bindings.FPDF_StructTree_CountChildren(tree) };
+        for index in 0..count.max(0) {
+            let element = unsafe { bindings.FPDF_StructTree_GetChildAtIndex(tree, index) };
+            if !element.is_null() {
+                out.push(read_tag_node(&*bindings, element));
+            }
+        }
+        unsafe { bindings.FPDF_StructTree_Close(tree) };
         Ok(out)
     }
 

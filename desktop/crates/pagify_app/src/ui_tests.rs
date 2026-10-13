@@ -5816,3 +5816,22 @@ fn flatten_attach_and_attachcomment_run_from_the_box() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// The Accessibility tab's Tags Panel: opens with the page's structure
+/// flattened into rows, says it is read-only, and closes again.
+#[test]
+fn tagspanel_lists_the_structure_tree_read_only() {
+    let mut h = harness("tagged.pdf");
+    h.state_mut().submit("tagspanel");
+    h.run_steps(2);
+
+    let panel = h.state().tab().panels.tags.as_ref().expect("the panel did not open");
+    let rows: Vec<&str> = panel.rows.iter().map(|(_, row)| row.as_str()).collect();
+    assert!(rows.iter().any(|r| r.starts_with("Document")), "{rows:?}");
+    assert!(rows.iter().any(|r| r.starts_with("H1")), "{rows:?}");
+    assert!(rows.iter().any(|r| r.starts_with('P')), "{rows:?}");
+
+    h.state_mut().submit("tagspanel");
+    h.run_steps(1);
+    assert!(h.state().tab().panels.tags.is_none(), "the panel did not close");
+}

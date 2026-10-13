@@ -545,6 +545,15 @@ struct PanelsState {
     /// The Comments panel's rows, while it is open on this tab. Read once on
     /// opening and re-read after every removal — never rebuilt per frame.
     comments: Option<CommentsPanel>,
+    /// The Tags panel's rows, while it is open on this tab — the page in
+    /// view's structure tree, flattened with indents. Read once on opening.
+    tags: Option<TagsPanel>,
+}
+
+/// The Tags panel's rows, flattened from `pagify_shell`'s tree.
+struct TagsPanel {
+    page: usize,
+    rows: Vec<(usize, String)>,
 }
 
 /// The Comments panel's rows, as `pagify_shell::comments` lists them.
@@ -1004,7 +1013,7 @@ impl DocTab {
             view_state: ViewState { page: 0, zoom: ZoomMode::Fit, rotation: Rotation::None, view: None, hover_view: None, viewport_rect: None, anchor_offset: None, last_view: None, scroll_offset: egui::Vec2::ZERO, scroll_pt: 0.0, pan_by: None, scroll_to_pt: None, canvas_pt: egui::vec2(800.0, 600.0), reveal: None, saved_revision: 0, copy_wanted: false, snapshot_wanted: false, autoscroll: false, ruler: false, paper_tint: pagify_shell::verbs::PaperTint::White, },
             edit: EditState { editing_run: None, new_text_box: None },
             next_text_id: 0x0100_0000,
-            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, },
+            panels: PanelsState { pending_link: None, extract_ask: None, pending_article_box: None, bookmark_panel: None, find_needle: String::new(), find_hits: Vec::new(), find_at: 0, find_replace: None, spell_scan: None, spelling: None, view_settings: false, calculator: None, comments: None, tags: None, },
             bookmarked_pages: std::collections::HashSet::new(),
             joined_groups: Vec::new(),
             organize: OrganizeState { selection_page: 0, organize_selected: Vec::new(), organize_anchor: None, organize_drag: None },
@@ -2906,6 +2915,7 @@ impl PagifyApp {
         self.draw_view_settings(&ctx);
         self.draw_calculator(&ctx);
         self.draw_comments(&ctx);
+        self.draw_tags(&ctx);
         self.draw_spell_check(&ctx);
         self.draw_bookmark_panel(&ctx);
         self.draw_link_prompt(&ctx);
@@ -14405,6 +14415,31 @@ impl PagifyApp {
         }
     }
 
+    /// Open or close the Tags panel — the Accessibility tab's Tags Panel.
+    ///
+    /// The page in view's structure tree, flattened with indents; read once
+    /// on opening. **Read-only**, and the panel says so: PDFium reads
+    /// structure, it does not write it, so editing tags is not built.
+    fn toggle_tags_panel(&mut self) {
+        if self.tab().panels.tags.is_some() {
+            self.tab_mut().panels.tags = None;
+            return;
+        }
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let page = self.tab().view_state.page;
+        match session.structure_outline(page) {
+            Ok(nodes) => {
+                let mut rows = Vec::new();
+                flatten_tags(&nodes, 0, &mut rows);
+                self.tab_mut().panels.tags = Some(TagsPanel { page, rows });
+            }
+            Err(e) => self.say_error(format!("tagspanel: {e}")),
+        }
+    }
+
     /// Bake every page's annotations and form fields into its content — the
     /// Page tab's Flatten.
     ///
@@ -15921,6 +15956,19 @@ fn decode_picture(path: &std::path::Path) -> Result<(Vec<u8>, u32, u32), String>
     let photo = decoded.to_rgba8();
     let (width, height) = photo.dimensions();
     Ok((photo.into_raw(), width, height))
+}
+
+/// One structure-tree node's row text: the tag, and its title where it has
+/// one. The indent is the row's own depth.
+fn flatten_tags(nodes: &[pdf_core::document::TagNode], depth: usize, out: &mut Vec<(usize, String)>) {
+    for node in nodes {
+        let row = match &node.title {
+            Some(title) if !title.trim().is_empty() => format!("{} — {}", node.kind, title),
+            _ => node.kind.clone(),
+        };
+        out.push((depth, row));
+        flatten_tags(&node.children, depth + 1, out);
+    }
 }
 
 /// The fill behind the pages for a [`pagify_shell::verbs::PaperTint`], or

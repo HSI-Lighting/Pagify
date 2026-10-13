@@ -48,6 +48,7 @@ mod pages;
 mod annotate;
 mod forms;
 mod attachments;
+mod structure;
 mod save;
 
 use std::path::{Path, PathBuf};

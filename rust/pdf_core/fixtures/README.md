@@ -459,3 +459,14 @@ reads empty through them for every widget shape this repo could make, and
 hand-writing `/AS` and the value drives PDFium's per-control state machine
 into reporting the *other* control checked. Measured, not assumed — the
 notes are in `pdfium_doc.rs` and `Document::set_form_radio`.
+
+## tagged.pdf
+
+One page with a heading and a paragraph, carrying a real structure tree: a
+`Document` tag holding an `H1` and a `P` (with alternate text), marked
+content with MCIDs, `/StructParents` and a `/ParentTree` — the canonical
+shape PDFium's `FPDF_StructTree_GetForPage` walks. It exists for the Tags
+panel, which lists a page's structure read-only; the tags are not visible
+in the page's own content beyond the words.
+
+Rebuild it with `tools/make_tagged_fixture.py fixtures/tagged.pdf`.
