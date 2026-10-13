@@ -12,6 +12,20 @@ impl Session {
         registry::with_session(self.handle, |s| s.document.structure_outline(page))
     }
 
+    /// The page's tags in reading order — every element's kind, depth
+    /// first — or `None` for an untagged page.
+    pub fn structure_sequence(&self, page: usize) -> Result<Option<Vec<String>>> {
+        let outline = self.structure_outline(page)?;
+        if outline.is_empty() {
+            return Ok(None);
+        }
+        let mut sequence = Vec::new();
+        for node in &outline {
+            walk_kinds(node, &mut sequence);
+        }
+        Ok(Some(sequence))
+    }
+
     /// The alternate-text reading: how many `Figure` elements carry `/Alt`,
     /// and which ones do not, as `(page, kind)`.
     ///
@@ -27,6 +41,13 @@ impl Session {
             }
         }
         Ok((with_alt, missing))
+    }
+}
+
+fn walk_kinds(node: &pdf_core::document::TagNode, out: &mut Vec<String>) {
+    out.push(node.kind.clone());
+    for child in &node.children {
+        walk_kinds(child, out);
     }
 }
 

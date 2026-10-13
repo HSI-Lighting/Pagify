@@ -5859,3 +5859,25 @@ fn alttext_reports_the_bare_figure() {
         "the answer does not point at the tree: {said:?}"
     );
 }
+
+/// The Accessibility tab's Reading Order, reading in this build: a tagged
+/// page's sequence, an untagged page's plain answer, and the count.
+#[test]
+fn readingorder_reads_tagged_and_untagged_pages() {
+    let mut h = harness("tagged.pdf");
+    h.state_mut().submit("readingorder");
+    h.run_steps(1);
+    let said: Vec<&str> = h.state().cmd.history().iter().map(|e| e.text.as_str()).collect();
+    assert!(
+        said.iter().any(|l| l.contains("in reading order: Document > H1 > P")),
+        "the sequence is missing: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("1 of 1 page(s) tagged")),
+        "the count is missing: {said:?}"
+    );
+    assert!(
+        said.iter().any(|l| l.contains("it does not write it")),
+        "the answer must say editing is not built: {said:?}"
+    );
+}

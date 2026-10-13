@@ -14465,6 +14465,54 @@ impl PagifyApp {
         }
     }
 
+    /// The reading-order reading — the Accessibility tab's Reading Order,
+    /// which in this build reads rather than edits.
+    fn report_reading_order(&mut self, spec: &str) {
+        let Some(session) = self.tab().doc.as_ref().map(|d| d.session.clone()) else {
+            self.say_error("nothing open.");
+            return;
+        };
+        let count = self.tab().doc.as_ref().map(|d| d.page_count).unwrap_or(0);
+        let pages = if spec.trim().is_empty() {
+            (0..count).collect::<Vec<_>>()
+        } else {
+            match pagify_shell::organize::parse_range(spec, count) {
+                Ok(pages) => pages,
+                Err(why) => {
+                    self.say_error(why);
+                    return;
+                }
+            }
+        };
+        let mut tagged = 0usize;
+        for page in &pages {
+            match session.structure_sequence(*page) {
+                Ok(Some(kinds)) => {
+                    tagged += 1;
+                    let shown = kinds.iter().take(12).cloned().collect::<Vec<_>>().join(" > ");
+                    let more = kinds.len().saturating_sub(12);
+                    self.say_info(format!(
+                        "page {}: tagged — {} element(s) in reading order: {shown}{}",
+                        page + 1,
+                        kinds.len(),
+                        if more > 0 { format!(" …(+{more})") } else { String::new() }
+                    ));
+                }
+                Ok(None) => self.say_info(format!(
+                    "page {}: no tags — a screen reader reads it by geometry; `reflow` \
+                     rebuilds a page's own order.",
+                    page + 1
+                )),
+                Err(e) => self.say_error(format!("readingorder: {e}")),
+            }
+        }
+        self.say_info(format!(
+            "{tagged} of {} page(s) tagged. Editing the order is not built — PDFium reads \
+             structure, it does not write it; `tagspanel` lists the tree.",
+            pages.len()
+        ));
+    }
+
     /// Open or close the Tags panel — the Accessibility tab's Tags Panel.
     ///
     /// The page in view's structure tree, flattened with indents; read once

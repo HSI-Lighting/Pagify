@@ -55,3 +55,18 @@ fn an_untagged_page_reads_no_tags() {
 
     assert!(outline.is_empty(), "an untagged page reported tags: {outline:?}");
 }
+
+#[test]
+fn the_reading_order_is_the_tag_sequence_or_none_at_all() {
+    let session = Session::open(fixture("tagged.pdf")).expect("open");
+
+    let sequence = session.structure_sequence(0).expect("sequence");
+
+    assert_eq!(
+        sequence.expect("a tagged page"),
+        ["Document", "H1", "P", "Figure", "Figure"]
+    );
+
+    let bare = Session::open(fixture("two-column.pdf")).expect("open");
+    assert!(bare.structure_sequence(0).expect("sequence").is_none(), "untagged must be None");
+}

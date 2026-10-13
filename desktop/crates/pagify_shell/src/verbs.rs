@@ -473,6 +473,10 @@ pub enum Verb {
     /// the Accessibility tab's Set Alternate Text, which in this build
     /// reads rather than edits.
     AltText { pages: String },
+    /// The reading-order reading: each page's tags in order, or word that it
+    /// has none — the Accessibility tab's Reading Order, which in this
+    /// build reads rather than edits.
+    ReadingOrder { pages: String },
     /// Write every form field's name, kind and value as JSON —
     /// `formexport [file.json]`. Bare, the app asks for the file.
     FormExport { dest: Option<PathBuf> },
@@ -972,7 +976,6 @@ const PLANNED: &[(&str, &str, &str)] = &[
     ("portfolio", "the conversion phase", "the PDF Portfolio tool"),
     ("readaloud", "the viewing phase", "the Read tool"),
     ("readingoptions", "the accessibility phase", "the Reading Options tool"),
-    ("readingorder", "the accessibility phase", "the Reading Order tool"),
     ("requestsignature", "the signing phase", "the Request Signature tool"),
     ("reverseview", "the viewing phase", "the Reverse View tool"),
     ("sendbulk", "the signing phase", "the Send in Bulk tool"),
@@ -1111,7 +1114,7 @@ pub fn claimed_tokens() -> Vec<&'static str> {
         "exportimages", "fromfiles", "viewsetting", "calculator", "managecomments",
         "pagemarks", "fromclipboard", "pencil", "rearrange", "fromtemplate", "addshape",
         "drawing", "keeptool", "formexport", "formimport", "formtosheet", "tooltip",
-        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext",
+        "resetform", "flatten", "attach", "attachcomment", "tagspanel", "alttext", "readingorder",
         "searchhighlight", "compare", "changecolor",
         "outlinedfont", "lock", "lockall", "lockarea", "unlock", "secure",
         "hiddendata", "sanitize", "sanitise", "smartredact", "whiteout", "areahighlight", "sensitivity", "fillsign", "certify", "validate", "signature", "managesignatures", "applysignatures", "documentstatus", "status", "signrectangle", "signline", "signcheck", "signcross", "signdot", "predefinedtext", "moveobject", "editobject", "sessionlog",
@@ -1764,6 +1767,7 @@ fn parse_conversion(head: &str, _rest: &[&str], tail: &str) -> Option<Result<Ver
         }),
         "tagspanel" => Ok(Verb::TagSpanel),
         "alttext" => Ok(Verb::AltText { pages: tail.trim().to_string() }),
+        "readingorder" => Ok(Verb::ReadingOrder { pages: tail.trim().to_string() }),
         "flatten" => Ok(Verb::Flatten),
         "attach" => Ok(Verb::Attach {
             source: (!tail.is_empty()).then(|| resolve_path(tail)),
@@ -2801,6 +2805,23 @@ mod alt_text_tests {
         assert!(
             PLANNED.iter().all(|(v, _, _)| *v != "alttext"),
             "`alttext` is still in the planned table"
+        );
+    }
+}
+
+#[cfg(test)]
+mod reading_order_tests {
+    use super::*;
+
+    #[test]
+    fn readingorder_parses_and_is_not_planned() {
+        assert_eq!(
+            parse("readingorder"),
+            Some(Ok(Verb::ReadingOrder { pages: String::new() }))
+        );
+        assert!(
+            PLANNED.iter().all(|(v, _, _)| *v != "readingorder"),
+            "`readingorder` is still in the planned table"
         );
     }
 }
